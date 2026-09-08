@@ -1,0 +1,59 @@
+name: Native integration build inputs
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/native-integration-inputs.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  inputs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact source without retained credentials
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Install repository toolchain
+        run: rustup show active-toolchain
+      - name: Retain pinned transport dependency sources
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/fr-native-inputs"
+          mkdir -p "$root/deps/src" "$root/sdk"
+          cat > "$root/deps/Cargo.toml" <<'EOF'
+          [package]
+          name = "fr-integration-build-inputs"
+          version = "0.1.0"
+          edition = "2024"
+          [dependencies]
+          asupersync = { version = "=0.4.10", default-features = false, features = ["tls-webpki-roots"] }
+          serde = { version = "1", features = ["derive"] }
+          serde_json = "1"
+          EOF
+          printf '%s\n' '// Build-input resolution only; not a product crate.' > "$root/deps/src/lib.rs"
+          cargo fetch --manifest-path "$root/deps/Cargo.toml"
+          tar -czf "$root/cargo-registry.tar.gz" -C "${CARGO_HOME:-$HOME/.cargo}" registry
+          git ls-files -z | tar --null -T - -czf "$root/source.tar.gz"
+          printf '%s\n' "$GITHUB_SHA" > "$root/source-commit.txt"
+      - name: Retain Debian 13 media headers for matching local SDK verification
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$RUNNER_TEMP/fr-native-inputs/sdk:/out" debian:trixie-slim sh -ec '
+            apt-get update
+            cd /out
+            apt-get download libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxext-dev
+          '
+          (cd "$RUNNER_TEMP/fr-native-inputs" && sha256sum *.tar.gz sdk/*.deb > SHA256SUMS)
+      - name: Upload build inputs, not qualification claims
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-integration-build-inputs
+          path: ${{ runner.temp }}/fr-native-inputs/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
