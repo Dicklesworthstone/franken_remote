@@ -323,7 +323,8 @@ impl SendCache {
                         &self.limits,
                         out,
                     )?;
-                    p.next_original += u32::try_from(length).map_err(|_| SendError::InvalidPayload)?;
+                    p.next_original +=
+                        u32::try_from(length).map_err(|_| SendError::InvalidPayload)?;
                     (Channel::Recovery, n)
                 }
             }

@@ -55,6 +55,7 @@ rust_lane() {
   cargo check --workspace --all-targets --all-features --locked
   cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
   cargo test --workspace --all-features --locked
+  cargo test --workspace --all-features --locked --examples
   echo "Rust lane: passed (format/check/clippy/tests, including test-only media contracts)"
 }
 
