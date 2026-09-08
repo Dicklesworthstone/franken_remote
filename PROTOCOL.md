@@ -31,5 +31,6 @@ Per plan §17.1, one concise specification covering:
 | Displays | DisplayCatalog, GeometryChanged, SelectDisplay |
 | Media | DecoderConfiguration, DecoderConfigured, RecoveryAccessUnit, FirstFrameDecoded, AccessUnitFragment, RepairRequest, RecoveryRequest |
 | Input | KeyTransition, ButtonTransition, PointerState, RelativeCheckpoint, Scroll, CommitText, HeldState |
-| Auxiliary | CursorShape, ClipboardBegin/Chunk/Commit, AudioConfiguration, AudioPacket |
+| Auxiliary | CursorShape, ClipboardBegin/Chunk/Commit, AudioConfiguration, AudioPacket (audio messages carry an explicit direction: playback-down and microphone-up are independent negotiated capabilities per plan v1.4) |
+| Files | FileOffer, FileAccept, FileChunk, FileComplete, FileCancel, SyncJobState (the plan §15.6 transfer/synchronization envelope on its own bounded channel) |
 | Feedback | PresentedState, ReceiverPressure, StageMetrics, QualityDecision |

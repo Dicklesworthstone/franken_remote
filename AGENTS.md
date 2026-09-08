@@ -237,7 +237,7 @@ The correct outcome may be a typed refusal, a plan amendment proposal, or a nega
 
 ## 14. Beads (`br`) — dependency-aware issue tracking
 
-This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`) for issue state once the tracker is initialized (`br init` creates `.beads/`, tracked in git). `br` is non-invasive — it never runs git.
+This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`) for issue state; the tracker lives in `.beads/` (issue prefix `fr`), tracked in git. `br` is non-invasive — it never runs git.
 
 ```bash
 br ready --unassigned --no-db --json              # Authoritative claimable work

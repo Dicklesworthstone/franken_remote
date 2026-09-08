@@ -876,7 +876,8 @@ Messages should include:
 | Displays | DisplayCatalog, GeometryChanged, SelectDisplay |
 | Media | DecoderConfiguration, DecoderConfigured, RecoveryAccessUnit, FirstFrameDecoded, AccessUnitFragment, RepairRequest, RecoveryRequest |
 | Input | KeyTransition, ButtonTransition, PointerState, RelativeCheckpoint, Scroll, CommitText, HeldState |
-| Auxiliary | CursorShape, ClipboardBegin/Chunk/Commit, AudioConfiguration, AudioPacket |
+| Auxiliary | CursorShape, ClipboardBegin/Chunk/Commit, AudioConfiguration, AudioPacket — audio messages carry an explicit direction, since version 1.4 makes playback-down and microphone-up independent negotiated capabilities |
+| Files | FileOffer, FileAccept, FileChunk, FileComplete, FileCancel, SyncJobState — the Section 15.6 transfer/synchronization envelope over its own bounded channel |
 | Feedback | PresentedState, ReceiverPressure, StageMetrics, QualityDecision |
 
 These names are proposed protocol categories, not existing implemented APIs.
@@ -887,7 +888,7 @@ Define a compact stream binding for session, display, codec configuration, recov
 
 ### 17.2 Explicit limits
 
-Start with a 64-KiB ordinary control-message ceiling, one-MiB complete text clipboard transfer on its separate chunked channel, 16-MiB maximum encoded access unit, dimensions no larger than 8192 per axis, and at most 16,777,216 coded pixels per picture. These are protocol/resource ceilings, not default operating points or promises of native-resolution support for every monitor. Endpoint capability and application budgets negotiate downward; alignment padding counts in the allocation check.
+Start with a 64-KiB ordinary control-message ceiling, one-MiB complete text clipboard transfer on its separate chunked channel, 16-MiB maximum encoded access unit, dimensions no larger than 8192 per axis, and at most 16,777,216 coded pixels per picture. File-transfer chunks ride their own bounded channel with a negotiated chunk size under the Section 15.6 per-session byte/rate/concurrency budgets; image clipboard payloads are bounded transfers on that channel, never control-parser messages. These are protocol/resource ceilings, not default operating points or promises of native-resolution support for every monitor. Endpoint capability and application budgets negotiate downward; alignment padding counts in the allocation check.
 
 Replace the old universal two-incomplete-picture limit with a negotiated dependency/reassembly window, initially 2–12 pictures sized by Section 12, **also** constrained by bytes. A provisional per-viewer compressed-media budget of 32 MiB covers incomplete/held access units and associated metadata, while the shared sender repair cache has a separately admitted byte budget. A receiver accepting one 16-MiB picture does not thereby accept twelve such pictures. Global host/client limits cap all streams, viewers, pending handshakes, and closing generations. Values are experimental starting points and must be tested with legitimate keyframes and mobile memory pressure before freeze.
 

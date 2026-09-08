@@ -29,6 +29,8 @@ Aligned with the plan's threat model (§19) and security test matrix (§24.3):
 - HTTPS/QUIC: certificate/hostname/ALPN validation, 0-RTT admission, downgrade to WSS with weakened semantics, Tailscale Serve identity-header forgery;
 - local IPC: role-capability forgery, worker substitution, approval-endpoint reachability from unauthorized process roles, named-pipe/socket session binding;
 - privileged helpers, installer, and updates: privilege containment of the platform broker, signed process-family integrity, mixed-generation activation, library search-path injection, archive path traversal, forced rollback;
+- file transfer and synchronization: path traversal and symlink escape on received paths, non-atomic publication of partial transfers, budget-exhaustion floods, sync-job conflict handling that silently overwrites;
+- bidirectional audio: microphone activation without the explicit client enable, virtual-microphone endpoint integrity and signing (including the Windows driver-class component), endpoint-scope misrepresentation;
 - denial of service: pre-admission floods, codec-probe reservation, recovery-request storms, half-attached channels, per-viewer and global byte budgets;
 - privacy: screen/clipboard/input/audio content reaching logs, traces, discovery responses, or diagnostic exports; endpoint-wide audio scope misrepresentation.
 
