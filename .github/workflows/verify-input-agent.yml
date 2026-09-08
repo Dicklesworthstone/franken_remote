@@ -32,11 +32,13 @@ jobs:
           patch=base64.b64decode(obj['content'])
           assert hashlib.sha1(f'blob {len(patch)}\0'.encode()+patch).hexdigest()==sha
           paths=[x.split(' b/',1)[1] for x in patch.decode().splitlines() if x.startswith('diff --git ')]
-          assert paths and len(paths)==len(set(paths))
-          assert all(x.startswith('crates/') and x.endswith('.rs') and '..' not in x.split('/') for x in paths)
+          expected={'crates/fr-core/src/authority.rs':'880c5102b253f09fda6aefca259719f5380194cf','crates/fr-core/src/input_submission.rs':'41440fabe77221b457d86f0a1c2a18644f37b237','crates/fr-core/tests/input_monitor.rs':'96d7638970fd771f390ab2e0472ea5b756f9fc8e'}
+          assert sorted(paths)==sorted(expected) and len(paths)==len(set(paths))
           assert 'deleted file mode' not in patch.decode()
-          subprocess.run(['git','apply','--check','--index','-'],input=patch,check=True)
-          subprocess.run(['git','apply','--index','-'],input=patch,check=True)
+          subprocess.run(['git','apply','--recount','--check','--index','-'],input=patch,check=True)
+          subprocess.run(['git','apply','--recount','--index','-'],input=patch,check=True)
+          for path in paths:
+              assert subprocess.check_output(['git','hash-object',path],text=True).strip()==expected[path],path
           Path(os.environ['RUNNER_TEMP'],'input-paths.json').write_text(json.dumps(paths))
           PY
       - name: Install pinned compiler and native SDKs
