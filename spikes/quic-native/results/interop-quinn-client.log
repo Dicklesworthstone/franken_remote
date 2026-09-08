@@ -1,0 +1,1 @@
+RESULT scenario=interop-quinn-client row=handshake-from-independent-client status=failed detail="server handshake failed: native QUIC handshake failed: crypto provider failure: provider=rustls-quic-handshake, code=packet_header_decode"

@@ -1,0 +1,1 @@
+RESULT scenario=idle-cpu row=receive-suspends-not-busy-polls status=failed detail="IdleOutcome { wall_ms: 6000, cpu_ms: 6000, cpu_fraction_percent: 99, wakeups: 12 }"

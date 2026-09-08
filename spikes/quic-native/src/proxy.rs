@@ -38,6 +38,8 @@ pub struct ProxyStats {
     pub dropped_c2s: AtomicU64,
     pub dropped_s2c: AtomicU64,
     pub reordered: AtomicU64,
+    /// First few observed datagrams as (direction, size) — 'c' = client→server.
+    pub wire_log: std::sync::Mutex<Vec<(char, usize)>>,
 }
 
 pub struct Proxy {
@@ -89,6 +91,11 @@ impl Proxy {
                             if let Some(dcid) = parse_long_header_dcid(&payload) {
                                 dcid_reported = true;
                                 let _ = dcid_tx.send(dcid);
+                            }
+                        }
+                        if let Ok(mut log) = thread_stats.wire_log.lock() {
+                            if log.len() < 64 {
+                                log.push((if from_server { 's' } else { 'c' }, len));
                             }
                         }
                         let destination = if from_server {

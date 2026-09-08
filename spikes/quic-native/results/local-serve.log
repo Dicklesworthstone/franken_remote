@@ -1,0 +1,3 @@
+SERVING on 127.0.0.1:47777
+RESULT scenario=tailnet-pair row=server-handshake status=passed detail="peer=127.0.0.1:47614 alpn="fr-spike/0""
+RESULT scenario=tailnet-pair row=server-echo status=passed detail="stream_bytes_echoed=1048576 datagrams_echoed=4"

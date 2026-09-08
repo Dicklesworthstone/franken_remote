@@ -1,0 +1,2 @@
+SERVING on 0.0.0.0:47777
+RESULT scenario=tailnet-pair row=server-handshake status=passed detail="peer=100.100.118.85:5003 alpn="fr-spike/0""

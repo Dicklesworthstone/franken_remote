@@ -1,0 +1,2 @@
+RESULT scenario=loss row=handshake-under-loss status=passed detail="established through 3% loss / 2% reorder middlebox"
+RESULT scenario=loss row=stream-recovers-under-loss status=passed detail="TransferOutcome { bytes_sent: 1048576, bytes_echoed: 1048576, checksum_ok: true, elapsed_ms: 161, client_lost: 108, client_acked: 1044, client_pto: 0, smoothed_rtt_us: 157, cwnd: 3334 } proxy_dropped_c2s=34 proxy_dropped_s2c=27 proxy_reordered=31"

@@ -36,10 +36,20 @@ fn main() {
         "cancel" => cancel(),
         "interop-quinn-server" => interop_quinn_server(),
         "interop-quinn-client" => interop_quinn_client(),
+        // Cross-machine pair for a real network (e.g. tailnet direct path):
+        //   host A: quic-native-spike serve 0.0.0.0:47777 <ca+leaf dir>
+        //   host B: quic-native-spike connect-remote <A>:47777 <ca+leaf dir>
+        // The PKI is written by `connect-remote --emit-pki <dir>` beforehand and
+        // copied to the server so both ends share one CA. The initial DCID is a
+        // fixed convention on both ends (the accept API needs it out of band).
+        "serve" => serve_remote(),
+        "connect-remote" => connect_remote(),
+        "emit-pki" => emit_pki(),
         other => {
             eprintln!(
                 "unknown scenario {other:?}; expected one of: self-pair | tls-negative | \
-                 idle-cpu | loss | cancel | interop-quinn-server | interop-quinn-client"
+                 idle-cpu | loss | cancel | interop-quinn-server | interop-quinn-client | \
+                 emit-pki <dir> | serve <bind-addr> <pki-dir> | connect-remote <addr> <pki-dir>"
             );
             std::process::exit(2);
         }
@@ -432,6 +442,268 @@ fn cancel() {
     }
 }
 
+const REMOTE_PAIR_DCID: &[u8] = b"spike-i7";
+const REMOTE_TRANSFER_BYTES: u64 = 1 << 20;
+
+fn emit_pki() {
+    let dir = std::env::args().nth(2).expect("emit-pki <dir>");
+    let pki = TestPki::generate();
+    std::fs::create_dir_all(&dir).expect("create pki dir");
+    std::fs::write(format!("{dir}/ca.der"), pki.ca_der.as_ref()).expect("write ca");
+    std::fs::write(format!("{dir}/leaf.der"), pki.leaf_der.as_ref()).expect("write leaf");
+    std::fs::write(
+        format!("{dir}/leaf.key.der"),
+        pki.leaf_key.secret_der(),
+    )
+    .expect("write key");
+    println!("PKI written to {dir}");
+}
+
+fn load_pki_dir(dir: &str) -> (
+    rustls::pki_types::CertificateDer<'static>,
+    rustls::pki_types::CertificateDer<'static>,
+    rustls::pki_types::PrivateKeyDer<'static>,
+) {
+    let ca = rustls::pki_types::CertificateDer::from(
+        std::fs::read(format!("{dir}/ca.der")).expect("read ca"),
+    );
+    let leaf = rustls::pki_types::CertificateDer::from(
+        std::fs::read(format!("{dir}/leaf.der")).expect("read leaf"),
+    );
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(
+        rustls::pki_types::PrivatePkcs8KeyDer::from(
+            std::fs::read(format!("{dir}/leaf.key.der")).expect("read key"),
+        ),
+    );
+    (ca, leaf, key)
+}
+
+fn serve_remote() {
+    let scenario = "tailnet-pair";
+    let bind = std::env::args().nth(2).expect("serve <bind-addr> <pki-dir>");
+    let pki_dir = std::env::args().nth(3).expect("serve <bind-addr> <pki-dir>");
+    let (_ca, leaf, key) = load_pki_dir(&pki_dir);
+    let cx = Cx::for_testing();
+
+    let outcome = block_on(async {
+        let endpoint = asup::bind_endpoint(&cx, &bind).await?;
+        println!("SERVING on {}", endpoint.local_addr());
+        let mut server = asup::accept(
+            &cx,
+            endpoint,
+            leaf,
+            key,
+            REMOTE_PAIR_DCID,
+            b"spike-s7",
+            NativeQuicConnectionConfig::default(),
+        )
+        .await?;
+        println!(
+            "RESULT scenario={scenario} row=server-handshake status=passed detail=\"peer={} alpn={:?}\"",
+            server.peer_addr(),
+            String::from_utf8_lossy(server.negotiated_alpn())
+        );
+
+        use asupersync::net::quic_native::StreamId;
+        let deadline = Instant::now() + Duration::from_secs(180);
+        let mut stream: Option<StreamId> = None;
+        let mut echoed = 0u64;
+        let mut eof_seen = false;
+        let mut fin_echoed = false;
+        let mut datagrams_echoed = 0u64;
+        let mut done_at: Option<Instant> = None;
+        let mut pending: std::collections::VecDeque<asupersync::bytes::Bytes> =
+            std::collections::VecDeque::new();
+        loop {
+            if Instant::now() > deadline {
+                return Err(format!("serve timed out: echoed={echoed}"));
+            }
+            if let Some(at) = done_at {
+                if at.elapsed() > Duration::from_secs(10) {
+                    break;
+                }
+            }
+            server
+                .drive_io_once(&cx, Duration::from_millis(5))
+                .await
+                .map_err(|e| format!("drive: {e}"))?;
+            if stream.is_none() {
+                stream = server
+                    .connection_mut()
+                    .next_readable_stream(&cx)
+                    .map_err(|e| format!("next_readable_stream: {e}"))?
+                    .map(|readiness| readiness.stream_id);
+            }
+            if let Some(id) = stream {
+                let mut read_any = false;
+                loop {
+                    let bytes = server
+                        .connection_mut()
+                        .read_stream(&cx, id, 4096)
+                        .map_err(|e| format!("read: {e}"))?;
+                    if bytes.is_empty() {
+                        break;
+                    }
+                    read_any = true;
+                    echoed += bytes.len() as u64;
+                    pending.push_back(bytes);
+                }
+                if read_any {
+                    server
+                        .connection_mut()
+                        .configure_stream_receive_window(&cx, id, 1 << 20)
+                        .map_err(|e| format!("window: {e}"))?;
+                    server
+                        .connection_mut()
+                        .advertise_connection_receive_limit(&cx, echoed + (16 << 20))
+                        .map_err(|e| format!("MAX_DATA: {e}"))?;
+                }
+                if !eof_seen {
+                    eof_seen = server.connection_mut().is_stream_eof(id).unwrap_or(false);
+                }
+                while let Some(front) = pending.front() {
+                    let fin = eof_seen && pending.len() == 1;
+                    match server
+                        .connection_mut()
+                        .write_stream(&cx, id, front.clone(), fin)
+                    {
+                        Ok(()) => {
+                            fin_echoed = fin;
+                            pending.pop_front();
+                        }
+                        Err(_) => break,
+                    }
+                }
+                if eof_seen && pending.is_empty() && !fin_echoed {
+                    fin_echoed = server
+                        .connection_mut()
+                        .write_stream(&cx, id, asupersync::bytes::Bytes::new(), true)
+                        .is_ok();
+                }
+                if fin_echoed && done_at.is_none() {
+                    done_at = Some(Instant::now());
+                }
+            }
+            while let Some(datagram) = server.connection_mut().recv_datagram() {
+                if server.connection_mut().send_datagram(&cx, datagram).is_ok() {
+                    datagrams_echoed += 1;
+                }
+            }
+        }
+        Ok::<_, String>((echoed, datagrams_echoed))
+    });
+    match outcome {
+        Ok((echoed, datagrams)) => result_row(
+            scenario,
+            "server-echo",
+            "passed",
+            &format!("stream_bytes_echoed={echoed} datagrams_echoed={datagrams}"),
+        ),
+        Err(error) => result_row(scenario, "server-echo", "failed", &error),
+    }
+}
+
+fn connect_remote() {
+    let scenario = "tailnet-pair";
+    let addr = std::env::args()
+        .nth(2)
+        .expect("connect-remote <addr> <pki-dir>");
+    let pki_dir = std::env::args()
+        .nth(3)
+        .expect("connect-remote <addr> <pki-dir>");
+    let (ca, _leaf, _key) = load_pki_dir(&pki_dir);
+    let cx = Cx::for_testing();
+    let started = Instant::now();
+
+    let connected = block_on(async {
+        let endpoint = asup::bind_endpoint(&cx, "0.0.0.0:0").await?;
+        asup::connect(
+            &cx,
+            endpoint,
+            addr.parse().map_err(|e| format!("bad addr: {e}"))?,
+            vec![ca],
+            "localhost",
+            REMOTE_PAIR_DCID,
+            b"spike-c7",
+            NativeQuicConnectionConfig::default(),
+        )
+        .await
+    });
+    let mut client = match connected {
+        Ok(client) => {
+            result_row(
+                scenario,
+                "client-handshake",
+                "passed",
+                &format!(
+                    "established to {} in {} ms; alpn={:?}",
+                    addr,
+                    started.elapsed().as_millis(),
+                    String::from_utf8_lossy(client.negotiated_alpn())
+                ),
+            );
+            client
+        }
+        Err(error) => {
+            result_row(scenario, "client-handshake", "failed", &error);
+            return;
+        }
+    };
+
+    match client_echo_against_remote(&cx, &mut client, REMOTE_TRANSFER_BYTES) {
+        Ok(outcome) => {
+            let status = if outcome.checksum_ok && outcome.bytes_echoed == REMOTE_TRANSFER_BYTES {
+                "passed"
+            } else {
+                "failed"
+            };
+            result_row(scenario, "stream-echo-1mib", status, &format!("{outcome:?}"));
+        }
+        Err(error) => result_row(scenario, "stream-echo-1mib", "failed", &error),
+    }
+
+    // Datagram roundtrip at sizes measured safe on loopback (≤1150).
+    let datagram_outcome = block_on(async {
+        let mut sent = 0u64;
+        let mut echoed = 0u64;
+        for size in [64usize, 512, 1000, 1150] {
+            if client
+                .connection_mut()
+                .send_datagram(&cx, asup::pattern_chunk(size as u64, size))
+                .is_ok()
+            {
+                sent += 1;
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while echoed < sent && Instant::now() < deadline {
+            client
+                .drive_io_once(&cx, Duration::from_millis(10))
+                .await
+                .map_err(|e| format!("drive: {e}"))?;
+            while client.connection_mut().recv_datagram().is_some() {
+                echoed += 1;
+            }
+        }
+        Ok::<_, String>((sent, echoed))
+    });
+    match datagram_outcome {
+        Ok((sent, echoed)) => result_row(
+            scenario,
+            "datagram-roundtrip",
+            if sent > 0 && echoed == sent {
+                "passed"
+            } else {
+                "failed"
+            },
+            &format!("{echoed}/{sent} datagrams echoed over the real network"),
+        ),
+        Err(error) => result_row(scenario, "datagram-roundtrip", "failed", &error),
+    }
+    let _ = client.connection_mut().begin_close(&cx, 0, 0);
+    let _ = block_on(client.flush(&cx));
+}
+
 /// Single-sided client transfer against an independently driven remote peer.
 fn client_echo_against_remote(
     cx: &Cx,
@@ -521,6 +793,9 @@ fn interop_quinn_server() {
     let cx = Cx::for_testing();
     let (server_addr, report_rx, server_thread) =
         quinn_peer::spawn_echo_server(pki.leaf_der.clone(), pki.leaf_key.clone_key(), ALPN);
+    // Lossless sniffing middlebox so a handshake failure leaves wire evidence
+    // (datagram sizes and directions) instead of a bare error string.
+    let middlebox = proxy::Proxy::spawn(server_addr, 0, 0, 7).expect("sniff proxy");
 
     let connected = block_on(async {
         let config = NativeQuicConnectionConfig::default();
@@ -528,7 +803,7 @@ fn interop_quinn_server() {
         asup::connect(
             &cx,
             endpoint,
-            server_addr,
+            middlebox.client_facing,
             vec![pki.ca_der.clone()],
             "localhost",
             b"spike-i5",
@@ -551,7 +826,24 @@ fn interop_quinn_server() {
             client
         }
         Err(error) => {
-            result_row(scenario, "handshake-against-independent-server", "failed", &error);
+            let wire = middlebox
+                .stats
+                .wire_log
+                .lock()
+                .map(|log| {
+                    log.iter()
+                        .map(|(direction, size)| format!("{direction}{size}"))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            result_row(
+                scenario,
+                "handshake-against-independent-server",
+                "failed",
+                &format!("{error}; wire[dir+bytes]={wire}"),
+            );
+            middlebox.shutdown();
             drop(report_rx);
             let _ = server_thread.join();
             return;
@@ -628,6 +920,7 @@ fn interop_quinn_server() {
             "quinn server never reported",
         ),
     }
+    middlebox.shutdown();
     let _ = server_thread.join();
 }
 

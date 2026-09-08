@@ -1,0 +1,4 @@
+# Fetched build products (rch job result dir) — 500 MB debug binary lives here
+out/
+# Cargo lockfile of this standalone spike is tracked; its target/ is covered by
+# the root ignore. Scenario evidence under results/ IS tracked.
