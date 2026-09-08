@@ -34,4 +34,4 @@ Aligned with the plan's threat model (§19) and security test matrix (§24.3):
 
 ## Non-claims
 
-No production support window or security SLA exists before an implementation release. Admitted tailnet peers are deliberately trusted with desktop control under the default policy; a compromised admitted device has that authority until revoked. The selected desktop user, host OS, installed Tailscale authority, and GPU/media stack are explicit trust limits. Process separation is crash isolation, not a sandbox, unless a specific enforced OS sandbox is documented for that target.
+No production support window or security SLA exists before an implementation release. Nodes inside the locally selected sharing scope (the host user's own devices by default; the whole tailnet only by explicit local choice) are deliberately trusted with desktop control; a compromised in-scope device has that authority until revoked. The selected desktop user, host OS, installed Tailscale authority, and GPU/media stack are explicit trust limits. Process separation is crash isolation, not a sandbox, unless a specific enforced OS sandbox is documented for that target.

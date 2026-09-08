@@ -1,6 +1,6 @@
 # Comprehensive Plan for the Design of FrankenRemote
 
-**Version:** 1.1 — reviewed and corrected architecture and implementation proposal  
+**Version:** 1.2 — reviewed and corrected architecture and implementation proposal; narrows the default admission scope  
 **Date:** September 7, 2026, America/New_York  
 **Project initiator:** Jeffrey Emanuel  
 **Host daemon:** FrankenRemoteDaemon (`frd`)  
@@ -59,7 +59,7 @@ The recommended decisions are:
 | Browser decoding | WebCodecs when the exact HEVC configuration works. WASM runs protocol and session logic, not an assumed universal HEVC software decoder. |
 | Audio | Opus only, independently of the one-video-codec rule. No microphone forwarding in the initial product. |
 | Connectivity and identity | The installed Tailscale client, its authenticated local metadata, existing tailnet grants, and tailnet addresses. No embedded second VPN or identity service. |
-| Admission default | Any verified, reachable member of the same tailnet may request desktop control. Optional local approval, disabled by default, gates observation as well as control. |
+| Admission default | Default sharing scope is the host's own tailnet user: verified, reachable nodes belonging to the same tailnet user identity as the host may request desktop control. Admitting all tailnet members and tagged nodes is an explicit local setup choice, not the default. Optional local approval, disabled by default, gates observation as well as control. |
 | Runtime | Asupersync only, including cancellation-aware ownership and deterministic tests. No hidden Tokio runtime. |
 | Native transport | Target Asupersync native QUIC, after live-wire/security qualification: reliable control/input, datagram media with bounded reference-aware recovery. WSS is an explicit compatibility profile for native clients too. |
 | Browser transport | Actual HTTP/3 WebTransport interoperability over Asupersync, qualified early. Separate, bounded secure WebSocket channels are the explicit degraded fallback. |
@@ -85,6 +85,8 @@ Version 1.1 resolves errors and under-specified boundaries, not just wording. Th
 
 The product requirements remain HEVC-only video, Tailscale-only connectivity and machine identity, Asupersync, narrow foreign-code boundaries, and the existing code-size ceiling. No new relay, account system, codec project, database, or general automation framework is introduced.
 
+Version 1.2 narrows one default and changes nothing else: the out-of-box admission scope is the host user's own tailnet devices rather than every same-tailnet principal, with tailnet-wide sharing as an explicit local choice (Sections 2.1, 6.1, 19.2). The rationale is that desktop control is the most dangerous capability on a tailnet and FrankenRemote deliberately carries no second credential, so the admission default bears the entire authentication burden; Taildrop, a strictly less dangerous capability, already defaults to same-user scope. The scope check consumes only identity evidence Section 6.2 already requires the adapter to produce and fixture-test, so no new subsystem, pairing step, or account is introduced.
+
 ## 2. Product boundary and user experience
 
 ### 2.1 The ordinary experience
@@ -97,7 +99,7 @@ The default connection requests control. The host makes the controller visible l
 
 The interface should initially show only the machine, selected display, connection state, and a small toolbar. Detailed metrics belong behind a connection-quality panel. Common failures receive specific explanations: permission missing, no supported HEVC decoder, host not in an interactive session, tailnet policy blocked, controller busy, or browser transport degraded.
 
-Setup asks the local installer to enable sharing of the selected OS session and explains that the default admits other reachable, verified tailnet members, not only the owner's devices. Installing a client alone never enables hosting. No approval prompt or privacy-sensitive capability probe runs before identity checks; repeated requests are deduplicated and rate-limited. Approval expires or is cancelled when its requesting session ends. Switching from approval-off to approval-on revokes existing grants unless the local user explicitly approves those particular sessions.
+Setup asks the local installer to enable sharing of the selected OS session and to choose a sharing scope. The default scope admits only nodes that verifiably belong to the host's own tailnet user identity; admitting all tailnet members and tagged nodes is an explicit choice made at setup or later through local configuration, and setup explains exactly what the wider scope means. A tagged host machine has no owning tailnet user, so it cannot use the own-user default and requires an explicit scope selection. Installing a client alone never enables hosting. No approval prompt or privacy-sensitive capability probe runs before identity checks; repeated requests are deduplicated and rate-limited. Approval expires or is cancelled when its requesting session ends. Switching from approval-off to approval-on revokes existing grants unless the local user explicitly approves those particular sessions.
 
 ### 2.2 Scope of version 1
 
@@ -262,6 +264,9 @@ The intended default is:
 
 ```text
 verified current same-tailnet node
+AND within the locally selected sharing scope
+    (default: nodes of the host's own tailnet user;
+     explicit local option: all tailnet members and tagged nodes)
 AND allowed to reach this host by Tailscale policy
 AND locally enabled desktop sharing
 AND requested capability supported by this OS session
@@ -269,7 +274,7 @@ AND (a controller slot is available, when requesting control)
 AND local approval, only when configured
 ```
 
-There is no requirement that the peer have the same human owner as the host. Different tailnet users and tagged machines are valid principals. The policy intentionally trusts admitted tailnet devices with desktop control; a compromised admitted device has that authority until revoked.
+Different tailnet users and tagged machines are valid principals, but only when the host has locally selected the tailnet-wide scope or an explicit Tailscale app-capability grant admits them; the out-of-box scope is the host user's own devices. The reasoning is deliberate: desktop control is the most dangerous capability a tailnet service can grant, and FrankenRemote intentionally has no second credential, so the admission policy is the entire authentication story. Scope membership is decided from the same authenticated local metadata as admission itself (Section 6.2) — the peer node's user identity compared against the host node's — never from names, DNS, or reachability, and missing or ambiguous user evidence is a typed refusal exactly as in Section 6.2. The policy intentionally trusts devices inside the selected scope with desktop control; a compromised in-scope device has that authority until revoked, which is why the widest scope must be chosen rather than assumed.
 
 The daemon binds only to its current Tailscale IPv4/IPv6 node addresses and enforces a platform-qualified tailnet ingress boundary using interface/socket/firewall facilities where available. Binding a destination address alone is not universally proof of ingress through the tunnel. It must not listen on all interfaces and trust a `100.64.0.0/10` source. Loss of the tailnet, self-node identity change, or tailnet change closes affected listeners and invalidates sessions.
 
@@ -896,6 +901,8 @@ frd install
 frd status --json
 frd approval set local
 frd approval set none
+frd sharing set own-user
+frd sharing set tailnet
 ```
 
 These are planned interfaces, not commands claimed to exist today. The initial command set stays small; a full workflow language and an MCP server are not required to make JSON automation useful.
@@ -948,7 +955,7 @@ A worker process alone is not a security sandbox. Use OS-supported privilege/tok
 
 Protect against unrelated network clients, shared external tailnet principals, malicious web origins on admitted machines, malformed protocol/media, stale worker callbacks, local unprivileged IPC forgery, and resource exhaustion by an admitted peer.
 
-The host OS, its selected interactive user, installed Tailscale authority, and relevant GPU/system media stack are trusted to the extent required by their roles. A malicious local administrator can already control the machine. A compromised same-tailnet node has the default access the user deliberately requested; optional Tailscale restrictions and local approval narrow that trust but do not change the default into hidden pairing.
+The host OS, its selected interactive user, installed Tailscale authority, and relevant GPU/system media stack are trusted to the extent required by their roles. A malicious local administrator can already control the machine. A compromised node inside the locally selected sharing scope has the access that scope deliberately grants; the own-user default keeps other users' devices and tagged nodes — the class of machine most commonly compromised — outside that trust until the local user explicitly widens it. Optional Tailscale restrictions and local approval narrow the trust further; none of this turns admission into hidden pairing.
 
 Do not expose FFmpeg's arbitrary file/protocol/filter machinery through the wire format. Treat clipboard text and terminal semantic data as untrusted content, never executable instructions for the daemon.
 

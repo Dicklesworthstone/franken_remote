@@ -46,7 +46,7 @@ The project values:
 
 Before a material change, read the relevant portions of, in order of authority:
 
-1. [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) — version 1.1; the review corrections in §1 and §27.1 are binding requirements, not commentary;
+1. [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) — version 1.2; the review corrections in §1 and §27.1 are binding requirements, not commentary;
 2. [`PROTOCOL.md`](PROTOCOL.md) once it carries normative content (today it is a status stub deferring to plan §17);
 3. [`SECURITY.md`](SECURITY.md) and the threat model in plan §19;
 4. this file;
@@ -208,7 +208,7 @@ Local builds: prefix cargo invocations with `RCH_CARGO_WRAPPER_BYPASS=1` on host
 
 A reviewer should be able to answer:
 
-- Which plan section and invariant own this behavior, and does the change contradict a v1.1 correction?
+- Which plan section and invariant own this behavior, and does the change contradict a §1/§27.1 correction?
 - Is it Asupersync-only, safe-Rust-only outside the named FFI crates, and dependency-compliant on every target?
 - Are observation, readiness, and input authority still separate, generation-fenced, and expiry-checked at submission time?
 - Is every queue bounded in count **and** bytes, including hidden and shared-viewer stages, without violating surface/reference ownership?

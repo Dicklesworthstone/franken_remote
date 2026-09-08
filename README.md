@@ -2,7 +2,7 @@
 
 **A tailnet-native remote workstation in Rust: open a machine on your Tailscale network and use its existing desktop, with hardware-accelerated HEVC, no separate account or pairing ceremony, and a system that refuses to accumulate invisible latency.**
 
-> **Status: researched design, pre-implementation.** This repository currently contains the reviewed architecture and implementation proposal, not working software. The single source of truth for what is being built and why is [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) (version 1.1, 2026-09-07, all 27 sections re-reviewed with corrections integrated in place). Every number, latency target, protocol limit, and platform claim below is a **proposed engineering objective or experimental starting point taken from that plan — not a measured FrankenRemote result**. No code, benchmark, or qualification evidence exists yet, and this README will be trued up in place as implementation phases land.
+> **Status: researched design, pre-implementation.** This repository currently contains the reviewed architecture and implementation proposal, not working software. The single source of truth for what is being built and why is [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) (version 1.2, 2026-09-07, all 27 sections re-reviewed with corrections integrated in place). Every number, latency target, protocol limit, and platform claim below is a **proposed engineering objective or experimental starting point taken from that plan — not a measured FrankenRemote result**. No code, benchmark, or qualification evidence exists yet, and this README will be trued up in place as implementation phases land.
 >
 > **License:** `LicenseRef-MIT-OpenAI-Anthropic-Rider` — the MIT license plus the OpenAI/Anthropic rider (see [`LICENSE`](LICENSE)). Because the rider withholds rights from named parties, these terms are **not** OSI-approved open source; the repository is source-available and must be described that way.
 
@@ -33,7 +33,7 @@ Condensed from plan §1; each row is a settled decision, not an open question.
 | Encoding | Fixed-function hardware encoders preferred. x265 is a possible opt-in software fallback candidate, not the name of the hardware path. |
 | Audio | **Opus only.** Host playback audio; no microphone forwarding in v1. |
 | Connectivity & identity | The **installed Tailscale client** and its authenticated local metadata, grants, and addresses. No embedded VPN, ICE/STUN, second identity system, or public relay. |
-| Admission default | Any verified, reachable member of the same tailnet may request desktop control. Optional local approval (off by default) gates **observation as well as control**. |
+| Admission default | Sharing scope defaults to the host's **own tailnet user's devices**; admitting all tailnet members and tagged nodes is an explicit local choice. Optional local approval (off by default) gates **observation as well as control**. |
 | Runtime | **Asupersync only**, including cancellation-aware ownership and deterministic tests. No hidden Tokio. |
 | Native transport | Asupersync native QUIC after live-wire/security qualification: reliable control/input, datagram media with bounded reference-aware recovery. WSS is an explicit, labeled compatibility profile. |
 | Browser transport | Actual HTTP/3 WebTransport interoperability, qualified early. Bounded secure-WebSocket channels are the explicit degraded fallback. |
