@@ -46,7 +46,7 @@ The project values:
 
 Before a material change, read the relevant portions of, in order of authority:
 
-1. [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) — version 1.2; the review corrections in §1 and §27.1 are binding requirements, not commentary;
+1. [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) — version 1.3; the review corrections in §1 and §27.1 are binding requirements, not commentary;
 2. [`PROTOCOL.md`](PROTOCOL.md) once it carries normative content (today it is a status stub deferring to plan §17);
 3. [`SECURITY.md`](SECURITY.md) and the threat model in plan §19;
 4. this file;

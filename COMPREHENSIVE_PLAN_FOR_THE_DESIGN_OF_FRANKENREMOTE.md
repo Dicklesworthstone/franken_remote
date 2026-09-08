@@ -1,6 +1,6 @@
 # Comprehensive Plan for the Design of FrankenRemote
 
-**Version:** 1.2 — reviewed and corrected architecture and implementation proposal; narrows the default admission scope  
+**Version:** 1.3 — reviewed and corrected architecture and implementation proposal; narrows the default admission scope; names Chrome and Safari as the browser qualification bar  
 **Date:** September 7, 2026, America/New_York  
 **Project initiator:** Jeffrey Emanuel  
 **Host daemon:** FrankenRemoteDaemon (`frd`)  
@@ -86,6 +86,8 @@ Version 1.1 resolves errors and under-specified boundaries, not just wording. Th
 The product requirements remain HEVC-only video, Tailscale-only connectivity and machine identity, Asupersync, narrow foreign-code boundaries, and the existing code-size ceiling. No new relay, account system, codec project, database, or general automation framework is introduced.
 
 Version 1.2 narrows one default and changes nothing else: the out-of-box admission scope is the host user's own tailnet devices rather than every same-tailnet principal, with tailnet-wide sharing as an explicit local choice (Sections 2.1, 6.1, 19.2). The rationale is that desktop control is the most dangerous capability on a tailnet and FrankenRemote deliberately carries no second credential, so the admission default bears the entire authentication burden; Taildrop, a strictly less dangerous capability, already defaults to same-user scope. The scope check consumes only identity evidence Section 6.2 already requires the adapter to produce and fixture-test, so no new subsystem, pairing step, or account is introduced.
+
+Version 1.3 records one scoping decision by the project initiator: current Chrome and Safari, on OS/hardware combinations where their HEVC path actually passes the Section 16.3 probe, are the browser qualification bar — the browser client is good enough when those work. Other browsers remain probe-determined best effort; their gaps are acceptable and not release-blocking. This changes no architecture: runtime support is still decided per combination by the real decode-and-present probe, never by browser brand, and WSS remains the labeled fallback where a target browser lacks a qualified WebTransport path.
 
 ## 2. Product boundary and user experience
 
@@ -818,6 +820,8 @@ Close decoded `VideoFrame` objects promptly, bound the decode queue, and prefer 
 
 The client is supported only when its HEVC decode, presentation, secure transport, and required input capabilities pass. With HEVC-only, some browser/OS/hardware combinations will be unsupported. WSS can solve a transport gap; it cannot solve a missing codec. Do not conceal that distinction behind a generic “browser supported” badge.
 
+The browser qualification bar is current Chrome and Safari on OS/hardware combinations where their HEVC path passes this probe; the browser client is complete when those pass. Other browsers are probe-determined best effort, and their gaps are acceptable rather than release-blocking. Where a qualification-target browser lacks a qualified WebTransport path, the bounded WSS profile is its supported transport, under the same degraded-labeling rules. This bar selects where qualification effort goes; it does not replace the per-combination probe or license a brand check.
+
 Keep `hvc1`/`hev1` parameter-set rules and the declared NAL-length width consistent with the actual bytes. Parse/normalize encoder output once in the media adapter; do not concatenate arbitrary network chunks and call each chunk a frame. Each `EncodedVideoChunk` contains one complete admitted access unit, with a correct key/delta designation and presentation timestamp in the API's units. Reject unexpected in-band parameter-set changes until a new configuration is negotiated. The HEVC WebCodecs registration distinguishes configuration-record and Annex-B forms. [S15]
 
 Do not call `VideoDecoder.flush()` after every frame or use it as an arbitrary “show now” operation: the WebCodecs flush algorithm requires the next submitted chunk to be a key chunk. Test a single IDR, long static idle, one P picture, low-rate updates, and the final frame of a burst. Configure/reset/recovery is explicit; a flushed/reset decoder cannot accept an ordinary continuation as if reference state were unchanged. [S14]
@@ -1244,7 +1248,7 @@ Source reviewed, builds passed, simulated properties passed, independent wire in
 
 | Risk or open decision | Resolution policy |
 |---|---|
-| HEVC missing or slow in some browsers | Feature probe plus real decode/present test. Publish the limit. No secret second video codec. |
+| HEVC missing or slow in some browsers | Feature probe plus real decode/present test. Publish the limit. No secret second video codec. Chrome and Safari on supported hardware are the qualification bar; other browsers' gaps are accepted. |
 | Asupersync native or WebTransport composition is not production-qualified | Test actual endpoints, TLS/ALPN, independent peers, congestion and bounds. Upstream only bounded missing work; WSS is a labeled fallback, not datagram parity. |
 | Asupersync platform/runtime gaps exceed the integration allowance | Revisit schedule/scope before expanding application code. Count project-induced upstream work against the budget. |
 | GPU capture-to-encode copies erase the hardware advantage | Measure copies and latency before GUI expansion; change backend or surface path. |

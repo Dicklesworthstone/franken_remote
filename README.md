@@ -2,7 +2,7 @@
 
 **A tailnet-native remote workstation in Rust: open a machine on your Tailscale network and use its existing desktop, with hardware-accelerated HEVC, no separate account or pairing ceremony, and a system that refuses to accumulate invisible latency.**
 
-> **Status: researched design, pre-implementation.** This repository currently contains the reviewed architecture and implementation proposal, not working software. The single source of truth for what is being built and why is [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) (version 1.2, 2026-09-07, all 27 sections re-reviewed with corrections integrated in place). Every number, latency target, protocol limit, and platform claim below is a **proposed engineering objective or experimental starting point taken from that plan — not a measured FrankenRemote result**. No code, benchmark, or qualification evidence exists yet, and this README will be trued up in place as implementation phases land.
+> **Status: researched design, pre-implementation.** This repository currently contains the reviewed architecture and implementation proposal, not working software. The single source of truth for what is being built and why is [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) (version 1.3, 2026-09-07, all 27 sections re-reviewed with corrections integrated in place). Every number, latency target, protocol limit, and platform claim below is a **proposed engineering objective or experimental starting point taken from that plan — not a measured FrankenRemote result**. No code, benchmark, or qualification evidence exists yet, and this README will be trued up in place as implementation phases land.
 >
 > **License:** `LicenseRef-MIT-OpenAI-Anthropic-Rider` — the MIT license plus the OpenAI/Anthropic rider (see [`LICENSE`](LICENSE)). Because the rider withholds rights from named parties, these terms are **not** OSI-approved open source; the repository is source-available and must be described that way.
 
@@ -98,7 +98,7 @@ Target adapters from plan §8.3 — a statement of intended integration paths, n
 | Linux | PipeWire/portal on Wayland; explicit X11 adapter | FFmpeg hardware bridge to VAAPI / NVENC | Qualified GPU decode + native presentation |
 | iOS | Client only | — | VideoToolbox + native display layers/Metal |
 | Android | Client only | — | MediaCodec direct to Surface |
-| Browser | Client only | — | WebCodecs (real decode-and-present probe, never a brand check) |
+| Browser | Client only | — | WebCodecs (real decode-and-present probe, never a brand check); Chrome and Safari are the qualification bar, other browsers best-effort |
 
 FFmpeg integration is a deliberately narrow boundary (plan §9): a curated, allowlisted `libavcodec`/`libavutil` build per target, one pinned binding family, opaque GPU surfaces, observable copies, and no FFmpeg types crossing into session or wire layers. macOS/iOS use system VideoToolbox and Android uses MediaCodec, so bundled FFmpeg targets stay few. There is no hot-path `ffmpeg` subprocess. The pure-Rust HEVC candidate (`oxideav-h265`) is tracked as a possible future fallback/verification tool; **no HEVC encoder is written from scratch for this project.**
 
