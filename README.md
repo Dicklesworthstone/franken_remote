@@ -2,9 +2,7 @@
 
 **A tailnet-native remote workstation in Rust: open a machine on your Tailscale network and use its existing desktop, with hardware-accelerated HEVC, no separate account or pairing ceremony, and a system that refuses to accumulate invisible latency.**
 
-> **Status: researched design, pre-implementation.** This repository currently contains the reviewed architecture and implementation proposal, not working software. The single source of truth for what is being built and why is [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) (version 1.3, 2026-09-07, all 27 sections re-reviewed with corrections integrated in place). Every number, latency target, protocol limit, and platform claim below is a **proposed engineering objective or experimental starting point taken from that plan — not a measured FrankenRemote result**. No code, benchmark, or qualification evidence exists yet, and this README will be trued up in place as implementation phases land.
->
-> **License:** `LicenseRef-MIT-OpenAI-Anthropic-Rider` — the MIT license plus the OpenAI/Anthropic rider (see [`LICENSE`](LICENSE)). Because the rider withholds rights from named parties, these terms are **not** OSI-approved open source; the repository is source-available and must be described that way.
+> **Status: researched design, pre-implementation.** This repository currently contains the reviewed architecture and implementation proposal, not working software. The single source of truth for what is being built and why is [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) (version 1.4, 2026-09-07, all 27 sections re-reviewed with corrections integrated in place). Every number, latency target, protocol limit, and platform claim below is a **proposed engineering objective or experimental starting point taken from that plan — not a measured FrankenRemote result**. No code, benchmark, or qualification evidence exists yet, and this README will be trued up in place as implementation phases land.
 
 The two shipped names are:
 
@@ -31,7 +29,8 @@ Condensed from plan §1; each row is a settled decision, not an open question.
 |---|---|
 | Video | **HEVC/H.265 only.** Main, 8-bit, 4:2:0 baseline; additional profiles by positive capability negotiation. No second video codec, ever, including "just for browsers." |
 | Encoding | Fixed-function hardware encoders preferred. x265 is a possible opt-in software fallback candidate, not the name of the hardware path. |
-| Audio | **Opus only.** Host playback audio; no microphone forwarding in v1. |
+| Audio | **Opus only, both directions.** Host playback audio to the client, and explicit-enable client microphone to the host through a per-OS qualified virtual-mic endpoint. |
+| Files & clipboard | Explicit file send/receive plus **ATP-backed folder synchronization** (reusing asupersync's transfer machinery) over a separate bounded channel; automatic bidirectional text clipboard sync, default-on for the controller. |
 | Connectivity & identity | The **installed Tailscale client** and its authenticated local metadata, grants, and addresses. No embedded VPN, ICE/STUN, second identity system, or public relay. |
 | Admission default | Sharing scope defaults to the host's **own tailnet user's devices**; admitting all tailnet members and tagged nodes is an explicit local choice. Optional local approval (off by default) gates **observation as well as control**. |
 | Runtime | **Asupersync only**, including cancellation-aware ownership and deterministic tests. No hidden Tokio. |
@@ -39,7 +38,7 @@ Condensed from plan §1; each row is a settled decision, not an open question.
 | Browser transport | Actual HTTP/3 WebTransport interoperability, qualified early. Bounded secure-WebSocket channels are the explicit degraded fallback. |
 | Safety | Safe Rust (`#![forbid(unsafe_code)]`) in protocol and authority code; a small audited unsafe/foreign boundary for OS and media APIs, with media work isolated from input authority. |
 | Product scope | Selected full displays of an existing interactive desktop. No window-isolation promise, independent remote login, preboot access, USB/printer forwarding, or public-internet brokering. |
-| Size discipline | ~180,000 handwritten Rust lines including tests; 240,000 planned ceiling; hard stop below 250,000. |
+| Size discipline | ~194,000 handwritten Rust lines including tests; 240,000 planned ceiling; hard stop below 250,000. |
 
 Four assumptions the plan makes explicit rather than burying: HEVC is not x265; HEVC-only does not imply every browser (the supported set comes from a real decode-and-present probe); high bitrate does not repair 4:2:0 chroma subsampling; and a daemon cannot erase OS consent boundaries.
 
@@ -104,9 +103,9 @@ FFmpeg integration is a deliberately narrow boundary (plan §9): a curated, allo
 
 ## Product boundary
 
-**Version 1 includes:** Linux/macOS/Windows hosting; desktop native clients; iOS and Android clients; a browser client; keyboard and pointer control; a practical touch interface; host playback audio; explicit text clipboard exchange; display selection; reconnection; useful diagnostics. One host exposes one existing interactive user session; one remote controller owns input at a time, with a small explicit viewer limit (initially one controller plus two read-only viewers, subject to resource admission).
+**Version 1 includes:** Linux/macOS/Windows hosting; desktop native clients; iOS and Android clients with first-class native SwiftUI and Jetpack Compose UIs over the shared Rust core, developed in this monorepo; a browser client; keyboard and pointer control; a practical touch interface; audio in both directions (host playback to the client, explicit-enable client microphone to the host); a shared clipboard with automatic bidirectional text sync; explicit file send/receive with ATP-backed folder synchronization; display selection; reconnection; useful diagnostics. One host exposes one existing interactive user session; one remote controller owns input at a time, with a small explicit viewer limit (initially one controller plus two read-only viewers, subject to resource admission).
 
-**Non-goals (plan §2.3):** file synchronization, remote filesystem mounting, USB passthrough, printer redirection, webcam/microphone forwarding, remote shell execution, session recording, an enterprise dashboard, mobile hosting, public-internet guest links, a proprietary cloud account, or a replacement for Tailscale. No AI model in the critical path; no synthesized application responses or fabricated state to hide latency (local cursor rendering is fine; fake application state is not).
+**Non-goals (plan §2.3):** remote filesystem mounting, USB passthrough, printer redirection, webcam forwarding, remote shell execution, session recording, an enterprise dashboard, mobile hosting, public-internet guest links, a proprietary cloud account, or a replacement for Tailscale. No AI model in the critical path; no synthesized application responses or fabricated state to hide latency (local cursor rendering is fine; fake application state is not).
 
 **Honest limits stated up front:** sharing even one display can control the wider logged-in session through application actions — setup says so explicitly. Lock, logout, or user switching ends observation and control. A daemon does not bypass Wayland compositor consent, macOS TCC/login windows, or Windows secure desktops.
 
@@ -142,13 +141,13 @@ frankenremote/
     fr/               CLI and thin desktop launch integration
     fr-web/           WASM entrypoint and browser boundary
     fr-lab/           fixtures, deterministic scenarios, benchmark harness
-  mobile/             thin signed iOS/Android application shells
+  mobile/             native SwiftUI (iOS) and Kotlin/Compose (Android) apps over the shared core
   web/                small self-hosted JS/CSS/HTML shell
   native/             reproducible media build recipes and manifests
   xtask/              repository-owned verification/release commands
 ```
 
-Budget: **180k handwritten Rust lines** (tests and project-induced upstream work included) as the target, **240k planned maximum**, hard stop below 250k, plus a separate ≤15k allowance for JS/Swift/Kotlin/build glue. One fixed counting command in the repository; the counting method does not get redefined near the end.
+Budget: **194k handwritten Rust lines** (tests and project-induced upstream work included) as the target, **240k planned maximum**, hard stop below 250k, plus a separate ≤20k allowance for JS/Swift/Kotlin/build glue — raised in v1.4 because the mobile apps deliberately carry first-class native UIs. One fixed counting command in the repository; the counting method does not get redefined near the end.
 
 ## Implementation sequence
 
@@ -158,7 +157,7 @@ Six phases with explicit exit gates (plan §23). Phase 0 exists so that architec
 |---|---|---|
 | **0 — Retire architectural risks** | Real capture→HEVC→decode→present spikes; live Asupersync QUIC endpoint qualification; real HTTP/3 WebTransport interop; browser hvcC/access-unit probes; tailnet identity fixtures (sharing/tagging/ingress); OS lifecycle grants; packaging; fragmented-loss recovery | Each experiment has a reproducible command, exact hardware identity, result, and retained failure reason |
 | **1 — One complete controlled desktop** | One native host/client pair end to end, with the generation model from the beginning | Survives worker restart, network interruption, focus loss, ticket expiry, and resize without stale authority or a growing queue; instrumented latency result exists; a mock codec does not satisfy this gate |
-| **2 — All host platforms + native desktop clients** | Three host adapters, service lifecycle, audio, clipboard, display selection, viewer admission and handoff | Common session/input fault suite passes on each qualified OS with device evidence |
+| **2 — All host platforms + native desktop clients** | Three host adapters, service lifecycle, audio both ways, shared clipboard, file send/receive, display selection, viewer admission and handoff | Common session/input fault suite passes on each qualified OS with device evidence |
 | **3 — Browser and mobile clients** | WASM state machine, decode probes, secure-origin defenses, WSS fallback, touch/lifecycle behavior | Real browsers/phones connect over their own tailnet connectivity; background/resume cannot preserve stale control |
 | **4 — Quality, adaptation, recovery tuning** | Deterministic controller, idle behavior, settle-to-sharp, loss recovery, telemetry — improving what already works, not first implementing correctness | Defined network scenarios show stable operating points; controller decisions replay deterministically |
 | **5 — Release qualification** | Adversarial parsing, origin attacks, tailnet-sharing tests, thermal/long-duration, installer/update/rollback, hardware comparisons | Signed artifacts reproduce tested behavior; unsupported states fail specifically; no claim outruns retained evidence |

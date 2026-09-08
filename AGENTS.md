@@ -46,7 +46,7 @@ The project values:
 
 Before a material change, read the relevant portions of, in order of authority:
 
-1. [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) — version 1.3; the review corrections in §1 and §27.1 are binding requirements, not commentary;
+1. [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) — version 1.4; the review corrections in §1 and §27.1 are binding requirements, not commentary;
 2. [`PROTOCOL.md`](PROTOCOL.md) once it carries normative content (today it is a status stub deferring to plan §17);
 3. [`SECURITY.md`](SECURITY.md) and the threat model in plan §19;
 4. this file;
@@ -74,7 +74,7 @@ If these disagree, stop and surface the contradiction. Do not implement the most
 
 ### 3.3 One video codec, one audio codec
 
-- **HEVC only** (Main, 8-bit, 4:2:0 baseline; extensions by positive capability negotiation). **Opus only** for audio, with a small explicit `libopus` exception in the dependency record.
+- **HEVC only** (Main, 8-bit, 4:2:0 baseline; extensions by positive capability negotiation). **Opus only** for audio, in both directions — host playback down, explicit-enable client microphone up — with a small explicit `libopus` exception in the dependency record.
 - No second video codec may enter the tree for any reason, including browser gaps ("WSS can solve a transport gap; it cannot solve a missing codec — publish the limit").
 - No HEVC encoder is written from scratch. The media interface (`Encoder`, `Decoder`, `GpuSurface`, `EncodedAccessUnit`, `CodecConfiguration`, `MediaCapabilities`) stays replaceable; pure-Rust candidates are evaluated behind it, never load-bearing for the schedule.
 - Capability comes from probes plus a real encode/decode of a representative workload — never from a vendor name, an API accepting a request, or a nominal "HEVC supported" bit.
@@ -99,7 +99,7 @@ If these disagree, stop and surface the contradiction. Do not implement the most
 
 ### 3.7 Size discipline
 
-- **180k target / 240k planned maximum / hard stop below 250k** handwritten Rust lines, tests and project-induced upstream work included. Separate allowance of at most 15k for JS/Swift/Kotlin/build glue; product logic does not migrate there to evade the limit.
+- **194k target / 240k planned maximum / hard stop below 250k** handwritten Rust lines, tests and project-induced upstream work included. Separate allowance of at most 20k for JS/Swift/Kotlin/build glue (the mobile apps deliberately carry first-class native SwiftUI/Compose UIs); protocol, session, media, and input logic does not migrate there to evade the limit.
 - One fixed counting command lives in the repository once code exists; handwritten Rust, generated bindings, non-Rust glue, vendored source, and upstream changes are reported separately. The counting method is never redefined near the end. When core delivery approaches the ceiling, optional scope is cut first — never security or qualification tests.
 
 ## 4. Authority, session, and input rules

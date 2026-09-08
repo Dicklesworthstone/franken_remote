@@ -1,11 +1,11 @@
 # Comprehensive Plan for the Design of FrankenRemote
 
-**Version:** 1.3 — reviewed and corrected architecture and implementation proposal; narrows the default admission scope; names Chrome and Safari as the browser qualification bar  
+**Version:** 1.4 — reviewed and corrected architecture and implementation proposal; v1.2 narrowed the default admission scope, v1.3 named the Chrome/Safari browser qualification bar, v1.4 makes the first-class native Swift and Kotlin mobile applications explicit and promotes ATP file synchronization, the shared clipboard, and bidirectional audio into core scope  
 **Date:** September 7, 2026, America/New_York  
 **Project initiator:** Jeffrey Emanuel  
 **Host daemon:** FrankenRemoteDaemon (`frd`)  
 **Client and command-line interface:** FrankenRemote (`fr`)  
-**Implementation target:** 180,000 handwritten Rust lines; planned ceiling 240,000; hard limit below 250,000  
+**Implementation target:** 194,000 handwritten Rust lines; planned ceiling 240,000; hard limit below 250,000  
 **Status:** researched design, not an implementation or benchmark report; all 27 sections re-reviewed, with corrections integrated in place
 
 > **The product:** Open a machine on your tailnet and use its existing desktop, with hardware-accelerated HEVC, no separate account or pairing ceremony, and a system that refuses to accumulate invisible latency.
@@ -30,7 +30,7 @@
 12. [Transport and media recovery](#12-transport-and-media-recovery)
 13. [Adaptive quality and latency control](#13-adaptive-quality-and-latency-control)
 14. [Desktop text quality and precision extensions](#14-desktop-text-quality-and-precision-extensions)
-15. [Input, clipboard, audio, and multiple displays](#15-input-clipboard-audio-and-multiple-displays)
+15. [Input, clipboard, audio, files, and multiple displays](#15-input-clipboard-audio-files-and-multiple-displays)
 16. [Desktop, mobile, and browser clients](#16-desktop-mobile-and-browser-clients)
 17. [Protocol shape and interoperability](#17-protocol-shape-and-interoperability)
 18. [Agent ergonomics and FrankenTerm integration](#18-agent-ergonomics-and-frankenterm-integration)
@@ -57,7 +57,8 @@ The recommended decisions are:
 | Apple media | ScreenCaptureKit and VideoToolbox through narrow platform adapters. |
 | Windows/Linux media | Native capture, GPU-surface interoperability, and a trimmed FFmpeg `libavcodec`/`libavutil` boundary for the initial hardware codec integration. |
 | Browser decoding | WebCodecs when the exact HEVC configuration works. WASM runs protocol and session logic, not an assumed universal HEVC software decoder. |
-| Audio | Opus only, independently of the one-video-codec rule. No microphone forwarding in the initial product. |
+| Audio | Opus only, independently of the one-video-codec rule, in both directions: host playback audio to the client and explicit-enable client microphone to the host. The host-side virtual-microphone endpoint is per-OS qualified work with its own Phase 0 spike. |
+| Files and clipboard | Explicit file send/receive plus folder synchronization, reusing asupersync's ATP object-transfer machinery over a separate bounded channel. Automatic bidirectional text clipboard synchronization is a default-on capability of the controlling session. |
 | Connectivity and identity | The installed Tailscale client, its authenticated local metadata, existing tailnet grants, and tailnet addresses. No embedded second VPN or identity service. |
 | Admission default | Default sharing scope is the host's own tailnet user: verified, reachable nodes belonging to the same tailnet user identity as the host may request desktop control. Admitting all tailnet members and tagged nodes is an explicit local setup choice, not the default. Optional local approval, disabled by default, gates observation as well as control. |
 | Runtime | Asupersync only, including cancellation-aware ownership and deterministic tests. No hidden Tokio runtime. |
@@ -65,7 +66,7 @@ The recommended decisions are:
 | Browser transport | Actual HTTP/3 WebTransport interoperability over Asupersync, qualified early. Separate, bounded secure WebSocket channels are the explicit degraded fallback. |
 | Safety | Safe Rust in protocol and authority code; a small audited unsafe/foreign boundary for OS and media APIs, with media work isolated from input authority. |
 | Product scope | Selected full displays of an existing interactive desktop. No window-isolation promise, independent remote login, preboot access, USB/printer forwarding, or public-internet brokering. |
-| Size discipline | Approximately 180k handwritten Rust lines including tests and project-induced upstream work; 60k contingency; stop below 250k. |
+| Size discipline | Approximately 194k handwritten Rust lines including tests and project-induced upstream work; 46k contingency; stop below 250k. |
 
 Four assumptions need to be made explicit rather than buried in implementation:
 
@@ -89,6 +90,10 @@ Version 1.2 narrows one default and changes nothing else: the out-of-box admissi
 
 Version 1.3 records one scoping decision by the project initiator: current Chrome and Safari, on OS/hardware combinations where their HEVC path actually passes the Section 16.3 probe, are the browser qualification bar — the browser client is good enough when those work. Other browsers remain probe-determined best effort; their gaps are acceptable and not release-blocking. This changes no architecture: runtime support is still decided per combination by the real decode-and-present probe, never by browser brand, and WSS remains the labeled fallback where a target browser lacks a qualified WebTransport path.
 
+Version 1.4 makes the mobile client shape explicit rather than implied. The iOS application is a first-class native Swift/SwiftUI application and the Android application a first-class native Kotlin/Jetpack Compose application. Both sit over the same shared Rust core crates used by the desktop and browser clients — connection setup, protocol and session state, recovery, input semantics, quality feedback, diagnostics — through one narrow, audited FFI boundary per platform, and both are developed in this monorepo under `mobile/ios` and `mobile/android` with repository-owned build commands; there are no satellite mobile repositories. "Thin shell" continues to mean logic-thin, never UI-poor: platform-conventional interface quality is a product requirement, while session, protocol, media, and input logic stay in Rust. The non-Rust allowance in Section 22.2 rises from 15k to 20k handwritten lines to account for the two native UI layers honestly.
+
+Version 1.4 also promotes three capabilities from excluded or minimal status into the core product, by decision of the project initiator. First, file transfer and folder synchronization are v1 scope, built on asupersync's existing ATP object-transfer machinery over a separate bounded channel rather than a new protocol (Section 15.6); the Section 12.2 exclusion of durable object transfer now applies to the real-time media path, not to this capability. Second, the shared clipboard is table stakes: automatic bidirectional text clipboard synchronization is default-on for the controlling session (Section 15.3). Third, audio is bidirectional: explicit-enable client microphone forwarding into a per-OS qualified host virtual-microphone endpoint joins host playback audio (Section 15.4), with the Windows endpoint acknowledged as driver-class work carrying its own Phase 0 spike. The Section 22.2 budget rises to a 194k-line target inside the unchanged 240k planned maximum and sub-250k hard stop.
+
 ## 2. Product boundary and user experience
 
 ### 2.1 The ordinary experience
@@ -105,7 +110,7 @@ Setup asks the local installer to enable sharing of the selected OS session and 
 
 ### 2.2 Scope of version 1
 
-Version 1 includes Linux/macOS/Windows hosting, desktop native clients, iOS and Android clients, a browser client, keyboard and pointer control, a practical touch interface, host playback audio, explicit text clipboard exchange, display selection, reconnection, and useful diagnostics.
+Version 1 includes Linux/macOS/Windows hosting, desktop native clients, iOS and Android clients, a browser client, keyboard and pointer control, a practical touch interface, audio in both directions (host playback audio to the client, and explicit-enable client microphone to the host where the host endpoint qualifies), a shared clipboard with automatic bidirectional text synchronization, explicit file send/receive with ATP-backed folder synchronization, display selection, reconnection, and useful diagnostics.
 
 A host exposes one existing interactive user session selected by local configuration. Multiple monitors belong to that session. Simultaneous independent user logins are not part of the product. One remote controller owns input at a time. The initial viewer limit should be small and explicit, such as one controller and two read-only viewers, subject to resource admission.
 
@@ -117,7 +122,7 @@ Lock, logout, or user switching ends observation and control. Cooperative client
 
 ### 2.3 Non-goals
 
-Do not include file synchronization, remote filesystem mounting, USB passthrough, printer redirection, webcam or microphone forwarding, remote shell execution, session recording, an enterprise dashboard, mobile hosting, public-internet guest links, a proprietary cloud account, or a replacement for Tailscale.
+Do not include remote filesystem mounting, USB passthrough, printer redirection, webcam forwarding, remote shell execution, session recording, an enterprise dashboard, mobile hosting, public-internet guest links, a proprietary cloud account, or a replacement for Tailscale. (File synchronization and microphone forwarding were non-goals before version 1.4; both are now core scope under Sections 15.4 and 15.6.)
 
 Do not add an AI model to the critical path. Do not synthesize plausible remote application responses or hide latency by pretending an action has already succeeded. Local cursor rendering is appropriate; fabricated application state is not.
 
@@ -584,7 +589,7 @@ Tailscale owns path establishment and relay selection; FrankenRemote adds no ICE
 
 ### 12.2 A small real-time profile, not all of ATP
 
-Reuse Asupersync framing where suitable, sockets, scheduling, cancellation, congestion machinery, and deterministic models. Upstream only the missing reusable real-time mechanisms. Do not import durable object transfer, historical frame replay, swarms, content addressing, or per-frame proof bundles.
+Reuse Asupersync framing where suitable, sockets, scheduling, cancellation, congestion machinery, and deterministic models. Upstream only the missing reusable real-time mechanisms. Do not import durable object transfer, historical frame replay, swarms, content addressing, or per-frame proof bundles into the real-time media path. The file-transfer capability of Section 15.6 deliberately reuses ATP's durable object-transfer machinery, but on its own bounded channel with its own budgets; it shares congestion capacity with media and must never sit ahead of input or starve the freshness contract.
 
 FEC is not mandatory in the initial implementation, but **working loss recovery is mandatory** before advertising a constrained-network operating point. Baseline repair combines bounded missing-fragment retransmission for ordinary media with a bounded reliable bootstrap/recovery stream. Existing RaptorQ can support a later small-group experiment only if measured stall frequency, latency, bytes, and CPU improve. A failed recovery gate cannot be waved away as a future FEC optimization.
 
@@ -722,7 +727,7 @@ On a small display, a native-resolution viewport is often more useful than shrin
 
 Distinguish local zoom of a full-display stream from a host-encoded crop. Local zoom changes only the client transform. A host crop changes the negotiated viewport/mapping generation and must be acknowledged before coordinate-dependent input uses it. Every click resolves through displayed-frame crop, letterboxing, rotation, DPI scale, and display origin. Out-of-content touches do not clamp into an unintended clickable edge. Advertise the wider OS-session control scope even when only a crop is visible.
 
-## 15. Input, clipboard, audio, and multiple displays
+## 15. Input, clipboard, audio, files, and multiple displays
 
 ### 15.1 Input is not video traffic
 
@@ -748,7 +753,7 @@ Revoke is synchronous at the authority decision point, while OS cleanup completi
 
 ### 15.3 Clipboard
 
-Start with explicit text copy/paste, a one-MiB configurable limit, bounded UTF-8 validation, and no automatic file, HTML, image, or URL opening. Automatic clipboard synchronization is off by default. Clipboard access belongs to the controlling session, not every read-only viewer.
+A shared clipboard is table stakes for a remote workstation: automatic bidirectional text clipboard synchronization between the controlling client and the host is a core capability of version 1, enabled by default for the controlling session, with a visible off switch on both ends. The limit starts at one MiB of validated UTF-8 per item, with no automatic file, HTML, or URL opening. Image clipboard content is a negotiated optional capability carried over the bounded transfer channel of Section 15.6, never smuggled through the control parser. Clipboard access belongs to the controlling session, not every read-only viewer, and local approval, when enabled, covers clipboard synchronization like any other observation capability.
 
 Use sequence identifiers and source labels to prevent echo loops. Clear session buffers on closure. Clipboard contents do not appear in routine logs or diagnostic traces.
 
@@ -758,7 +763,9 @@ Use a separate bounded transfer with declared total length and chunk sequence, n
 
 ### 15.4 Audio
 
-Use Opus as the only audio format, with a small explicit `libopus` exception and a recorded license/build configuration. Playback audio capture is disabled until locally enabled and is active only for an admitted session that requests it. No microphone forwarding. Audio scope is a separately advertised/approved capability, not inferred from which display is visible. [S29]
+Use Opus as the only audio format in both directions, with a small explicit `libopus` exception and a recorded license/build configuration. Audio is bidirectional in version 1: host playback audio flows to the client, and the client's microphone can flow to the host. Playback audio capture is disabled until locally enabled and is active only for an admitted session that requests it. Microphone forwarding is explicit-enable per session on the client — a talk toggle backed by the client OS's microphone permission — never activated automatically by connecting, and surfaced by a visible indicator on both ends. Audio scope in each direction is a separately advertised/approved capability, not inferred from which display is visible. [S29]
+
+Client-to-host audio terminates in a per-OS qualified virtual-microphone endpoint that ordinary host applications can select as an input device: a PipeWire virtual source on Linux, a signed user-space CoreAudio server plugin on macOS, and on Windows a signed virtual audio endpoint driver. The Windows endpoint is the riskiest row — genuine driver-class work with its own signing and packaging requirements, not handwritten Rust, counted like other native components — and it receives its own Phase 0 spike. Where a host OS's endpoint cannot be qualified, microphone forwarding is a typed unsupported capability on that host, never a silent fake device or an undisclosed third-party driver download. The uplink reuses the same Opus framing, sequence/timeline, jitter, and generation rules as the downlink with the roles reversed; browser clients capture through getUserMedia under its own permission prompt and encode within the bounded worklet/WASM budget described below.
 
 Start with 48-kHz mono/stereo, normally 10-ms packets. Convert/resample the actual capture-device rate and format at one controlled boundary; do not assume every device produces 48 kHz. Negotiate channels and maximum packet duration/decoded samples, validate them before allocation, and use sequence numbers plus a monotonic sample timeline. Keep capture gaps, silence suppression, device changes, and configuration resets explicit.
 
@@ -780,6 +787,14 @@ A display ID is stable only within the OS's actual identity guarantees; connecto
 
 Per-viewer subscriptions reference share-session pipelines, not another viewer's task region. A late join waits for a fresh qualified recovery point; it does not force existing viewers to replay old frames. Read-only cursor feedback and local UI focus remain separate from control authority. Add counters for total pipelines, encoder sessions, surfaces, cached bytes, and queued repair work across all viewers.
 
+### 15.6 File transfer and synchronization
+
+Explicit file send/receive between an admitted controlling client and the host is version-1 scope, together with locally configured folder-synchronization jobs. The transfer machinery reuses asupersync's ATP — resumable, integrity-verified object transfer — over a separate bounded channel inside the admitted session. FrankenRemote designs no new transfer protocol, and the real-time media path is unchanged: Section 12.2's exclusions apply to media, not to this capability. Transfer traffic shares congestion capacity with everything else and must never sit ahead of input on a shared resource or starve the freshness contract; it is admitted against its own byte, rate, and concurrency budgets.
+
+Authority follows the existing model. File transfer is a separately advertised capability of the controlling session — read-only viewers get nothing — and local approval, when enabled, gates it like any other sensitive capability. The client cannot browse or address arbitrary host paths: sends land in a locally configured drop directory, receives come from explicit host-side selection or a configured share directory, and folder-synchronization jobs name explicit local directories on both ends. Every received path is validated against traversal and symlink escape before any write; nothing received is automatically opened or executed; partial transfers are written to temporary names and published atomically, so cancellation or crash never leaves a half-visible file. Transfer contents never appear in logs or diagnostics; progress metadata does.
+
+Folder-synchronization jobs are configured locally on the host and accepted explicitly on the client, one-way or bidirectional, with a simple explicit conflict policy — keep both with a conflict marker rather than silently overwriting — and ATP's resumption semantics across reconnects. Explicit send/receive lands with the Phase 2 desktop work (and on mobile/browser in Phase 3, within each platform's file-access limits); synchronization jobs complete in Phase 4. None of this is required for the Phase 1 exit gate.
+
 ## 16. Desktop, mobile, and browser clients
 
 ### 16.1 Shared core, thin native shells
@@ -788,7 +803,7 @@ Share connection setup, protocol parsing, session state, stream recovery, input 
 
 Use small native shells for window creation, menus, permissions, and display presentation. AppKit/Metal, Win32/D3D, and an appropriate Linux windowing layer are candidates. Choose one minimal Rust windowing integration where it preserves hardware-surface interoperability; qualify it before committing to a broad UI framework. No Electron or bundled Chromium in the daemon or desktop client.
 
-The GUI needs a machine picker, recent hosts, a display viewer, an input toolbar, connection quality, permissions, and settings. It does not need a web application platform. Small Swift/Objective-C and Kotlin/Java bridges are acceptable where they reduce fragile FFI or platform lifecycle code; count and audit them separately rather than pretending all platform glue is Rust.
+The GUI needs a machine picker, recent hosts, a display viewer, an input toolbar, connection quality, permissions, and settings. It does not need a web application platform. Small Swift/Objective-C and Kotlin/Java bridges are acceptable where they reduce fragile FFI or platform lifecycle code; count and audit them separately rather than pretending all platform glue is Rust. On mobile the native layer is deliberately more than glue: Section 16.2 commits the iOS and Android applications to first-class native user interfaces.
 
 The windowing choice is a release-blocking interoperability decision, not permission to hand-write three widget toolkits. Select one minimal maintained shell/window integration where possible, retaining native video-surface presentation adapters. Count the real accessibility, DPI, input, menu, and lifecycle work in the client budget. Avoid GPU-to-CPU readback just to fit a preferred GUI abstraction.
 
@@ -797,6 +812,8 @@ Qualify the minimum OS versions, CPU architectures, ABI targets, and graphics AP
 ### 16.2 iOS and Android
 
 Mobile clients are viewers/controllers, not daemons. Tailscale remains the system's installed VPN client. The application must handle network changes, foreground/background transitions, orientation, safe areas, software keyboards, hardware keyboards, and thermal/resource pressure.
+
+Both applications live in this repository — `mobile/ios` and `mobile/android` — and are built by repository-owned commands; there are no satellite mobile repositories. Each is a genuinely native application: SwiftUI on iOS and Jetpack Compose on Android for the machine picker, saved hosts and host links, the session viewer chrome, input toolbars and touch-mode controls, the talk toggle, settings, permission explanations, and connection diagnostics — following each platform's conventions for navigation, appearance, text input, and accessibility. The shared Rust core (`fr-client` and the crates beneath it) owns connection establishment, protocol and session state, media scheduling and recovery, input semantics, and diagnostics; it is exposed to Swift and Kotlin through one narrow, audited boundary per platform, whose binding mechanism (hand-written C ABI plus a maintained wrapper, or a qualified binding generator) is chosen by a short decision note during mobile bring-up, not an open-ended framework survey. Decoded video is presented through the platform pipelines Section 8.3 already requires — VideoToolbox output on iOS, MediaCodec-to-Surface on Android — never routed through the UI toolkit's ordinary image path.
 
 On Android, decode to a Surface rather than repeatedly copying decoded pixels into Rust memory. On iOS, use the system video pipeline. Media APIs remain foreign/system trust boundaries even when called through safe-looking Rust wrappers. [S28]
 
@@ -1091,8 +1108,8 @@ frankenremote/
     fr-web/           WASM entrypoint and browser boundary
     fr-lab/           fixtures, deterministic scenarios, benchmark harness
   mobile/
-    ios/              thin signed application shell
-    android/          thin signed application shell
+    ios/              native SwiftUI application over the shared Rust core
+    android/          native Kotlin/Jetpack Compose application over the shared core
   web/                small self-hosted JS/CSS/HTML shell
   native/             reproducible media build recipes and manifests
   xtask/              repository-owned verification/release commands
@@ -1109,19 +1126,20 @@ These are proposed responsibility boundaries, not a requirement to create every 
 | Tailscale identity, discovery, and HTTPS | 10,000 |
 | Media core and codec wrappers | 16,000 |
 | Linux, macOS, and Windows host adapters | 30,000 |
-| Input, clipboard, and audio | 16,000 |
+| Input, clipboard, and audio (both directions, including virtual-mic endpoint integration) | 22,000 |
+| File transfer and synchronization over ATP | 8,000 |
 | Desktop client shells and presentation | 16,000 |
 | Mobile client bridges and lifecycle | 12,000 |
 | Browser WASM client and JS boundary support | 10,000 |
 | CLI, diagnostics, packaging, and update logic | 10,000 |
 | Tests, fuzzing, simulation, and benchmark harnesses | 33,000 |
-| **Target total** | **180,000** |
-| **Contingency, including optional precision experiments** | **60,000** |
+| **Target total** | **194,000** |
+| **Contingency, including optional precision experiments** | **46,000** |
 | **Planned maximum** | **240,000** |
 
 The budget includes handwritten test code and incremental work moved upstream specifically to enable this project. Moving code into Asupersync is good reuse, but it is not permission to hide the implementation effort.
 
-Existing upstream code, generated SDK bindings, FFmpeg, system libraries, and assets are not counted as newly handwritten FrankenRemote Rust. Report their sizes, licenses, and trust boundaries separately. Establish a separate small allowance, initially at most 15k handwritten lines, for JS/Swift/Kotlin/build glue; do not move major product logic there to evade the Rust limit.
+Existing upstream code, generated SDK bindings, FFmpeg, system libraries, the Windows virtual-audio component, and assets are not counted as newly handwritten FrankenRemote Rust. Report their sizes, licenses, and trust boundaries separately. Establish a separate allowance, initially at most 20k handwritten lines, for JS, Swift, Kotlin, and build glue — raised from 15k in version 1.4 because the iOS and Android applications deliberately carry first-class native user interfaces. Presentation, navigation, and OS lifecycle code belongs in that allowance; do not move protocol, session, media, or input logic there to evade the Rust limit.
 
 These are planning allocations, not an estimate derived from an implemented prototype. Review the actual slope at each milestone. If core delivery approaches 240k before qualification, remove optional scope or simplify abstractions. Do not redefine the counting method near the end.
 
@@ -1145,6 +1163,7 @@ Work in small real vertical experiments, not a large scaffold. Every experiment 
 | OS lifecycle | Independent capture/input/clipboard/audio grants; Wayland restore-token rotation and PipeWire mapping, macOS signed-helper attribution, Windows user-session handoff/loopback scope, lock/suspend | Publish exact capability rows; capture success, root status, or service registration is not a permission proof |
 | Native packaging | Reproducible stripped codecs plus native shell/surface interop on Linux/Windows; signed Apple system-media shell; permission/ABI/license checks | Choose one wrapper/shell strategy and correct packaging before multiplying adapters |
 | Recovery and authority | Fragmented HEVC with loss/reordering, startup handshake, bounded cache, reference-versus-presentation expiry, input queued through a long stall, local revoke | No claimed low-latency or safe-control operating point until these real paths pass |
+| Host virtual-mic endpoint | Create a selectable host input device per OS — PipeWire virtual source, signed user-space CoreAudio server plugin, Windows virtual audio endpoint driver — route the Opus uplink into a real host application, and measure latency; validate the signing/packaging path | Microphone forwarding ships as typed-unsupported on the failing host OS; no undisclosed third-party driver and no fake device |
 
 The browser and OS risks are tested here even though complete clients are delivered later. They must not be discovered after most of the product has been written.
 
@@ -1160,7 +1179,7 @@ Select the first pair from the successful Phase 0 experiments, preferably with a
 
 ### Phase 2 — All host platforms and native desktop clients
 
-Complete the three host adapters, service/session lifecycle, native desktop presentation, audio, explicit text clipboard, display selection, and permission diagnostics. Add bounded viewer admission and controller handoff only after single-controller behavior is correct.
+Complete the three host adapters, service/session lifecycle, native desktop presentation, audio in both directions where the host endpoint qualifies, the default-on shared clipboard, explicit file send/receive over ATP, display selection, and permission diagnostics. Add bounded viewer admission and controller handoff only after single-controller behavior is correct.
 
 Native GUI event loops and OS callbacks integrate through the common Asupersync-owned session machinery; they are not an excuse to introduce another Rust async runtime. Platform-specific callback and thread-affinity boundaries remain explicit.
 
@@ -1174,7 +1193,7 @@ Finish the thin browser shell and shared WASM state machine, hardware decode pro
 
 ### Phase 4 — Quality, adaptation, and recovery
 
-Tune the already functioning deterministic controller, idle behavior, settle-to-sharp refinement, cursor separation, text/motion policies, loss recovery, and telemetry. Phase 4 improves measured quality and performance; it is not where basic deadline, congestion, or reference-chain correctness is first implemented. Optimize observed copies and queues before advanced codec tools.
+Tune the already functioning deterministic controller, idle behavior, settle-to-sharp refinement, cursor separation, text/motion policies, loss recovery, and telemetry, and complete the ATP folder-synchronization jobs on the already working transfer channel. Phase 4 improves measured quality and performance; it is not where basic deadline, congestion, or reference-chain correctness is first implemented. Optimize observed copies and queues before advanced codec tools.
 
 **Exit gate:** the defined network scenarios show stable operating points, bounded application queueing, and measured text/latency tradeoffs. Controller decisions replay deterministically from sanitized traces.
 
@@ -1218,7 +1237,7 @@ Rotate a Wayland restore token, reuse a numeric PipeWire node ID, revoke clipboa
 
 Attempt control from an unrelated LAN source, a forged `100.x` address on the wrong interface, an external sharee, a shared-in node, a subnet-routed source, and a malicious web origin running on an otherwise admitted client.
 
-Attempt forged Serve headers, unauthorized local IPC approval, stale-generation worker messages, oversized media configuration, excessive fragment counts, duplicate-fragment memory inflation, recovery-request floods, and clipboard echo loops.
+Attempt forged Serve headers, unauthorized local IPC approval, stale-generation worker messages, oversized media configuration, excessive fragment counts, duplicate-fragment memory inflation, recovery-request floods, clipboard echo loops, file-transfer path traversal and symlink escape, transfer-budget exhaustion floods, and microphone activation without the explicit client enable.
 
 Fuzz the wire parser, HEVC configuration normalization, geometry arithmetic, input decoder, and local IPC framing. Use independent decoder interoperability tests for generated streams. Media-worker containment supplements parser bounds; it does not replace them.
 
@@ -1264,7 +1283,7 @@ Source reviewed, builds passed, simulated properties passed, independent wire in
 | Reliable input executes long after it is safe | Host-issued expiring tickets, independent lease watchdog, submission-time checks, no automatic replay. |
 | Read-only viewing or audio bypasses local approval/scope | Gate all observation; disclose endpoint-wide audio and wider GUI control authority; do not claim window isolation. |
 | Tiny idle/latency targets rely on hidden surfaces or stale timestamps | Account for the process family and GPU memory; separate cold/warm startup, source verification, decode, and actual presentation. |
-| Complexity grows through “helpful” integrations | Apply the 180k target and 240k planned ceiling at each milestone; cut optional features first. |
+| Complexity grows through “helpful” integrations | Apply the 194k target and 240k planned ceiling at each milestone; cut optional features first. |
 
 The implementation should reject, unless a later explicit scope change justifies them: a new HEVC encoder, a full WebRTC stack, a custom VPN, public relay infrastructure, federated session management, a database-backed fleet service, mandatory RaptorQ on every frame, multiple video codec families, arbitrary FFmpeg filter graphs, and prediction that fabricates application state.
 
@@ -1306,7 +1325,7 @@ The Asupersync snapshot inspected was `bf6b361deb3154c56d1450ea679e6d4a3cbf09b9`
 | Media FFI | Send/receive state, padded buffers, borrowed surfaces, fences, thread affinity, device loss, and sandbox limits are explicit |
 | OS integration | Portal token/stream lifecycle, clipboard order, Windows audio scope, signed helpers, protected content, HDR-to-SDR qualification |
 | Browser | Correct hvcC/access units, flush/keyframe behavior, input/origin bootstrap, output-frame lifetime, hidden-tab and cache lifecycle |
-| Scope and budgets | Full-display baseline; defer isolated-window claims and optional precision; retain 180k/240k Rust allocations |
+| Scope and budgets | Full-display baseline; defer isolated-window claims and optional precision; retain 194k/240k Rust allocations |
 | Evidence | New tests are future implementation gates, not represented as performed; source review is not hardware or wire qualification |
 
 ### 27.2 References
