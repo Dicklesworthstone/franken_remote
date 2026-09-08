@@ -44,6 +44,9 @@ impl Capabilities {
     pub const fn contains(self, capability: Capability) -> bool {
         self.0 & (1 << capability as u8) != 0
     }
+    pub const fn contains_all(self, required: Self) -> bool {
+        self.0 & required.0 == required.0
+    }
 }
 
 /// One bounded native API operation. Text is one Unicode scalar, never half of
@@ -290,6 +293,14 @@ impl InputSession {
             cumulative: (0, 0),
         })
     }
+    /// Immutable locally granted geometry for native factory validation.
+    pub const fn bounds(&self) -> InputBounds {
+        self.bounds
+    }
+    /// The negotiated operations, which may be a subset of native support.
+    pub const fn capabilities(&self) -> Capabilities {
+        self.capabilities
+    }
     pub fn monitor(&self) -> InputMonitor {
         self.authority.clone()
     }
@@ -424,6 +435,16 @@ impl InputSession {
             submitted_releases: submitted,
             remaining: self.held_count(),
         }
+    }
+    /// Read an already recorded reliable result without admitting or retrying
+    /// an action. Used by native supervision after an unwind to retain the
+    /// confirmed operation prefix. Eviction remains explicit; no input content.
+    pub fn retained_receipt(&self, sequence: u64) -> Option<Receipt> {
+        self.receipts
+            .iter()
+            .flatten()
+            .find(|r| r.sequence == sequence)
+            .copied()
     }
     pub fn held_count(&self) -> u16 {
         u16::try_from(

@@ -8,3 +8,5 @@ pub mod worker;
 pub mod media;
 
 pub mod input_watchdog;
+
+pub mod input_agent;
