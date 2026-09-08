@@ -15,6 +15,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fr-native"
+version = "0.1.0"
+dependencies = [
+ "fr-core",
+ "fr-media",
+ "fr-wire",
+]
+
+[[package]]
 name = "fr-wire"
 version = "0.1.0"
 dependencies = [
