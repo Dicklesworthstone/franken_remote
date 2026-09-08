@@ -6,3 +6,5 @@ pub mod worker;
 
 #[cfg(target_os = "linux")]
 pub mod media;
+
+pub mod input_watchdog;
