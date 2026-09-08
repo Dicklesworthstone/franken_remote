@@ -17,5 +17,7 @@
 //!   over-limit or overflow-adjacent input is a typed refusal before any
 //!   allocation or foreign call.
 
+pub mod authority;
 pub mod ids;
 pub mod limits;
+pub mod time;

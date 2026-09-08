@@ -142,6 +142,13 @@ unpredictable_id! {
     /// reacquisition mints a new identity (plan section 6.3).
     InputLeaseId
 }
+unpredictable_id! {
+    /// One short-lived input-validity ticket handle: a bounded host-side
+    /// record addressed by opaque random bits, needing no PKI or custom
+    /// cryptography (plan section 15.1). Verified again immediately before
+    /// every OS submission; delayed traffic gets no new lifetime at receipt.
+    InputTicketId
+}
 
 monotonic_generation! {
     /// Display topology/geometry version. Coordinate-dependent input binds
