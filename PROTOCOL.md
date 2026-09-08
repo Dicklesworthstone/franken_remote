@@ -227,6 +227,7 @@ The `fr_core::ids` wire widths are:
 | `OsSessionId` | 16 opaque bytes, big-endian encoding of the core `u128` |
 | `RemoteSessionId` | 16 opaque bytes, big-endian encoding of the core `u128` |
 | `InputLeaseId` | 16 opaque bytes, big-endian encoding of the core `u128` |
+| `InputTicketId` | 16 opaque bytes, big-endian encoding of the core `u128` |
 | `DisplayGeometryGeneration` | 8 bytes, `u64` |
 | `CodecConfigurationGeneration` | 8 bytes, `u64` |
 | `RecoveryGeneration` | 8 bytes, `u64` |
@@ -545,7 +546,7 @@ Refusal reasons are stable typed categories, not unbounded prose:
 `attachment_invalid`, `approval_required`, `permission_missing`,
 `invalid_limits`, `resource_limit`, `malformed_record`, `role_violation`,
 `invalid_state`, `stale_generation`, `sequence_gap`, `ticket_expired`,
-`lease_expired`, `view_unready`, `unknown_history_no_replay`,
+`lease_expired`, `view_unready`, `controller_busy`, `unknown_history_no_replay`,
 `no_supported_hevc_decoder`, `recovery_budget_exhausted`, and
 `microphone_endpoint_unsupported`. Unknown required reason encodings refuse
 parsing; numeric assignments land with the implementing codec's fixtures.
