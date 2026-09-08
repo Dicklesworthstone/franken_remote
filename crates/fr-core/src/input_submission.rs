@@ -105,6 +105,22 @@ pub enum Submission {
 pub trait InputSink {
     fn prepare(&mut self, operation: Operation) -> Result<(), PlatformError>;
     fn submit(&mut self, operation: Operation) -> Submission;
+    /// Undo reversible preparation when final authorization fails, on unwind,
+    /// or after submission. Idempotent, release-only and never a new input event.
+    /// Backends must retain uncertain restoration state for local cleanup.
+    fn cancel_prepared(&mut self) {}
+    /// X11 has no standalone repeat event. Request two separately authorized
+    /// operations instead of hiding release/press inside one native submission.
+    fn repeat_requires_pair(&self) -> bool {
+        false
+    }
+}
+
+struct PreparedSink<'a, S: InputSink>(&'a mut S);
+impl<S: InputSink> Drop for PreparedSink<'_, S> {
+    fn drop(&mut self) {
+        self.0.cancel_prepared();
+    }
 }
 
 /// Local-only one-way cancellation. This never grants or renews a lease and
@@ -489,7 +505,11 @@ impl Attempt<'_, '_> {
         sink: &mut impl InputSink,
         clock: &mut impl FnMut() -> HostInstant,
     ) -> Result<(), Refusal> {
-        sink.prepare(op).map_err(Refusal::Platform)?;
+        // Install the cleanup guard before prepare: even preparation can panic
+        // after acquiring reversible platform state. No native press is allowed
+        // in prepare, and a stale ticket must not leave that state stranded.
+        let prepared = PreparedSink(sink);
+        prepared.0.prepare(op).map_err(Refusal::Platform)?;
         self.owner.check(self.request.credentials, clock())?;
         // Track a possible press BEFORE invoking the platform. Even a panic or
         // an unknown native result must leave enough state for release cleanup.
@@ -506,7 +526,7 @@ impl Attempt<'_, '_> {
         };
         self.track(op, true);
         self.uncertain = true;
-        match sink.submit(op) {
+        match prepared.0.submit(op) {
             Submission::Submitted => {
                 self.uncertain = false;
                 self.submitted += 1;
@@ -552,6 +572,47 @@ impl Attempt<'_, '_> {
             _ => {}
         }
     }
+    fn key_transition(
+        &mut self,
+        key: PhysicalKey,
+        transition: KeyTransition,
+        sink: &mut impl InputSink,
+        clock: &mut impl FnMut() -> HostInstant,
+    ) -> Result<(), Refusal> {
+        self.owner.require(Capability::Keys)?;
+        let held = self.owner.keys[usize::from(key.usage())];
+        match transition {
+            KeyTransition::Repeat => {
+                self.owner.require(Capability::Repeat)?;
+                if !held {
+                    return Err(Refusal::InvalidTransition);
+                }
+            }
+            KeyTransition::Press if held => return Err(Refusal::InvalidTransition),
+            KeyTransition::Release if !held => return Err(Refusal::InvalidTransition),
+            _ => {}
+        }
+        if transition == KeyTransition::Repeat && sink.repeat_requires_pair() {
+            self.one(
+                Operation::Key {
+                    key,
+                    transition: KeyTransition::Release,
+                },
+                sink,
+                clock,
+            )?;
+            self.one(
+                Operation::Key {
+                    key,
+                    transition: KeyTransition::Press,
+                },
+                sink,
+                clock,
+            )
+        } else {
+            self.one(Operation::Key { key, transition }, sink, clock)
+        }
+    }
     fn execute(
         &mut self,
         sink: &mut impl InputSink,
@@ -560,20 +621,7 @@ impl Attempt<'_, '_> {
         self.owner.check(self.request.credentials, clock())?;
         match self.request.event {
             InputEvent::Key { key, transition } => {
-                self.owner.require(Capability::Keys)?;
-                let held = self.owner.keys[usize::from(key.usage())];
-                match transition {
-                    KeyTransition::Repeat => {
-                        self.owner.require(Capability::Repeat)?;
-                        if !held {
-                            return Err(Refusal::InvalidTransition);
-                        }
-                    }
-                    KeyTransition::Press if held => return Err(Refusal::InvalidTransition),
-                    KeyTransition::Release if !held => return Err(Refusal::InvalidTransition),
-                    _ => {}
-                }
-                self.one(Operation::Key { key, transition }, sink, clock)
+                self.key_transition(key, transition, sink, clock)
             }
             InputEvent::Pointer { position } => {
                 self.owner.position(position)?;
