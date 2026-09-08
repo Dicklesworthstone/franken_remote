@@ -484,6 +484,21 @@ impl SessionAuthority {
             && self.lease.is_some_and(|lease| now < lease.authorized_until)
     }
 
+    /// Read-only deadline snapshot for the independent input watchdog. Time
+    /// checks stay in the serialized caller: a concurrent observer's earlier
+    /// clock sample must not regress the submission owner's clock high-water.
+    /// This never renews authority and deliberately does not inspect tickets.
+    pub fn control_deadline(&self) -> Result<HostInstant, AuthorityError> {
+        if self.phase != Phase::Viewing || self.readiness != ViewReadiness::Ready {
+            return Err(AuthorityError::ViewUnready);
+        }
+        let observation = self
+            .observation_until
+            .ok_or(AuthorityError::ObservationExpired)?;
+        let lease = self.lease.ok_or(AuthorityError::NoLease)?;
+        Ok(lease.authorized_until.min(observation))
+    }
+
     /// Applies elapsed-deadline cleanup after a scheduling stall. An actual
     /// suspend/wake event MUST additionally call `invalidate_for_suspend`,
     /// because some OS clocks do not include suspended time.

@@ -17,7 +17,7 @@ use crate::{
 };
 use core::fmt;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -135,6 +135,59 @@ impl RevokeHandle {
         self.0.load(Ordering::Acquire)
     }
 }
+/// Read/revoke-only access to the SAME authority used at native submission.
+/// The monitor cannot grant control, create tickets, or renew a lease. Its
+/// mutex protects only pure policy operations, never platform preparation,
+/// submission, cleanup, or a caller-supplied clock callback.
+#[derive(Clone)]
+pub struct InputMonitor {
+    authority: Arc<Mutex<SessionAuthority>>,
+    revoke: RevokeHandle,
+}
+impl InputMonitor {
+    pub fn revoke(&self) {
+        self.revoke.revoke();
+    }
+    pub fn is_revoked(&self) -> bool {
+        self.revoke.is_revoked()
+    }
+    /// Check a freshly sampled clock, returning the actual authority deadline.
+    /// Ticket expiry is intentionally independent: it refuses new actions but
+    /// does not release a key that is still held under a live control lease.
+    pub fn deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
+        let result = self.with(|a| {
+            let deadline = a.control_deadline()?;
+            if now >= deadline {
+                // Fence before releasing the policy lock. A concurrent renewal
+                // cannot install authority after this terminal expiry decision.
+                self.revoke();
+                return Err(AuthorityError::LeaseExpired);
+            }
+            Ok(deadline)
+        });
+        if result.is_err() {
+            self.revoke();
+        }
+        result
+    }
+    fn with<T>(
+        &self,
+        f: impl FnOnce(&mut SessionAuthority) -> Result<T, AuthorityError>,
+    ) -> Result<T, Refusal> {
+        if self.is_revoked() {
+            return Err(Refusal::Revoked);
+        }
+        let mut authority = self.authority.lock().map_err(|_| {
+            self.revoke();
+            Refusal::AuthorityUnavailable
+        })?;
+        if self.is_revoked() {
+            return Err(Refusal::Revoked);
+        }
+        f(&mut authority).map_err(Refusal::Authority)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     Authority(AuthorityError),
@@ -150,6 +203,7 @@ pub enum Refusal {
     Revoked,
     Platform(PlatformError),
     UnknownEffect,
+    AuthorityUnavailable,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Receipt {
@@ -178,7 +232,7 @@ pub struct Cleanup {
 /// state. Never reconstruct it to resume an old lease. No Clone or secret Debug.
 /// The enclosing OS share-session owner still arbitrates the global controller.
 pub struct InputSession {
-    authority: SessionAuthority,
+    authority: InputMonitor,
     session: RemoteSessionId,
     lease: InputLeaseId,
     view: InputView,
@@ -210,6 +264,11 @@ impl InputSession {
         authority
             .authorize_submission(credentials.lease, credentials.ticket, now)
             .map_err(Refusal::Authority)?;
+        let revoke = RevokeHandle(Arc::new(AtomicBool::new(false)));
+        let authority = InputMonitor {
+            authority: Arc::new(Mutex::new(authority)),
+            revoke: revoke.clone(),
+        };
         Ok(Self {
             authority,
             session: credentials.session,
@@ -221,7 +280,7 @@ impl InputSession {
                 .map_err(Refusal::Sequence)?,
             receipts: [None; MAX_RETAINED_INPUT_RECEIPTS],
             receipt_cursor: 0,
-            revoke: RevokeHandle(Arc::new(AtomicBool::new(false))),
+            revoke,
             keys: [false; 256],
             buttons: [false; 5],
             pointer_floor: None,
@@ -231,6 +290,9 @@ impl InputSession {
             cumulative: (0, 0),
         })
     }
+    pub fn monitor(&self) -> InputMonitor {
+        self.authority.clone()
+    }
     pub fn revoke_handle(&self) -> RevokeHandle {
         self.revoke.clone()
     }
@@ -238,17 +300,15 @@ impl InputSession {
     pub fn revoke(&mut self) {
         self.revoke.revoke();
         self.ledger.fence();
-        self.authority.revoke_lease();
+
         self.mode_ticket = None;
     }
     /// Focus loss, view/configuration/mapping replacement and worker failure
     /// require a new grant. Restoring pixels never resurrects this input owner.
     pub fn invalidate_view(&mut self) {
-        self.authority.mark_view_stale();
         self.revoke();
     }
     pub fn suspend(&mut self) {
-        self.authority.invalidate_for_suspend();
         self.revoke();
     }
     pub fn issue_observation_challenge(
@@ -258,8 +318,7 @@ impl InputSession {
     ) -> Result<HostInstant, Refusal> {
         self.check_active()?;
         self.authority
-            .issue_observation_challenge(nonce, now)
-            .map_err(Refusal::Authority)
+            .with(|a| a.issue_observation_challenge(nonce, now))
     }
     pub fn renew_observation(
         &mut self,
@@ -268,8 +327,7 @@ impl InputSession {
     ) -> Result<HostInstant, Refusal> {
         self.check_active()?;
         self.authority
-            .respond_observation_challenge(nonce, now)
-            .map_err(Refusal::Authority)
+            .with(|a| a.respond_observation_challenge(nonce, now))
     }
     pub fn issue_control_challenge(
         &mut self,
@@ -278,14 +336,12 @@ impl InputSession {
     ) -> Result<HostInstant, Refusal> {
         self.check_active()?;
         self.authority
-            .issue_control_challenge(nonce, now)
-            .map_err(Refusal::Authority)
+            .with(|a| a.issue_control_challenge(nonce, now))
     }
     pub fn renew_control(&mut self, nonce: u128, now: HostInstant) -> Result<HostInstant, Refusal> {
         self.check_active()?;
         self.authority
-            .respond_control_challenge(self.lease, nonce, now)
-            .map_err(Refusal::Authority)
+            .with(|a| a.respond_control_challenge(self.lease, nonce, now))
     }
     /// The local authority supplies a fresh unpredictable ID. This is NOT an
     /// automatic retry API: consumed actions remain consumed after renewal.
@@ -297,8 +353,7 @@ impl InputSession {
         self.check_active()?;
         let until = self
             .authority
-            .issue_input_ticket(self.lease, ticket, now)
-            .map_err(Refusal::Authority)?;
+            .with(|a| a.issue_input_ticket(self.lease, ticket, now))?;
         self.mode_ticket = Some(ticket);
         Ok(until)
     }
@@ -306,7 +361,12 @@ impl InputSession {
     /// Ticket expiry rejects actions; lease/view expiry additionally ends held
     /// state. A runtime watchdog must call this; this type starts no timer itself.
     pub fn maintain(&mut self, now: HostInstant, sink: &mut impl InputSink) -> Cleanup {
-        if self.revoke.is_revoked() || !self.authority.has_live_control(now) {
+        if self.revoke.is_revoked()
+            || !self
+                .authority
+                .with(|a| Ok(a.has_live_control(now)))
+                .unwrap_or(false)
+        {
             self.revoke();
         }
         if self.revoke.is_revoked() {
@@ -447,8 +507,7 @@ impl InputSession {
             return Err(Refusal::Authority(AuthorityError::TicketInvalid));
         }
         self.authority
-            .authorize_submission(self.lease, credentials.ticket, now)
-            .map_err(Refusal::Authority)
+            .with(|a| a.authorize_submission(self.lease, credentials.ticket, now))
     }
     fn require(&self, cap: Capability) -> Result<(), Refusal> {
         if self.capabilities.contains(cap) {
@@ -487,6 +546,14 @@ impl InputSession {
         ) {
             self.revoke();
         }
+    }
+}
+
+impl Drop for InputSession {
+    fn drop(&mut self) {
+        // Monitors cannot outlive the submission owner as live authority.
+        // Native release remains an explicit, separately acknowledged operation.
+        self.revoke.revoke();
     }
 }
 

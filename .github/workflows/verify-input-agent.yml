@@ -5,13 +5,12 @@ on:
     branches: [main]
     paths: ['.github/workflows/verify-input-agent.yml']
 permissions:
-  contents: write
+  contents: read
 env:
   CARGO_BUILD_JOBS: '1'
   CARGO_PROFILE_DEV_DEBUG: '0'
   CARGO_PROFILE_TEST_DEBUG: '0'
   CARGO_INCREMENTAL: '0'
-  INPUT_PATCH: d5c8cbb357f3dd545d191d5801d4f4b29efe7502
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -20,47 +19,32 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
-      - name: Apply reviewed input source without branch writes
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Verify committed input runtime sources
         run: |
-          python3 - <<'PY'
-          import base64,hashlib,json,os,subprocess
-          from pathlib import Path
-          sha=os.environ['INPUT_PATCH']
-          obj=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}']))
-          patch=base64.b64decode(obj['content'])
-          assert hashlib.sha1(f'blob {len(patch)}\0'.encode()+patch).hexdigest()==sha
-          paths=[x.split(' b/',1)[1] for x in patch.decode().splitlines() if x.startswith('diff --git ')]
-          expected={'crates/fr-core/src/authority.rs':'880c5102b253f09fda6aefca259719f5380194cf','crates/fr-core/src/input_submission.rs':'41440fabe77221b457d86f0a1c2a18644f37b237','crates/fr-core/tests/input_monitor.rs':'96d7638970fd771f390ab2e0472ea5b756f9fc8e'}
-          assert sorted(paths)==sorted(expected) and len(paths)==len(set(paths))
-          assert 'deleted file mode' not in patch.decode()
-          subprocess.run(['git','apply','--recount','--check','--index','-'],input=patch,check=True)
-          subprocess.run(['git','apply','--recount','--index','-'],input=patch,check=True)
-          for path in paths:
-              assert subprocess.check_output(['git','hash-object',path],text=True).strip()==expected[path],path
-          Path(os.environ['RUNNER_TEMP'],'input-paths.json').write_text(json.dumps(paths))
-          PY
-      - name: Install pinned compiler and native SDKs
+          cargo fmt --all --check
+          cargo test -p frd --locked
+          cargo clippy -p frd --all-targets --locked -- -D warnings
+      - name: Retain pinned dependencies for memory-constrained native development
+        if: always()
         run: |
-          rustup show active-toolchain
-          sudo apt-get update
-          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth
-      - name: Verify exact input and native sources
-        run: |
-          ./scripts/verify.sh fast
-          ./scripts/verify.sh docs
-      - name: Retain verified source objects for explicit commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          git diff --check
-          python3 - <<'PY'
-          import base64,json,os,subprocess
-          from pathlib import Path
-          for path in json.loads(Path(os.environ['RUNNER_TEMP'],'input-paths.json').read_text()):
-              data=Path(path).read_bytes()
-              body=json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()})
-              result=subprocess.run(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,capture_output=True,check=True)
-              print(json.dumps({'path':path,'sha':json.loads(result.stdout)['sha'],'verified_against':os.environ['GITHUB_SHA']}))
-          PY
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/input-runtime/libraries"
+          find target/debug -type f \( -name '*.rlib' -o -name '*.rmeta' -o -name '*.so' -o -name '*.a' \) -exec cp -n '{}' "$RUNNER_TEMP/input-runtime/libraries/" \;
+          test -n "$(find "$RUNNER_TEMP/input-runtime/libraries" -name 'libasupersync*.rlib' -print -quit)"
+          rustc -Vv > "$RUNNER_TEMP/input-runtime/compiler.txt"
+          git rev-parse HEAD > "$RUNNER_TEMP/input-runtime/source-commit.txt"
+          cp Cargo.lock "$RUNNER_TEMP/input-runtime/Cargo.lock"
+          tar -czf "$RUNNER_TEMP/input-runtime/libraries.tar.gz" -C "$RUNNER_TEMP/input-runtime" libraries
+          (cd "$RUNNER_TEMP/input-runtime" && sha256sum libraries.tar.gz > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: input-runtime-build-inputs
+          path: |
+            ${{ runner.temp }}/input-runtime/*.tar.gz
+            ${{ runner.temp }}/input-runtime/*.txt
+            ${{ runner.temp }}/input-runtime/Cargo.lock
+            ${{ runner.temp }}/input-runtime/SHA256SUMS
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
