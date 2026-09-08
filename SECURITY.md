@@ -1,6 +1,6 @@
 # Security Policy
 
-FrankenRemote is currently a pre-implementation, spec-first project. Security reports may concern design defects in [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) that would produce an unsafe implementation, repository verification/release automation, or future code.
+FrankenRemote is a spec-first project in early implementation, with initial core and media-contract crates but no working remote workstation. Security reports may concern defects in the existing code, design defects in [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md), or repository verification/release automation.
 
 ## Reporting a vulnerability
 

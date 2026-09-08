@@ -1,6 +1,6 @@
 # AGENTS.md — FrankenRemote Contributor and Coding-Agent Contract
 
-This file is normative for humans and software agents working in this repository. It applies even when a task appears small. FrankenRemote is currently **spec-first and pre-implementation**: the repository contains a reviewed design, not code. The most dangerous contribution right now is a convenient abstraction, scaffold, or "temporary" shortcut that contradicts the final system.
+This file is normative for humans and software agents working in this repository. It applies even when a task appears small. FrankenRemote is **spec-first, in early implementation**: the reviewed design now has initial core and media-contract crates, but no working remote workstation. The most dangerous contribution right now is a convenient abstraction, scaffold, or "temporary" shortcut that contradicts the final system.
 
 ---
 
@@ -157,9 +157,9 @@ Forbidden substitutes include:
 
 A subset is acceptable when its unsupported surface is typed and the implemented path already has the final ownership, failure, cancellation, generation, and bounds discipline. Work in small real vertical experiments, not a large scaffold.
 
-### 8.1 Workspace bootstrap (read before creating the first crate)
+### 8.1 Workspace construction (read before creating a crate)
 
-There is deliberately **no root `Cargo.toml` yet**: a virtual workspace with zero members breaks every cargo command in the checkout. When the first real crate lands, create in ONE commit:
+The root `Cargo.toml` and `fr-core` bootstrap landed together in `c9fb756`. A virtual workspace with zero members breaks every cargo command in the checkout. Preserve the bootstrap contract below, and add each new crate's complete manifest/source plus workspace path entry and lockfile update in ONE coherent commit:
 
 - `crates/fr-<name>/Cargo.toml` + `src/lib.rs` (with `#![forbid(unsafe_code)]` as line 1 for non-FFI crates);
 - the root `Cargo.toml`: `resolver = "3"`, `members = ["crates/*"]`, `[workspace.package]` (edition 2024, `license-file = "LICENSE"`), a `[workspace.dependencies]` path entry per first-party crate (consumers write `fr-core.workspace = true`), `asupersync` pinned with `default-features = false`, and workspace lints (`unsafe_code = "forbid"`, with the named FFI boundary crates opting out explicitly and documenting why);

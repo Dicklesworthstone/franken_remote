@@ -139,12 +139,12 @@ impl CodedGeometry {
                 dimension: alignment,
             });
         }
-        if coded_width % alignment != 0 || coded_height % alignment != 0 {
+        if !coded_width.is_multiple_of(alignment) || !coded_height.is_multiple_of(alignment) {
             return Err(ConfigError::UnalignedCoded {
-                dimension: if coded_width % alignment != 0 {
-                    coded_width
-                } else {
+                dimension: if coded_width.is_multiple_of(alignment) {
                     coded_height
+                } else {
+                    coded_width
                 },
             });
         }

@@ -494,20 +494,20 @@ impl SessionAuthority {
     /// pending challenges before any queued work is processed. Returns
     /// whether the control lease survived.
     pub fn apply_resume_boundary(&mut self, now: HostInstant) -> bool {
-        if let Some(until) = self.observation_until {
-            if now > until {
-                self.drop_observation();
-            }
+        if let Some(until) = self.observation_until
+            && now > until
+        {
+            self.drop_observation();
         }
-        if let Some(challenge) = self.observation_challenge {
-            if now > challenge.deadline {
-                self.observation_challenge = None;
-            }
+        if let Some(challenge) = self.observation_challenge
+            && now > challenge.deadline
+        {
+            self.observation_challenge = None;
         }
-        if let Some(challenge) = self.control_challenge {
-            if now > challenge.deadline {
-                self.control_challenge = None;
-            }
+        if let Some(challenge) = self.control_challenge
+            && now > challenge.deadline
+        {
+            self.control_challenge = None;
         }
         let mut lease_survived = false;
         if let Some(lease) = self.lease {
@@ -564,8 +564,7 @@ impl SessionAuthority {
     fn check_observation_live(&self, now: HostInstant) -> Result<(), AuthorityError> {
         match self.observation_until {
             Some(until) if now <= until => Ok(()),
-            Some(_) => Err(AuthorityError::ObservationExpired),
-            None => Err(AuthorityError::ObservationExpired),
+            Some(_) | None => Err(AuthorityError::ObservationExpired),
         }
     }
 
@@ -682,7 +681,7 @@ mod tests {
         );
         // A response with the wrong nonce, while observation is still live, is
         // refused as a challenge mismatch.
-        a.issue_observation_challenge(0xdef, at(2_000_000));
+        let _deadline = a.issue_observation_challenge(0xdef, at(2_000_000));
         assert_eq!(
             a.respond_observation_challenge(0x111, at(2_100_000)),
             Err(AuthorityError::ChallengeMismatch)
@@ -837,7 +836,7 @@ mod tests {
         // And a stale observation challenge cannot resurrect it: issue while
         // live, respond after the observation deadline.
         let (mut b, _, _) = viewing_with_control(t0);
-        b.issue_observation_challenge(0x9, at(2_000_000));
+        let _deadline = b.issue_observation_challenge(0x9, at(2_000_000));
         assert_eq!(
             b.respond_observation_challenge(0x9, at(3_500_000)),
             Err(AuthorityError::ObservationExpired)

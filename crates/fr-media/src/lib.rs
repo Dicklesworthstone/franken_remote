@@ -1,12 +1,12 @@
 #![forbid(unsafe_code)]
-//! FrankenRemote media contracts (plan sections 8.1, 8.2, 9.1).
+//! `FrankenRemote` media contracts (plan sections 8.1, 8.2, 9.1).
 //!
-//! FrankenRemote owns the media *interface*, not the codec. This crate is the
+//! `FrankenRemote` owns the media *interface*, not the codec. This crate is the
 //! bounded, ownership-aware contract that every backend implements — Apple
-//! VideoToolbox, the FFmpeg hardware bridge, an opt-in software encoder, or
+//! `VideoToolbox`, the `FFmpeg` hardware bridge, an opt-in software encoder, or
 //! the [`fake`] test double — so that no foreign codec type ever appears in a
 //! session or wire signature, and any backend can be replaced without
-//! rewriting FrankenRemote.
+//! rewriting `FrankenRemote`.
 //!
 //! What lives here:
 //!

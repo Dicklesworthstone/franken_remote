@@ -68,7 +68,7 @@ pub struct EncodeRequest {
 }
 
 /// The encoder contract: submit capture surfaces, drain encoded access units.
-/// A backend implements this over VideoToolbox, the FFmpeg bridge, or the
+/// A backend implements this over `VideoToolbox`, the `FFmpeg` bridge, or the
 /// software profile; nothing here exposes a foreign codec type.
 pub trait Encoder {
     /// (Re)configures the encoder. Advancing the configuration is a fence

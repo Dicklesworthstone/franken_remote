@@ -2,7 +2,7 @@
 
 **A tailnet-native remote workstation in Rust: open a machine on your Tailscale network and use its existing desktop, with hardware-accelerated HEVC, no separate account or pairing ceremony, and a system that refuses to accumulate invisible latency.**
 
-> **Status: researched design, pre-implementation.** This repository currently contains the reviewed architecture and implementation proposal, not working software. The single source of truth for what is being built and why is [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) (version 1.4, 2026-09-07, all 27 sections re-reviewed with corrections integrated in place). Every number, latency target, protocol limit, and platform claim below is a **proposed engineering objective or experimental starting point taken from that plan — not a measured FrankenRemote result**. No code, benchmark, or qualification evidence exists yet, and this README will be trued up in place as implementation phases land.
+> **Status: early implementation; no working remote workstation yet.** The workspace now contains core identity, limits and authority logic plus safe media contracts. The single source of truth for what is being built and why is [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) (version 1.4, 2026-09-07, all 27 sections re-reviewed with corrections integrated in place). Every number, latency target, protocol limit, and platform claim below remains a **proposed engineering objective or experimental starting point taken from that plan — not a measured FrankenRemote result**. Unit tests and deterministic simulations establish only their tested properties; they do not establish live transport interoperability, codec qualification, or hardware performance.
 
 The two shipped names are:
 
@@ -176,6 +176,31 @@ The plan's evidence rules bind this repository from day one (plan §24):
 - A capability row is `passed`, `failed`, `blocked`, or `not tested` — an untested row is never "supported with caveats."
 - Deterministic lab tests exercise the production state machines and limits (lease expiry, generation fencing, recovery budgets, receiver credits), not generated traces that never touch production logic.
 - Native fault tests, security tests (forged sources, origin attacks, hostile HEVC parameter sets, replayed tickets), and the hardware/network matrix are enumerated in the plan as **requirements to execute during implementation, not tests already run.**
+
+The implemented foundation lives in [`fr-core`](crates/fr-core/src/lib.rs)
+(typed identities, limits and clock-injected authority) and
+[`fr-media`](crates/fr-media/src/lib.rs) (safe codec/surface contracts; its fake
+backend is test-only). [`fr-lab`](crates/fr-lab/src/lib.rs) supplies seeded
+loss, duplication, reordering and delay, with bounded packet slots, payload
+bytes and trace metadata. Its authority scenarios call the actual core state
+machine. `advance` services packets at their due times; `elapse` followed by
+`drain` models a stalled receiver, so input expiry uses the later submission
+clock. Reconnect fences queued old datagrams. This harness does not qualify
+QUIC/WSS, codecs, OS injection, or cancellation of foreign work.
+
+Run the focused scenarios and the synthetic authority-stall example through RCH:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p fr-lab --locked -j 2
+RCH_REQUIRE_REMOTE=1 rch exec -- cargo run -p fr-lab --example authority_stall --locked -j 2 -- 17
+RCH_REQUIRE_REMOTE=1 rch exec -- cargo run -p fr-lab --example seeded_replay --locked -j 2 -- 31
+```
+
+Failures include the seed and bounded metadata schedule; payloads are excluded.
+Queue accounting includes preallocated packet-slot storage even when empty;
+trace storage is reported separately. These counters exclude allocator overhead
+and Asupersync's fixed runtime baseline and are not process-memory measurements.
+Use `fr-lab` only from tests/tools, never as a shipping transport dependency.
 
 ## Repository map
 

@@ -1,0 +1,15 @@
+[package]
+name = "fr-lab"
+version = "0.1.0"
+description = "Bounded deterministic fault scenarios for FrankenRemote production state machines"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+asupersync.workspace = true
+fr-core.workspace = true
+
+[lints]
+workspace = true

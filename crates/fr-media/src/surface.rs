@@ -1,6 +1,6 @@
 //! Opaque GPU surfaces and observable copy accounting (plan section 11.1).
 //!
-//! FrankenRemote keeps GPU surfaces opaque inside the backend adapter: this
+//! `FrankenRemote` keeps GPU surfaces opaque inside the backend adapter: this
 //! crate never inspects pixels. A surface is identified by its backend, its
 //! dimensions, and a pixel format; the actual memory lives behind the
 //! [`GpuSurface`] trait. "Zero-copy" is a *measured* property, so every path
@@ -52,7 +52,7 @@ impl fmt::Display for PixelFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SurfaceBackend {
-    /// Apple VideoToolbox / IOSurface.
+    /// Apple `VideoToolbox` / `IOSurface`.
     VideoToolbox,
     /// Direct3D 11 texture.
     Direct3D11,
