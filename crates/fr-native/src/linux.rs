@@ -8,6 +8,7 @@ use fr_core::{ids::RecoveryGeneration, limits::ProtocolLimits};
 use fr_media::{
     access_unit::{EncodedAccessUnit, FrameId, FrameKind},
     config::{CodecConfiguration, ColorInfo},
+    hevc::HevcGuard,
 };
 use std::{collections::VecDeque, ffi::CString, rc::Rc};
 
@@ -173,6 +174,7 @@ pub struct HevcEncoder {
     raw: NonNull<c_void>,
     config: CodecConfiguration,
     limits: ProtocolLimits,
+    admission: HevcGuard,
     pending: VecDeque<Pending>,
     last_submitted: Option<FrameId>,
     last_output: Option<FrameId>,
@@ -199,6 +201,8 @@ impl HevcEncoder {
         {
             return Err(NativeError::InvalidConfiguration);
         }
+        let admission =
+            HevcGuard::new(config, limits, 4).map_err(|_| NativeError::InvalidConfiguration)?;
         let mut ptr = core::ptr::null_mut();
         // SAFETY: validated integer ranges; bridge writes only the out pointer, owns all codec allocations.
         status(unsafe {
@@ -217,6 +221,7 @@ impl HevcEncoder {
             raw: NonNull::new(ptr).ok_or(NativeError::Allocation)?,
             config,
             limits,
+            admission,
             pending: VecDeque::with_capacity(4),
             last_submitted: None,
             last_output: None,
@@ -300,7 +305,7 @@ impl HevcEncoder {
                 return Err(error);
             }
         };
-        if p.force_idr && !idr {
+        if (p.force_idr && !idr) || self.admission.validate_annex_b(&bytes, idr).is_err() {
             self.closed = true;
             return Err(NativeError::UnsupportedBitstream);
         }
@@ -348,12 +353,14 @@ impl Drop for HevcEncoder {
 }
 
 /// Software decode with fixed admitted dimensions and padded packet ownership.
-/// Until the full parameter-set validator lands, callers must supply locally
-/// produced/independently validated baseline media, never arbitrary network AUs.
+/// The pure-Rust HEVC guard admits parameter sets and complete slice headers
+/// before foreign submission. This is not CABAC validation or an OS sandbox;
+/// native decoding still belongs in the deadline-supervised media process.
 pub struct HevcDecoder {
     raw: NonNull<c_void>,
     config: CodecConfiguration,
     limits: ProtocolLimits,
+    admission: HevcGuard,
     pending: VecDeque<FrameId>,
     last: Option<FrameId>,
     closed: bool,
@@ -367,6 +374,8 @@ impl HevcDecoder {
         if g.has_padding() || config.color() != ColorInfo::sdr_bt709() {
             return Err(NativeError::InvalidConfiguration);
         }
+        let admission =
+            HevcGuard::new(config, limits, 4).map_err(|_| NativeError::InvalidConfiguration)?;
         let mut ptr = core::ptr::null_mut();
         // SAFETY: bounded dimensions and writable out pointer; no Rust pointer retained.
         status(unsafe {
@@ -380,6 +389,7 @@ impl HevcDecoder {
             raw: NonNull::new(ptr).ok_or(NativeError::Allocation)?,
             config,
             limits,
+            admission,
             pending: VecDeque::with_capacity(4),
             last: None,
             closed: false,
@@ -412,6 +422,12 @@ impl HevcDecoder {
         if self.pending.len() >= 4 {
             return Err(NativeError::NeedDrain);
         }
+        // Validation and codec acceptance form one transaction. A native EAGAIN
+        // must not consume a picture or make the retry look like a replay.
+        let mut admission = self.admission.clone();
+        admission
+            .validate_annex_b(unit.bytes(), idr)
+            .map_err(|_| NativeError::UnsupportedBitstream)?;
         // SAFETY: bridge copies into av_new_packet's padded reference-counted storage before returning.
         match status(unsafe {
             fr_decoder_send(
@@ -428,6 +444,7 @@ impl HevcDecoder {
                 return Err(e);
             }
         }
+        self.admission = admission;
         self.pending.push_back(unit.frame());
         self.last = Some(unit.frame());
         Ok(())
@@ -676,3 +693,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod admission_tests;
