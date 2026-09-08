@@ -12,7 +12,23 @@ use fr_core::{
     input::{DesktopPoint, InputBounds, KeyTransition, PointerButton},
     input_submission::{Capabilities, Capability, InputSink, Operation, PlatformError, Submission},
 };
-use std::{ffi::CString, rc::Rc};
+use std::{
+    ffi::CString,
+    rc::Rc,
+    sync::{Mutex, MutexGuard},
+};
+
+// libXtst/libXext keep a process-global extension-display cache, including an
+// unlocked last-display fast path. XInitThreads does not make cache lifetime
+// safe against concurrent XTest lookup and XCloseDisplay. Serialize our foreign
+// extension access, NOT authority. Acquire during preflight, before the final
+// ticket/clock check; never wait for this lock for the first time in submit.
+static XTEST: Mutex<()> = Mutex::new(());
+fn xtest_access() -> MutexGuard<'static, ()> {
+    XTEST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 #[link(name = "X11")]
 unsafe extern "C" {
@@ -79,6 +95,7 @@ pub struct X11Pointer {
     root: c_ulong,
     dimensions: (u32, u32),
     prepared: Option<Operation>,
+    xtest: Option<MutexGuard<'static, ()>>,
     keyboard: Keyboard,
     buttons: [Option<u8>; 5],
     prepared_button: Option<u8>,
@@ -106,6 +123,7 @@ impl X11Pointer {
             root,
             dimensions: (0, 0),
             prepared: None,
+            xtest: None,
             keyboard: Keyboard::new(display),
             buttons: [None; 5],
             prepared_button: None,
@@ -113,17 +131,20 @@ impl X11Pointer {
         };
         let (mut event, mut error, mut major, mut minor) = (0, 0, 0, 0);
         // SAFETY: valid exclusively borrowed out parameters and live display.
-        if unsafe {
-            XTestQueryExtension(
-                owner.display.as_ptr(),
-                &raw mut event,
-                &raw mut error,
-                &raw mut major,
-                &raw mut minor,
-            )
-        } == 0
-            || major < 2
-        {
+        let available = {
+            let _access = xtest_access();
+            // SAFETY: the guard also excludes extension-display removal.
+            unsafe {
+                XTestQueryExtension(
+                    owner.display.as_ptr(),
+                    &raw mut event,
+                    &raw mut error,
+                    &raw mut major,
+                    &raw mut minor,
+                )
+            }
+        };
+        if available == 0 || major < 2 {
             return Err(PlatformError::Unsupported);
         }
         owner.dimensions = owner.geometry()?;
@@ -145,6 +166,8 @@ impl X11Pointer {
     /// Retire input authority before this local-only keyboard cleanup. Returns
     /// false when native release/restoration is still uncertain; do not hand off.
     pub fn cleanup_keyboard(&mut self) -> bool {
+        self.cancel_prepared();
+        let _access = xtest_access();
         self.keyboard.cleanup()
     }
     /// Local release-only teardown after the input lease has been retired.
@@ -153,6 +176,7 @@ impl X11Pointer {
     /// never grant another controller on the strength of core held-count alone.
     pub fn cleanup_native(&mut self) -> bool {
         self.cancel_prepared();
+        let _access = xtest_access();
         let keyboard_done = self.keyboard.cleanup();
         for index in 0..self.buttons.len() {
             let Some(code) = self.buttons[index] else {
@@ -309,11 +333,17 @@ impl InputSink for X11Pointer {
             Operation::Button { button, pressed } => self.prepare_button(button, pressed)?,
             _ => return Err(PlatformError::Unsupported),
         }
+        // Wait for foreign-cache exclusivity only after native queries. The
+        // caller still samples authority AFTER this returns. A hung preflight
+        // on one display must not hold the shared extension cache lock.
+        let access = xtest_access();
         self.prepared = Some(op);
+        self.xtest = Some(access);
         Ok(())
     }
     fn submit(&mut self, op: Operation) -> Submission {
-        if self.prepared.take() != Some(op) {
+        let access = self.xtest.take();
+        if self.prepared.take() != Some(op) || access.is_none() {
             return Submission::NotSubmitted(PlatformError::Unsupported);
         }
         if let Operation::Key { key, transition } = op {
@@ -365,6 +395,7 @@ impl InputSink for X11Pointer {
         self.prepared = None;
         self.prepared_button = None;
         self.keyboard.cancel_prepared();
+        self.xtest = None;
     }
     fn repeat_requires_pair(&self) -> bool {
         true
@@ -373,7 +404,9 @@ impl InputSink for X11Pointer {
 impl Drop for X11Pointer {
     fn drop(&mut self) {
         let _ = self.cleanup_native();
-        // SAFETY: unique live context, no other thread or callback holds it.
+        let _access = xtest_access();
+        // SAFETY: unique live context; serialize extension cache removal with
+        // every other XTest lookup/registration/removal in this adapter.
         unsafe {
             XCloseDisplay(self.display.as_ptr());
         }
