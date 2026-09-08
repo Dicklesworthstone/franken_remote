@@ -10,6 +10,10 @@ use fr_core::{
 use fr_wire::input::{
     InputDelivery, InputDirection, MAX_INPUT_RECORD_BYTES, decode_input, encode_input,
 };
+use fr_wire::input_result::{
+    INPUT_RESULT_BYTES, InputResult, ResultBinding, SequenceSpace, Stage, decode_input_result,
+    encode_input_result,
+};
 use std::{
     cell::Cell,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -141,7 +145,42 @@ fn dispatch(
         route,
     )
     .unwrap();
-    o.dispatch(parsed, s, clock)
+    let dispatched = o.dispatch(parsed, s, clock)?;
+    if let Dispatch::Completed(receipt) = dispatched {
+        let binding = ResultBinding {
+            channel: 7,
+            session: c.session,
+            lease: c.lease,
+        };
+        let space = if event.is_pointer() {
+            SequenceSpace::Pointer
+        } else {
+            SequenceSpace::Action
+        };
+        let result = InputResult::from_receipt(binding, space, receipt).unwrap();
+        let mut response = [0; INPUT_RESULT_BYTES];
+        let len = encode_input_result(
+            result,
+            &mut response,
+            &ProtocolLimits::ABSOLUTE,
+            InputDirection::HostToViewer,
+            InputDelivery::Reliable,
+        )
+        .unwrap();
+        let received = decode_input_result(
+            &response[..len],
+            &ProtocolLimits::ABSOLUTE,
+            binding,
+            InputDirection::HostToViewer,
+            InputDelivery::Reliable,
+        )
+        .unwrap();
+        assert_eq!(received, result);
+        assert_eq!(received.outcome, receipt.outcome);
+        assert_eq!(received.submitted_operations, receipt.submitted_operations);
+        assert_ne!(received.stage, Stage::Observed);
+    }
+    Ok(dispatched)
 }
 fn send(o: &mut InputSession, s: &mut Sink, seq: u64, event: InputEvent<'_>) -> Receipt {
     receipt(dispatch(o, s, credentials(), seq, event, || time(10)).unwrap())

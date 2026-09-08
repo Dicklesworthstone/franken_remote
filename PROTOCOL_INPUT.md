@@ -57,10 +57,79 @@ lengths are checked. FRD0 optional extensions follow the existing bounded ordere
 extension rule; unknown required fields fail closed. Credentials, key identities,
 coordinates and text are omitted from input Debug output.
 
-HeldState and InputResult are still specified but not encoded by this first
-input-record slice. Unknown kinds are refused rather than claimed implemented.
+HeldState remains specified but unimplemented. InputResult uses the separate
+receipt payload below. Unknown kinds are refused rather than claimed implemented.
 Wire validity alone is not proof of input authorization, native injection, live
 QUIC interoperability, or a usable controlled desktop.
+
+## InputResult (0x0048)
+
+InputResult travels reliably from host to viewer on the attached input channel.
+It has a 50-byte fixed payload (74 bytes including FRD0), followed by optional
+bounded extensions. This assigns the previously unimplemented v0 kind; existing
+action fixtures and the application version are unchanged.
+
+| Payload offset | Width | Field |
+|---:|---:|---|
+| 0 | 16 | RemoteSessionId |
+| 16 | 16 | InputLeaseId |
+| 32 | 8 | Sequence |
+| 40 | 1 | Sequence space: 0 reliable action, 1 absolute pointer |
+| 41 | 1 | Stage: 0 admitted, 1 submitted to OS, 2 observed through instrumentation |
+| 42 | 1 | Outcome: 0 submitted, 1 applied locally, 2 rejected before submission, 3 expired before submission, 4 cancelled before submission, 5 partially submitted, 6 effect unknown |
+| 43 | 4 | Confirmed prefix, in native operations (not bytes, clicks or text characters) |
+| 47 | 1 | Unknown next native operation: boolean |
+| 48 | 2 | Refusal code; 0 means absent |
+
+The receiver supplies the authenticated channel/session/lease binding and checks
+all three. Separate sequence spaces prevent a pointer receipt from acknowledging
+an unrelated reliable action with the same sequence. These checks are parse and
+binding validation; the caller still owns live-session or bounded closing-drain
+admission. A result never authorizes input or retries an action.
+
+Submitted and partially submitted outcomes require a nonzero confirmed prefix.
+Applied-local and before-submission outcomes require zero. Only a fully submitted
+outcome may report observed; conversion from a core receipt never invents that
+stage. Without a confirmed prefix the stage is admitted, even if entry into the
+next native call left an unknown effect. Partial/unknown receipts retain every
+confirmed operation. The unknown boolean is true exactly for effect-unknown;
+the next operation is uncertain and subsequent operations were not attempted.
+The bound is the existing 4096-byte committed-text ceiling (at most 4096 scalar
+operations), including the uncertain operation. A client interprets the prefix
+against its retained original action; the result carries no input content.
+
+Successful/local outcomes have no refusal. Expired outcomes name observation,
+lease or ticket expiry; cancellation names local revoke. Rejected/partial outcomes
+require a reason, and effect-unknown requires code 32. Undefined codes and
+contradictory stage/outcome/count/reason combinations fail closed.
+
+Refusal codes are content-free categories, with no internal phase, sequence-gap
+detail, library string, ticket or input payload copied onto the wire:
+
+| Code | Category | Code | Category |
+|---:|---|---:|---|
+| 1 | invalid_state | 18 | previous_action_pending |
+| 2 | observation_expired | 19 | sequence_gap |
+| 3 | no_lease | 20 | not_pending |
+| 4 | stale_lease | 21 | stale_session |
+| 5 | lease_expired | 22 | stale_view |
+| 6 | view_unready | 23 | out_of_bounds |
+| 7 | controller_busy | 24 | unsupported |
+| 8 | controller_cleanup_required | 25 | invalid_transition |
+| 9 | ticket_invalid | 26 | relative_overflow |
+| 10 | ticket_expired | 27 | mode_mismatch |
+| 11 | challenge_mismatch | 28 | revoked |
+| 12 | challenge_pending | 29 | permission_missing |
+| 13 | challenge_expired | 30 | platform_geometry_changed |
+| 14 | clock_regression | 31 | platform_unavailable |
+| 15 | deadline_overflow | 32 | unknown_effect |
+| 16 | invalid_receipt_capacity | 33 | authority_unavailable |
+| 17 | sequence_fenced | | |
+
+`InputResult::from_receipt` converts only a completed core receipt. It does not
+turn `ConsumedWithoutReceipt`, obsolete pointer state, or a missing process reply
+into a new zero-prefix rejection. Those paths still need their own bounded
+session/refusal reply integration. Cleanup releases never alter a prior receipt.
 
 ## Final submission owner
 

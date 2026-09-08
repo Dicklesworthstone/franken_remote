@@ -104,6 +104,7 @@ pub enum Kind {
     Scroll = 0x0044,
     Text = 0x0045,
     InputMode = 0x0047,
+    InputResult = 0x0048,
 }
 impl Kind {
     fn parse(value: u16) -> Result<Self, WireError> {
@@ -119,6 +120,7 @@ impl Kind {
             0x0044 => Ok(Self::Scroll),
             0x0045 => Ok(Self::Text),
             0x0047 => Ok(Self::InputMode),
+            0x0048 => Ok(Self::InputResult),
             _ => Err(WireError::UnsupportedKind),
         }
     }
@@ -134,7 +136,8 @@ impl Kind {
             | Self::Relative
             | Self::Scroll
             | Self::Text
-            | Self::InputMode => None,
+            | Self::InputMode
+            | Self::InputResult => None,
         }
     }
 }
