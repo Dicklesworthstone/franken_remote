@@ -18,6 +18,7 @@ mod linux {
         Present {
             surface: X11Surface,
             codec: HevcDecoder,
+            display_next: Option<bool>,
         },
     }
     fn native(e: NativeError) -> Error {
@@ -63,6 +64,7 @@ mod linux {
                 )
                 .map_err(native)?,
                 codec: HevcDecoder::new(config, limits).map_err(native)?,
+                display_next: None,
             },
         })
     }
@@ -74,8 +76,16 @@ mod linux {
                     Err(NativeError::NeedInput) => Ok((Kind::NeedInput, Vec::new())),
                     Err(e) => Err(native(e)),
                 },
-                Self::Present { surface, codec } => match codec.poll_output() {
+                Self::Present {
+                    surface,
+                    codec,
+                    display_next,
+                } => match codec.poll_output() {
                     Ok((frame, pixels)) => {
+                        let display = display_next.take().ok_or(Error::WrongState)?;
+                        if !display {
+                            return Ok((Kind::Decoded, frame.as_raw().to_be_bytes().to_vec()));
+                        }
                         surface.present(&pixels).map_err(native)?;
                         // Explicit local verification mode only, never a remote peer option.
                         // Production does not read every presented frame back from the GPU/X server.
@@ -111,13 +121,25 @@ mod linux {
                         Err(e) => Err(native(e)),
                     }
                 }
-                Kind::Present => {
-                    let Self::Present { codec, .. } = self else {
+                Kind::Present | Kind::Decode => {
+                    let Self::Present {
+                        codec,
+                        display_next,
+                        ..
+                    } = self
+                    else {
                         return Err(Error::WrongRole);
                     };
+                    if display_next.is_some() {
+                        return Ok((Kind::NeedDrain, Vec::new()));
+                    }
+                    let display = request.header.kind == Kind::Present;
                     let unit = worker::parse_unit(request.into_body(), limits)?;
                     match codec.submit(&unit) {
-                        Ok(()) => self.poll(verify),
+                        Ok(()) => {
+                            *display_next = Some(display);
+                            self.poll(verify)
+                        }
                         Err(NativeError::NeedDrain) => Ok((Kind::NeedDrain, Vec::new())),
                         Err(e) => Err(native(e)),
                     }

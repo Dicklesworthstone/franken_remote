@@ -311,7 +311,7 @@ impl Worker {
         if !matches!(
             (self.role, kind),
             (Role::Capture, Kind::Capture)
-                | (Role::Present, Kind::Present)
+                | (Role::Present, Kind::Present | Kind::Decode)
                 | (_, Kind::Poll | Kind::Stop)
         ) {
             return Err(Error::Protocol(worker::Error::WrongRole));
@@ -441,7 +441,11 @@ fn allowed_reply(request: Kind, reply: Kind) -> bool {
             Kind::Configure => reply == Kind::Ready,
             Kind::Capture => matches!(reply, Kind::Unit | Kind::NeedInput | Kind::NeedDrain),
             Kind::Present => matches!(reply, Kind::Presented | Kind::NeedInput | Kind::NeedDrain),
-            Kind::Poll => matches!(reply, Kind::Unit | Kind::Presented | Kind::NeedInput),
+            Kind::Decode => matches!(reply, Kind::Decoded | Kind::NeedInput | Kind::NeedDrain),
+            Kind::Poll => matches!(
+                reply,
+                Kind::Unit | Kind::Presented | Kind::Decoded | Kind::NeedInput
+            ),
             Kind::Stop => reply == Kind::Stopped,
             _ => false,
         }

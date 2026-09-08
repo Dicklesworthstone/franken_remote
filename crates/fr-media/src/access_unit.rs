@@ -147,6 +147,12 @@ impl EncodedAccessUnit {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+    /// Move compressed content into a bounded sender without cloning it.
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
     /// Convenience: whether the declared kind is IDR.
     #[must_use]
     pub const fn is_idr(&self) -> bool {

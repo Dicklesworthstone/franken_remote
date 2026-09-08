@@ -500,9 +500,11 @@ dependencies = [
 name = "fr-native"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "fr-core",
  "fr-media",
  "fr-wire",
+ "frd",
 ]
 
 [[package]]

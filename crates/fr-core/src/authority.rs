@@ -260,6 +260,17 @@ impl SessionAuthority {
         self.check_observation_live(now)
     }
 
+    /// Remaining observation deadline after a fresh authorization check. Runtime
+    /// integrations use this to cap media work, never to grant new authority.
+    pub fn observation_deadline(
+        &mut self,
+        now: HostInstant,
+    ) -> Result<HostInstant, AuthorityError> {
+        self.authorize_observation_delivery(now)?;
+        self.observation_until
+            .ok_or(AuthorityError::ObservationExpired)
+    }
+
     /// Records a current, trustworthy presented view; never grants a lease.
     pub fn mark_view_ready(&mut self, now: HostInstant) -> Result<(), AuthorityError> {
         self.check_time(now)?;

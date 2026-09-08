@@ -27,6 +27,7 @@ pub enum Kind {
     Poll = 3,
     Present = 4,
     Stop = 5,
+    Decode = 6,
     Ready = 257,
     Unit = 258,
     NeedInput = 259,
@@ -34,6 +35,7 @@ pub enum Kind {
     Presented = 261,
     Stopped = 262,
     Refused = 263,
+    Decoded = 264,
 }
 impl Kind {
     fn parse(n: u16) -> Result<Self, Error> {
@@ -43,6 +45,7 @@ impl Kind {
             3 => Self::Poll,
             4 => Self::Present,
             5 => Self::Stop,
+            6 => Self::Decode,
             257 => Self::Ready,
             258 => Self::Unit,
             259 => Self::NeedInput,
@@ -50,6 +53,7 @@ impl Kind {
             261 => Self::Presented,
             262 => Self::Stopped,
             263 => Self::Refused,
+            264 => Self::Decoded,
             _ => return Err(Error::Malformed),
         })
     }
@@ -63,9 +67,9 @@ impl Kind {
             Self::Poll | Self::Stop | Self::NeedInput | Self::NeedDrain | Self::Stopped => {
                 length == 0
             }
-            Self::Presented => length == 8,
+            Self::Presented | Self::Decoded => length == 8,
             Self::Refused => length == 2,
-            Self::Unit | Self::Present => {
+            Self::Unit | Self::Present | Self::Decode => {
                 length > UNIT_PREFIX_BYTES
                     && length - UNIT_PREFIX_BYTES <= limits.max_encoded_access_unit_bytes() as usize
             }
@@ -372,20 +376,41 @@ pub fn parse_capture(b: &[u8]) -> Result<(FrameId, u64, bool), Error> {
     Ok((FrameId::from_raw(u64_at(b, 0)?), u64_at(b, 8)?, b[16] == 1))
 }
 pub fn unit_payload(unit: &EncodedAccessUnit) -> Result<Vec<u8>, Error> {
+    unit_parts(
+        unit.frame(),
+        unit.capture_micros(),
+        unit.config_generation(),
+        unit.kind(),
+        unit.bytes(),
+    )
+}
+/// Serialize directly from a bounded received picture without cloning its AU.
+pub fn unit_parts(
+    frame: FrameId,
+    capture: u64,
+    config: CodecConfigurationGeneration,
+    kind: FrameKind,
+    bytes: &[u8],
+) -> Result<Vec<u8>, Error> {
+    ProtocolLimits::ABSOLUTE
+        .validate_access_unit_len(bytes.len())
+        .map_err(|_| Error::ResourceLimit)?;
     let mut b = Vec::new();
-    b.try_reserve_exact(UNIT_PREFIX_BYTES + unit.bytes().len())
-        .map_err(|_| Error::Allocation)?;
-    b.extend_from_slice(&unit.frame().as_raw().to_be_bytes());
-    b.extend_from_slice(&unit.capture_micros().to_be_bytes());
-    b.extend_from_slice(&unit.config_generation().as_raw().to_be_bytes());
-    let (kind, reference) = match unit.kind() {
+    let length = UNIT_PREFIX_BYTES
+        .checked_add(bytes.len())
+        .ok_or(Error::ResourceLimit)?;
+    b.try_reserve_exact(length).map_err(|_| Error::Allocation)?;
+    b.extend_from_slice(&frame.as_raw().to_be_bytes());
+    b.extend_from_slice(&capture.to_be_bytes());
+    b.extend_from_slice(&config.as_raw().to_be_bytes());
+    let (kind, reference) = match kind {
         FrameKind::Idr { recovery } => (0, recovery.as_raw()),
         FrameKind::Predicted { references } => (1, references.as_raw()),
     };
     b.extend_from_slice(&reference.to_be_bytes());
     b.push(kind);
     b.extend_from_slice(&[0; 7]);
-    b.extend_from_slice(unit.bytes());
+    b.extend_from_slice(bytes);
     Ok(b)
 }
 pub fn parse_unit(b: Vec<u8>, limits: &ProtocolLimits) -> Result<EncodedAccessUnit, Error> {

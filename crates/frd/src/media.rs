@@ -1,0 +1,459 @@
+//! Joins observation authority, process workers and the production media engine.
+//! Admission remains Tailscale's job; this module accepts an ALREADY authorized
+//! `SessionAuthority`. It creates neither identity nor an alternate transport.
+use crate::worker::{self, Deadline, Launch, Worker};
+use asupersync::{
+    cx::Cx,
+    time::sleep,
+    types::{CancelKind, Time},
+};
+use fr_core::{
+    authority::{AuthorityError, SessionAuthority},
+    time::HostInstant,
+};
+use fr_media::{
+    access_unit::{EncodedAccessUnit, FrameId, FrameKind},
+    delivery::{
+        DeliveryMode, MediaBindings, MediaEpoch, PacketOffer, ReceivePipeline, SendCache,
+        SendError, SendPolicy,
+    },
+    worker::{Configuration, Kind, Role, capture_payload, parse_unit, unit_parts},
+};
+use fr_wire::{FrameDescriptor, MediaLimits, PipelineState, Progress, SourceObservation};
+use std::{
+    fmt,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Error {
+    Authority(AuthorityError),
+    Worker(worker::Error),
+    Send(SendError),
+    InvalidFrame,
+    Backpressure,
+    Delivery,
+    Poisoned,
+}
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+impl std::error::Error for Error {}
+impl From<worker::Error> for Error {
+    fn from(e: worker::Error) -> Self {
+        Self::Worker(e)
+    }
+}
+impl From<SendError> for Error {
+    fn from(e: SendError) -> Self {
+        Self::Send(e)
+    }
+}
+impl From<fr_media::worker::Error> for Error {
+    fn from(e: fr_media::worker::Error) -> Self {
+        Self::Worker(worker::Error::Protocol(e))
+    }
+}
+pub fn host_now(cx: &Cx) -> Result<HostInstant, Error> {
+    let clock = cx.timer_driver().ok_or(worker::Error::MissingRuntime)?;
+    Ok(HostInstant::from_micros(clock.now().as_nanos() / 1000))
+}
+/// Clones share one authority, not copies of it. The dedicated session Cx must
+/// descend from its runtime region; do not supply a daemon-wide Cx. Local revoke
+/// closes authority FIRST, then cancels its in-flight operations without taking
+/// a media-worker lock. No authority mutex is held across IPC or codec work.
+#[derive(Clone)]
+pub struct ObservationControl {
+    authority: Arc<Mutex<SessionAuthority>>,
+    cx: Cx,
+}
+impl ObservationControl {
+    pub fn new(cx: Cx, mut authority: SessionAuthority) -> Result<Self, Error> {
+        authority
+            .authorize_observation_delivery(host_now(&cx)?)
+            .map_err(Error::Authority)?;
+        Ok(Self {
+            authority: Arc::new(Mutex::new(authority)),
+            cx,
+        })
+    }
+    pub fn check(&self) -> Result<HostInstant, Error> {
+        self.cx.checkpoint().map_err(|_| worker::Error::Cancelled)?;
+        let mut authority = self.authority.lock().map_err(|_| Error::Poisoned)?;
+        let now = host_now(&self.cx)?;
+        authority
+            .authorize_observation_delivery(now)
+            .map_err(Error::Authority)?;
+        Ok(now)
+    }
+    pub fn deadline(&self, maximum: Duration) -> Result<Deadline, Error> {
+        let mut authority = self.authority.lock().map_err(|_| Error::Poisoned)?;
+        let until = authority
+            .observation_deadline(host_now(&self.cx)?)
+            .map_err(Error::Authority)?;
+        let nanos = until
+            .as_micros()
+            .checked_mul(1000)
+            .ok_or(worker::Error::Deadline)?;
+        Ok(Deadline::after(&self.cx, maximum)?.capped_at(Time::from_nanos(nanos)))
+    }
+    pub fn revoke(&self) {
+        if let Ok(mut a) = self.authority.lock() {
+            a.close();
+        }
+        self.cx.cancel_fast(CancelKind::User);
+    }
+    pub fn suspend(&self) {
+        if let Ok(mut a) = self.authority.lock() {
+            a.invalidate_for_suspend();
+        }
+        self.cx.cancel_fast(CancelKind::ParentCancelled);
+    }
+    pub fn issue_challenge(&self, nonce: u128) -> Result<HostInstant, Error> {
+        self.authority
+            .lock()
+            .map_err(|_| Error::Poisoned)?
+            .issue_observation_challenge(nonce, host_now(&self.cx)?)
+            .map_err(Error::Authority)
+    }
+    pub fn renew(&self, nonce: u128) -> Result<HostInstant, Error> {
+        self.authority
+            .lock()
+            .map_err(|_| Error::Poisoned)?
+            .respond_observation_challenge(nonce, host_now(&self.cx)?)
+            .map_err(Error::Authority)
+    }
+}
+/// OS share-session-owned capture worker. The broker keeps this separate from
+/// per-viewer Subscription objects. At most one capture is in flight; callers
+/// cannot accumulate raw frames while a codec stalls. Sharing one encoder among
+/// viewers additionally requires the broker's bounded fanout admission.
+pub struct CaptureSource {
+    worker: Worker,
+    configuration: Configuration,
+    next: Option<FrameId>,
+}
+impl CaptureSource {
+    pub async fn start(
+        control: &ObservationControl,
+        launch: Launch,
+        configuration: Configuration,
+    ) -> Result<Self, Error> {
+        control.check()?;
+        let worker = Worker::start(
+            &control.cx,
+            launch,
+            configuration,
+            control.deadline(Duration::from_secs(2))?,
+        )
+        .await?;
+        if worker.role() != Role::Capture {
+            return Err(Error::InvalidFrame);
+        }
+        control.check()?;
+        Ok(Self {
+            worker,
+            configuration,
+            next: Some(FrameId::FIRST),
+        })
+    }
+    pub async fn capture(
+        &mut self,
+        control: &ObservationControl,
+        force_idr: bool,
+    ) -> Result<EncodedAccessUnit, Error> {
+        let issued = control.check()?;
+        let deadline = control.deadline(Duration::from_secs(2))?;
+        let frame = self.next.ok_or(Error::InvalidFrame)?;
+        // Retire the frame identity before a possible external effect. A canceled
+        // exchange poisons its worker, so this frame is never silently retried.
+        self.next = frame.next();
+        let mut operation = MediaOperation::new(&mut self.worker);
+        let mut reply = operation
+            .worker
+            .request(
+                &control.cx,
+                Kind::Capture,
+                capture_payload(frame, issued.as_micros(), force_idr),
+                deadline,
+            )
+            .await?;
+        loop {
+            control.check()?;
+            match reply.header.kind {
+                Kind::Unit => {
+                    let unit = parse_unit(reply.into_body(), &self.configuration.limits()?)?;
+                    if unit.frame() != frame
+                        || unit.config_generation() != self.configuration.generation
+                        || unit.capture_micros() != issued.as_micros()
+                    {
+                        return Err(Error::InvalidFrame);
+                    }
+                    operation.completed = true;
+                    return Ok(unit);
+                }
+                Kind::NeedInput => {
+                    let now = control
+                        .cx
+                        .timer_driver()
+                        .ok_or(worker::Error::MissingRuntime)?
+                        .now();
+                    sleep(now, Duration::from_millis(1)).await;
+                    reply = operation
+                        .worker
+                        .request(&control.cx, Kind::Poll, vec![], deadline)
+                        .await?;
+                }
+                _ => return Err(Error::Backpressure),
+            }
+        }
+    }
+    pub fn worker_mut(&mut self) -> &mut Worker {
+        &mut self.worker
+    }
+}
+/// A viewer's cache and generation do not own the shared capture worker. No
+/// media packet is even encoded after its observation authority is revoked.
+/// The transport MUST also call `authorize_write` immediately before each actual
+/// enqueue/write, using the `PacketOffer`'s unchanged absolute send deadline.
+pub struct Subscription {
+    control: ObservationControl,
+    cache: SendCache,
+    limits: MediaLimits,
+    epoch: MediaEpoch,
+    first: bool,
+}
+impl Subscription {
+    pub fn new(
+        control: ObservationControl,
+        limits: MediaLimits,
+        bindings: MediaBindings,
+        epoch: MediaEpoch,
+        policy: SendPolicy,
+    ) -> Result<Self, Error> {
+        control.check()?;
+        Ok(Self {
+            control,
+            cache: SendCache::new(limits, bindings, epoch, policy)?,
+            limits,
+            epoch,
+            first: true,
+        })
+    }
+    pub fn enqueue(&mut self, unit: EncodedAccessUnit) -> Result<(), Error> {
+        let now = self.control.check()?;
+        if unit.config_generation() != self.epoch.configuration
+            || unit.capture_micros() > now.as_micros()
+            || (self.first && !unit.is_idr())
+        {
+            return Err(Error::InvalidFrame);
+        }
+        let reference = match unit.kind() {
+            FrameKind::Idr { .. } => None,
+            FrameKind::Predicted { references } => Some(references.as_raw()),
+        };
+        let progress = Progress {
+            descriptor: FrameDescriptor {
+                frame: unit.frame().as_raw(),
+                reference,
+                total_bytes: u32::try_from(unit.bytes().len()).map_err(|_| Error::InvalidFrame)?,
+                stride: self.limits.fragment_stride(),
+                capture_micros: unit.capture_micros(),
+            },
+            // A successful worker capture confirms service sometime after the
+            // request instant. Report that conservative lower bound, not receipt time.
+            observed_micros: unit.capture_micros(),
+            observation: SourceObservation::Captured,
+            pipeline: PipelineState::Running,
+        };
+        self.cache.push(
+            progress,
+            unit.into_bytes(),
+            if self.first {
+                DeliveryMode::Recovery
+            } else {
+                DeliveryMode::Datagrams
+            },
+            now.as_micros(),
+        )?;
+        self.first = false;
+        Ok(())
+    }
+    pub fn next_packet(&mut self, out: &mut [u8]) -> Result<Option<PacketOffer>, Error> {
+        let now = self.control.check()?;
+        Ok(self.cache.next_packet(now.as_micros(), out)?)
+    }
+    pub fn authorize_write(&self, offer: &PacketOffer) -> Result<(), Error> {
+        if self.control.check()?.as_micros() >= offer.send_by_micros {
+            return Err(worker::Error::Deadline.into());
+        }
+        Ok(())
+    }
+    pub fn queue_repair(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        self.cache
+            .queue_repair(bytes, self.control.check()?.as_micros())?;
+        Ok(())
+    }
+    pub fn next_repair(&mut self, out: &mut [u8]) -> Result<Option<PacketOffer>, Error> {
+        Ok(self
+            .cache
+            .next_repair_packet(self.control.check()?.as_micros(), out)?)
+    }
+}
+/// Viewer-local process owner. Compressed receiver reservations remain alive
+/// until a real decoder/presenter completion; no success is inferred from IPC
+/// submission. This local trusted-stream lane does not qualify hostile HEVC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentationStage {
+    DecodedOnly,
+    SubmittedToCompositor,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PresentationReceipt {
+    pub frame: FrameId,
+    pub stage: PresentationStage,
+}
+pub struct Presenter {
+    worker: Worker,
+    configuration: Configuration,
+}
+impl Presenter {
+    pub async fn start(
+        cx: &Cx,
+        launch: Launch,
+        configuration: Configuration,
+    ) -> Result<Self, Error> {
+        let worker = Worker::start(
+            cx,
+            launch,
+            configuration,
+            Deadline::after(cx, Duration::from_secs(2))?,
+        )
+        .await?;
+        if worker.role() != Role::Present {
+            return Err(Error::InvalidFrame);
+        }
+        Ok(Self {
+            worker,
+            configuration,
+        })
+    }
+    pub async fn present_next(
+        &mut self,
+        cx: &Cx,
+        receiver: &mut ReceivePipeline,
+    ) -> Result<Option<PresentationReceipt>, Error> {
+        let now = host_now(cx)?.as_micros();
+        let Some(picture) = receiver.take_decodable(now).map_err(|_| Error::Delivery)? else {
+            return Ok(None);
+        };
+        let d = picture.descriptor();
+        if picture.epoch().configuration != self.configuration.generation {
+            receiver.close();
+            return Err(Error::InvalidFrame);
+        }
+        let kind = d.reference.map_or(
+            FrameKind::Idr {
+                recovery: picture.epoch().recovery,
+            },
+            |id| FrameKind::Predicted {
+                references: FrameId::from_raw(id),
+            },
+        );
+        // One IPC staging buffer plus one retained receiver buffer, each capped
+        // by negotiated max-AU. The runtime integration admits both allocations.
+        let payload = unit_parts(
+            FrameId::from_raw(d.frame),
+            d.capture_micros,
+            self.configuration.generation,
+            kind,
+            picture.bytes(),
+        )?;
+        let display = picture.within_display_queue_budget();
+        let mut operation = MediaOperation::new(&mut self.worker);
+        let result = async {
+            let deadline = Deadline::after(cx, Duration::from_millis(200))?;
+            let mut reply = operation
+                .worker
+                .request(
+                    cx,
+                    if display { Kind::Present } else { Kind::Decode },
+                    payload,
+                    deadline,
+                )
+                .await?;
+            loop {
+                match reply.header.kind {
+                    kind if kind
+                        == if display {
+                            Kind::Presented
+                        } else {
+                            Kind::Decoded
+                        }
+                        && reply.body() == d.frame.to_be_bytes() =>
+                    {
+                        return Ok(FrameId::from_raw(d.frame));
+                    }
+                    Kind::NeedInput => {
+                        sleep(
+                            cx.timer_driver()
+                                .ok_or(worker::Error::MissingRuntime)?
+                                .now(),
+                            Duration::from_millis(1),
+                        )
+                        .await;
+                        reply = operation
+                            .worker
+                            .request(cx, Kind::Poll, vec![], deadline)
+                            .await?;
+                    }
+                    _ => return Err(Error::InvalidFrame),
+                }
+            }
+        }
+        .await;
+        let ack = receiver.acknowledge_decode(&picture, result.is_ok(), host_now(cx)?.as_micros());
+        match result {
+            Ok(frame) => {
+                ack.map_err(|_| Error::Delivery)?;
+                operation.completed = true;
+                Ok(Some(PresentationReceipt {
+                    frame,
+                    stage: if display {
+                        PresentationStage::SubmittedToCompositor
+                    } else {
+                        PresentationStage::DecodedOnly
+                    },
+                }))
+            }
+            Err(error) => Err(error),
+        }
+    }
+    pub fn worker_mut(&mut self) -> &mut Worker {
+        &mut self.worker
+    }
+}
+/// Keep cancellation terminal across the WHOLE codec operation, including
+/// cooperative waits BETWEEN IPC exchanges. A packet-level guard alone cannot
+/// protect a decoder that already accepted input before returning `NeedInput`.
+struct MediaOperation<'a> {
+    worker: &'a mut Worker,
+    completed: bool,
+}
+impl<'a> MediaOperation<'a> {
+    fn new(worker: &'a mut Worker) -> Self {
+        Self {
+            worker,
+            completed: false,
+        }
+    }
+}
+impl Drop for MediaOperation<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.worker.abort();
+        }
+    }
+}

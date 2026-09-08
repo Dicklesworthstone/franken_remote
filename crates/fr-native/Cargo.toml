@@ -12,6 +12,8 @@ fr-media.workspace = true
 
 [dev-dependencies]
 fr-wire.workspace = true
+frd.workspace = true
+asupersync.workspace = true
 
 [features]
 default = []

@@ -3,3 +3,6 @@
 //! never in an authority task. Asupersync QUIC remains the primary transport.
 #[cfg(target_os = "linux")]
 pub mod worker;
+
+#[cfg(target_os = "linux")]
+pub mod media;
