@@ -26,7 +26,7 @@ jobs:
           rustup show active-toolchain
           sudo apt-get update
           sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev pkg-config xvfb xauth
-      - name: Materialize exact staged worker slice without branch writes
+      - name: Materialize reviewed media join without branch writes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -36,29 +36,32 @@ jobs:
           repo=os.environ['GITHUB_REPOSITORY']
           def api(path):
               return json.loads(subprocess.check_output(['gh','api',f'repos/{repo}/{path}']))
-          tree=api('git/trees/eff84d35ec198851c1c46cfe22303bb8ae987c5e?recursive=1')
+          def blob(sha):
+              data=base64.b64decode(api('git/blobs/'+sha)['content'])
+              assert len(data)<100000 and hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()==sha
+              return data
+          tree=api('git/trees/636152d76eb5c1a226b213ac7b6d18e61541f272?recursive=1')
           assert not tree.get('truncated')
           entries={e['path']:e for e in tree['tree']}
-          paths=['crates/frd/Cargo.toml','crates/frd/src/lib.rs','crates/frd/src/worker.rs','crates/frd/tests/worker_supervision.rs','crates/frd/tests/support/worker_fixture.py']
-          for path in paths:
-              target=Path(path)
-              assert not target.exists(),f'Concurrent implementation: {path}'
+          additions=['crates/frd/src/media.rs','crates/frd/tests/media_authority.rs','crates/fr-native/tests/supervised_media.rs']
+          changed=['crates/fr-core/src/authority.rs','crates/fr-media/src/access_unit.rs','crates/fr-media/src/worker.rs','crates/fr-native/Cargo.toml','crates/fr-native/src/bin/media_worker.rs','crates/frd/src/worker.rs','crates/frd/src/lib.rs']
+          patch=blob('9e23135913eeec77c1828011042567e0763e0c89')
+          touched=[line.split(' b/',1)[1] for line in patch.decode().splitlines() if line.startswith('diff --git ')]
+          assert sorted(touched)==sorted(changed)
+          subprocess.run(['git','apply','--check','-'],input=patch,check=True)
+          for path in additions:
+              assert not Path(path).exists(),f'Concurrent implementation: {path}'
+          subprocess.run(['git','apply','-'],input=patch,check=True)
+          for path in additions:
               entry=entries[path]
               assert entry['type']=='blob' and entry['mode']=='100644'
-              blob=api('git/blobs/'+entry['sha'])
-              data=base64.b64decode(blob['content'])
-              assert len(data)<100000 and hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()==entry['sha']
-              target.parent.mkdir(parents=True,exist_ok=True)
-              target.write_bytes(data)
-          root=Path('Cargo.toml'); text=root.read_text()
-          anchor='fr-native = { path = "crates/fr-native" }'
-          assert text.count(anchor)==1 and 'frd = ' not in text
-          root.write_text(text.replace(anchor,anchor+'\nfrd = { path = "crates/frd" }'))
-          Path(os.environ['RUNNER_TEMP'],'worker-paths.json').write_text(json.dumps(paths+['Cargo.toml','Cargo.lock']))
+              target=Path(path); target.parent.mkdir(parents=True,exist_ok=True)
+              target.write_bytes(blob(entry['sha']))
+          Path(os.environ['RUNNER_TEMP'],'worker-paths.json').write_text(json.dumps(additions+changed+['Cargo.lock']))
           PY
           cargo fmt --all
           cargo check --workspace --all-targets --all-features
-      - name: Verify workspace and actual media processes
+      - name: Verify workspace and actual supervised media processes
         run: |
           ./scripts/verify.sh fast
           ./scripts/verify.sh docs
