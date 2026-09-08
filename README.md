@@ -183,7 +183,7 @@ The plan's evidence rules bind this repository from day one (plan §24):
 |---|---|
 | [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) | The constitution. 27 sections: decisions, boundaries, protocol shape, budgets, phases, verification matrix, references |
 | [`AGENTS.md`](AGENTS.md) | Normative contract for humans and coding agents working here |
-| [`PROTOCOL.md`](PROTOCOL.md) | Reserved for the concise wire specification; currently a status stub pointing at plan §17 |
+| [`PROTOCOL.md`](PROTOCOL.md) | Normative v0-draft: framing, messages, roles, generations, and limits; not implemented or frozen |
 | [`SECURITY.md`](SECURITY.md) | Reporting policy and highest-priority areas |
 | [`LICENSE`](LICENSE) | MIT + OpenAI/Anthropic rider |
 
