@@ -90,7 +90,7 @@ fn connect_approval_view_control_and_close_drive_production_transitions() {
 #[test]
 fn healthy_delivery_authorizes_before_the_ticket_deadline() {
     let mut lab = scenario(15, Limits::default()).unwrap();
-    let (state, lease, ticket) = controlling();
+    let (mut state, lease, ticket) = controlling();
     lab.send(
         Destination::Host,
         b"synthetic-action",
@@ -117,7 +117,7 @@ fn healthy_delivery_authorizes_before_the_ticket_deadline() {
 #[test]
 fn stalled_delivery_checks_the_actual_submission_clock() {
     let mut lab = scenario(17, Limits::default()).unwrap();
-    let (state, lease, ticket) = controlling();
+    let (mut state, lease, ticket) = controlling();
     lab.send(
         Destination::Host,
         b"synthetic-action",
