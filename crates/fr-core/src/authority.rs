@@ -280,6 +280,12 @@ impl SessionAuthority {
         nonce: u128,
         now: HostInstant,
     ) -> Result<HostInstant, AuthorityError> {
+        // A challenge can only renew authority that is still live. If the
+        // observation deadline already passed, authority is gone and
+        // reacquisition is a new grant — a challenge issued while observation
+        // was live cannot resurrect it after it lapsed (found in review by
+        // AzureBasin; plan section 6.3).
+        self.check_observation_live(now)?;
         let challenge = self
             .observation_challenge
             .ok_or(AuthorityError::ChallengeMismatch)?;
@@ -355,6 +361,9 @@ impl SessionAuthority {
         nonce: u128,
         now: HostInstant,
     ) -> Result<HostInstant, AuthorityError> {
+        // Control cannot outlive observation: if the observation deadline
+        // lapsed, the control lease cannot be renewed either.
+        self.check_observation_live(now)?;
         let lease = self.lease.as_mut().ok_or(AuthorityError::NoLease)?;
         if lease.id != lease_id {
             return Err(AuthorityError::StaleLease);
@@ -392,7 +401,8 @@ impl SessionAuthority {
         now: HostInstant,
     ) -> Result<HostInstant, AuthorityError> {
         // Control readiness gates ticket issuance: a stale view must not keep
-        // minting submission tickets.
+        // minting submission tickets, and control cannot outlive observation.
+        self.check_observation_live(now)?;
         if self.readiness != ViewReadiness::Ready {
             return Err(AuthorityError::ViewUnready);
         }
@@ -433,6 +443,11 @@ impl SessionAuthority {
         if self.phase != Phase::Viewing {
             return Err(AuthorityError::InvalidState { phase: self.phase });
         }
+        // Control authority is a strict subset of observation authority: an
+        // action can never be submitted to a view the session is no longer
+        // authorized to observe, even if the control lease was independently
+        // renewed past the observation deadline (found in review by AzureBasin).
+        self.check_observation_live(now)?;
         if self.readiness != ViewReadiness::Ready {
             return Err(AuthorityError::ViewUnready);
         }
@@ -462,11 +477,13 @@ impl SessionAuthority {
         self.control_challenge = None;
     }
 
-    /// True when the session currently holds a usable control lease (present,
-    /// authorized at `now`, ready view). Read-only helper for the broker.
+    /// True when the session currently holds a usable control lease: live
+    /// observation, a `Ready` view, and a present, authorized lease. Control
+    /// is a strict subset of observation. Read-only helper for the broker.
     #[must_use]
     pub fn has_live_control(&self, now: HostInstant) -> bool {
-        self.readiness == ViewReadiness::Ready
+        self.check_observation_live(now).is_ok()
+            && self.readiness == ViewReadiness::Ready
             && self.lease.is_some_and(|l| now <= l.authorized_until)
     }
 
@@ -654,13 +671,17 @@ mod tests {
         a.authorize_observation(at(0)).unwrap();
         a.mark_view_ready(at(0)).unwrap();
         let deadline = a.issue_observation_challenge(0xabc, at(1_000_000));
-        // A response after the challenge deadline is terminal, not a renewal.
+        // A response after the deadlines is terminal, not a renewal. Because
+        // observation authorization (3s) lapses at or before any challenge's
+        // deadline, ObservationExpired is the fundamental refusal that fires —
+        // reacquisition is a new grant either way (no resurrection).
         let late = HostInstant::from_micros(deadline.as_micros() + 1);
         assert_eq!(
             a.respond_observation_challenge(0xabc, late),
-            Err(AuthorityError::ChallengeExpired)
+            Err(AuthorityError::ObservationExpired)
         );
-        // A response with the wrong nonce is refused too.
+        // A response with the wrong nonce, while observation is still live, is
+        // refused as a challenge mismatch.
         a.issue_observation_challenge(0xdef, at(2_000_000));
         assert_eq!(
             a.respond_observation_challenge(0x111, at(2_100_000)),
@@ -772,6 +793,54 @@ mod tests {
             Err(AuthorityError::InvalidState {
                 phase: Phase::Closed
             })
+        );
+    }
+
+    #[test]
+    fn control_cannot_outlive_observation() {
+        // Regression for AzureBasin's review finding: renewing the control
+        // lease past the observation deadline must NOT authorize input, and
+        // an observation challenge cannot resurrect lapsed observation.
+        let t0 = at(0);
+        let (mut a, lease, _) = viewing_with_control(t0);
+
+        // Renew control far into the future via a control challenge, while
+        // observation is deliberately never renewed (its deadline is 3s).
+        a.issue_control_challenge(0x1, at(1_000_000)).unwrap();
+        a.respond_control_challenge(lease, 0x1, at(1_500_000))
+            .unwrap();
+        // Now issue a ticket while observation is still live, then advance
+        // past the observation deadline (3s) but within the renewed lease.
+        let ticket = InputTicketId::from_raw(5);
+        a.issue_input_ticket(lease, ticket, at(2_000_000)).unwrap();
+
+        // At 3.5s: observation lapsed (deadline was 3s), lease still renewed.
+        // Submission MUST be refused because observation is dead.
+        assert_eq!(
+            a.authorize_submission(lease, ticket, at(3_500_000)),
+            Err(AuthorityError::ObservationExpired)
+        );
+        // Issuing another ticket is refused for the same reason.
+        assert_eq!(
+            a.issue_input_ticket(lease, InputTicketId::from_raw(6), at(3_500_000)),
+            Err(AuthorityError::ObservationExpired)
+        );
+        // Renewing control is refused: control cannot outlive observation.
+        a.issue_control_challenge(0x2, at(2_500_000)).unwrap();
+        assert_eq!(
+            a.respond_control_challenge(lease, 0x2, at(3_500_000)),
+            Err(AuthorityError::ObservationExpired)
+        );
+        // has_live_control agrees.
+        assert!(!a.has_live_control(at(3_500_000)));
+
+        // And a stale observation challenge cannot resurrect it: issue while
+        // live, respond after the observation deadline.
+        let (mut b, _, _) = viewing_with_control(t0);
+        b.issue_observation_challenge(0x9, at(2_000_000));
+        assert_eq!(
+            b.respond_observation_challenge(0x9, at(3_500_000)),
+            Err(AuthorityError::ObservationExpired)
         );
     }
 
