@@ -84,7 +84,9 @@ impl ProbeCache {
     /// An empty cache.
     #[must_use]
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     /// Records a fresh probe result, replacing any prior entry for a device
@@ -95,7 +97,10 @@ impl ProbeCache {
                 && e.identity.device == identity.device
                 && e.identity.driver == identity.driver)
         });
-        self.entries.push(CachedProbe { identity, capabilities });
+        self.entries.push(CachedProbe {
+            identity,
+            capabilities,
+        });
     }
 
     /// Returns a cached result only when the identity matches exactly. A
@@ -159,7 +164,10 @@ impl SessionAdmission {
     /// simultaneous codec sessions.
     #[must_use]
     pub const fn new(max_sessions: u32) -> Self {
-        Self { max_sessions, active: 0 }
+        Self {
+            max_sessions,
+            active: 0,
+        }
     }
 
     /// Admits one session, or refuses when capacity is exhausted. The returned

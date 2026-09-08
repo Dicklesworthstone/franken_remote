@@ -158,7 +158,9 @@ mod tests {
     #[test]
     fn access_unit_validates_length_and_nonempty() {
         let l = ProtocolLimits::ABSOLUTE;
-        let idr = FrameKind::Idr { recovery: RecoveryGeneration::INITIAL };
+        let idr = FrameKind::Idr {
+            recovery: RecoveryGeneration::INITIAL,
+        };
         let ok = EncodedAccessUnit::new(&l, FrameId::FIRST, idr, gen0(), 1_000, vec![1, 2, 3]);
         assert!(ok.is_ok());
         assert!(ok.unwrap().is_idr());
@@ -180,7 +182,9 @@ mod tests {
     #[test]
     fn predicted_frames_carry_their_reference() {
         let l = ProtocolLimits::ABSOLUTE;
-        let kind = FrameKind::Predicted { references: FrameId::FIRST };
+        let kind = FrameKind::Predicted {
+            references: FrameId::FIRST,
+        };
         let au = EncodedAccessUnit::new(&l, FrameId::from_raw(1), kind, gen0(), 16_000, vec![9])
             .unwrap();
         assert!(!au.is_idr());

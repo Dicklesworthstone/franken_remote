@@ -135,7 +135,9 @@ impl CodedGeometry {
             return Err(ConfigError::Limits(LimitsError::ZeroDimension));
         }
         if alignment == 0 || !alignment.is_power_of_two() {
-            return Err(ConfigError::UnalignedCoded { dimension: alignment });
+            return Err(ConfigError::UnalignedCoded {
+                dimension: alignment,
+            });
         }
         if coded_width % alignment != 0 || coded_height % alignment != 0 {
             return Err(ConfigError::UnalignedCoded {
@@ -154,7 +156,12 @@ impl CodedGeometry {
                 coded_height,
             });
         }
-        Ok(Self { coded_width, coded_height, crop_width, crop_height })
+        Ok(Self {
+            coded_width,
+            coded_height,
+            crop_width,
+            crop_height,
+        })
     }
 
     /// Coded (allocation) width.
@@ -238,7 +245,9 @@ impl CodecConfiguration {
         gop: GopPolicy,
     ) -> Result<Self, ConfigError> {
         if color.transfer.is_hdr() {
-            return Err(ConfigError::HdrNotRepresentable { transfer: color.transfer });
+            return Err(ConfigError::HdrNotRepresentable {
+                transfer: color.transfer,
+            });
         }
         Ok(Self {
             generation,
@@ -322,12 +331,20 @@ impl fmt::Display for ConfigError {
             Self::UnalignedCoded { dimension } => {
                 write!(f, "coded dimension {dimension} is not aligned")
             }
-            Self::CropExceedsCoded { crop_width, crop_height, coded_width, coded_height } => write!(
+            Self::CropExceedsCoded {
+                crop_width,
+                crop_height,
+                coded_width,
+                coded_height,
+            } => write!(
                 f,
                 "crop {crop_width}x{crop_height} exceeds coded {coded_width}x{coded_height}"
             ),
             Self::HdrNotRepresentable { transfer } => {
-                write!(f, "HDR transfer {transfer:?} cannot be represented as SDR baseline")
+                write!(
+                    f,
+                    "HDR transfer {transfer:?} cannot be represented as SDR baseline"
+                )
             }
             Self::ZeroFrameRate => f.write_str("zero frame rate"),
             Self::GopOverflow => f.write_str("GOP frame count overflow"),
@@ -389,7 +406,9 @@ mod tests {
         };
         assert!(matches!(
             CodecConfiguration::new_baseline(gen0(), geom, hdr, gop),
-            Err(ConfigError::HdrNotRepresentable { transfer: TransferFunction::Pq })
+            Err(ConfigError::HdrNotRepresentable {
+                transfer: TransferFunction::Pq
+            })
         ));
     }
 

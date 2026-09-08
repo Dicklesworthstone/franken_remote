@@ -81,8 +81,11 @@ pub trait Encoder {
     /// caller must [`poll_output`](Encoder::poll_output) before retrying this
     /// same surface. A surface from the wrong backend or a mismatched
     /// configuration is a typed refusal, never encoded.
-    fn submit(&mut self, surface: &dyn GpuSurface, request: EncodeRequest)
-        -> Result<(), MediaError>;
+    fn submit(
+        &mut self,
+        surface: &dyn GpuSurface,
+        request: EncodeRequest,
+    ) -> Result<(), MediaError>;
 
     /// Drains one available encoded access unit. `NeedMoreInput` means none is
     /// ready yet. The first output after `configure` is always an IDR.
