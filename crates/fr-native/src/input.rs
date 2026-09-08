@@ -43,6 +43,8 @@ unsafe extern "C" {
         mask: *mut c_uint,
     ) -> c_int;
     fn XFlush(display: *mut c_void) -> c_int;
+    fn XSync(display: *mut c_void, discard: c_int) -> c_int;
+    fn XGetPointerMapping(display: *mut c_void, map: *mut u8, count: c_int) -> c_int;
 }
 // Linux's versioned ABI. No runtime loader search or downloaded library is used.
 #[link(name = "libXtst.so.6", kind = "dylib", modifiers = "+verbatim")]
@@ -78,6 +80,8 @@ pub struct X11Pointer {
     dimensions: (u32, u32),
     prepared: Option<Operation>,
     keyboard: Keyboard,
+    buttons: [Option<u8>; 5],
+    prepared_button: Option<u8>,
     _thread: PhantomData<Rc<()>>,
 }
 impl X11Pointer {
@@ -102,6 +106,8 @@ impl X11Pointer {
             dimensions: (0, 0),
             prepared: None,
             keyboard: Keyboard::new(display),
+            buttons: [None; 5],
+            prepared_button: None,
             _thread: PhantomData,
         };
         let (mut event, mut error, mut major, mut minor) = (0, 0, 0, 0);
@@ -139,6 +145,91 @@ impl X11Pointer {
     /// false when native release/restoration is still uncertain; do not hand off.
     pub fn cleanup_keyboard(&mut self) -> bool {
         self.keyboard.cleanup()
+    }
+    /// Local release-only teardown after the input lease has been retired.
+    /// Both keyboard preparation and this owner's recorded button presses are
+    /// cleaned up. False means native cleanup remains pending; retry locally,
+    /// never grant another controller on the strength of core held-count alone.
+    pub fn cleanup_native(&mut self) -> bool {
+        self.cancel_prepared();
+        let keyboard_done = self.keyboard.cleanup();
+        for index in 0..self.buttons.len() {
+            let Some(code) = self.buttons[index] else {
+                continue;
+            };
+            // SAFETY: release only the physical code recorded BEFORE our press.
+            // XSync orders server processing; it is not an application receipt.
+            let accepted = unsafe {
+                let accepted = XTestFakeButtonEvent(self.display.as_ptr(), u32::from(code), 0, 0);
+                XSync(self.display.as_ptr(), 0);
+                accepted
+            };
+            if accepted == 0 {
+                continue;
+            }
+            let logical = [1u32, 3, 2, 8, 9][index];
+            // Core XQueryPointer exposes only the first five logical buttons.
+            // Extended buttons have API/server-sync evidence, not a held mask.
+            if logical <= 5
+                && !self
+                    .query_pointer()
+                    .is_ok_and(|(_, mask)| mask & (1 << (7 + logical)) == 0)
+            {
+                continue;
+            }
+            self.buttons[index] = None;
+        }
+        keyboard_done && self.buttons.iter().all(Option::is_none)
+    }
+    fn prepare_button(
+        &mut self,
+        button: PointerButton,
+        pressed: bool,
+    ) -> Result<(), PlatformError> {
+        let index = button as usize - 1;
+        if !pressed {
+            self.prepared_button = Some(self.buttons[index].ok_or(PlatformError::Unsupported)?);
+            return Ok(());
+        }
+        if self.geometry()? != self.dimensions {
+            return Err(PlatformError::GeometryChanged);
+        }
+        if self.buttons[index].is_some() {
+            return Err(PlatformError::Permission);
+        }
+        let logical = match button {
+            PointerButton::Primary => 1u8,
+            PointerButton::Secondary => 3,
+            PointerButton::Middle => 2,
+            PointerButton::Back => 8,
+            PointerButton::Forward => 9,
+        };
+        if logical <= 5 && self.query_pointer()?.1 & (1 << (7 + logical)) != 0 {
+            return Err(PlatformError::Permission);
+        }
+        let mut mapping = [0u8; 256];
+        // SAFETY: live display and fixed-size map. Check returned count before
+        // indexing; zero disables a physical button and duplicates are refused.
+        let count = unsafe { XGetPointerMapping(self.display.as_ptr(), mapping.as_mut_ptr(), 256) };
+        let count = usize::try_from(count)
+            .ok()
+            .filter(|n| (1..=256).contains(n))
+            .ok_or(PlatformError::Unavailable)?;
+        let mut selected = None;
+        for (index, mapped) in mapping[..count].iter().enumerate() {
+            if *mapped == logical {
+                if selected.is_some() {
+                    return Err(PlatformError::Unsupported);
+                }
+                selected = Some(u8::try_from(index + 1).map_err(|_| PlatformError::Unsupported)?);
+            }
+        }
+        let code = selected.ok_or(PlatformError::Unsupported)?;
+        if self.buttons.contains(&Some(code)) {
+            return Err(PlatformError::Permission);
+        }
+        self.prepared_button = Some(code);
+        Ok(())
     }
     pub fn bounds(&self) -> InputBounds {
         InputBounds::new(
@@ -213,13 +304,8 @@ impl InputSink for X11Pointer {
                     return Err(PlatformError::GeometryChanged);
                 }
             }
-            Operation::Button { pressed: true, .. } => {
-                if self.geometry()? != self.dimensions {
-                    return Err(PlatformError::GeometryChanged);
-                }
-            }
-            // Release-only cleanup must still work after geometry replacement.
-            Operation::Button { pressed: false, .. } => {}
+            // Release-only cleanup still works after geometry replacement.
+            Operation::Button { button, pressed } => self.prepare_button(button, pressed)?,
             _ => return Err(PlatformError::Unsupported),
         }
         self.prepared = Some(op);
@@ -240,33 +326,43 @@ impl InputSink for X11Pointer {
                 Operation::Absolute(p) => {
                     XTestFakeMotionEvent(self.display.as_ptr(), self.screen, p.x, p.y, 0)
                 }
-                Operation::Button { button, pressed } => XTestFakeButtonEvent(
-                    self.display.as_ptr(),
-                    match button {
-                        PointerButton::Primary => 1,
-                        PointerButton::Secondary => 3,
-                        PointerButton::Middle => 2,
-                        PointerButton::Back => 8,
-                        PointerButton::Forward => 9,
-                    },
-                    c_int::from(pressed),
-                    0,
-                ),
+                Operation::Button { button, pressed } => {
+                    let Some(code) = self.prepared_button.take() else {
+                        return Submission::NotSubmitted(PlatformError::Unsupported);
+                    };
+                    if pressed {
+                        self.buttons[button as usize - 1] = Some(code);
+                    }
+                    XTestFakeButtonEvent(
+                        self.display.as_ptr(),
+                        u32::from(code),
+                        c_int::from(pressed),
+                        0,
+                    )
+                }
                 _ => return Submission::NotSubmitted(PlatformError::Unsupported),
             }
         };
         if accepted == 0 {
-            return Submission::NotSubmitted(PlatformError::Unavailable);
+            return Submission::Unknown;
         }
         // SAFETY: live connection. Fatal Xlib I/O errors remain process failures;
         // never catch one and pretend the server rolled back an input event.
         unsafe {
             XFlush(self.display.as_ptr());
         }
+        if let Operation::Button {
+            button,
+            pressed: false,
+        } = op
+        {
+            self.buttons[button as usize - 1] = None;
+        }
         Submission::Submitted
     }
     fn cancel_prepared(&mut self) {
         self.prepared = None;
+        self.prepared_button = None;
         self.keyboard.cancel_prepared();
     }
     fn repeat_requires_pair(&self) -> bool {
@@ -275,7 +371,7 @@ impl InputSink for X11Pointer {
 }
 impl Drop for X11Pointer {
     fn drop(&mut self) {
-        let _ = self.keyboard.cleanup();
+        let _ = self.cleanup_native();
         // SAFETY: unique live context, no other thread or callback holds it.
         unsafe {
             XCloseDisplay(self.display.as_ptr());

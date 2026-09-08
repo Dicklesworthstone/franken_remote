@@ -56,6 +56,8 @@ struct KeyboardState {
 }
 unsafe extern "C" {
     fn XInitThreads() -> c_int;
+    fn XGetPointerMapping(d: *mut c_void, map: *mut u8, n: c_int) -> c_int;
+    fn XSetPointerMapping(d: *mut c_void, map: *const u8, n: c_int) -> c_int;
     fn XOpenDisplay(name: *const c_char) -> *mut c_void;
     fn XCloseDisplay(d: *mut c_void) -> c_int;
     fn XDefaultRootWindow(d: *mut c_void) -> c_ulong;
@@ -643,4 +645,123 @@ fn local_revoke_during_native_preparation_cancels_without_input() {
     assert!(!o.down(code));
     assert_eq!(o.repeat(code), original);
     assert_eq!(o.events(), [] as [(i32, u32, bool); 0]);
+}
+
+fn button_event(button: PointerButton, pressed: bool) -> InputEvent<'static> {
+    InputEvent::Button {
+        button,
+        pressed,
+        position: DesktopPoint { x: 30, y: 40 },
+        barrier: 0,
+    }
+}
+#[test]
+fn swapped_button_mapping_preserves_logical_clicks_and_all_five_buttons() {
+    let (_server, name) = Server::start();
+    let o = Observer::new(&name);
+    let mut map = [0u8; 256];
+    let n = unsafe { XGetPointerMapping(o.d, map.as_mut_ptr(), 256) };
+    assert!((9..=256).contains(&n));
+    map.swap(0, 2);
+    assert_eq!(unsafe { XSetPointerMapping(o.d, map.as_ptr(), n) }, 0);
+    let mut native = X11Pointer::open(&name).unwrap();
+    let (mut owner, c) = session(&native);
+    for (i, (button, logical)) in [
+        (PointerButton::Primary, 1),
+        (PointerButton::Secondary, 3),
+        (PointerButton::Middle, 2),
+        (PointerButton::Back, 8),
+        (PointerButton::Forward, 9),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (pressed, offset, event_kind) in [(true, 0, 4), (false, 1, 5)] {
+            let r = completed(send(
+                &mut owner,
+                &mut native,
+                c,
+                u64::try_from(2 * i).unwrap() + offset,
+                button_event(button, pressed),
+                || HostInstant::ORIGIN,
+            ));
+            assert_eq!(r.outcome, InputOutcome::SubmittedToOs);
+            assert_eq!(r.submitted_operations, 2);
+            assert_eq!(o.wait_events(1), [(event_kind, logical, false)]);
+        }
+    }
+    assert_eq!(owner.cleanup(&mut native).remaining, 0);
+    assert!(native.cleanup_native());
+}
+#[test]
+fn native_owner_drop_releases_a_drag_and_keyboard_without_an_explicit_cleanup_call() {
+    let (_server, name) = Server::start();
+    let o = Observer::new(&name);
+    let code = o.code(0x61);
+    let original = o.repeat(code);
+    let mut native = X11Pointer::open(&name).unwrap();
+    let (mut owner, c) = session(&native);
+    let r = completed(send(
+        &mut owner,
+        &mut native,
+        c,
+        0,
+        button_event(PointerButton::Primary, true),
+        || HostInstant::ORIGIN,
+    ));
+    assert_eq!(r.outcome, InputOutcome::SubmittedToOs);
+    let _ = send(
+        &mut owner,
+        &mut native,
+        c,
+        1,
+        key(KeyTransition::Press),
+        || HostInstant::ORIGIN,
+    );
+    o.wait_down(code, true);
+    o.wait_pointer((30, 40, 1 << 8));
+    owner.revoke_handle().revoke();
+    drop(native);
+    o.wait_down(code, false);
+    o.wait_pointer((30, 40, 0));
+    assert_eq!(o.repeat(code), original);
+}
+#[test]
+fn a_preexisting_local_drag_is_not_claimed_or_released_by_another_native_owner() {
+    let (_server, name) = Server::start();
+    let o = Observer::new(&name);
+    let mut local = X11Pointer::open(&name).unwrap();
+    let (mut local_owner, lc) = session(&local);
+    let _ = send(
+        &mut local_owner,
+        &mut local,
+        lc,
+        0,
+        button_event(PointerButton::Primary, true),
+        || HostInstant::ORIGIN,
+    );
+    o.wait_pointer((30, 40, 1 << 8));
+    let mut remote = X11Pointer::open(&name).unwrap();
+    let (mut owner, c) = session(&remote);
+    let r = completed(send(
+        &mut owner,
+        &mut remote,
+        c,
+        0,
+        button_event(PointerButton::Primary, true),
+        || HostInstant::ORIGIN,
+    ));
+    assert_eq!(r.outcome, InputOutcome::PartiallySubmittedToOs);
+    assert_eq!(r.submitted_operations, 1); // The earlier, separately checked motion did submit.
+    assert_eq!(
+        r.refusal,
+        Some(Refusal::Platform(PlatformError::Permission))
+    );
+    assert_eq!(owner.cleanup(&mut remote).remaining, 0);
+    assert!(remote.cleanup_native());
+    drop(remote);
+    o.wait_pointer((30, 40, 1 << 8));
+    assert_eq!(local_owner.cleanup(&mut local).remaining, 0);
+    assert!(local.cleanup_native());
+    o.wait_pointer((30, 40, 0));
 }

@@ -30,25 +30,23 @@ no credentials or input content enter diagnostics or the native ABI helper.
 
 ## Verification
 
-Six `keyboard_x11` integration tests exercise the actual FRD0 input codec, shared
+Nine `keyboard_x11` integration tests exercise the actual FRD0 input codec, shared
 InputSession, native XKB/XTest calls and an independent Xlib client observing its
-window, keyboard state and repeat settings on fresh local Xvfb servers:
+window, keyboard state and repeat settings on fresh local Xvfb servers. Six cover
+keyboard behavior: press/release, duplicate suppression, explicit repeat without
+a second server-generated stream, ticket expiry after preparation, expiry between
+repeat release/press, refusal of pre-existing input, physical-keycode retention
+through keymap changes, and local revoke during preparation. Three additional
+cases exercise swapped button mappings for all five buttons, simultaneous key/
+drag cleanup on normal Drop, and refusal to claim/release another local drag.
 
-- press/release, duplicate suppression, explicit repeat, absence of a second
-  server-generated repeat stream, pointer/button operation and revoke cleanup;
-- ticket expiry after XKB preparation: no press and original repeat restored;
-- expiry between repeat release/press: partial receipt, no replay;
-- refusal of a key already held by another local input owner;
-- keymap changes preserve the original physical keycode for release/new presses;
-- local revoke during native preparation prevents input and restores preparation.
-
-These tests passed locally with the repository-pinned nightly and the actual
-Cargo-built first-party libraries. Strict native-library Cargo Clippy and pinned
-Clippy checking of the integration test also passed. The command for a normally
-provisioned checkout is:
+All nine passed locally, alongside the four unchanged pointer integration tests,
+with the repository-pinned nightly and the actual Cargo-built first-party
+libraries. Strict native-library Cargo Clippy and pinned Clippy checking of both
+integration test sources also passed. The reproduction command is:
 
 ```sh
-cargo test -p fr-native --features linux-input --test keyboard_x11 -- --test-threads=1
+cargo test -p fr-native --features linux-input --test keyboard_x11 --locked -- --test-threads=1
 ```
 
 Requirements: Xvfb, X11 development headers, the installed libXtst.so.6 ABI,
@@ -57,11 +55,12 @@ independent observer is test-only; no fabricated native backend is used.
 
 ## Integration limits
 
-InputSession cleanup and native keyboard cleanup are separate evidence. Before
+InputSession cleanup and native preparation cleanup are separate evidence. Before
 controller handoff, retire authority, require core held-state cleanup to finish,
-and require `X11Pointer::cleanup_keyboard()` to return true. A failed restoration
+and require `X11Pointer::cleanup_native()` to return true. A failed restoration
 is retained and blocks new presses; zero core-held keys alone does not certify
-that preparation was restored. Drop is best effort, not an acknowledged handoff.
+that preparation was restored. `cleanup_keyboard()` covers only the keyboard;
+Drop is best effort, not an acknowledged handoff.
 
 X11 cannot perfectly distinguish a simultaneous physical local press of the same
 key from an injected press. Per-key repeat settings are X-server-global while
