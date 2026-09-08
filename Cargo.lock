@@ -11,6 +11,7 @@ name = "fr-media"
 version = "0.1.0"
 dependencies = [
  "fr-core",
+ "fr-wire",
 ]
 
 [[package]]

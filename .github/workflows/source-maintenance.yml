@@ -2,7 +2,7 @@ name: Review source maintenance
 
 # Review-only suggestions: no commit/ref/PR writes. Run explicitly or when
 # this recipe itself changes, never on each ordinary source push.
-# Current review target: executable media wire codecs and their golden fixtures.
+# Current review target: bounded frame reassembly and reference-aware delivery.
 on:
   workflow_dispatch:
   push:

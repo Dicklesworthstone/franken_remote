@@ -9,9 +9,9 @@ mod media;
 mod record;
 
 pub use media::{
-    FrameDescriptor, Fragment, Progress, RecoveryChunk, RepairRange, RepairRequest,
-    SourceObservation, PipelineState, decode_fragment, decode_progress,
-    decode_recovery, decode_repair, encode_fragment, encode_progress,
-    encode_recovery, encode_repair, FRAGMENT_OVERHEAD, RECOVERY_OVERHEAD,
+    FRAGMENT_OVERHEAD, Fragment, FrameDescriptor, PipelineState, Progress, RECOVERY_OVERHEAD,
+    RecoveryChunk, RepairRange, RepairRequest, SourceObservation, decode_fragment, decode_progress,
+    decode_recovery, decode_repair, encode_fragment, encode_progress, encode_recovery,
+    encode_repair,
 };
-pub use record::{Channel, Kind, MediaLimits, Record, WireError, HEADER_BYTES};
+pub use record::{Channel, HEADER_BYTES, Kind, MediaLimits, Record, WireError};
