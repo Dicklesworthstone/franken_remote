@@ -1,23 +1,19 @@
 #![forbid(unsafe_code)]
-//! `FrankenRemote` core types.
+//! `FrankenRemote` core types and deterministic authority policy.
 //!
-//! This crate owns the vocabulary every other `FrankenRemote` crate speaks:
-//! the distinct identity and generation types that fence stale work (plan
-//! section 7.2), and the single tested limits structure that every parser,
-//! allocator, and FFI boundary consults before doing work (plan section
-//! 17.2). Session authority state machines join this crate in a later slice
-//! (bead fr-p1-session-authority); nothing here depends on a runtime.
+//! This crate owns typed identities, generations, checked protocol limits,
+//! host-clock session authorization, and bounded input-sequence accounting.
+//! It has no runtime, network listener, OS input injector, or codec backend.
+//! Integration must still authenticate peers and check the actual host clock,
+//! geometry, mapping, and OS-session state immediately before external work.
 //!
-//! Two rules travel with these types everywhere:
-//!
-//! - identifiers of different kinds never interchange, so a display-geometry
-//!   generation can never be passed where an input lease is expected — the
-//!   type system, not discipline, enforces the fencing;
-//! - every limit is a negotiate-downward ceiling with checked arithmetic, so
-//!   over-limit or overflow-adjacent input is a typed refusal before any
-//!   allocation or foreign call.
+//! Identifiers of different kinds never interchange. Limits negotiate only
+//! downward. Expired/refused authority cannot authorize a new submission, and
+//! evicting a receipt never makes its already-consumed input sequence new.
+//! These are core policy guarantees, not end-to-end hardware qualification.
 
 pub mod authority;
 pub mod ids;
+pub mod input_sequence;
 pub mod limits;
 pub mod time;
