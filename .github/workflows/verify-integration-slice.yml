@@ -1,0 +1,84 @@
+name: Verify staged integration slice
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/verify-integration-slice.yml']
+permissions:
+  contents: write
+
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Install pinned compiler and native SDKs
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev pkg-config xvfb xauth openssl
+      - name: Install exact staged source without ref writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64,json,os,subprocess,hashlib
+          from pathlib import Path
+          repo=os.environ['GITHUB_REPOSITORY']
+          def api(path):
+              return json.loads(subprocess.check_output(['gh','api',f'repos/{repo}/{path}']))
+          tree=api('git/trees/28af7862110c896ba212c98f5d6de9dc360cb0e7?recursive=1')
+          assert not tree.get('truncated')
+          paths=['crates/fr-transport/Cargo.toml','crates/fr-transport/src/lib.rs','crates/fr-transport/src/socket.rs','crates/fr-transport/src/wss.rs','crates/fr-transport/tests/wss_live.rs','crates/fr-transport/tests/support/mod.rs']
+          entries={e['path']:e for e in tree['tree']}
+          for path in paths:
+              target=Path(path)
+              assert not target.exists(),f'Already present: {path}'
+              entry=entries[path]
+              assert entry['type']=='blob' and entry['mode']=='100644'
+              blob=api('git/blobs/'+entry['sha'])
+              data=base64.b64decode(blob['content'])
+              assert len(data)<100000
+              assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()==entry['sha']
+              target.parent.mkdir(parents=True,exist_ok=True)
+              target.write_bytes(data)
+          root=Path('Cargo.toml')
+          text=root.read_text()
+          old='asupersync = { version = "0.4.10", default-features = false }'
+          assert text.count(old)==1
+          text=text.replace(old,'asupersync = { version = "=0.4.10", default-features = false }')
+          anchor='fr-native = { path = "crates/fr-native" }'
+          assert text.count(anchor)==1
+          root.write_text(text.replace(anchor,anchor+'\nfr-transport = { path = "crates/fr-transport" }'))
+          Path(os.environ['RUNNER_TEMP'],'slice-paths.json').write_text(json.dumps(paths+['Cargo.toml','Cargo.lock']))
+          PY
+          cargo generate-lockfile
+      - name: Verify exact source
+        run: |
+          ./scripts/verify.sh fast
+          ./scripts/verify.sh docs
+          xvfb-run -a -s '-screen 0 640x360x24 -nolisten tcp' cargo run -p fr-native --features linux-media --example native_roundtrip -- --software-explicit
+      - name: Retain verified source blobs for explicit review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git diff --check
+          python3 - <<'PY'
+          import base64,json,os,subprocess
+          from pathlib import Path
+          paths=json.loads(Path(os.environ['RUNNER_TEMP'],'slice-paths.json').read_text())
+          for path in paths:
+              data=Path(path).read_bytes()
+              body=json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()})
+              result=subprocess.run(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,capture_output=True,check=True)
+              print(json.dumps({'path':path,'sha':json.loads(result.stdout)['sha'],'verified_against':os.environ['GITHUB_SHA']}))
+          PY
