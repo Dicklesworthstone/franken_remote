@@ -2,9 +2,9 @@
 
 **A tailnet-native remote workstation in Rust: open a machine on your Tailscale network and use its existing desktop, with hardware-accelerated HEVC, no separate account or pairing ceremony, and a system that refuses to accumulate invisible latency.**
 
-> **Status: researched design, pre-implementation.** This repository currently contains the reviewed architecture and implementation proposal, not working software. The single source of truth for what is being built and why is [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) (version 1.4, 2026-09-07, all 27 sections re-reviewed with corrections integrated in place). Every number, latency target, protocol limit, and platform claim below is a **proposed engineering objective or experimental starting point taken from that plan — not a measured FrankenRemote result**. No code, benchmark, or qualification evidence exists yet, and this README will be trued up in place as implementation phases land.
+> **Status: early implementation; not an installable remote desktop yet.** The repository contains a Rust workspace with tested core authority, identity/limit types, bounded input replay accounting, and media contracts. There is no working `frd`/`fr` application, qualified live transport, or hardware capture/codec backend yet. [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) records the implemented slices and exact verification evidence. The design source of truth remains [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) (version 1.4). Every latency target, operating envelope, and platform claim below is a **proposed engineering objective from that plan, not a measured FrankenRemote result**.
 
-The two shipped names are:
+The two planned binary names are:
 
 - **`frd`** — FrankenRemoteDaemon, the host-side broker and its internal process-role family (interactive-session agent, on-demand media worker);
 - **`fr`** — the FrankenRemote client and command-line interface.
@@ -20,6 +20,19 @@ The engineering thesis, from the plan:
 **The problem.** Remote desktop tools accumulate the wrong things: their own accounts, pairing databases, relays, and identity systems layered on top of a network that already has all of those; television-shaped video defaults (cinematic rate control, frame-count vanity metrics, multi-second hidden buffers) applied to terminal text and document work; and input paths that happily replay stale clicks into a desktop that has moved on. The result feels slow in ways nobody can explain, and stops in ways nobody can trust.
 
 **The solution.** FrankenRemote deliberately owns almost nothing except policy. The installed Tailscale client provides connectivity, machine identity, admission evidence, and HTTPS certificates — there is no FrankenRemote password, PIN, pairing store, coordination service, or relay. Asupersync provides the sole async runtime, cancellation-aware ownership, bounded channels, and a deterministic lab. Platform APIs (ScreenCaptureKit/VideoToolbox, Desktop Duplication, PipeWire/portals, MediaCodec, WebCodecs) and a trimmed FFmpeg boundary provide capture and hardware HEVC. What FrankenRemote itself builds is the connective discipline: a freshness contract with bounded queues at every stage, input authority that expires and ends cleanly, codec-aware loss recovery, and diagnostics that answer "why does this feel slow?" directly.
+
+## Develop and verify
+
+The current workspace contains `fr-core` and `fr-media`. From a checkout with Rustup installed, the repository's `rust-toolchain.toml` selects the exact nightly:
+
+```bash
+./scripts/verify.sh fast
+./scripts/verify.sh docs
+```
+
+The fast lane runs formatting, workspace compilation, strict Clippy, and tests with all features, including the explicitly test-only media backend. At source commit `e7d57d5a1a284ec0b8da6374d3eda8613167c1e1`, the [retained Linux verification run](https://github.com/Dicklesworthstone/franken_remote/actions/runs/34231571592) passed **47 core unit tests, 17 media unit tests, 9 media contract tests, and 3 compile-fail doctests**. These are source/policy and fake-backend contract results, not live Asupersync, Tailscale, OS-input, or HEVC hardware qualification.
+
+The `full` lane additionally requires UBS and fails explicitly when it is unavailable. The `release` lane remains blocked until native artifacts and qualification exist. CI calls the same repository-owned commands; it does not replace native builder or hardware evidence. See the [implementation status](IMPLEMENTATION_STATUS.md) for integration boundaries and remaining work.
 
 ## Executive decisions
 
@@ -124,7 +137,7 @@ FFmpeg integration is a deliberately narrow boundary (plan §9): a curated, allo
 
 ## Proposed workspace
 
-From plan §22 — responsibility boundaries, not a requirement to create every crate before the first working slice. Crates enter the workspace only with a real vertical slice.
+From plan §22 — responsibility boundaries, not a requirement to create every crate before the first working slice. Crates enter the workspace only with a real vertical slice. The current members are `fr-core` and `fr-media`; the other directories below remain planned.
 
 ```text
 frankenremote/
@@ -183,6 +196,7 @@ The plan's evidence rules bind this repository from day one (plan §24):
 |---|---|
 | [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) | The constitution. 27 sections: decisions, boundaries, protocol shape, budgets, phases, verification matrix, references |
 | [`AGENTS.md`](AGENTS.md) | Normative contract for humans and coding agents working here |
+| [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) | Implemented slices, source verification evidence, and remaining integration gates |
 | [`PROTOCOL.md`](PROTOCOL.md) | Normative v0-draft: framing, messages, roles, generations, and limits; not implemented or frozen |
 | [`SECURITY.md`](SECURITY.md) | Reporting policy and highest-priority areas |
 | [`LICENSE`](LICENSE) | MIT + OpenAI/Anthropic rider |
