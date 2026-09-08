@@ -1,0 +1,35 @@
+# Phase 0 spike: qualify one live Asupersync QUIC endpoint composition
+# (bead fr-p0-quic-native-aqy; plan §4.1, §12.1, §12.4, §23 Phase 0).
+#
+# Standalone by design: the empty [workspace] table keeps this spike out of
+# any future root workspace. Nothing here ships; quinn/tokio/rcgen are the
+# INDEPENDENT test peer and fixture tooling the bead requires and are
+# forbidden from production per AGENTS.md §3.5.
+[package]
+name = "quic-native-spike"
+version = "0.0.1"
+edition = "2024"
+license-file = "../../LICENSE"
+publish = false
+
+[workspace]
+
+[dependencies]
+# The composition under qualification. Path assumption: the FrankenSuite
+# checkouts are siblings (…/projects/asupersync next to …/projects/franken_remote).
+# The qualified revision is recorded in RESULTS.md.
+# `test-internals` is asupersync's documented dev-time opt-in for constructing
+# an explicit capability context (`Cx::for_testing`) outside the runtime — the
+# same way upstream's own live-UDP integration proof drives this composition.
+asupersync = { path = "../../../asupersync", features = ["tls", "test-internals"] }
+futures-lite = "2"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+rcgen = "0.13"
+
+# Independent QUIC peer (test-only, never shipped): quinn + its tokio runtime.
+quinn = "0.11"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "macros", "sync"] }
+bytes = "1"
+
+[profile.release]
+debug = true
