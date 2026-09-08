@@ -7,6 +7,7 @@
 
 pub mod input;
 pub mod input_result;
+pub mod stream;
 mod media;
 mod record;
 
