@@ -36,21 +36,36 @@ jobs:
           repo=os.environ['GITHUB_REPOSITORY']
           def api(path):
               return json.loads(subprocess.check_output(['gh','api',f'repos/{repo}/{path}']))
-          tree=api('git/trees/28af7862110c896ba212c98f5d6de9dc360cb0e7?recursive=1')
+          tree=api('git/trees/0db0bad0ff3802dd3403e0c31e43f4f4c0d33a28?recursive=1')
           assert not tree.get('truncated')
-          paths=['crates/fr-transport/Cargo.toml','crates/fr-transport/src/lib.rs','crates/fr-transport/src/socket.rs','crates/fr-transport/src/wss.rs','crates/fr-transport/tests/wss_live.rs','crates/fr-transport/tests/support/mod.rs']
+          paths=[
+              'crates/fr-transport/Cargo.toml','crates/fr-transport/src/lib.rs',
+              'crates/fr-transport/src/socket.rs','crates/fr-transport/src/wss.rs',
+              'crates/fr-transport/tests/wss_live.rs','crates/fr-transport/tests/support/mod.rs',
+              'crates/fr-tailnet/Cargo.toml','crates/fr-tailnet/src/lib.rs',
+              'crates/fr-tailnet/src/local.rs','crates/fr-tailnet/src/http.rs',
+              'crates/fr-native/Cargo.toml','crates/fr-native/examples/native_wss_roundtrip.rs',
+              'crates/fr-native/examples/support/mod.rs','scripts/verify_native_wss.sh',
+              'NETWORK_TRANSPORT.md',
+          ]
+          replace={'crates/fr-native/Cargo.toml':'950ab9b8c19f6a8d8617577d3d4d4e283090fb41'}
           entries={e['path']:e for e in tree['tree']}
+          def blob_sha(data):
+              return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
           for path in paths:
               target=Path(path)
-              assert not target.exists(),f'Already present: {path}'
+              if path in replace:
+                  assert target.is_file() and blob_sha(target.read_bytes())==replace[path],f'Concurrent change: {path}'
+              else:
+                  assert not target.exists(),f'Already present: {path}'
               entry=entries[path]
-              assert entry['type']=='blob' and entry['mode']=='100644'
+              assert entry['type']=='blob' and entry['mode'] in ('100644','100755')
               blob=api('git/blobs/'+entry['sha'])
               data=base64.b64decode(blob['content'])
-              assert len(data)<100000
-              assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()==entry['sha']
+              assert len(data)<100000 and blob_sha(data)==entry['sha']
               target.parent.mkdir(parents=True,exist_ok=True)
               target.write_bytes(data)
+              target.chmod(int(entry['mode'][-3:],8))
           root=Path('Cargo.toml')
           text=root.read_text()
           old='asupersync = { version = "0.4.10", default-features = false }'
@@ -59,7 +74,9 @@ jobs:
           text=text.replace(old,pinned)
           anchor='fr-native = { path = "crates/fr-native" }'
           assert text.count(anchor)==1
-          root.write_text(text.replace(anchor,anchor+'\nfr-transport = { path = "crates/fr-transport" }'))
+          assert 'fr-transport = ' not in text and 'fr-tailnet = ' not in text
+          additions='\nfr-transport = { path = "crates/fr-transport" }\nfr-tailnet = { path = "crates/fr-tailnet" }'
+          root.write_text(text.replace(anchor,anchor+additions))
           Path(os.environ['RUNNER_TEMP'],'slice-paths.json').write_text(json.dumps(paths+['Cargo.toml','Cargo.lock']))
           PY
           cargo generate-lockfile
@@ -68,6 +85,7 @@ jobs:
           ./scripts/verify.sh fast
           ./scripts/verify.sh docs
           xvfb-run -a -s '-screen 0 640x360x24 -nolisten tcp' cargo run -p fr-native --features linux-media --example native_roundtrip -- --software-explicit
+          ./scripts/verify_native_wss.sh
       - name: Retain verified source blobs for explicit review
         env:
           GH_TOKEN: ${{ github.token }}
