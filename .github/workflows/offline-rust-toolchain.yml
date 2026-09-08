@@ -1,0 +1,32 @@
+name: Offline Rust toolchain
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/offline-rust-toolchain.yml']
+permissions:
+  contents: read
+jobs:
+  toolchain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Archive the repository-pinned Linux compiler
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          root="$(dirname "$(dirname "$(rustup which rustc)")")"
+          mkdir -p "$RUNNER_TEMP/offline-rust"
+          tar -C "$root" --exclude='lib/rustlib/wasm32-unknown-unknown' -czf "$RUNNER_TEMP/offline-rust/toolchain.tar.gz" bin lib
+          rustc -Vv > "$RUNNER_TEMP/offline-rust/compiler.txt"
+          (cd "$RUNNER_TEMP/offline-rust" && sha256sum toolchain.tar.gz > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: offline-rust-toolchain
+          path: ${{ runner.temp }}/offline-rust/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
