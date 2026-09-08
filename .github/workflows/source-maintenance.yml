@@ -25,6 +25,7 @@ jobs:
       - name: Apply machine-applicable source suggestions
         run: |
           export RCH_CARGO_WRAPPER_BYPASS=1
+          cargo fix --workspace --all-targets --all-features --locked --allow-dirty --allow-staged
           cargo clippy --fix --workspace --all-targets --all-features --locked --allow-dirty --allow-staged -- -D warnings
           cargo fmt --all
       - name: Verify suggested source
