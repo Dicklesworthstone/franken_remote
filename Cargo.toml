@@ -31,6 +31,7 @@ fr-lab = { path = "crates/fr-lab" }
 fr-media = { path = "crates/fr-media" }
 fr-wire = { path = "crates/fr-wire" }
 fr-native = { path = "crates/fr-native" }
+frd = { path = "crates/frd" }
 
 [workspace.lints.rust]
 # Protocol/policy/authority code is safe Rust (AGENTS.md section 3.2). The

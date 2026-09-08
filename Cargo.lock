@@ -543,6 +543,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "frd"
+version = "0.1.0"
+dependencies = [
+ "asupersync",
+ "fr-core",
+ "fr-media",
+ "fr-wire",
+]
+
+[[package]]
 name = "futures-core"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,5 @@
+#![forbid(unsafe_code)]
+//! Host broker integration. Native capture/codec code runs in child processes,
+//! never in an authority task. Asupersync QUIC remains the primary transport.
+#[cfg(target_os = "linux")]
+pub mod worker;
