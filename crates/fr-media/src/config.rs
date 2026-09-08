@@ -119,6 +119,35 @@ pub struct CodedGeometry {
 }
 
 impl CodedGeometry {
+    /// Rounds a visible surface up to a backend's coded alignment, checking the
+    /// padded allocation against limits rather than just the displayed pixels.
+    pub fn from_visible(
+        limits: &ProtocolLimits,
+        crop_width: u32,
+        crop_height: u32,
+        alignment: u32,
+    ) -> Result<Self, ConfigError> {
+        if alignment == 0 || !alignment.is_power_of_two() {
+            return Err(ConfigError::UnalignedCoded {
+                dimension: alignment,
+            });
+        }
+        let round = |value: u32| {
+            value
+                .checked_add(alignment - 1)
+                .map(|v| v & !(alignment - 1))
+                .ok_or(ConfigError::Limits(LimitsError::ArithmeticOverflow))
+        };
+        Self::new(
+            limits,
+            round(crop_width)?,
+            round(crop_height)?,
+            crop_width,
+            crop_height,
+            alignment,
+        )
+    }
+
     /// Builds coded+crop geometry, validating that the crop fits within the
     /// coded dimensions, the coded dimensions are aligned to `alignment` (a
     /// nonzero power of two), and both are within the negotiated limits.
@@ -386,6 +415,38 @@ mod tests {
             CodedGeometry::new(&l, 8208, 16, 8208, 16, 16),
             Err(ConfigError::Limits(_))
         ));
+    }
+
+    #[test]
+    fn visible_geometry_budgets_coded_padding_and_checked_rounding() {
+        let limits = ProtocolLimits::ABSOLUTE;
+        for (width, height, coded_width, coded_height) in [
+            (640, 360, 640, 368),
+            (1920, 1080, 1920, 1088),
+            (1366, 768, 1376, 768),
+            (64, 64, 64, 64),
+        ] {
+            let geometry = CodedGeometry::from_visible(&limits, width, height, 16).unwrap();
+            assert_eq!(
+                (geometry.coded_width(), geometry.coded_height()),
+                (coded_width, coded_height)
+            );
+            assert_eq!(
+                (geometry.crop_width(), geometry.crop_height()),
+                (width, height)
+            );
+        }
+        for (width, height, alignment) in [
+            (0, 360, 16),
+            (640, 0, 16),
+            (640, 360, 0),
+            (640, 360, 3),
+            (u32::MAX, 360, 16),
+            (8193, 16, 16),
+            (8192, 2049, 16),
+        ] {
+            assert!(CodedGeometry::from_visible(&limits, width, height, alignment).is_err());
+        }
     }
 
     #[test]

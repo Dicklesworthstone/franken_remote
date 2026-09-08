@@ -83,6 +83,12 @@ fn oversized_announcements_refuse_before_reading_a_body() {
 fn role_kinds_and_configurations_are_exact() {
     let c = config();
     assert_eq!(Configuration::decode(&c.encode().unwrap()), Ok(c));
+    let geometry = c.codec().unwrap().geometry();
+    assert_eq!(
+        (geometry.coded_width(), geometry.coded_height()),
+        (640, 368)
+    );
+    assert_eq!((geometry.crop_width(), geometry.crop_height()), (640, 360));
     for c in [
         Configuration { width: 0, ..c },
         Configuration { width: 641, ..c },

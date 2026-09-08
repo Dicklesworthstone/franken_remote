@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (w, h) = (capture.width(), capture.height());
     let config = CodecConfiguration::new_baseline(
         CodecConfigurationGeneration::INITIAL,
-        CodedGeometry::new(&limits, w, h, w, h, 2)?,
+        CodedGeometry::from_visible(&limits, w, h, 16)?,
         ColorInfo::sdr_bt709(),
         GopPolicy::baseline_for_frame_rate(30)?,
     )?;

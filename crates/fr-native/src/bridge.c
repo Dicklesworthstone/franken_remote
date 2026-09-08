@@ -137,13 +137,14 @@ typedef struct { AVCodecContext *ctx; AVFrame *frame; struct SwsContext *scale; 
 void fr_decoder_free(FrDecoder *d) {
     if (!d) return; avcodec_free_context(&d->ctx); av_frame_free(&d->frame); sws_freeContext(d->scale); free(d);
 }
-int fr_decoder_new(int w,int h,FrDecoder **out) {
-    if (!out) return FR_INVALID; *out=NULL; if (!geometry(w,h)) return FR_INVALID;
+int fr_decoder_new(int w,int h,int coded_w,int coded_h,FrDecoder **out) {
+    if (!out) return FR_INVALID; *out=NULL;
+    if (!geometry(w,h) || !geometry(coded_w,coded_h) || w>coded_w || h>coded_h) return FR_INVALID;
     const AVCodec *codec=avcodec_find_decoder(AV_CODEC_ID_HEVC); if (!codec) return FR_UNAVAILABLE;
     FrDecoder *d=calloc(1,sizeof(*d)); if (!d) return FR_MEMORY;
     d->ctx=avcodec_alloc_context3(codec); d->frame=av_frame_alloc(); d->w=w; d->h=h;
     if (!d->ctx || !d->frame) { fr_decoder_free(d); return FR_MEMORY; }
-    d->ctx->width=w; d->ctx->height=h; d->ctx->max_pixels=(int64_t)w*h;
+    d->ctx->width=w; d->ctx->height=h; d->ctx->max_pixels=(int64_t)coded_w*coded_h;
     d->ctx->thread_count=1; d->ctx->thread_type=FF_THREAD_SLICE;
     d->ctx->err_recognition=AV_EF_EXPLODE|AV_EF_CAREFUL; d->ctx->flags|=AV_CODEC_FLAG_LOW_DELAY;
     if (avcodec_open2(d->ctx,codec,NULL)<0) { fr_decoder_free(d); return FR_UNAVAILABLE; }

@@ -279,15 +279,11 @@ impl Configuration {
         }
         CodecConfiguration::new_baseline(
             self.generation,
-            CodedGeometry::new(
-                &self.limits()?,
-                self.width,
-                self.height,
-                self.width,
-                self.height,
-                2,
-            )
-            .map_err(|_| Error::ResourceLimit)?,
+            // The initial native subset uses a 16-pixel minimum coding block.
+            // Actual encoder parameter sets must agree; this is not a hardware
+            // capability claim. The IPC width/height remain the visible surface.
+            CodedGeometry::from_visible(&self.limits()?, self.width, self.height, 16)
+                .map_err(|_| Error::ResourceLimit)?,
             ColorInfo::sdr_bt709(),
             GopPolicy::baseline_for_frame_rate(u32::from(self.fps))
                 .map_err(|_| Error::Unsupported)?,

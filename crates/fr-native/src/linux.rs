@@ -8,7 +8,10 @@ use fr_core::{ids::RecoveryGeneration, limits::ProtocolLimits};
 use fr_media::{
     access_unit::{EncodedAccessUnit, FrameId, FrameKind},
     config::{CodecConfiguration, ColorInfo},
-    hevc::HevcGuard,
+    hevc::{
+        HevcGuard,
+        framing::{annex_b_to_length_prefixed, length_prefixed_to_annex_b},
+    },
 };
 use std::{collections::VecDeque, ffi::CString, rc::Rc};
 
@@ -31,7 +34,13 @@ unsafe extern "C" {
     fn fr_encoder_drain(p: *mut c_void) -> c_int;
     fn fr_encoder_peek(p: *mut c_void, len: *mut usize, pts: *mut i64) -> c_int;
     fn fr_encoder_take(p: *mut c_void, bytes: *mut u8, len: usize) -> c_int;
-    fn fr_decoder_new(w: c_int, h: c_int, out: *mut *mut c_void) -> c_int;
+    fn fr_decoder_new(
+        w: c_int,
+        h: c_int,
+        coded_w: c_int,
+        coded_h: c_int,
+        out: *mut *mut c_void,
+    ) -> c_int;
     fn fr_decoder_free(p: *mut c_void);
     fn fr_decoder_send(p: *mut c_void, bytes: *const u8, len: usize, pts: i64) -> c_int;
     fn fr_decoder_receive(p: *mut c_void, bytes: *mut u8, len: usize, pts: *mut i64) -> c_int;
@@ -193,8 +202,8 @@ impl HevcEncoder {
         initialize()?;
         let g = config.geometry();
         frame_len(g.coded_width(), g.coded_height(), &limits)?;
-        if g.has_padding()
-            || config.color() != ColorInfo::sdr_bt709()
+        frame_len(g.crop_width(), g.crop_height(), &limits)?;
+        if config.color() != ColorInfo::sdr_bt709()
             || !(1..=240).contains(&fps)
             || !(10_000..=200_000_000).contains(&bitrate)
             || config.gop().max_gop_frames() > 480
@@ -208,8 +217,8 @@ impl HevcEncoder {
         status(unsafe {
             fr_encoder_new(
                 backend as c_int,
-                c_int::try_from(g.coded_width()).map_err(|_| NativeError::InvalidConfiguration)?,
-                c_int::try_from(g.coded_height()).map_err(|_| NativeError::InvalidConfiguration)?,
+                c_int::try_from(g.crop_width()).map_err(|_| NativeError::InvalidConfiguration)?,
+                c_int::try_from(g.crop_height()).map_err(|_| NativeError::InvalidConfiguration)?,
                 c_int::try_from(fps).map_err(|_| NativeError::InvalidConfiguration)?,
                 c_int::try_from(bitrate).map_err(|_| NativeError::InvalidConfiguration)?,
                 c_int::try_from(config.gop().max_gop_frames())
@@ -241,7 +250,7 @@ impl HevcEncoder {
             return Err(NativeError::Closed);
         }
         let g = self.config.geometry();
-        if frame.width != g.coded_width() || frame.height != g.coded_height() {
+        if frame.width != g.crop_width() || frame.height != g.crop_height() {
             return Err(NativeError::GeometryChanged);
         }
         if self.last_submitted.is_some_and(|last| id <= last) || id.as_raw() > i64::MAX as u64 {
@@ -309,6 +318,15 @@ impl HevcEncoder {
             self.closed = true;
             return Err(NativeError::UnsupportedBitstream);
         }
+        // Annex B is a native API detail. Only canonical four-byte-length NALs
+        // leave this adapter for delivery, IPC or browser sample preparation.
+        let bytes = match annex_b_to_length_prefixed(&bytes, self.limits) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                self.closed = true;
+                return Err(NativeError::UnsupportedBitstream);
+            }
+        };
         let kind = if idr {
             FrameKind::Idr {
                 recovery: RecoveryGeneration::INITIAL,
@@ -371,7 +389,8 @@ impl HevcDecoder {
         initialize()?;
         let g = config.geometry();
         frame_len(g.coded_width(), g.coded_height(), &limits)?;
-        if g.has_padding() || config.color() != ColorInfo::sdr_bt709() {
+        frame_len(g.crop_width(), g.crop_height(), &limits)?;
+        if config.color() != ColorInfo::sdr_bt709() {
             return Err(NativeError::InvalidConfiguration);
         }
         let admission =
@@ -380,6 +399,8 @@ impl HevcDecoder {
         // SAFETY: bounded dimensions and writable out pointer; no Rust pointer retained.
         status(unsafe {
             fr_decoder_new(
+                c_int::try_from(g.crop_width()).map_err(|_| NativeError::InvalidConfiguration)?,
+                c_int::try_from(g.crop_height()).map_err(|_| NativeError::InvalidConfiguration)?,
                 c_int::try_from(g.coded_width()).map_err(|_| NativeError::InvalidConfiguration)?,
                 c_int::try_from(g.coded_height()).map_err(|_| NativeError::InvalidConfiguration)?,
                 &raw mut ptr,
@@ -409,13 +430,12 @@ impl HevcDecoder {
         self.limits
             .validate_access_unit_len(unit.bytes().len())
             .map_err(|_| NativeError::UnsupportedBitstream)?;
-        let idr = annex_b_idr(unit.bytes())?;
-        if idr != unit.is_idr()
-            || (!idr
-                && unit.kind()
-                    != FrameKind::Predicted {
-                        references: self.last.ok_or(NativeError::UnsupportedBitstream)?,
-                    })
+        let idr = unit.is_idr();
+        if !idr
+            && unit.kind()
+                != (FrameKind::Predicted {
+                    references: self.last.ok_or(NativeError::UnsupportedBitstream)?,
+                })
         {
             return Err(NativeError::UnsupportedBitstream);
         }
@@ -426,14 +446,16 @@ impl HevcDecoder {
         // must not consume a picture or make the retry look like a replay.
         let mut admission = self.admission.clone();
         admission
-            .validate_annex_b(unit.bytes(), idr)
+            .validate_length_prefixed(unit.bytes(), idr)
+            .map_err(|_| NativeError::UnsupportedBitstream)?;
+        let bytes = length_prefixed_to_annex_b(unit.bytes(), self.limits)
             .map_err(|_| NativeError::UnsupportedBitstream)?;
         // SAFETY: bridge copies into av_new_packet's padded reference-counted storage before returning.
         match status(unsafe {
             fr_decoder_send(
                 self.raw.as_ptr(),
-                unit.bytes().as_ptr(),
-                unit.bytes().len(),
+                bytes.as_ptr(),
+                bytes.len(),
                 i64::try_from(unit.frame().as_raw()).map_err(|_| NativeError::StaleGeneration)?,
             )
         }) {
@@ -454,7 +476,7 @@ impl HevcDecoder {
             return Err(NativeError::Closed);
         }
         let g = self.config.geometry();
-        let mut bytes = zeroed(frame_len(g.coded_width(), g.coded_height(), &self.limits)?)?;
+        let mut bytes = zeroed(frame_len(g.crop_width(), g.crop_height(), &self.limits)?)?;
         let mut pts = 0;
         // SAFETY: packed BGRA destination is exactly the admitted size; bridge rejects changed geometry.
         status(unsafe {
@@ -473,8 +495,8 @@ impl HevcDecoder {
         Ok((
             id,
             BgraFrame {
-                width: g.coded_width(),
-                height: g.coded_height(),
+                width: g.crop_width(),
+                height: g.crop_height(),
                 bytes,
             },
         ))
