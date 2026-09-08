@@ -54,8 +54,9 @@ jobs:
           root=Path('Cargo.toml')
           text=root.read_text()
           old='asupersync = { version = "0.4.10", default-features = false }'
-          assert text.count(old)==1
-          text=text.replace(old,'asupersync = { version = "=0.4.10", default-features = false }')
+          pinned='asupersync = { version = "=0.4.10", default-features = false }'
+          assert text.count(old)+text.count(pinned)==1,'unexpected runtime configuration'
+          text=text.replace(old,pinned)
           anchor='fr-native = { path = "crates/fr-native" }'
           assert text.count(anchor)==1
           root.write_text(text.replace(anchor,anchor+'\nfr-transport = { path = "crates/fr-transport" }'))
