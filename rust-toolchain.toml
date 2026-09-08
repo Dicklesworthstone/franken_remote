@@ -1,0 +1,13 @@
+[toolchain]
+# Exact pinned nightly (no floating "nightly") per AGENTS.md §3.6 and plan
+# §20.2: "nightly" means deliberately updated and tested, not silently moving
+# on every build. Matches the pin used across the FrankenSuite (asupersync,
+# frankengit, franken_manim) so the constellation resolves one toolchain.
+# Advancing this date is a material change: run the target matrix, record
+# regressions, and retain a tested rollback toolchain.
+channel = "nightly-2026-08-31"
+components = ["rustfmt", "clippy"]
+# fr-web builds the shared client state machine for the browser; listing the
+# target here makes rustup install it with the toolchain so fresh clones never
+# hit E0463 "can't find crate for std" when that lane lands.
+targets = ["wasm32-unknown-unknown"]

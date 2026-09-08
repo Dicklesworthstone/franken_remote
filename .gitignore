@@ -1,0 +1,65 @@
+# OS junk
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+
+# Editors
+.idea/
+.vscode/
+
+# Build artifacts
+target/
+target-*/
+target_*/
+crates/*/target/
+dist/
+
+# Native media build outputs (recipes/manifests under native/ are tracked;
+# compiled FFmpeg/Opus artifacts and SDK payloads are not)
+native/out/
+native/build/
+*.a
+*.so
+*.dylib
+*.dll
+
+# Captures, recordings, and benchmark media — never commit screen content
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.y4m
+*.ivf
+*.hevc
+*.h265
+frames/
+recordings/
+
+# Diagnostic exports, traces, and benchmark scratch
+*.frdiag
+diagnostics/
+bench-scratch/
+
+# Certificates and keys must never enter source control
+*.pem
+*.key
+*.p12
+
+# bv (beads viewer) local config and caches
+.bv/
+
+# br doctor per-run artifacts
+.doctor/
+
+# rch project override (local builds only)
+.rch/
+
+# Archives
+*.tar.gz
+*.zip
