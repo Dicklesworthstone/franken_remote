@@ -142,7 +142,7 @@ fn actual_decoder_backpressure_retries_do_not_consume_admission() {
 #[test]
 fn coded_padding_is_admitted_but_only_visible_pixels_are_presented() {
     let limits = ProtocolLimits::ABSOLUTE;
-    for (width, height) in [(640, 360), (1366, 768), (62, 66)] {
+    for (width, height) in [(640, 360), (1366, 768), (62, 66), (130, 70), (1374, 770)] {
         let geometry = CodedGeometry::from_visible(&limits, width, height, 16).unwrap();
         assert!(geometry.has_padding());
         let config = CodecConfiguration::new_baseline(
@@ -169,7 +169,9 @@ fn coded_padding_is_admitted_but_only_visible_pixels_are_presented() {
                 .submit(&frame, FrameId::from_raw(n), n * 33_333, n == 2)
                 .unwrap();
             let unit = encoder.poll_output().unwrap();
-            decoder.submit(&unit).unwrap();
+            decoder.submit(&unit).unwrap_or_else(|error| {
+                panic!("decoder submit refused {width}x{height} frame {n}: {error:?}")
+            });
             let (id, output) = decoder.poll_output().unwrap();
             assert_eq!(id, unit.frame());
             assert_eq!((output.width(), output.height()), (width, height));
