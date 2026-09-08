@@ -106,10 +106,7 @@ impl InputSequenceLedger {
     /// Constructs a fresh lease epoch, starting at reliable action sequence 0.
     /// The containing authority owner must generate a fresh lease identity;
     /// callers may not reconstruct this ledger to resume an old lease.
-    pub fn new(
-        lease: InputLeaseId,
-        receipt_capacity: usize,
-    ) -> Result<Self, InputSequenceError> {
+    pub fn new(lease: InputLeaseId, receipt_capacity: usize) -> Result<Self, InputSequenceError> {
         if !(1..=MAX_RETAINED_INPUT_RECEIPTS).contains(&receipt_capacity) {
             return Err(InputSequenceError::InvalidCapacity {
                 requested: receipt_capacity,
@@ -330,7 +327,7 @@ mod tests {
         let foreign = InputLeaseId::from_raw(2);
         assert_eq!(owner.admit(foreign, 0), Err(InputSequenceError::StaleLease));
         assert_eq!(owner.next_sequence(), Some(0));
-        owner.admit(lease(), 0).unwrap();
+        assert_eq!(owner.admit(lease(), 0), Ok(InputAdmission::Admitted));
         assert_eq!(
             owner.record_outcome(foreign, 0, InputOutcome::SubmittedToOs),
             Err(InputSequenceError::StaleLease)
@@ -341,7 +338,7 @@ mod tests {
     #[test]
     fn wrong_or_duplicate_completion_cannot_change_a_receipt() {
         let mut owner = ledger(2);
-        owner.admit(lease(), 0).unwrap();
+        assert_eq!(owner.admit(lease(), 0), Ok(InputAdmission::Admitted));
         assert_eq!(
             owner.record_outcome(lease(), 1, InputOutcome::SubmittedToOs),
             Err(InputSequenceError::NotPending)
@@ -362,7 +359,7 @@ mod tests {
     #[test]
     fn fence_does_not_fabricate_completion_of_an_outstanding_effect() {
         let mut owner = ledger(2);
-        owner.admit(lease(), 0).unwrap();
+        assert_eq!(owner.admit(lease(), 0), Ok(InputAdmission::Admitted));
         owner.fence();
         assert_eq!(owner.pending_sequence(), Some(0));
         assert_eq!(owner.admit(lease(), 0), Ok(InputAdmission::InFlight));
@@ -387,11 +384,14 @@ mod tests {
             InputOutcome::EffectUnknown,
         ] {
             let mut owner = ledger(2);
-            owner.admit(lease(), 0).unwrap();
+            assert_eq!(owner.admit(lease(), 0), Ok(InputAdmission::Admitted));
             owner.record_outcome(lease(), 0, outcome).unwrap();
             assert!(owner.is_fenced());
             assert_eq!(owner.admit(lease(), 1), Err(InputSequenceError::Fenced));
-            assert_eq!(owner.admit(lease(), 0), Ok(InputAdmission::Completed(outcome)));
+            assert_eq!(
+                owner.admit(lease(), 0),
+                Ok(InputAdmission::Completed(outcome))
+            );
         }
     }
 
@@ -407,7 +407,10 @@ mod tests {
             owner.admit(lease(), u64::MAX),
             Ok(InputAdmission::Completed(InputOutcome::SubmittedToOs))
         );
-        assert_eq!(owner.admit(lease(), 0), Ok(InputAdmission::ConsumedWithoutReceipt));
+        assert_eq!(
+            owner.admit(lease(), 0),
+            Ok(InputAdmission::ConsumedWithoutReceipt)
+        );
     }
 
     #[test]
@@ -437,7 +440,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             owner.admit(lease(), 0),
-            Ok(InputAdmission::Completed(InputOutcome::ExpiredBeforeSubmission))
+            Ok(InputAdmission::Completed(
+                InputOutcome::ExpiredBeforeSubmission
+            ))
         );
         assert_eq!(owner.admit(lease(), 1), Err(InputSequenceError::Fenced));
     }

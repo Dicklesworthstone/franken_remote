@@ -227,7 +227,10 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(format!("{first:?}"), format!("{second:?}"));
         assert_eq!(format!("{first:#?}"), format!("{second:#?}"));
-        assert_eq!(format!("{:?}", Some(&first)), format!("{:?}", Some(&second)));
+        assert_eq!(
+            format!("{:?}", Some(&first)),
+            format!("{:?}", Some(&second))
+        );
         assert!(!format!("{first:?}").contains("11, 22, 33, 44"));
         assert!(format!("{first:?}").contains("byte_len: 4"));
     }
