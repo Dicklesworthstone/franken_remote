@@ -54,8 +54,14 @@ on `3b8f7e9` ([run 34274407094](https://github.com/Dicklesworthstone/franken_rem
 passed formatting, compilation and strict Clippy before exposing the cropped-frame
 allocation failure on FFmpeg 6.1. The `8f501c0` full native-workspace rerun
 ([run 34276085651](https://github.com/Dicklesworthstone/franken_remote/actions/runs/34276085651))
-remains queued at this status snapshot. Neither failed nor queued runs are
-counted as passing evidence; FFmpeg 6.1 requalification remains outstanding.
+completed successfully on Ubuntu 24.04 x86_64 with FFmpeg 6.1.1-3ubuntu5
+and the pinned `nightly-2026-08-31`. `./scripts/verify.sh fast` passed formatting,
+workspace all-target/all-feature compilation, strict Clippy (`-D warnings`),
+workspace tests/doctests and example tests, with zero failed or ignored tests.
+`./scripts/verify.sh docs` also passed. The cropped-frame regression now passes
+on both tested FFmpeg versions. This complete Cargo-workspace result validates
+exact source `8f501c0`, not later concurrent source changes. The earlier failed
+run remains negative evidence rather than being relabeled as passing.
 
 `InputSession` does not start a watchdog. The interactive agent must independently
 service lease expiry and local revoke, connect focus/lock/suspend/display lifecycle,
