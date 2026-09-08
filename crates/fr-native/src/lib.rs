@@ -10,3 +10,6 @@ pub use linux::*;
 mod parent;
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 pub use parent::bind_worker_parent;
+
+#[cfg(all(target_os = "linux", feature = "linux-input"))]
+pub mod input;

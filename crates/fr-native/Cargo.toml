@@ -18,6 +18,7 @@ asupersync.workspace = true
 [features]
 default = []
 linux-media = []
+linux-input = []
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

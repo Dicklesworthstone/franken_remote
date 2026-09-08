@@ -31,7 +31,7 @@ jobs:
       - name: Install repository-pinned toolchain
         run: rustup show active-toolchain
       - name: Install Linux native media SDKs
-        run: sudo apt-get update && sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev pkg-config xvfb xauth
+        run: sudo apt-get update && sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth
       - name: Run Rust verification
         run: ./scripts/verify.sh fast
       - name: Exercise real X11 capture and HEVC library delivery
