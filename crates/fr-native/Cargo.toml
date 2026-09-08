@@ -9,6 +9,8 @@ build = "build.rs"
 [dependencies]
 fr-core.workspace = true
 fr-media.workspace = true
+frd = { workspace = true, optional = true }
+asupersync = { workspace = true, optional = true }
 
 [dev-dependencies]
 fr-wire.workspace = true
@@ -19,6 +21,7 @@ asupersync.workspace = true
 default = []
 linux-media = []
 linux-input = []
+linux-input-agent = ["linux-input", "dep:frd", "dep:asupersync"]
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

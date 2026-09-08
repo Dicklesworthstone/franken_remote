@@ -91,6 +91,7 @@ impl X11Pointer {
         if !local_display(name) {
             return Err(PlatformError::Unsupported);
         }
+        crate::xlib::initialize_threads().map_err(|_| PlatformError::Unavailable)?;
         let name = CString::new(name).map_err(|_| PlatformError::Unsupported)?;
         // SAFETY: NUL-terminated name lives through call; returned context is
         // uniquely owned and used only on its creating thread until Drop.
@@ -378,7 +379,7 @@ impl Drop for X11Pointer {
         }
     }
 }
-fn local_display(name: &str) -> bool {
+pub(crate) fn local_display(name: &str) -> bool {
     if name.len() > 32 {
         return false;
     }
