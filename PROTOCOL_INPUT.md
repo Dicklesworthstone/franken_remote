@@ -167,3 +167,13 @@ The sink must not enqueue delayed work or retry behind the final check. Native
 permission/geometry checks and physical/synthetic key collisions remain platform
 responsibilities. Tests using the recording fault sink prove policy behavior,
 not native OS effects or a complete interactive remote desktop.
+
+## Native result projection
+
+The canonical native `Agent` exposes `try_input_result` and `input_response`
+for projecting real retained replies through the above codec. It captures
+the original binding and sequence space after successful enqueue, never
+substitutes the current controller's binding, and returns explicit non-record
+outcomes when a receipt does not exist. See
+[INPUT_AGENT_RESULTS.md](INPUT_AGENT_RESULTS.md) for lifecycle and cancellation
+behavior. No new wire record or observed-effect claim is introduced.

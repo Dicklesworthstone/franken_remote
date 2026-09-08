@@ -1,5 +1,19 @@
 # Changelog
 
+## Native input cancellation and result delivery
+
+- Check parent Asupersync cancellation after each native preparation and before
+  final input submission; preserve an already submitted text prefix. Two
+  deterministic negative controls fail on unchanged `3f4f39b` and pass after
+  the fix.
+- Return actual native receipts through the existing `InputResult` codec with
+  their original request binding, even across cleanup and handoff. Preserve
+  explicit evicted/missing/unknown outcomes and cancelled-wait semantics.
+- Exercise the canonical native owner and watchdog with actual XKB/XTest,
+  private Xvfb servers, idle expiry, blocked preparation, lifecycle stops and
+  native repeat restoration. See [INPUT_AGENT_RESULTS.md](INPUT_AGENT_RESULTS.md)
+  for locally verified test scope and remaining integration limits.
+
 ## 2026-09-08 — Input records through native submission
 
 - `d9f8ea7`: seven bounded, allocation-free input action codecs with complete view/authority bindings, separate pointer/action sequence spaces and independent golden bytes.

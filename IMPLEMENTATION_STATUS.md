@@ -2,6 +2,18 @@
 
 Updated September 8, 2026. **Early Rust implementation, not an installable remote desktop.** The comprehensive plan remains the design authority; this file records implementation and evidence, not additional product scope. No application or live-transport/hardware phase gate is declared complete by the tests below.
 
+## Native-owner cancellation and returned input results
+
+The native owner now checks parent runtime cancellation at each final native
+submission and projects actual receipts into the existing `InputResult` codec
+using the originating request's immutable binding. Late results, partial/unknown
+text effects, receipt eviction and cancelled waits retain explicit semantics.
+[INPUT_AGENT_RESULTS.md](INPUT_AGENT_RESULTS.md) records the implementation,
+real XKB/XTest/Asupersync integration tests, reproduction commands and exact
+local verification scope. This extends the canonical owner/watchdog rather
+than adding another actor or runtime. Broader transport and application gates
+remain open; the local test evidence is not a fresh remote CI result.
+
 ## Input result receipts
 
 Sources `7b6fcdcf37d32e2cdf23e0f948fe933c1245ab66` and
