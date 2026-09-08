@@ -15,3 +15,11 @@ pub use parent::bind_worker_parent;
 pub mod input;
 #[cfg(all(target_os = "linux", feature = "linux-input"))]
 mod keyboard;
+
+#[cfg(all(target_os = "linux", feature = "linux-input-agent"))]
+pub mod input_agent;
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "linux-media", feature = "linux-input")
+))]
+pub mod xlib;

@@ -533,6 +533,7 @@ impl X11Surface {
         present: Option<(u32, u32)>,
         limits: ProtocolLimits,
     ) -> Result<Self, NativeError> {
+        crate::xlib::initialize_threads().map_err(|_| NativeError::DisplayUnavailable)?;
         let name = display
             .map(CString::new)
             .transpose()
