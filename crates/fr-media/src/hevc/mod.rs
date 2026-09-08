@@ -13,7 +13,12 @@
 use crate::config::CodecConfiguration;
 use core::fmt;
 use fr_core::limits::ProtocolLimits;
+use framing::{LengthPrefixed, Units};
 use nal::{AnnexB, Nal};
+
+pub mod framing;
+mod record;
+pub use record::{DecoderRecord, Hvc1AccessUnit};
 use std::sync::Arc;
 
 mod nal;
@@ -134,7 +139,28 @@ impl HevcGuard {
         self.limits
             .validate_access_unit_len(bytes.len())
             .map_err(|_| HevcError::Limit)?;
-        let mut units = AnnexB::new(bytes)?;
+        self.validate_units(Units::AnnexB(AnnexB::new(bytes)?), declared_idr)
+    }
+    /// Validates canonical four-byte-length-prefixed access units, without
+    /// allocating a second copy or accepting Annex B by heuristic.
+    pub fn validate_length_prefixed(
+        &mut self,
+        bytes: &[u8],
+        declared_idr: bool,
+    ) -> Result<PictureInfo, HevcError> {
+        self.limits
+            .validate_access_unit_len(bytes.len())
+            .map_err(|_| HevcError::Limit)?;
+        self.validate_units(
+            Units::LengthPrefixed(LengthPrefixed::new(bytes)),
+            declared_idr,
+        )
+    }
+    fn validate_units(
+        &mut self,
+        mut units: Units<'_>,
+        declared_idr: bool,
+    ) -> Result<PictureInfo, HevcError> {
         let mut sets: [Option<&[u8]>; 3] = [None; 3];
         let mut picture = None;
         let mut aud = false;

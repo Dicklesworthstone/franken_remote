@@ -102,6 +102,12 @@ impl<'a> Bits<'a> {
             left: 0,
         }
     }
+    pub fn validate_escaping(mut self) -> Result<(), HevcError> {
+        while self.cursor < self.bytes.len() {
+            self.byte()?;
+        }
+        Ok(())
+    }
     fn byte(&mut self) -> Result<u8, HevcError> {
         let mut byte = *self.bytes.get(self.cursor).ok_or(HevcError::Truncated)?;
         self.cursor += 1;
