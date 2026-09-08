@@ -2,7 +2,81 @@
 
 Updated September 8, 2026. **Early Rust implementation, not an installable remote desktop.** The comprehensive plan remains the design authority; this file records implementation and evidence, not additional product scope. No application or live-transport/hardware phase gate is declared complete by the tests below.
 
-## Input framing, final submission, and native X11 effects
+## Input result receipts
+
+Sources `7b6fcdcf37d32e2cdf23e0f948fe933c1245ab66` and
+`3577eb306f79839eb73251a5b41108f1540811e2` implement the host-to-viewer
+`InputResult` kind (0x0048) in [fr-wire](crates/fr-wire/src/input_result.rs).
+The allocation-free codec checks the attached channel/session/lease, separates
+pointer and reliable-action sequence spaces, enforces negotiated record limits,
+and rejects contradictory stage/outcome/count/reason combinations. Conversion
+from a completed core receipt preserves the confirmed native-operation prefix
+and an uncertain next operation; it never promotes submission to observation.
+The fixed result carries no typed text, key identity, coordinates or ticket.
+[PROTOCOL_INPUT.md](PROTOCOL_INPUT.md#inputresult-0x0048) defines its exact bytes.
+
+Ten independently constructed byte fixtures and ten receipt tests cover the
+outcomes, stages, malformed records, truncation, bindings, extensions and bounds.
+The existing sixteen wire-to-submission fault tests now encode and decode their
+actual core receipts. The single-byte mutation sweep is bounded adversarial
+testing, not a coverage-guided fuzz campaign or independent-peer interoperability.
+Those fault tests use an explicit recording sink, not live desktop input.
+
+### Receipt revision verification
+
+Exact source `3307d194b57819edf29f40fbd149c46eff6a1e2e` (including the receipt
+changes and the separately landed watchdog) passed the following gates on
+September 8. Builds ran serially on RCH worker `hz3`, Linux x86_64, with
+`nightly-2026-08-31`, FFmpeg package `7:8.0.1-3ubuntu2` and Xvfb
+`2:21.1.22-1ubuntu1`. Each build/test command below used
+`RCH_REQUIRE_REMOTE=1 RCH_WORKER=hz3 rch exec --source-content-receipt --`.
+All four returned remote exit 0 and receipts matching every one of the detached
+checkout's 148 tracked files; before/after tracked-file hashes were unchanged.
+
+| Command after the RCH prefix | Result |
+|---|---|
+| `cargo check --workspace --all-targets --all-features --locked -j 4` | Passed |
+| `cargo clippy --workspace --all-targets --all-features --locked -j 4 -- -D warnings` | Passed |
+| `cargo test --workspace --all-features --locked -j 4` | 236 passed, zero failed/ignored/filtered |
+| `cargo test --workspace --all-features --locked --examples -j 4` | Examples compiled; two corpus-reader tests passed, zero failed/ignored/filtered |
+
+These are the Rust commands from `scripts/verify.sh fast`, invoked separately
+through RCH. Local `RCH_CARGO_WRAPPER_BYPASS=1 cargo fmt --all --check` and
+`./scripts/verify.sh docs` also passed. The native tests exercised Xvfb and
+software HEVC; this is not physical-GPU qualification, a live Tailscale session,
+or independent wire interoperability. Full logs and RCH source receipts are
+retained under `/tmp/fr-input-result-validation-3307d19-canonical/` on the
+dispatcher, with their build IDs and receipt hashes recorded in the framing bead.
+
+UBS scanned all five changed Rust files and **exited 1**, with 26 critical and
+282 warning findings. Self-review classified the critical findings as 25 generic
+binary `decode` sites misidentified as JWT handling and one existing explicit
+test panic; warnings inventory test assertions/unwraps, fixture copies and
+bounds-checked slices. No source suppression was added. `UBS_SKIP_RUST_BUILD=1`
+disabled its duplicate local Cargo subprocesses because the explicit RCH gates
+above supply those checks. The scan remains nonzero, not a clean full-lane pass;
+its complete output is `/tmp/fr-input-result-ubs.txt`. Independent review has
+been requested but has not returned.
+
+An earlier mutable-checkout run returned four successful Cargo exits but changed
+source during execution; it is indeterminate as a combined revision-bound gate.
+It remains retained negative evidence, superseded by the detached run above.
+
+`HeldState`, other missing message classes, the fuzz harness/campaign, and actual
+session response transport remain open. Evicted receipts, obsolete pointer state
+and missing process replies cannot be converted into fabricated zero-effect
+results. `fr-fr-wire-framing-i0u` remains in progress with its original acceptance
+criteria. Its new dependency `fr-rmk` records an existing contradiction:
+PROTOCOL.md requires an explicit HID page/usage pair, while the key codec and
+PROTOCOL_INPUT.md use an implicit keyboard page. Existing key bytes are preserved
+pending explicit resolution under the repository's constitutional hierarchy.
+
+## Earlier input framing, final submission, and native X11 effects
+
+This subsection retains the verification and integration limits of its named
+earlier revisions. Later XKB keyboard work, the `08c6f72` independent authority
+monitor and the `3307d19` Asupersync watchdog are separate changes; their presence
+does not establish a qualified input-agent process or host/client lifecycle.
 
 The September 8 input implementation adds the missing path from bounded action
 records to final authority checks and a real platform sink, without enabling an
@@ -73,13 +147,15 @@ repeat ownership, committed text, relative motion and scroll remain unsupported
 in this native adapter even though their bounded wire/core paths exist.
 
 The next critical join is qualified Tailscale identity/transport plus the real
-input-agent watchdog and client lifecycle. InputResult/HeldState encoding and
-native keyboard/text qualification also remain open. No installable desktop,
+input-agent watchdog and client lifecycle. HeldState encoding, session response
+transport and native keyboard/text qualification also remain open. InputResult
+encoding is now implemented as described above. No installable desktop,
 live QUIC qualification, hardware latency result or Phase 1 completion is claimed.
 The existing beads `fr-fr-wire-framing-i0u`, `fr-p1-input-pipeline-ay1`,
 `fr-p1-session-agent-iq3` and `fr-p2-host-linux-4e4` are only partially implemented.
-Their original acceptance criteria remain in force; no bead was closed or its
-assignment overwritten (`br` is unavailable in this environment).
+Their original acceptance criteria remain in force. Those earlier input passes
+did not close or reassign beads because `br` was unavailable in that environment;
+the receipt pass above claimed the framing bead without closing it.
 
 ## Encoded-media path now implemented
 
@@ -159,4 +235,4 @@ For each reliable input action, consume its sequence before any possible externa
 
 The input framing and final submission owner above now join those policies to an explicit X11 pointer/button path. The authenticated host/client session, independently progressing input watchdog and native lifecycle integration remain unfinished while the Phase 0 transport/media experiments continue. Do not turn policy tests or Xvfb effects into a claim of a working remote desktop.
 
-Existing Beads task records were not rewritten because `br` was unavailable. Their broader original acceptance criteria and assignments remain intact; the source and revision-scoped evidence above identify what actually landed.
+The earlier implementation passes did not rewrite Beads task records because `br` was unavailable. Their broader original acceptance criteria remain intact; the receipt pass above records its claim and blocking protocol defect explicitly. The source and revision-scoped evidence identify what actually landed.
