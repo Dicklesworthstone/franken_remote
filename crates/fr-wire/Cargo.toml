@@ -1,0 +1,13 @@
+[package]
+name = "fr-wire"
+version = "0.1.0"
+description = "Bounded FrankenRemote v0 binary media records"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[dependencies]
+fr-core.workspace = true
+
+[lints]
+workspace = true
