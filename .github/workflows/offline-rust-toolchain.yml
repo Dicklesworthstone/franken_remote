@@ -14,10 +14,26 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
-      - name: Archive the repository-pinned Linux compiler
+      - name: Archive exact source and locked dependencies
         run: |
           set -euo pipefail
           rustup show active-toolchain
+          mkdir -p "$RUNNER_TEMP/offline-source"
+          git archive --format=tar.gz -o "$RUNNER_TEMP/offline-source/source.tar.gz" HEAD
+          git rev-parse HEAD > "$RUNNER_TEMP/offline-source/source-commit.txt"
+          cargo vendor --locked "$RUNNER_TEMP/vendor" > "$RUNNER_TEMP/offline-source/vendor-config.toml"
+          tar -C "$RUNNER_TEMP" -czf "$RUNNER_TEMP/offline-source/vendor.tar.gz" vendor
+          (cd "$RUNNER_TEMP/offline-source" && sha256sum source.tar.gz vendor.tar.gz > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: offline-source-and-dependencies
+          path: ${{ runner.temp }}/offline-source/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+      - name: Archive the repository-pinned Linux compiler
+        run: |
+          set -euo pipefail
           root="$(dirname "$(dirname "$(rustup which rustc)")")"
           mkdir -p "$RUNNER_TEMP/offline-rust"
           tar -C "$root" --exclude='lib/rustlib/wasm32-unknown-unknown' -czf "$RUNNER_TEMP/offline-rust/toolchain.tar.gz" bin lib
