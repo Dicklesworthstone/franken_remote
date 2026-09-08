@@ -320,12 +320,9 @@ impl HevcEncoder {
         }
         // Annex B is a native API detail. Only canonical four-byte-length NALs
         // leave this adapter for delivery, IPC or browser sample preparation.
-        let bytes = match annex_b_to_length_prefixed(&bytes, self.limits) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                self.closed = true;
-                return Err(NativeError::UnsupportedBitstream);
-            }
+        let Ok(bytes) = annex_b_to_length_prefixed(&bytes, self.limits) else {
+            self.closed = true;
+            return Err(NativeError::UnsupportedBitstream);
         };
         let kind = if idr {
             FrameKind::Idr {
