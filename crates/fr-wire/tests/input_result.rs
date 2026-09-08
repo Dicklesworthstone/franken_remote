@@ -16,7 +16,7 @@ fn binding() -> ResultBinding {
 }
 fn hex(s: &str) -> Vec<u8> {
     let (pairs, tail) = s.trim().as_bytes().as_chunks::<2>();
-    assert!(tail.is_empty());
+    assert_eq!(tail, []);
     pairs
         .iter()
         .map(|p| u8::from_str_radix(core::str::from_utf8(p).unwrap(), 16).unwrap())
@@ -292,6 +292,33 @@ fn negotiated_byte_caps_and_output_storage_are_enforced_before_writes() {
         Err(WireError::ResourceLimit)
     );
     let result = decode(&fixtures()[0].0).unwrap();
+    let too_small = ProtocolLimits::with_overrides(LimitOverrides {
+        max_control_message_bytes: Some(73),
+        ..LimitOverrides::default()
+    })
+    .unwrap();
+    let mut out = [0xaa; INPUT_RESULT_BYTES];
+    assert_eq!(
+        encode_input_result(
+            result,
+            &mut out,
+            &too_small,
+            InputDirection::HostToViewer,
+            InputDelivery::Reliable
+        ),
+        Err(WireError::ResourceLimit)
+    );
+    assert_eq!(out, [0xaa; INPUT_RESULT_BYTES]);
+    assert_eq!(
+        decode_input_result(
+            &fixtures()[0].0,
+            &too_small,
+            binding(),
+            InputDirection::HostToViewer,
+            InputDelivery::Reliable
+        ),
+        Err(WireError::ResourceLimit)
+    );
     for n in 0..INPUT_RESULT_BYTES {
         let mut out = [0xaa; INPUT_RESULT_BYTES];
         assert_eq!(

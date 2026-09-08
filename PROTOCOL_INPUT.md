@@ -97,6 +97,8 @@ the next operation is uncertain and subsequent operations were not attempted.
 The bound is the existing 4096-byte committed-text ceiling (at most 4096 scalar
 operations), including the uncertain operation. A client interprets the prefix
 against its retained original action; the result carries no input content.
+Partial actions must leave room for the refused operation. Pointer results have
+at most one operation and cannot report partial submission or local application.
 
 Successful/local outcomes have no refusal. Expired outcomes name observation,
 lease or ticket expiry; cancellation names local revoke. Rejected/partial outcomes
