@@ -2,6 +2,7 @@ name: Review source maintenance
 
 # Review-only: no commit/ref/PR writes. Suggested source remains subject to
 # review and normal repository verification before it is adopted.
+# Current review: complete sender/receiver media-delivery integration.
 on:
   workflow_dispatch:
   push:
@@ -22,17 +23,6 @@ jobs:
           persist-credentials: false
       - name: Install pinned toolchain
         run: rustup show active-toolchain
-      - name: Apply reviewed diagnostic boundary correction
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('crates/fr-media/src/delivery/receive.rs')
-          s = p.read_text()
-          if s.count('.finish()') == 2:
-              p.write_text(s.replace('.finish()', '.finish_non_exhaustive()'))
-          elif s.count('.finish_non_exhaustive()') != 2:
-              raise SystemExit('Unexpected receive diagnostic shape; review required')
-          PY
       - name: Apply machine-applicable source suggestions
         run: |
           export RCH_CARGO_WRAPPER_BYPASS=1
@@ -64,7 +54,7 @@ jobs:
               print(json.dumps({'path': path, 'sha': json.loads(result.stdout)['sha'], 'source_commit': os.environ['GITHUB_SHA']}))
           PY
       - name: Package reproducible offline review inputs
-        if: always()
+        if: always() && github.event_name == 'workflow_dispatch'
         run: |
           mkdir -p "$RUNNER_TEMP/fr-review"
           git ls-files -z | tar --null -T - -czf "$RUNNER_TEMP/fr-review/source.tar.gz"
@@ -73,7 +63,7 @@ jobs:
           printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/fr-review/source-commit.txt"
           (cd "$RUNNER_TEMP/fr-review" && sha256sum *.tar.gz > SHA256SUMS)
       - name: Retain offline verification bundle
-        if: always()
+        if: always() && github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: offline-media-review
