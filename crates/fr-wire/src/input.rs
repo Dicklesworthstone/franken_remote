@@ -18,7 +18,7 @@ use fr_core::{
 /// Session, lease, ticket (16 bytes each), four generations and sequence (u64).
 pub const INPUT_PREFIX_BYTES: usize = 88;
 /// Per-action UTF-8 ceiling. Whole clipboard transfers are a different channel.
-pub const MAX_TEXT_BYTES: usize = 4096;
+pub const MAX_TEXT_BYTES: usize = fr_core::input::MAX_COMMITTED_TEXT_BYTES;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputDirection {
     ViewerToHost,

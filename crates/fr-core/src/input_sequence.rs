@@ -27,6 +27,8 @@ pub const MAX_RETAINED_INPUT_RECEIPTS: usize = 32;
 pub enum InputOutcome {
     /// The requested input was submitted to the OS API.
     SubmittedToOs,
+    /// Input mode/state changed without an external OS operation.
+    AppliedLocally,
     /// Rejected before any OS submission.
     RejectedBeforeSubmission,
     /// Ticket/authority expired before any OS submission.
@@ -183,7 +185,10 @@ impl InputSequenceLedger {
         self.pending = None;
         self.receipts[self.receipt_cursor] = Some(Receipt { sequence, outcome });
         self.receipt_cursor = (self.receipt_cursor + 1) % self.receipt_capacity;
-        if outcome != InputOutcome::SubmittedToOs {
+        if !matches!(
+            outcome,
+            InputOutcome::SubmittedToOs | InputOutcome::AppliedLocally
+        ) {
             self.fenced = true;
         }
         Ok(())

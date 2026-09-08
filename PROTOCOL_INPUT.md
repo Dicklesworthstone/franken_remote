@@ -61,3 +61,38 @@ HeldState and InputResult are still specified but not encoded by this first
 input-record slice. Unknown kinds are refused rather than claimed implemented.
 Wire validity alone is not proof of input authorization, native injection, live
 QUIC interoperability, or a usable controlled desktop.
+
+## Final submission owner
+
+`fr-core::input_submission::InputSession` now joins these records to the existing
+session authority and replay ledger. The local caller transfers one already
+admitted authority into it, supplies the selected display bounds and qualified
+sink capabilities, and routes parsed actions through `dispatch`. There is no
+network listener or implicit identity grant in this API.
+
+Every individual OS operation runs platform preflight, then checks the actual
+host clock, current ticket, observation/control, complete view binding and local
+revoke immediately before submission. A click's position and button transition
+are separate checked operations; committed text is checked at each Unicode scalar.
+Results retain the count of confirmed native operations even when the suffix was
+expired, rejected or uncertain. An input-mode change or zero relative delta is
+`AppliedLocally`, not an invented OS submission. Mode changes require a new ticket
+so old absolute-pointer datagrams cannot survive a mode transition.
+
+The owner has fixed held-key/button arrays and a 32-receipt window independent of
+the consumed sequence floor. Old pointer datagrams at or below a click barrier
+are obsolete; missing pointer sequences cannot gap the reliable action stream.
+Partial/refused/uncertain reliable actions fence dependent input; cleanup is a
+separate local release-only operation. An unknown press remains tracked before
+native entry, including across an unwinding panic. Unknown/failed releases stay
+tracked for subsequent cleanup rather than being reported released.
+
+The independent local revoke handle needs no media/authority mutex. It stops
+subsequent submissions but cannot undo a native call already entered. The runtime
+must service `maintain` while idle and connect its independent watchdog to revoke;
+this synchronous core starts no timer. Focus loss, suspend and view replacement
+end this input owner and require a new grant, never silent authority restoration.
+The sink must not enqueue delayed work or retry behind the final check. Native
+permission/geometry checks and physical/synthetic key collisions remain platform
+responsibilities. Tests using the recording fault sink prove policy behavior,
+not native OS effects or a complete interactive remote desktop.

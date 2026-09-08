@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['.github/workflows/verify-worker-integration.yml']
+    paths: ['.github/workflows/verify-worker-integration.yml', 'crates/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'scripts/verify.sh']
 permissions:
   contents: read
 

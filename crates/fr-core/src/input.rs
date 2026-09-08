@@ -7,6 +7,9 @@ use crate::ids::{
 };
 use core::fmt;
 
+/// Maximum complete UTF-8 bytes in one committed-text action.
+pub const MAX_COMMITTED_TEXT_BYTES: usize = 4096;
+
 /// The complete input view binding. A generation from another view is not usable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InputView {
