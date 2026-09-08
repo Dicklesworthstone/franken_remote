@@ -153,7 +153,10 @@ beyond the implementation bounds. A selected limit MUST be valid and no larger
 than either endpoint's offer or local policy. W cannot be less than 2 or more
 than 12. Positive byte/geometry ceilings, representable framing, and all
 cross-field constraints must be validated; an impossible selection is
-`invalid_limits`, not an implicit increase. Negotiating A does not reserve W×A.
+`invalid_limits`, not an implicit increase. The core requires B >= A, using
+the **selected** access-unit ceiling: a smaller A permits a smaller B, without
+an artificial 16-MiB minimum. Metadata still needs additional admission within
+B. Negotiating A does not reserve W×A.
 Each live allocation still needs count **and** byte admission, including
 fragment maps, duplicates, bookkeeping, closing generations, and shared-viewer
 retention. Shared sender repair-cache bytes and decoded/GPU surface pools have
@@ -254,6 +257,10 @@ another's shared pipeline. A healthy viewer can consume a newly encoded IDR
 without restarting its own recovery epoch. Unknown/retired-generation datagrams
 are discarded before payload allocation; version 0 has **zero** preconfiguration
 media allowance. Reliable use of an unknown binding refuses that channel.
+Fencing retains only a bounded closure/receipt-drain record for known bindings
+until its deadline: it permits `LeaseRevoked`, `InputResult`, cancellation,
+and `Closed` reporting in Z, never new observation or input. Such a record
+does not make a retired binding live again and is charged to closing budgets.
 
 Every auxiliary channel attaches using `ChannelAttach` as its first reliable
 record, with one-use opaque ticket, peer/session, direction, role, and binding.
@@ -457,8 +464,10 @@ logs or error strings.
 
 ## 7. Media completeness, recovery, and freshness
 
-Baseline video is HEVC Main, 8-bit, 4:2:0. Configuration includes exact `hvcC`;
-each admitted access unit consists of four-byte-length-prefixed NAL units.
+Baseline video is HEVC Main, 8-bit, 4:2:0 SDR, progressive, one layer and one
+temporal layer, without B-frame reordering or future-frame lookahead. Signal
+color primaries, transfer, matrix, and range separately. Configuration includes
+exact `hvcC`; each admitted access unit consists of four-byte-length-prefixed NAL units.
 Native media adapters may normalize to Annex B. Parameter sets and declared
 `hvc1`/`hev1` codec identifier must agree with the actual access units; validate
 VPS/SPS/PPS, NAL count, dimensions, bit depth, layers, crop, reorder/DPB demands,
