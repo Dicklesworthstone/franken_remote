@@ -1,0 +1,53 @@
+# FrankenRemote workspace.
+# Crates enter only with a real vertical slice; no placeholder crates.
+# Every directory under crates/ is a workspace member via the glob, so it MUST
+# be a complete crate: a directory there without a Cargo.toml breaks every
+# cargo command for every agent in the checkout, immediately. Create new
+# crates ALL AT ONCE (manifest + src/lib.rs + the [workspace.dependencies]
+# path entry below in the same commit), per AGENTS.md section 8.1.
+
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+license-file = "LICENSE"
+repository = "https://github.com/Dicklesworthstone/franken_remote"
+
+[workspace.dependencies]
+# The sole async runtime (AGENTS.md section 3.1). Pinned here so every
+# consumer inherits one version; default-features off because FrankenRemote
+# enables only the Asupersync features it qualifies (plan section 4.1).
+# 0.4.10 is the newest published release (verified against crates.io
+# 2026-09-08); the plan inspected the 0.4.11 snapshot, which is unpublished —
+# revisit this pin when it ships. The local /data/projects/asupersync
+# checkout is 0.4.11 and is read by spikes, never path-depended-on here.
+asupersync = { version = "0.4.10", default-features = false }
+# First-party crates, wired by path in exactly one place; consumers write
+# `fr-core.workspace = true`.
+fr-core = { path = "crates/fr-core" }
+
+[workspace.lints.rust]
+# Protocol/policy/authority code is safe Rust (AGENTS.md section 3.2). The
+# named FFI boundary crates (fr-ffi, platform adapters) will opt out of this
+# single lint deliberately and document why; nothing else may.
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+# Error/panic doc sections are written where they carry real content, not as
+# lint appeasement.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# Domain types repeat the crate's nouns deliberately (limits::LimitsError).
+module_name_repetitions = "allow"
+# must_use is applied where misuse is a real bug, not everywhere it fits.
+must_use_candidate = "allow"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

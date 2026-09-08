@@ -1,0 +1,14 @@
+[package]
+name = "fr-core"
+version = "0.1.0"
+description = "FrankenRemote core: typed identity/generation types, the single protocol limits structure, and (in later slices) session authority"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Deliberately none in this slice: typed identifiers and limits are std-only.
+# Asupersync enters with the session-authority slice (fr-p1-session-authority).
+
+[lints]
+workspace = true
