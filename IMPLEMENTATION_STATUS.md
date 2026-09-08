@@ -2,6 +2,79 @@
 
 Updated September 8, 2026. **Early Rust implementation, not an installable remote desktop.** The comprehensive plan remains the design authority; this file records implementation and evidence, not additional product scope. No application or live-transport/hardware phase gate is declared complete by the tests below.
 
+## Input framing, final submission, and native X11 effects
+
+The September 8 input implementation adds the missing path from bounded action
+records to final authority checks and a real platform sink, without enabling an
+unqualified network service. [PROTOCOL_INPUT.md](PROTOCOL_INPUT.md) specifies the
+byte layout and [NATIVE_INPUT.md](NATIVE_INPUT.md) documents the native boundary.
+
+| Source commit | Implemented behavior |
+|---|---|
+| `d9f8ea7bc3a2154637f998f5395cf30d091b24e5` | Seven allocation-free FRD0 input codecs: keys, buttons, absolute pointer state, cumulative relative checkpoints, scroll, committed UTF-8 and mode changes. Full session/lease/ticket/view bindings; authenticated direction/channel checks; independent exact byte fixtures. |
+| `3b8f7e9742191677979a3729c88afcdc30834a30` | One lease-owned final submission path joins the authority and replay ledger. Each native call checks the actual clock after platform preflight. Pointer barriers, mode-ticket fencing, scalar-bounded text, confirmed-prefix/unknown-effect receipts and release-only cleanup are implemented. |
+| `eca3253c0a6c2810b75d0c5233c277d58d6efa49` | Opt-in Linux X11/XTest pointer/button adapter. Actual wire records drive native motion/drag/release through the same submission owner, with X11 state queries verifying effects. Other native input capabilities explicitly refuse. |
+| `8f501c0691b20e3b8b7da436af5c0ccb614e1479` | Fix native HEVC allocation admission to account for FFmpeg's aligned rows without loosening the Rust coded/crop/profile/DPB guard. The crop regression retains its original assertions and includes additional awkward dimensions. |
+
+This builds on the existing supervised native-media and HEVC-guard work already
+present at `812f35c398f35ae1ba78d9ccddace278e9180195`; those earlier changes are not
+attributed to the input implementation. Historical evidence below remains scoped
+to its named source revision, not the current workspace. Concurrent compound-repeat
+and reversible-preparation cleanup support at `10b51d7` is preserved; it is not
+included in the verification counts below.
+
+### Input verification and remaining integration
+
+The pinned nightly passed 157 core/wire/media tests, including seven new input
+codec tests and 16 byte-codec-to-submission fault tests, plus strict Clippy for
+those crates, formatting and documentation checks. Four live Xvfb input tests
+and one local-display-selector unit test also passed by compiling the exact
+first-party sources directly with the pinned compiler. Native-library Cargo
+Clippy and test Clippy with the workspace's existing lint settings passed.
+The direct native tests are real X11 API effects with synthetic local authority
+grants, not Tailscale admission or physical-device qualification.
+
+The `8f501c0` native sources additionally passed all nine native unit tests
+(including the display-selector test above) against matching Debian FFmpeg
+7.1.5 headers/runtime, plus the 12-frame X11 capture -> HEVC -> wire delivery ->
+decode -> presentation/readback example. The codec crop test exercises five
+awkward geometries, including 1366x768. A fresh negative-control build changing
+only the C bridge back to its pre-fix `eca3253` source failed at 1366x768 frame 0
+with `Allocation`; the otherwise identical fixed build passed. These direct
+pinned-compiler executions used the actual first-party source and native APIs,
+not a substitute codec or runtime. They are not a full Cargo-workspace test run.
+The C compiler reports existing misleading-indentation warnings in the compact
+bridge; they were retained, not hidden or relabeled as a warning-free C build.
+
+A local full Cargo build was killed while compiling Asupersync under the 4-GiB
+execution limit, including a serialized-backend retry and the later all-target
+metadata-only check. Full-workspace Clippy could not run after that check failed.
+The full GitHub native run
+on `3b8f7e9` ([run 34274407094](https://github.com/Dicklesworthstone/franken_remote/actions/runs/34274407094))
+passed formatting, compilation and strict Clippy before exposing the cropped-frame
+allocation failure on FFmpeg 6.1. The `8f501c0` full native-workspace rerun
+([run 34276085651](https://github.com/Dicklesworthstone/franken_remote/actions/runs/34276085651))
+remains queued at this status snapshot. Neither failed nor queued runs are
+counted as passing evidence; FFmpeg 6.1 requalification remains outstanding.
+
+`InputSession` does not start a watchdog. The interactive agent must independently
+service lease expiry and local revoke, connect focus/lock/suspend/display lifecycle,
+and arbitrate the single global controller before this becomes an unattended
+control path. The X11 connection belongs in that input process, never the broker
+or media worker. Xlib can block or terminate; entered native calls cannot be
+rolled back and failed-process key release remains uncertain. Keyboard mapping,
+repeat ownership, committed text, relative motion and scroll remain unsupported
+in this native adapter even though their bounded wire/core paths exist.
+
+The next critical join is qualified Tailscale identity/transport plus the real
+input-agent watchdog and client lifecycle. InputResult/HeldState encoding and
+native keyboard/text qualification also remain open. No installable desktop,
+live QUIC qualification, hardware latency result or Phase 1 completion is claimed.
+The existing beads `fr-fr-wire-framing-i0u`, `fr-p1-input-pipeline-ay1`,
+`fr-p1-session-agent-iq3` and `fr-p2-host-linux-4e4` are only partially implemented.
+Their original acceptance criteria remain in force; no bead was closed or its
+assignment overwritten (`br` is unavailable in this environment).
+
 ## Encoded-media path now implemented
 
 The source at `b2a2888e84601b9cb79be7fd248c54cc9aced67d` adds a complete bounded **encoded picture -> binary records -> fragment repair -> reference-ordered picture** path. It includes the new `fr-wire` crate and `fr-media::delivery::{SendCache, ReceivePipeline, MediaBudget}`. No runtime, foreign codec or external serialization dependency was added. The objects execute production packetization/reassembly policy; they are not mock codec implementations.
@@ -10,7 +83,7 @@ Sender ownership, reliable IDR startup, immutable progress announcements, out-of
 
 See [PROTOCOL_MEDIA.md](PROTOCOL_MEDIA.md) for executable record layouts, [MEDIA_DELIVERY.md](MEDIA_DELIVERY.md) for integration and the reproduction command, and [CHANGELOG.md](CHANGELOG.md) for incremental commits. The rest of the session wire protocol, transport scheduling/credits, host identity adapters and native codec/capture workers remain incomplete.
 
-### Current source verification
+### Earlier encoded-media source verification
 
 Source `b2a2888e84601b9cb79be7fd248c54cc9aced67d` also passed [GitHub Rust verification run 34237484950](https://github.com/Dicklesworthstone/franken_remote/actions/runs/34237484950). On Linux x86_64 with the pinned `nightly-2026-08-31`, `./scripts/verify.sh fast` passed formatting, all-target/all-feature compilation, strict Clippy with `-D warnings`, normal tests/doctests and example tests. `./scripts/verify.sh docs` also passed. There are **111 Rust tests**, zero failed or ignored: the previous 76 plus 10 wire tests, 13 receiver tests, 10 sender/receiver integration tests and 2 corpus-reader example tests. The new packet impairment tests run the real byte codecs and delivery owners with injected clocks; they are not Asupersync lab execution or a physical network benchmark.
 
@@ -29,7 +102,7 @@ This adds **real HEVC byte-preservation and independent software-decode evidence
 
 The next critical integration work is the qualified Asupersync transport composition and one real capture/HEVC/presentation path, joined to current authority and delivery owners. Repository task `fr-5nb` records the prior QUIC qualification defects; it needs fixes/requalification, not a second shipping QUIC implementation. `fr-fr-wire-framing-i0u` is only partially implemented because non-media message classes and its fuzz campaign remain outstanding. No Beads task is declared closed by this delivery pass; `br` was unavailable in this execution environment.
 
-## Implemented slices
+## Earlier authority/media-contract slices
 
 | Component | Present behavior | Boundary still requiring integration |
 |---|---|---|
@@ -78,6 +151,6 @@ Keep one serialized authority owner per remote session under the OS share-sessio
 
 For each reliable input action, consume its sequence before any possible external effect, then recheck live observation/control, the ticket, geometry, and viewport mapping immediately before injection. Record whether submission happened, partially happened, was refused/expired/cancelled before submission, or has an unknown effect. A failed or uncertain predecessor fences dependent actions. Receipt eviction never authorizes re-execution. Release-only cleanup belongs to the local input owner, not a retry of the remote action.
 
-These owners still need bounded protocol/input decoding and a real host-side submission boundary while the Phase 0 native transport/media experiments continue. Do not turn additional pure-state tests into a claim of a working desktop or defer the live endpoint/codec risks until after building clients.
+The input framing and final submission owner above now join those policies to an explicit X11 pointer/button path. The authenticated host/client session, independently progressing input watchdog and native lifecycle integration remain unfinished while the Phase 0 transport/media experiments continue. Do not turn policy tests or Xvfb effects into a claim of a working remote desktop.
 
-Existing Beads task records were not rewritten by this connector-only implementation pass. Reconcile ownership and completion through `br` on the development checkout; the source and retained test evidence above identify what actually landed.
+Existing Beads task records were not rewritten because `br` was unavailable. Their broader original acceptance criteria and assignments remain intact; the source and revision-scoped evidence above identify what actually landed.

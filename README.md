@@ -2,7 +2,7 @@
 
 **A tailnet-native remote workstation in Rust: open a machine on your Tailscale network and use its existing desktop, with hardware-accelerated HEVC, no separate account or pairing ceremony, and a system that refuses to accumulate invisible latency.**
 
-> **Status: early implementation; not an installable remote desktop yet.** The repository contains a Rust workspace with tested core authority, identity/limit types, bounded input replay accounting, and media contracts. There is no working `frd`/`fr` application, qualified live transport, or hardware capture/codec backend yet. [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) records the implemented slices and exact verification evidence. The design source of truth remains [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) (version 1.4). Every latency target, operating envelope, and platform claim below is a **proposed engineering objective from that plan, not a measured FrankenRemote result**.
+> **Status: early implementation; not an installable remote desktop yet.** The Rust workspace contains tested authority and bounded media delivery, HEVC admission/normalization, supervised Linux media workers, and input records joined to submission-time checks with an opt-in native X11 pointer/button adapter. There is no complete `frd`/`fr` application, qualified live transport, or hardware-qualified capture/codec path yet. [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) records the implemented slices and exact verification evidence. The design source of truth remains [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) (version 1.4). Every latency target, operating envelope, and platform claim below is a **proposed engineering objective from that plan, not a measured FrankenRemote result**.
 
 The two planned binary names are:
 
@@ -23,7 +23,7 @@ The engineering thesis, from the plan:
 
 ## Develop and verify
 
-The current workspace contains `fr-core` and `fr-media`. From a checkout with Rustup installed, the repository's `rust-toolchain.toml` selects the exact nightly:
+The current workspace contains `fr-core`, `fr-wire`, `fr-media`, `fr-native`, `frd`, and `fr-lab`. From a checkout with Rustup installed, the repository's `rust-toolchain.toml` selects the exact nightly:
 
 ```bash
 ./scripts/verify.sh fast
@@ -31,6 +31,8 @@ The current workspace contains `fr-core` and `fr-media`. From a checkout with Ru
 ```
 
 The fast lane runs formatting, workspace compilation, strict Clippy, and tests with all features, including the explicitly test-only media backend. At source commit `e7d57d5a1a284ec0b8da6374d3eda8613167c1e1`, the [retained Linux verification run](https://github.com/Dicklesworthstone/franken_remote/actions/runs/34231571592) passed **47 core unit tests, 17 media unit tests, 9 media contract tests, and 3 compile-fail doctests**. These are source/policy and fake-backend contract results, not live Asupersync, Tailscale, OS-input, or HEVC hardware qualification.
+
+The input implementation and its verification limits are described in [PROTOCOL_INPUT.md](PROTOCOL_INPUT.md) and [NATIVE_INPUT.md](NATIVE_INPUT.md). Pointer/button effects have been exercised against real X11/XTest servers; native keyboard/text, the independent input-agent watchdog, and the authenticated live-session join remain unfinished. This is not an installable controlled desktop.
 
 The `full` lane additionally requires UBS and fails explicitly when it is unavailable. The `release` lane remains blocked until native artifacts and qualification exist. CI calls the same repository-owned commands; it does not replace native builder or hardware evidence. See the [implementation status](IMPLEMENTATION_STATUS.md) for integration boundaries and remaining work.
 
@@ -137,7 +139,7 @@ FFmpeg integration is a deliberately narrow boundary (plan §9): a curated, allo
 
 ## Proposed workspace
 
-From plan §22 — responsibility boundaries, not a requirement to create every crate before the first working slice. Crates enter the workspace only with a real vertical slice. The current members are `fr-core` and `fr-media`; the other directories below remain planned.
+From plan §22 — responsibility boundaries, not a requirement to create every crate before the first working slice. Crates enter the workspace only with a real vertical slice. The current members are `fr-core`, `fr-wire`, `fr-media`, `fr-native`, `frd`, and `fr-lab`; the other responsibility boundaries below remain planned.
 
 ```text
 frankenremote/
