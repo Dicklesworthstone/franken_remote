@@ -10,6 +10,10 @@
 //! be rolled back or safely killed as threads: they retain the seat until both
 //! cleanup layers and native destruction finish. The platform process supervisor
 //! must handle process death; this module never claims release after a crash.
+mod result;
+use result::ResultContext;
+pub use result::{InputReply, InputResponse};
+
 use crate::input_watchdog::{self, Control, StopReason, Watchdog};
 use asupersync::{
     cx::Cx,
@@ -140,6 +144,7 @@ impl Seat {
             shared: shared.clone(),
             native: native.clone(),
             route,
+            response_context: None,
         };
         let driver = Driver {
             watchdog,
@@ -173,6 +178,7 @@ pub enum Error {
     Stopped,
     Backpressure,
     NoPendingCommand,
+    NotInputCommand,
     RecordTooLarge,
     Wire(WireError),
     Clock(input_watchdog::Error),
@@ -301,6 +307,7 @@ pub struct Agent {
     shared: Arc<Shared>,
     native: Thread,
     route: Route,
+    response_context: Option<ResultContext>,
 }
 impl Agent {
     pub fn control(&self) -> Control {
@@ -326,7 +333,7 @@ impl Agent {
         if bytes.len() > MAX_INPUT_RECORD_BYTES {
             return Err(Error::RecordTooLarge);
         }
-        decode_input(
+        let request = decode_input(
             bytes,
             &self.route.limits,
             self.route.binding,
@@ -340,14 +347,21 @@ impl Agent {
             length: bytes.len(),
         };
         command.bytes[..bytes.len()].copy_from_slice(bytes);
-        self.enqueue(command)
+        let context = ResultContext::new(self.route.binding, request);
+        self.enqueue(command)?;
+        // Mutate only after successful admission. A refused second command
+        // must never replace the original uncollected result's binding.
+        self.response_context = Some(context);
+        Ok(())
     }
     pub fn authority(&mut self, command: AuthorityCommand) -> Result<(), Error> {
         self.enqueue(Command {
             kind: CommandKind::Authority(command),
             bytes: [0; MAX_INPUT_RECORD_BYTES],
             length: 0,
-        })
+        })?;
+        self.response_context = None;
+        Ok(())
     }
     fn enqueue(&mut self, command: Command) -> Result<(), Error> {
         {
@@ -373,6 +387,7 @@ impl Agent {
         if reply.is_some() {
             m.outstanding = false;
             m.reply_waker = None;
+            self.response_context = None;
         }
         Ok(reply)
     }
@@ -429,6 +444,7 @@ impl Future for Response<'_> {
             }
         };
         if let Some(result) = outcome {
+            this.agent.response_context = None;
             this.done = true;
             Poll::Ready(result)
         } else {
