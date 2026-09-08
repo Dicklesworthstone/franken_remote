@@ -1,5 +1,6 @@
 use std::{env, path::PathBuf, process::Command};
 fn main() {
+    build_keyboard();
     println!("cargo:rerun-if-changed=src/bridge.c");
     if env::var_os("CARGO_FEATURE_LINUX_MEDIA").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux")
@@ -93,4 +94,50 @@ fn main() {
             println!("cargo:rustc-link-search=native={path}");
         }
     }
+}
+
+fn build_keyboard() {
+    println!("cargo:rerun-if-changed=src/keyboard.c");
+    println!("cargo:rerun-if-env-changed=CC");
+    if env::var_os("CARGO_FEATURE_LINUX_INPUT").is_none()
+        || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux")
+    {
+        return;
+    }
+    assert_eq!(
+        env::var("HOST").unwrap(),
+        env::var("TARGET").unwrap(),
+        "XKB cross-builds require a qualified native sysroot"
+    );
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    assert!(
+        Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
+            .args([
+                "-std=c11",
+                "-O2",
+                "-fPIC",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-c",
+                "src/keyboard.c",
+                "-o"
+            ])
+            .arg(out.join("keyboard.o"))
+            .status()
+            .expect("native C compiler")
+            .success(),
+        "install X11 development headers (libx11-dev)"
+    );
+    assert!(
+        Command::new("ar")
+            .arg("crs")
+            .arg(out.join("libfrkeyboard.a"))
+            .arg(out.join("keyboard.o"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=frkeyboard");
 }

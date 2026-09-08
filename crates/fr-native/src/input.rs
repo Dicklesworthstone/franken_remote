@@ -1,14 +1,15 @@
-//! Explicit local-X11 pointer adapter for the interactive input process.
+//! Explicit local-X11 keyboard/pointer adapter for the interactive input process.
 //! Never load this in the broker/media worker. Xlib may block or terminate on
 //! display loss; the independent watchdog/revoke path must remain outside it.
 //! This is not a Wayland permission fallback or an X11 security sandbox.
+use crate::keyboard::Keyboard;
 use core::{
     ffi::{c_char, c_int, c_uint, c_ulong, c_void},
     marker::PhantomData,
     ptr::NonNull,
 };
 use fr_core::{
-    input::{DesktopPoint, InputBounds, PointerButton},
+    input::{DesktopPoint, InputBounds, KeyTransition, PointerButton},
     input_submission::{Capabilities, Capability, InputSink, Operation, PlatformError, Submission},
 };
 use std::{ffi::CString, rc::Rc};
@@ -76,6 +77,7 @@ pub struct X11Pointer {
     root: c_ulong,
     dimensions: (u32, u32),
     prepared: Option<Operation>,
+    keyboard: Keyboard,
     _thread: PhantomData<Rc<()>>,
 }
 impl X11Pointer {
@@ -99,6 +101,7 @@ impl X11Pointer {
             root,
             dimensions: (0, 0),
             prepared: None,
+            keyboard: Keyboard::new(display),
             _thread: PhantomData,
         };
         let (mut event, mut error, mut major, mut minor) = (0, 0, 0, 0);
@@ -123,9 +126,19 @@ impl X11Pointer {
         Ok(owner)
     }
     pub fn capabilities(&self) -> Capabilities {
-        Capabilities::default()
+        let caps = Capabilities::default()
             .with(Capability::Absolute)
-            .with(Capability::Buttons)
+            .with(Capability::Buttons);
+        if self.keyboard.enabled() {
+            caps.with(Capability::Keys).with(Capability::Repeat)
+        } else {
+            caps
+        }
+    }
+    /// Retire input authority before this local-only keyboard cleanup. Returns
+    /// false when native release/restoration is still uncertain; do not hand off.
+    pub fn cleanup_keyboard(&mut self) -> bool {
+        self.keyboard.cleanup()
     }
     pub fn bounds(&self) -> InputBounds {
         InputBounds::new(
@@ -184,8 +197,14 @@ impl X11Pointer {
 }
 impl InputSink for X11Pointer {
     fn prepare(&mut self, op: Operation) -> Result<(), PlatformError> {
-        self.prepared = None;
+        self.cancel_prepared();
         match op {
+            Operation::Key { key, transition } => {
+                if transition != KeyTransition::Release && self.geometry()? != self.dimensions {
+                    return Err(PlatformError::GeometryChanged);
+                }
+                self.keyboard.prepare(key, transition)?;
+            }
             Operation::Absolute(position) => {
                 if !self.bounds().contains(position) {
                     return Err(PlatformError::GeometryChanged);
@@ -209,6 +228,9 @@ impl InputSink for X11Pointer {
     fn submit(&mut self, op: Operation) -> Submission {
         if self.prepared.take() != Some(op) {
             return Submission::NotSubmitted(PlatformError::Unsupported);
+        }
+        if let Operation::Key { key, transition } = op {
+            return self.keyboard.submit(key, transition);
         }
         // SAFETY: validated operation and owned display. Delay=0 prevents a
         // server-side scheduled replay. No Rust pointer is retained. XFlush
@@ -243,9 +265,17 @@ impl InputSink for X11Pointer {
         }
         Submission::Submitted
     }
+    fn cancel_prepared(&mut self) {
+        self.prepared = None;
+        self.keyboard.cancel_prepared();
+    }
+    fn repeat_requires_pair(&self) -> bool {
+        true
+    }
 }
 impl Drop for X11Pointer {
     fn drop(&mut self) {
+        let _ = self.keyboard.cleanup();
         // SAFETY: unique live context, no other thread or callback holds it.
         unsafe {
             XCloseDisplay(self.display.as_ptr());

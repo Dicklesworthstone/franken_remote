@@ -13,3 +13,5 @@ pub use parent::bind_worker_parent;
 
 #[cfg(all(target_os = "linux", feature = "linux-input"))]
 pub mod input;
+#[cfg(all(target_os = "linux", feature = "linux-input"))]
+mod keyboard;
