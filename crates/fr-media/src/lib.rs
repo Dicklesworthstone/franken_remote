@@ -28,3 +28,6 @@ pub mod surface;
 
 #[cfg(feature = "testing")]
 pub mod fake;
+
+/// Private media-process protocol; never accepted on network channels.
+pub mod worker;

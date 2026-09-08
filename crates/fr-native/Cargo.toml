@@ -30,3 +30,8 @@ must_use_candidate = "allow"
 [[example]]
 name = "native_roundtrip"
 required-features = ["linux-media"]
+
+[[bin]]
+name = "fr-media-worker"
+path = "src/bin/media_worker.rs"
+required-features = ["linux-media"]
