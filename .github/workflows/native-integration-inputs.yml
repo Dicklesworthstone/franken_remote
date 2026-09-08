@@ -9,6 +9,11 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+
 jobs:
   inputs:
     runs-on: ubuntu-latest
@@ -20,11 +25,11 @@ jobs:
           persist-credentials: false
       - name: Install repository toolchain
         run: rustup show active-toolchain
-      - name: Retain pinned transport dependency sources
+      - name: Retain pinned transport dependency sources and compiled libraries
         run: |
           set -euo pipefail
           root="$RUNNER_TEMP/fr-native-inputs"
-          mkdir -p "$root/deps/src" "$root/sdk"
+          mkdir -p "$root/deps/src" "$root/sdk" "$root/libraries"
           cat > "$root/deps/Cargo.toml" <<'EOF'
           [package]
           name = "fr-integration-build-inputs"
@@ -32,11 +37,20 @@ jobs:
           edition = "2024"
           [dependencies]
           asupersync = { version = "=0.4.10", default-features = false, features = ["tls-webpki-roots"] }
+          socket2 = { version = "=0.6.5", features = ["all"] }
+          libc = "=0.2.189"
           serde = { version = "1", features = ["derive"] }
           serde_json = "1"
+          time = { version = "=0.3.55", features = ["parsing"] }
           EOF
           printf '%s\n' '// Build-input resolution only; not a product crate.' > "$root/deps/src/lib.rs"
           cargo fetch --manifest-path "$root/deps/Cargo.toml"
+          cargo build --manifest-path "$root/deps/Cargo.toml" --locked
+          find "$root/deps/target/debug" -type f \( -name '*.rlib' -o -name '*.rmeta' -o -name '*.so' -o -name '*.a' \) -exec cp -n '{}' "$root/libraries/" \;
+          rustc -Vv > "$root/libraries/compiler.txt"
+          cp "$root/deps/Cargo.lock" "$root/libraries/Cargo.lock"
+          (cd "$root/libraries" && sha256sum *.rlib *.rmeta *.so *.a > SHA256SUMS)
+          tar -czf "$root/compiled-libraries.tar.gz" -C "$root" libraries
           tar -czf "$root/cargo-registry.tar.gz" -C "${CARGO_HOME:-$HOME/.cargo}" registry
           git ls-files -z | tar --null -T - -czf "$root/source.tar.gz"
           printf '%s\n' "$GITHUB_SHA" > "$root/source-commit.txt"
@@ -53,7 +67,11 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: native-integration-build-inputs
-          path: ${{ runner.temp }}/fr-native-inputs/
+          path: |
+            ${{ runner.temp }}/fr-native-inputs/*.tar.gz
+            ${{ runner.temp }}/fr-native-inputs/sdk/
+            ${{ runner.temp }}/fr-native-inputs/source-commit.txt
+            ${{ runner.temp }}/fr-native-inputs/SHA256SUMS
           retention-days: 1
           compression-level: 0
           if-no-files-found: error
