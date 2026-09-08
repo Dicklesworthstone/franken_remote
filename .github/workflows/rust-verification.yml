@@ -1,0 +1,40 @@
+name: Rust verification
+
+# Calls the same repository-owned lane used by local builders. This is only
+# Rust/source evidence, never hardware or transport qualification.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'scripts/verify.sh'
+      - '.github/workflows/rust-verification.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-verification-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - name: Install repository-pinned toolchain
+        run: rustup show active-toolchain
+      - name: Install Linux native media SDKs
+        run: sudo apt-get update && sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev pkg-config xvfb xauth
+      - name: Run Rust verification
+        run: ./scripts/verify.sh fast
+      - name: Exercise real X11 capture and HEVC library delivery
+        run: xvfb-run -a -s '-screen 0 640x360x24 -nolisten tcp' cargo run -p fr-native --features linux-media --example native_roundtrip -- --software-explicit
+      - name: Verify documentation links
+        run: ./scripts/verify.sh docs

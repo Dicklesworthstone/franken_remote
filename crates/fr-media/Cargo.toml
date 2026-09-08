@@ -1,22 +1,19 @@
 [package]
 name = "fr-media"
 version = "0.1.0"
-description = "FrankenRemote media contracts: ownership-aware Encoder/Decoder/GpuSurface/CodecConfiguration/MediaCapabilities and the HEVC baseline bitstream rules, with no foreign codec types in any public signature"
+description = "FrankenRemote media contracts and bounded encoded-picture delivery"
 edition.workspace = true
 license-file.workspace = true
 repository.workspace = true
 
 [dependencies]
-# Only fr-core: the media contracts speak the shared limits/id vocabulary and
-# nothing else. No codec library, no runtime — those live behind the traits in
-# fr-ffi and the platform adapters. This single-dependency graph is what keeps
-# foreign codec types out of every fr-media signature (AGENTS.md 3.2/3.3).
+# First-party types and actual packet codecs only. Runtime and foreign media
+# implementations remain outside this dependency boundary.
 fr-core.workspace = true
+fr-wire.workspace = true
 
 [features]
-# The scriptable fake backend is a test double, never a shipping codec. It is
-# gated so it can never be linked into a production binary by accident; tests
-# and downstream dev-dependencies enable it explicitly.
+# Test double only; release capability never follows from enabling this flag.
 testing = []
 
 [lints]

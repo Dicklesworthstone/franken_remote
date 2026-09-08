@@ -29,6 +29,8 @@ asupersync = { version = "=0.4.10", default-features = false }
 fr-core = { path = "crates/fr-core" }
 fr-lab = { path = "crates/fr-lab" }
 fr-media = { path = "crates/fr-media" }
+fr-wire = { path = "crates/fr-wire" }
+fr-native = { path = "crates/fr-native" }
 
 [workspace.lints.rust]
 # Protocol/policy/authority code is safe Rust (AGENTS.md section 3.2). The

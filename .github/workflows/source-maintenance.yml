@@ -1,0 +1,73 @@
+name: Review source maintenance
+
+# Review-only: no commit/ref/PR writes. Suggested source remains subject to
+# review and normal repository verification before it is adopted.
+# Current review: complete sender/receiver media-delivery integration.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/source-maintenance.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  suggest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup show active-toolchain
+      - name: Apply machine-applicable source suggestions
+        run: |
+          export RCH_CARGO_WRAPPER_BYPASS=1
+          cargo fix --workspace --all-targets --all-features --locked --allow-dirty --allow-staged
+          cargo clippy --fix --workspace --all-targets --all-features --locked --allow-dirty --allow-staged -- -D warnings
+          cargo fmt --all
+      - name: Verify suggested source
+        run: ./scripts/verify.sh fast
+      - name: Retain reviewable source blobs and diff
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git diff --check
+          git diff --stat
+          git diff -- crates
+          python3 - <<'PY'
+          import base64, json, os, subprocess
+          from pathlib import Path
+          paths = subprocess.check_output(['git', 'diff', '--name-only', '-z']).decode().split('\0')
+          for path in filter(None, paths):
+              if not path.startswith('crates/') or not path.endswith('.rs'):
+                  raise SystemExit(f'Unexpected maintenance path: {path}')
+              data = Path(path).read_bytes()
+              body = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()})
+              result = subprocess.run(
+                  ['gh', 'api', '--method', 'POST', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', '--input', '-'],
+                  input=body, text=True, capture_output=True, check=True)
+              print(json.dumps({'path': path, 'sha': json.loads(result.stdout)['sha'], 'source_commit': os.environ['GITHUB_SHA']}))
+          PY
+      - name: Package reproducible offline review inputs
+        if: always() && github.event_name == 'workflow_dispatch'
+        run: |
+          mkdir -p "$RUNNER_TEMP/fr-review"
+          git ls-files -z | tar --null -T - -czf "$RUNNER_TEMP/fr-review/source.tar.gz"
+          sysroot="$(rustc --print sysroot)"
+          tar -czf "$RUNNER_TEMP/fr-review/rust-toolchain.tar.gz" -C "$sysroot" bin lib
+          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/fr-review/source-commit.txt"
+          (cd "$RUNNER_TEMP/fr-review" && sha256sum *.tar.gz > SHA256SUMS)
+      - name: Retain offline verification bundle
+        if: always() && github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: offline-media-review
+          path: ${{ runner.temp }}/fr-review/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error

@@ -1,13 +1,13 @@
 //! Encoded access units and their identity/dependency metadata (plan sections
 //! 8.1, 12.3).
 //!
-//! An [`EncodedAccessUnit`] is one complete admitted picture: bytes plus the
-//! metadata that fences it against stale configuration and lets the receiver
-//! reason about reference dependencies. The bytes stay opaque; this crate does
-//! not parse the HEVC bitstream (that bounded validation lives at the wire
-//! boundary and in the decoder-configuration path). Length is validated
-//! against the shared limits at construction so an over-ceiling unit can never
-//! be built.
+//! An [`EncodedAccessUnit`] holds length-validated bytes and declared metadata.
+//! This crate does not parse HEVC or authenticate metadata: bounded bitstream
+//! validation, reference-chain checks, and session admission remain mandatory
+//! before decoder submission. Construction checks length, not those stronger
+//! properties. Diagnostic formatting deliberately never exposes screen bytes.
+
+use core::fmt;
 
 use fr_core::ids::{CodecConfigurationGeneration, RecoveryGeneration};
 use fr_core::limits::{LimitsError, ProtocolLimits};
@@ -44,7 +44,8 @@ impl FrameId {
     }
 }
 
-/// The reference role of an access unit in the low-delay baseline chain.
+/// The declared reference role in the low-delay baseline chain. Bitstream
+/// validation must establish that the encoded picture actually has this role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameKind {
     /// An independently decodable IDR: a clean reference-chain reset used on
@@ -63,17 +64,17 @@ pub enum FrameKind {
 }
 
 impl FrameKind {
-    /// True for an IDR (a reference-chain reset).
+    /// True for a declared IDR (independent validation still required).
     #[must_use]
     pub const fn is_idr(self) -> bool {
         matches!(self, Self::Idr { .. })
     }
 }
 
-/// One complete encoded access unit. Construction validates the byte length
-/// against the negotiated limits, so an over-ceiling unit is a typed refusal
-/// and can never exist as a value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One nonempty, length-validated access unit. The constructor does not
+/// establish that these opaque bytes encode a conforming HEVC picture.
+/// `Debug` includes bounded metadata and byte length, never compressed pixels.
+#[derive(Clone, PartialEq, Eq)]
 pub struct EncodedAccessUnit {
     frame: FrameId,
     kind: FrameKind,
@@ -83,10 +84,22 @@ pub struct EncodedAccessUnit {
     bytes: Vec<u8>,
 }
 
+impl fmt::Debug for EncodedAccessUnit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EncodedAccessUnit")
+            .field("frame", &self.frame)
+            .field("kind", &self.kind)
+            .field("config_generation", &self.config_generation)
+            .field("capture_micros", &self.capture_micros)
+            .field("byte_len", &self.bytes.len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl EncodedAccessUnit {
     /// Builds an access unit, validating its length against the negotiated
-    /// access-unit ceiling. An IDR must be non-empty; a zero-length picture is
-    /// never valid.
+    /// access-unit ceiling. A zero-length picture is never valid. Callers
+    /// must admit allocation budgets before assembling the supplied vector.
     pub fn new(
         limits: &ProtocolLimits,
         frame: FrameId,
@@ -113,7 +126,7 @@ impl EncodedAccessUnit {
     pub const fn frame(&self) -> FrameId {
         self.frame
     }
-    /// The reference kind.
+    /// The declared reference kind.
     #[must_use]
     pub const fn kind(&self) -> FrameKind {
         self.kind
@@ -128,12 +141,13 @@ impl EncodedAccessUnit {
     pub const fn capture_micros(&self) -> u64 {
         self.capture_micros
     }
-    /// The opaque encoded bytes.
+    /// The opaque encoded bytes. These contain screen content and must not
+    /// be included in ordinary logs or diagnostic exports.
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
-    /// Convenience: whether this is an IDR.
+    /// Convenience: whether the declared kind is IDR.
     #[must_use]
     pub const fn is_idr(&self) -> bool {
         self.kind.is_idr()
@@ -165,13 +179,11 @@ mod tests {
         assert!(ok.is_ok());
         assert!(ok.unwrap().is_idr());
 
-        // Empty is refused.
         assert_eq!(
             EncodedAccessUnit::new(&l, FrameId::FIRST, idr, gen0(), 0, vec![]),
             Err(LimitsError::ZeroDimension)
         );
 
-        // Over-ceiling is refused without allocating the picture as valid.
         let too_big = vec![0u8; (l.max_encoded_access_unit_bytes() as usize) + 1];
         assert!(matches!(
             EncodedAccessUnit::new(&l, FrameId::FIRST, idr, gen0(), 0, too_big),
@@ -192,5 +204,47 @@ mod tests {
             FrameKind::Predicted { references } => assert_eq!(references, FrameId::FIRST),
             FrameKind::Idr { .. } => panic!("expected predicted"),
         }
+    }
+
+    fn unit_with_bytes(bytes: Vec<u8>) -> EncodedAccessUnit {
+        EncodedAccessUnit::new(
+            &ProtocolLimits::ABSOLUTE,
+            FrameId::FIRST,
+            FrameKind::Idr {
+                recovery: RecoveryGeneration::INITIAL,
+            },
+            gen0(),
+            1_000,
+            bytes,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn debug_output_is_independent_of_pixel_content() {
+        let first = unit_with_bytes(vec![11, 22, 33, 44]);
+        let second = unit_with_bytes(vec![55, 66, 77, 88]);
+        assert_ne!(first, second);
+        assert_eq!(format!("{first:?}"), format!("{second:?}"));
+        assert_eq!(format!("{first:#?}"), format!("{second:#?}"));
+        assert_eq!(
+            format!("{:?}", Some(&first)),
+            format!("{:?}", Some(&second))
+        );
+        assert!(!format!("{first:?}").contains("11, 22, 33, 44"));
+        assert!(format!("{first:?}").contains("byte_len: 4"));
+    }
+
+    #[test]
+    fn large_payload_debug_output_stays_bounded() {
+        let unit = unit_with_bytes(vec![254; 64 * 1024]);
+        let compact = format!("{unit:?}");
+        let pretty = format!("{unit:#?}");
+        assert!(compact.len() < 512);
+        assert!(pretty.len() < 512);
+        assert!(compact.contains("byte_len: 65536"));
+        assert!(!compact.contains("254"));
+        assert!(!pretty.contains("254"));
+        assert_eq!(unit.bytes().len(), 64 * 1024);
     }
 }

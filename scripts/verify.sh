@@ -1,15 +1,11 @@
 #!/usr/bin/env bash
-# Repository-owned verification lanes for FrankenRemote.
-#
-# This script is the authoritative entrypoint; workflow YAML and dsr/act call
-# it and contain no correctness logic of their own (AGENTS.md section 10).
-# Pre-implementation, only the docs lane exists. Code lanes appear together
-# with the first workspace crate; until then they refuse honestly instead of
-# pretending absent gates passed.
+# Repository-owned verification lanes. CI and local builders call the same
+# commands; Rust tests are not evidence of native media or wire qualification.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+export RCH_CARGO_WRAPPER_BYPASS=1
 
 lane="${1:-}"
 
@@ -19,13 +15,10 @@ docs_lane() {
   files=$(find . -maxdepth 2 -name '*.md' -not -path './target/*' -not -path './.git/*' | sort)
 
   for f in $files; do
-    # Extract inline markdown link targets: [text](target)
     while IFS= read -r target; do
-      # Skip absolute URLs, mail links, and pure in-page anchors.
       case "$target" in
         http://*|https://*|mailto:*|\#*) continue ;;
       esac
-      # Strip any trailing anchor.
       local path="${target%%#*}"
       [ -z "$path" ] && continue
       local dir
@@ -37,7 +30,6 @@ docs_lane() {
     done < <(grep -oE '\]\(([^)]+)\)' "$f" | sed -E 's/^\]\((<)?//; s/(>)?\)$//')
   done
 
-  # Files the constitution requires to exist at the repository root.
   for required in \
     COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md \
     AGENTS.md README.md PROTOCOL.md SECURITY.md LICENSE rust-toolchain.toml; do
@@ -54,13 +46,39 @@ docs_lane() {
   echo "docs lane: passed"
 }
 
+rust_lane() {
+  if [ ! -f Cargo.toml ]; then
+    echo "Rust lane: BLOCKED (workspace manifest missing)" >&2
+    return 2
+  fi
+  cargo fmt --all --check
+  cargo check --workspace --all-targets --all-features --locked
+  cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+  cargo test --workspace --all-features --locked
+  cargo test --workspace --all-features --locked --examples
+  echo "Rust lane: passed (format/check/clippy/tests, including test-only media contracts)"
+}
+
 case "$lane" in
   docs)
     docs_lane
     ;;
-  fast|full|release)
-    echo "verify.sh: lane '$lane' is dormant: no workspace crates exist yet (spec-first phase)." >&2
-    echo "verify.sh: refusing rather than reporting a pass for gates that did not run." >&2
+  fast)
+    rust_lane
+    ;;
+  full)
+    rust_lane
+    docs_lane
+    if ! command -v ubs >/dev/null 2>&1; then
+      echo "full lane: BLOCKED (ubs is not installed; Rust/docs gates ran above)" >&2
+      exit 2
+    fi
+    # Scan the source tree, not an empty git diff after a clean checkout.
+    ubs .
+    echo "full source lane: passed; native/wire/hardware qualification is separate"
+    ;;
+  release)
+    echo "release lane: BLOCKED (native artifacts and qualification matrix are not implemented)" >&2
     exit 2
     ;;
   *)
