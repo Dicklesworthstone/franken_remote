@@ -665,10 +665,20 @@ fn execute<S: InputSink>(
                 reliable_sequence = Some(request.sequence);
             }
             Reply::Input(session.dispatch(request, sink, || {
+                // This callback runs AFTER every native preparation. The
+                // independent watchdog may not yet have been scheduled after
+                // parent cancellation; never let that lag authorize a press
+                // or the next scalar of a partially submitted text operation.
+                if cx.checkpoint().is_err() {
+                    shared.control.stop(StopReason::Cancelled);
+                }
                 input_watchdog::host_now(cx).expect("captured timer")
             }))
         }
         CommandKind::Authority(command) => {
+            if cx.checkpoint().is_err() {
+                shared.control.stop(StopReason::Cancelled);
+            }
             let now = input_watchdog::host_now(cx).expect("captured timer");
             Reply::Authority(match command {
                 AuthorityCommand::ObservationChallenge(n) => {
