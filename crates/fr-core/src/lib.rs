@@ -14,6 +14,7 @@
 
 pub mod authority;
 pub mod ids;
+pub mod input;
 pub mod input_sequence;
 pub mod limits;
 pub mod time;

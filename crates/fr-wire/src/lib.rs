@@ -5,6 +5,7 @@
 //! identity, observation authority, or HEVC syntax. A transport must install
 //! an admitted binding before using them. No runtime or codec is linked here.
 
+pub mod input;
 mod media;
 mod record;
 

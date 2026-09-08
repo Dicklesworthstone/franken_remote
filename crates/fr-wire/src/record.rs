@@ -21,6 +21,7 @@ pub enum WireError {
     InvalidFlags,
     InvalidBinding,
     WrongChannel,
+    WrongRole,
     InvalidLimits,
     ResourceLimit,
     ArithmeticOverflow,
@@ -88,7 +89,7 @@ impl MediaLimits {
     }
 }
 
-/// Only the implemented v0 media kinds are executable in this slice.
+/// Implemented v0 media and input kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum Kind {
@@ -96,6 +97,13 @@ pub enum Kind {
     Fragment = 0x0034,
     Repair = 0x0035,
     Progress = 0x0037,
+    Key = 0x0040,
+    Button = 0x0041,
+    Pointer = 0x0042,
+    Relative = 0x0043,
+    Scroll = 0x0044,
+    Text = 0x0045,
+    InputMode = 0x0047,
 }
 impl Kind {
     fn parse(value: u16) -> Result<Self, WireError> {
@@ -104,15 +112,29 @@ impl Kind {
             0x0034 => Ok(Self::Fragment),
             0x0035 => Ok(Self::Repair),
             0x0037 => Ok(Self::Progress),
+            0x0040 => Ok(Self::Key),
+            0x0041 => Ok(Self::Button),
+            0x0042 => Ok(Self::Pointer),
+            0x0043 => Ok(Self::Relative),
+            0x0044 => Ok(Self::Scroll),
+            0x0045 => Ok(Self::Text),
+            0x0047 => Ok(Self::InputMode),
             _ => Err(WireError::UnsupportedKind),
         }
     }
-    const fn channel(self) -> Channel {
+    const fn channel(self) -> Option<Channel> {
         match self {
-            Self::Recovery => Channel::Recovery,
-            Self::Fragment => Channel::Video,
-            Self::Repair => Channel::Control,
-            Self::Progress => Channel::MediaConfig,
+            Self::Recovery => Some(Channel::Recovery),
+            Self::Fragment => Some(Channel::Video),
+            Self::Repair => Some(Channel::Control),
+            Self::Progress => Some(Channel::MediaConfig),
+            Self::Key
+            | Self::Button
+            | Self::Pointer
+            | Self::Relative
+            | Self::Scroll
+            | Self::Text
+            | Self::InputMode => None,
         }
     }
 }
@@ -149,7 +171,15 @@ impl<'a> Record<'a> {
         binding: u32,
         channel: Channel,
     ) -> Result<Self, WireError> {
-        if bytes.len() > limits.record_bytes {
+        Self::decode_bounded(bytes, limits.record_bytes, binding, Some(channel))
+    }
+    pub(crate) fn decode_bounded(
+        bytes: &'a [u8],
+        maximum: usize,
+        binding: u32,
+        channel: Option<Channel>,
+    ) -> Result<Self, WireError> {
+        if bytes.len() > maximum {
             return Err(WireError::ResourceLimit);
         }
         let mut r = Reader::new(bytes);
@@ -285,13 +315,22 @@ impl<'a> Writer<'a> {
         kind: Kind,
         payload: usize,
     ) -> Result<Self, WireError> {
+        Self::record_bounded(out, limits.record_bytes, binding, kind, payload)
+    }
+    pub(crate) fn record_bounded(
+        out: &'a mut [u8],
+        maximum: usize,
+        binding: u32,
+        kind: Kind,
+        payload: usize,
+    ) -> Result<Self, WireError> {
         let total = HEADER_BYTES
             .checked_add(payload)
             .ok_or(WireError::ArithmeticOverflow)?;
         if binding == 0 {
             return Err(WireError::InvalidBinding);
         }
-        if total > limits.record_bytes {
+        if total > maximum {
             return Err(WireError::ResourceLimit);
         }
         if total > out.len() {
