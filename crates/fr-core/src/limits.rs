@@ -177,8 +177,6 @@ impl ProtocolLimits {
     /// above a ceiling or below a floor are typed refusals — administrator
     /// convenience never widens an implementation bound (plan section 17.2).
     pub fn with_overrides(overrides: LimitOverrides) -> Result<Self, LimitsError> {
-        let a = Self::ABSOLUTE;
-
         fn take_u32(
             field: LimitField,
             ceiling: u32,
@@ -201,6 +199,7 @@ impl ProtocolLimits {
             }
         }
 
+        let a = Self::ABSOLUTE;
         let reassembly = match overrides.reassembly_window_pictures {
             None => a.reassembly_window_pictures,
             Some(v) if v > Self::REASSEMBLY_WINDOW_CEILING => {

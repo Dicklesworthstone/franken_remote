@@ -200,7 +200,10 @@ impl SessionAuthority {
     /// This starts a new grant with no retained challenge, lease, or readiness.
     pub fn authorize_observation(&mut self, now: HostInstant) -> Result<(), AuthorityError> {
         self.check_time(now)?;
-        if !matches!(self.phase, Phase::CapabilitiesChecked | Phase::WaitingApproval) {
+        if !matches!(
+            self.phase,
+            Phase::CapabilitiesChecked | Phase::WaitingApproval
+        ) {
             return Err(AuthorityError::InvalidState { phase: self.phase });
         }
         let until = self.deadline_from(now)?;
@@ -369,9 +372,10 @@ impl SessionAuthority {
             .checked_add(self.policy.ticket_lifetime)
             .filter(|deadline| *deadline > now)
             .ok_or(AuthorityError::DeadlineOverflow)?;
-        let expires_at = uncapped
-            .min(lease.authorized_until)
-            .min(self.observation_until.ok_or(AuthorityError::ObservationExpired)?);
+        let expires_at = uncapped.min(lease.authorized_until).min(
+            self.observation_until
+                .ok_or(AuthorityError::ObservationExpired)?,
+        );
         lease.ticket = Some(Ticket {
             id: ticket_id,
             expires_at,
@@ -455,7 +459,10 @@ impl SessionAuthority {
         {
             self.control_challenge = None;
         }
-        if self.lease.is_some_and(|lease| now >= lease.authorized_until) {
+        if self
+            .lease
+            .is_some_and(|lease| now >= lease.authorized_until)
+        {
             self.revoke_lease();
         }
         if let Some(lease) = self.lease.as_mut()
@@ -589,12 +596,17 @@ mod tests {
         a.authorize_observation(at(0)).unwrap();
         assert_eq!(
             a.grant_lease(lease, at(0)),
-            Err(AuthorityError::InvalidState { phase: Phase::ViewOpening })
+            Err(AuthorityError::InvalidState {
+                phase: Phase::ViewOpening
+            })
         );
         a.mark_view_ready(at(0)).unwrap();
         assert!(!a.has_live_control(at(0)));
         a.mark_view_stale();
-        assert_eq!(a.grant_lease(lease, at(0)), Err(AuthorityError::ViewUnready));
+        assert_eq!(
+            a.grant_lease(lease, at(0)),
+            Err(AuthorityError::ViewUnready)
+        );
     }
 
     #[test]
@@ -658,12 +670,18 @@ mod tests {
     fn controller_slot_is_busy_until_revoked_then_handoff_serializes() {
         let (mut a, first, _) = viewing_with_control(at(0));
         let second = InputLeaseId::from_raw(42);
-        assert_eq!(a.grant_lease(second, at(100_000)), Err(AuthorityError::ControllerBusy));
+        assert_eq!(
+            a.grant_lease(second, at(100_000)),
+            Err(AuthorityError::ControllerBusy)
+        );
         a.revoke_lease();
         a.grant_lease(second, at(200_000)).unwrap();
         let ticket = InputTicketId::from_raw(7);
         a.issue_input_ticket(second, ticket, at(200_000)).unwrap();
-        assert_eq!(a.authorize_submission(first, ticket, at(200_100)), Err(AuthorityError::StaleLease));
+        assert_eq!(
+            a.authorize_submission(first, ticket, at(200_100)),
+            Err(AuthorityError::StaleLease)
+        );
     }
 
     #[test]
@@ -676,21 +694,32 @@ mod tests {
         assert_eq!(a.phase(), Phase::CapabilitiesChecked);
         assert_eq!(
             a.authorize_submission(lease, ticket, resumed),
-            Err(AuthorityError::InvalidState { phase: Phase::CapabilitiesChecked })
+            Err(AuthorityError::InvalidState {
+                phase: Phase::CapabilitiesChecked
+            })
         );
         a.authorize_observation(resumed).unwrap();
         a.mark_view_ready(resumed).unwrap();
-        assert_eq!(a.authorize_submission(lease, ticket, resumed), Err(AuthorityError::NoLease));
+        assert_eq!(
+            a.authorize_submission(lease, ticket, resumed),
+            Err(AuthorityError::NoLease)
+        );
     }
 
     #[test]
     fn resume_boundary_keeps_a_live_lease_but_can_expire_only_its_ticket() {
         let (mut a, lease, ticket) = viewing_with_control(at(0));
         a.issue_control_challenge(5, at(100_000)).unwrap();
-        assert_eq!(a.respond_control_challenge(lease, 5, at(150_000)), Ok(at(3_100_000)));
+        assert_eq!(
+            a.respond_control_challenge(lease, 5, at(150_000)),
+            Ok(at(3_100_000))
+        );
         let resumed = at(1_200_000);
         assert!(a.apply_resume_boundary(resumed));
-        assert_eq!(a.authorize_submission(lease, ticket, resumed), Err(AuthorityError::TicketInvalid));
+        assert_eq!(
+            a.authorize_submission(lease, ticket, resumed),
+            Err(AuthorityError::TicketInvalid)
+        );
         let next = InputTicketId::from_raw(77);
         a.issue_input_ticket(lease, next, resumed).unwrap();
         assert_eq!(a.authorize_submission(lease, next, resumed), Ok(()));
@@ -700,7 +729,10 @@ mod tests {
     fn ticket_lifetime_is_clamped_to_the_lease_authorization() {
         let (mut a, lease, _) = viewing_with_control(at(0));
         let ticket = InputTicketId::from_raw(9);
-        assert_eq!(a.issue_input_ticket(lease, ticket, at(2_800_000)), Ok(at(3_000_000)));
+        assert_eq!(
+            a.issue_input_ticket(lease, ticket, at(2_800_000)),
+            Ok(at(3_000_000))
+        );
     }
 
     #[test]
@@ -710,7 +742,9 @@ mod tests {
         assert_eq!(a.phase(), Phase::Closed);
         assert_eq!(
             a.authorize_submission(lease, ticket, at(1)),
-            Err(AuthorityError::InvalidState { phase: Phase::Closed })
+            Err(AuthorityError::InvalidState {
+                phase: Phase::Closed
+            })
         );
     }
 
@@ -718,13 +752,26 @@ mod tests {
     fn control_cannot_outlive_observation() {
         let (mut a, lease, _) = viewing_with_control(at(0));
         a.issue_control_challenge(1, at(1_000_000)).unwrap();
-        a.respond_control_challenge(lease, 1, at(1_500_000)).unwrap();
+        a.respond_control_challenge(lease, 1, at(1_500_000))
+            .unwrap();
         let ticket = InputTicketId::from_raw(5);
-        assert_eq!(a.issue_input_ticket(lease, ticket, at(2_800_000)), Ok(at(3_000_000)));
+        assert_eq!(
+            a.issue_input_ticket(lease, ticket, at(2_800_000)),
+            Ok(at(3_000_000))
+        );
         a.issue_control_challenge(2, at(2_900_000)).unwrap();
-        assert_eq!(a.authorize_submission(lease, ticket, at(3_500_000)), Err(AuthorityError::ObservationExpired));
-        assert_eq!(a.issue_input_ticket(lease, InputTicketId::from_raw(6), at(3_500_000)), Err(AuthorityError::ObservationExpired));
-        assert_eq!(a.respond_control_challenge(lease, 2, at(3_500_000)), Err(AuthorityError::ObservationExpired));
+        assert_eq!(
+            a.authorize_submission(lease, ticket, at(3_500_000)),
+            Err(AuthorityError::ObservationExpired)
+        );
+        assert_eq!(
+            a.issue_input_ticket(lease, InputTicketId::from_raw(6), at(3_500_000)),
+            Err(AuthorityError::ObservationExpired)
+        );
+        assert_eq!(
+            a.respond_control_challenge(lease, 2, at(3_500_000)),
+            Err(AuthorityError::ObservationExpired)
+        );
         assert!(!a.has_live_control(at(3_500_000)));
     }
 
@@ -734,8 +781,14 @@ mod tests {
         let mut a = SessionAuthority::new(session, AuthorityPolicy::plan_defaults());
         a.mark_capabilities_checked().unwrap();
         a.authorize_observation(at(0)).unwrap();
-        assert_eq!(a.mark_view_ready(at(3_000_000)), Err(AuthorityError::ObservationExpired));
-        assert_eq!(a.grant_lease(lease, at(3_000_000)), Err(AuthorityError::ObservationExpired));
+        assert_eq!(
+            a.mark_view_ready(at(3_000_000)),
+            Err(AuthorityError::ObservationExpired)
+        );
+        assert_eq!(
+            a.grant_lease(lease, at(3_000_000)),
+            Err(AuthorityError::ObservationExpired)
+        );
     }
 
     #[test]
@@ -744,14 +797,28 @@ mod tests {
         a.issue_observation_challenge(11, at(1)).unwrap();
         a.issue_control_challenge(12, at(1)).unwrap();
         a.refuse();
-        let refused = Err(AuthorityError::InvalidState { phase: Phase::Refused });
+        let refused = Err(AuthorityError::InvalidState {
+            phase: Phase::Refused,
+        });
         assert!(!a.has_live_control(at(2)));
         assert_eq!(a.authorize_observation_delivery(at(2)), refused);
         assert_eq!(a.authorize_submission(lease, ticket, at(2)), refused);
-        assert_eq!(a.respond_observation_challenge(11, at(2)), refused.map(|()| at(0)));
-        assert_eq!(a.respond_control_challenge(lease, 12, at(2)), refused.map(|()| at(0)));
-        assert_eq!(a.issue_input_ticket(lease, ticket, at(2)), refused.map(|()| at(0)));
-        assert_eq!(a.issue_observation_challenge(13, at(2)), refused.map(|()| at(0)));
+        assert_eq!(
+            a.respond_observation_challenge(11, at(2)),
+            refused.map(|()| at(0))
+        );
+        assert_eq!(
+            a.respond_control_challenge(lease, 12, at(2)),
+            refused.map(|()| at(0))
+        );
+        assert_eq!(
+            a.issue_input_ticket(lease, ticket, at(2)),
+            refused.map(|()| at(0))
+        );
+        assert_eq!(
+            a.issue_observation_challenge(13, at(2)),
+            refused.map(|()| at(0))
+        );
         assert_eq!(a.readiness(), ViewReadiness::Unready);
     }
 
@@ -762,7 +829,10 @@ mod tests {
         assert!(!a.apply_resume_boundary(at(3_000_000)));
         a.require_approval().unwrap();
         a.authorize_observation(at(3_000_000)).unwrap();
-        assert_eq!(a.respond_observation_challenge(7, at(3_000_001)), Err(AuthorityError::ChallengeMismatch));
+        assert_eq!(
+            a.respond_observation_challenge(7, at(3_000_001)),
+            Err(AuthorityError::ChallengeMismatch)
+        );
     }
 
     #[test]
@@ -770,8 +840,14 @@ mod tests {
         let (mut a, lease, _) = viewing_with_control(at(0));
         let observation = a.issue_observation_challenge(1, at(1_000_000)).unwrap();
         let control = a.issue_control_challenge(2, at(1_000_000)).unwrap();
-        assert_eq!(a.respond_observation_challenge(1, at(2_900_000)), Ok(observation));
-        assert_eq!(a.respond_control_challenge(lease, 2, at(2_900_000)), Ok(control));
+        assert_eq!(
+            a.respond_observation_challenge(1, at(2_900_000)),
+            Ok(observation)
+        );
+        assert_eq!(
+            a.respond_control_challenge(lease, 2, at(2_900_000)),
+            Ok(control)
+        );
         assert_eq!(observation, at(4_000_000));
         assert_eq!(control, at(4_000_000));
         assert!(!a.has_live_control(at(4_000_000)));
@@ -780,10 +856,19 @@ mod tests {
     #[test]
     fn clock_regression_fences_instead_of_resurrecting_expired_input() {
         let (mut a, lease, ticket) = viewing_with_control(at(0));
-        assert_eq!(a.authorize_submission(lease, ticket, at(1_000_000)), Err(AuthorityError::TicketExpired));
-        assert_eq!(a.authorize_submission(lease, ticket, at(999_999)), Err(AuthorityError::ClockRegression));
+        assert_eq!(
+            a.authorize_submission(lease, ticket, at(1_000_000)),
+            Err(AuthorityError::TicketExpired)
+        );
+        assert_eq!(
+            a.authorize_submission(lease, ticket, at(999_999)),
+            Err(AuthorityError::ClockRegression)
+        );
         assert_eq!(a.phase(), Phase::Closed);
-        assert_eq!(a.authorize_submission(lease, ticket, at(1_000_001)), Err(AuthorityError::ClockRegression));
+        assert_eq!(
+            a.authorize_submission(lease, ticket, at(1_000_001)),
+            Err(AuthorityError::ClockRegression)
+        );
         assert!(!a.has_live_control(at(1_000_001)));
     }
 
@@ -796,8 +881,14 @@ mod tests {
         a.require_approval().unwrap();
         a.authorize_observation(at(0)).unwrap();
         a.mark_view_ready(at(0)).unwrap();
-        assert_eq!(a.authorize_submission(lease, ticket, at(0)), Err(AuthorityError::NoLease));
-        assert_eq!(a.respond_observation_challenge(1, at(0)), Err(AuthorityError::ChallengeMismatch));
+        assert_eq!(
+            a.authorize_submission(lease, ticket, at(0)),
+            Err(AuthorityError::NoLease)
+        );
+        assert_eq!(
+            a.respond_observation_challenge(1, at(0)),
+            Err(AuthorityError::ChallengeMismatch)
+        );
     }
 
     #[test]
@@ -805,11 +896,26 @@ mod tests {
         let (mut a, lease, _) = viewing_with_control(at(0));
         a.issue_observation_challenge(1, at(100_000)).unwrap();
         a.issue_control_challenge(2, at(100_000)).unwrap();
-        assert_eq!(a.issue_observation_challenge(3, at(1_100_000)), Err(AuthorityError::ChallengePending));
-        assert_eq!(a.issue_control_challenge(4, at(1_100_000)), Err(AuthorityError::ChallengePending));
-        assert_eq!(a.respond_observation_challenge(1, at(1_500_000)), Ok(at(3_100_000)));
-        assert_eq!(a.respond_control_challenge(lease, 2, at(1_500_000)), Ok(at(3_100_000)));
-        assert_eq!(a.respond_observation_challenge(1, at(1_500_001)), Err(AuthorityError::ChallengeMismatch));
+        assert_eq!(
+            a.issue_observation_challenge(3, at(1_100_000)),
+            Err(AuthorityError::ChallengePending)
+        );
+        assert_eq!(
+            a.issue_control_challenge(4, at(1_100_000)),
+            Err(AuthorityError::ChallengePending)
+        );
+        assert_eq!(
+            a.respond_observation_challenge(1, at(1_500_000)),
+            Ok(at(3_100_000))
+        );
+        assert_eq!(
+            a.respond_control_challenge(lease, 2, at(1_500_000)),
+            Ok(at(3_100_000))
+        );
+        assert_eq!(
+            a.respond_observation_challenge(1, at(1_500_001)),
+            Err(AuthorityError::ChallengeMismatch)
+        );
     }
 
     #[test]
@@ -818,7 +924,10 @@ mod tests {
         a.issue_observation_challenge(1, at(2_000_000)).unwrap();
         a.respond_observation_challenge(1, at(2_100_000)).unwrap();
         let replacement = InputLeaseId::from_raw(9);
-        assert_eq!(a.grant_lease(replacement, at(3_000_000)), Err(AuthorityError::ControllerCleanupRequired));
+        assert_eq!(
+            a.grant_lease(replacement, at(3_000_000)),
+            Err(AuthorityError::ControllerCleanupRequired)
+        );
         a.revoke_lease();
         assert_eq!(a.grant_lease(replacement, at(3_000_000)), Ok(()));
     }
@@ -826,7 +935,10 @@ mod tests {
     #[test]
     fn deadline_overflow_cannot_mint_a_saturated_challenge() {
         let (mut a, _, _) = viewing_with_control(at(u64::MAX - 3_000_000));
-        assert_eq!(a.issue_observation_challenge(1, at(u64::MAX - 2_000_000)), Err(AuthorityError::DeadlineOverflow));
+        assert_eq!(
+            a.issue_observation_challenge(1, at(u64::MAX - 2_000_000)),
+            Err(AuthorityError::DeadlineOverflow)
+        );
         assert!(a.observation_challenge.is_none());
     }
 }

@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
-//! FrankenRemote core types.
+//! `FrankenRemote` core types.
 //!
-//! This crate owns the vocabulary every other FrankenRemote crate speaks:
+//! This crate owns the vocabulary every other `FrankenRemote` crate speaks:
 //! the distinct identity and generation types that fence stale work (plan
 //! section 7.2), and the single tested limits structure that every parser,
 //! allocator, and FFI boundary consults before doing work (plan section
