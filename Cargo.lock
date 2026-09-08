@@ -477,6 +477,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
+name = "fr-client"
+version = "0.1.0"
+dependencies = [
+ "fr-core",
+ "fr-wire",
+]
+
+[[package]]
 name = "fr-core"
 version = "0.1.0"
 
@@ -501,6 +509,7 @@ name = "fr-native"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "fr-client",
  "fr-core",
  "fr-media",
  "fr-wire",

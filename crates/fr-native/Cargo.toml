@@ -13,6 +13,7 @@ frd = { workspace = true, optional = true }
 asupersync = { workspace = true, optional = true }
 
 [dev-dependencies]
+fr-client.workspace = true
 fr-wire.workspace = true
 frd.workspace = true
 asupersync.workspace = true
