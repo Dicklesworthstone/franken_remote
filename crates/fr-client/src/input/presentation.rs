@@ -211,6 +211,19 @@ impl PresentedInput {
         }
         self.input.action(action, out, now).map_err(Error::Input)
     }
+    /// Use actual local platform held state. This never bypasses terminal view
+    /// or receiver failure; those still require independent host revocation.
+    pub fn reconcile_held(
+        &mut self,
+        observed: fr_core::held_state::HeldState,
+        out: &mut [u8],
+        now: ClientInstant,
+    ) -> Result<Option<super::held::EncodedHeldState>, Error> {
+        self.tick(now)?;
+        self.input
+            .reconcile_held(observed, out, now)
+            .map_err(Error::Input)
+    }
     /// Drain real receipts even after view failure; confirmed effects are not
     /// rolled back by losing presentation and actions are never regenerated.
     pub fn result(&mut self, bytes: &[u8], now: ClientInstant) -> Result<ResultEvent, Error> {

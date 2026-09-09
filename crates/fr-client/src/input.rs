@@ -2,6 +2,7 @@
 //! and terminal host receipts. Encoding consumes an identity: send those bytes
 //! once through the bounded authenticated transport, or stop this owner. Never
 //! regenerate an uncertain action with a fresh ticket. Only metadata is retained.
+pub mod held;
 use fr_core::{
     ids::{InputTicketId, RemoteSessionId},
     input::{
@@ -137,6 +138,8 @@ pub struct InputClient {
     view_until: Option<ClientInstant>,
     next_action: Option<u64>,
     next_pointer: Option<u64>,
+    next_held: Option<u64>,
+    held_after: Option<ClientInstant>,
     pending: [Option<Pending>; MAX_PENDING_ACTIONS],
     receipts: [Option<InputResult>; MAX_PENDING_ACTIONS],
     receipt_cursor: usize,
@@ -183,6 +186,8 @@ impl InputClient {
             view_until: None,
             next_action: Some(0),
             next_pointer: Some(0),
+            next_held: Some(0),
+            held_after: None,
             pending: [None; MAX_PENDING_ACTIONS],
             receipts: [None; MAX_PENDING_ACTIONS],
             receipt_cursor: 0,
