@@ -8,6 +8,7 @@
 pub mod authority;
 pub mod clock;
 pub mod decoder;
+pub mod held_state;
 pub mod input;
 pub mod input_result;
 mod media;

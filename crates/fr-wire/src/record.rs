@@ -114,6 +114,7 @@ pub enum Kind {
     Relative = 0x0043,
     Scroll = 0x0044,
     Text = 0x0045,
+    HeldState = 0x0046,
     InputMode = 0x0047,
     InputResult = 0x0048,
     ClockProbe = 0x0084,
@@ -153,6 +154,7 @@ impl Kind {
             0x0043 => Ok(Self::Relative),
             0x0044 => Ok(Self::Scroll),
             0x0045 => Ok(Self::Text),
+            0x0046 => Ok(Self::HeldState),
             0x0047 => Ok(Self::InputMode),
             0x0048 => Ok(Self::InputResult),
             0x0084 => Ok(Self::ClockProbe),
@@ -182,6 +184,7 @@ impl Kind {
             | Self::Pointer
             | Self::Relative
             | Self::Scroll
+            | Self::HeldState
             | Self::Text
             | Self::InputMode
             | Self::InputResult

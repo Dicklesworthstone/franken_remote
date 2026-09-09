@@ -15,7 +15,9 @@ use crate::{
     },
     time::HostInstant,
 };
+mod held;
 use core::fmt;
+pub use held::{Reconciliation, ReconciliationOutcome};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -252,6 +254,8 @@ pub struct InputSession {
     mode_epoch: u64,
     mode_ticket: Option<InputTicketId>,
     cumulative: (i64, i64),
+    reconciliation_floor: Option<u64>,
+    reconciliation: Option<Reconciliation>,
 }
 impl InputSession {
     pub fn new(
@@ -291,6 +295,8 @@ impl InputSession {
             mode_epoch: 0,
             mode_ticket: Some(credentials.ticket),
             cumulative: (0, 0),
+            reconciliation_floor: None,
+            reconciliation: None,
         })
     }
     /// Immutable locally granted geometry for native factory validation.
