@@ -1,4 +1,4 @@
-name: Verify reviewed admission integration
+name: Verify reviewed input admission
 on:
   workflow_dispatch:
   push:
@@ -24,45 +24,36 @@ jobs:
           rustup show active-toolchain
           sudo apt-get update
           sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
-      - name: Stage exact reviewed source without branch writes
+      - name: Stage exact reviewed input patch without ref writes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 - <<'PY'
           import base64,hashlib,json,os,subprocess
           from pathlib import Path
-          repo=os.environ['GITHUB_REPOSITORY']
           def sha(data):
               return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
-          def read_blob(oid):
-              raw=json.loads(subprocess.check_output(['gh','api',f'repos/{repo}/git/blobs/{oid}']))
-              data=base64.b64decode(raw['content'])
-              assert sha(data)==oid
-              return data
-          changed=['crates/fr-tailnet/src/lib.rs','crates/fr-tailnet/src/local.rs','crates/fr-tailnet/src/local/tests.rs','crates/frd/Cargo.toml','crates/frd/src/media.rs','Cargo.lock']
-          new={
-              'crates/fr-tailnet/src/lease.rs':'a71a4611e817d2a39806296b47601acbae91cdc1',
-              'crates/frd/examples/tailnet_media_check.rs':'598390a5c828dcdeea323f05d8621881270a9b08',
+          expected={
+              'crates/frd/src/input_agent.rs':('712c0f7cb2de81d6dd4cfb0cd7370f25085fe47b','54f3fc9e36c9be5f9daafa5926ad940369660b8e'),
+              'crates/frd/examples/tailnet_media_check.rs':('598390a5c828dcdeea323f05d8621881270a9b08','5f872be873f7b2b4a758c83667dffa4e14b0b578'),
           }
-          before={p:sha(Path(p).read_bytes()) for p in changed}
-          patch=Path(os.environ['RUNNER_TEMP'],'admission.patch')
-          patch.write_bytes(read_blob('566af0f39167df4ef8815e8b9a06a56ed5eb6241'))
-          actual=set(subprocess.check_output(['git','apply','--numstat',str(patch)],text=True).splitlines())
-          assert {line.split('\t',2)[2] for line in actual}==set(changed)
+          for path,(before,_) in expected.items():
+              assert sha(Path(path).read_bytes())==before,f'Concurrent source change: {path}'
+          oid='f6a871557263944828678a802353e4e1ec4c9518'
+          blob=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
+          data=base64.b64decode(blob['content'])
+          assert sha(data)==oid
+          patch=Path(os.environ['RUNNER_TEMP'],'input-admission.patch')
+          patch.write_bytes(data)
+          stats=subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
+          assert {line.split('\t',2)[2] for line in stats.splitlines()}==set(expected)
           subprocess.run(['git','apply','--check',str(patch)],check=True)
           subprocess.run(['git','apply',str(patch)],check=True)
-          for path,oid in new.items():
-              target=Path(path)
-              assert not target.exists(),f'Concurrent source exists: {target}'
-              target.parent.mkdir(parents=True,exist_ok=True)
-              target.write_bytes(read_blob(oid))
-          paths=changed+list(new)
-          Path(os.environ['RUNNER_TEMP'],'admission-paths.json').write_text(json.dumps(paths))
-          Path(os.environ['RUNNER_TEMP'],'admission-before.json').write_text(json.dumps(before))
-          print(json.dumps({'staged_on':os.environ['GITHUB_SHA'],'before':before}))
+          for path,(_,after) in expected.items():
+              assert sha(Path(path).read_bytes())==after,path
+          print('EXACT_INPUT_PATCH_ON',os.environ['GITHUB_SHA'])
           PY
-          cargo metadata --locked --format-version=1 > "$RUNNER_TEMP/admission-metadata.json"
-      - name: Verify committed workspace plus exact admission changes
+      - name: Verify full workspace and eight admission scenarios
         run: |
           ./scripts/verify.sh fast
           ./scripts/verify.sh docs
@@ -70,26 +61,23 @@ jobs:
           python3 - <<'PY'
           import json,os,subprocess
           from pathlib import Path
-          artifacts=[json.loads(line) for line in Path(os.environ['RUNNER_TEMP'],'example-build.jsonl').read_text().splitlines() if line.startswith('{')]
-          paths={x['executable'] for x in artifacts if x.get('executable') and x.get('target',{}).get('name')=='tailnet_media_check'}
+          rows=[json.loads(line) for line in Path(os.environ['RUNNER_TEMP'],'example-build.jsonl').read_text().splitlines() if line.startswith('{')]
+          paths={row['executable'] for row in rows if row.get('executable') and row.get('target',{}).get('name')=='tailnet_media_check'}
           assert len(paths)==1
-          executable=Path(next(iter(paths))).resolve(strict=True)
-          assert executable.is_relative_to(Path('target').resolve())
-          subprocess.run(['sudo','--',str(executable)],check=True)
+          exe=Path(next(iter(paths))).resolve(strict=True)
+          assert exe.is_relative_to(Path('target').resolve())
+          subprocess.run(['sudo','--',str(exe)],check=True)
           PY
           git diff --check
-      - name: Retain exact verified source for explicit publication
+      - name: Export two verified source blobs for explicit publication
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 - <<'PY'
           import base64,json,os,subprocess
           from pathlib import Path
-          paths=json.loads(Path(os.environ['RUNNER_TEMP'],'admission-paths.json').read_text())
-          before=json.loads(Path(os.environ['RUNNER_TEMP'],'admission-before.json').read_text())
-          for path in paths:
-              data=Path(path).read_bytes()
-              body=json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()})
-              result=subprocess.run(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,capture_output=True,check=True)
-              print(json.dumps({'path':path,'before':before.get(path),'sha':json.loads(result.stdout)['sha'],'verified_against':os.environ['GITHUB_SHA']}))
+          for path in ['crates/frd/src/input_agent.rs','crates/frd/examples/tailnet_media_check.rs']:
+              body=json.dumps({'encoding':'base64','content':base64.b64encode(Path(path).read_bytes()).decode()})
+              response=subprocess.run(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,capture_output=True,check=True)
+              print(json.dumps({'path':path,'sha':json.loads(response.stdout)['sha'],'verified_against':os.environ['GITHUB_SHA']}))
           PY
