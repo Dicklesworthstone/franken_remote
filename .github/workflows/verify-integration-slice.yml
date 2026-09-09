@@ -1,20 +1,22 @@
-name: Verify staged integration slice
+name: Verify native QUIC integration
 on:
   workflow_dispatch:
   push:
     branches: [main]
     paths:
       - '.github/workflows/verify-integration-slice.yml'
-      - 'crates/fr-wire/src/lib.rs'
+      - 'crates/fr-transport/**'
+      - 'crates/frd/**'
+      - 'crates/fr-wire/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
 permissions:
-  contents: write
-
+  contents: read
 env:
   CARGO_BUILD_JOBS: '1'
   CARGO_PROFILE_DEV_DEBUG: '0'
   CARGO_PROFILE_TEST_DEBUG: '0'
   CARGO_INCREMENTAL: '0'
-
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -28,90 +30,34 @@ jobs:
           rustup show active-toolchain
           sudo apt-get update
           sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
-      - name: Install exact reviewed QUIC source without ref writes
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Verify committed native QUIC and full workspace
         run: |
-          python3 - <<'PY'
-          import base64,gzip,json,os,subprocess,hashlib
-          from pathlib import Path
-          repo=os.environ['GITHUB_REPOSITORY']
-          def blob_sha(data):
-              return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
-          chunks=[
-              '94231bb07e105d93320d40b1d2ec42e255698fc5',
-              '6aa5194a6f9e3f51bee2167439caca2f212c5b05',
-              'eef0a2ab9a3fab6b5a6a12c05ffa36d02e0b30b5',
-              '5d8c3a1ffe24a347b4f3770d114dbbb87ddd9f81',
-              '9224356fddcd04c8eba8ed9fc9ff795c681f1f18',
-          ]
-          bundle=b''
-          for sha in chunks:
-              blob=json.loads(subprocess.check_output(['gh','api',f'repos/{repo}/git/blobs/{sha}']))
-              data=base64.b64decode(blob['content'])
-              assert blob_sha(data)==sha and len(data)<=5500
-              bundle+=data
-          assert blob_sha(bundle)=='eb206455c51e938d75cfbec351c6cdbddcbf9352'
-          source=json.loads(gzip.decompress(bundle))
-          expected={
-              'crates/fr-transport/Cargo.toml':'d40f7e5e183b411248bdcaecd57f2f136ca4fd33',
-              'crates/fr-transport/src/lib.rs':'5b6c059bc0e7675e899c240503ed5897f28637bb',
-              'crates/fr-transport/src/quic.rs':'4fd1490f26e9dce1104be69e4d50818b9e95f359',
-              'crates/fr-transport/tests/native_quic.rs':'a6686deb2dae7df4b578cf84884fa27e253df9aa',
-              'crates/fr-transport/tests/support/mod.rs':'0830f0b6819d0077abef43583e195d379642523d',
-              'QUIC_RECORDS.md':'1040d87feb08616e64ef1565587819b2c26c9ae0',
-          }
-          assert source.keys()==expected.keys()
-          for path,text in source.items():
-              target=Path(path)
-              data=text.encode()
-              assert not target.exists(),f'Concurrent implementation already present: {path}'
-              assert len(data)<40000 and blob_sha(data)==expected[path],path
-              target.parent.mkdir(parents=True,exist_ok=True)
-              target.write_bytes(data)
-          root=Path('Cargo.toml')
-          old={p:blob_sha(Path(p).read_bytes()) for p in ['Cargo.toml','Cargo.lock']}
-          text=root.read_text()
-          assert text.count('asupersync = { version = "=0.4.10", default-features = false }')==1
-          anchor='fr-wire = { path = "crates/fr-wire" }'
-          assert text.count(anchor)==1 and 'fr-transport = ' not in text
-          root.write_text(text.replace(anchor,anchor+'\nfr-transport = { path = "crates/fr-transport" }'))
-          print(json.dumps({'staged_on':os.environ['GITHUB_SHA'],'original_blobs':old}))
-          Path(os.environ['RUNNER_TEMP'],'slice-paths.json').write_text(json.dumps(list(expected)+['Cargo.toml','Cargo.lock']))
-          PY
-          cargo metadata --format-version=1 > "$RUNNER_TEMP/quic-metadata.json"
-          git diff -- Cargo.toml Cargo.lock
-      - name: Retain exact staged checkout before verification
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/fr-quic-source"
-          git ls-files -z --cached --others --exclude-standard | tar --null -T - -czf "$RUNNER_TEMP/fr-quic-source/source.tar.gz"
-          git rev-parse HEAD > "$RUNNER_TEMP/fr-quic-source/base-commit.txt"
-          cp "$RUNNER_TEMP/slice-paths.json" "$RUNNER_TEMP/fr-quic-source/"
-          (cd "$RUNNER_TEMP/fr-quic-source" && sha256sum source.tar.gz > SHA256SUMS)
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: staged-quic-source
-          path: ${{ runner.temp }}/fr-quic-source/
-          retention-days: 1
-          if-no-files-found: error
-      - name: Verify actual source and live Asupersync QUIC
-        run: |
+          cargo test -p fr-transport --locked -- --test-threads=4
           ./scripts/verify.sh fast
           ./scripts/verify.sh docs
-          cargo test -p fr-transport --test native_quic --locked -- --test-threads=4
-      - name: Retain verified source blobs for explicit commit
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Retain exact TLS build inputs for constrained native development
+        if: always()
         run: |
-          git diff --check
-          python3 - <<'PY'
-          import base64,json,os,subprocess
-          from pathlib import Path
-          paths=json.loads(Path(os.environ['RUNNER_TEMP'],'slice-paths.json').read_text())
-          for path in paths:
-              data=Path(path).read_bytes()
-              body=json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()})
-              result=subprocess.run(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,capture_output=True,check=True)
-              print(json.dumps({'path':path,'sha':json.loads(result.stdout)['sha'],'verified_against':os.environ['GITHUB_SHA']}))
-          PY
+          set -euo pipefail
+          root="$RUNNER_TEMP/fr-quic-inputs"
+          mkdir -p "$root/libraries"
+          find target/debug -type f \( -name '*.rlib' -o -name '*.rmeta' -o -name '*.so' -o -name '*.a' \) -exec cp -n '{}' "$root/libraries/" \;
+          test -n "$(find "$root/libraries" -name 'libasupersync*.rlib' -print -quit)"
+          rustc -Vv > "$root/compiler.txt"
+          git rev-parse HEAD > "$root/source-commit.txt"
+          cp Cargo.lock "$root/Cargo.lock"
+          git archive --format=tar.gz -o "$root/source.tar.gz" HEAD
+          tar -czf "$root/libraries.tar.gz" -C "$root" libraries
+          (cd "$root" && sha256sum *.tar.gz > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: committed-quic-build-inputs
+          path: |
+            ${{ runner.temp }}/fr-quic-inputs/*.tar.gz
+            ${{ runner.temp }}/fr-quic-inputs/*.txt
+            ${{ runner.temp }}/fr-quic-inputs/Cargo.lock
+            ${{ runner.temp }}/fr-quic-inputs/SHA256SUMS
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error

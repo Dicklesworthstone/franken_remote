@@ -30,6 +30,7 @@ fr-core = { path = "crates/fr-core" }
 fr-lab = { path = "crates/fr-lab" }
 fr-media = { path = "crates/fr-media" }
 fr-wire = { path = "crates/fr-wire" }
+fr-transport = { path = "crates/fr-transport" }
 fr-native = { path = "crates/fr-native" }
 frd = { path = "crates/frd" }
 fr-client = { path = "crates/fr-client" }
