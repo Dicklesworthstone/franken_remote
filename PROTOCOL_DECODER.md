@@ -49,3 +49,13 @@ not a network/codec qualification result. Reproduce with:
 cargo test -p fr-wire --locked
 cargo clippy -p fr-wire --all-targets --locked -- -D warnings
 ```
+
+## Implemented native startup
+
+Source `6dcfc2b` connects these records to the real supervised native decoder and
+Asupersync QUIC. Its nine integration tests include network-carried configuration,
+first-IDR decoding and actual X11 readback, then a dependent picture through the
+same decoder and receiver. The already installed channel/admission setup remains
+an explicit fixture, not a live-tailnet claim. See [DECODER_STARTUP.md](DECODER_STARTUP.md)
+for exact ownership, timeouts, supported native subset, verification provenance,
+and remaining application-level integration.

@@ -1,11 +1,21 @@
-name: Verify reviewed network decoder startup
+name: Verify network decoder startup
 on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['.github/workflows/source-maintenance.yml']
+    paths:
+      - '.github/workflows/source-maintenance.yml'
+      - 'crates/fr-wire/src/decoder.rs'
+      - 'crates/fr-wire/src/record.rs'
+      - 'crates/fr-wire/tests/decoder.rs'
+      - 'crates/frd/src/media.rs'
+      - 'crates/frd/src/media/decoder_startup.rs'
+      - 'crates/fr-native/tests/decoder_startup.rs'
+      - 'crates/fr-transport/src/quic.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
 permissions:
-  contents: write
+  contents: read
 env:
   CARGO_BUILD_JOBS: '1'
   CARGO_PROFILE_DEV_DEBUG: '0'
@@ -19,79 +29,19 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
-      - name: Stage exact reviewed decoder startup without ref writes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import base64,gzip,hashlib,json,os,subprocess
-          from pathlib import Path
-          expected={
-            'crates/fr-native/tests/decoder_startup.rs':(None,'568b00e4b8c959ed50d704afe5058eb6929ec515'),
-            'crates/fr-transport/src/quic.rs':('a66d3aef1e44cfeb6fae6554959a09058afbb720','bafe28855029f5601e1a811d709a204cff0c6793'),
-            'crates/frd/src/media.rs':('bfc7dc50e7dae0a2a3d56eb3cefbde6d7cf5d828','aa2f0bd27b25d58b63c26ca485bf7348e5e700d2'),
-            'crates/frd/src/media/decoder_startup.rs':(None,'4bcc2f82b9f006a2a33fe3bfa39e285bfeec0990'),
-          }
-          def sha(data): return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
-          def blob(oid):
-            raw=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
-            data=base64.b64decode(raw['content'])
-            assert sha(data)==oid
-            return data
-          for p,(before,after) in expected.items():
-            if before is None: assert not Path(p).exists(),p
-            else: assert sha(Path(p).read_bytes())==before,p
-          parts=['775e921bd7216dc9cfec02467ec9379afd53edb5','7e96007d8bcb7962332055c3321de6af84f80eea','12428bd8e79f900012e2b16ad18e9826e15cb472','9089d874f7603371acb074e04526c29a0175b4d2']
-          data=[blob(oid) for oid in parts]
-          assert all(len(part)==4288 for part in data)
-          compressed=base64.b64decode(b''.join(data),validate=True)
-          assert sha(compressed)=='b3b43f18142206c7f87645b9dbdba02383a597ce'
-          patch=gzip.decompress(compressed)
-          assert len(patch)==57023
-          assert hashlib.sha256(patch).hexdigest()=='b57461bdb02a6a660640b5bcf59c0c606876add8269dd838d4eed304952e5c50'
-          path=Path(os.environ['RUNNER_TEMP'],'decoder-startup.patch');path.write_bytes(patch)
-          actual=subprocess.check_output(['git','apply','--numstat',str(path)],text=True)
-          assert {line.split('\t',2)[2] for line in actual.splitlines()}==set(expected)
-          subprocess.run(['git','apply','--check',str(path)],check=True)
-          subprocess.run(['git','apply',str(path)],check=True)
-          for p,(before,after) in expected.items(): assert sha(Path(p).read_bytes())==after,p
-          # A drive slice is not a delivery acknowledgement. The correction waits
-          # for the actual reply and requires its exact rejection, not a timeout.
-          fix=Path(os.environ['RUNNER_TEMP'],'decoder-arrival.patch')
-          fix.write_bytes(blob('974fbb86f7a88ab0ca63e9b058494677e666778d'))
-          actual=subprocess.check_output(['git','apply','--numstat',str(fix)],text=True)
-          assert {line.split('\t',2)[2] for line in actual.splitlines()}=={'crates/fr-native/tests/decoder_startup.rs'}
-          subprocess.run(['git','apply','--check',str(fix)],check=True)
-          subprocess.run(['git','apply',str(fix)],check=True)
-          expected['crates/fr-native/tests/decoder_startup.rs']=(None,'35ba834e6cf00c09e141dde3989a28a3b469d18f')
-          for p,(before,after) in expected.items(): assert sha(Path(p).read_bytes())==after,p
-          Path(os.environ['RUNNER_TEMP'],'decoder-paths.json').write_text(json.dumps(expected))
-          print('Candidate hashes verified on',os.environ['GITHUB_SHA'])
-          PY
       - name: Install pinned compiler and native SDKs
         run: |
           rustup show active-toolchain
           sudo apt-get update
           sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
-      - name: Verify full candidate workspace
+      - name: Verify exact committed workspace
         run: |
           ./scripts/verify.sh fast
           ./scripts/verify.sh docs
-          cargo test -p fr-native --features linux-media --test decoder_startup --locked -- --nocapture
-          git diff --check
-      - name: Export exact verified source objects without changing branches
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Exercise actual network configuration and native decoder startup
         run: |
-          python3 - <<'PY'
-          import base64,hashlib,json,os,subprocess
-          from pathlib import Path
-          expected=json.loads(Path(os.environ['RUNNER_TEMP'],'decoder-paths.json').read_text())
-          for path,(before,after) in expected.items():
-            data=Path(path).read_bytes()
-            assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()==after
-            body=json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()})
-            result=subprocess.run(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,capture_output=True,check=True)
-            assert json.loads(result.stdout)['sha']==after
-            print(json.dumps({'path':path,'before':before,'sha':after,'verified_against':os.environ['GITHUB_SHA']}))
-          PY
+          cargo test -p fr-native --features linux-media --test decoder_startup --locked -- --nocapture
+      - name: Confirm verification did not modify tracked source
+        run: |
+          git diff --exit-code
+          git diff --cached --exit-code
