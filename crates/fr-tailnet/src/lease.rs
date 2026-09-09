@@ -110,6 +110,11 @@ impl Admission {
         owner.lease.check()?;
         Ok(owner)
     }
+    /// Retained authority context. Session deadlines use this exact clock;
+    /// do not compare admission timestamps with another runtime clock.
+    pub fn context(&self) -> Cx {
+        self.lease.cx.clone()
+    }
     pub fn lease(&self) -> Lease {
         self.lease.clone()
     }
