@@ -8,6 +8,10 @@ use fr_wire::{
     RecoveryChunk, RepairRange, WireError, decode_fragment, decode_progress, decode_recovery,
     encode_repair,
 };
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 const SLOTS: usize = ProtocolLimits::REASSEMBLY_WINDOW_CEILING as usize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +85,7 @@ pub struct ReceivedPicture {
     epoch: MediaEpoch,
     bindings: MediaBindings,
     queue_fresh: bool,
+    display_until_us: u64,
     bytes: TrackedBytes,
 }
 impl fmt::Debug for ReceivedPicture {
@@ -107,6 +112,43 @@ impl ReceivedPicture {
     /// clock-uncertainty, visibility and current authority checks.
     pub const fn within_display_queue_budget(&self) -> bool {
         self.queue_fresh
+    }
+}
+
+/// Successful decoder completion, issued only after the receiver accepts the
+/// matching in-flight picture. This certifies neither source freshness nor
+/// visibility. It owns no pixels and does not release a retained picture budget.
+#[derive(Debug)]
+pub struct DecodedFrame {
+    scope: Arc<AtomicBool>,
+    descriptor: FrameDescriptor,
+    epoch: MediaEpoch,
+    bindings: MediaBindings,
+    display_until_us: u64,
+}
+impl DecodedFrame {
+    pub(crate) fn belongs_to(&self, scope: &Arc<AtomicBool>) -> bool {
+        Arc::ptr_eq(&self.scope, scope) && self.scope.load(Ordering::Acquire)
+    }
+    pub(crate) fn into_parts(self) -> (FrameDescriptor, MediaEpoch, MediaBindings, u64) {
+        (
+            self.descriptor,
+            self.epoch,
+            self.bindings,
+            self.display_until_us,
+        )
+    }
+    pub const fn descriptor(&self) -> FrameDescriptor {
+        self.descriptor
+    }
+    pub const fn epoch(&self) -> MediaEpoch {
+        self.epoch
+    }
+    pub const fn bindings(&self) -> MediaBindings {
+        self.bindings
+    }
+    pub const fn display_deadline_us(&self) -> u64 {
+        self.display_until_us
     }
 }
 
@@ -261,6 +303,7 @@ struct InFlight {
 /// One receiver subscription. Its fixed slot table, incomplete pictures and
 /// outstanding decoder inputs are bounded; it cannot be cloned into two owners.
 pub struct ReceivePipeline {
+    scope: Arc<AtomicBool>,
     config: ReceiveConfig,
     budget: MediaBudget,
     state: ReceiveState,
@@ -290,6 +333,7 @@ impl ReceivePipeline {
             return Err(DeliveryError::ResourceLimit);
         }
         Ok(Self {
+            scope: Arc::new(AtomicBool::new(true)),
             config,
             budget,
             state: ReceiveState::AwaitingConfiguration,
@@ -302,6 +346,9 @@ impl ReceivePipeline {
             in_flight: None,
             progress: None,
         })
+    }
+    pub(crate) fn presentation_scope(&self) -> (Arc<AtomicBool>, ReceiveConfig) {
+        (self.scope.clone(), self.config)
     }
     pub const fn state(&self) -> ReceiveState {
         self.state
@@ -544,6 +591,7 @@ impl ReceivePipeline {
             epoch: self.config.epoch,
             bindings: self.config.bindings,
             queue_fresh: now < a.display_until,
+            display_until_us: a.display_until,
             bytes: a.bytes,
         }))
     }
@@ -578,6 +626,23 @@ impl ReceivePipeline {
         self.state = ReceiveState::Streaming;
         Ok(())
     }
+    /// Preserve the original display deadline after actual decoder completion.
+    /// A delayed decoder cannot turn a fresh-at-dequeue snapshot into fresh video.
+    pub fn complete_decode(
+        &mut self,
+        picture: &ReceivedPicture,
+        now: u64,
+    ) -> Result<DecodedFrame, DeliveryError> {
+        self.acknowledge_decode(picture, true, now)?;
+        Ok(DecodedFrame {
+            scope: self.scope.clone(),
+            descriptor: picture.descriptor,
+            epoch: picture.epoch,
+            bindings: picture.bindings,
+            display_until_us: picture.display_until_us,
+        })
+    }
+
     /// Emit at most one bounded repair request into caller-owned storage.
     /// Repeated polls cannot extend frame lifetime or create unbounded requests.
     pub fn repair_request(
@@ -685,6 +750,7 @@ impl ReceivePipeline {
             return Err(DeliveryError::StaleGeneration);
         }
         self.clear();
+        self.scope = Arc::new(AtomicBool::new(true));
         self.config.epoch = epoch;
         self.config.bindings = bindings;
         self.state = ReceiveState::AwaitingConfiguration;
@@ -696,6 +762,7 @@ impl ReceivePipeline {
         self.state = ReceiveState::Closed;
     }
     fn clear(&mut self) {
+        self.scope.store(false, Ordering::Release);
         for slot in &mut self.slots {
             *slot = None;
         }
@@ -721,5 +788,11 @@ impl ReceivePipeline {
         }
         self.last_now = Some(now);
         Ok(())
+    }
+}
+
+impl Drop for ReceivePipeline {
+    fn drop(&mut self) {
+        self.scope.store(false, Ordering::Release);
     }
 }
