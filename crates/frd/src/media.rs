@@ -26,6 +26,7 @@ use std::{
     time::Duration,
 };
 mod capture_update;
+pub mod renewal;
 pub use capture_update::CaptureUpdate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +75,7 @@ pub struct ObservationControl {
     authority: Arc<Mutex<SessionAuthority>>,
     cx: Cx,
     admission: Option<fr_tailnet::Lease>,
+    renewal_attached: Arc<std::sync::atomic::AtomicBool>,
 }
 impl ObservationControl {
     pub fn new(cx: Cx, mut authority: SessionAuthority) -> Result<Self, Error> {
@@ -84,6 +86,7 @@ impl ObservationControl {
             authority: Arc::new(Mutex::new(authority)),
             cx,
             admission: None,
+            renewal_attached: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
     /// Bind the already locally approved application authority to live Tailscale

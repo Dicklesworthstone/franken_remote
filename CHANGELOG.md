@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-09-09 — Observation renewal over session control
+
+- `d6b01fc`: implement the bounded Challenge/ChallengeResponse codecs and a one-response viewer owner. Preserve full session/scope bindings, opaque host deadlines, exact bytes across backpressure, replay refusal and redacted diagnostics.
+- `aca5fa2`: attach one renewal owner to the existing approved observation and actual QUIC control streams. Timely matching responses install the original issue-time deadline. Queuing, ACKs, media traffic and control-scope responses do not renew observation. Unsent expiry, peer FIN/RESET, failed or abandoned I/O and owner drop end observation; connection replacement cannot redirect old challenges.
+
+Twenty new codec, responder and real localhost UDP/TLS tests pass. The local selection totals 295 tests, zero failed or ignored, with strict selected Clippy and formatting. Runtime-bound checks rebuild first-party sources against retained matching Asupersync TLS libraries, not a fresh dependency build. Source `d6b01fc` also passed complete native-workspace GitHub verification in run 34373509056; the later combined revision is checked separately. No Asupersync release or dependency pin was changed.
+
+Observation renewal is separate from Tailscale revalidation, local consent, source/presentation freshness, input tickets and control-lease renewal. This adds no listener or graphical lifecycle. See [PROTOCOL_AUTHORITY.md](PROTOCOL_AUTHORITY.md) for exact bytes, integration and evidence.
+
 ## 2026-09-09 — Installed Tailscale admission through final media/input effects
 
 - `a1e3c1`: implement the Linux installed-LocalAPI boundary with root Unix peer credentials, bounded Asupersync HTTP, consistent status/WhoIs snapshots, exact node addresses, explicit sharing scope and per-connection app-capability grants. No prefix/DNS membership inference, embedded VPN, new runtime, policy mutation or public listener.
