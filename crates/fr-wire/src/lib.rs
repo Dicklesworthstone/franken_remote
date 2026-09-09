@@ -6,6 +6,7 @@
 //! an admitted binding before using them. No runtime or codec is linked here.
 
 pub mod authority;
+pub mod clock;
 pub mod input;
 pub mod input_result;
 mod media;

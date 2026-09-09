@@ -113,6 +113,8 @@ pub enum Kind {
     Text = 0x0045,
     InputMode = 0x0047,
     InputResult = 0x0048,
+    ClockProbe = 0x0084,
+    ClockReply = 0x0085,
 }
 impl Kind {
     pub(crate) const fn initial(self) -> bool {
@@ -147,6 +149,8 @@ impl Kind {
             0x0045 => Ok(Self::Text),
             0x0047 => Ok(Self::InputMode),
             0x0048 => Ok(Self::InputResult),
+            0x0084 => Ok(Self::ClockProbe),
+            0x0085 => Ok(Self::ClockReply),
             _ => Err(WireError::UnsupportedKind),
         }
     }
@@ -171,7 +175,9 @@ impl Kind {
             | Self::Scroll
             | Self::Text
             | Self::InputMode
-            | Self::InputResult => None,
+            | Self::InputResult
+            | Self::ClockProbe
+            | Self::ClockReply => None,
         }
     }
 }
