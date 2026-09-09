@@ -98,6 +98,8 @@ pub enum Kind {
     SelectedConfiguration = 0x0003,
     ApprovalRequired = 0x0010,
     SessionOpened = 0x0011,
+    Challenge = 0x0015,
+    ChallengeResponse = 0x0016,
     BindingAccepted = 0x001c,
     Recovery = 0x0032,
     Fragment = 0x0034,
@@ -130,6 +132,8 @@ impl Kind {
             0x0003 => Ok(Self::SelectedConfiguration),
             0x0010 => Ok(Self::ApprovalRequired),
             0x0011 => Ok(Self::SessionOpened),
+            0x0015 => Ok(Self::Challenge),
+            0x0016 => Ok(Self::ChallengeResponse),
             0x001c => Ok(Self::BindingAccepted),
             0x0032 => Ok(Self::Recovery),
             0x0034 => Ok(Self::Fragment),
@@ -157,6 +161,8 @@ impl Kind {
             | Self::SelectedConfiguration
             | Self::ApprovalRequired
             | Self::SessionOpened
+            | Self::Challenge
+            | Self::ChallengeResponse
             | Self::BindingAccepted
             | Self::Key
             | Self::Button
