@@ -723,3 +723,6 @@ fn malformed_action_payload_revokes_the_attachment_without_a_native_effect() {
         assert!(shutdown.handoff_safe());
     });
 }
+
+#[path = "input_quic/held.rs"]
+mod held;

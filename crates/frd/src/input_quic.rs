@@ -15,7 +15,7 @@ use fr_transport::quic::{
     StreamRoute,
 };
 use fr_wire::{
-    WireError,
+    Kind, WireError,
     input::{InputDelivery, InputDirection, MAX_INPUT_RECORD_BYTES},
     input_result::{INPUT_RESULT_BYTES, InputResult, encode_input_result},
 };
@@ -104,11 +104,14 @@ pub enum Progress {
     ReceiptQueued(InputResult),
     ObsoletePointer,
     Authority(Result<HostInstant, Refusal>),
+    /// Local native reconciliation outcome, not a peer acknowledgement.
+    Reconciliation(Reply),
     Stopped,
 }
 #[derive(Clone, Copy)]
 enum Command {
     Input,
+    Reconcile,
     Authority,
 }
 struct Pending {
@@ -129,6 +132,7 @@ pub struct QuicInput {
     command: Option<Command>,
     pending: Option<Pending>,
     last_reply: Option<InputReply>,
+    last_reconciliation: Option<Reply>,
 }
 impl QuicInput {
     /// `cx` must be the same clock/authority region used to create the agent and
@@ -167,6 +171,7 @@ impl QuicInput {
             command: None,
             pending: None,
             last_reply: None,
+            last_reconciliation: None,
         })
     }
     pub fn control(&self) -> Control {
@@ -177,6 +182,11 @@ impl QuicInput {
     }
     pub const fn last_reply(&self) -> Option<InputReply> {
         self.last_reply
+    }
+    /// Retains actual release prefixes/unknown effects even after disconnect.
+    /// A reconciliation is not an action and has no fabricated `InputResult`.
+    pub const fn last_reconciliation(&self) -> Option<Reply> {
+        self.last_reconciliation
     }
     pub fn pending_receipt(&self) -> Option<InputResult> {
         self.pending.as_ref().map(|p| p.result)
@@ -209,6 +219,14 @@ impl QuicInput {
     fn collect(&mut self) -> Result<Progress, Error> {
         match self.command {
             None => Ok(Progress::Idle),
+            Some(Command::Reconcile) => {
+                let Some(reply) = self.agent.try_reply().map_err(Error::Agent)? else {
+                    return Ok(Progress::NativePending);
+                };
+                self.command = None;
+                self.last_reconciliation = Some(reply);
+                Ok(Progress::Reconciliation(reply))
+            }
             Some(Command::Authority) => {
                 let Some(reply) = self.agent.try_reply().map_err(Error::Agent)? else {
                     return Ok(Progress::NativePending);
@@ -308,9 +326,24 @@ impl QuicInput {
         if !self.can_accept_input() {
             return Ok(Disposition::Blocked);
         }
-        match self.agent.submit(bytes, delivery) {
+        // Dispatch only: the native agent validates the entire immutable record
+        // before copying it. A kind byte alone never authorizes reconciliation.
+        let reconciliation = delivery == InputDelivery::Reliable
+            && bytes
+                .get(6..8)
+                .is_some_and(|kind| kind == (Kind::HeldState as u16).to_be_bytes());
+        let result = if reconciliation {
+            self.agent.reconcile_held(bytes)
+        } else {
+            self.agent.submit(bytes, delivery)
+        };
+        match result {
             Ok(()) => {
-                self.command = Some(Command::Input);
+                self.command = Some(if reconciliation {
+                    Command::Reconcile
+                } else {
+                    Command::Input
+                });
                 Ok(Disposition::Consumed)
             }
             Err(input_agent::Error::Backpressure | input_agent::Error::Stopped) => {
