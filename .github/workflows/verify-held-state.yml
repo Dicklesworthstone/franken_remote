@@ -40,7 +40,7 @@ jobs:
               'crates/frd/src/input_quic.rs': 'be93069c31de1cfa67dd297e44885203820932ab',
               'crates/frd/tests/input_agent_results.rs': '873a407ad1a4d03677add85656757f85ef102bd7',
               'crates/frd/tests/input_agent_results/held.rs': None,
-              'crates/fr-transport/src/quic.rs': 'a66d3aef1e44cfeb6fae6554959a09058afbb720',
+              'crates/fr-transport/src/quic.rs': 'bafe28855029f5601e1a811d709a204cff0c6793',
               'crates/fr-native/tests/input_quic.rs': '7cc520a5b9a0ffa99f7696a48495134898fa51b4',
               'crates/fr-native/tests/input_quic/held.rs': None,
           }
@@ -76,10 +76,33 @@ jobs:
           patch.write_bytes(patch_bytes)
           stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
           assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(after)
-          subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
-          subprocess.run(['git', 'apply', str(patch)], check=True)
+          route_path = 'crates/fr-transport/src/quic.rs'
+          subprocess.run(['git', 'apply', '--check', f'--exclude={route_path}', str(patch)], check=True)
+          subprocess.run(['git', 'apply', f'--exclude={route_path}', str(patch)], check=True)
           for path, expected in after.items():
-              assert sha(Path(path).read_bytes()) == expected, path
+              if path != route_path:
+                  assert sha(Path(path).read_bytes()) == expected, path
+          # Preserve the independently committed decoder-route extension exactly.
+          enum_addition = b'    /// Decoder configuration and first-frame acknowledgements, one ordered lane.\n    DecoderReplies,\n'
+          arm_addition = b'            Self::DecoderReplies => matches!(kind, 0x0031 | 0x0033),\n'
+          current = Path(route_path).read_bytes()
+          assert current.count(enum_addition) == 1 and current.count(arm_addition) == 1
+          original = current.replace(enum_addition, b'').replace(arm_addition, b'')
+          assert sha(original) == 'a66d3aef1e44cfeb6fae6554959a09058afbb720'
+          isolated = Path(os.environ['RUNNER_TEMP'], 'held-route-merge')
+          isolated_file = isolated / route_path
+          isolated_file.parent.mkdir(parents=True, exist_ok=True)
+          isolated_file.write_bytes(original)
+          subprocess.run(['git', 'apply', f'--include={route_path}', str(patch)], cwd=isolated, check=True)
+          merged = isolated_file.read_bytes()
+          assert sha(merged) == after[route_path]
+          enum_anchor = b'    InputActions,\n'
+          arm_anchor = b'            Self::Exact(expected) => kind == expected,\n'
+          assert merged.count(enum_anchor) == 1 and merged.count(arm_anchor) == 1
+          merged = merged.replace(enum_anchor, enum_anchor + enum_addition).replace(arm_anchor, arm_anchor + arm_addition)
+          assert merged.replace(enum_addition, b'').replace(arm_addition, b'') == isolated_file.read_bytes()
+          Path(route_path).write_bytes(merged)
+          after[route_path] = sha(merged)
           route_test = Path('crates/fr-transport/tests/native_quic.rs')
           data = route_test.read_bytes()
           assert sha(data) == '0e1e881e6ce0fb4b459c56d7fc77649c4a29e015'
