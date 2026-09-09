@@ -10,7 +10,9 @@ use fr_media::{
     access_unit::EncodedAccessUnit,
     delivery::{BudgetUsage, MediaBindings, SendError},
 };
-use fr_transport::quic::{self, DatagramRoute, QuicRecords, Route, StreamRoute};
+use fr_transport::quic::{
+    self, DatagramRoute, Messages, Priority, QuicRecords, Route, StreamRoute,
+};
 use fr_wire::Channel;
 use std::time::Duration;
 
@@ -43,10 +45,13 @@ impl Routes {
             || !recovery.outbound
             || !video.outbound
             || repair.outbound
-            || progress.kind != 0x37
-            || recovery.kind != 0x32
+            || progress.priority != Priority::Critical
+            || repair.priority != Priority::Critical
+            || recovery.priority != Priority::Bulk
+            || progress.messages != Messages::Exact(0x37)
+            || recovery.messages != Messages::Exact(0x32)
             || video.kind != 0x34
-            || repair.kind != 0x35
+            || repair.messages != Messages::Exact(0x35)
             || progress.binding != bindings.for_channel(Channel::MediaConfig)
             || recovery.binding != bindings.for_channel(Channel::Recovery)
             || video.binding != bindings.for_channel(Channel::Video)

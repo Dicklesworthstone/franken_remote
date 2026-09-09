@@ -12,7 +12,12 @@ use fr_wire::{
     HEADER_BYTES,
     stream::{RecordStream, StreamError},
 };
-use std::{collections::VecDeque, fmt, time::Duration};
+use std::{
+    collections::VecDeque,
+    fmt,
+    sync::{Arc, Weak},
+    time::Duration,
+};
 
 pub const ALPN: &[u8] = b"fr-remote/0";
 const MAX_STREAMS: usize = 8;
@@ -55,14 +60,37 @@ impl From<StreamError> for Error {
     }
 }
 
-/// Route information supplied by the authenticated session/binding owner.
-/// A stream is unidirectional in this first native media slice. Its direction
-/// and initiator bits must agree with the local TLS role and `outbound`.
+/// An admitted reliable stream's message family. Input transitions share ONE
+/// ordered stream; assigning a stream per key/button/text kind would reorder
+/// external effects. This is not a wildcard for unknown message classes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Messages {
+    Exact(u16),
+    InputActions,
+}
+impl Messages {
+    fn contains(self, kind: u16) -> bool {
+        match self {
+            Self::Exact(expected) => kind == expected,
+            Self::InputActions => matches!(kind, 0x0040 | 0x0041 | 0x0043..=0x0046),
+        }
+    }
+}
+/// Locally selected traffic class, never chosen by a peer's record flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Priority {
+    Critical,
+    Bulk,
+}
+/// Authenticated local route: stream initiator/direction agree with TLS role.
+/// A binding may have one stream in EACH direction; input/result share the
+/// same application binding without admitting a second parallel action stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamRoute {
     pub stream: StreamId,
     pub binding: u32,
-    pub kind: u16,
+    pub messages: Messages,
+    pub priority: Priority,
     pub outbound: bool,
     pub maximum: usize,
 }
@@ -78,6 +106,11 @@ pub struct Policy {
     pub connection_window: u64,
     pub retained_send_bytes: usize,
     pub retained_send_records: usize,
+    /// Separate bounded storage that bulk records cannot occupy.
+    pub critical_send_bytes: usize,
+    pub critical_send_records: usize,
+    /// Leave this much actual native connection credit for critical streams.
+    pub critical_connection_credit: u64,
     pub datagram_record_bytes: usize,
     pub record_lifetime_micros: u64,
 }
@@ -88,6 +121,9 @@ impl Default for Policy {
             connection_window: 524_288,
             retained_send_bytes: 131_072,
             retained_send_records: 128,
+            critical_send_bytes: 8192,
+            critical_send_records: 16,
+            critical_connection_credit: 8192,
             datagram_record_bytes: MAX_DATAGRAM_RECORD,
             record_lifetime_micros: 2_000_000,
         }
@@ -117,6 +153,13 @@ impl EmptySendState {
         }
         self.0 == *live
     }
+}
+struct Sender {
+    route: StreamRoute,
+    empty: EmptySendState,
+    bytes: usize,
+    records: usize,
+    until: Option<u64>,
 }
 struct PendingWrite {
     route: StreamRoute,
@@ -149,7 +192,13 @@ pub struct Usage {
     pub remainder_bytes: usize,
     pub retained_send_upper_bound: usize,
     pub retained_send_records: usize,
+    pub critical_send_bytes: usize,
+    pub critical_send_records: usize,
 }
+/// Opaque identity for one connection owner, never a peer-supplied session ID.
+#[derive(Clone)]
+pub struct ConnectionBinding(Weak<()>);
+
 /// One exclusive connection owner. In-flight I/O moves the native connection
 /// out of this object: dropping that future drops the socket and makes reuse
 /// terminal, instead of retrying a partially transmitted record.
@@ -157,23 +206,21 @@ pub struct Usage {
 /// Reliable send accounting is deliberately conservative: credit is released
 /// only when native reliable buffers are proven empty, NOT merely when packet
 /// assembly drains or an ACK count increases. Batches, not individual frames,
-/// may wait for ACKs; there is no new on-wire per-frame acknowledgement.
+/// on each stream may wait for ACKs; there is no new on-wire per-frame acknowledgement.
 /// Asupersync still owns congestion/loss recovery and its qualification gates.
 pub struct QuicRecords {
+    identity: Arc<()>,
     native: Option<NativeQuicUdpConnection>,
     streams: Vec<StreamRoute>,
     datagrams: Vec<DatagramRoute>,
     inbound: Vec<Inbound>,
     pending_datagram: Option<(DatagramRoute, Bytes, u64)>,
     policy: Policy,
-    sent_bytes: usize,
-    sent_records: usize,
-    batch_until: Option<u64>,
     last_now: Option<u64>,
     read_bytes: u64,
     advertised_limit: u64,
     pending_writes: VecDeque<PendingWrite>,
-    empty_senders: Vec<EmptySendState>,
+    senders: Vec<Sender>,
     cursor: usize,
 }
 impl fmt::Debug for QuicRecords {
@@ -215,7 +262,7 @@ impl QuicRecords {
             return Err(Error::InvalidPolicy);
         }
         let mut inbound = Vec::new();
-        let mut empty_senders = Vec::new();
+        let mut senders = Vec::new();
         for route in streams {
             if route.outbound {
                 let s = native
@@ -231,7 +278,13 @@ impl QuicRecords {
                 {
                     return Err(Error::InvalidPolicy);
                 }
-                empty_senders.push(EmptySendState(s.clone()));
+                senders.push(Sender {
+                    route: *route,
+                    empty: EmptySendState(s.clone()),
+                    bytes: 0,
+                    records: 0,
+                    until: None,
+                });
             } else {
                 // Installing the accepted binding also bounds the native stream
                 // before the first application read. Previously received data is
@@ -261,22 +314,42 @@ impl QuicRecords {
             }
         }
         Ok(Self {
+            identity: Arc::new(()),
             native: Some(native),
             streams: streams.to_vec(),
             datagrams: datagrams.to_vec(),
             inbound,
             pending_datagram: None,
             policy,
-            sent_bytes: 0,
-            sent_records: 0,
-            batch_until: None,
             last_now: None,
             read_bytes: 0,
             advertised_limit: policy.connection_window,
             pending_writes: VecDeque::new(),
-            empty_senders,
+            senders,
             cursor: 0,
         })
+    }
+    pub fn binding(&self) -> ConnectionBinding {
+        ConnectionBinding(Arc::downgrade(&self.identity))
+    }
+    /// Object identity only; this does not make a closed connection live.
+    pub fn is_bound_to(&self, binding: &ConnectionBinding) -> bool {
+        Weak::ptr_eq(&Arc::downgrade(&self.identity), &binding.0)
+    }
+    pub fn has_route(&self, route: Route) -> bool {
+        match route {
+            Route::Stream(route) => self.streams.contains(&route),
+            Route::Datagram(route) => self.datagrams.contains(&route),
+        }
+    }
+    /// A clean FIN on an admitted input stream is still a session lifecycle
+    /// event, not permission to retain held input indefinitely.
+    pub fn receive_finished(&self, route: StreamRoute) -> Result<bool, Error> {
+        self.inbound
+            .iter()
+            .find(|s| s.route == route)
+            .map(|s| s.fin)
+            .ok_or(Error::WrongRoute)
     }
     pub fn is_closed(&self) -> bool {
         self.native.is_none()
@@ -289,9 +362,11 @@ impl QuicRecords {
             s.framing.close();
             s.remainder = Bytes::new();
         }
-        self.sent_bytes = 0;
-        self.sent_records = 0;
-        self.batch_until = None;
+        for s in &mut self.senders {
+            s.bytes = 0;
+            s.records = 0;
+            s.until = None;
+        }
     }
     pub fn usage(&self) -> Usage {
         Usage {
@@ -309,9 +384,19 @@ impl QuicRecords {
                     .pending_datagram
                     .as_ref()
                     .map_or(0, |(_, b, _)| b.len()),
-            retained_send_upper_bound: self.sent_bytes,
-            retained_send_records: self.sent_records,
+            retained_send_upper_bound: self.senders.iter().map(|s| s.bytes).sum(),
+            retained_send_records: self.senders.iter().map(|s| s.records).sum(),
+            critical_send_bytes: self.send_usage(Priority::Critical).0,
+            critical_send_records: self.send_usage(Priority::Critical).1,
         }
+    }
+    fn send_usage(&self, priority: Priority) -> (usize, usize) {
+        self.senders
+            .iter()
+            .filter(|s| s.route.priority == priority)
+            .fold((0, 0), |(bytes, records), s| {
+                (bytes + s.bytes, records + s.records)
+            })
     }
     fn check(&mut self, cx: &Cx, authorize: &mut impl FnMut() -> bool) -> Result<u64, Error> {
         if self.is_closed() {
@@ -331,7 +416,11 @@ impl QuicRecords {
                 return Err(Error::Clock);
             }
             self.last_now = Some(now);
-            if self.batch_until.is_some_and(|until| now >= until) {
+            if self
+                .senders
+                .iter()
+                .any(|s| s.until.is_some_and(|until| now >= until))
+            {
                 return Err(Error::Expired);
             }
             for s in &mut self.inbound {
@@ -368,10 +457,19 @@ impl QuicRecords {
                 if !r.outbound || !self.streams.contains(&r) {
                     return Err(Error::WrongRoute);
                 }
-                validate_record(bytes, r.maximum, r.binding, r.kind)?;
-                if self.sent_records >= self.policy.retained_send_records
-                    || bytes.len() > self.policy.retained_send_bytes - self.sent_bytes
-                {
+                validate_record(bytes, r.maximum, r.binding, r.messages)?;
+                let (used_bytes, used_records) = self.send_usage(r.priority);
+                let (byte_limit, record_limit) = match r.priority {
+                    Priority::Critical => (
+                        self.policy.critical_send_bytes,
+                        self.policy.critical_send_records,
+                    ),
+                    Priority::Bulk => (
+                        self.policy.retained_send_bytes,
+                        self.policy.retained_send_records,
+                    ),
+                };
+                if used_records >= record_limit || bytes.len() > byte_limit - used_bytes {
                     return Err(Error::Backpressure);
                 }
             }
@@ -379,7 +477,12 @@ impl QuicRecords {
                 if !r.outbound || !self.datagrams.contains(&r) {
                     return Err(Error::WrongRoute);
                 }
-                validate_record(bytes, self.policy.datagram_record_bytes, r.binding, r.kind)?;
+                validate_record(
+                    bytes,
+                    self.policy.datagram_record_bytes,
+                    r.binding,
+                    Messages::Exact(r.kind),
+                )?;
                 let queued = native
                     .connection()
                     .inner()
@@ -415,10 +518,16 @@ impl QuicRecords {
                     offset: 0,
                     send_by: send_by_micros,
                 });
-                self.sent_bytes += bytes.len();
-                self.sent_records += 1;
-                self.batch_until = Some(
-                    self.batch_until
+                let sender = self
+                    .senders
+                    .iter_mut()
+                    .find(|s| s.route == route)
+                    .expect("validated outgoing route");
+                sender.bytes += bytes.len();
+                sender.records += 1;
+                sender.until = Some(
+                    sender
+                        .until
                         .map_or(send_by_micros, |old| old.min(send_by_micros)),
                 );
             }
@@ -491,18 +600,21 @@ impl QuicRecords {
         }
         // Pending bytes alone exclude retransmission copies. Prove actual
         // stream-buffer absence; total flight includes unrelated ACK/control.
-        let empty = self.empty_senders.iter_mut().all(|witness| {
-            native
-                .connection()
-                .inner()
-                .streams()
-                .stream(witness.0.id)
-                .is_ok_and(|live| witness.matches(live))
-        });
-        if self.pending_writes.is_empty() && empty {
-            self.sent_bytes = 0;
-            self.sent_records = 0;
-            self.batch_until = None;
+        for sender in &mut self.senders {
+            if !self.pending_writes.iter().any(|p| p.route == sender.route)
+                && native
+                    .connection()
+                    .inner()
+                    .streams()
+                    .stream(sender.route.stream)
+                    .is_ok_and(|live| sender.empty.matches(live))
+            {
+                // A stalled bulk stream must not hold already acknowledged
+                // control receipts against the critical storage reservation.
+                sender.bytes = 0;
+                sender.records = 0;
+                sender.until = None;
+            }
         }
         Ok(())
     }
@@ -513,9 +625,6 @@ impl QuicRecords {
         if self.pending_writes.iter().any(|p| now >= p.send_by) {
             return Err(Error::Expired);
         }
-        let Some(pending) = self.pending_writes.front_mut() else {
-            return Ok(());
-        };
         let native = self.native.as_mut().ok_or(Error::Closed)?;
         let inner = native.connection().inner();
         let path = native.connection().path_stats();
@@ -528,13 +637,53 @@ impl QuicRecords {
         {
             return Ok(());
         }
-        let credit = inner.stream_send_credit_remaining(pending.route.stream);
-        let length = (pending.bytes.len() - pending.offset)
-            .min(900)
-            .min(usize::try_from(credit).unwrap_or(usize::MAX));
-        if length == 0 {
-            return Ok(());
+        let reserve = if self
+            .senders
+            .iter()
+            .any(|s| s.route.priority == Priority::Critical)
+        {
+            self.policy.critical_connection_credit
+        } else {
+            0
+        };
+        let connection_credit = inner.streams().connection_send_remaining();
+        let mut selected = None;
+        for priority in [Priority::Critical, Priority::Bulk] {
+            for (index, pending) in self.pending_writes.iter().enumerate() {
+                // Preserve bytes and whole-record order WITHIN each stream,
+                // while a flow-blocked stream cannot block another stream.
+                if pending.route.priority != priority
+                    || self
+                        .pending_writes
+                        .iter()
+                        .take(index)
+                        .any(|p| p.route.stream == pending.route.stream)
+                {
+                    continue;
+                }
+                let credit = inner
+                    .stream_send_credit_remaining(pending.route.stream)
+                    .min(if priority == Priority::Bulk {
+                        connection_credit.saturating_sub(reserve)
+                    } else {
+                        connection_credit
+                    });
+                let length = (pending.bytes.len() - pending.offset)
+                    .min(900)
+                    .min(usize::try_from(credit).unwrap_or(usize::MAX));
+                if length != 0 {
+                    selected = Some((index, length));
+                    break;
+                }
+            }
+            if selected.is_some() {
+                break;
+            }
         }
+        let Some((index, length)) = selected else {
+            return Ok(());
+        };
+        let pending = &mut self.pending_writes[index];
         native
             .connection_mut()
             .write_stream(
@@ -546,7 +695,7 @@ impl QuicRecords {
             .map_err(|_| Error::Native)?;
         pending.offset += length;
         if pending.offset == pending.bytes.len() {
-            self.pending_writes.pop_front();
+            self.pending_writes.remove(index);
         }
         Ok(())
     }
@@ -560,7 +709,19 @@ impl QuicRecords {
         mut authorize: impl FnMut() -> bool,
         mut handler: impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
     ) -> Result<usize, Error> {
-        let result = self.receive_inner(cx, &mut authorize, &mut handler);
+        self.receive_ready(cx, &mut authorize, |_| true, &mut handler)
+    }
+    /// Read only lanes whose bounded consumers can accept a record. A blocked
+    /// lane keeps its native flow credit rather than copying bytes merely to
+    /// advertise a larger receive window. Poll other lanes and expiry normally.
+    pub fn receive_ready(
+        &mut self,
+        cx: &Cx,
+        mut authorize: impl FnMut() -> bool,
+        mut ready: impl FnMut(Route) -> bool,
+        mut handler: impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+    ) -> Result<usize, Error> {
+        let result = self.receive_inner(cx, &mut authorize, &mut ready, &mut handler);
         if result.is_err() {
             self.close();
         }
@@ -600,7 +761,12 @@ impl QuicRecords {
             if kind != route.kind {
                 return Err(Error::WrongRoute);
             }
-            validate_record(&bytes, self.policy.datagram_record_bytes, binding, kind)?;
+            validate_record(
+                &bytes,
+                self.policy.datagram_record_bytes,
+                binding,
+                Messages::Exact(kind),
+            )?;
             let until = current
                 .checked_add(self.policy.record_lifetime_micros)
                 .ok_or(Error::Clock)?;
@@ -623,6 +789,7 @@ impl QuicRecords {
         &mut self,
         cx: &Cx,
         authorize: &mut impl FnMut() -> bool,
+        ready: &mut impl FnMut(Route) -> bool,
         handler: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
     ) -> Result<usize, Error> {
         let mut count = 0;
@@ -632,10 +799,16 @@ impl QuicRecords {
             let which = self.cursor % lanes;
             self.cursor = (self.cursor + 1) % lanes;
             if which == self.inbound.len() {
-                count += self.receive_datagram(current, handler)?;
+                count += self.receive_datagram(current, &mut |route, bytes| {
+                    if ready(route) {
+                        handler(route, bytes)
+                    } else {
+                        Ok(Disposition::Blocked)
+                    }
+                })?;
             } else {
                 let s = &mut self.inbound[which];
-                if s.fin {
+                if s.fin || !ready(Route::Stream(s.route)) {
                     continue;
                 }
                 if s.framing.frame(current)?.is_none() {
@@ -656,7 +829,7 @@ impl QuicRecords {
                     s.remainder = s.remainder.slice(n..);
                 }
                 if let Some(bytes) = s.framing.frame(current)? {
-                    validate_record(bytes, s.route.maximum, s.route.binding, s.route.kind)?;
+                    validate_record(bytes, s.route.maximum, s.route.binding, s.route.messages)?;
                     if handler(Route::Stream(s.route), bytes).map_err(|()| Error::Handler)?
                         == Disposition::Consumed
                     {
@@ -712,6 +885,9 @@ fn validate_policy(
         || !(p.stream_window..=524_288).contains(&p.connection_window)
         || !(1..=1_048_576).contains(&p.retained_send_bytes)
         || !(1..=1024).contains(&p.retained_send_records)
+        || !(HEADER_BYTES..=65536).contains(&p.critical_send_bytes)
+        || !(1..=128).contains(&p.critical_send_records)
+        || !(1..=p.connection_window).contains(&p.critical_connection_credit)
         || !(HEADER_BYTES..=MAX_DATAGRAM_RECORD).contains(&p.datagram_record_bytes)
         || !(1..=5_000_000).contains(&p.record_lifetime_micros)
     {
@@ -719,15 +895,21 @@ fn validate_policy(
     }
     for (i, r) in streams.iter().enumerate() {
         if r.binding == 0
-            || r.kind == 0
+            || matches!(r.messages, Messages::Exact(0))
+            || (r.messages == Messages::InputActions
+                && (!r.stream.is_local_for(StreamRole::Client) || r.priority != Priority::Critical))
             || !(HEADER_BYTES..=65536).contains(&r.maximum)
             || r.maximum as u64 > p.stream_window
-            || r.maximum > p.retained_send_bytes
+            || r.maximum
+                > match r.priority {
+                    Priority::Critical => p.critical_send_bytes,
+                    Priority::Bulk => p.retained_send_bytes,
+                }
             || r.stream.direction() != StreamDirection::Unidirectional
             || r.stream.is_local_for(role) != r.outbound
-            || streams[..i]
-                .iter()
-                .any(|old| old.stream == r.stream || old.binding == r.binding)
+            || streams[..i].iter().any(|old| {
+                old.stream == r.stream || (old.binding == r.binding && old.outbound == r.outbound)
+            })
         {
             return Err(Error::InvalidPolicy);
         }
@@ -735,15 +917,27 @@ fn validate_policy(
     for (i, r) in datagrams.iter().enumerate() {
         if r.binding == 0
             || r.kind == 0
-            || datagrams[..i].iter().any(|old| old.binding == r.binding)
-            || streams.iter().any(|old| old.binding == r.binding)
+            || datagrams[..i]
+                .iter()
+                .any(|old| old.binding == r.binding && old.outbound == r.outbound)
+            || streams.iter().any(|old| {
+                old.binding == r.binding
+                    && old.outbound == r.outbound
+                    && !(old.messages == Messages::InputActions && r.kind == 0x0042)
+            })
+            || (r.kind == 0x0042 && r.outbound != (role == StreamRole::Client))
         {
             return Err(Error::InvalidPolicy);
         }
     }
     Ok(())
 }
-fn validate_record(bytes: &[u8], maximum: usize, binding: u32, kind: u16) -> Result<(), Error> {
+fn validate_record(
+    bytes: &[u8],
+    maximum: usize,
+    binding: u32,
+    messages: Messages,
+) -> Result<(), Error> {
     if bytes.len() < HEADER_BYTES {
         return Err(Error::Malformed);
     }
@@ -752,7 +946,7 @@ fn validate_record(bytes: &[u8], maximum: usize, binding: u32, kind: u16) -> Res
     }
     if bytes[..6] != *b"FRD0\0\0"
         || bytes[8..12] != [0; 4]
-        || u16::from_be_bytes([bytes[6], bytes[7]]) != kind
+        || !messages.contains(u16::from_be_bytes([bytes[6], bytes[7]]))
         || u32::from_be_bytes(bytes[16..20].try_into().map_err(|_| Error::Malformed)?) != binding
     {
         return Err(Error::WrongRoute);
