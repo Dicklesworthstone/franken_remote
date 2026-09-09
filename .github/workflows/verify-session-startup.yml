@@ -1,0 +1,80 @@
+name: Verify native session startup
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/verify-session-startup.yml']
+permissions:
+  contents: write
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Install pinned compiler and native SDKs
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
+      - name: Stage exact reviewed bootstrap patch without branch writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, subprocess
+          from pathlib import Path
+          before = {
+              'crates/fr-transport/src/quic.rs': 'c39295f631dec417fef48e547ca4a5972c1ae376',
+              'crates/fr-transport/tests/native_quic.rs': '8d66342550abeca609d663402b99695990346da1',
+          }
+          after = {
+              'crates/fr-transport/src/quic.rs': 'a80a7b1e9c5b6c0b6abdc9337573563a9b8ca347',
+              'crates/fr-transport/src/quic/startup.rs': 'ec516f3a0a29d20034ff7542a35f7ffd1b5adfd9',
+              'crates/fr-transport/tests/native_quic.rs': '0e1e881e6ce0fb4b459c56d7fc77649c4a29e015',
+          }
+          def sha(data):
+              return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
+          for path, oid in before.items():
+              assert sha(Path(path).read_bytes()) == oid, f'Concurrent source changed: {path}'
+          assert not Path('crates/fr-transport/src/quic/startup.rs').exists()
+          oid = 'aacbd1aa5f745f6f29efc7727d9b798bc391505c'
+          blob = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
+          data = base64.b64decode(blob['content'])
+          assert sha(data) == oid
+          patch = Path(os.environ['RUNNER_TEMP'], 'bootstrap.patch')
+          patch.write_bytes(data)
+          stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
+          assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(after)
+          subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
+          subprocess.run(['git', 'apply', str(patch)], check=True)
+          for path, oid in after.items():
+              assert sha(Path(path).read_bytes()) == oid, path
+          Path(os.environ['RUNNER_TEMP'], 'verified-paths.json').write_text(json.dumps(after))
+          PY
+      - name: Verify full workspace and actual native UDP TLS tests
+        run: |
+          ./scripts/verify.sh fast
+          ./scripts/verify.sh docs
+          git diff --check
+      - name: Export exact verified source blobs for explicit publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, subprocess
+          from pathlib import Path
+          for path, expected in json.loads(Path(os.environ['RUNNER_TEMP'], 'verified-paths.json').read_text()).items():
+              body = json.dumps({'encoding': 'base64', 'content': base64.b64encode(Path(path).read_bytes()).decode()})
+              result = subprocess.run(['gh', 'api', '--method', 'POST', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', '--input', '-'], input=body, text=True, capture_output=True, check=True)
+              actual = json.loads(result.stdout)['sha']
+              assert actual == expected, path
+              print(json.dumps({'path': path, 'sha': actual, 'verified_against': os.environ['GITHUB_SHA']}))
+          PY

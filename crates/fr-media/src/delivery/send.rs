@@ -7,6 +7,9 @@ use fr_wire::{
 };
 use std::sync::Arc;
 
+mod observation;
+use observation::PendingObservation;
+
 const CACHE_SLOTS: usize = 64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SendPolicy {
@@ -72,6 +75,8 @@ pub enum SendError {
     RepairRateLimited,
     RepairBudgetExceeded,
     OriginalExpired,
+    InvalidObservation,
+    ObservationExpired,
 }
 impl From<WireError> for SendError {
     fn from(e: WireError) -> Self {
@@ -188,6 +193,9 @@ pub struct SendCache {
     used_bytes: usize,
     used_pictures: usize,
     last_inserted: Option<u64>,
+    // Fixed metadata survives payload eviction; observations never revive bytes.
+    last_progress: Option<Progress>,
+    observation: Option<PendingObservation>,
     last_now: Option<u64>,
     repair: Option<RepairJob>,
     repair_window_start: u64,
@@ -224,6 +232,8 @@ impl SendCache {
             used_bytes: 0,
             used_pictures: 0,
             last_inserted: None,
+            last_progress: None,
+            observation: None,
             last_now: None,
             repair: None,
             repair_window_start: 0,
@@ -305,6 +315,8 @@ impl SendCache {
         self.used_bytes = used;
         self.used_pictures += 1;
         self.last_inserted = Some(d.frame);
+        self.last_progress = Some(progress);
+        self.observation = None;
         Ok(())
     }
     /// Emits progress before each picture, then at most one original fragment
@@ -325,7 +337,8 @@ impl SendCache {
             })
             .min_by_key(|(_, frame)| *frame);
         let Some((index, frame)) = chosen else {
-            return Ok(None);
+            // Original announcements and references precede idle observations.
+            return self.next_observation(out);
         };
         let p = self.pictures[index].as_mut().expect("selected");
         let (channel, n) = if p.announced {
@@ -515,6 +528,10 @@ impl SendCache {
             self.needs_recovery = true;
             return Err(SendError::OriginalExpired);
         }
+        // Expired source metadata is replaceable, not a broken codec reference.
+        if self.observation.as_ref().is_some_and(|o| now >= o.send_by) {
+            self.observation = None;
+        }
         for index in 0..CACHE_SLOTS {
             if self.pictures[index]
                 .as_ref()
@@ -542,7 +559,12 @@ impl SendCache {
         if self.closed || self.needs_recovery {
             return None;
         }
-        self.pictures.iter().flatten().map(|p| p.send_by).min()
+        self.pictures
+            .iter()
+            .flatten()
+            .map(|p| p.send_by)
+            .chain(self.observation.as_ref().map(|o| o.send_by))
+            .min()
     }
     pub fn replace(
         &mut self,
@@ -576,6 +598,8 @@ impl SendCache {
         })
     }
     fn clear(&mut self) {
+        self.last_progress = None;
+        self.observation = None;
         for p in &mut self.pictures {
             *p = None;
         }
