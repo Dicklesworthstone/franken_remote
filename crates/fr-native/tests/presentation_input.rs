@@ -158,7 +158,11 @@ fn run(scenario: impl std::future::Future<Output = ()>) {
     // Each experiment measures real 50 ms display deadlines. Obtain the fixture
     // slot before creating runtimes, native workers, or time-limited grants.
     static SCENARIOS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = SCENARIOS.lock().unwrap();
+    // No shared experiment state is protected, so one failing private fixture
+    // must not turn the remaining tests into lock-poison failures.
+    let _guard = SCENARIOS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     runtime().block_on(scenario);
 }
 async fn close_media(cx: &Cx, capture: &mut CaptureSource, presenter: &mut Presenter) {
@@ -182,7 +186,7 @@ async fn close_media(cx: &Cx, capture: &mut CaptureSource, presenter: &mut Prese
     }
 }
 struct Video {
-    _source: X11Surface,
+    source: X11Surface,
     control: ObservationControl,
     capture: CaptureSource,
     presenter: Presenter,
@@ -278,7 +282,7 @@ async fn prepare(source_server: &Server, viewer_server: &Server, cx: &Cx) -> Vid
         .confirm_mapping(credentials().session, credentials().view, now(cx))
         .unwrap();
     Video {
-        _source: source,
+        source,
         control,
         capture,
         presenter,
@@ -294,7 +298,7 @@ async fn scenario(delay_receipt: bool) {
     let viewer_server = Server::start();
     let cx = Cx::current().unwrap();
     let Video {
-        _source,
+        source: _source,
         control,
         mut capture,
         mut presenter,
@@ -537,10 +541,21 @@ fn impaired_transfer(video: &mut Video, loss: Option<Loss>, counts: &mut Recover
     }
     flush_fragments(video, &mut held, counts, cx);
 }
-async fn capture_pattern(video: &mut Video, phase: u8, counts: &mut RecoveryCounts) -> usize {
+fn marker(phase: u8) -> [u8; 4] {
+    if phase == 0 {
+        [190, 160, 60, 255]
+    } else {
+        [60, 180, 220, 255]
+    }
+}
+async fn capture_pattern(
+    video: &mut Video,
+    phase: u8,
+    counts: &mut RecoveryCounts,
+) -> (usize, u64) {
     let limits = config().limits().unwrap();
     let mut pixels = vec![0; 320 * 240 * 4];
-    for (index, pixel) in pixels.chunks_exact_mut(4).enumerate() {
+    for (index, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let (width, height) = if phase == 0 { (4, 4) } else { (3, 5) };
         let tile = ((index % 320) / width + (index / 320) / height) % 2;
         pixel.copy_from_slice(if tile == 0 {
@@ -548,9 +563,14 @@ async fn capture_pattern(video: &mut Video, phase: u8, counts: &mut RecoveryCoun
         } else {
             &[190, 160, 60, 255]
         });
+        // A large interior marker identifies the source frame despite HEVC
+        // color rounding and subsampling of the fine checkerboard.
+        if (128..192).contains(&(index % 320)) && (96..144).contains(&(index / 320)) {
+            pixel.copy_from_slice(&marker(phase));
+        }
     }
     video
-        ._source
+        .source
         .present(&BgraFrame::new(320, 240, pixels, &limits).unwrap())
         .unwrap();
     let unit = video.capture.capture(&video.control, false).await.unwrap();
@@ -559,15 +579,17 @@ async fn capture_pattern(video: &mut Video, phase: u8, counts: &mut RecoveryCoun
         "repair must exercise a predictive HEVC picture"
     );
     let bytes = unit.bytes().len();
+    let frame = unit.frame().as_raw();
     assert!(bytes > video.wire.fragment_stride() as usize);
     counts.encoded_bytes += bytes;
+    let before = video.subscription.cache_usage().bytes;
     video.subscription.enqueue(unit).unwrap();
     assert!(
-        video.subscription.cache_usage().bytes > bytes,
+        video.subscription.cache_usage().bytes > before + bytes,
         "cache omitted picture metadata"
     );
     check_bounds(video, counts);
-    bytes
+    (bytes, frame)
 }
 async fn sleep_until(cx: &Cx, until: u64) {
     let remaining = until.saturating_sub(now(cx).0);
@@ -577,20 +599,42 @@ async fn sleep_until(cx: &Cx, until: u64) {
     )
     .await;
 }
-async fn present_visible(video: &mut Video, output: &mut X11Surface, cx: &Cx) -> Vec<u8> {
+async fn present_visible(
+    video: &mut Video,
+    output: &mut X11Surface,
+    cx: &Cx,
+    expected_frame: u64,
+    expected_marker: [u8; 4],
+) -> Vec<u8> {
     let receipt = video
         .presenter
         .present_next(cx, &mut video.receiver)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(receipt.stage, PresentationStage::SubmittedToCompositor);
+    assert_eq!(
+        receipt.stage,
+        PresentationStage::SubmittedToCompositor,
+        "expected visible frame {expected_frame}; current_us={} display_deadline_us={}",
+        now(cx).0,
+        receipt.decoded.display_deadline_us()
+    );
     let frame = receipt.frame.as_raw();
+    assert_eq!(frame, expected_frame);
     video
         .client
         .decoded(receipt.decoded, true, now(cx))
         .unwrap();
     let pixels = output.snapshot().unwrap().pixels().to_vec();
+    for (x, y) in [(144, 108), (160, 120), (176, 132)] {
+        let p = &pixels[4 * (y * 320 + x)..][..3];
+        assert!(
+            p.iter()
+                .zip(expected_marker)
+                .all(|(&actual, expected)| actual.abs_diff(expected) < 10),
+            "wrong source frame is visible"
+        );
+    }
     video.client.visible(frame, now(cx)).unwrap();
     assert_eq!(video.receiver.budget_usage(), BudgetUsage::default());
     pixels
@@ -624,6 +668,169 @@ async fn repair_missing(video: &mut Video, counts: &mut RecoveryCounts, cx: &Cx)
     }
     assert!(counts.repair_wire_bytes <= SendPolicy::default().repair_bytes_per_window);
 }
+fn collect_input_result(
+    client: &mut PresentedInput,
+    result: fr_wire::input_result::InputResult,
+    cx: &Cx,
+) {
+    let mut packet = [0; fr_wire::input_result::INPUT_RESULT_BYTES];
+    let bytes = fr_wire::input_result::encode_input_result(
+        result,
+        &mut packet,
+        &config().limits().unwrap(),
+        fr_wire::input::InputDirection::HostToViewer,
+        InputDelivery::Reliable,
+    )
+    .unwrap();
+    assert_eq!(
+        client.result(&packet[..bytes], now(cx)).unwrap(),
+        ResultEvent::Completed(result)
+    );
+}
+async fn press_drag(video: &mut Video, agent: &mut Agent, cx: &Cx) {
+    let mut packet = [0; 1150];
+    let press = video
+        .client
+        .action(
+            Action::Button {
+                button: PointerButton::Primary,
+                pressed: true,
+                position: DesktopPoint { x: 30, y: 40 },
+            },
+            &mut packet,
+            now(cx),
+        )
+        .unwrap();
+    agent
+        .submit(&packet[..press.bytes], InputDelivery::Reliable)
+        .unwrap();
+    let frd::input_agent::InputReply::Record(result) =
+        agent.input_response().unwrap().await.unwrap()
+    else {
+        panic!("real native press receipt required")
+    };
+    assert_eq!(result.outcome, InputOutcome::SubmittedToOs);
+    assert_eq!(result.submitted_operations, 2);
+    collect_input_result(&mut video.client, result, cx);
+}
+async fn queued_input_fence(video: &mut Video, server: &Server, cx: &Cx, expire_ticket: bool) {
+    let (mut agent, running, seat) = native_input(server, &video.observer);
+    press_drag(video, &mut agent, cx).await;
+    let mut packet = [0; 1150];
+    let before = video.observer.query_pointer().unwrap();
+    assert_eq!(before.1 & 256, 256);
+    let queued = video
+        .client
+        .action(
+            Action::Button {
+                button: PointerButton::Primary,
+                pressed: false,
+                position: DesktopPoint { x: 80, y: 90 },
+            },
+            &mut packet,
+            now(cx),
+        )
+        .unwrap();
+    // One immutable reliable action is retained by this transport-fault fixture.
+    // No ticket refresh or implicit retry may change what reaches the host.
+    let queued_at = now(cx).0;
+    let fence_trigger_at;
+    if expire_ticket {
+        sleep_until(cx, queued_at + 260_000).await;
+        assert!(video.client.tick(now(cx)).is_err());
+        assert_eq!(video.client.stopped(), Some(StopReason::ViewStale));
+        // Deliberately withhold the client's stop signal too. This isolates the
+        // host ticket check when stalled transport delays both action and stop.
+        sleep_until(cx, queued_at + 1_100_000).await;
+        assert!(
+            !agent.control().is_stopped(),
+            "lease ended before the ticket oracle"
+        );
+        assert_eq!(video.observer.query_pointer().unwrap(), before);
+        fence_trigger_at = now(cx).0;
+        agent
+            .submit(&packet[..queued.bytes], InputDelivery::Reliable)
+            .unwrap();
+        let frd::input_agent::InputReply::Record(expired) =
+            agent.input_response().unwrap().await.unwrap()
+        else {
+            panic!("real native ticket-expiry receipt required")
+        };
+        assert_eq!(expired.outcome, InputOutcome::ExpiredBeforeSubmission);
+        assert_eq!(expired.stage, fr_wire::input_result::Stage::Admitted);
+        assert_eq!(
+            expired.reason,
+            Some(fr_wire::input_result::Reason::TicketExpired)
+        );
+        assert_eq!(expired.submitted_operations, 0);
+        // A terminal refused action revokes the sequence and triggers separate
+        // release-only cleanup. It must never perform its requested movement.
+        assert!(agent.control().is_stopped());
+        assert_eq!(video.observer.query_pointer().unwrap().0, before.0);
+        collect_input_result(&mut video.client, expired, cx);
+        assert_eq!(video.client.pending_actions(), 0);
+    } else {
+        fence_trigger_at = now(cx).0;
+        agent.control().stop(HostStop::LocalRevoke);
+        // The authority fence is synchronous; native cleanup is a separate result.
+        assert!(agent.control().is_stopped());
+        assert_eq!(
+            agent.submit(&packet[..queued.bytes], InputDelivery::Reliable),
+            Err(frd::input_agent::Error::Stopped)
+        );
+        video.client.hidden();
+    }
+    let shutdown = running.finish();
+    assert_eq!(
+        shutdown.reason,
+        if expire_ticket {
+            HostStop::AuthorityEnded
+        } else {
+            HostStop::LocalRevoke
+        }
+    );
+    assert!(shutdown.handoff_safe());
+    assert!(!seat.is_occupied());
+    let after = video.observer.query_pointer().unwrap();
+    assert_eq!(
+        after.0, before.0,
+        "queued expired/revoked action moved the pointer"
+    );
+    assert_eq!(after.1 & 256, 0);
+    println!(
+        "input_fence ticket_expiry={expire_ticket} queued_age_us={} fence_trigger_to_cleanup_readback_us={} queued_record_bytes={}",
+        now(cx).0 - queued_at,
+        now(cx).0 - fence_trigger_at,
+        queued.bytes
+    );
+}
+async fn decode_late_reference(
+    video: &mut Video,
+    cx: &Cx,
+    reference_frame: u64,
+    output: &mut X11Surface,
+    old_pixels: &[u8],
+) {
+    let receipt = video
+        .presenter
+        .present_next(cx, &mut video.receiver)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.stage, PresentationStage::DecodedOnly);
+    assert_eq!(receipt.frame.as_raw(), reference_frame);
+    assert!(now(cx).0 >= receipt.decoded.display_deadline_us());
+    video
+        .client
+        .decoded(receipt.decoded, false, now(cx))
+        .unwrap();
+    assert_eq!(
+        output.snapshot().unwrap().pixels(),
+        old_pixels,
+        "late reference was displayed"
+    );
+    assert_eq!(video.receiver.budget_usage().pictures, 1);
+}
 async fn recovery_case(loss: Loss, late_reference: bool) {
     let source = Server::start();
     let viewer = Server::start();
@@ -633,10 +840,19 @@ async fn recovery_case(loss: Loss, late_reference: bool) {
     let mut counts = RecoveryCounts::default();
     let bootstrap = video.capture.capture(&video.control, false).await.unwrap();
     assert!(bootstrap.is_idr());
+    let bootstrap_frame = bootstrap.frame().as_raw();
     video.subscription.enqueue(bootstrap).unwrap();
     impaired_transfer(&mut video, None, &mut counts, &cx);
-    let old_pixels = present_visible(&mut video, &mut output, &cx).await;
-    let bytes = capture_pattern(&mut video, 0, &mut counts).await;
+    let old_pixels = present_visible(
+        &mut video,
+        &mut output,
+        &cx,
+        bootstrap_frame,
+        [40, 80, 180, 255],
+    )
+    .await;
+    let (bytes, reference_frame) = capture_pattern(&mut video, 0, &mut counts).await;
+    let mut final_frame = reference_frame;
     let arrival = now(&cx).0;
     impaired_transfer(&mut video, Some(loss), &mut counts, &cx);
     assert!(counts.dropped_fragments > 0);
@@ -658,7 +874,7 @@ async fn recovery_case(loss: Loss, late_reference: bool) {
         // Capture the dependent only AFTER the missing reference becomes too
         // old to display, so this is not a test that presents two old pictures.
         sleep_until(&cx, arrival + 65_000).await;
-        capture_pattern(&mut video, 1, &mut counts).await;
+        final_frame = capture_pattern(&mut video, 1, &mut counts).await.1;
         impaired_transfer(&mut video, None, &mut counts, &cx);
         assert!(
             video
@@ -671,29 +887,27 @@ async fn recovery_case(loss: Loss, late_reference: bool) {
         );
     }
     // No additional capture/progress packet is needed to find final-frame loss.
+    let repair_started_at = now(&cx).0;
     repair_missing(&mut video, &mut counts, &cx).await;
     assert_eq!(counts.repair_fragments, counts.dropped_fragments);
     if late_reference {
-        let receipt = video
-            .presenter
-            .present_next(&cx, &mut video.receiver)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(receipt.stage, PresentationStage::DecodedOnly);
-        assert!(now(&cx).0 >= receipt.decoded.display_deadline_us());
-        video
-            .client
-            .decoded(receipt.decoded, false, now(&cx))
-            .unwrap();
-        assert_eq!(
-            output.snapshot().unwrap().pixels(),
-            old_pixels,
-            "late reference was displayed"
+        let decode_started_at = now(&cx).0;
+        decode_late_reference(&mut video, &cx, reference_frame, &mut output, &old_pixels).await;
+        println!(
+            "late_schedule pre_repair_us={} repair_us={} reference_decode_and_readback_us={}",
+            repair_started_at - arrival,
+            decode_started_at - repair_started_at,
+            now(&cx).0 - decode_started_at
         );
-        assert_eq!(video.receiver.budget_usage().pictures, 1);
     }
-    let new_pixels = present_visible(&mut video, &mut output, &cx).await;
+    let new_pixels = present_visible(
+        &mut video,
+        &mut output,
+        &cx,
+        final_frame,
+        marker(u8::from(late_reference)),
+    )
+    .await;
     assert_ne!(
         new_pixels, old_pixels,
         "repaired HEVC did not change the visible image"
@@ -704,15 +918,24 @@ async fn recovery_case(loss: Loss, late_reference: bool) {
         std::mem::size_of::<[Option<(PacketOffer, [u8; 1150])>; 4]>(),
         std::mem::size_of::<Subscription>()
     );
-    drag_then_expire(&mut video.client, &mut video.observer, &source, &cx).await;
+    match loss {
+        Loss::FinalFragment => {
+            drag_then_expire(&mut video.client, &mut video.observer, &source, &cx).await;
+        }
+        Loss::EntirePicture => queued_input_fence(&mut video, &source, &cx, true).await,
+        Loss::EveryFifth => queued_input_fence(&mut video, &source, &cx, false).await,
+    }
+    expire_cache_and_close(&mut video, &cx).await;
+}
+async fn expire_cache_and_close(video: &mut Video, cx: &Cx) {
     // Service the actual host-clock cache deadline during idle, without
     // fabricating a capture/progress heartbeat to keep this subscription alive.
     while let Some(deadline) = video.subscription.next_deadline() {
-        sleep_until(&cx, deadline.as_micros()).await;
+        sleep_until(cx, deadline.as_micros()).await;
         video.subscription.tick().unwrap();
     }
     assert_eq!(video.subscription.cache_usage(), BudgetUsage::default());
-    close_media(&cx, &mut video.capture, &mut video.presenter).await;
+    close_media(cx, &mut video.capture, &mut video.presenter).await;
 }
 #[test]
 fn actual_hevc_final_fragment_loss_repairs_without_a_later_frame_and_idle_cache_expires() {

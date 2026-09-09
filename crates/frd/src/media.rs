@@ -309,12 +309,15 @@ impl Subscription {
             pictures: self.cache.cached_pictures(),
         }
     }
+    /// Cache deadline only; authority expiry needs its independent watchdog.
     /// The owning Asupersync task must service this even when video goes idle.
     /// Reading the deadline does not renew authority or extend cache retention.
     pub fn next_deadline(&self) -> Option<HostInstant> {
         self.cache.next_deadline().map(HostInstant::from_micros)
     }
     /// Expire cache entries without requiring another capture, packet or repair.
+    /// On authority/cancellation failure the owner must retire this subscription;
+    /// dropping it releases its cache. This method never extends authority.
     pub fn tick(&mut self) -> Result<(), Error> {
         self.cache.tick(self.control.check()?.as_micros())?;
         Ok(())
