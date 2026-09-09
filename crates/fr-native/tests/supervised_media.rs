@@ -85,9 +85,9 @@ fn pattern(frame: u8, limits: &fr_core::limits::ProtocolLimits) -> BgraFrame {
 fn mutable_worker_access_fences_swapped_capture_provenance() {
     let displays = [Display::start(), Display::start()];
     let limits = configuration().limits().unwrap();
-    let mut surfaces = displays.each_ref().map(|display| {
-        X11Surface::presenter(Some(&display.name), 320, 240, limits).unwrap()
-    });
+    let mut surfaces = displays
+        .each_ref()
+        .map(|display| X11Surface::presenter(Some(&display.name), 320, 240, limits).unwrap());
     surfaces[0].present(&pattern(1, &limits)).unwrap();
     surfaces[1].present(&pattern(7, &limits)).unwrap();
     assert_ne!(
@@ -131,8 +131,12 @@ async fn verify_swapped_capture(
     let image = Path::new(env!("CARGO_BIN_EXE_fr-media-worker"));
     let launch_a = Launch::new(image, &displays[0].name, None, Role::Capture, 11).unwrap();
     let launch_b = Launch::new(image, &displays[1].name, None, Role::Capture, 12).unwrap();
-    let mut a = CaptureSource::start(control, launch_a, config).await.unwrap();
-    let mut b = CaptureSource::start(control, launch_b, config).await.unwrap();
+    let mut a = CaptureSource::start(control, launch_a, config)
+        .await
+        .unwrap();
+    let mut b = CaptureSource::start(control, launch_b, config)
+        .await
+        .unwrap();
     let initial_a = a.capture_if_changed(control, true).await.unwrap();
     let initial_b = b.capture_if_changed(control, true).await.unwrap();
     for initial in [&initial_a, &initial_b] {
