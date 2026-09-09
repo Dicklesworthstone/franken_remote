@@ -19,6 +19,9 @@ use std::{
     time::Duration,
 };
 
+mod startup;
+pub use startup::ControlRoutes;
+
 pub const ALPN: &[u8] = b"fr-remote/0";
 const MAX_STREAMS: usize = 8;
 const MAX_DATAGRAMS: usize = 4;
@@ -67,11 +70,17 @@ impl From<StreamError> for Error {
 pub enum Messages {
     Exact(u16),
     InputActions,
+    /// Initial native control only, before the host installs a binding.
+    Negotiation,
+    /// Bound connection control. The session codec still checks kind/state.
+    SessionControl,
 }
 impl Messages {
     fn contains(self, kind: u16) -> bool {
         match self {
             Self::Exact(expected) => kind == expected,
+            Self::Negotiation => matches!(kind, 0x0001..=0x0003 | 0x0010 | 0x0011),
+            Self::SessionControl => matches!(kind, 0x0012..=0x001e),
             // HeldState (0x0046) is not implemented; InputMode (0x0047)
             // is an ordered action in the existing fr-wire input codec.
             Self::InputActions => matches!(kind, 0x0040 | 0x0041 | 0x0043..=0x0045 | 0x0047),
@@ -305,11 +314,15 @@ impl QuicRecords {
                 }
                 inbound.push(Inbound {
                     route: *route,
-                    framing: RecordStream::new(
-                        route.maximum,
-                        route.binding,
-                        policy.record_lifetime_micros,
-                    )?,
+                    framing: if route.messages == Messages::Negotiation {
+                        RecordStream::negotiation(route.maximum, policy.record_lifetime_micros)?
+                    } else {
+                        RecordStream::new(
+                            route.maximum,
+                            route.binding,
+                            policy.record_lifetime_micros,
+                        )?
+                    },
                     remainder: Bytes::new(),
                     fin: false,
                 });
@@ -919,8 +932,22 @@ fn validate_policy(
     {
         return Err(Error::InvalidPolicy);
     }
+    let bootstrap = streams.iter().any(|r| r.messages == Messages::Negotiation);
+    if bootstrap
+        && (streams.len() != 2
+            || !datagrams.is_empty()
+            || streams.iter().filter(|r| r.outbound).count() != 1
+            || streams.iter().any(|r| {
+                r.messages != Messages::Negotiation
+                    || r.binding != 0
+                    || r.priority != Priority::Critical
+                    || r.maximum > fr_wire::negotiation::MAX_RECORD
+            }))
+    {
+        return Err(Error::InvalidPolicy);
+    }
     for (i, r) in streams.iter().enumerate() {
-        if r.binding == 0
+        if (r.binding == 0 && !bootstrap)
             || matches!(r.messages, Messages::Exact(0))
             || (r.messages == Messages::InputActions
                 && (!r.stream.is_local_for(StreamRole::Client) || r.priority != Priority::Critical))

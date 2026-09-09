@@ -965,3 +965,214 @@ fn parallel_action_streams_and_wrong_initiators_are_refused_before_admission() {
         );
     });
 }
+
+async fn bootstrap_connections(
+    cx: &Cx,
+) -> (QuicRecords, ControlRoutes, QuicRecords, ControlRoutes) {
+    let (client, host) = support::native_pair(cx, "localhost", ALPN).await;
+    let (client, c) = QuicRecords::bootstrap(client.unwrap(), cx, Policy::default()).unwrap();
+    let (host, h) = QuicRecords::bootstrap(host.unwrap(), cx, Policy::default()).unwrap();
+    (client, c, host, h)
+}
+fn startup_bytes(message: &fr_wire::negotiation::Message) -> Vec<u8> {
+    let mut bytes = vec![0; fr_wire::negotiation::MAX_RECORD];
+    let n = fr_wire::negotiation::encode(message, bytes.len(), &mut bytes).unwrap();
+    bytes.truncate(n);
+    bytes
+}
+fn startup_offer() -> fr_wire::negotiation::Offer {
+    fr_wire::negotiation::Offer {
+        versions: vec![0],
+        profile: 1,
+        profile_version: 0,
+        role: fr_wire::negotiation::Role::Observe,
+        limits: ProtocolLimits::ABSOLUTE,
+        capabilities: vec![],
+    }
+}
+async fn bootstrap_drive(cx: &Cx, client: &mut QuicRecords, host: &mut QuicRecords) {
+    let (a, b) = Box::pin(support::both(
+        client.drive(cx, Duration::from_millis(1), || true),
+        host.drive(cx, Duration::from_millis(1), || true),
+    ))
+    .await;
+    a.unwrap();
+    b.unwrap();
+}
+#[test]
+fn bootstrap_hello_and_bound_ack_use_the_same_authenticated_streams() {
+    runtime().block_on(async {
+        use fr_wire::negotiation::{self, Message};
+        let cx = Cx::current().unwrap();
+        let (mut client, c, mut host, h) = Box::pin(bootstrap_connections(&cx)).await;
+        let identity = host.binding();
+        let hello = Message::ClientHello(startup_offer());
+        client
+            .send(
+                &cx,
+                Route::Stream(c.outbound),
+                &startup_bytes(&hello),
+                clock(&cx) + 2_000_000,
+                || true,
+            )
+            .unwrap();
+        assert!(matches!(
+            client.bind_control(&cx, c, 1, 4096, || true),
+            Err(Error::Backpressure)
+        ));
+        let mut received = None;
+        for _ in 0..100 {
+            bootstrap_drive(&cx, &mut client, &mut host).await;
+            host.receive(
+                &cx,
+                || true,
+                |route, bytes| {
+                    assert_eq!(route, Route::Stream(h.inbound));
+                    received = Some(negotiation::decode(bytes, 4096, 0).unwrap());
+                    Ok(Disposition::Consumed)
+                },
+            )
+            .unwrap();
+            if received.is_some() {
+                break;
+            }
+        }
+        assert_eq!(received, Some(hello));
+        let h2 = host.bind_control(&cx, h, 7, 4096, || true).unwrap();
+        let c2 = client.bind_control(&cx, c, 7, 4096, || true).unwrap();
+        assert_eq!(h2.inbound.stream, h.inbound.stream);
+        assert!(host.is_bound_to(&identity));
+        assert!(!host.has_route(Route::Stream(h.inbound)));
+        assert!(matches!(
+            host.bind_control(&cx, h, 8, 4096, || true),
+            Err(Error::WrongRoute)
+        ));
+        let ack = Message::BindingAccepted { binding: 7 };
+        client
+            .send(
+                &cx,
+                Route::Stream(c2.outbound),
+                &startup_bytes(&ack),
+                clock(&cx) + 2_000_000,
+                || true,
+            )
+            .unwrap();
+        let mut received = None;
+        for _ in 0..100 {
+            bootstrap_drive(&cx, &mut client, &mut host).await;
+            host.receive(
+                &cx,
+                || true,
+                |route, bytes| {
+                    assert_eq!(route, Route::Stream(h2.inbound));
+                    received = Some(negotiation::decode(bytes, 4096, 7).unwrap());
+                    Ok(Disposition::Consumed)
+                },
+            )
+            .unwrap();
+            if received.is_some() {
+                break;
+            }
+        }
+        assert_eq!(received, Some(ack));
+    });
+}
+#[test]
+fn bootstrap_is_not_a_zero_bound_media_or_input_escape() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let (mut client, c, host, _h) = Box::pin(bootstrap_connections(&cx)).await;
+        for kind in [0x0040u16, 0x0032, 0x0034, 0x001c] {
+            let mut bytes = vec![0u8; 24];
+            bytes[..4].copy_from_slice(b"FRD0");
+            bytes[6..8].copy_from_slice(&kind.to_be_bytes());
+            assert!(matches!(
+                client.send(
+                    &cx,
+                    Route::Stream(c.outbound),
+                    &bytes,
+                    clock(&cx) + 1_000_000,
+                    || true
+                ),
+                Err(Error::WrongRoute)
+            ));
+        }
+        assert_eq!(client.usage().retained_send_records, 0);
+        assert_eq!(client.addresses().unwrap().0, host.addresses().unwrap().1);
+        assert_eq!(
+            client.role().unwrap(),
+            asupersync::net::quic_native::StreamRole::Client
+        );
+        assert!(matches!(
+            client.bind_control(&cx, c, 0, 4096, || true),
+            Err(Error::WrongRoute)
+        ));
+        assert!(matches!(
+            client.bind_control(&cx, c, 1, 4097, || true),
+            Err(Error::WrongRoute)
+        ));
+        assert!(matches!(
+            client.bind_control(&cx, c, 1, 4096, || false),
+            Err(Error::Unauthorized)
+        ));
+        assert!(client.is_closed());
+    });
+}
+#[test]
+fn bootstrap_transition_cannot_relabel_an_incomplete_record() {
+    runtime().block_on(async {
+        use fr_wire::negotiation::{Capability, Message};
+        let cx = Cx::current().unwrap();
+        let (mut client, c, mut host, h) = Box::pin(bootstrap_connections(&cx)).await;
+        let mut offer = startup_offer();
+        offer.capabilities = (0..16)
+            .map(|i| Capability {
+                name: format!("c{i:02}{}", "x".repeat(60)),
+                version: 1,
+                required: false,
+            })
+            .collect();
+        let bytes = startup_bytes(&Message::ClientHello(offer));
+        assert!(bytes.len() > 900);
+        client
+            .send(
+                &cx,
+                Route::Stream(c.outbound),
+                &bytes,
+                clock(&cx) + 2_000_000,
+                || true,
+            )
+            .unwrap();
+        bootstrap_drive(&cx, &mut client, &mut host).await;
+        host.receive(
+            &cx,
+            || true,
+            |_, _| panic!("only first 900-byte prefix was staged"),
+        )
+        .unwrap();
+        assert!(host.usage().framed_capacity > 0);
+        assert!(matches!(
+            host.bind_control(&cx, h, 9, 4096, || true),
+            Err(Error::Backpressure)
+        ));
+        let mut complete = false;
+        for _ in 0..100 {
+            bootstrap_drive(&cx, &mut client, &mut host).await;
+            host.receive(
+                &cx,
+                || true,
+                |_, got| {
+                    assert_eq!(got, bytes);
+                    complete = true;
+                    Ok(Disposition::Consumed)
+                },
+            )
+            .unwrap();
+            if complete {
+                break;
+            }
+        }
+        assert!(complete);
+        host.bind_control(&cx, h, 9, 4096, || true).unwrap();
+    });
+}
