@@ -4,7 +4,7 @@
 //! caller to ask for another packet, reconstruct a header, or extend its deadline.
 //! This owner joins that cursor to transport backpressure without owning the
 //! shared capture worker, input lease, or transport's connection lifetime.
-use crate::media::{Error, Subscription};
+use crate::media::{CaptureUpdate, Error, Subscription};
 use fr_media::{access_unit::EncodedAccessUnit, delivery::PacketOffer};
 use std::fmt;
 
@@ -76,6 +76,12 @@ impl Egress {
             .ok_or(Error::Send(fr_media::delivery::SendError::Closed))?
             .enqueue(unit)
     }
+    pub fn enqueue_capture(&mut self, update: CaptureUpdate) -> Result<(), Error> {
+        self.subscription
+            .as_mut()
+            .ok_or(Error::Send(fr_media::delivery::SendError::Closed))?
+            .enqueue_capture(update)
+    }
     pub fn queue_repair(&mut self, request: &[u8]) -> Result<(), Error> {
         self.subscription
             .as_mut()
@@ -104,6 +110,13 @@ impl Egress {
         self.subscription
             .as_ref()
             .and_then(Subscription::next_deadline)
+            .into_iter()
+            .chain(
+                self.pending
+                    .as_ref()
+                    .map(|offer| fr_core::time::HostInstant::from_micros(offer.send_by_micros())),
+            )
+            .min()
     }
     pub fn cache_usage(&self) -> fr_media::delivery::BudgetUsage {
         self.subscription.as_ref().map_or(

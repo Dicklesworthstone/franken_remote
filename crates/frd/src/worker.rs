@@ -347,7 +347,7 @@ impl Worker {
         }
         if !matches!(
             (self.role, kind),
-            (Role::Capture, Kind::Capture)
+            (Role::Capture, Kind::Capture | Kind::CaptureIfChanged)
                 | (Role::Present, Kind::Present | Kind::Decode)
                 | (_, Kind::Poll | Kind::Stop)
         ) {
@@ -478,6 +478,10 @@ fn allowed_reply(request: Kind, reply: Kind) -> bool {
             Kind::Configure => reply == Kind::Ready,
             Kind::ConfigureDecoder => reply == Kind::DecoderReady,
             Kind::Capture => matches!(reply, Kind::Unit | Kind::NeedInput | Kind::NeedDrain),
+            Kind::CaptureIfChanged => matches!(
+                reply,
+                Kind::Unit | Kind::Unchanged | Kind::NeedInput | Kind::NeedDrain
+            ),
             Kind::Present => matches!(reply, Kind::Presented | Kind::NeedInput | Kind::NeedDrain),
             Kind::Decode => matches!(reply, Kind::Decoded | Kind::NeedInput | Kind::NeedDrain),
             Kind::Poll => matches!(
@@ -497,6 +501,22 @@ mod tests {
         time::{TimerDriverHandle, VirtualClock},
     };
     use std::sync::Arc;
+
+    #[test]
+    fn unchanged_is_only_a_reply_to_an_explicit_conditional_capture() {
+        assert!(allowed_reply(Kind::CaptureIfChanged, Kind::Unchanged));
+        assert!(allowed_reply(Kind::CaptureIfChanged, Kind::Unit));
+        for request in [
+            Kind::Capture,
+            Kind::Present,
+            Kind::Decode,
+            Kind::Poll,
+            Kind::Configure,
+            Kind::Stop,
+        ] {
+            assert!(!allowed_reply(request, Kind::Unchanged));
+        }
+    }
 
     #[test]
     fn elapsed_rearmed_watchdog_is_never_polled_after_completion() {

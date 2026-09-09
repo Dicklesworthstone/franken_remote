@@ -129,6 +129,14 @@ impl QuicEgress {
         self.tick()?;
         self.egress.enqueue(frame).map_err(Error::Media)
     }
+    pub fn enqueue_capture(&mut self, update: media::CaptureUpdate) -> Result<(), Error> {
+        self.tick()?;
+        self.egress.enqueue_capture(update).map_err(Error::Media)
+    }
+    /// Includes a prepared, backpressured observation after its payload expired.
+    pub fn next_deadline(&self) -> Option<fr_core::time::HostInstant> {
+        self.egress.next_deadline()
+    }
     pub fn tick(&mut self) -> Result<(), Error> {
         self.egress.tick().map_err(Error::Media)
     }

@@ -17,7 +17,7 @@ use fr_media::{
         BudgetUsage, DecodedFrame, DecoderBinding, DeliveryError, DeliveryMode, MediaBindings,
         MediaEpoch, PacketOffer, ReceivePipeline, SendCache, SendError, SendPolicy,
     },
-    worker::{Configuration, Kind, Role, capture_payload, parse_unit, unit_parts},
+    worker::{Configuration, Kind, Role, unit_parts},
 };
 use fr_wire::{FrameDescriptor, MediaLimits, PipelineState, Progress, SourceObservation};
 use std::{
@@ -25,6 +25,9 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+mod capture_update;
+pub use capture_update::CaptureUpdate;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Authority(AuthorityError),
@@ -172,6 +175,8 @@ pub struct CaptureSource {
     worker: Worker,
     configuration: Configuration,
     next: Option<FrameId>,
+    source: Arc<()>,
+    last_capture: Option<FrameId>,
 }
 impl CaptureSource {
     pub async fn start(
@@ -195,58 +200,9 @@ impl CaptureSource {
             worker,
             configuration,
             next: Some(FrameId::FIRST),
+            source: Arc::new(()),
+            last_capture: None,
         })
-    }
-    pub async fn capture(
-        &mut self,
-        control: &ObservationControl,
-        force_idr: bool,
-    ) -> Result<EncodedAccessUnit, Error> {
-        let issued = control.check()?;
-        let deadline = control.deadline(Duration::from_secs(2))?;
-        let frame = self.next.ok_or(Error::InvalidFrame)?;
-        // Retire the frame identity before a possible external effect. A canceled
-        // exchange poisons its worker, so this frame is never silently retried.
-        self.next = frame.next();
-        let mut operation = MediaOperation::new(&mut self.worker);
-        let mut reply = operation
-            .worker
-            .request(
-                &control.cx,
-                Kind::Capture,
-                capture_payload(frame, issued.as_micros(), force_idr),
-                deadline,
-            )
-            .await?;
-        loop {
-            control.check()?;
-            match reply.header.kind {
-                Kind::Unit => {
-                    let unit = parse_unit(reply.into_body(), &self.configuration.limits()?)?;
-                    if unit.frame() != frame
-                        || unit.config_generation() != self.configuration.generation
-                        || unit.capture_micros() != issued.as_micros()
-                    {
-                        return Err(Error::InvalidFrame);
-                    }
-                    operation.completed = true;
-                    return Ok(unit);
-                }
-                Kind::NeedInput => {
-                    let now = control
-                        .cx
-                        .timer_driver()
-                        .ok_or(worker::Error::MissingRuntime)?
-                        .now();
-                    sleep(now, Duration::from_millis(1)).await;
-                    reply = operation
-                        .worker
-                        .request(&control.cx, Kind::Poll, vec![], deadline)
-                        .await?;
-                }
-                _ => return Err(Error::Backpressure),
-            }
-        }
     }
     pub fn worker_mut(&mut self) -> &mut Worker {
         &mut self.worker
@@ -262,6 +218,7 @@ pub struct Subscription {
     limits: MediaLimits,
     epoch: MediaEpoch,
     first: bool,
+    capture_source: Option<Arc<()>>,
 }
 impl Subscription {
     pub fn new(
@@ -278,6 +235,7 @@ impl Subscription {
             limits,
             epoch,
             first: true,
+            capture_source: None,
         })
     }
     /// Exact record bound used by this subscription's packetizer.
@@ -321,6 +279,8 @@ impl Subscription {
             now.as_micros(),
         )?;
         self.first = false;
+        // Unproven lower-level frames cannot inherit another source's evidence.
+        self.capture_source = None;
         Ok(())
     }
     pub fn next_packet(&mut self, out: &mut [u8]) -> Result<Option<PacketOffer>, Error> {
@@ -349,6 +309,7 @@ impl Subscription {
         self.cache.replace(epoch, bindings, now.as_micros())?;
         self.epoch = epoch;
         self.first = true;
+        self.capture_source = None;
         Ok(())
     }
     pub fn queue_repair(&mut self, bytes: &[u8]) -> Result<(), Error> {
