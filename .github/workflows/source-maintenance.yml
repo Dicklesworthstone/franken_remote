@@ -1,11 +1,18 @@
-name: Verify reviewed input admission
+name: Verify tailnet and effect-bound admission
 on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['.github/workflows/source-maintenance.yml']
+    paths:
+      - '.github/workflows/source-maintenance.yml'
+      - 'crates/fr-tailnet/**'
+      - 'crates/frd/src/input_agent.rs'
+      - 'crates/frd/src/media.rs'
+      - 'crates/frd/examples/tailnet_media_check.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
 permissions:
-  contents: write
+  contents: read
 env:
   CARGO_BUILD_JOBS: '1'
   CARGO_PROFILE_DEV_DEBUG: '0'
@@ -24,60 +31,26 @@ jobs:
           rustup show active-toolchain
           sudo apt-get update
           sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
-      - name: Stage exact reviewed input patch without ref writes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import base64,hashlib,json,os,subprocess
-          from pathlib import Path
-          def sha(data):
-              return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
-          expected={
-              'crates/frd/src/input_agent.rs':('712c0f7cb2de81d6dd4cfb0cd7370f25085fe47b','54f3fc9e36c9be5f9daafa5926ad940369660b8e'),
-              'crates/frd/examples/tailnet_media_check.rs':('598390a5c828dcdeea323f05d8621881270a9b08','5f872be873f7b2b4a758c83667dffa4e14b0b578'),
-          }
-          for path,(before,_) in expected.items():
-              assert sha(Path(path).read_bytes())==before,f'Concurrent source change: {path}'
-          oid='f6a871557263944828678a802353e4e1ec4c9518'
-          blob=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
-          data=base64.b64decode(blob['content'])
-          assert sha(data)==oid
-          patch=Path(os.environ['RUNNER_TEMP'],'input-admission.patch')
-          patch.write_bytes(data)
-          stats=subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
-          assert {line.split('\t',2)[2] for line in stats.splitlines()}==set(expected)
-          subprocess.run(['git','apply','--check',str(patch)],check=True)
-          subprocess.run(['git','apply',str(patch)],check=True)
-          for path,(_,after) in expected.items():
-              assert sha(Path(path).read_bytes())==after,path
-          print('EXACT_INPUT_PATCH_ON',os.environ['GITHUB_SHA'])
-          PY
-      - name: Verify full workspace and eight admission scenarios
+      - name: Verify exact committed workspace
         run: |
           ./scripts/verify.sh fast
           ./scripts/verify.sh docs
-          cargo build -p frd --example tailnet_media_check --locked --message-format=json > "$RUNNER_TEMP/example-build.jsonl"
+      - name: Exercise root-credential LocalAPI through media and input
+        run: |
+          cargo build -p frd --example tailnet_media_check --locked --message-format=json > "$RUNNER_TEMP/admission-example.jsonl"
           python3 - <<'PY'
           import json,os,subprocess
           from pathlib import Path
-          rows=[json.loads(line) for line in Path(os.environ['RUNNER_TEMP'],'example-build.jsonl').read_text().splitlines() if line.startswith('{')]
+          rows=[json.loads(line) for line in Path(os.environ['RUNNER_TEMP'],'admission-example.jsonl').read_text().splitlines() if line.startswith('{')]
           paths={row['executable'] for row in rows if row.get('executable') and row.get('target',{}).get('name')=='tailnet_media_check'}
           assert len(paths)==1
-          exe=Path(next(iter(paths))).resolve(strict=True)
-          assert exe.is_relative_to(Path('target').resolve())
-          subprocess.run(['sudo','--',str(exe)],check=True)
+          executable=Path(next(iter(paths))).resolve(strict=True)
+          assert executable.is_relative_to(Path('target').resolve())
+          # Only this synthetic credential fixture runs as root. It connects to
+          # its own socket and records input; no installed daemon or desktop.
+          subprocess.run(['sudo','--',str(executable)],check=True)
           PY
-          git diff --check
-      - name: Export two verified source blobs for explicit publication
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Confirm verification did not modify tracked source
         run: |
-          python3 - <<'PY'
-          import base64,json,os,subprocess
-          from pathlib import Path
-          for path in ['crates/frd/src/input_agent.rs','crates/frd/examples/tailnet_media_check.rs']:
-              body=json.dumps({'encoding':'base64','content':base64.b64encode(Path(path).read_bytes()).decode()})
-              response=subprocess.run(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,capture_output=True,check=True)
-              print(json.dumps({'path':path,'sha':json.loads(response.stdout)['sha'],'verified_against':os.environ['GITHUB_SHA']}))
-          PY
+          git diff --exit-code
+          git diff --cached --exit-code
