@@ -27,7 +27,7 @@ use std::{
     ffi::CString,
     io::{BufRead, BufReader, Read},
     process::{Child, Command, Stdio},
-    sync::{Once, mpsc},
+    sync::{Mutex, MutexGuard, Once, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -54,10 +54,20 @@ unsafe extern "C" {
 struct Server {
     child: Child,
     name: String,
+    _scenario: MutexGuard<'static, ()>,
 }
 impl Server {
     fn start() -> Self {
         static INIT: Once = Once::new();
+        // PausedPreparation deliberately retains the process-wide XTest lock
+        // through authority expiry and the driver's drain timeout. These are
+        // separate input-process scenarios, so acquire isolation BEFORE grants
+        // start ticking and retain it through native/display cleanup. Otherwise
+        // the fault injection expires an unrelated test's valid input ticket.
+        static SCENARIO: Mutex<()> = Mutex::new(());
+        let scenario = SCENARIO
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // SAFETY: once, before any Xlib use by this test executable. Each
         // observer and input backend still owns its own thread-local display.
         INIT.call_once(|| assert_ne!(unsafe { XInitThreads() }, 0));
@@ -83,6 +93,7 @@ impl Server {
         Self {
             child,
             name: format!(":{}", number.trim().parse::<u16>().unwrap()),
+            _scenario: scenario,
         }
     }
 }
