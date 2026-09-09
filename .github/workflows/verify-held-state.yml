@@ -37,8 +37,8 @@ jobs:
               'crates/fr-core/src/lib.rs': '5a3ce230a1d7fd7c48b0f56f7d743cb12b6bfbe6',
               'crates/fr-core/tests/held_state.rs': None,
               'crates/fr-wire/src/held_state.rs': None,
-              'crates/fr-wire/src/lib.rs': '07ba5cac1a2e2724d1211a872d1b9bca954db533',
-              'crates/fr-wire/src/record.rs': '04dc89bd236bbf46b469d9881e59b8be17b7262a',
+              'crates/fr-wire/src/lib.rs': '16f4fd61a83787314128c0c9d6f3c41ca773f27f',
+              'crates/fr-wire/src/record.rs': 'fb12a2396761e2d8ada93576a3fc4f2d60931715',
               'crates/fr-wire/tests/held_state.rs': None,
           }
           after = {
@@ -48,8 +48,8 @@ jobs:
               'crates/fr-core/src/lib.rs': '44544aae0f895f95133d5056e5db8ed9cc03045e',
               'crates/fr-core/tests/held_state.rs': '0536961b29652dc497405f46938152caa0c8ffd6',
               'crates/fr-wire/src/held_state.rs': 'd560455d9adbc899935ece53d6cf3e718fece433',
-              'crates/fr-wire/src/lib.rs': 'b6ad9db65aa566bfbb917e32a3a31119466d27a2',
-              'crates/fr-wire/src/record.rs': '1c02d71d656487d033135ef765355374886db7e0',
+              'crates/fr-wire/src/lib.rs': '7b1a5ca1fc93190fe78df88842e1c1f002b6bdef',
+              'crates/fr-wire/src/record.rs': 'd101498de2fa3a522fa39940eddb4ec0cb0e190e',
               'crates/fr-wire/tests/held_state.rs': '5eaa39b178bd39ca4f8ee30ee2a6e62485dfa8b0',
           }
           def sha(data):
@@ -69,6 +69,10 @@ jobs:
           patch.write_bytes(patch_bytes)
           stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
           assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(after)
+          subprocess.run(['git', 'apply', '--check', '--exclude=crates/fr-wire/src/lib.rs', str(patch)], check=True)
+          subprocess.run(['git', 'apply', '--exclude=crates/fr-wire/src/lib.rs', str(patch)], check=True)
+          # Exact reviewed export-line merge, retaining the concurrent decoder module.
+          patch.write_text('--- a/crates/fr-wire/src/lib.rs\n+++ b/crates/fr-wire/src/lib.rs\n@@ -8,6 +8,7 @@\n pub mod authority;\n pub mod clock;\n pub mod decoder;\n+pub mod held_state;\n pub mod input;\n pub mod input_result;\n mod media;\n')
           subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
           subprocess.run(['git', 'apply', str(patch)], check=True)
           for path, expected in after.items():
