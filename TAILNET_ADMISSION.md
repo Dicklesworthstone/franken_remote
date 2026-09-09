@@ -69,6 +69,9 @@ retained for change detection, not used as independent permission evidence.
 `Authorization` has no public JSON constructor and cannot be cloned. Default
 validity is one second, beginning BEFORE the first LocalAPI request, configurable
 only up to three seconds. A separate lookup timeout is bounded to three seconds.
+Lookup expiry, cancellation and monotonic-clock regression are checked both
+before and after polling the response operation, including a ready response.
+Crossing the lookup deadline refuses that result; the operation is not restarted.
 Delayed responses and snapshot retries never move issuance time. Strict RFC3339
 key expiry caps the deadline, fractional expiry rounds down, and wall-clock checks
 also refuse crossed expiry or regression. Revalidation requires the old proof to
