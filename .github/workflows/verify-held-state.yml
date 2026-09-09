@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['.github/workflows/verify-held-state.yml']
+    paths: ['.github/workflows/verify-held-state.yml', 'crates/fr-core/src/held_state.rs', 'crates/fr-core/src/input_submission/**', 'crates/fr-wire/src/held_state.rs', 'crates/fr-client/src/input/**', 'crates/frd/src/input_agent*', 'crates/frd/src/input_agent/**', 'crates/frd/tests/input_agent*', 'crates/frd/tests/input_agent_results/**', 'crates/fr-native/tests/input_quic*', 'crates/fr-native/tests/input_quic/**', 'crates/fr-transport/src/quic.rs']
 permissions:
-  contents: write
+  contents: read
 env:
   CARGO_BUILD_JOBS: '1'
   CARGO_PROFILE_DEV_DEBUG: '0'
@@ -23,132 +23,8 @@ jobs:
         run: |
           rustup show active-toolchain
           sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
-      - name: Stage exact client and native QUIC implementation
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import base64, hashlib, json, lzma, os, subprocess
-          from pathlib import Path
-          before = {
-              'crates/fr-client/src/input.rs': '7539ea3155b766bbfd38cb35cf6e9d1ecc8afdc9',
-              'crates/fr-client/src/input/held.rs': None,
-              'crates/fr-client/src/input/presentation.rs': '4bb0d1a8ad67ab70aaa91191dec6a931fa6e54b3',
-              'crates/fr-client/tests/held_state.rs': None,
-              'crates/frd/src/input_agent.rs': '61f92982c94f0f8fe592f90d93e93678944bea86',
-              'crates/frd/src/input_agent/result.rs': '77eb03e557f4977072d658cce41a394b821b5a27',
-              'crates/frd/src/input_quic.rs': 'be93069c31de1cfa67dd297e44885203820932ab',
-              'crates/frd/tests/input_agent_results.rs': '873a407ad1a4d03677add85656757f85ef102bd7',
-              'crates/frd/tests/input_agent_results/held.rs': None,
-              'crates/fr-transport/src/quic.rs': 'bafe28855029f5601e1a811d709a204cff0c6793',
-              'crates/fr-native/tests/input_quic.rs': '7cc520a5b9a0ffa99f7696a48495134898fa51b4',
-              'crates/fr-native/tests/input_quic/held.rs': None,
-          }
-          after = {
-              'crates/fr-client/src/input.rs': '476765153d845cb1bf8c2c93daab8553eb0fb96f',
-              'crates/fr-client/src/input/held.rs': '3171a1800c3723d4836d0b070f3ad4be88f2cbf5',
-              'crates/fr-client/src/input/presentation.rs': '637f25f82d416fc863b7094902f0a82a7e162f88',
-              'crates/fr-client/tests/held_state.rs': 'e835099956b0261bd5bb4614594bf87c39c567e6',
-              'crates/frd/src/input_agent.rs': 'f9e63e9e09613ae630c82226eed634aa028db994',
-              'crates/frd/src/input_agent/result.rs': 'fe55fe2a7722bc3ee16a02a0d165e69549be8943',
-              'crates/frd/src/input_quic.rs': '3d0bab1bb3519471bafd4ad94cfe8bf4c44ef396',
-              'crates/frd/tests/input_agent_results.rs': 'bd2620fb0025c483b6bc55bfb4521798e23ca206',
-              'crates/frd/tests/input_agent_results/held.rs': 'e3c82cc301997b09e4b5bdf9711fe19ec525485d',
-              'crates/fr-transport/src/quic.rs': 'cb9e244418ed2d0cd05a9d09bef253d88f825d75',
-              'crates/fr-native/tests/input_quic.rs': '91e2d27a21f2ecc53e6e388c58921d3d11988fe3',
-              'crates/fr-native/tests/input_quic/held.rs': '5be3e05d3baaec2b656f689bc4843c389bf6eb82',
-          }
-          def sha(data):
-              return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
-          assert sha(Path('crates/fr-core/src/input_submission/held.rs').read_bytes()) == '6f470baffe03782abe9cd142bdcf42ebdd9408ae'
-          for path, expected in before.items():
-              actual = sha(Path(path).read_bytes()) if Path(path).exists() else None
-              assert actual == expected, f'Concurrent change: {path}'
-          oid = '2d428c2c33abc3d1dd1265a79c45ff029939fe07'
-          row = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
-          raw = base64.b64decode(row['content'])
-          assert len(raw) == 9996 and sha(raw) == oid
-          decoder = lzma.LZMADecompressor()
-          patch_bytes = decoder.decompress(raw, max_length=45149)
-          assert decoder.eof and not decoder.unused_data
-          assert len(patch_bytes) == 45148 and sha(patch_bytes) == 'd994e8c72b48fd1b168954b8b41c942888671a0b'
-          patch = Path(os.environ['RUNNER_TEMP'], 'held-integration.patch')
-          patch.write_bytes(patch_bytes)
-          stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
-          assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(after)
-          route_path = 'crates/fr-transport/src/quic.rs'
-          subprocess.run(['git', 'apply', '--check', f'--exclude={route_path}', str(patch)], check=True)
-          subprocess.run(['git', 'apply', f'--exclude={route_path}', str(patch)], check=True)
-          for path, expected in after.items():
-              if path != route_path:
-                  assert sha(Path(path).read_bytes()) == expected, path
-          # Preserve the independently committed decoder-route extension exactly.
-          enum_addition = b'    /// Decoder configuration and first-frame acknowledgements, one ordered lane.\n    DecoderReplies,\n'
-          arm_addition = b'            Self::DecoderReplies => matches!(kind, 0x0031 | 0x0033),\n'
-          current = Path(route_path).read_bytes()
-          assert current.count(enum_addition) == 1 and current.count(arm_addition) == 1
-          original = current.replace(enum_addition, b'').replace(arm_addition, b'')
-          assert sha(original) == 'a66d3aef1e44cfeb6fae6554959a09058afbb720'
-          isolated = Path(os.environ['RUNNER_TEMP'], 'held-route-merge')
-          isolated_file = isolated / route_path
-          isolated_file.parent.mkdir(parents=True, exist_ok=True)
-          isolated_file.write_bytes(original)
-          subprocess.run(['git', 'apply', f'--include={route_path}', str(patch)], cwd=isolated, check=True)
-          merged = isolated_file.read_bytes()
-          assert sha(merged) == after[route_path]
-          enum_anchor = b'    InputActions,\n'
-          arm_anchor = b'            Self::Exact(expected) => kind == expected,\n'
-          assert merged.count(enum_anchor) == 1 and merged.count(arm_anchor) == 1
-          merged = merged.replace(enum_anchor, enum_anchor + enum_addition).replace(arm_anchor, arm_anchor + arm_addition)
-          assert merged.replace(enum_addition, b'').replace(arm_addition, b'') == isolated_file.read_bytes()
-          Path(route_path).write_bytes(merged)
-          after[route_path] = sha(merged)
-          route_test = Path('crates/fr-transport/tests/native_quic.rs')
-          data = route_test.read_bytes()
-          assert sha(data) == '0e1e881e6ce0fb4b459c56d7fc77649c4a29e015'
-          replacements = [
-              (b'// fr-wire::input. Distinct markers expose cross-kind stream reordering.\n        let frames: Vec<_> = [0x40, 0x41, 0x45, 0x44, 0x43, 0x47, 0x40]', b'// the fr-wire action and HeldState codecs. Distinct markers expose\n        // cross-kind stream reordering, including release-only reconciliation.\n        let frames: Vec<_> = [0x40, 0x41, 0x45, 0x46, 0x44, 0x43, 0x47, 0x40]'),
-              (b'for forbidden in [0x42, 0x46, 0x48, 0x32, 0xffff]', b'for forbidden in [0x42, 0x48, 0x49, 0x32, 0xffff]'),
-          ]
-          for old, new in replacements:
-              assert data.count(old) == 1
-              data = data.replace(old, new)
-          assert sha(data) == 'bfb651debabba9e7709463f8d6c5ff716302a2ab'
-          route_test.write_bytes(data)
-          after[str(route_test)] = sha(data)
-          Path(os.environ['RUNNER_TEMP'], 'held-state-paths.json').write_text(json.dumps(after))
-          PY
-      - name: Retain exact candidate source for review
-        run: |
-          mkdir -p "$RUNNER_TEMP/held-candidate"
-          tar --exclude='./.git' --exclude='./target' -czf "$RUNNER_TEMP/held-candidate/source.tar.gz" .
-          cp "$RUNNER_TEMP/held-state-paths.json" "$RUNNER_TEMP/held-candidate/paths.json"
-          git rev-parse HEAD > "$RUNNER_TEMP/held-candidate/base-commit.txt"
-          (cd "$RUNNER_TEMP/held-candidate" && sha256sum source.tar.gz > SHA256SUMS)
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: held-state-reviewed-candidate
-          path: ${{ runner.temp }}/held-candidate/
-          retention-days: 1
-          compression-level: 0
-          if-no-files-found: error
-      - name: Verify complete workspace and real X11 QUIC reconciliation
+      - name: Verify committed workspace and real X11 QUIC reconciliation
         run: |
           ./scripts/verify.sh fast
           ./scripts/verify.sh docs
-          git diff --check
-      - name: Export verified source objects without branch writes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import base64, hashlib, json, os, subprocess
-          from pathlib import Path
-          for path, expected in json.loads(Path(os.environ['RUNNER_TEMP'], 'held-state-paths.json').read_text()).items():
-              data = Path(path).read_bytes()
-              assert hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest() == expected
-              body = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()})
-              result = subprocess.run(['gh', 'api', '--method', 'POST', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', '--input', '-'], input=body, text=True, capture_output=True, check=True)
-              assert json.loads(result.stdout)['sha'] == expected, path
-              print(json.dumps({'path': path, 'sha': expected, 'verified_against': os.environ['GITHUB_SHA']}))
-          PY
+          git diff --exit-code
