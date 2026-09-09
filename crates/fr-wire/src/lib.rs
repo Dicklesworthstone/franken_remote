@@ -7,9 +7,9 @@
 
 pub mod input;
 pub mod input_result;
-pub mod stream;
 mod media;
 mod record;
+pub mod stream;
 
 pub use media::{
     FRAGMENT_OVERHEAD, Fragment, FrameDescriptor, PipelineState, Progress, RECOVERY_OVERHEAD,
