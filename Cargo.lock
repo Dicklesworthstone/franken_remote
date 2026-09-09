@@ -481,6 +481,7 @@ name = "fr-client"
 version = "0.1.0"
 dependencies = [
  "fr-core",
+ "fr-media",
  "fr-wire",
 ]
 

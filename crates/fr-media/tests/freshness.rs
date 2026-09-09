@@ -271,7 +271,8 @@ fn heartbeat_unknown_source_and_duplicates_do_not_refresh_pixels() {
         SourceObservation::Unknown,
         27_000,
     )
-    .unwrap_err();
+    .unwrap();
+    assert_eq!(view.evidence(27_000), Err(Error::SourceUnknown));
     progress(
         &mut view,
         limits,
@@ -409,4 +410,31 @@ fn receiver_failure_drop_and_numeric_binding_reuse_invalidate_visibility() {
         new_view.decoded(token, true, 21_000),
         Err(Error::StaleBinding)
     );
+}
+
+#[test]
+fn shared_budget_does_not_allow_a_foreign_picture_to_certify_decode() {
+    let limits = MediaLimits::new(ProtocolLimits::ABSOLUTE, 1150, 16384, 64).unwrap();
+    let config = ReceiveConfig {
+        limits,
+        bindings: MediaBindings::new(1, 2, 3, 4).unwrap(),
+        epoch: MediaEpoch {
+            configuration: CodecConfigurationGeneration::INITIAL,
+            recovery: RecoveryGeneration::INITIAL,
+        },
+        policy: ReceivePolicy::default(),
+    };
+    let budget = MediaBudget::new(limits.protocol()).unwrap();
+    let mut first = ReceivePipeline::new(config, budget.clone()).unwrap();
+    let mut second = ReceivePipeline::new(config, budget).unwrap();
+    first.decoder_configured(0).unwrap();
+    second.decoder_configured(0).unwrap();
+    let a = picture(&mut first, limits, 0, 100, 100);
+    let b = picture(&mut second, limits, 0, 100, 100);
+    assert!(matches!(
+        second.complete_decode(&a, 101),
+        Err(DeliveryError::StaleGeneration)
+    ));
+    assert!(second.complete_decode(&b, 101).is_ok());
+    assert!(first.complete_decode(&a, 101).is_ok());
 }

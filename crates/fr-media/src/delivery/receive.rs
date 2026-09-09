@@ -81,6 +81,7 @@ pub enum ReceiveUpdate {
 /// alive while a decoder borrows its bytes. Taking it out of a queue does not
 /// release receiver credit. It does NOT certify HEVC syntax or visible output.
 pub struct ReceivedPicture {
+    scope: Arc<AtomicBool>,
     descriptor: FrameDescriptor,
     epoch: MediaEpoch,
     bindings: MediaBindings,
@@ -587,6 +588,7 @@ impl ReceivePipeline {
             deadline: a.reference_until,
         });
         Ok(Some(ReceivedPicture {
+            scope: self.scope.clone(),
             descriptor: a.descriptor,
             epoch: self.config.epoch,
             bindings: self.config.bindings,
@@ -604,7 +606,9 @@ impl ReceivePipeline {
         success: bool,
         now: u64,
     ) -> Result<(), DeliveryError> {
-        if picture.epoch != self.config.epoch
+        if !Arc::ptr_eq(&picture.scope, &self.scope)
+            || !picture.scope.load(Ordering::Acquire)
+            || picture.epoch != self.config.epoch
             || picture.bindings != self.config.bindings
             || !picture.bytes.belongs_to(&self.budget)
         {
