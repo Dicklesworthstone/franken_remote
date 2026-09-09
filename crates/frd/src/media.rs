@@ -26,6 +26,7 @@ use std::{
     time::Duration,
 };
 mod capture_update;
+pub mod clock;
 pub mod renewal;
 pub use capture_update::CaptureUpdate;
 
