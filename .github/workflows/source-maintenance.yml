@@ -26,6 +26,18 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
+      - name: Retain exact committed source for offline integration
+        run: |
+          mkdir -p "$RUNNER_TEMP/session-source"
+          git archive --format=tar.gz -o "$RUNNER_TEMP/session-source/source.tar.gz" HEAD
+          git rev-parse HEAD > "$RUNNER_TEMP/session-source/source-commit.txt"
+          (cd "$RUNNER_TEMP/session-source" && sha256sum source.tar.gz > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: session-source
+          path: ${{ runner.temp }}/session-source/
+          retention-days: 1
+          if-no-files-found: error
       - name: Install pinned compiler and native SDKs
         run: |
           rustup show active-toolchain
