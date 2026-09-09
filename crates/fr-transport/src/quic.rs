@@ -353,6 +353,25 @@ impl QuicRecords {
             .map(|s| s.fin)
             .ok_or(Error::WrongRoute)
     }
+    /// Authenticated peer FIN/RESET, regardless of unread data or consumer
+    /// backpressure. Input owners must fence on this before dispatching more
+    /// effects. This is NOT proof that framing completed or native work drained;
+    /// `receive_finished` retains its separate consumed-through-FIN meaning.
+    pub fn receive_ended(&self, route: StreamRoute) -> Result<bool, Error> {
+        if !self.inbound.iter().any(|s| s.route == route) {
+            return Err(Error::WrongRoute);
+        }
+        let stream = self
+            .native
+            .as_ref()
+            .ok_or(Error::Closed)?
+            .connection()
+            .inner()
+            .streams()
+            .stream(route.stream)
+            .map_err(|_| Error::Native)?;
+        Ok(stream.final_size.is_some() || stream.recv_reset.is_some())
+    }
     pub fn is_closed(&self) -> bool {
         self.native.is_none()
     }

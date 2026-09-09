@@ -274,7 +274,7 @@ impl QuicInput {
             .map_err(Error::Transport)?;
         if io
             .connection
-            .receive_finished(self.routes.actions)
+            .receive_ended(self.routes.actions)
             .map_err(Error::Transport)?
         {
             self.control().stop(StopReason::ClientDisconnected);
@@ -335,6 +335,15 @@ impl QuicInput {
         let mut io = IoGuard::new(connection, self.control());
         let cx = self.cx.clone();
         let routes = self.routes;
+        // FIN/RESET is an authority boundary even when the native owner or its
+        // receipt is blocked. Inspect metadata without draining a refused lane.
+        if io
+            .connection
+            .receive_ended(routes.actions)
+            .map_err(Error::Transport)?
+        {
+            self.control().stop(StopReason::ClientDisconnected);
+        }
         let available = Cell::new(self.can_accept_input());
         let mut fault = None;
         let first = io.connection.receive_ready(
@@ -383,7 +392,7 @@ impl QuicInput {
         let rest = rest.map_err(|e| fault.unwrap_or(Error::Transport(e)))?;
         if io
             .connection
-            .receive_finished(routes.actions)
+            .receive_ended(routes.actions)
             .map_err(Error::Transport)?
         {
             self.control().stop(StopReason::ClientDisconnected);
@@ -411,6 +420,13 @@ impl QuicInput {
                 .drive(&self.cx, wait, &mut authorize)
                 .await
                 .map_err(Error::Transport)?;
+            if io
+                .connection
+                .receive_ended(self.routes.actions)
+                .map_err(Error::Transport)?
+            {
+                self.control().stop(StopReason::ClientDisconnected);
+            }
             io.complete = true;
             Ok(())
         }
