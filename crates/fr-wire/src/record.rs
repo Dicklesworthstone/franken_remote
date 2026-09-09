@@ -101,7 +101,10 @@ pub enum Kind {
     Challenge = 0x0015,
     ChallengeResponse = 0x0016,
     BindingAccepted = 0x001c,
+    DecoderConfiguration = 0x0030,
+    DecoderConfigured = 0x0031,
     Recovery = 0x0032,
+    FirstFrameDecoded = 0x0033,
     Fragment = 0x0034,
     Repair = 0x0035,
     Progress = 0x0037,
@@ -137,7 +140,10 @@ impl Kind {
             0x0015 => Ok(Self::Challenge),
             0x0016 => Ok(Self::ChallengeResponse),
             0x001c => Ok(Self::BindingAccepted),
+            0x0030 => Ok(Self::DecoderConfiguration),
+            0x0031 => Ok(Self::DecoderConfigured),
             0x0032 => Ok(Self::Recovery),
+            0x0033 => Ok(Self::FirstFrameDecoded),
             0x0034 => Ok(Self::Fragment),
             0x0035 => Ok(Self::Repair),
             0x0037 => Ok(Self::Progress),
@@ -159,7 +165,10 @@ impl Kind {
             Self::Recovery => Some(Channel::Recovery),
             Self::Fragment => Some(Channel::Video),
             Self::Repair => Some(Channel::Control),
-            Self::Progress => Some(Channel::MediaConfig),
+            Self::Progress
+            | Self::DecoderConfiguration
+            | Self::DecoderConfigured
+            | Self::FirstFrameDecoded => Some(Channel::MediaConfig),
             Self::ClientHello
             | Self::HostCapabilities
             | Self::SelectedConfiguration

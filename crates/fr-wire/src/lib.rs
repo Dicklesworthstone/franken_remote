@@ -7,6 +7,7 @@
 
 pub mod authority;
 pub mod clock;
+pub mod decoder;
 pub mod input;
 pub mod input_result;
 mod media;
