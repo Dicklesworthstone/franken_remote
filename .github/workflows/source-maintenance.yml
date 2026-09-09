@@ -33,16 +33,17 @@ jobs:
             'crates/frd/src/media/decoder_startup.rs':(None,'4bcc2f82b9f006a2a33fe3bfa39e285bfeec0990'),
           }
           def sha(data): return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
+          def blob(oid):
+            raw=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
+            data=base64.b64decode(raw['content'])
+            assert sha(data)==oid
+            return data
           for p,(before,after) in expected.items():
             if before is None: assert not Path(p).exists(),p
             else: assert sha(Path(p).read_bytes())==before,p
           parts=['775e921bd7216dc9cfec02467ec9379afd53edb5','7e96007d8bcb7962332055c3321de6af84f80eea','12428bd8e79f900012e2b16ad18e9826e15cb472','9089d874f7603371acb074e04526c29a0175b4d2']
-          data=[]
-          for oid in parts:
-            raw=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
-            part=base64.b64decode(raw['content'])
-            assert len(part)==4288 and sha(part)==oid
-            data.append(part)
+          data=[blob(oid) for oid in parts]
+          assert all(len(part)==4288 for part in data)
           compressed=base64.b64decode(b''.join(data),validate=True)
           assert sha(compressed)=='b3b43f18142206c7f87645b9dbdba02383a597ce'
           patch=gzip.decompress(compressed)
@@ -53,6 +54,16 @@ jobs:
           assert {line.split('\t',2)[2] for line in actual.splitlines()}==set(expected)
           subprocess.run(['git','apply','--check',str(path)],check=True)
           subprocess.run(['git','apply',str(path)],check=True)
+          for p,(before,after) in expected.items(): assert sha(Path(p).read_bytes())==after,p
+          # A drive slice is not a delivery acknowledgement. The correction waits
+          # for the actual reply and requires its exact rejection, not a timeout.
+          fix=Path(os.environ['RUNNER_TEMP'],'decoder-arrival.patch')
+          fix.write_bytes(blob('7ea3e7e4fa73b0cae86286cd53122455eea5a770'))
+          actual=subprocess.check_output(['git','apply','--numstat',str(fix)],text=True)
+          assert {line.split('\t',2)[2] for line in actual.splitlines()}=={'crates/fr-native/tests/decoder_startup.rs'}
+          subprocess.run(['git','apply','--check',str(fix)],check=True)
+          subprocess.run(['git','apply',str(fix)],check=True)
+          expected['crates/fr-native/tests/decoder_startup.rs']=(None,'1b17ed0258cc20b0b0525f7125029f11c5ce1b04')
           for p,(before,after) in expected.items(): assert sha(Path(p).read_bytes())==after,p
           Path(os.environ['RUNNER_TEMP'],'decoder-paths.json').write_text(json.dumps(expected))
           print('Candidate hashes verified on',os.environ['GITHUB_SHA'])
