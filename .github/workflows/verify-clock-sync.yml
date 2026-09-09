@@ -22,7 +22,6 @@ jobs:
       - name: Install pinned compiler and native SDKs
         run: |
           rustup show active-toolchain
-          sudo apt-get update
           sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
       - name: Stage exact reviewed clock sources without branch writes
         env:
