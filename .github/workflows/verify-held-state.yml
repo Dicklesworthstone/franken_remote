@@ -1,0 +1,97 @@
+name: Verify held-state reconciliation
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/verify-held-state.yml']
+permissions:
+  contents: write
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Install pinned compiler and native SDKs
+        run: |
+          rustup show active-toolchain
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
+      - name: Stage exact release-only core and wire implementation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, subprocess
+          from pathlib import Path
+          before = {
+              'crates/fr-core/src/held_state.rs': None,
+              'crates/fr-core/src/input_submission.rs': '0a8711208f763d6522a5c1c6d98e102bc0a13c45',
+              'crates/fr-core/src/input_submission/held.rs': None,
+              'crates/fr-core/src/lib.rs': '5a3ce230a1d7fd7c48b0f56f7d743cb12b6bfbe6',
+              'crates/fr-core/tests/held_state.rs': None,
+              'crates/fr-wire/src/held_state.rs': None,
+              'crates/fr-wire/src/lib.rs': '07ba5cac1a2e2724d1211a872d1b9bca954db533',
+              'crates/fr-wire/src/record.rs': '04dc89bd236bbf46b469d9881e59b8be17b7262a',
+              'crates/fr-wire/tests/held_state.rs': None,
+          }
+          after = {
+              'crates/fr-core/src/held_state.rs': '48a2b19c16f93643d8f22d7a076ad38e4ce87d06',
+              'crates/fr-core/src/input_submission.rs': 'd5d25a4fbdf70c5503d31ce067a0b01156c5c533',
+              'crates/fr-core/src/input_submission/held.rs': '6f470baffe03782abe9cd142bdcf42ebdd9408ae',
+              'crates/fr-core/src/lib.rs': '44544aae0f895f95133d5056e5db8ed9cc03045e',
+              'crates/fr-core/tests/held_state.rs': '0536961b29652dc497405f46938152caa0c8ffd6',
+              'crates/fr-wire/src/held_state.rs': 'd560455d9adbc899935ece53d6cf3e718fece433',
+              'crates/fr-wire/src/lib.rs': 'b6ad9db65aa566bfbb917e32a3a31119466d27a2',
+              'crates/fr-wire/src/record.rs': '1c02d71d656487d033135ef765355374886db7e0',
+              'crates/fr-wire/tests/held_state.rs': '5eaa39b178bd39ca4f8ee30ee2a6e62485dfa8b0',
+          }
+          def sha(data):
+              return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
+          for path, expected in before.items():
+              actual = sha(Path(path).read_bytes()) if Path(path).exists() else None
+              assert actual == expected, f'Concurrent change: {path}'
+          oid = '03acb5df90b09ab2ddf7ad37dd1fb4c59146dcc3'
+          row = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
+          raw = base64.b64decode(row['content'])
+          assert len(raw) == 7360 and sha(raw) == oid
+          decoder = lzma.LZMADecompressor()
+          patch_bytes = decoder.decompress(raw, max_length=33337)
+          assert decoder.eof and not decoder.unused_data
+          assert len(patch_bytes) == 33336 and sha(patch_bytes) == 'c245ce59ebd75a048da638d67cc8bca079a971fb'
+          patch = Path(os.environ['RUNNER_TEMP'], 'held-state.patch')
+          patch.write_bytes(patch_bytes)
+          stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
+          assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(after)
+          subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
+          subprocess.run(['git', 'apply', str(patch)], check=True)
+          for path, expected in after.items():
+              assert sha(Path(path).read_bytes()) == expected, path
+          Path(os.environ['RUNNER_TEMP'], 'held-state-paths.json').write_text(json.dumps(after))
+          PY
+      - name: Verify complete workspace and reconciliation regressions
+        run: |
+          ./scripts/verify.sh fast
+          ./scripts/verify.sh docs
+          git diff --check
+      - name: Export verified source objects without branch writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, subprocess
+          from pathlib import Path
+          for path, expected in json.loads(Path(os.environ['RUNNER_TEMP'], 'held-state-paths.json').read_text()).items():
+              data = Path(path).read_bytes()
+              assert hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest() == expected
+              body = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()})
+              result = subprocess.run(['gh', 'api', '--method', 'POST', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', '--input', '-'], input=body, text=True, capture_output=True, check=True)
+              assert json.loads(result.stdout)['sha'] == expected, path
+              print(json.dumps({'path': path, 'sha': expected, 'verified_against': os.environ['GITHUB_SHA']}))
+          PY
