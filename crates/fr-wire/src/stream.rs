@@ -54,9 +54,18 @@ impl fmt::Debug for RecordStream {
 }
 impl RecordStream {
     pub fn new(maximum: usize, binding: u32, lifetime_micros: u64) -> Result<Self, StreamError> {
+        if binding == 0 {
+            return Err(StreamError::InvalidPolicy);
+        }
+        Self::new_inner(maximum, binding, lifetime_micros)
+    }
+    /// Initial control only. Zero binding never admits media or input records.
+    pub fn negotiation(maximum: usize, lifetime_micros: u64) -> Result<Self, StreamError> {
+        Self::new_inner(maximum, 0, lifetime_micros)
+    }
+    fn new_inner(maximum: usize, binding: u32, lifetime_micros: u64) -> Result<Self, StreamError> {
         if !(HEADER_BYTES..=ProtocolLimits::ABSOLUTE.max_control_message_bytes() as usize)
             .contains(&maximum)
-            || binding == 0
             || !(1..=5_000_000).contains(&lifetime_micros)
         {
             return Err(StreamError::InvalidPolicy);
@@ -129,6 +138,14 @@ impl RecordStream {
         }
         if h[8..12] != [0; 4] {
             return Err(WireError::InvalidFlags);
+        }
+        if self.binding == 0
+            && !matches!(
+                u16::from_be_bytes([h[6], h[7]]),
+                0x0001..=0x0003 | 0x0010 | 0x0011
+            )
+        {
+            return Err(WireError::UnsupportedKind);
         }
         let word = |i| u32::from_be_bytes([h[i], h[i + 1], h[i + 2], h[i + 3]]);
         if word(16) != self.binding {
