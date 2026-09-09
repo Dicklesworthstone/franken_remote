@@ -51,15 +51,18 @@ jobs:
           }
           def sha(data):
               return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
+          def read_blob(oid):
+              blob = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
+              data = base64.b64decode(blob['content'])
+              assert sha(data) == oid
+              return data
           for path, oid in before.items():
               if oid is None:
                   assert not Path(path).exists(), f'Concurrent source exists: {path}'
               else:
                   assert sha(Path(path).read_bytes()) == oid, f'Concurrent source changed: {path}'
-          oid = '405e173c8859358738226d92a5da7dd571fb3fc9'
-          blob = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
-          raw = base64.b64decode(blob['content'])
-          assert len(raw) == 12988 and sha(raw) == oid
+          raw = read_blob('405e173c8859358738226d92a5da7dd571fb3fc9')
+          assert len(raw) == 12988
           decoder = lzma.LZMADecompressor()
           data = decoder.decompress(raw, max_length=100001)
           assert decoder.eof and not decoder.unused_data
@@ -70,6 +73,19 @@ jobs:
           assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(after)
           subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
           subprocess.run(['git', 'apply', str(patch)], check=True)
+          for path, oid in after.items():
+              assert sha(Path(path).read_bytes()) == oid, path
+          correction = {
+              'crates/fr-transport/tests/support/mod.rs': '2a8537713a9c36a2f3bdcbbce011522572d1af11',
+              'crates/frd/examples/native_session_check.rs': '1e79f89af3e604968a94417a4b7186998002899c',
+              'crates/frd/src/session.rs': '70c400f3a9445833752e8df8d5421af006ed60bc',
+          }
+          patch.write_bytes(read_blob('10e560cf01b24c7b933634085e533d7549f1e6c8'))
+          stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
+          assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(correction)
+          subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
+          subprocess.run(['git', 'apply', str(patch)], check=True)
+          after.update(correction)
           for path, oid in after.items():
               assert sha(Path(path).read_bytes()) == oid, path
           Path(os.environ['RUNNER_TEMP'], 'verified-paths.json').write_text(json.dumps(after))
