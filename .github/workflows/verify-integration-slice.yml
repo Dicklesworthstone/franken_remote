@@ -25,68 +25,66 @@ jobs:
         run: |
           rustup show active-toolchain
           sudo apt-get update
-          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev pkg-config xvfb xauth openssl
-      - name: Install exact staged source without ref writes
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
+      - name: Install exact reviewed QUIC source without ref writes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 - <<'PY'
-          import base64,json,os,subprocess,hashlib
+          import base64,gzip,json,os,subprocess,hashlib
           from pathlib import Path
           repo=os.environ['GITHUB_REPOSITORY']
-          def api(path):
-              return json.loads(subprocess.check_output(['gh','api',f'repos/{repo}/{path}']))
-          tree=api('git/trees/0db0bad0ff3802dd3403e0c31e43f4f4c0d33a28?recursive=1')
-          assert not tree.get('truncated')
-          paths=[
-              'crates/fr-transport/Cargo.toml','crates/fr-transport/src/lib.rs',
-              'crates/fr-transport/src/socket.rs','crates/fr-transport/src/wss.rs',
-              'crates/fr-transport/tests/wss_live.rs','crates/fr-transport/tests/support/mod.rs',
-              'crates/fr-tailnet/Cargo.toml','crates/fr-tailnet/src/lib.rs',
-              'crates/fr-tailnet/src/local.rs','crates/fr-tailnet/src/http.rs',
-              'crates/fr-native/Cargo.toml','crates/fr-native/examples/native_wss_roundtrip.rs',
-              'crates/fr-native/examples/support/mod.rs','scripts/verify_native_wss.sh',
-              'NETWORK_TRANSPORT.md',
-          ]
-          replace={'crates/fr-native/Cargo.toml':'950ab9b8c19f6a8d8617577d3d4d4e283090fb41'}
-          entries={e['path']:e for e in tree['tree']}
           def blob_sha(data):
               return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
-          for path in paths:
-              target=Path(path)
-              if path in replace:
-                  assert target.is_file() and blob_sha(target.read_bytes())==replace[path],f'Concurrent change: {path}'
-              else:
-                  assert not target.exists(),f'Already present: {path}'
-              entry=entries[path]
-              assert entry['type']=='blob' and entry['mode'] in ('100644','100755')
-              blob=api('git/blobs/'+entry['sha'])
+          chunks=[
+              '94231bb07e105d93320d40b1d2ec42e255698fc5',
+              '6aa5194a6f9e3f51bee2167439caca2f212c5b05',
+              'eef0a2ab9a3fab6b5a6a12c05ffa36d02e0b30b5',
+              '5d8c3a1ffe24a347b4f3770d114dbbb87ddd9f81',
+              '9224356fddcd04c8eba8ed9fc9ff795c681f1f18',
+          ]
+          bundle=b''
+          for sha in chunks:
+              blob=json.loads(subprocess.check_output(['gh','api',f'repos/{repo}/git/blobs/{sha}']))
               data=base64.b64decode(blob['content'])
-              assert len(data)<100000 and blob_sha(data)==entry['sha']
+              assert blob_sha(data)==sha and len(data)<=5500
+              bundle+=data
+          assert blob_sha(bundle)=='eb206455c51e938d75cfbec351c6cdbddcbf9352'
+          source=json.loads(gzip.decompress(bundle))
+          expected={
+              'crates/fr-transport/Cargo.toml':'d40f7e5e183b411248bdcaecd57f2f136ca4fd33',
+              'crates/fr-transport/src/lib.rs':'5b6c059bc0e7675e899c240503ed5897f28637bb',
+              'crates/fr-transport/src/quic.rs':'4fd1490f26e9dce1104be69e4d50818b9e95f359',
+              'crates/fr-transport/tests/native_quic.rs':'a6686deb2dae7df4b578cf84884fa27e253df9aa',
+              'crates/fr-transport/tests/support/mod.rs':'0830f0b6819d0077abef43583e195d379642523d',
+              'QUIC_RECORDS.md':'1040d87feb08616e64ef1565587819b2c26c9ae0',
+          }
+          assert source.keys()==expected.keys()
+          for path,text in source.items():
+              target=Path(path)
+              data=text.encode()
+              assert not target.exists(),f'Concurrent implementation already present: {path}'
+              assert len(data)<40000 and blob_sha(data)==expected[path],path
               target.parent.mkdir(parents=True,exist_ok=True)
               target.write_bytes(data)
-              target.chmod(int(entry['mode'][-3:],8))
           root=Path('Cargo.toml')
+          old={p:blob_sha(Path(p).read_bytes()) for p in ['Cargo.toml','Cargo.lock']}
           text=root.read_text()
-          old='asupersync = { version = "0.4.10", default-features = false }'
-          pinned='asupersync = { version = "=0.4.10", default-features = false }'
-          assert text.count(old)+text.count(pinned)==1,'unexpected runtime configuration'
-          text=text.replace(old,pinned)
-          anchor='fr-native = { path = "crates/fr-native" }'
-          assert text.count(anchor)==1
-          assert 'fr-transport = ' not in text and 'fr-tailnet = ' not in text
-          additions='\nfr-transport = { path = "crates/fr-transport" }\nfr-tailnet = { path = "crates/fr-tailnet" }'
-          root.write_text(text.replace(anchor,anchor+additions))
-          Path(os.environ['RUNNER_TEMP'],'slice-paths.json').write_text(json.dumps(paths+['Cargo.toml','Cargo.lock']))
+          assert text.count('asupersync = { version = "=0.4.10", default-features = false }')==1
+          anchor='fr-wire = { path = "crates/fr-wire" }'
+          assert text.count(anchor)==1 and 'fr-transport = ' not in text
+          root.write_text(text.replace(anchor,anchor+'\nfr-transport = { path = "crates/fr-transport" }'))
+          print(json.dumps({'staged_on':os.environ['GITHUB_SHA'],'original_blobs':old}))
+          Path(os.environ['RUNNER_TEMP'],'slice-paths.json').write_text(json.dumps(list(expected)+['Cargo.toml','Cargo.lock']))
           PY
-          cargo generate-lockfile
-      - name: Verify exact source
+          cargo metadata --format-version=1 > "$RUNNER_TEMP/quic-metadata.json"
+          git diff -- Cargo.toml Cargo.lock
+      - name: Verify actual source and live Asupersync QUIC
         run: |
           ./scripts/verify.sh fast
           ./scripts/verify.sh docs
-          xvfb-run -a -s '-screen 0 640x360x24 -nolisten tcp' cargo run -p fr-native --features linux-media --example native_roundtrip -- --software-explicit
-          ./scripts/verify_native_wss.sh
-      - name: Retain verified source blobs for explicit review
+          cargo test -p fr-transport --test native_quic --locked -- --test-threads=4
+      - name: Retain verified source blobs for explicit commit
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
