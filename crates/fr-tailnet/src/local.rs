@@ -272,7 +272,21 @@ async fn bounded<T>(
         if current >= end {
             return Poll::Ready(Err(Error::Timeout));
         }
-        if let Poll::Ready(result) = operation.as_mut().poll(task) {
+        let result = operation.as_mut().poll(task);
+        // A poll can finish after the deadline or observe cancellation while
+        // parsing a response. Check again before accepting output or waiting.
+        let current = match now(cx) {
+            Ok(v) => v,
+            Err(e) => return Poll::Ready(Err(e)),
+        };
+        if current < last {
+            return Poll::Ready(Err(Error::Clock));
+        }
+        last = current;
+        if current >= end {
+            return Poll::Ready(Err(Error::Timeout));
+        }
+        if let Poll::Ready(result) = result {
             return Poll::Ready(result);
         }
         if pulse.as_mut().poll(task).is_ready() {
