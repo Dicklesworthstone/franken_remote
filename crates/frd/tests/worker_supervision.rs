@@ -205,3 +205,87 @@ fn launch_is_local_only_and_deadlines_cannot_be_unbounded() {
         w.reap(&cx, deadline(&cx, 500)).await.unwrap();
     });
 }
+
+#[test]
+fn spawn_failures_are_sanitized_and_writable_image_recovers_after_reap() {
+    use asupersync::process::ProcessError;
+    use frd::worker::SpawnFailure;
+    let secret = "private executable path and native library message";
+    for error in [
+        ProcessError::NotFound(secret.into()),
+        ProcessError::PermissionDenied(secret.into()),
+        ProcessError::Unsupported(secret.into()),
+        ProcessError::InvalidConfiguration(secret.into()),
+        ProcessError::Io(std::io::Error::other(secret)),
+    ] {
+        assert!(!format!("{}", Error::SpawnFailed(error.into())).contains(secret));
+    }
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let holder_image = fixture("hold-writer");
+        let target = PathBuf::from(format!("{}.target", holder_image.display()));
+        std::fs::write(
+            &target,
+            include_str!("support/worker_fixture.py").replace("@MODE@", "healthy"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut holder = Worker::start(
+            &cx,
+            Launch::new(&holder_image, ":0", None, Role::Capture, 77).unwrap(),
+            config(),
+            deadline(&cx, 1000),
+        )
+        .await
+        .unwrap();
+        let start = || Launch::new(&target, ":0", None, Role::Capture, 78).unwrap();
+        assert!(matches!(
+            Worker::start(&cx, start(), config(), deadline(&cx, 1000)).await,
+            Err(Error::SpawnFailed(SpawnFailure::Io {
+                kind: std::io::ErrorKind::ExecutableFileBusy,
+                raw_os_error: Some(26)
+            }))
+        ));
+        holder
+            .request(&cx, Kind::Stop, vec![], deadline(&cx, 500))
+            .await
+            .unwrap();
+        assert!(
+            holder
+                .reap(&cx, deadline(&cx, 500))
+                .await
+                .unwrap()
+                .success()
+        );
+        assert_eq!(holder.state(), State::Reaped);
+        let mut target_worker = Worker::start(&cx, start(), config(), deadline(&cx, 1000))
+            .await
+            .unwrap();
+        assert_eq!(
+            target_worker
+                .request(&cx, Kind::Poll, vec![], deadline(&cx, 500))
+                .await
+                .unwrap()
+                .header
+                .kind,
+            Kind::NeedInput
+        );
+        target_worker
+            .request(&cx, Kind::Stop, vec![], deadline(&cx, 500))
+            .await
+            .unwrap();
+        assert!(
+            target_worker
+                .reap(&cx, deadline(&cx, 500))
+                .await
+                .unwrap()
+                .success()
+        );
+        assert_eq!(target_worker.state(), State::Reaped);
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(matches!(
+            Worker::start(&cx, start(), config(), deadline(&cx, 1000)).await,
+            Err(Error::SpawnFailed(SpawnFailure::PermissionDenied))
+        ));
+    });
+}

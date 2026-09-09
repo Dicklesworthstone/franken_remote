@@ -14,6 +14,10 @@ def reply(header, kind, body):
     os.write(1, header[:6]+struct.pack('>H', kind)+header[8:32]+struct.pack('>I', len(body))+body)
 h = read(36)
 b = read(struct.unpack('>I', h[32:])[0])
+if MODE == 'hold-writer':
+    # Keep the descriptor outside the parallel Rust test process so unrelated
+    # forks cannot inherit it. Configure acknowledges that the writer is open.
+    writer = open(__file__ + '.target', 'r+b')
 reply(h, 257, b)
 while True:
     h = read(36)

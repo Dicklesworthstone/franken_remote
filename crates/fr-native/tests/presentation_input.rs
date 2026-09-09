@@ -1354,7 +1354,9 @@ fn failed_native_startup_never_configures_receiver_and_drop_invalidates_view() {
         let launch = Launch::new(&missing, &viewer.name, None, Role::Present, 99).unwrap();
         assert!(matches!(
             Presenter::start(&cx, launch, config(), &record, &mut receiver).await,
-            Err(frd::media::Error::Worker(frd::worker::Error::SpawnFailed))
+            Err(frd::media::Error::Worker(frd::worker::Error::SpawnFailed(
+                frd::worker::SpawnFailure::NotFound
+            )))
         ));
         assert_eq!(receiver.state(), ReceiveState::Closed);
         assert_eq!(receiver.budget_usage(), BudgetUsage::default());
