@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 fr-core.workspace = true
 fr-wire.workspace = true
+fr-media.workspace = true
 
 [lints]
 workspace = true

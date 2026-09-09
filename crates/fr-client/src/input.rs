@@ -569,3 +569,6 @@ impl InputClient {
 
 #[cfg(test)]
 mod tests;
+
+/// Input whose freshness evidence comes from the media presentation path.
+pub mod presentation;

@@ -184,6 +184,9 @@ impl ViewTracker {
             closed: false,
         })
     }
+    pub const fn epoch(&self) -> MediaEpoch {
+        self.epoch
+    }
     pub fn synchronize(&mut self, clock: ClockCorrelation, now_us: u64) -> Result<(), Error> {
         if clock.host_boot() != self.clock.host_boot() {
             return Err(Error::StaleBinding);
@@ -194,6 +197,7 @@ impl ViewTracker {
         }
         clock.age_upper_us(clock.sample.host_sample_us, now_us)?;
         self.clock = clock;
+        self.bump()?;
         Ok(())
     }
     /// Parse current-bound `MediaProgress`. A heartbeat is not accepted here.
@@ -216,6 +220,9 @@ impl ViewTracker {
         })?;
         let p = decode_progress(record, limits).map_err(|_| Error::InvalidProgress)?;
         self.tick(now_us)?;
+        if p.pipeline == PipelineState::Failed {
+            return self.fail(Error::SourceUnknown);
+        }
         if let Some(old) = self.progress {
             if p.descriptor.frame < old.descriptor.frame {
                 return Err(Error::Obsolete);
@@ -224,7 +231,10 @@ impl ViewTracker {
                 if p.descriptor != old.descriptor {
                     return self.fail(Error::InvalidProgress);
                 }
-                if p.observed_micros < old.observed_micros {
+                if p.observation != SourceObservation::Unknown
+                    && old.observation != SourceObservation::Unknown
+                    && p.observed_micros < old.observed_micros
+                {
                     return Err(Error::Obsolete);
                 }
                 if p == old {
@@ -240,9 +250,6 @@ impl ViewTracker {
                 return self.fail(Error::InvalidProgress);
             }
             self.clock.age_upper_us(p.observed_micros, now_us)?;
-        }
-        if p.pipeline == PipelineState::Failed {
-            return self.fail(Error::SourceUnknown);
         }
         if self
             .visible
