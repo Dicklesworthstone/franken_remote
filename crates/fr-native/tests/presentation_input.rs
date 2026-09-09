@@ -154,6 +154,13 @@ fn runtime() -> Runtime {
         .build()
         .unwrap()
 }
+fn run(scenario: impl std::future::Future<Output = ()>) {
+    // Each experiment measures real 50 ms display deadlines. Obtain the fixture
+    // slot before creating runtimes, native workers, or time-limited grants.
+    static SCENARIOS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = SCENARIOS.lock().unwrap();
+    runtime().block_on(scenario);
+}
 async fn close_media(cx: &Cx, capture: &mut CaptureSource, presenter: &mut Presenter) {
     for worker in [capture.worker_mut(), presenter.worker_mut()] {
         worker
@@ -419,9 +426,303 @@ async fn drag_then_expire(
 
 #[test]
 fn captured_video_visible_readback_input_receipt_and_idle_stale_cleanup() {
-    runtime().block_on(scenario(false));
+    run(scenario(false));
 }
 #[test]
 fn delayed_native_decode_receipt_cannot_enable_input_on_an_old_display_deadline() {
-    runtime().block_on(scenario(true));
+    run(scenario(true));
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Loss {
+    FinalFragment,
+    EntirePicture,
+    EveryFifth,
+}
+#[derive(Debug, Default)]
+struct RecoveryCounts {
+    original_fragments: usize,
+    dropped_fragments: usize,
+    duplicate_fragments: usize,
+    repair_fragments: usize,
+    repair_wire_bytes: usize,
+    encoded_bytes: usize,
+    peak_sender_bytes: usize,
+    peak_receiver_bytes: usize,
+}
+fn check_bounds(video: &Video, counts: &mut RecoveryCounts) {
+    let send = video.subscription.cache_usage();
+    let receive = video.receiver.budget_usage();
+    assert!(send.bytes <= SendPolicy::default().max_cached_bytes);
+    assert!(send.pictures <= SendPolicy::default().max_cached_pictures);
+    assert!(
+        u64::try_from(receive.bytes).unwrap()
+            <= video.wire.protocol().per_viewer_compressed_bytes()
+    );
+    assert!(receive.pictures <= usize::from(video.wire.protocol().reassembly_window_pictures()));
+    counts.peak_sender_bytes = counts.peak_sender_bytes.max(send.bytes);
+    counts.peak_receiver_bytes = counts.peak_receiver_bytes.max(receive.bytes);
+}
+fn receive_packet(video: &mut Video, offer: PacketOffer, packet: &[u8], cx: &Cx) {
+    let at = now(cx);
+    video.receiver.receive(offer.channel, packet, at.0).unwrap();
+    if offer.channel == Channel::MediaConfig {
+        video.client.progress(packet, &video.wire, at).unwrap();
+    }
+}
+fn flush_fragments(
+    video: &mut Video,
+    held: &mut [Option<(PacketOffer, [u8; 1150])>; 4],
+    counts: &mut RecoveryCounts,
+    cx: &Cx,
+) {
+    for entry in held.iter_mut().rev() {
+        if let Some((offer, packet)) = entry.take() {
+            receive_packet(video, offer, &packet[..offer.byte_len], cx);
+            let before = video.receiver.budget_usage();
+            receive_packet(video, offer, &packet[..offer.byte_len], cx);
+            assert_eq!(
+                video.receiver.budget_usage(),
+                before,
+                "duplicate allocated again"
+            );
+            counts.duplicate_fragments += 1;
+            check_bounds(video, counts);
+        }
+    }
+}
+fn impaired_transfer(video: &mut Video, loss: Option<Loss>, counts: &mut RecoveryCounts, cx: &Cx) {
+    let mut packet = [0; 1150];
+    // The fault injector itself has exactly four inline records, including
+    // their metadata. It never accumulates a whole encoded picture's packets.
+    let mut held = [None; 4];
+    let mut held_count = 0;
+    while let Some(offer) = video.subscription.next_packet(&mut packet).unwrap() {
+        video.subscription.authorize_write(&offer).unwrap();
+        if offer.channel == Channel::Video {
+            let record =
+                fr_wire::Record::decode(&packet[..offer.byte_len], &video.wire, 1, Channel::Video)
+                    .unwrap();
+            let fragment = fr_wire::decode_fragment(record, &video.wire).unwrap();
+            let total = fragment.descriptor.fragment_count().unwrap();
+            assert!(
+                total > 1,
+                "real HEVC picture did not exercise fragmentation"
+            );
+            counts.original_fragments += 1;
+            let drop = match loss {
+                Some(Loss::FinalFragment) => fragment.index + 1 == total,
+                Some(Loss::EntirePicture) => true,
+                Some(Loss::EveryFifth) => fragment.index.is_multiple_of(5),
+                None => false,
+            };
+            if drop {
+                counts.dropped_fragments += 1;
+                continue;
+            }
+            held[held_count] = Some((offer, packet));
+            held_count += 1;
+            if held_count == held.len() {
+                flush_fragments(video, &mut held, counts, cx);
+                held_count = 0;
+            }
+        } else {
+            assert!(matches!(
+                offer.channel,
+                Channel::MediaConfig | Channel::Recovery
+            ));
+            receive_packet(video, offer, &packet[..offer.byte_len], cx);
+            check_bounds(video, counts);
+        }
+    }
+    flush_fragments(video, &mut held, counts, cx);
+}
+async fn capture_pattern(video: &mut Video, phase: u8, counts: &mut RecoveryCounts) -> usize {
+    let limits = config().limits().unwrap();
+    let mut pixels = vec![0; 320 * 240 * 4];
+    for (index, pixel) in pixels.chunks_exact_mut(4).enumerate() {
+        let (width, height) = if phase == 0 { (4, 4) } else { (3, 5) };
+        let tile = ((index % 320) / width + (index / 320) / height) % 2;
+        pixel.copy_from_slice(if tile == 0 {
+            &[40, 80, 180, 255]
+        } else {
+            &[190, 160, 60, 255]
+        });
+    }
+    video
+        ._source
+        .present(&BgraFrame::new(320, 240, pixels, &limits).unwrap())
+        .unwrap();
+    let unit = video.capture.capture(&video.control, false).await.unwrap();
+    assert!(
+        !unit.is_idr(),
+        "repair must exercise a predictive HEVC picture"
+    );
+    let bytes = unit.bytes().len();
+    assert!(bytes > video.wire.fragment_stride() as usize);
+    counts.encoded_bytes += bytes;
+    video.subscription.enqueue(unit).unwrap();
+    assert!(
+        video.subscription.cache_usage().bytes > bytes,
+        "cache omitted picture metadata"
+    );
+    check_bounds(video, counts);
+    bytes
+}
+async fn sleep_until(cx: &Cx, until: u64) {
+    let remaining = until.saturating_sub(now(cx).0);
+    asupersync::time::sleep(
+        cx.timer_driver().unwrap().now(),
+        Duration::from_micros(remaining),
+    )
+    .await;
+}
+async fn present_visible(video: &mut Video, output: &mut X11Surface, cx: &Cx) -> Vec<u8> {
+    let receipt = video
+        .presenter
+        .present_next(cx, &mut video.receiver)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.stage, PresentationStage::SubmittedToCompositor);
+    let frame = receipt.frame.as_raw();
+    video
+        .client
+        .decoded(receipt.decoded, true, now(cx))
+        .unwrap();
+    let pixels = output.snapshot().unwrap().pixels().to_vec();
+    video.client.visible(frame, now(cx)).unwrap();
+    assert_eq!(video.receiver.budget_usage(), BudgetUsage::default());
+    pixels
+}
+async fn repair_missing(video: &mut Video, counts: &mut RecoveryCounts, cx: &Cx) {
+    let deadline = video.receiver.next_deadline().unwrap();
+    sleep_until(cx, deadline).await;
+    let mut packet = [0; 1150];
+    let size = video
+        .receiver
+        .repair_request(now(cx).0, &mut packet)
+        .unwrap()
+        .unwrap();
+    assert!(size <= video.wire.record_bytes());
+    video.subscription.queue_repair(&packet[..size]).unwrap();
+    assert!(
+        video
+            .receiver
+            .repair_request(now(cx).0, &mut packet)
+            .unwrap()
+            .is_none(),
+        "repair rate limit not enforced"
+    );
+    while let Some(offer) = video.subscription.next_repair(&mut packet).unwrap() {
+        assert_eq!(offer.channel, Channel::Video);
+        video.subscription.authorize_write(&offer).unwrap();
+        receive_packet(video, offer, &packet[..offer.byte_len], cx);
+        counts.repair_fragments += 1;
+        counts.repair_wire_bytes += offer.byte_len;
+        check_bounds(video, counts);
+    }
+    assert!(counts.repair_wire_bytes <= SendPolicy::default().repair_bytes_per_window);
+}
+async fn recovery_case(loss: Loss, late_reference: bool) {
+    let source = Server::start();
+    let viewer = Server::start();
+    let cx = Cx::current().unwrap();
+    let mut video = prepare(&source, &viewer, &cx).await;
+    let mut output = X11Surface::capture(Some(&viewer.name), config().limits().unwrap()).unwrap();
+    let mut counts = RecoveryCounts::default();
+    let bootstrap = video.capture.capture(&video.control, false).await.unwrap();
+    assert!(bootstrap.is_idr());
+    video.subscription.enqueue(bootstrap).unwrap();
+    impaired_transfer(&mut video, None, &mut counts, &cx);
+    let old_pixels = present_visible(&mut video, &mut output, &cx).await;
+    let bytes = capture_pattern(&mut video, 0, &mut counts).await;
+    let arrival = now(&cx).0;
+    impaired_transfer(&mut video, Some(loss), &mut counts, &cx);
+    assert!(counts.dropped_fragments > 0);
+    assert!(
+        video.receiver.budget_usage().bytes > bytes,
+        "receiver omitted fragment metadata"
+    );
+    assert!(
+        video
+            .presenter
+            .present_next(&cx, &mut video.receiver)
+            .await
+            .unwrap()
+            .is_none(),
+        "incomplete HEVC reached decoder"
+    );
+    assert_eq!(output.snapshot().unwrap().pixels(), old_pixels);
+    if late_reference {
+        // Capture the dependent only AFTER the missing reference becomes too
+        // old to display, so this is not a test that presents two old pictures.
+        sleep_until(&cx, arrival + 65_000).await;
+        capture_pattern(&mut video, 1, &mut counts).await;
+        impaired_transfer(&mut video, None, &mut counts, &cx);
+        assert!(
+            video
+                .presenter
+                .present_next(&cx, &mut video.receiver)
+                .await
+                .unwrap()
+                .is_none(),
+            "broken dependency reached decoder"
+        );
+    }
+    // No additional capture/progress packet is needed to find final-frame loss.
+    repair_missing(&mut video, &mut counts, &cx).await;
+    assert_eq!(counts.repair_fragments, counts.dropped_fragments);
+    if late_reference {
+        let receipt = video
+            .presenter
+            .present_next(&cx, &mut video.receiver)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.stage, PresentationStage::DecodedOnly);
+        assert!(now(&cx).0 >= receipt.decoded.display_deadline_us());
+        video
+            .client
+            .decoded(receipt.decoded, false, now(&cx))
+            .unwrap();
+        assert_eq!(
+            output.snapshot().unwrap().pixels(),
+            old_pixels,
+            "late reference was displayed"
+        );
+        assert_eq!(video.receiver.budget_usage().pictures, 1);
+    }
+    let new_pixels = present_visible(&mut video, &mut output, &cx).await;
+    assert_ne!(
+        new_pixels, old_pixels,
+        "repaired HEVC did not change the visible image"
+    );
+    println!(
+        "recovery={loss:?} late_reference={late_reference} elapsed_us={} counts={counts:?} injector_bytes={} subscription_fixed_bytes={}",
+        now(&cx).0 - arrival,
+        std::mem::size_of::<[Option<(PacketOffer, [u8; 1150])>; 4]>(),
+        std::mem::size_of::<Subscription>()
+    );
+    drag_then_expire(&mut video.client, &mut video.observer, &source, &cx).await;
+    // Service the actual host-clock cache deadline during idle, without
+    // fabricating a capture/progress heartbeat to keep this subscription alive.
+    while let Some(deadline) = video.subscription.next_deadline() {
+        sleep_until(&cx, deadline.as_micros()).await;
+        video.subscription.tick().unwrap();
+    }
+    assert_eq!(video.subscription.cache_usage(), BudgetUsage::default());
+    close_media(&cx, &mut video.capture, &mut video.presenter).await;
+}
+#[test]
+fn actual_hevc_final_fragment_loss_repairs_without_a_later_frame_and_idle_cache_expires() {
+    run(recovery_case(Loss::FinalFragment, false));
+}
+#[test]
+fn actual_hevc_lost_final_picture_is_announced_and_repaired_before_idle() {
+    run(recovery_case(Loss::EntirePicture, false));
+}
+#[test]
+fn actual_hevc_late_repaired_reference_unlocks_a_fresh_dependent_without_presenting_old_pixels() {
+    run(recovery_case(Loss::EveryFifth, true));
 }

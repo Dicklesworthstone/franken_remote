@@ -14,8 +14,8 @@ use fr_core::{
 use fr_media::{
     access_unit::{EncodedAccessUnit, FrameId, FrameKind},
     delivery::{
-        DecodedFrame, DeliveryMode, MediaBindings, MediaEpoch, PacketOffer, ReceivePipeline,
-        SendCache, SendError, SendPolicy,
+        BudgetUsage, DecodedFrame, DeliveryMode, MediaBindings, MediaEpoch, PacketOffer,
+        ReceivePipeline, SendCache, SendError, SendPolicy,
     },
     worker::{Configuration, Kind, Role, capture_payload, parse_unit, unit_parts},
 };
@@ -300,6 +300,24 @@ impl Subscription {
         Ok(self
             .cache
             .next_repair_packet(self.control.check()?.as_micros(), out)?)
+    }
+    /// Charged encoded capacities and per-picture metadata. Fixed cache/repair
+    /// storage is part of `size_of::<Subscription>()`, not this dynamic charge.
+    pub const fn cache_usage(&self) -> BudgetUsage {
+        BudgetUsage {
+            bytes: self.cache.cached_bytes(),
+            pictures: self.cache.cached_pictures(),
+        }
+    }
+    /// The owning Asupersync task must service this even when video goes idle.
+    /// Reading the deadline does not renew authority or extend cache retention.
+    pub fn next_deadline(&self) -> Option<HostInstant> {
+        self.cache.next_deadline().map(HostInstant::from_micros)
+    }
+    /// Expire cache entries without requiring another capture, packet or repair.
+    pub fn tick(&mut self) -> Result<(), Error> {
+        self.cache.tick(self.control.check()?.as_micros())?;
+        Ok(())
     }
 }
 /// Viewer-local process owner. Compressed receiver reservations remain alive
