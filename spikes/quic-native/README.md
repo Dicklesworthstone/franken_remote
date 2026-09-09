@@ -20,22 +20,48 @@ Raw scenario output is retained under `results/`.
 - `src/proxy.rs` — deterministic seeded loss/reorder middlebox + Initial-DCID
   sniffer (the single-connection accept API needs the DCID out of band).
 - `src/certs.rs` — runtime rcgen PKI; real WebPKI verification, no skip-verify.
-- `run_all.sh` — reproducible local driver.
+- `run_all.sh` — runs a prebuilt binary, retains every scenario exit, and
+  returns nonzero if any scenario fails. It refuses an existing results path.
 
 ## Running
 
+From the repository root, compile and test through RCH. The spike is a separate
+workspace: root workspace tests do not execute its receive-window regression.
+
 ```bash
-./run_all.sh                       # all local scenarios
-# Cross-machine pair (host A serves, host B connects):
-quic-native-spike emit-pki /tmp/spike-pki       # then copy dir to both hosts
-quic-native-spike serve 0.0.0.0:47777 /tmp/spike-pki          # host A
-quic-native-spike connect-remote <A>:47777 /tmp/spike-pki     # host B
+RCH_REQUIRE_REMOTE=1 rch exec -- cargo test --locked -j 2 --manifest-path spikes/quic-native/Cargo.toml
+bash spikes/quic-native/fetch_bin.sh
+bash spikes/quic-native/run_all.sh spikes/quic-native/out/quic-native-spike spikes/quic-native/results/new-run
 ```
 
-Builds assume the FrankenSuite checkouts are siblings (`../../../asupersync`);
-the qualified asupersync revision is pinned in RESULTS.md. On this fleet, use
-rch offload (see AGENTS.md §10); the `fetch_bin.sh` helper builds remotely and
-returns the binary via a job result dir.
+Choose a new results directory for each run. The runner executes the RCH-built
+release binary locally; it performs no compilation. Keep its input binary fixed
+through the entire run: it checks the digest between scenarios and at completion
+and refuses mixed-build evidence. Retain the RCH build log with its source
+revision and dependency identity alongside the scenario logs. Debug-build
+timings do not replace the original release-build measurements.
+
+```bash
+# Cross-machine pair (host A serves, host B connects):
+quic-native-spike emit-pki /tmp/spike-pki       # then copy dir to both hosts
+quic-native-spike serve <A-tailnet-IP>:47777 /tmp/spike-pki          # host A
+quic-native-spike connect-remote <A-tailnet-IP>:47777 /tmp/spike-pki # host B
+```
+
+The manifest and lockfile pin an immutable Asupersync candidate. A pin is not a
+qualification result: read `RESULTS.md` for measured rows and remaining failures.
+The root workspace retains its separate published runtime pin. `fetch_bin.sh`
+uses strict RCH to build the release binary and copies the returned artifact
+into this spike's `out/` directory.
+
+The receive-window test sends four 1024-byte payloads over one real TLS/UDP
+stream with a fixed 1024-byte receive window. Each application read must
+replenish both advertised and enforced credit; reconfiguring a larger window
+cannot hide a stalled transfer.
+
+The TLS-negative scenario retains the client certificate-verification result,
+requests server cancellation, and awaits server completion. Cancellation is
+cleanup; only the client's fatal TLS alert satisfies the refusal assertion.
 
 ## No-claims boundary
 

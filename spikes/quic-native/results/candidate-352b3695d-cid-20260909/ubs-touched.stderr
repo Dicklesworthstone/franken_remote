@@ -1,0 +1,8 @@
+ℹ Preparing shadow workspace for 4 file(s) and 0 directory target(s)
+ℹ Scanning shadow workspace at /data/tmp/tmp.pMw1H8bbFW/files_scan
+UBS Meta-Runner v5.3.13  2026-09-09 02:10:20
+Project: /data/projects/franken_remote
+Format:  json
+Detected: rust
+Scanning rust...
+Finished rust (9s)

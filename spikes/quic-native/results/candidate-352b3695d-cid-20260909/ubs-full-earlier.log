@@ -1,0 +1,1665 @@
+ℹ Scan size after ignores: 524MB (limit 1000MB)
+ℹ Created filtered scan workspace at /data/tmp/tmp.sxxkcmrN5n/scan
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗              ║
+║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝              ║
+║  ██║   ██║██║     ██║   ██║██╔████╔██║███████║   ██║   █████╗                ║
+║  ██║   ██║██║     ██║   ██║██║╚██╔╝██║██╔══██║   ██║   ██╔══╝                ║
+║  ╚██████╔╝███████╗██║   ██║██║ ╚═╝ ██║██║  ██║   ██║   ███████╗              ║
+║   ╚═════╝ ╚══════╝╚═╝   ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝              ║
+║                                                                              ║
+║  ██████╗ ██╗   ██╗ ██████╗         __       __                               ║
+║  ██╔══██╗██║   ██║██╔════╝         \ `-'"-'` /                               ║
+║  ██████╔╝██║   ██║██║  ███╗        / \_   _/ \                               ║
+║  ██╔══██╗██║   ██║██║   ██║        |  d\_/b  |                               ║
+║  ██████╔╝╚██████╔╝╚██████╔╝       .'\   V   /'.                              ║
+║  ╚═════╝  ╚═════╝  ╚═════╝        /   '-...-'   \                            ║
+║                                  | /         \ |                             ║
+║                                  \/\         /\/                             ║
+║                                  ==(||)---(||)==                             ║
+║                                                                              ║
+║  ███████╗  ██████╗   █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗              ║
+║  ██╔════╝  ██╔═══╝  ██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗             ║
+║  ███████╗  ██║      ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝             ║
+║  ╚════██║  ██║      ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗             ║
+║  ███████║  ██████╗  ██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║             ║
+║  ╚══════╝  ╚═════╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝                  ║
+║                                                                              ║
+║   JS / TS • PYTHON • C / C++ • RUST • GO • JAVA • RUBY                       ║
+║   SWIFT • C# • ELIXIR                                                        ║
+║                    UBS: ULTIMATE BUG SCANNER • SARIF FUSION ☄️               ║
+║                                                                              ║
+║                                                                              ║
+║                     Night Owl QA                                             ║
+║                     “We see bugs before you do.”                             ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+UBS Meta-Runner v5.3.13  2026-09-09 01:46:23
+Project: /data/projects/franken_remote
+Format:  text
+Detected: python cpp rust
+Scanning python...
+Scanning cpp...
+Scanning rust...
+Finished cpp (4s)
+Finished python (7s)
+Finished rust (50s)
+
+──────── python ────────
+
+╔═══════════════════════════════════════════════════════════════════╗
+║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗   ║
+║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝   ║
+║  ██║   ██║██║     ██║   ██║██╔████╔██║███████║   ██║   █████╗     ║
+║  ██║   ██║██║     ██║   ██║██║╚██╔╝██║██╔══██║   ██║   ██╔══╝     ║
+║  ╚██████╔╝███████╗██║   ██║██║ ╚═╝ ██║██║  ██║   ██║   ███████╗   ║
+║   ╚═════╝ ╚══════╝╚═╝   ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝   ║
+║                                                                   ║
+║  ██████╗ ██╗   ██╗ ██████╗                /^\/^\                  ║
+║  ██╔══██╗██║   ██║██╔════╝              _|__|  O|                 ║
+║  ██████╔╝██║   ██║██║  ███╗            /~     \_/ \               ║
+║  ██╔══██╗██║   ██║██║   ██║           |__________/ \              ║
+║  ██████╔╝╚██████╔╝╚██████╔╝            \_______    \              ║
+║  ╚═════╝  ╚═════╝  ╚═════╝                     `\   \             ║
+║                                                  |   |            ║
+║                                                 /   /             ║
+║                                                /   /              ║
+║                                                                   ║
+║  ███████╗  ██████╗   █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗   ║
+║  ██╔════╝  ██╔═══╝  ██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗  ║
+║  ███████╗  ██║      ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝  ║
+║  ╚════██║  ██║      ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗  ║
+║  ███████║  ██████╗  ██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║  ║
+║  ╚══════╝  ╚═════╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝       ║
+║                                                                   ║
+║  Python module • async/await, serialization, venv heuristics      ║
+║  UBS module: python • catches None bugs & async blocking          ║
+║  ASCII homage: classic snake (ASCII Art Archive)                  ║
+║  Run standalone: modules/ubs-python.sh --help                     ║
+║                                                                   ║
+║  Night Owl QA                                                     ║
+║  “We see bugs before you do.”                                     ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+Project:  /data/projects/franken_remote
+Started:  2026-09-09 01:46:24
+Files:    2 source files (py,pyi,pyx,pxd,pxi,ipynb)
+
+✓ ast-grep available (ast-grep) - full AST analysis enabled
+✓ uv detected - uvx ephemeral analyzers enabled
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. NONE / DEFENSIVE PROGRAMMING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: None equality, truthy confusions, deep attribute chains
+Pythonic checks use 'is (not) None' and safe attribute access patterns.
+
+• == None or != None (should use 'is' / 'is not')
+  ✓ OK No None equality comparisons
+
+• Attribute chains depth (fragile without guards)
+
+• dict.get(key) without default used immediately
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. NUMERIC / ARITHMETIC PITFALLS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: Division by variable, float equality, modulo hazards
+Silent numeric bugs propagate incorrect results or ZeroDivisionError.
+
+• Division by variable (possible ÷0)
+  ℹ Info (7 found)
+    Division operations found - check divisors
+
+• Floating-point equality (==)
+
+• Modulo by variable (verify non-zero)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. COLLECTION SAFETY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: Index risks, mutation during iteration, len checks
+Collection misuse leads to IndexError or logical errors.
+
+• Index arithmetic like arr[i±1]
+
+• Mutation during iteration
+
+• len(x) comparisons
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. COMPARISON & TYPE CHECKING TRAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: 'is' with literals, type() equality, truthiness with bools
+Prefer idiomatic Python comparisons and isinstance.
+
+• 'is' with literals
+  ✓ OK No 'is' literal comparisons
+
+• type(x) == T instead of isinstance
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. ASYNC/AWAIT PITFALLS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: blocking calls in async, await in loops, floating tasks
+Async bugs cause unpredictable latency and deadlocks.
+  ℹ Info (0 found)
+    Async functions found
+
+• await inside loops (performance)
+
+• Blocking calls in async def
+
+• Async error path coverage
+  ✓ OK All async operations appear protected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. ERROR HANDLING ANTI-PATTERNS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: bare except, swallowed errors, poor re-raise
+Proper exception handling simplifies debugging and recovery.
+
+• Bare except
+  ✓ OK No bare except blocks
+
+• except ...: pass
+
+• raise e (loses traceback)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. SECURITY VULNERABILITIES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: code injection, unsafe deserialization, weak crypto, TLS/CSRF/autoescape off
+Security bugs expose users to attacks and data breaches.
+
+• eval/exec usage
+  ✓ OK No eval/exec detected
+
+• pickle.load/loads
+
+• yaml.load without Loader
+
+• Unsafe deserialization loaders
+  ✓ OK No unsafe Python deserialization loaders detected
+
+• subprocess shell=True / os.system
+  ✓ OK No shell=True / os.system detected
+
+• Command injection dataflow
+  ✓ OK No command injection dataflow detected
+
+• Subprocess calls without timeouts
+  ✓ OK No subprocess calls missing explicit timeouts detected
+
+• Interpolated SQL execution
+  ✓ OK No interpolated SQL execution detected
+
+• NoSQL query injection
+  ✓ OK No request-controlled NoSQL filters detected
+
+• Request-controlled regex patterns
+  ✓ OK No request-controlled regex patterns detected
+
+• Server-side template injection
+  ✓ OK No request-controlled template sources detected
+
+• HTTP response header injection
+  ✓ OK No request-controlled response headers detected
+
+• Email header injection
+  ✓ OK No request-controlled email headers detected
+
+• LDAP filter/DN injection
+  ✓ OK No request-controlled LDAP filters or DNs detected
+
+• requests verify=False (TLS disabled)
+
+• Weak hash algorithms (md5/sha1)
+
+• Password hashing misconfiguration
+  ✓ OK No weak password hashing configurations detected
+
+• Weak or static cryptography configuration
+  ✓ OK No weak crypto modes or static IV/nonces detected
+
+• Timing-safe comparison for secrets
+  ✓ OK No timing-sensitive secret equality comparisons detected
+
+• Security-sensitive assert statements
+  ✓ OK No security-sensitive assert statements detected
+
+• Unsafe filesystem permission modes
+  ✓ OK No world-writable file modes or permissive umasks detected
+
+• Hardcoded secrets
+
+• tempfile.mktemp (insecure)
+
+• Archive extraction path traversal
+  ✓ OK No unvalidated archive extract()/extractall() calls detected
+
+• Open redirect sinks
+  ✓ OK No request-derived open redirect sinks detected
+
+• Host header trusted for absolute URLs
+  ✓ OK No Host-header-derived absolute URLs detected
+
+• SSRF-prone outbound HTTP targets
+  ✓ OK No request-derived outbound HTTP targets detected
+
+• Outbound HTTP calls without timeouts
+  ✓ OK No outbound HTTP calls missing explicit timeouts detected
+
+• Request-derived filesystem paths
+  ✓ OK No request-derived filesystem paths detected
+
+• JWT verification bypass
+  ✓ OK No JWT verification bypass patterns detected
+
+• Credentialed wildcard CORS
+  ✓ OK No wildcard credentialed CORS configurations detected
+
+• Cookie/session security flags
+  ✓ OK No insecure cookie/session flags detected
+
+• CSRF protection disabled
+  ✓ OK No explicit CSRF disable patterns detected
+
+• Template autoescape disabled
+  ✓ OK No explicit template autoescape disables detected
+
+• Request-controlled values marked safe HTML
+  ✓ OK No request-controlled values marked safe HTML detected
+
+• Request-derived mass assignment
+  ✓ OK No request-derived mass assignment patterns detected
+
+• Debug mode and host allow-list
+  ✓ OK No production debug or wildcard host settings detected
+
+• Unsafe XML parser exposure
+  ✓ OK No unsafe XML parser exposure detected
+
+• Security-sensitive random module usage
+  ✓ OK No security-sensitive random module usage detected
+
+• Disabled TLS certificate verification
+  ✓ OK No disabled TLS verification patterns detected
+
+• Lightweight taint analysis
+  ✓ OK No tainted sources reach dangerous sinks
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. FUNCTION & SCOPE ISSUES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: mutable defaults, many params, nested defs, returns
+Function-level bugs cause subtle state leaks and readability problems.
+
+• Mutable default arguments
+  ✓ OK No mutable default arguments
+
+• Functions with high parameter count (>6)
+
+• Nested function declarations
+
+• Missing returns heuristic
+  ℹ Info (2 found)
+    Some functions may lack return statements
+    Void intended?
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. PARSING & TYPE CONVERSION BUGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: json.loads without try, str+num concat, int() edge cases
+Parsing bugs cause runtime exceptions and data corruption.
+
+• json.loads without try/catch
+  ⚠ Warning (2 found)
+    json.loads without error handling
+    Examples: scripts/verify_hevc_delivery.py:155 scripts/verify_hevc_delivery.py:178
+
+• String concatenation with + adjacent to digits (possible type mix)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. CONTROL FLOW GOTCHAS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: return/break in finally, nested ternary, unreachable code
+Flow pitfalls cause surprising behavior and lost exceptions.
+
+• return/break/continue inside finally
+
+• Nested conditional expressions
+
+• Unreachable code after return
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. DEBUGGING & PRODUCTION CODE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: print, breakpoint/pdb, sensitive logs
+Debug artifacts degrade performance and leak information.
+
+• print statements
+  ✓ OK Minimal print usage
+
+• breakpoint() / pdb.set_trace()
+  ✓ OK No debugger calls
+
+• Logging sensitive data
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. PERFORMANCE & MEMORY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: string concat in loops, regex compile in loops, I/O in loops
+Performance anti-patterns reduce throughput and increase latency.
+
+• String concatenation in loops
+
+• re.compile inside loops
+
+• I/O heavy ops in loops
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. VARIABLE & SCOPE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: global/nonlocal usage, wildcard imports
+Scope issues cause hard-to-debug conflicts and side effects.
+
+• global/nonlocal statements
+
+• Wildcard imports
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14. CODE QUALITY MARKERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: TODO, FIXME, HACK, XXX, NOTE
+Technical debt markers indicate incomplete or problematic code.
+  ✓ OK No technical debt markers
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15. REGEX & STRING SAFETY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: ReDoS, dynamic regex with input, escaping issues
+Regex bugs cause performance issues and security vulnerabilities.
+
+• Nested quantifiers (ReDoS risk)
+
+• Dynamic re.compile from variables
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+16. I/O & RESOURCE SAFETY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: open without with, missing encoding, rmtree(ignore_errors)
+I/O bugs leak resources and produce nondeterministic behavior.
+
+• open(...) without context manager
+  ✓ OK File usage appears context-managed
+
+• open() without explicit encoding
+  ℹ Info (4 found)
+    open() missing encoding
+    Pass encoding='utf-8' (or desired charset) for portability
+
+• shutil.rmtree(ignore_errors=True)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+17. TYPING STRICTNESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: Any usage, type: ignore density
+Type hygiene reduces runtime errors.
+
+• 'Any' usage
+
+• type: ignore comments
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+18. PYTHON I/O & MODULE USAGE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: os.system, wildcard imports, dynamic import
+Prefer safer subprocess APIs and explicit imports.
+
+• os.system invocations
+
+• Dynamic imports
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+19. RESOURCE LIFECYCLE CORRELATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: File handles, subprocesses, and async tasks missing cleanup
+Unreleased resources leak descriptors, zombie processes, and pending tasks
+
+• Resource lifecycle correlation
+  ✓ OK All tracked resource acquisitions have matching cleanups
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+AST-GREP RULE PACK FINDINGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+• ast-grep rule-pack summary
+  ⚠ Warning (2 found)
+    py.json.loads-no-try: json.loads without exception handling
+      /data/projects/franken_remote/scripts/verify_hevc_delivery.py:155 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/scripts/verify_hevc_delivery.py#L155)
+      probe = json.loads(command(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_packets", "-show_streams", "-show_data", "-show_entries", "stream=codec_name,profile,width,height,pix_fmt,extradata:packet=data,flags", "-of", "json", str(mp4)], directory, "probe"))
+      /data/projects/franken_remote/scripts/verify_hevc_delivery.py:178 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/scripts/verify_hevc_delivery.py#L178)
+      stats = json.loads(command(["cargo", "run", "--offline", "--locked", "-p", "fr-media", "--example", "hevc_delivery", "--", str(source), str(delivered)], directory, "deliver"))
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+20. UV-POWERED EXTRA ANALYZERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Ruff linting, Bandit security, Pip-audit, Mypy, Safety, Detect-secrets
+Uses uvx when available; falls back to system tools if installed.
+
+• ruff (lint)
+[
+  {
+    "cell": null,
+    "code": "EXE001",
+    "end_location": {
+      "column": 19,
+      "row": 1
+    },
+    "filename": "/data/projects/franken_remote/crates/frd/tests/support/worker_fixture.py",
+    "fix": null,
+    "location": {
+      "column": 1,
+      "row": 1
+    },
+    "message": "Shebang is present but file is not executable",
+    "name": "shebang-not-executable",
+    "noqa_row": 2,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/shebang-not-executable"
+  },
+  {
+    "cell": null,
+    "code": "I001",
+    "end_location": {
+      "column": 29,
+      "row": 3
+    },
+    "filename": "/data/projects/franken_remote/crates/frd/tests/support/worker_fixture.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "import os\nimport struct\nimport sys\nimport time\n\n",
+          "end_location": {
+            "column": 1,
+            "row": 4
+          },
+          "location": {
+            "column": 1,
+            "row": 3
+          }
+        }
+      ],
+      "message": "Organize imports"
+    },
+    "location": {
+      "column": 1,
+      "row": 3
+    },
+    "message": "Import block is un-sorted or un-formatted",
+    "name": "unsorted-imports",
+    "noqa_row": 3,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unsorted-imports"
+  },
+  {
+    "cell": null,
+    "code": "F401",
+    "end_location": {
+      "column": 23,
+      "row": 3
+    },
+    "filename": "/data/projects/franken_remote/crates/frd/tests/support/worker_fixture.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "import os, struct, time",
+          "end_location": {
+            "column": 29,
+            "row": 3
+          },
+          "location": {
+            "column": 1,
+            "row": 3
+          }
+        }
+      ],
+      "message": "Remove unused import: `sys`"
+    },
+    "location": {
+      "column": 20,
+      "row": 3
+    },
+    "message": "`sys` imported but unused",
+    "name": "unused-import",
+    "noqa_row": 3,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unused-import"
+  },
+  {
+    "cell": null,
+    "code": "EXE001",
+    "end_location": {
+      "column": 23,
+      "row": 1
+    },
+    "filename": "/data/projects/franken_remote/scripts/verify_hevc_delivery.py",
+    "fix": null,
+    "location": {
+      "column": 1,
+      "row": 1
+    },
+    "message": "Shebang is present but file is not executable",
+    "name": "shebang-not-executable",
+    "noqa_row": 7,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/shebang-not-executable"
+  },
+  {
+    "cell": null,
+    "code": "I001",
+    "end_location": {
+      "column": 11,
+      "row": 18
+    },
+    "filename": "/data/projects/franken_remote/scripts/verify_hevc_delivery.py",
+    "fix": {
+      "applicability": "safe",
+      "edits": [
+        {
+          "content": "from __future__ import annotations\n\nimport argparse\nimport hashlib\nimport json\nimport platform\nimport shutil\nimport struct\nimport subprocess\nimport sys\nfrom pathlib import Path\n\n",
+          "end_location": {
+            "column": 1,
+            "row": 20
+          },
+          "location": {
+            "column": 1,
+            "row": 8
+          }
+        }
+      ],
+      "message": "Organize imports"
+    },
+    "location": {
+      "column": 1,
+      "row": 8
+    },
+    "message": "Import block is un-sorted or un-formatted",
+    "name": "unsorted-imports",
+    "noqa_row": 8,
+    "severity": "error",
+    "url": "https://docs.astral.sh/ruff/rules/unsorted-imports"
+  }
+]  ruff stderr:
+INFO add_decision: Id::<PubGrubPackage>(0) @ 0a0.dev0 without checking dependencies
+INFO add_decision: Id::<PubGrubPackage>(1) @ 0.16.6 without checking dependencies
+  ℹ Info (5 found)
+    Ruff emitted findings
+    Review ruff output above
+
+• bandit (security)
+Run started:2026-09-09 05:46:29.015872+00:00
+
+Test results:
+>> Issue: [B404:blacklist] Consider possible security implications associated with the subprocess module.
+   Severity: Low   Confidence: High
+   CWE: CWE-78 (https://cwe.mitre.org/data/definitions/78.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/blacklists/blacklist_imports.html#b404-import-subprocess
+   Location: /data/projects/franken_remote/scripts/verify_hevc_delivery.py:17:0
+16	import struct
+17	import subprocess
+18	import sys
+
+--------------------------------------------------
+>> Issue: [B603:subprocess_without_shell_equals_true] subprocess call - check for execution of untrusted input.
+   Severity: Low   Confidence: High
+   CWE: CWE-78 (https://cwe.mitre.org/data/definitions/78.html)
+   More Info: https://bandit.readthedocs.io/en/1.9.4/plugins/b603_subprocess_without_shell_equals_true.html
+   Location: /data/projects/franken_remote/scripts/verify_hevc_delivery.py:28:17
+27	    with (directory / f"{name}.stdout").open("xb") as stdout, (directory / f"{name}.stderr").open("xb") as stderr:
+28	        result = subprocess.run(argv, cwd=ROOT, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, timeout=timeout, check=False)
+29	    if result.returncode:
+
+--------------------------------------------------
+
+Code scanned:
+	Total lines of code: 221
+	Total lines skipped (#nosec): 0
+	Total potential issues skipped due to specifically being disabled (e.g., #nosec BXXX): 0
+
+Run metrics:
+	Total issues (by severity):
+		Undefined: 0
+		Low: 2
+		Medium: 0
+		High: 0
+	Total issues (by confidence):
+		Undefined: 0
+		Low: 0
+		Medium: 0
+		High: 2
+Files skipped (0):
+  ℹ Info (0 found)
+    Bandit scan completed
+    See output above
+
+• pip-audit (dependencies)
+  ℹ Info (0 found)
+    pip-audit run (if available)
+    Review advisories above
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+21. DEPRECATIONS & PY3.13 MIGRATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: deprecated modules/APIs likely to break on newer Python
+Proactive remediation avoids upgrade surprises.
+
+• Deprecated modules/APIs
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+22. PACKAGING & CONFIG HYGIENE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: unpinned requirements, editable installs, local paths
+Supply-chain & reproducibility safeguards.
+
+• Requirements without pins
+
+• Editable installs / local paths
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+23. NOTEBOOK HYGIENE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: large cell outputs, execution counts, trusted state
+Keeps VCS diffs clean and reproducible.
+
+• Large embedded outputs
+
+═══════════════════════════════════════════════════════════════════════════
+                    🎯 SCAN COMPLETE 🎯
+═══════════════════════════════════════════════════════════════════════════
+
+Summary Statistics:
+  Files scanned:    2
+  Critical issues:  0
+  Warning issues:   4
+  Info items:       18
+
+Priority Actions:
+  ⚠ Review and fix WARNING items
+  These cause bugs, performance issues, or maintenance problems
+  ℹ Consider INFO suggestions
+  Code quality improvements and best practices
+
+Scan completed at: 2026-09-09 01:46:30
+
+Tip: Run with -v/--verbose for more code samples per finding.
+Add to pre-commit: ./ubs --ci --fail-on-warning --summary-json=.ubs-summary.json . > py-bug-scan-report.txt
+
+
+──────── cpp ────────
+
+╔══════════════════════════════════════════════════════════════════╗
+║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗  ║
+║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝  ║
+║  ██║   ██║██║     ██║   ██║██╔████╔██║███████║   ██║   █████╗    ║
+║  ██║   ██║██║     ██║   ██║██║╚██╔╝██║██╔══██║   ██║   ██╔══╝    ║
+║  ╚██████╔╝███████╗██║   ██║██║ ╚═╝ ██║██║  ██║   ██║   ███████╗  ║
+║   ╚═════╝ ╚══════╝╚═╝   ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝  ║
+║                                      ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒             ║
+║  ██████╗ ██╗   ██╗ ██████╗           ▒▒▒▒▄██████▄▒▒▒             ║
+║  ██╔══██╗██║   ██║██╔════╝           ▒▒▒██████████▒▒             ║
+║  ██████╔╝██║   ██║██║  ███╗          ▒▒███▀▒▒▒▒▀██▌▒             ║
+║  ██╔══██╗██║   ██║██║   ██║          ▒▐██▌▒▒▒▒▒▒▒▒▒▒             ║
+║  ██████╔╝╚██████╔╝╚██████╔╝          ▒▐██▌▒▒▒▄█▄▒▄█▄             ║
+║  ╚═════╝  ╚═════╝  ╚═════╝           ▒▐██▌▒▒▒▒▀▒▒▒▀▒             ║
+║                                      ▒▒███▄▒▒▒▒▄██▌▒             ║
+║                                      ▒▒▒██████████▒▒             ║
+║                                      ▒▒▒▒▀██████▀▒▒▒             ║
+║                                      ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒             ║
+║                                                                  ║
+║  ███████╗  ██████╗   █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗  ║
+║  ██╔════╝  ██╔═══╝  ██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗ ║
+║  ███████╗  ██║      ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝ ║
+║  ╚════██║  ██║      ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗ ║
+║  ███████║  ██████╗  ██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║ ║
+║  ╚══════╝  ╚═════╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝      ║
+║                                                                  ║
+║  C/C++ module • UB hunts, RAII nudges, sanitizer hygiene         ║
+║  UBS module: cpp • AST-grep + clang heuristics for legacy        ║
+║  ASCII homage: gear/cog motif (EmojiCombos)                      ║
+║  Run standalone: modules/ubs-cpp.sh --help                       ║
+║                                                                  ║
+║  Night Owl QA                                                    ║
+║  “We see bugs before you do.”                                    ║
+╚══════════════════════════════════════════════════════════════════╝
+
+Project:  /data/projects/franken_remote
+Started:  2026-09-09 01:46:24
+Files:    0 source files (cpp,cc,cxx,cppm,mpp,ixx,h,hpp,hxx,hh,ipp,tpp)
+
+✓ ast-grep available (ast-grep) - full AST analysis enabled
+ℹ ast-grep version: ast-grep 0.45.3
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. MEMORY & RAII
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: raw new/delete, C-style casts, const_cast, nullptr misuse, delete[] vs delete
+Manual memory and unsafe casts are primary sources of UB and leaks
+
+• Raw new allocations (prefer make_unique/make_shared)
+
+• Manual delete (leaks/double free risk)
+
+• C-style casts
+
+• const_cast/reinterpret_cast (dangerous)
+
+• NULL used instead of nullptr
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. EXCEPTIONS & ERROR HANDLING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: throw in destructor, catch by value, deprecated specs, generic throws
+Exception safety errors cause terminate(), leaks, and slicing
+
+• Throw in destructor
+  ✓ OK No throws in destructors
+
+• Catch by value (prefer const&)
+
+• Deprecated dynamic exception specification
+
+• Generic throw types
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. CONCURRENCY & ATOMICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: manual lock/unlock, async without policy, weak memory orders
+Concurrency bugs are catastrophic under load and hard to reproduce
+
+• Manual mutex lock/unlock (prefer RAII)
+
+• std::async without explicit launch policy
+
+• Weak memory-order usage
+
+• Async error path coverage
+  ✓ OK No std::async usage detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. MODERNIZATION (C++20+)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: using-namespace in headers, removed types, bind, nullptr, modules
+Keeps codebase aligned with modern idioms & readability
+
+• 'using namespace std;' especially in headers
+
+• Removed/legacy types: std::auto_ptr
+
+• std::bind (prefer lambdas)
+
+• Modules/global module fragment presence
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. POINTER & LIFETIME HAZARDS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: string_view from temporary, return local ref, move-of-const
+Lifetime bugs compile fine and explode at runtime
+
+• std::string_view from temporary
+
+• Returning reference/value risks (heuristic)
+
+• std::move on const
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. NUMERIC & ARITHMETIC PITFALLS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: division by variable, integer overflow-prone code, fp equality
+Silent overflows/fp comparisons trigger logic bugs and UB
+
+• Division by variable (check non-zero)
+
+• Floating-point equality checks
+
+• Modulo by variable
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. UNDEFINED BEHAVIOR RISK ZONE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: dangerous casts, unsafe C APIs, security-sensitive non-crypto randomness, request path traversal, open redirects, response header injection, outbound URL SSRF, archive traversal, delete mismatch
+UB can pass tests and still crash in production
+
+• Dangerous functions (strcpy/gets/scanf/sprintf)
+
+• Shell command execution APIs
+
+• Request-derived filesystem paths
+  ✓ OK No request-derived filesystem paths detected
+
+• Request-derived open redirects
+  ✓ OK No request-derived redirect sinks detected
+
+• Request-derived response headers
+  ✓ OK No request-derived response header sinks detected
+
+• Request-derived outbound HTTP URLs
+  ✓ OK No request-derived outbound HTTP URL sinks detected
+
+• Archive extraction path traversal
+  ✓ OK No unvalidated archive extraction path construction detected
+
+• Security-sensitive non-crypto randomness
+  ✓ OK No security-sensitive non-crypto randomness detected
+
+• reinterpret_cast/const_cast occurrences
+
+• delete vs delete[] mismatch (heuristic)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. HEADER & INCLUDE HYGIENE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: using-namespace in headers, C headers, excessive includes, pragma once
+Header hygiene prevents ODR violations and compile-time blow-ups
+
+• Header guards or #pragma once missing (heuristic)
+
+• C headers included in C++
+
+• using namespace std in headers
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. STL & ALGORITHMS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: erase invalidation, std::move misuse, std::bind, raw loops
+Make idiomatic use of algorithms to reduce bugs
+
+• erase while iterating (invalidates iterators)
+
+• Manual loops where algorithm fits (heuristic)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. STRING & I/O SAFETY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: printf-family, dangerous scanf formats, fmt migration
+Type-safety and format correctness prevent latent crashes
+
+• printf/scanf/sprintf family usage
+
+• std::endl usage
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. MACROS & PREPROCESSOR TRAPS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: min/max macros, debug leftovers, macro side effects
+Macros can silently rewrite code and cause ODR/symbol issues
+
+• min/max macro definitions
+
+• DEBUG/TRACE macros enabled (heuristic)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. CMAKE & BUILD HYGIENE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: non-C++20 standard settings, missing warnings, no sanitizers, RTTI/exceptions flags
+Build settings are part of correctness and performance
+
+• CMAKE_CXX_STANDARD and target_compile_features
+  ℹ Info (1 found)
+    CMake lacks explicit C++ standard settings
+    Set CMAKE_CXX_STANDARD 20 and/or target_compile_features(... cxx_std_20)
+
+• Warnings enabled (-Wall -Wextra -Wpedantic)
+  ℹ Info (1 found)
+    No common warnings in CMake found
+
+• Sanitizers configured (ASan/UBSan)
+  ℹ Info (1 found)
+    No sanitizers detected in CMake
+
+• Exceptions/RTTI disabled?
+
+• Position Independent Code and LTO (optional)
+  ℹ Info (1 found)
+    PIC not detected (fine for static, check for shared libs)
+  ℹ Info (1 found)
+    LTO not detected (optional)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. CODE QUALITY MARKERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: TODO, FIXME, HACK, XXX comments
+Technical debt markers indicate areas needing attention
+  ✓ OK No technical debt markers
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14. PERFORMANCE & ALLOCATION PRESSURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: tight-loop string concatenation, many small allocations, I/O in loops
+Performance bugs degrade latency and throughput
+
+• String concatenation in tight loops (+=)
+
+• I/O in loops (heuristic)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15. TEST/DEBUG LEFTOVERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: assert/abort left enabled, debug prints
+Debug artifacts can affect performance and user experience
+
+• assert/abort present
+
+• Debug prints (std::cout/cerr)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+16. RESOURCE LIFECYCLE CORRELATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: std::thread spawn w/o join, malloc/calloc without free, fopen without fclose
+Manual resources must be paired with cleanup to avoid leaks and crashes
+
+• Resource lifecycle correlation
+  ⚠ Warning (1 found)
+    malloc/calloc/realloc without free [crates/fr-native/src/bridge.c:57:16]
+    Heap allocation is never released with free() (e)
+  ⚠ Warning (1 found)
+    malloc/calloc/realloc without free [crates/fr-native/src/bridge.c:145:16]
+    Heap allocation is never released with free() (d)
+  ⚠ Warning (1 found)
+    malloc/calloc/realloc without free [crates/fr-native/src/bridge.c:238:9]
+    Heap allocation is never released with free() (data)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+AST-GREP RULE PACK FINDINGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ℹ ast-grep produced structured matches. Showing brief tally by rule id:
+  (no matches)
+
+═══════════════════════════════════════════════════════════════════════════
+                    🎯 SCAN COMPLETE 🎯
+═══════════════════════════════════════════════════════════════════════════
+
+Summary Statistics:
+  Files scanned:    0
+  Critical issues:  0
+  Warning issues:   3
+  Info items:       5
+
+Priority Actions:
+  ⚠ Review and fix WARNING items
+  These cause bugs, performance issues, or maintenance problems
+  ℹ Consider INFO suggestions
+  Code quality improvements and best practices
+
+Scan completed at: 2026-09-09 01:46:25
+
+Tip: Run with -v/--verbose for more code samples per finding.
+Add to pre-commit: ./ubs --ci --fail-on-warning . > cpp-scan-report.txt
+
+
+──────── rust ────────
+
+╔═══════════════════════════════════════════════════════════════════╗
+║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗   ║
+║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝   ║
+║  ██║   ██║██║     ██║   ██║██╔████╔██║███████║   ██║   █████╗     ║
+║  ██║   ██║██║     ██║   ██║██║╚██╔╝██║██╔══██║   ██║   ██╔══╝     ║
+║  ╚██████╔╝███████╗██║   ██║██║ ╚═╝ ██║██║  ██║   ██║   ███████╗   ║
+║   ╚═════╝ ╚══════╝╚═╝   ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝   ║
+║                                            /\                     ║
+║  ██████╗ ██╗   ██╗ ██████╗                ( /   @ @    ()         ║
+║  ██╔══██╗██║   ██║██╔════╝                 \  __| |__  /          ║
+║  ██████╔╝██║   ██║██║  ███╗                 -/   "   \-           ║
+║  ██╔══██╗██║   ██║██║   ██║                /-|       |-\          ║
+║  ██████╔╝╚██████╔╝╚██████╔╝               / /-\     /-\ \         ║
+║  ╚═════╝  ╚═════╝  ╚═════╝                 / /-`---'-\\ \          ║
+║                                             /         \           ║
+║                                                                   ║
+║  ███████╗  ██████╗   █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗   ║
+║  ██╔════╝  ██╔═══╝  ██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗  ║
+║  ███████╗  ██║      ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝  ║
+║  ╚════██║  ██║      ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗  ║
+║  ███████║  ██████╗  ██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║  ║
+║  ╚══════╝  ╚═════╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝       ║
+║                                                                   ║
+║  Rust module • ownership sanity, unsafe & async spotlights        ║
+║  UBS module: rust • cargo-aware targeting, low-noise caching      ║
+║  ASCII homage: Ferris crab (ASCII Art Archive)                    ║
+║  Run standalone: modules/ubs-rust.sh --help                       ║
+║                                                                   ║
+║  Night Owl QA                                                     ║
+║  “We see bugs before you do.”                                     ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+
+Project:  /data/projects/franken_remote
+Started:  2026-09-09 01:46:23
+Files:    103 source files (rs)
+
+✓ ast-grep available (ast-grep) - full AST analysis enabled
+✓ cargo detected
+  ✓ clippy available
+  ✓ rustfmt available
+  ✓ cargo-audit available
+  ✓ cargo-deny available
+  ⚠ cargo-udeps not installed
+  ✓ cargo-outdated available
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. OWNERSHIP & ERROR HANDLING MACROS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: unwrap/expect, panic/unreachable/todo/unimplemented, dbg/println
+Panic-prone and debug macros frequently leak into production and cause crashes
+
+• unwrap()/expect() usage
+  ⚠ Warning (4559 found)
+    Potential panics via unwrap/expect
+    Prefer `?` or match to propagate/handle errors
+      /data/projects/franken_remote/crates/fr-core/tests/input_preparation.rs:44 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-core/tests/input_preparation.rs#L44)
+          a.mark_capabilities_checked().unwrap();
+      /data/projects/franken_remote/crates/fr-core/tests/input_preparation.rs:45 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-core/tests/input_preparation.rs#L45)
+          a.authorize_observation(HostInstant::ORIGIN).unwrap();
+      /data/projects/franken_remote/crates/fr-core/tests/input_preparation.rs:46 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-core/tests/input_preparation.rs#L46)
+          a.mark_view_ready(HostInstant::ORIGIN).unwrap();
+      /data/projects/franken_remote/crates/fr-core/tests/input_preparation.rs:47 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-core/tests/input_preparation.rs#L47)
+          a.grant_lease(lease, HostInstant::ORIGIN).unwrap();
+      /data/projects/franken_remote/crates/fr-core/tests/input_preparation.rs:48 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-core/tests/input_preparation.rs#L48)
+          a.issue_input_ticket(lease, ticket, HostInstant::ORIGIN)
+
+• panic!/unreachable!/todo!/unimplemented!
+  🔥 CRITICAL (29 found)
+    panic! macro(s) present
+    Avoid panic! in library code
+      /data/projects/franken_remote/crates/fr-core/tests/input_monitor.rs:144 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-core/tests/input_monitor.rs#L144)
+              panic!("receipt required")
+      /data/projects/franken_remote/crates/fr-core/tests/input_preparation.rs:86 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-core/tests/input_preparation.rs#L86)
+              _ => panic!("must report outcome"),
+      /data/projects/franken_remote/crates/frd/tests/input_agent_cancellation.rs:118 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/tests/input_agent_cancellation.rs#L118)
+              panic!("expected submission receipt: {value:?}")
+      /data/projects/franken_remote/crates/frd/tests/input_agent.rs:119 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/tests/input_agent.rs#L119)
+              panic!("expected submission receipt: {value:?}")
+      /data/projects/franken_remote/crates/frd/tests/input_agent.rs:498 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/tests/input_agent.rs#L498)
+              panic!("retained panic receipt required")
+
+• dbg!/println!/eprintln!
+  ℹ Info (56 found)
+    println! found - prefer logging
+  ℹ Info (18 found)
+    eprintln! found - prefer logging
+
+• Guard clauses that still unwrap later
+  ✓ OK No guard/unwrap mismatches detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. UNSAFE & MEMORY OPERATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: unsafe blocks, transmute/uninitialized/zeroed/forget, raw ffi hazards
+These patterns may introduce UB, memory leaks, or hard-to-debug crashes
+
+• unsafe { ... } blocks
+  ℹ Info (240 found)
+    unsafe blocks present
+    Ensure invariants and narrow scope
+
+• transmute, uninitialized, zeroed, assume_init, forget
+
+• CStr::from_bytes_with_nul_unchecked
+
+• get_unchecked / from_utf8_unchecked / from_raw_parts
+
+• Unsafe Send/Sync impls
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. CONCURRENCY & ASYNC PITFALLS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: Arc<Mutex>, Rc<RefCell>, blocking ops in async, await-in-loop, spawn misuse
+Concurrency misuse leads to deadlocks, head-of-line blocking, and performance issues
+
+• Arc<Mutex<..>> / Rc<RefCell<..>> / RwLock
+  ℹ Info (4 found)
+    Arc<Mutex<..>> detected - verify contention
+
+• Mutex::lock().unwrap()/expect()
+  ⚠ Warning (13 found)
+    Poisoned lock handling via unwrap/expect
+      /data/projects/franken_remote/crates/frd/tests/input_agent.rs:179 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/tests/input_agent.rs#L179)
+              let mut e = self.trace.effects.lock().unwrap();
+      /data/projects/franken_remote/crates/frd/tests/input_agent.rs:290 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/tests/input_agent.rs#L290)
+          assert_eq!(trace_state.effects.lock().unwrap().len(), 1);
+      /data/projects/franken_remote/crates/frd/tests/input_agent.rs:340 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/tests/input_agent.rs#L340)
+          assert!(trace_state.effects.lock().unwrap().is_empty());
+      /data/projects/franken_remote/crates/frd/tests/input_agent.rs:379 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/tests/input_agent.rs#L379)
+          assert_eq!(trace_state.effects.lock().unwrap().len(), 2);
+      /data/projects/franken_remote/crates/frd/tests/input_agent_cancellation.rs:139 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/tests/input_agent_cancellation.rs#L139)
+              self.effects.lock().unwrap().push(op);
+
+• await inside loops (sequentialism)
+
+• Blocking ops inside async (thread::sleep, std::fs)
+
+• block_on within async context
+
+• std::thread::spawn within async
+
+• tokio::spawn usage (heuristic for detached tasks)
+
+• Async error path coverage
+  ✓ OK tokio::spawn handles appear awaited
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. NUMERIC & FLOATING-POINT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: float equality, division/modulo by variable, potential overflow hints
+Numeric bugs cause subtle logic errors or panics in debug builds (overflow)
+
+• Floating-point equality comparisons
+  ℹ Info (93 found)
+    Float equality/inequality check
+    Consider epsilon comparisons
+
+• Division/modulo by variable (verify non-zero)
+  ℹ Info (49 found)
+    Division by variables - guard zero divisors
+  ℹ Info (9 found)
+    Modulo by variables - guard zero divisors
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. COLLECTIONS & ITERATORS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: clone in loops, collect then iterate, nth(0), length checks
+Iterator misuse often leads to unnecessary allocations or slow paths
+
+• clone() occurrences & clone() in loops
+  ℹ Info (168 found)
+    clone() usages - audit for necessity
+      /data/projects/franken_remote/crates/frd/src/input_watchdog.rs:154 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/src/input_watchdog.rs#L154)
+              self.control.clone()
+      /data/projects/franken_remote/crates/frd/src/input_watchdog.rs:179 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/src/input_watchdog.rs#L179)
+                  .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task.waker().clone());
+      /data/projects/franken_remote/crates/frd/src/input_watchdog.rs:221 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/src/input_watchdog.rs#L221)
+                      this.driver.register(wake, task.waker().clone()),
+  ⚠ Warning (13 found)
+    clone() inside loops - potential perf hit
+      /data/projects/franken_remote/spikes/quic-native/src/asup.rs:224 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/spikes/quic-native/src/asup.rs#L224)
+      .write_stream(cx, stream, chunk.clone(), fin)
+      /data/projects/franken_remote/spikes/quic-native/src/asup.rs:265 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/spikes/quic-native/src/asup.rs#L265)
+      .write_stream(cx, id, front.clone(), fin)
+      /data/projects/franken_remote/spikes/quic-native/src/asup.rs:375 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/spikes/quic-native/src/asup.rs#L375)
+      match sender.connection_mut().send_datagram(cx, payload.clone()) {
+
+• collect::<Vec<_>>() then for
+  ℹ Info (3 found)
+    collect::<Vec<_>>() usage - consider streaming
+      /data/projects/franken_remote/spikes/quic-native/src/main.rs:923 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/spikes/quic-native/src/main.rs#L923)
+                          log.iter()
+      /data/projects/franken_remote/spikes/quic-native/src/main.rs:924 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/spikes/quic-native/src/main.rs#L924)
+                              .map(|(direction, size)| format!("{direction}{size}"))
+      /data/projects/franken_remote/spikes/quic-native/src/main.rs:925 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/spikes/quic-native/src/main.rs#L925)
+                              .collect::<Vec<_>>()
+
+• nth(0) → next()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. STRING & ALLOCATION SMELLS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: needless allocations, format!(literal), to_owned().to_string()
+Unnecessary allocations and conversions reduce performance
+
+• to_owned().to_string() chain
+
+• format!("literal") with no placeholders
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. FILESYSTEM & PROCESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: blocking std::fs in async, process::Command usage heuristics
+I/O misuse or command construction from untrusted input can be risky
+
+• std::fs usage (general inventory)
+  ℹ Info (17 found)
+    std::fs operations present - consider async equivalents where applicable
+
+• std::process::Command usage
+  ℹ Info (1 found)
+    Command::new detected - ensure args are sanitized and errors handled
+      /data/projects/franken_remote/spikes/quic-native/src/asup.rs:466 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/spikes/quic-native/src/asup.rs#L466)
+          let clock = std::process::Command::new("getconf")
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. SECURITY FINDINGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: TLS verification disabled, weak hash algos, security-sensitive non-crypto randomness, timing-unsafe secret comparisons, JWT verification bypasses, shell command injection, request-derived response headers/open redirects/host-header absolute URLs/outbound URLs/SQL/regex, unbounded request body reads, credentialed CORS, HTTP URLs, secrets
+Security misconfigurations can lead to credential leaks, command injection, and MITM attacks
+
+• Weak hash algorithms (MD5/SHA1)
+  ✓ OK No MD5/SHA1 found
+
+• TLS verification disabled
+
+• Security-sensitive non-crypto randomness
+  🔥 CRITICAL (3 found)
+    Security token generated with non-cryptographic randomness
+    Use OsRng/getrandom/ring::rand/openssl::rand or a framework helper backed by OS cryptographic randomness for tokens, sessions, CSRF nonces, OTPs, salts, API keys, and secrets
+      /data/projects/franken_remote/crates/frd/tests/input_agent.rs:339 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/tests/input_agent.rs#L339)
+      assert!(runner.finish().handoff_safe());  [.finish() in security-sensitive generation context]
+      /data/projects/franken_remote/crates/frd/tests/input_agent.rs:576 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/tests/input_agent.rs#L576)
+      assert!(runner.finish().handoff_safe());  [.finish() in security-sensitive generation context]
+      /data/projects/franken_remote/crates/fr-native/tests/input_agent_x11.rs:399 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-native/tests/input_agent_x11.rs#L399)
+      let shutdown = running.finish();  [.finish() in security-sensitive generation context]
+
+• Secret/token comparisons without timing-safe equality
+  🔥 CRITICAL (44 found)
+    Secret, signature, or token compared with ==/!=
+    Use subtle::ConstantTimeEq, ring::constant_time::verify_slices_are_equal, crypto_memcmp, or a reviewed constant-time helper for bearer tokens, HMACs, CSRF values, reset secrets, API keys, and signatures
+      /data/projects/franken_remote/crates/fr-core/src/authority.rs:384 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-core/src/authority.rs#L384)
+      if lease.id != lease_id {
+      /data/projects/franken_remote/crates/fr-core/src/authority.rs:410 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-core/src/authority.rs#L410)
+      if lease.id != lease_id {
+      /data/projects/franken_remote/crates/fr-core/src/authority.rs:416 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-core/src/authority.rs#L416)
+      if lease.ticket.is_some_and(|ticket| ticket.id == ticket_id) {
+
+• JWT decode, validation bypass, or missing claim binding
+  🔥 CRITICAL (120 found)
+    JWT decode/validation bypass risk
+    Use jsonwebtoken::decode with a real DecodingKey and Validation that keeps signature, expiration, issuer, and audience checks enabled and required; avoid dangerous::insecure_decode, dangerous_unsafe_decode, insecure_disable_signature_validation(), validate_exp=false, and validate_aud=false
+      /data/projects/franken_remote/crates/frd/src/media.rs:527 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/src/media.rs#L527)
+      .complete_decode(&picture, completed_at)
+      /data/projects/franken_remote/crates/frd/src/media.rs:544 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/src/media.rs#L544)
+      .acknowledge_decode(&picture, false, completed_at);
+      /data/projects/franken_remote/crates/frd/src/worker.rs:392 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/src/worker.rs#L392)
+      let h = Header::decode(&bytes, &limits)?;
+
+• Shell command execution through -c/-lc
+  ✓ OK No shell -c/-lc Command usage detected
+
+• Command::new executable from untrusted-looking value
+
+• Path join/push with untrusted-looking segment
+
+• Archive entry paths joined into extraction destination
+
+• Predictable temp-file writes
+  ⚠ Warning (2 found)
+    Predictable temp-file write race
+    Use tempfile::NamedTempFile/tempfile::Builder or OpenOptions::create_new(true) with unpredictable names
+      /data/projects/franken_remote/crates/frd/tests/worker_supervision.rs:44 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/tests/worker_supervision.rs#L44)
+      std::fs::write(
+      /data/projects/franken_remote/crates/fr-transport/tests/support/mod.rs:85 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-transport/tests/support/mod.rs#L85)
+      std::fs::write(dir.join("extensions"), "subjectAltName=DNS:localhost
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature
+extendedKeyUsage=serverAuth
+").unwrap();
+
+• Request-derived open redirects
+  ✓ OK No request-derived open redirect sinks detected
+
+• Host header used for absolute URL construction
+  ✓ OK No Host-header-derived absolute URL construction detected
+
+• Request-derived response headers
+  ✓ OK No request-derived response header values detected
+
+• Request-derived outbound HTTP URLs
+  ✓ OK No request-derived outbound HTTP URL sinks detected
+
+• Request-derived SQL construction
+  ✓ OK No request-derived SQL construction sinks detected
+
+• Request-controlled regex patterns
+  ✓ OK No request-controlled regex compilation detected
+
+• Unbounded request body reads
+  ✓ OK No unbounded request body reads detected
+
+• CORS credential policy
+  ✓ OK No unsafe CORS credential policy detected
+
+• Plain http:// URLs
+
+• Hardcoded secrets/credentials
+  ✓ OK No hardcoded secrets detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. CODE QUALITY MARKERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: TODO, FIXME, HACK, NOTE
+Technical debt markers indicate incomplete or problematic code
+  ✓ OK No TODO/FIXME/HACK markers found
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. MODULE & VISIBILITY ISSUES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: pub use wildcards, glob imports, re-exports
+Overly broad visibility complicates API stability and encapsulation
+
+• Wildcard imports (use crate::* or ::*)
+  ℹ Info (27 found)
+    Wildcard imports found; prefer explicit names
+      /data/projects/franken_remote/crates/fr-core/src/input_sequence.rs:233 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-core/src/input_sequence.rs#L233)
+          use super::*;
+      /data/projects/franken_remote/crates/fr-core/src/authority.rs:629 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-core/src/authority.rs#L629)
+          use super::*;
+      /data/projects/franken_remote/crates/fr-core/src/time.rs:98 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-core/src/time.rs#L98)
+          use super::*;
+
+• pub use re-exports (inventory)
+  ℹ Info (9 found)
+    pub use re-exports present - verify API surface
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. TESTS & BENCHES HYGIENE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: ignored tests, todo! in tests, println!/dbg! in tests
+Ensure tests do not hide failures or produce noisy output
+
+• #[ignore] tests
+
+• todo!/unimplemented! in tests
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. LINTS & STYLE (fmt/clippy)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo fmt -- --check, cargo clippy
+Formatter and lints help maintain consistent style and catch many issues
+  ✓ OK Formatting is clean
+  ✓ OK No clippy warnings/errors
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. BUILD HEALTH (check/test)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo check, cargo test --no-run
+Ensures the project compiles and tests build
+  ✓ OK cargo check clean
+  ✓ OK Tests build clean
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14. DEPENDENCY HYGIENE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo audit, cargo deny check, cargo udeps, cargo outdated
+Keeps dependencies safe, minimal, and up-to-date
+  ✓ OK No known advisories (cargo-audit)
+  ✓ OK cargo-deny clean
+  ℹ Info (1 found)
+    cargo-udeps not installed; skipping unused dep scan
+  ✓ OK Dependencies up-to-date
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15. API MISUSE (COMMON)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: nth(0), DefaultHasher, expect_err/unwrap_err, Option::unwrap_or_default in hot paths
+Common footguns and readability hazards
+
+• std::collections::hash_map::DefaultHasher
+
+• unwrap_err()/expect_err() usage inventory
+  ℹ Info (38 found)
+    unwrap_err/expect_err present - ensure test-only or justified
+
+• Option::unwrap_or_default inventory
+  ℹ Info (4 found)
+    unwrap_or_default present - validate default semantics
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+16. DOMAIN-SPECIFIC HEURISTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: reqwest builder, SQL string concatenation (heuristic), serde_json::from_str without context
+Domain patterns that often hint at bugs
+
+• reqwest::ClientBuilder inventory
+
+• serde_json::from_str without error context (heuristic)
+
+• SQL string concatenation (heuristic)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+17. AST-GREP RULE PACK FINDINGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ℹ Info (0 found)
+    AST rule pack staged
+    Run with --format=sarif to emit SARIF from the rule pack
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+18. META STATISTICS & INVENTORY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: crate counts, bin/lib targets, feature flags (Cargo.toml heuristic)
+High-level view of the project layout
+
+• Cargo.toml features (heuristic count)
+  ℹ Info (features sections: 0, bins: 0, workspace: 0
+0)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+19. RESOURCE LIFECYCLE CORRELATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: std::thread::spawn without join, tokio::spawn without await, TcpStream without shutdown
+Rust relies on explicit joins/shutdowns even with RAII—leaks create zombie work
+
+• Resource lifecycle correlation
+  🔥 CRITICAL (2 found)
+    std::thread::spawn without join() [37m[[0mspikes/quic-native/src/quinn_peer.rs[37m][0m
+    Store the JoinHandle and call join() or detach intentionally (acquire=2, release=0)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+20. ASYNC LOCKING ACROSS AWAIT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: locks acquired in async fns and potentially held across await
+Holding locks across await can deadlock, starve tasks, and cause latency spikes; std::sync locks can block executor threads
+
+• std::sync lock usage inside async fn (blocking risk)
+  ✓ OK No obvious std::sync lock usage inside async fns
+
+• Potential std::sync guard held across await (heuristic)
+
+• Potential async lock guard held across await (tokio/async locks heuristic)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+21. PANIC SURFACES & UNWINDING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: assert macros, direct indexing, unreachable_unchecked/unwrap_unchecked, panic/unwrap inside Drop
+Panics in destructors or UB hints can crash/abort in subtle ways; these can slip past linting depending on cfg/features
+
+• assert!/assert_eq!/assert_ne! inventory
+  ⚠ Warning (1830 found)
+    assert! macros present (panic surface)
+    If these are runtime invariants, consider explicit error handling; ensure not reachable by untrusted input
+
+• unreachable_unchecked / unwrap_unchecked
+
+• direct indexing / slicing panic surfaces
+  ⚠ Warning (354 found)
+    Direct indexing/slicing may panic
+    Use get()/get_mut(), checked ranges, or prior bounds checks when indexes can come from input
+      /data/projects/franken_remote/crates/frd/src/media_egress.rs:177 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/src/media_egress.rs#L177)
+              match send(offer, &self.buffer[..offer.byte_len()], &mut guard) {
+      /data/projects/franken_remote/crates/fr-lab/src/lib.rs:489 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-lab/src/lib.rs#L489)
+                  let packet = self.packets[index].take().expect("selected occupied slot");
+      /data/projects/franken_remote/crates/fr-core/src/input_sequence.rs:140 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-core/src/input_sequence.rs#L140)
+              if let Some(receipt) = self.receipts[..self.receipt_capacity]
+
+• panic!/unwrap/expect inside Drop
+  ⚠ Warning (4 found)
+    Potential panics inside Drop implementations
+    Panics during Drop + unwinding can abort; avoid unwrap/expect/panic in destructors
+      /data/projects/franken_remote/crates/frd/tests/input_agent.rs:196 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/tests/input_agent.rs#L196)
+      entered.send(()).unwrap();
+      /data/projects/franken_remote/crates/frd/tests/input_agent.rs:197 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/tests/input_agent.rs#L197)
+      resume.recv_timeout(Duration::from_secs(4)).unwrap();
+      /data/projects/franken_remote/crates/frd/tests/input_agent_results.rs:192 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/tests/input_agent_results.rs#L192)
+      entered.send(()).unwrap();
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+22. SUSPICIOUS CASTS & TRUNCATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: pervasive `as` casts, try_into().unwrap, numeric narrowing patterns
+`as` casts can silently truncate or change sign; conversion panics may be missed in uncommon input paths
+
+• `as` cast inventory
+  ℹ Info (78 found)
+    `as` casts present (possible truncation/sign bugs)
+    Prefer TryFrom/TryInto for correctness or document invariants
+      /data/projects/franken_remote/crates/frd/src/input_watchdog.rs:76 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/frd/src/input_watchdog.rs#L76)
+                      .compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire);
+      /data/projects/franken_remote/crates/fr-wire/src/input.rs:236 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-wire/src/input.rs#L236)
+                  w.u8(transition as u8)?;
+      /data/projects/franken_remote/crates/fr-wire/src/input.rs:244 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-wire/src/input.rs#L244)
+                  w.u8(button as u8)?;
+
+• len()/count() narrowed via `as`
+
+• try_into().unwrap()/expect() (panic on conversion failure)
+  ⚠ Warning (11 found)
+    try_into().unwrap()/expect() present
+    Handle conversion errors explicitly; panics can be input-dependent
+      /data/projects/franken_remote/crates/fr-transport/tests/support/mod.rs:140 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-transport/tests/support/mod.rs#L140)
+                  std::fs::read(dir.join("key.der"))
+      /data/projects/franken_remote/crates/fr-transport/tests/support/mod.rs:141 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-transport/tests/support/mod.rs#L141)
+                      .unwrap()
+      /data/projects/franken_remote/crates/fr-transport/tests/support/mod.rs:142 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-transport/tests/support/mod.rs#L142)
+                      .try_into()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+23. PARSING & VALIDATION ROBUSTNESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: parse/from_str/env-var unwraps, decode unwraps, missing error context
+Parsing and decoding failures often happen in prod on edge inputs; unwrap/expect turns them into panics
+
+• parse::<T>().unwrap()/expect()
+  ⚠ Warning (6 found)
+    parse::<T>().unwrap()/expect() present
+    Validate input or propagate errors with context
+      /data/projects/franken_remote/crates/fr-native/tests/worker_process.rs:34 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-native/tests/worker_process.rs#L34)
+              let number = name.trim().parse::<u32>().expect("Xvfb displayfd response");
+      /data/projects/franken_remote/crates/fr-transport/tests/support/mod.rs:156 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-transport/tests/support/mod.rs#L156)
+                  "127.0.0.1:0".parse().unwrap(),
+      /data/projects/franken_remote/crates/fr-transport/tests/support/mod.rs:163 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-transport/tests/support/mod.rs#L163)
+                  "127.0.0.1:0".parse().unwrap(),
+
+• serde/toml deserialization unwrap()/expect()
+
+• env::var(...).unwrap()/expect()
+  ⚠ Warning (2 found)
+    env::var(...).unwrap()/expect()
+    Handle missing/invalid env vars with defaults or clear error propagation
+      /data/projects/franken_remote/crates/fr-native/build.rs:44 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-native/build.rs#L44)
+          let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+      /data/projects/franken_remote/crates/fr-native/build.rs:112 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/crates/fr-native/build.rs#L112)
+          let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+24. PERF/DoS HOTSPOTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: regex compilation in loops, chars().nth(n), format!/allocations in loops
+Some perf pitfalls become DoS risks on large inputs or hot paths; these often evade linting in non-bench builds
+
+• Regex::new occurrences and in-loop compilation
+  ✓ OK No regex::Regex::new detected
+
+• chars().nth(n)/nth_back(n) (O(n))
+
+• format!/to_string/allocations inside loops (heuristic)
+  ⚠ Warning (4 found)
+    String allocation inside loop
+    Consider preallocating buffers, using write!, or restructuring to reduce allocations
+      /data/projects/franken_remote/spikes/quic-native/src/asup.rs:211 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/spikes/quic-native/src/asup.rs#L211)
+      return Err(format!(
+      /data/projects/franken_remote/spikes/quic-native/src/asup.rs:392 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/spikes/quic-native/src/asup.rs#L392)
+      out.lethal_error = Some(format!("sender drive after admitted send: {error}"));
+      /data/projects/franken_remote/spikes/quic-native/src/asup.rs:397 (https://github.com/Dicklesworthstone/franken_remote/blob/421184b11f5e54f7a179bb31f91786ce5d012d98/spikes/quic-native/src/asup.rs#L397)
+      out.lethal_error = Some(format!("receiver drive: {error}"));
+
+═══════════════════════════════════════════════════════════════════════════
+                    🎯 SCAN COMPLETE 🎯
+═══════════════════════════════════════════════════════════════════════════
+
+Summary Statistics:
+  Files scanned:    103
+  Critical issues:  198
+  Warning issues:   6798
+  Info items:       815
+
+Priority Actions:
+  🔥 FIX CRITICAL ISSUES IMMEDIATELY
+  These cause crashes, security vulnerabilities, or data corruption
+  ⚠ Review and fix WARNING items
+  These cause bugs, performance issues, or maintenance problems
+  ℹ Consider INFO suggestions
+  Code quality improvements and best practices
+
+Scan completed at: 2026-09-09 01:47:13
+
+Tip: Run with -v/--verbose for more code samples per finding.
+Add to CI: ./ubs --ci --fail-on-warning . > rust-bug-scan.txt
+
+
+──────── Combined Summary ────────
+Files: 105
+Critical: 198
+Warning: 6805
+Info: 838

@@ -99,8 +99,9 @@ dependencies = [
 
 [[package]]
 name = "asupersync"
-version = "0.4.11"
-source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=352b3695d3cb84a6296bb307a7880a6c9fafc2f8#352b3695d3cb84a6296bb307a7880a6c9fafc2f8"
+version = "0.4.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e8b505d6aadb778c9c4b0ae174966641f11d578d253b7786f2407b17d5045ec"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
@@ -159,8 +160,9 @@ dependencies = [
 
 [[package]]
 name = "asupersync-macros"
-version = "0.4.11"
-source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=352b3695d3cb84a6296bb307a7880a6c9fafc2f8#352b3695d3cb84a6296bb307a7880a6c9fafc2f8"
+version = "0.4.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a14f9f162d8418e4e347f4965f42f41ca970f8e81be496e04ab4f79c94818c8"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -636,8 +638,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "franken-decision"
-version = "0.4.11"
-source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=352b3695d3cb84a6296bb307a7880a6c9fafc2f8#352b3695d3cb84a6296bb307a7880a6c9fafc2f8"
+version = "0.4.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3645a3f60a4e63b19feac3121871cd5599fe46a10c4e90cabaee9fd6d27a030"
 dependencies = [
  "franken-evidence",
  "franken-kernel",
@@ -646,8 +649,9 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.4.11"
-source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=352b3695d3cb84a6296bb307a7880a6c9fafc2f8#352b3695d3cb84a6296bb307a7880a6c9fafc2f8"
+version = "0.4.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad9d4f7ad2461e03e792809d98c9f02dc816ab3b3766493a0b0bf6a07d7effc0"
 dependencies = [
  "serde",
  "serde_json",
@@ -655,8 +659,9 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.4.11"
-source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=352b3695d3cb84a6296bb307a7880a6c9fafc2f8#352b3695d3cb84a6296bb307a7880a6c9fafc2f8"
+version = "0.4.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92263c58ff55e6f171441ce40efb70ed26a2588d38a793435f2aeef456246696"
 dependencies = [
  "serde",
 ]
@@ -784,9 +789,9 @@ dependencies = [
 
 [[package]]
 name = "hybrid-array"
-version = "0.4.14"
+version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "707114b52a152fa7bdb290cd7cd5912d9467273b6d74e21b8d81aca1f8533f6b"
+checksum = "27f864f10dfb56725ce5ce5472bc52252c8f93a4ab86327122cebf62c5f59a17"
 dependencies = [
  "typenum",
 ]
@@ -2561,18 +2566,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.56"
+version = "0.8.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "556764e583adb45a9f8d413c2a147fa7e8d821e48e12b14fd560b607998b75eb"
+checksum = "d35102a9f36d089ccae9e4c6802bc118be4487b80aaffc0ab4e0cf5ce92d2873"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.56"
+version = "0.8.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2ab42fc20575779bd240faa45f94a74256f755c0fa9e89f0ede20d91d0cdfc1"
+checksum = "146c01f5ab44258da43cf276c74a2763db2ff3969c9c652c3f2de07041d0b2bc"
 dependencies = [
  "proc-macro2",
  "quote",

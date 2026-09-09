@@ -1,0 +1,11 @@
+2026-09-09T06:03:24Z
+Linux sensedemobox 7.0.0-30-generic #30-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 31 18:22:54 UTC 2026 x86_64 GNU/Linux
+6845e932b476e778df2cfc447c2854cbedd9d2deeacde50b55966111b10cb7c7  /tmp/fr-5nb-final-20260909/quic-native-spike
+b7296d0b2c476f78c1f11c02c388480d5d8ee3ff63500b44b362dcb5648d40a0  Cargo.toml
+8d3747fb599cafaf43e252cc63a726ca55fbc9b1adeb24603cc502b47aefde68  Cargo.lock
+fbef3f0351c438ece454d0a5e16e9e60ebd7d15e32ffee7f47c6eb40449ab996  src/asup.rs
+1c15678b872d11094a93cfde36a5ac350377ffa6f8335421997a4189040ee482  src/certs.rs
+1e9d61362c443ecd34e6c144ef622038c5c658a43c0fb786995e8a26abd6aa08  src/main.rs
+3e427965bed82630121ffef786fb7f66a9ae39b7f1654bf45b54fac03e02915b  src/proxy.rs
+7d64627652b16ffba28976fdf149144df941491c55b037a0b4eb293dcf91e314  src/quinn_peer.rs
+Dependency identity is in Cargo.lock; retain the matching RCH build log.

@@ -1,0 +1,1 @@
+Exploratory run: TLS-negative timed out at 180 seconds. RCH replaced the input binary during this multi-scenario run, so this directory is not single-build qualification evidence. Retained as negative history. Use candidate-352b3695d-cid-20260909 for the final fixed-binary run; its final exit is also nonzero because both independent exchanges fail.

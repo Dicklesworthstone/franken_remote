@@ -10,25 +10,37 @@ use std::time::{Duration, Instant};
 
 use asupersync::bytes::Bytes;
 use asupersync::cx::Cx;
-use asupersync::net::quic_core::{ConnectionId, TransportParameters};
+use asupersync::net::quic_core::{ConnectionId, TransportParameters, UnknownTransportParameter};
 use asupersync::net::quic_native::handshake_driver::{
     QuicHandshakeDriver, client_config, server_config,
 };
 use asupersync::net::quic_native::{
-    NativeQuicConnectionConfig, NativeQuicUdpConnection, QuicPathStats, QuicUdpEndpoint,
-    QuicUdpEndpointConfig, StreamId,
+    NativeQuicConnectionConfig, NativeQuicUdpConnection, QuicUdpEndpoint, QuicUdpEndpointConfig,
+    StreamId,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use std::net::SocketAddr;
 
 pub const ALPN: &[u8] = b"fr-spike/0";
 
-/// Timeout for a whole handshake attempt (generous: loss scenarios retransmit).
-pub const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(30);
-
-/// Mirror the connection config into wire transport parameters the same way the
-/// in-tree live-UDP test does, then negotiate downward from there.
-pub fn transport_parameter_bytes(config: &NativeQuicConnectionConfig) -> Vec<u8> {
+/// Advertise receive limits and the actual connection IDs required by RFC 9000
+/// section 7.3. The driver accepts caller-encoded parameters; its core subset
+/// represents these standard byte-valued parameters through `unknown`.
+pub fn transport_parameter_bytes(
+    config: &NativeQuicConnectionConfig,
+    local_cid: ConnectionId,
+    original_destination_cid: Option<ConnectionId>,
+) -> Vec<u8> {
+    let mut connection_ids = vec![UnknownTransportParameter {
+        id: 0x0f, // initial_source_connection_id (both endpoints)
+        value: local_cid.as_bytes().to_vec(),
+    }];
+    if let Some(original) = original_destination_cid {
+        connection_ids.push(UnknownTransportParameter {
+            id: 0x00, // original_destination_connection_id (server only, no Retry)
+            value: original.as_bytes().to_vec(),
+        });
+    }
     let parameters = TransportParameters {
         initial_max_data: Some(config.connection_recv_limit),
         initial_max_stream_data_bidi_local: Some(config.recv_window),
@@ -37,6 +49,7 @@ pub fn transport_parameter_bytes(config: &NativeQuicConnectionConfig) -> Vec<u8>
         initial_max_streams_bidi: Some(config.max_local_bidi),
         initial_max_streams_uni: Some(config.max_local_uni),
         max_datagram_frame_size: Some(65535),
+        unknown: connection_ids,
         ..TransportParameters::default()
     };
     let mut bytes = Vec::new();
@@ -44,6 +57,21 @@ pub fn transport_parameter_bytes(config: &NativeQuicConnectionConfig) -> Vec<u8>
         .encode(&mut bytes)
         .expect("encode transport parameters");
     bytes
+}
+
+#[test]
+fn connection_id_parameters_use_actual_role_specific_bytes() {
+    let config = NativeQuicConnectionConfig::default();
+    let local = ConnectionId::new(b"local").unwrap();
+    let original = ConnectionId::new(b"first").unwrap();
+    let client = transport_parameter_bytes(&config, local, None);
+    let server = transport_parameter_bytes(&config, local, Some(original));
+    // RFC 9000 TLVs, independent of the upstream decoder: ID, byte length,
+    // raw CID. No server-only original destination parameter on the client.
+    assert!(client.ends_with(b"\x0f\x05local"));
+    assert_eq!(server.len(), client.len() + 7);
+    assert!(server.starts_with(&client));
+    assert!(server.ends_with(b"\x00\x05first"));
 }
 
 pub async fn bind_endpoint(cx: &Cx, addr: &str) -> Result<QuicUdpEndpoint, String> {
@@ -69,12 +97,14 @@ pub async fn connect(
     local_cid: &[u8],
     config: NativeQuicConnectionConfig,
 ) -> Result<NativeQuicUdpConnection, String> {
-    let tls = client_config(roots, vec![ALPN.to_vec()])
-        .map_err(|e| format!("client tls config: {e}"))?;
+    let initial_dcid = ConnectionId::new(initial_dcid).map_err(|e| format!("initial dcid: {e}"))?;
+    let local_cid = ConnectionId::new(local_cid).map_err(|e| format!("client cid: {e}"))?;
+    let tls =
+        client_config(roots, vec![ALPN.to_vec()]).map_err(|e| format!("client tls config: {e}"))?;
     let driver = QuicHandshakeDriver::client(
         tls,
         ServerName::try_from(server_name.to_string()).map_err(|e| format!("server name: {e}"))?,
-        transport_parameter_bytes(&config),
+        transport_parameter_bytes(&config, local_cid, None),
     )
     .map_err(|e| format!("client driver: {e}"))?;
     NativeQuicUdpConnection::connect(
@@ -82,8 +112,8 @@ pub async fn connect(
         endpoint,
         server_addr,
         driver,
-        ConnectionId::new(initial_dcid).expect("initial dcid"),
-        ConnectionId::new(local_cid).expect("client cid"),
+        initial_dcid,
+        local_cid,
         config,
         ALPN,
     )
@@ -104,21 +134,18 @@ pub async fn accept(
     local_cid: &[u8],
     config: NativeQuicConnectionConfig,
 ) -> Result<NativeQuicUdpConnection, String> {
+    let initial_dcid = ConnectionId::new(initial_dcid).map_err(|e| format!("initial dcid: {e}"))?;
+    let local_cid = ConnectionId::new(local_cid).map_err(|e| format!("server cid: {e}"))?;
     let tls = server_config(vec![leaf], key, vec![ALPN.to_vec()])
         .map_err(|e| format!("server tls config: {e}"))?;
-    let driver = QuicHandshakeDriver::server(tls, transport_parameter_bytes(&config))
-        .map_err(|e| format!("server driver: {e}"))?;
-    NativeQuicUdpConnection::accept(
-        cx,
-        endpoint,
-        driver,
-        ConnectionId::new(initial_dcid).expect("initial dcid"),
-        ConnectionId::new(local_cid).expect("server cid"),
-        config,
-        ALPN,
+    let driver = QuicHandshakeDriver::server(
+        tls,
+        transport_parameter_bytes(&config, local_cid, Some(initial_dcid)),
     )
-    .await
-    .map_err(|e| format!("server handshake failed: {e}"))
+    .map_err(|e| format!("server driver: {e}"))?;
+    NativeQuicUdpConnection::accept(cx, endpoint, driver, initial_dcid, local_cid, config, ALPN)
+        .await
+        .map_err(|e| format!("server handshake failed: {e}"))
 }
 
 /// FNV-1a over a byte stream; enough to prove end-to-end integrity.
@@ -160,6 +187,24 @@ pub struct TransferOutcome {
     pub cwnd: u64,
 }
 
+impl std::fmt::Display for TransferOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "bytes_sent={} bytes_echoed={} checksum_ok={} elapsed_ms={} client_lost={} client_acked={} client_pto={} smoothed_rtt_us={} cwnd={}",
+            self.bytes_sent,
+            self.bytes_echoed,
+            self.checksum_ok,
+            self.elapsed_ms,
+            self.client_lost,
+            self.client_acked,
+            self.client_pto,
+            self.smoothed_rtt_us,
+            self.cwnd
+        )
+    }
+}
+
 /// Client writes `total` patterned bytes on one bidi stream; server echoes them
 /// back on the same stream; client verifies the echo checksum. Both connections
 /// are interleaved in one task; every byte crosses real UDP.
@@ -199,8 +244,7 @@ pub async fn echo_transfer(
         }
 
         // Client: keep the send queue primed without overrunning flow control.
-        while sent < total
-            && client.connection_mut().pending_stream_data_bytes(stream) < MAX_QUEUED
+        while sent < total && client.connection_mut().pending_stream_data_bytes(stream) < MAX_QUEUED
         {
             let len = CHUNK.min((total - sent) as usize);
             let chunk = pattern_chunk(sent, len);
@@ -351,8 +395,10 @@ pub async fn datagram_probe(
     let sizes: &[usize] = &[
         64, 256, 512, 1024, 1100, 1150, 1180, 1200, 1232, 1250, 1350, 2048, 4096, 65527,
     ];
-    let mut out = DatagramProbeOutcome::default();
-    out.integrity_ok = true;
+    let mut out = DatagramProbeOutcome {
+        integrity_ok: true,
+        ..DatagramProbeOutcome::default()
+    };
 
     'sizes: for &size in sizes {
         let payload = pattern_chunk(size as u64, size);
@@ -395,16 +441,30 @@ pub async fn datagram_probe(
     Ok(out)
 }
 
-/// utime+stime of this process in microseconds (Linux /proc, 100 Hz ticks).
-pub fn process_cpu_micros() -> u64 {
-    let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+/// utime+stime of this process in microseconds; missing counters are an error.
+pub fn process_cpu_micros(ticks_per_second: u64) -> Result<u64, String> {
+    let stat =
+        std::fs::read_to_string("/proc/self/stat").map_err(|e| format!("CPU counter: {e}"))?;
     // Fields 14 and 15 (1-based) are utime/stime in clock ticks; the comm field
     // is parenthesized and may contain spaces, so split after the last ')'.
-    let after = stat.rsplit_once(')').map(|(_, rest)| rest).unwrap_or("");
+    let after = stat
+        .rsplit_once(')')
+        .map(|(_, rest)| rest)
+        .ok_or("invalid CPU counter")?;
     let fields: Vec<&str> = after.split_whitespace().collect();
-    let utime: u64 = fields.get(11).and_then(|v| v.parse().ok()).unwrap_or(0);
-    let stime: u64 = fields.get(12).and_then(|v| v.parse().ok()).unwrap_or(0);
-    (utime + stime) * 10_000
+    let utime: u64 = fields
+        .get(11)
+        .and_then(|v| v.parse().ok())
+        .ok_or("missing utime")?;
+    let stime: u64 = fields
+        .get(12)
+        .and_then(|v| v.parse().ok())
+        .ok_or("missing stime")?;
+    utime
+        .checked_add(stime)
+        .and_then(|ticks| ticks.checked_mul(1_000_000))
+        .and_then(|micros| micros.checked_div(ticks_per_second))
+        .ok_or_else(|| "invalid CPU counter scale".to_string())
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -415,6 +475,16 @@ pub struct IdleOutcome {
     pub wakeups: u64,
 }
 
+impl std::fmt::Display for IdleOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "wall_ms={} cpu_ms={} cpu_fraction_percent={} wakeups={}",
+            self.wall_ms, self.cpu_ms, self.cpu_fraction_percent, self.wakeups
+        )
+    }
+}
+
 /// Hold an established connection open with a silent peer and measure how much
 /// CPU the receive path burns: reactor suspension vs busy-poll, measured — not
 /// inferred from async-looking signatures.
@@ -423,8 +493,21 @@ pub async fn idle_watch(
     conn: &mut NativeQuicUdpConnection,
     wall: Duration,
 ) -> Result<IdleOutcome, String> {
+    let clock = std::process::Command::new("getconf")
+        .arg("CLK_TCK")
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .map_err(|e| format!("CPU clock: {e}"))?;
+    if !clock.status.success() {
+        return Err("getconf CLK_TCK failed".to_string());
+    }
+    let ticks_per_second = std::str::from_utf8(&clock.stdout)
+        .map_err(|_| "invalid CLK_TCK")?
+        .trim()
+        .parse()
+        .map_err(|_| "invalid CLK_TCK")?;
     let started = Instant::now();
-    let cpu_before = process_cpu_micros();
+    let cpu_before = process_cpu_micros(ticks_per_second)?;
     let mut wakeups = 0u64;
     while started.elapsed() < wall {
         conn.drive_io_once(cx, Duration::from_millis(500))
@@ -433,7 +516,9 @@ pub async fn idle_watch(
         wakeups += 1;
     }
     let wall_us = started.elapsed().as_micros() as u64;
-    let cpu_us = process_cpu_micros().saturating_sub(cpu_before);
+    let cpu_us = process_cpu_micros(ticks_per_second)?
+        .checked_sub(cpu_before)
+        .ok_or("CPU counter moved backwards")?;
     Ok(IdleOutcome {
         wall_ms: wall_us / 1000,
         cpu_ms: cpu_us / 1000,

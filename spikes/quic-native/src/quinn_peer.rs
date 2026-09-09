@@ -49,8 +49,7 @@ pub fn spawn_echo_server(
             let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(Arc::new(crypto))
                 .expect("quic server crypto");
             let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
-            let transport =
-                Arc::get_mut(&mut config.transport).expect("fresh transport config");
+            let transport = Arc::get_mut(&mut config.transport).expect("fresh transport config");
             transport.datagram_receive_buffer_size(Some(1 << 16));
             transport.max_idle_timeout(Some(
                 quinn::IdleTimeout::try_from(Duration::from_secs(20)).expect("idle timeout"),
@@ -72,9 +71,7 @@ pub fn spawn_echo_server(
                 report.handshake_ok = true;
                 report.negotiated_alpn = connection
                     .handshake_data()
-                    .and_then(|data| {
-                        data.downcast::<quinn::crypto::rustls::HandshakeData>().ok()
-                    })
+                    .and_then(|data| data.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
                     .and_then(|data| data.protocol);
 
                 // Echo datagrams until the connection goes away.
@@ -90,26 +87,24 @@ pub fn spawn_echo_server(
                 });
 
                 // Echo exactly one bidirectional stream.
-                let stream_bytes = match tokio::time::timeout(
-                    Duration::from_secs(30),
-                    connection.accept_bi(),
-                )
-                .await
-                {
-                    Ok(Ok((mut send, mut recv))) => {
-                        let data = recv
-                            .read_to_end(ECHO_STREAM_LIMIT)
-                            .await
-                            .map_err(|e| format!("stream read failed: {e}"))?;
-                        send.write_all(&data)
-                            .await
-                            .map_err(|e| format!("stream echo failed: {e}"))?;
-                        send.finish().map_err(|e| format!("finish failed: {e}"))?;
-                        data.len() as u64
-                    }
-                    Ok(Err(e)) => return Err(format!("accept_bi failed: {e}")),
-                    Err(_) => 0,
-                };
+                let stream_bytes =
+                    match tokio::time::timeout(Duration::from_secs(30), connection.accept_bi())
+                        .await
+                    {
+                        Ok(Ok((mut send, mut recv))) => {
+                            let data = recv
+                                .read_to_end(ECHO_STREAM_LIMIT)
+                                .await
+                                .map_err(|e| format!("stream read failed: {e}"))?;
+                            send.write_all(&data)
+                                .await
+                                .map_err(|e| format!("stream echo failed: {e}"))?;
+                            send.finish().map_err(|e| format!("finish failed: {e}"))?;
+                            data.len() as u64
+                        }
+                        Ok(Err(e)) => return Err(format!("accept_bi failed: {e}")),
+                        Err(_) => 0,
+                    };
                 report.stream_bytes_echoed = stream_bytes;
 
                 // Give the peer time to finish reading, then wind down.
@@ -198,9 +193,7 @@ pub fn spawn_echo_client(
                 report.handshake_ok = true;
                 report.negotiated_alpn = connection
                     .handshake_data()
-                    .and_then(|data| {
-                        data.downcast::<quinn::crypto::rustls::HandshakeData>().ok()
-                    })
+                    .and_then(|data| data.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
                     .and_then(|data| data.protocol);
                 report.max_datagram_size = connection.max_datagram_size();
 
@@ -226,21 +219,31 @@ pub fn spawn_echo_client(
                 report.bytes_echoed = echoed.len() as u64;
                 report.echo_matches = echoed == payload;
 
+                let mut pending = Vec::with_capacity(4);
                 for size in [64usize, 512, 1000, 1150] {
                     let datagram: Vec<u8> = (0..size)
                         .map(|i| ((i as u64).wrapping_mul(31) >> 3) as u8)
                         .collect();
-                    if connection
-                        .send_datagram(bytes::Bytes::from(datagram))
-                        .is_ok()
-                    {
-                        report.datagrams_sent += 1;
-                    }
+                    let datagram = bytes::Bytes::from(datagram);
+                    connection
+                        .send_datagram(datagram.clone())
+                        .map_err(|e| format!("send {size}-byte datagram: {e}"))?;
+                    pending.push(datagram);
+                    report.datagrams_sent += 1;
                 }
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
                 while report.datagrams_echoed < report.datagrams_sent {
                     match tokio::time::timeout_at(deadline, connection.read_datagram()).await {
-                        Ok(Ok(_)) => report.datagrams_echoed += 1,
+                        Ok(Ok(bytes)) => {
+                            let index = pending
+                                .iter()
+                                .position(|expected| *expected == bytes)
+                                .ok_or_else(|| {
+                                    "unexpected or corrupted datagram echo".to_string()
+                                })?;
+                            pending.swap_remove(index);
+                            report.datagrams_echoed += 1;
+                        }
                         _ => break,
                     }
                 }

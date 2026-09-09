@@ -1,0 +1,22 @@
+{
+  "project": "/data/projects/franken_remote",
+  "timestamp": "2026-09-09 02:10:30",
+  "scanners": [
+    {
+      "project": "/data/projects/franken_remote",
+      "files": 4,
+      "critical": 5,
+      "warning": 109,
+      "info": 90,
+      "timestamp": "2026-09-09T06:10:29Z",
+      "format": "json",
+      "language": "rust"
+    }
+  ],
+  "totals": {
+    "critical": 5,
+    "warning": 109,
+    "info": 90,
+    "files": 4
+  }
+}

@@ -1,0 +1,2 @@
+RESULT scenario=interop-quinn-server row=handshake-against-independent-server status=failed detail="client handshake failed: native QUIC handshake failed: crypto provider failure: provider=rustls-quic-handshake, code=expected_long_header; wire[dir+bytes]=c1200,s1200,s54,c100"
+RESULT scenario=interop-quinn-server row=independent-peer-view status=failed detail="Ok(QuinnServerReport { handshake_ok: true, negotiated_alpn: Some([102, 114, 45, 115, 112, 105, 107, 101, 47, 48]), stream_bytes_echoed: 0, datagrams_echoed: 0, peer_error: Some("accept_bi failed: timed out") })"

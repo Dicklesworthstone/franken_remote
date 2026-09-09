@@ -1,0 +1,153 @@
+  [2m2026-09-09T05:20:59.255241Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1149989 at root@212.90.121.76 (0 slots remaining after reservation, speed 73.5)[0m
+    [2;3mat[0m rch/src/hook.rs:2645 [2;3mon[0m ThreadId(1)
+
+[*] Job j-30012848524493037 submitted to vmi1149989 (0 slots remaining, speed 73.5)
+  [2m2026-09-09T05:20:59.313945Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for franken_remote (hash: 0abe0d00ed431cee)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:571 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T05:20:59.313964Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 1 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:593 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T05:21:00.656582Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker vmi1149989...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:717 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T05:21:04.867414Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_remote -> /data/tmp/rch/franken_remote/0abe0d00ed431cee on vmi1149989 (streaming)[0m
+    [2;3mat[0m rch/src/transfer.rs:3618 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T05:21:06.798722Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 9 files, 2335370 bytes in 6080ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1014 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T05:21:06.815438Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: env 'CARGO_HOME=/root/.cargo' cargo test -j 2 --manifest-path spikes/quic-native/Cargo.toml --locked consumed_stream_window_accepts_four_windows_without_expanding_the_window -- --exact --nocapture[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1074 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T05:21:06.815505Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting TMPDIR for remote execution (worker-scoped path): /data/tmp -> /data/tmp/rch/franken_remote/0abe0d00ed431cee/.rch-tmp[0m
+    [2;3mat[0m rch/src/transfer.rs:1913 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T05:21:06.815522Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/tmp/cargo-target -> /data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-4e3c6fd7ef1436317e4b3914f434f296[0m
+    [2;3mat[0m rch/src/transfer.rs:1913 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T05:21:06.815543Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mWrapping command with external timeout protection, [1;32mkind[0m[32m: cargo test, [1;32mtimeout_secs[0m[32m: 3600[0m
+    [2;3mat[0m rch/src/transfer.rs:2740 [2;3mon[0m ThreadId(1)
+
+[1m[92m    Updating[0m crates.io index
+[1m[92m Downloading[0m crates ...
+[1m[92m  Downloaded[0m asupersync-macros v0.4.9
+[1m[92m  Downloaded[0m hybrid-array v0.4.15
+[1m[92m  Downloaded[0m zerocopy v0.8.57
+[1m[92m   Compiling[0m hybrid-array v0.4.15
+[1m[92m   Compiling[0m zerocopy v0.8.57
+[1m[92m   Compiling[0m crypto-common v0.2.2
+[1m[92m   Compiling[0m block-buffer v0.12.1
+[1m[92m   Compiling[0m inout v0.2.2
+[1m[92m   Compiling[0m cipher v0.5.2
+[1m[92m   Compiling[0m universal-hash v0.6.1
+[1m[92m   Compiling[0m chacha20 v0.10.2
+[1m[92m   Compiling[0m digest v0.11.3
+[1m[92m   Compiling[0m polyval v0.7.3
+[1m[92m   Compiling[0m aead v0.6.1
+[1m[92m   Compiling[0m ghash v0.6.0
+[1m[92m   Compiling[0m franken-evidence v0.4.9
+[1m[92m   Compiling[0m aes v0.9.3
+[1m[92m   Compiling[0m ppv-lite86 v0.2.21
+[1m[92m   Compiling[0m rand v0.10.2
+[1m[92m   Compiling[0m rand_chacha v0.3.1
+[1m[92m   Compiling[0m rand v0.8.8
+[1m[92m   Compiling[0m poly1305 v0.9.1
+[1m[92m   Compiling[0m ctr v0.10.1
+[1m[92m   Compiling[0m franken-kernel v0.4.9
+[1m[92m   Compiling[0m asupersync v0.4.10
+[1m[92m   Compiling[0m quinn-proto v0.11.17
+[1m[92m   Compiling[0m franken-decision v0.4.9
+[1m[92m   Compiling[0m nkeys v0.4.5
+[1m[92m   Compiling[0m aes-gcm v0.11.1
+[1m[92m   Compiling[0m chacha20poly1305 v0.11.0
+[1m[92m   Compiling[0m sha2 v0.11.0
+[1m[92m   Compiling[0m hmac v0.13.0
+[1m[92m   Compiling[0m sha1 v0.11.0
+[1m[92m   Compiling[0m asupersync-macros v0.4.9
+[1m[92m   Compiling[0m quinn v0.11.11
+[1m[92m   Compiling[0m quic-native-spike v0.0.1 (/data/tmp/rch/franken_remote/0abe0d00ed431cee/spikes/quic-native)
+[1m[33mwarning[0m[1m: unused import: `QuicPathStats`[0m
+  [1m[94m--> [0msrc/asup.rs:18:58
+   [1m[94m|[0m
+[1m[94m18[0m [1m[94m|[0m     NativeQuicConnectionConfig, NativeQuicUdpConnection, QuicPathStats, QuicUdpEndpoint,
+   [1m[94m|[0m                                                          [1m[33m^^^^^^^^^^^^^[0m
+   [1m[94m|[0m
+   [1m[94m= [0m[1mnote[0m: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+[1m[33mwarning[0m[1m: constant `HANDSHAKE_DEADLINE` is never used[0m
+  [1m[94m--> [0msrc/asup.rs:27:11
+   [1m[94m|[0m
+[1m[94m27[0m [1m[94m|[0m pub const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(30);
+   [1m[94m|[0m           [1m[33m^^^^^^^^^^^^^^^^^^[0m
+   [1m[94m|[0m
+   [1m[94m= [0m[1mnote[0m: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+[1m[33mwarning[0m[1m: multiple fields are never read[0m
+   [1m[94m--> [0msrc/asup.rs:152:9
+    [1m[94m|[0m
+[1m[94m151[0m [1m[94m|[0m pub struct TransferOutcome {
+    [1m[94m|[0m            [1m[94m---------------[0m [1m[94mfields in this struct[0m
+[1m[94m152[0m [1m[94m|[0m     pub bytes_sent: u64,
+    [1m[94m|[0m         [1m[33m^^^^^^^^^^[0m
+[1m[94m...[0m
+[1m[94m155[0m [1m[94m|[0m     pub elapsed_ms: u64,
+    [1m[94m|[0m         [1m[33m^^^^^^^^^^[0m
+[1m[94m156[0m [1m[94m|[0m     pub client_lost: u64,
+    [1m[94m|[0m         [1m[33m^^^^^^^^^^^[0m
+[1m[94m157[0m [1m[94m|[0m     pub client_acked: u64,
+    [1m[94m|[0m         [1m[33m^^^^^^^^^^^^[0m
+[1m[94m158[0m [1m[94m|[0m     pub client_pto: u32,
+    [1m[94m|[0m         [1m[33m^^^^^^^^^^[0m
+[1m[94m159[0m [1m[94m|[0m     pub smoothed_rtt_us: u64,
+    [1m[94m|[0m         [1m[33m^^^^^^^^^^^^^^^[0m
+[1m[94m160[0m [1m[94m|[0m     pub cwnd: u64,
+    [1m[94m|[0m         [1m[33m^^^^[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: `TransferOutcome` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+[1m[33mwarning[0m[1m: fields `wall_ms`, `cpu_ms`, and `wakeups` are never read[0m
+   [1m[94m--> [0msrc/asup.rs:425:9
+    [1m[94m|[0m
+[1m[94m424[0m [1m[94m|[0m pub struct IdleOutcome {
+    [1m[94m|[0m            [1m[94m-----------[0m [1m[94mfields in this struct[0m
+[1m[94m425[0m [1m[94m|[0m     pub wall_ms: u64,
+    [1m[94m|[0m         [1m[33m^^^^^^^[0m
+[1m[94m426[0m [1m[94m|[0m     pub cpu_ms: u64,
+    [1m[94m|[0m         [1m[33m^^^^^^[0m
+[1m[94m427[0m [1m[94m|[0m     pub cpu_fraction_percent: u64,
+[1m[94m428[0m [1m[94m|[0m     pub wakeups: u64,
+    [1m[94m|[0m         [1m[33m^^^^^^^[0m
+    [1m[94m|[0m
+    [1m[94m= [0m[1mnote[0m: `IdleOutcome` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+[1m[33mwarning[0m: `quic-native-spike` (bin "quic-native-spike" test) generated 4 warnings (run `cargo fix --bin "quic-native-spike" -p quic-native-spike --tests` to apply 1 suggestion)
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 3m 36s
+[1m[92m     Running[0m unittests src/main.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-4e3c6fd7ef1436317e4b3914f434f296/debug/build/quic-native-spike/a9608f7055fe8a1e/out/quic_native_spike-a9608f7055fe8a1e)
+
+running 1 test
+test consumed_stream_window_accepts_four_windows_without_expanding_the_window ... FAILED
+
+failures:
+
+failures:
+    consumed_stream_window_accepts_four_windows_without_expanding_the_window
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+thread 'consumed_stream_window_accepts_four_windows_without_expanding_the_window' (2017992) panicked at src/main.rs:156:22:
+server must accept its advertised receive credit: Transport(Stream(Flow(Exhausted { attempted: 1024, remaining: 0 })))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+[1m[91merror[0m: test failed, to rerun pass `--bin quic-native-spike`
+  [2m2026-09-09T05:24:44.392636Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=101 in 217577ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1206 [2;3mon[0m ThreadId(1)
+
+[W] Worker: vmi1149989 | Job: j-30012848524493037
+[T] Total: 223.7s (sync 6.1s, build 217.6s, artifacts --)
+^ Sync: 2.2 MB in 6.1s (375.1 KB/s)
+[C] Compile: 217.6s
+Artifacts: skipped
+[T] Cache: MISS
+{"api_version":"1.0","command":"env 'CARGO_HOME=/root/.cargo' cargo test -j 2 --manifest-path spikes/quic-native/Cargo.toml --locked consumed_stream_window_accepts_four_windows_without_expanding_the_window -- --exact --nocapture","outcome":"completed","location":"remote","worker_id":"vmi1149989","remote_exit_code":101,"duration_ms":226476,"timing":{"classify":null,"select":null,"sync_up":6080,"exec":217577,"sync_down":null,"cleanup":null,"total":null},"result_dirs":[]}
+[RCH] remote vmi1149989 failed (exit 101)

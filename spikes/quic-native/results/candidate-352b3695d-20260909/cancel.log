@@ -1,0 +1,1 @@
+RESULT scenario=cancel row=cancel-refuses-promptly status=passed detail="drive_io refused in 1.823µs (native QUIC UDP operation cancelled); post-cancel send refused (operation cancelled)"

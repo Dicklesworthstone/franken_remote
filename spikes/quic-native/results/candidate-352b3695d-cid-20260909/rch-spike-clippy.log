@@ -1,0 +1,64 @@
+  [2m2026-09-09T06:08:41.794935Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1149989 at root@212.90.121.76 (0 slots remaining after reservation, speed 73.5)[0m
+    [2;3mat[0m rch/src/hook.rs:2645 [2;3mon[0m ThreadId(1)
+
+[*] Job j-30013315971285004 submitted to vmi1149989 (0 slots remaining, speed 73.5)
+  [2m2026-09-09T06:08:41.855609Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for franken_remote (hash: ae6c8a9046dc29a7)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:571 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T06:08:41.855633Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 1 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:593 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T06:08:43.303157Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker vmi1149989...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:717 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T06:08:47.562468Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_remote -> /data/tmp/rch/franken_remote/ae6c8a9046dc29a7 on vmi1149989 (streaming)[0m
+    [2;3mat[0m rch/src/transfer.rs:3618 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T06:08:49.548507Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 10 files, 2340140 bytes in 6184ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1014 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T06:08:49.575472Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: env 'CARGO_HOME=/root/.cargo' cargo clippy -j 2 --manifest-path spikes/quic-native/Cargo.toml --all-targets --locked -- -D warnings[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1074 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T06:08:49.575554Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting TMPDIR for remote execution (worker-scoped path): /data/tmp -> /data/tmp/rch/franken_remote/ae6c8a9046dc29a7/.rch-tmp[0m
+    [2;3mat[0m rch/src/transfer.rs:1913 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T06:08:49.575568Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/tmp/cargo-target -> /data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-4e3c6fd7ef1436317e4b3914f434f296[0m
+    [2;3mat[0m rch/src/transfer.rs:1913 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T06:08:49.575593Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mWrapping command with external timeout protection, [1;32mkind[0m[32m: cargo clippy, [1;32mtimeout_secs[0m[32m: 3600[0m
+    [2;3mat[0m rch/src/transfer.rs:2740 [2;3mon[0m ThreadId(1)
+
+[1m[92m    Checking[0m quic-native-spike v0.0.1 (/data/tmp/rch/franken_remote/ae6c8a9046dc29a7/spikes/quic-native)
+[1m[92m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 0.95s
+  [2m2026-09-09T06:08:52.512847Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=0 in 2937ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1206 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T06:08:52.532076Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1297 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T06:08:52.532100Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/tmp/rch/franken_remote/ae6c8a9046dc29a7 on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:4388 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T06:08:54.512991Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 1980ms (1 files, 890 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:4443 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T06:08:54.513038Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mArtifacts retrieved: 1 files, 890 bytes in 1980ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1329 [2;3mon[0m ThreadId(1)
+
+[W] Worker: vmi1149989 | Job: j-30013315971285004
+[T] Total: 11.1s (sync 6.2s, build 2.9s, artifacts 2.0s)
+^ Sync: 2.2 MB in 6.2s (369.5 KB/s)
+[C] Compile: 2.9s
+v Artifacts: 890 B in 2.0s (449 B/s)
+[T] Cache: MISS
++------------- [OK] Build Successful -------------+
+| Duration: 2.9s (v 80% faster vs previous 15.0s) |
+| Artifacts: 1 files (890 B)                      |
+| Worker: vmi1149989                              |
+| Cache: MISS (warming cache)                     |
+| Time: 2026-09-09 06:08:54                       |
++-------------------------------------------------+
+[RCH] remote vmi1149989 (14.1s)
+[RCH] clean-overlay receipt: base=421184b11f5e54f7a179bb31f91786ce5d012d98 overlay-fingerprint=4c8207423d49c02be15f3a928559369ad6dbe4efa962c8b979c7865524c7da46
+{"api_version":"1.0","command":"env 'CARGO_HOME=/root/.cargo' cargo clippy -j 2 --manifest-path spikes/quic-native/Cargo.toml --all-targets --locked -- -D warnings","outcome":"completed","location":"remote","worker_id":"vmi1149989","remote_exit_code":0,"duration_ms":14199,"timing":{"classify":null,"select":null,"sync_up":6184,"exec":2937,"sync_down":1980,"cleanup":null,"total":null},"result_dirs":[]}

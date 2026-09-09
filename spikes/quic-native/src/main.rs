@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! Phase 0 gate `fr-p0-quic-native-aqy`: qualify one live Asupersync QUIC
 //! endpoint composition end to end (plan §4.1, §12.1, §12.4, §23 Phase 0).
 //!
@@ -6,14 +7,15 @@
 //!
 //! `RESULT scenario=<name> row=<row> status=<passed|failed|blocked> detail="…"`
 //!
-//! A failed row is a finding, not an error in this harness; the process exits
-//! zero unless the harness itself is broken.
+//! Failed or blocked rows produce a nonzero exit after scenario cleanup.
 
 mod asup;
 mod certs;
 mod proxy;
 mod quinn_peer;
 
+use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use asup::ALPN;
@@ -22,11 +24,16 @@ use asupersync::net::quic_native::{NativeQuicConnectionConfig, NativeQuicUdpConn
 use certs::TestPki;
 use futures_lite::future::{block_on, zip};
 
+static FAILED: AtomicBool = AtomicBool::new(false);
+
 fn result_row(scenario: &str, row: &str, status: &str, detail: &str) {
+    if status != "passed" {
+        FAILED.store(true, Ordering::Relaxed);
+    }
     println!("RESULT scenario={scenario} row={row} status={status} detail=\"{detail}\"");
 }
 
-fn main() {
+fn main() -> ExitCode {
     let scenario = std::env::args().nth(1).unwrap_or_default();
     match scenario.as_str() {
         "self-pair" => self_pair(),
@@ -54,6 +61,7 @@ fn main() {
             std::process::exit(2);
         }
     }
+    ExitCode::from(u8::from(FAILED.load(Ordering::Relaxed)))
 }
 
 /// Establish an asupersync client/server pair over real loopback UDP,
@@ -64,8 +72,21 @@ fn establish_pair(
     pki: &TestPki,
     client_target_override: Option<std::net::SocketAddr>,
 ) -> Result<(NativeQuicUdpConnection, NativeQuicUdpConnection), String> {
+    establish_pair_with_config(
+        cx,
+        pki,
+        client_target_override,
+        NativeQuicConnectionConfig::default(),
+    )
+}
+
+fn establish_pair_with_config(
+    cx: &Cx,
+    pki: &TestPki,
+    client_target_override: Option<std::net::SocketAddr>,
+    config: NativeQuicConnectionConfig,
+) -> Result<(NativeQuicUdpConnection, NativeQuicUdpConnection), String> {
     block_on(async {
-        let config = NativeQuicConnectionConfig::default();
         let client_endpoint = asup::bind_endpoint(cx, "127.0.0.1:0").await?;
         let server_endpoint = asup::bind_endpoint(cx, "127.0.0.1:0").await?;
         let server_addr = server_endpoint.local_addr();
@@ -94,6 +115,64 @@ fn establish_pair(
         .await;
         Ok((client?, server?))
     })
+}
+
+#[test]
+fn consumed_stream_window_accepts_four_windows_without_expanding_the_window() {
+    let cx = Cx::for_testing();
+    let pki = TestPki::generate();
+    let config = NativeQuicConnectionConfig {
+        send_window: 1024,
+        recv_window: 1024,
+        connection_send_limit: 8192,
+        connection_recv_limit: 8192,
+        ..NativeQuicConnectionConfig::default()
+    };
+    let (mut client, mut server) =
+        establish_pair_with_config(&cx, &pki, None, config).expect("real TLS handshake");
+    let stream = client.connection_mut().open_control_stream(&cx).unwrap();
+    server
+        .connection_mut()
+        .configure_stream_receive_window(&cx, stream, 1024)
+        .unwrap();
+
+    block_on(async {
+        for round in 0..4 {
+            let expected = asup::pattern_chunk(round * 1024, 1024);
+            client
+                .connection_mut()
+                .write_stream(&cx, stream, expected.clone(), round == 3)
+                .expect("consumption must replenish send credit");
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut received = Vec::with_capacity(1024);
+            while received.len() < 1024 {
+                assert!(Instant::now() < deadline, "window {round} stalled");
+                client
+                    .drive_io_once(&cx, Duration::from_millis(5))
+                    .await
+                    .expect("client drive");
+                server
+                    .drive_io_once(&cx, Duration::from_millis(5))
+                    .await
+                    .expect("server must accept its advertised receive credit");
+                received.extend_from_slice(
+                    &server
+                        .connection_mut()
+                        .read_stream(&cx, stream, 1024 - received.len())
+                        .unwrap(),
+                );
+            }
+            assert_eq!(received.as_slice(), &expected[..]);
+            // The public read advances the same 1024-byte window. No manual
+            // reconfiguration, larger window, or fresh stream masks enforcement.
+            server.flush(&cx).await.unwrap();
+            client
+                .drive_io_once(&cx, Duration::from_millis(5))
+                .await
+                .unwrap();
+        }
+    });
+    assert!(server.connection().is_stream_eof(stream).unwrap());
 }
 
 fn self_pair() {
@@ -129,12 +208,7 @@ fn self_pair() {
             } else {
                 "failed"
             };
-            result_row(
-                scenario,
-                "stream-echo-4mib",
-                status,
-                &format!("{outcome:?}"),
-            );
+            result_row(scenario, "stream-echo-4mib", status, &format!("{outcome}"));
         }
         Err(error) => result_row(scenario, "stream-echo-4mib", "failed", &error),
     }
@@ -143,6 +217,8 @@ fn self_pair() {
         Ok(outcome) => {
             let status = if outcome.integrity_ok
                 && outcome.delivered_count > 0
+                && outcome.delivered_count == outcome.sent_count
+                && outcome.max_delivered == outcome.max_accepted
                 && outcome.lethal_admitted_size == 0
             {
                 "passed"
@@ -166,19 +242,27 @@ fn tls_negative() {
         let client_endpoint = asup::bind_endpoint(&cx, "127.0.0.1:0").await?;
         let server_endpoint = asup::bind_endpoint(&cx, "127.0.0.1:0").await?;
         let server_addr = server_endpoint.local_addr();
+        let server_cx = Cx::for_testing();
         let (client, _server) = zip(
-            asup::connect(
-                &cx,
-                client_endpoint,
-                server_addr,
-                vec![pki.wrong_ca_der.clone()],
-                "localhost",
-                b"spike-i2",
-                b"spike-c2",
-                config,
-            ),
+            async {
+                let result = asup::connect(
+                    &cx,
+                    client_endpoint,
+                    server_addr,
+                    vec![pki.wrong_ca_der.clone()],
+                    "localhost",
+                    b"spike-i2",
+                    b"spike-c2",
+                    config,
+                )
+                .await;
+                // Retain the TLS outcome, then request and await peer cleanup.
+                // A refused client cannot finish the server handshake.
+                server_cx.set_cancel_requested(true);
+                result
+            },
             asup::accept(
-                &cx,
+                &server_cx,
                 server_endpoint,
                 pki.leaf_der.clone(),
                 pki.leaf_key.clone_key(),
@@ -194,7 +278,11 @@ fn tls_negative() {
         Ok(Err(reason)) => result_row(
             scenario,
             "untrusted-ca-refused",
-            "passed",
+            if reason.contains("read_hs_fatal_alert") {
+                "passed"
+            } else {
+                "failed"
+            },
             &format!("client refused as required: {reason}"),
         ),
         Ok(Ok(_)) => result_row(
@@ -212,19 +300,27 @@ fn tls_negative() {
         let client_endpoint = asup::bind_endpoint(&cx, "127.0.0.1:0").await?;
         let server_endpoint = asup::bind_endpoint(&cx, "127.0.0.1:0").await?;
         let server_addr = server_endpoint.local_addr();
+        let server_cx = Cx::for_testing();
         let (client, _server) = zip(
-            asup::connect(
-                &cx,
-                client_endpoint,
-                server_addr,
-                vec![pki.ca_der.clone()],
-                "not-the-server.invalid",
-                b"spike-i3",
-                b"spike-c3",
-                config,
-            ),
+            async {
+                let result = asup::connect(
+                    &cx,
+                    client_endpoint,
+                    server_addr,
+                    vec![pki.ca_der.clone()],
+                    "not-the-server.invalid",
+                    b"spike-i3",
+                    b"spike-c3",
+                    config,
+                )
+                .await;
+                // Retain the TLS outcome, then request and await peer cleanup.
+                // A refused client cannot finish the server handshake.
+                server_cx.set_cancel_requested(true);
+                result
+            },
             asup::accept(
-                &cx,
+                &server_cx,
                 server_endpoint,
                 pki.leaf_der.clone(),
                 pki.leaf_key.clone_key(),
@@ -240,7 +336,11 @@ fn tls_negative() {
         Ok(Err(reason)) => result_row(
             scenario,
             "wrong-hostname-refused",
-            "passed",
+            if reason.contains("read_hs_fatal_alert") {
+                "passed"
+            } else {
+                "failed"
+            },
             &format!("client refused as required: {reason}"),
         ),
         Ok(Ok(_)) => result_row(
@@ -291,10 +391,15 @@ fn idle_cpu() {
                 scenario,
                 "receive-suspends-not-busy-polls",
                 status,
-                &format!("{outcome:?}"),
+                &format!("{outcome}"),
             );
         }
-        Err(error) => result_row(scenario, "receive-suspends-not-busy-polls", "failed", &error),
+        Err(error) => result_row(
+            scenario,
+            "receive-suspends-not-busy-polls",
+            "failed",
+            &error,
+        ),
     }
 }
 
@@ -376,7 +481,7 @@ fn loss() {
                 "stream-recovers-under-loss",
                 status,
                 &format!(
-                    "{outcome:?} proxy_dropped_c2s={} proxy_dropped_s2c={} proxy_reordered={}",
+                    "{outcome} proxy_dropped_c2s={} proxy_dropped_s2c={} proxy_reordered={}",
                     middlebox
                         .stats
                         .dropped_c2s
@@ -451,15 +556,13 @@ fn emit_pki() {
     std::fs::create_dir_all(&dir).expect("create pki dir");
     std::fs::write(format!("{dir}/ca.der"), pki.ca_der.as_ref()).expect("write ca");
     std::fs::write(format!("{dir}/leaf.der"), pki.leaf_der.as_ref()).expect("write leaf");
-    std::fs::write(
-        format!("{dir}/leaf.key.der"),
-        pki.leaf_key.secret_der(),
-    )
-    .expect("write key");
+    std::fs::write(format!("{dir}/leaf.key.der"), pki.leaf_key.secret_der()).expect("write key");
     println!("PKI written to {dir}");
 }
 
-fn load_pki_dir(dir: &str) -> (
+fn load_pki_dir(
+    dir: &str,
+) -> (
     rustls::pki_types::CertificateDer<'static>,
     rustls::pki_types::CertificateDer<'static>,
     rustls::pki_types::PrivateKeyDer<'static>,
@@ -470,18 +573,20 @@ fn load_pki_dir(dir: &str) -> (
     let leaf = rustls::pki_types::CertificateDer::from(
         std::fs::read(format!("{dir}/leaf.der")).expect("read leaf"),
     );
-    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(
-        rustls::pki_types::PrivatePkcs8KeyDer::from(
-            std::fs::read(format!("{dir}/leaf.key.der")).expect("read key"),
-        ),
-    );
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+        std::fs::read(format!("{dir}/leaf.key.der")).expect("read key"),
+    ));
     (ca, leaf, key)
 }
 
 fn serve_remote() {
     let scenario = "tailnet-pair";
-    let bind = std::env::args().nth(2).expect("serve <bind-addr> <pki-dir>");
-    let pki_dir = std::env::args().nth(3).expect("serve <bind-addr> <pki-dir>");
+    let bind = std::env::args()
+        .nth(2)
+        .expect("serve <bind-addr> <pki-dir>");
+    let pki_dir = std::env::args()
+        .nth(3)
+        .expect("serve <bind-addr> <pki-dir>");
     let (_ca, leaf, key) = load_pki_dir(&pki_dir);
     let cx = Cx::for_testing();
 
@@ -518,10 +623,10 @@ fn serve_remote() {
             if Instant::now() > deadline {
                 return Err(format!("serve timed out: echoed={echoed}"));
             }
-            if let Some(at) = done_at {
-                if at.elapsed() > Duration::from_secs(10) {
-                    break;
-                }
+            if let Some(at) = done_at
+                && at.elapsed() > Duration::from_secs(10)
+            {
+                break;
             }
             server
                 .drive_io_once(&cx, Duration::from_millis(5))
@@ -657,7 +762,7 @@ fn connect_remote() {
             } else {
                 "failed"
             };
-            result_row(scenario, "stream-echo-1mib", status, &format!("{outcome:?}"));
+            result_row(scenario, "stream-echo-1mib", status, &format!("{outcome}"));
         }
         Err(error) => result_row(scenario, "stream-echo-1mib", "failed", &error),
     }
@@ -844,8 +949,13 @@ fn interop_quinn_server() {
                 &format!("{error}; wire[dir+bytes]={wire}"),
             );
             middlebox.shutdown();
-            drop(report_rx);
             let _ = server_thread.join();
+            result_row(
+                scenario,
+                "independent-peer-view",
+                "failed",
+                &format!("{:?}", report_rx.try_recv()),
+            );
             return;
         }
     };
@@ -857,23 +967,24 @@ fn interop_quinn_server() {
             } else {
                 "failed"
             };
-            result_row(scenario, "stream-echo-1mib", status, &format!("{outcome:?}"));
+            result_row(scenario, "stream-echo-1mib", status, &format!("{outcome}"));
         }
         Err(error) => result_row(scenario, "stream-echo-1mib", "failed", &error),
     }
 
-    // Datagrams: send a few, count echoes from the independent peer.
+    // Every requested datagram must be admitted and echoed byte for byte.
     let datagram_outcome = block_on(async {
         let mut sent = 0u64;
         let mut echoed = 0u64;
+        let mut pending = Vec::with_capacity(4);
         for size in [64usize, 512, 1000, 1150] {
-            if client
+            let payload = asup::pattern_chunk(size as u64, size);
+            client
                 .connection_mut()
-                .send_datagram(&cx, asup::pattern_chunk(size as u64, size))
-                .is_ok()
-            {
-                sent += 1;
-            }
+                .send_datagram(&cx, payload.clone())
+                .map_err(|e| format!("send {size}-byte datagram: {e}"))?;
+            pending.push(payload);
+            sent += 1;
         }
         let deadline = Instant::now() + Duration::from_secs(5);
         while echoed < sent && Instant::now() < deadline {
@@ -881,7 +992,12 @@ fn interop_quinn_server() {
                 .drive_io_once(&cx, Duration::from_millis(10))
                 .await
                 .map_err(|e| format!("drive: {e}"))?;
-            while client.connection_mut().recv_datagram().is_some() {
+            while let Some(bytes) = client.connection_mut().recv_datagram() {
+                let index = pending
+                    .iter()
+                    .position(|expected| *expected == bytes)
+                    .ok_or_else(|| "unexpected or corrupted datagram echo".to_string())?;
+                pending.swap_remove(index);
                 echoed += 1;
             }
         }
@@ -907,12 +1023,34 @@ fn interop_quinn_server() {
     let _ = client.connection_mut().begin_close(&cx, 0, 0);
     let _ = block_on(client.flush(&cx));
     match report_rx.recv_timeout(Duration::from_secs(40)) {
-        Ok(report) => result_row(
-            scenario,
-            "independent-peer-view",
-            if report.handshake_ok { "passed" } else { "failed" },
-            &format!("{report:?}"),
-        ),
+        Ok(report) => {
+            let peer_ok = report.handshake_ok
+                && report.negotiated_alpn.as_deref() == Some(ALPN)
+                && report.peer_error.is_none()
+                && report.stream_bytes_echoed == 1 << 20
+                && report.datagrams_echoed == 4;
+            result_row(
+                scenario,
+                "independent-peer-view",
+                if peer_ok { "passed" } else { "failed" },
+                &format!("{report:?}"),
+            );
+            let flights = middlebox.stats.coalesced_s2c.load(Ordering::Relaxed);
+            result_row(
+                scenario,
+                "coalesced-initial-handshake-forwarded",
+                if !peer_ok {
+                    "failed"
+                } else if flights == 0 {
+                    "blocked"
+                } else {
+                    "passed"
+                },
+                &format!(
+                    "server_datagrams={flights}; visible packet boundaries observed during independent exchange, not per-packet authentication evidence"
+                ),
+            );
+        }
         Err(_) => result_row(
             scenario,
             "independent-peer-view",
@@ -946,12 +1084,8 @@ fn interop_quinn_client() {
             return;
         }
     };
-    let (client_report_rx, client_thread) = quinn_peer::spawn_echo_client(
-        middlebox.client_facing,
-        pki.ca_der.clone(),
-        ALPN,
-        1 << 20,
-    );
+    let (client_report_rx, client_thread) =
+        quinn_peer::spawn_echo_client(middlebox.client_facing, pki.ca_der.clone(), ALPN, 1 << 20);
 
     let initial_dcid = match middlebox.initial_dcid.recv_timeout(Duration::from_secs(10)) {
         Ok(dcid) => dcid,
@@ -964,6 +1098,12 @@ fn interop_quinn_client() {
             );
             middlebox.shutdown();
             let _ = client_thread.join();
+            result_row(
+                scenario,
+                "independent-peer-view",
+                "failed",
+                &format!("{:?}", client_report_rx.try_recv()),
+            );
             return;
         }
     };
@@ -992,9 +1132,20 @@ fn interop_quinn_client() {
             server
         }
         Err(error) => {
-            result_row(scenario, "handshake-from-independent-client", "failed", &error);
+            result_row(
+                scenario,
+                "handshake-from-independent-client",
+                "failed",
+                &error,
+            );
             middlebox.shutdown();
             let _ = client_thread.join();
+            result_row(
+                scenario,
+                "independent-peer-view",
+                "failed",
+                &format!("{:?}", client_report_rx.try_recv()),
+            );
             return;
         }
     };
@@ -1067,14 +1218,15 @@ fn interop_quinn_client() {
                         Err(_) => break,
                     }
                 }
-                if eof_seen && pending.is_empty() && !fin_echoed {
-                    if server
+                if eof_seen
+                    && pending.is_empty()
+                    && !fin_echoed
+                    && server
                         .connection_mut()
                         .write_stream(&cx, id, asupersync::bytes::Bytes::new(), true)
                         .is_ok()
-                    {
-                        fin_echoed = true;
-                    }
+                {
+                    fin_echoed = true;
                 }
             }
             while let Some(datagram) = server.connection_mut().recv_datagram() {
@@ -1098,7 +1250,10 @@ fn interop_quinn_client() {
             result_row(
                 scenario,
                 "datagram-roundtrip",
-                if report.datagrams_sent > 0 && report.datagrams_echoed == report.datagrams_sent {
+                if report.error.is_none()
+                    && report.datagrams_sent == 4
+                    && report.datagrams_echoed == 4
+                {
                     "passed"
                 } else {
                     "failed"

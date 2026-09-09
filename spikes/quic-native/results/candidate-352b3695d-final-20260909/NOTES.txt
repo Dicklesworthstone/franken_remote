@@ -1,0 +1,1 @@
+Fixed-binary run after TLS peer cleanup, before correcting missing outbound CID transport parameters. Both Quinn peer reports explicitly diagnose CID authentication failure. The later candidate-352b3695d-cid-20260909 directory retains the final source run.

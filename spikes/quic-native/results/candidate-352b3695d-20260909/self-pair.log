@@ -1,0 +1,3 @@
+RESULT scenario=self-pair row=handshake status=passed detail="established in 1 ms; alpn client="fr-spike/0" server="fr-spike/0"; cids client=ConnectionId(7370696b652d6331)/ConnectionId(7370696b652d7331)"
+RESULT scenario=self-pair row=stream-echo-4mib status=passed detail="bytes_sent=4194304 bytes_echoed=4194304 checksum_ok=true elapsed_ms=194 client_lost=0 client_acked=3758 client_pto=0 smoothed_rtt_us=21381 cwnd=4354875"
+RESULT scenario=self-pair row=datagram-probe status=passed detail="DatagramProbeOutcome { max_accepted: 1150, min_refused: 1180, max_delivered: 1150, lethal_admitted_size: 0, lethal_error: None, sent_count: 6, delivered_count: 6, integrity_ok: true }"

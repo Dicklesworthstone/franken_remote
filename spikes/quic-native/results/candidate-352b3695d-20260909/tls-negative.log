@@ -1,0 +1,1 @@
+RESULT scenario=tls-negative row=untrusted-ca-refused status=passed detail="client refused as required: client handshake failed: native QUIC handshake failed: crypto provider failure: provider=rustls-quic-handshake, code=read_hs_fatal_alert"

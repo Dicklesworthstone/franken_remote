@@ -1,0 +1,2 @@
+RESULT scenario=interop-quinn-client row=handshake-from-independent-client status=passed detail="asupersync server admitted quinn 0.11 client; alpn="fr-spike/0" dcid_len=20"
+RESULT scenario=interop-quinn-client row=stream-echo-1mib status=failed detail="drive: native QUIC transport failed: unknown frame type: 24"

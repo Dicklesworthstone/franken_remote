@@ -1,0 +1,7 @@
+self-pair exit=0
+tls-negative exit=0
+idle-cpu exit=0
+loss exit=0
+cancel exit=0
+interop-quinn-server exit=1
+interop-quinn-client exit=1

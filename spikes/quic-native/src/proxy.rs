@@ -38,6 +38,8 @@ pub struct ProxyStats {
     pub dropped_c2s: AtomicU64,
     pub dropped_s2c: AtomicU64,
     pub reordered: AtomicU64,
+    /// Successfully forwarded server datagrams containing Initial + Handshake.
+    pub coalesced_s2c: AtomicU64,
     /// First few observed datagrams as (direction, size) — 'c' = client→server.
     pub wire_log: std::sync::Mutex<Vec<(char, usize)>>,
 }
@@ -87,16 +89,17 @@ impl Proxy {
                         if !from_server && client.is_none() {
                             client = Some(from);
                         }
-                        if !from_server && !dcid_reported {
-                            if let Some(dcid) = parse_long_header_dcid(&payload) {
-                                dcid_reported = true;
-                                let _ = dcid_tx.send(dcid);
-                            }
+                        if !from_server
+                            && !dcid_reported
+                            && let Some(dcid) = parse_long_header_dcid(&payload)
+                        {
+                            dcid_reported = true;
+                            let _ = dcid_tx.send(dcid);
                         }
-                        if let Ok(mut log) = thread_stats.wire_log.lock() {
-                            if log.len() < 64 {
-                                log.push((if from_server { 's' } else { 'c' }, len));
-                            }
+                        if let Ok(mut log) = thread_stats.wire_log.lock()
+                            && log.len() < 64
+                        {
+                            log.push((if from_server { 's' } else { 'c' }, len));
                         }
                         let destination = if from_server {
                             match client {
@@ -116,19 +119,20 @@ impl Proxy {
                         }
                         if let Some((held_payload, held_destination)) = held.take() {
                             // Deliver current first, held second: a swap.
-                            let _ = socket.send_to(&payload, destination);
-                            let _ = socket.send_to(&held_payload, held_destination);
+                            forward(&socket, &payload, destination, server, &thread_stats);
+                            forward(
+                                &socket,
+                                &held_payload,
+                                held_destination,
+                                server,
+                                &thread_stats,
+                            );
                             thread_stats.reordered.fetch_add(1, Ordering::Relaxed);
                         } else if rng.hit(reorder_permille) {
                             held = Some((payload, destination));
                             continue;
                         } else {
-                            let _ = socket.send_to(&payload, destination);
-                        }
-                        if from_server {
-                            thread_stats.forwarded_s2c.fetch_add(1, Ordering::Relaxed);
-                        } else {
-                            thread_stats.forwarded_c2s.fetch_add(1, Ordering::Relaxed);
+                            forward(&socket, &payload, destination, server, &thread_stats);
                         }
                     }
                     Err(error)
@@ -137,7 +141,13 @@ impl Proxy {
                     {
                         // Flush a held packet rather than delaying it forever.
                         if let Some((held_payload, held_destination)) = held.take() {
-                            let _ = socket.send_to(&held_payload, held_destination);
+                            forward(
+                                &socket,
+                                &held_payload,
+                                held_destination,
+                                server,
+                                &thread_stats,
+                            );
                         }
                     }
                     Err(_) => break,
@@ -160,6 +170,100 @@ impl Proxy {
             let _ = handle.join();
         }
     }
+}
+
+fn forward(
+    socket: &UdpSocket,
+    bytes: &[u8],
+    destination: SocketAddr,
+    server: SocketAddr,
+    stats: &ProxyStats,
+) {
+    if socket.send_to(bytes, destination).ok() != Some(bytes.len()) {
+        return;
+    }
+    if destination == server {
+        stats.forwarded_c2s.fetch_add(1, Ordering::Relaxed);
+    } else {
+        stats.forwarded_s2c.fetch_add(1, Ordering::Relaxed);
+        if initial_and_handshake(bytes) {
+            stats.coalesced_s2c.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Observe only v1 invariant headers and Length fields (RFC 9000 section 17.2).
+/// Never interpret protected packet-number bits or claim to authenticate bytes.
+fn initial_and_handshake(mut bytes: &[u8]) -> bool {
+    fn varint(bytes: &[u8], offset: &mut usize) -> Option<usize> {
+        let first = *bytes.get(*offset)?;
+        let width = 1usize << (first >> 6);
+        let end = offset.checked_add(width)?;
+        let mut value = u64::from(first & 0x3f);
+        for byte in bytes.get(*offset + 1..end)? {
+            value = (value << 8) | u64::from(*byte);
+        }
+        *offset = end;
+        usize::try_from(value).ok()
+    }
+    fn packet(bytes: &[u8]) -> Option<(u8, usize)> {
+        let first = *bytes.first()?;
+        if first & 0xc0 != 0xc0 || bytes.get(1..5)? != [0, 0, 0, 1] {
+            return None;
+        }
+        let kind = (first >> 4) & 3;
+        if kind == 3 {
+            return None;
+        } // Retry has no Length field.
+        let dcid = usize::from(*bytes.get(5)?);
+        if dcid > 20 {
+            return None;
+        }
+        let scid = usize::from(*bytes.get(6 + dcid)?);
+        if scid > 20 {
+            return None;
+        }
+        let mut offset = 7 + dcid + scid;
+        if kind == 0 {
+            let token = varint(bytes, &mut offset)?;
+            offset = offset.checked_add(token)?;
+        }
+        let length = varint(bytes, &mut offset)?;
+        let end = offset.checked_add(length)?;
+        // Protected PN plus AEAD tag; do not read the protected PN length.
+        (length >= 17 && end <= bytes.len()).then_some((kind, end))
+    }
+    let mut initial = false;
+    // Bound work even on a malformed or adversarial datagram.
+    for _ in 0..8 {
+        let Some((kind, end)) = packet(bytes) else {
+            return false;
+        };
+        if kind == 2 && initial {
+            return true;
+        }
+        initial |= kind == 0;
+        bytes = &bytes[end..];
+    }
+    false
+}
+
+#[test]
+fn coalesced_observer_checks_visible_lengths_without_reading_protected_bits() {
+    // Prefix-only parser fixtures, not encrypted packets or interoperability proof.
+    let initial = [vec![0xcf, 0, 0, 0, 1, 0, 0, 0, 17], vec![0; 17]].concat();
+    let handshake = [vec![0xef, 0, 0, 0, 1, 0, 0, 17], vec![0; 17]].concat();
+    assert!(!initial_and_handshake(&initial));
+    assert!(!initial_and_handshake(&handshake));
+    let flight = [initial.clone(), handshake.clone()].concat();
+    assert!(initial_and_handshake(&flight));
+    for end in 0..flight.len() {
+        assert!(!initial_and_handshake(&flight[..end]));
+    }
+    assert!(!initial_and_handshake(&[handshake, initial].concat()));
+    let mut wrong_version = flight.clone();
+    wrong_version[4] = 2;
+    assert!(!initial_and_handshake(&wrong_version));
 }
 
 /// Destination connection ID of a QUIC long-header packet (RFC 8999 §5.1).

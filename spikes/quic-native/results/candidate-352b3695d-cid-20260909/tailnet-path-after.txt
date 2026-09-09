@@ -1,0 +1,1 @@
+pong from omarchy (100.80.46.93) via 173.56.62.32:3544 in 35ms
