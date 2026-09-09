@@ -349,7 +349,7 @@ fn production_media_packetizer_and_receiver_run_over_native_quic() {
             let mut pending = send.next_packet(clock(&cx), &mut out).unwrap();
             for _ in 0..500 {
                 if let Some(offer) = pending {
-                    let route = match offer.channel {
+                    let route = match offer.channel() {
                         Channel::Video => Route::Datagram(p.video),
                         Channel::Recovery => Route::Stream(p.host_routes[1]),
                         Channel::MediaConfig => Route::Stream(p.host_routes[0]),
@@ -358,8 +358,8 @@ fn production_media_packetizer_and_receiver_run_over_native_quic() {
                     match p.server.send(
                         &cx,
                         route,
-                        &out[..offer.byte_len],
-                        offer.send_by_micros,
+                        &out[..offer.byte_len()],
+                        offer.send_by_micros(),
                         || true,
                     ) {
                         Ok(()) => pending = send.next_packet(clock(&cx), &mut out).unwrap(),
