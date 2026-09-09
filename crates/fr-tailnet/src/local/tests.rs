@@ -1047,3 +1047,68 @@ fn rearmed_cancellation_pulse_preserves_terminal_checks_and_drop_cleanup() {
             });
     }
 }
+
+#[test]
+fn operation_poll_cannot_cross_lookup_deadline_or_cancellation() {
+    use asupersync::time::{TimerDriverHandle, VirtualClock};
+    use std::task::{Context, Waker};
+    for completed in [true, false] {
+        for terminal in 0..6 {
+            let clock = Arc::new(VirtualClock::new());
+            clock.advance_to(Time::from_millis(20));
+            let driver = TimerDriverHandle::with_virtual_clock(clock.clone());
+            RuntimeBuilder::new()
+                .worker_threads(1)
+                .with_timer_driver(driver.clone())
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let mut polls = 0;
+                    let operation = poll_fn(|_| {
+                        polls += 1;
+                        if polls == 1 {
+                            return Poll::Pending;
+                        }
+                        match terminal {
+                            0 | 5 => clock.advance_to(Time::from_millis(119)),
+                            1 => clock.advance_to(Time::from_millis(120)),
+                            2 => clock.advance_to(Time::from_millis(121)),
+                            3 => cx.cancel_fast(CancelKind::User),
+                            _ => clock.set(Time::from_millis(10)),
+                        }
+                        if completed {
+                            Poll::Ready(if terminal == 5 {
+                                Err(Error::Http)
+                            } else {
+                                Ok(17)
+                            })
+                        } else {
+                            Poll::Pending
+                        }
+                    });
+                    let timers = driver.pending_count();
+                    let mut request = Box::pin(bounded(&cx, Duration::from_millis(100), operation));
+                    let mut task = Context::from_waker(Waker::noop());
+                    assert_eq!(request.as_mut().poll(&mut task), Poll::Pending);
+                    assert_eq!(driver.pending_count(), timers + 1);
+                    let expected = match terminal {
+                        0 if completed => Poll::Ready(Ok(17)),
+                        5 if completed => Poll::Ready(Err(Error::Http)),
+                        0 | 5 => Poll::Pending,
+                        1 | 2 => Poll::Ready(Err(Error::Timeout)),
+                        3 => Poll::Ready(Err(Error::Cancelled)),
+                        _ => Poll::Ready(Err(Error::Clock)),
+                    };
+                    assert_eq!(
+                        request.as_mut().poll(&mut task),
+                        expected,
+                        "completed={completed}, terminal={terminal}"
+                    );
+                    drop(request);
+                    assert_eq!(driver.pending_count(), timers);
+                    assert_eq!(polls, 2, "the operation must not be retried");
+                });
+        }
+    }
+}
