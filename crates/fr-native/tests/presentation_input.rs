@@ -398,7 +398,7 @@ async fn drag_then_expire(
         panic!("real native receipt required")
     };
     assert_eq!(result.outcome, InputOutcome::SubmittedToOs);
-    assert_eq!(observer.query_pointer().unwrap().1 & 256, 256);
+    observe_pressed(observer, &agent, cx).await;
     let count = fr_wire::input_result::encode_input_result(
         result,
         &mut packet,
@@ -711,7 +711,32 @@ async fn press_drag(video: &mut Video, agent: &mut Agent, cx: &Cx) {
     };
     assert_eq!(result.outcome, InputOutcome::SubmittedToOs);
     assert_eq!(result.submitted_operations, 2);
+    observe_pressed(&mut video.observer, agent, cx).await;
     collect_input_result(&mut video.client, result, cx);
+}
+
+async fn observe_pressed(observer: &mut X11Pointer, agent: &Agent, cx: &Cx) {
+    // SubmittedToOs certifies XFlush on the native connection. This independent
+    // observer connection may be serviced first. Wait only for observation;
+    // never resubmit an action, renew authority, or extend a source deadline.
+    let started = now(cx).0;
+    loop {
+        let state = observer.query_pointer().unwrap();
+        let elapsed = now(cx).0 - started;
+        assert!(
+            !agent.control().is_stopped(),
+            "press observation after {elapsed} us: control stopped {:?}, state {state:?}",
+            agent.control().reason()
+        );
+        if state == (DesktopPoint { x: 30, y: 40 }, 256) {
+            return;
+        }
+        assert!(
+            elapsed < 50_000,
+            "press not observed after {elapsed} us: {state:?}"
+        );
+        asupersync::time::sleep(cx.timer_driver().unwrap().now(), Duration::from_millis(1)).await;
+    }
 }
 async fn queued_input_fence(video: &mut Video, server: &Server, cx: &Cx, expire_ticket: bool) {
     let (mut agent, running, seat) = native_input(server, &video.observer);
