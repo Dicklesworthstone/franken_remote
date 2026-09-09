@@ -1,0 +1,72 @@
+  [2m2026-09-09T13:35:45.505492Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1149989 at root@212.90.121.76 (0 slots remaining after reservation, speed 73.5)[0m
+    [2;3mat[0m rch/src/hook.rs:2645 [2;3mon[0m ThreadId(1)
+
+[*] Job j-30013507080552473 submitted to vmi1149989 (0 slots remaining, speed 73.5)
+  [2m2026-09-09T13:35:45.567054Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for franken_remote (hash: 0a87911d06c4946f)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:571 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:35:45.567073Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 1 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:593 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:35:46.863393Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker vmi1149989...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:717 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:35:51.041242Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_remote -> /data/tmp/rch/franken_remote/0a87911d06c4946f on vmi1149989 (streaming)[0m
+    [2;3mat[0m rch/src/transfer.rs:3618 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:35:52.973828Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 21 files, 2947010 bytes in 6041ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1014 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:35:52.999213Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: env 'CARGO_HOME=/root/.cargo' cargo clippy --workspace --all-targets --all-features --locked -j 2 -- -D warnings[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1074 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:35:52.999277Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting TMPDIR for remote execution (worker-scoped path): /data/tmp -> /data/tmp/rch/franken_remote/0a87911d06c4946f/.rch-tmp[0m
+    [2;3mat[0m rch/src/transfer.rs:1913 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:35:52.999289Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/tmp/cargo-target -> /data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3[0m
+    [2;3mat[0m rch/src/transfer.rs:1913 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:35:52.999314Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mWrapping command with external timeout protection, [1;32mkind[0m[32m: cargo clippy, [1;32mtimeout_secs[0m[32m: 3600[0m
+    [2;3mat[0m rch/src/transfer.rs:2740 [2;3mon[0m ThreadId(1)
+
+[1m[92m    Checking[0m fr-core v0.1.0 (/data/tmp/rch/franken_remote/0a87911d06c4946f/crates/fr-core)
+[1m[92m    Checking[0m fr-tailnet v0.1.0 (/data/tmp/rch/franken_remote/0a87911d06c4946f/crates/fr-tailnet)
+[1m[92m    Checking[0m fr-wire v0.1.0 (/data/tmp/rch/franken_remote/0a87911d06c4946f/crates/fr-wire)
+[1m[92m   Compiling[0m fr-native v0.1.0 (/data/tmp/rch/franken_remote/0a87911d06c4946f/crates/fr-native)
+[1m[92m    Checking[0m fr-media v0.1.0 (/data/tmp/rch/franken_remote/0a87911d06c4946f/crates/fr-media)
+[1m[92m    Checking[0m fr-transport v0.1.0 (/data/tmp/rch/franken_remote/0a87911d06c4946f/crates/fr-transport)
+[1m[92m    Checking[0m frd v0.1.0 (/data/tmp/rch/franken_remote/0a87911d06c4946f/crates/frd)
+[1m[92m    Checking[0m fr-client v0.1.0 (/data/tmp/rch/franken_remote/0a87911d06c4946f/crates/fr-client)
+[1m[92m    Checking[0m fr-lab v0.1.0 (/data/tmp/rch/franken_remote/0a87911d06c4946f/crates/fr-lab)
+[1m[92m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 8.15s
+  [2m2026-09-09T13:36:02.659606Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=0 in 9660ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1206 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:36:02.679542Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1297 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:36:02.679565Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/tmp/rch/franken_remote/0a87911d06c4946f on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:4388 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:36:04.663623Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 1984ms (1 files, 974 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:4443 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:36:04.663667Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mArtifacts retrieved: 1 files, 974 bytes in 1984ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1329 [2;3mon[0m ThreadId(1)
+
+[W] Worker: vmi1149989 | Job: j-30013507080552473
+[T] Total: 17.7s (sync 6.0s, build 9.7s, artifacts 2.0s)
+^ Sync: 2.8 MB in 6.0s (476.4 KB/s)
+[C] Compile: 9.7s
+v Artifacts: 974 B in 2.0s (491 B/s)
+[T] Cache: MISS
++------------ [OK] Build Successful -------------+
+| Duration: 9.7s (v 89% faster vs previous 1.4m) |
+| Artifacts: 1 files (974 B)                     |
+| Worker: vmi1149989                             |
+| Cache: MISS (warming cache)                    |
+| Time: 2026-09-09 13:36:04                      |
++------------------------------------------------+
+[RCH] remote vmi1149989 (20.4s)
+[RCH] clean-overlay receipt: base=02cabc951820e330198aee456e2f0aa8fa694bd3 overlay-fingerprint=ee5b083779b4beddd4295ac1fc2ca588f910d824e31fd5e0787c2b0383fb361c
+{"api_version":"1.0","command":"env 'CARGO_HOME=/root/.cargo' cargo clippy --workspace --all-targets --all-features --locked -j 2 -- -D warnings","outcome":"completed","location":"remote","worker_id":"vmi1149989","remote_exit_code":0,"duration_ms":20516,"timing":{"classify":null,"select":null,"sync_up":6041,"exec":9660,"sync_down":1984,"cleanup":null,"total":null},"result_dirs":[]}

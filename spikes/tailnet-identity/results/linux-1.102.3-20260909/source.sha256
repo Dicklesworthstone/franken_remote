@@ -1,0 +1,6 @@
+a7aa460fdc12fb12c281b8cd9c5578149e8c1532659598c787c2333aef53d1c1  crates/fr-tailnet/src/lib.rs
+8dc35269c789477038d77fced487e862012f7aa167888fcddd0a0154bad46f7f  crates/fr-tailnet/src/metadata.rs
+072d4c87de2269d0232817d30548cce423c164e77777867b219d26bc5941119f  crates/fr-tailnet/src/local/tests.rs
+b0a6a0b8b28646feddf21e2cc763a84dc511210108e64c9545ba021071c7e3f5  crates/fr-tailnet/examples/localapi_check.rs
+1cc4279d8ed637bafadd40995f39c6c6bb8003c7d8c47fbfbb9ffa8804cf98d3  crates/fr-tailnet/tests/fixtures/linux-1.102.3/status.json
+42b8007c7df2a046afec4f6d00d29ccadf1e16a77265ff19d5c192ace3373084  crates/fr-tailnet/tests/fixtures/linux-1.102.3/whois.json

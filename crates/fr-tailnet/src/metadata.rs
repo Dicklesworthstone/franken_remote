@@ -313,7 +313,10 @@ pub(crate) fn evaluate(
     if n.sharer != 0 {
         return Err(Error::SharedPeer);
     }
-    if n.authorized != Some(true) || n.jailed || n.peer_api_only || !peer.in_map {
+    if n.authorized != Some(true) {
+        return Err(Error::MachineNotAuthorized);
+    }
+    if n.jailed || n.peer_api_only || !peer.in_map {
         return Err(Error::CapabilityDenied);
     }
     if n.stable_id != peer.id

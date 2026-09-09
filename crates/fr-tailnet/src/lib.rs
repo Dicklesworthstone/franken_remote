@@ -39,6 +39,8 @@ pub enum Error {
     IdentityMismatch,
     ScopeDenied,
     ExplicitScopeRequired,
+    /// Authenticated `WhoIs` did not positively report machine approval.
+    MachineNotAuthorized,
     CapabilityDenied,
     InvalidCapability,
     KeyExpired,

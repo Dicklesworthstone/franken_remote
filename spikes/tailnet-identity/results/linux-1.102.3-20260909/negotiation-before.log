@@ -1,0 +1,67 @@
+  [2m2026-09-09T13:30:16.339140Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1149989 at root@212.90.121.76 (0 slots remaining after reservation, speed 73.5)[0m
+    [2;3mat[0m rch/src/hook.rs:2645 [2;3mon[0m ThreadId(1)
+
+[*] Job j-30013507080552464 submitted to vmi1149989 (0 slots remaining, speed 73.5)
+  [2m2026-09-09T13:30:16.398061Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for franken_remote (hash: 120bbb164878aae5)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:571 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:30:16.398079Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 1 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:593 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:30:17.840478Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker vmi1149989...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:717 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:30:22.560933Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_remote -> /data/tmp/rch/franken_remote/120bbb164878aae5 on vmi1149989 (streaming)[0m
+    [2;3mat[0m rch/src/transfer.rs:3618 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:30:24.907005Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 5 files, 2940615 bytes in 7001ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1014 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:30:24.935146Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: env 'CARGO_HOME=/root/.cargo' cargo test -p fr-wire --test stream --locked -j 2 negotiation_overlimit_header_refuses_without_allocation_and_stays_failed -- --exact[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1074 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:30:24.935197Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting TMPDIR for remote execution (worker-scoped path): /data/tmp -> /data/tmp/rch/franken_remote/120bbb164878aae5/.rch-tmp[0m
+    [2;3mat[0m rch/src/transfer.rs:1913 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:30:24.935211Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/tmp/cargo-target -> /data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-4e3c6fd7ef1436317e4b3914f434f296[0m
+    [2;3mat[0m rch/src/transfer.rs:1913 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:30:24.935236Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mWrapping command with external timeout protection, [1;32mkind[0m[32m: cargo test, [1;32mtimeout_secs[0m[32m: 3600[0m
+    [2;3mat[0m rch/src/transfer.rs:2740 [2;3mon[0m ThreadId(1)
+
+[1m[92m   Compiling[0m fr-core v0.1.0 (/data/tmp/rch/franken_remote/120bbb164878aae5/crates/fr-core)
+[1m[92m   Compiling[0m fr-wire v0.1.0 (/data/tmp/rch/franken_remote/120bbb164878aae5/crates/fr-wire)
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 2.37s
+
+running 1 test
+[1m[92m     Running[0m tests/stream.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-4e3c6fd7ef1436317e4b3914f434f296/debug/build/fr-wire/bb65e0ade47f4980/out/stream-bb65e0ade47f4980)
+test negotiation_overlimit_header_refuses_without_allocation_and_stays_failed ... FAILED
+
+failures:
+
+---- negotiation_overlimit_header_refuses_without_allocation_and_stays_failed stdout ----
+
+thread 'negotiation_overlimit_header_refuses_without_allocation_and_stays_failed' (1163591) panicked at crates/fr-wire/tests/stream.rs:52:9:
+assertion `left == right` failed
+  left: Ok(1)
+ right: Err(Wire(ResourceLimit))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    negotiation_overlimit_header_refuses_without_allocation_and_stays_failed
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+[1m[91merror[0m: test failed, to rerun pass `-p fr-wire --test stream`
+  [2m2026-09-09T13:30:29.029162Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=101 in 4093ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1206 [2;3mon[0m ThreadId(1)
+
+[W] Worker: vmi1149989 | Job: j-30013507080552464
+[T] Total: 11.1s (sync 7.0s, build 4.1s, artifacts --)
+^ Sync: 2.8 MB in 7.0s (410.2 KB/s)
+[C] Compile: 4.1s
+Artifacts: skipped
+[T] Cache: MISS
+{"api_version":"1.0","command":"env 'CARGO_HOME=/root/.cargo' cargo test -p fr-wire --test stream --locked -j 2 negotiation_overlimit_header_refuses_without_allocation_and_stays_failed -- --exact","outcome":"completed","location":"remote","worker_id":"vmi1149989","remote_exit_code":101,"duration_ms":14911,"timing":{"classify":null,"select":null,"sync_up":7001,"exec":4093,"sync_down":null,"cleanup":null,"total":null},"result_dirs":[]}
+[RCH] remote vmi1149989 failed (exit 101)

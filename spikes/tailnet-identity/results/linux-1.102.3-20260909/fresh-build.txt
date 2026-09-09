@@ -1,0 +1,64 @@
+  [2m2026-09-09T13:29:22.660876Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1149989 at root@212.90.121.76 (0 slots remaining after reservation, speed 73.5)[0m
+    [2;3mat[0m rch/src/hook.rs:2645 [2;3mon[0m ThreadId(1)
+
+[*] Job j-30013507080552463 submitted to vmi1149989 (0 slots remaining, speed 73.5)
+  [2m2026-09-09T13:29:22.719471Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for franken_remote (hash: 7f71b893cb98d073)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:571 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:29:22.719509Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 1 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:593 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:29:24.137339Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker vmi1149989...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:717 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:29:28.346565Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_remote -> /data/tmp/rch/franken_remote/7f71b893cb98d073 on vmi1149989 (streaming)[0m
+    [2;3mat[0m rch/src/transfer.rs:3618 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:29:30.277502Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 16 files, 2944671 bytes in 6073ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1014 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:29:30.299750Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: env 'CARGO_HOME=/root/.cargo' cargo build -p fr-tailnet --example localapi_check --locked -j 2 '--message-format=json'[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1074 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:29:30.299796Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting TMPDIR for remote execution (worker-scoped path): /data/tmp -> /data/tmp/rch/franken_remote/7f71b893cb98d073/.rch-tmp[0m
+    [2;3mat[0m rch/src/transfer.rs:1913 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:29:30.299808Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/tmp/cargo-target -> /data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-4e3c6fd7ef1436317e4b3914f434f296[0m
+    [2;3mat[0m rch/src/transfer.rs:1913 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:29:30.299828Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mWrapping command with external timeout protection, [1;32mkind[0m[32m: cargo build, [1;32mtimeout_secs[0m[32m: 3600[0m
+    [2;3mat[0m rch/src/transfer.rs:2740 [2;3mon[0m ThreadId(1)
+
+[1m[92m   Compiling[0m fr-tailnet v0.1.0 (/data/tmp/rch/franken_remote/7f71b893cb98d073/crates/fr-tailnet)
+{"reason":"compiler-artifact","package_id":"path+file:///data/tmp/rch/franken_remote/7f71b893cb98d073/crates/fr-tailnet#0.1.0","manifest_path":"/data/tmp/rch/franken_remote/7f71b893cb98d073/crates/fr-tailnet/Cargo.toml","target":{"kind":["lib"],"crate_types":["lib"],"name":"fr_tailnet","src_path":"/data/tmp/rch/franken_remote/7f71b893cb98d073/crates/fr-tailnet/src/lib.rs","edition":"2024","doc":true,"doctest":true,"test":true},"profile":{"opt_level":"0","debuginfo":2,"debug_assertions":true,"overflow_checks":true,"test":false},"features":[],"filenames":["/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-4e3c6fd7ef1436317e4b3914f434f296/debug/build/fr-tailnet/8ecfad242e8916d1/out/libfr_tailnet-8ecfad242e8916d1.rlib","/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-4e3c6fd7ef1436317e4b3914f434f296/debug/build/fr-tailnet/8ecfad242e8916d1/out/libfr_tailnet-8ecfad242e8916d1.rmeta"],"executable":null,"fresh":false}
+{"reason":"compiler-artifact","package_id":"path+file:///data/tmp/rch/franken_remote/7f71b893cb98d073/crates/fr-tailnet#0.1.0","manifest_path":"/data/tmp/rch/franken_remote/7f71b893cb98d073/crates/fr-tailnet/Cargo.toml","target":{"kind":["example"],"crate_types":["bin"],"name":"localapi_check","src_path":"/data/tmp/rch/franken_remote/7f71b893cb98d073/crates/fr-tailnet/examples/localapi_check.rs","edition":"2024","doc":false,"doctest":false,"test":false},"profile":{"opt_level":"0","debuginfo":2,"debug_assertions":true,"overflow_checks":true,"test":false},"features":[],"filenames":["/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-4e3c6fd7ef1436317e4b3914f434f296/debug/examples/localapi_check"],"executable":"/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-4e3c6fd7ef1436317e4b3914f434f296/debug/examples/localapi_check","fresh":false}
+{"reason":"build-finished","success":true}
+[1m[92m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 2.92s
+  [2m2026-09-09T13:29:34.720287Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=0 in 4420ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1206 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:29:34.739725Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-4e3c6fd7ef1436317e4b3914f434f296 on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:4388 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:29:45.625694Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 10885ms (9 files, 135362 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:4443 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:29:45.625748Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 9 files, 135362 bytes in 10885ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1465 [2;3mon[0m ThreadId(1)
+
+[W] Worker: vmi1149989 | Job: j-30013507080552463
+[T] Total: 21.4s (sync 6.1s, build 4.4s, artifacts 10.9s)
+^ Sync: 2.8 MB in 6.1s (473.5 KB/s)
+[C] Compile: 4.4s
+v Artifacts: 132.2 KB in 10.9s (12.1 KB/s)
+[T] Cache: MISS
++------------ [OK] Build Successful -------------+
+| Duration: 4.4s (^ 92% slower vs previous 2.3s) |
+| Artifacts: 9 files (132.2 KB)                  |
+| Worker: vmi1149989                             |
+| Cache: MISS (warming cache)                    |
+| Time: 2026-09-09 13:29:45                      |
++------------------------------------------------+
+[RCH] remote vmi1149989 (24.5s)
+[RCH] clean-overlay receipt: base=02cabc951820e330198aee456e2f0aa8fa694bd3 overlay-fingerprint=43bdb67ef5113f7c18e0f63c918e27f9771811872474c9abacb39ac1ec7e43b7
+{"api_version":"1.0","command":"env 'CARGO_HOME=/root/.cargo' cargo build -p fr-tailnet --example localapi_check --locked -j 2 '--message-format=json'","outcome":"completed","location":"remote","worker_id":"vmi1149989","remote_exit_code":0,"duration_ms":24560,"timing":{"classify":null,"select":null,"sync_up":6073,"exec":4420,"sync_down":10885,"cleanup":null,"total":null},"result_dirs":[]}

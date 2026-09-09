@@ -1,0 +1,1079 @@
+  [2m2026-09-09T13:38:05.443357Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1149989 at root@212.90.121.76 (0 slots remaining after reservation, speed 73.5)[0m
+    [2;3mat[0m rch/src/hook.rs:2645 [2;3mon[0m ThreadId(1)
+
+[*] Job j-30013507080552477 submitted to vmi1149989 (0 slots remaining, speed 73.5)
+  [2m2026-09-09T13:38:05.502626Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for franken_remote (hash: 1906c5d7c01e70b8)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:571 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:38:05.502646Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 1 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:593 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:38:06.819308Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker vmi1149989...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:717 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:38:11.011352Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_remote -> /data/tmp/rch/franken_remote/1906c5d7c01e70b8 on vmi1149989 (streaming)[0m
+    [2;3mat[0m rch/src/transfer.rs:3618 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:38:12.935511Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 21 files, 2947010 bytes in 6049ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1014 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:38:12.955664Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: env 'CARGO_HOME=/root/.cargo' cargo test --workspace --all-features --locked -j 2[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1074 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:38:12.955705Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting TMPDIR for remote execution (worker-scoped path): /data/tmp -> /data/tmp/rch/franken_remote/1906c5d7c01e70b8/.rch-tmp[0m
+    [2;3mat[0m rch/src/transfer.rs:1913 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:38:12.955716Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/tmp/cargo-target -> /data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3[0m
+    [2;3mat[0m rch/src/transfer.rs:1913 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:38:12.955737Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mWrapping command with external timeout protection, [1;32mkind[0m[32m: cargo test, [1;32mtimeout_secs[0m[32m: 3600[0m
+    [2;3mat[0m rch/src/transfer.rs:2740 [2;3mon[0m ThreadId(1)
+
+[1m[92m   Compiling[0m fr-native v0.1.0 (/data/tmp/rch/franken_remote/1906c5d7c01e70b8/crates/fr-native)
+[1m[92m   Compiling[0m frd v0.1.0 (/data/tmp/rch/franken_remote/1906c5d7c01e70b8/crates/frd)
+[1m[92m   Compiling[0m fr-tailnet v0.1.0 (/data/tmp/rch/franken_remote/1906c5d7c01e70b8/crates/fr-tailnet)
+[1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 33.91s
+[1m[92m     Running[0m unittests src/lib.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-client/ef342bfa9961962f/out/fr_client-ef342bfa9961962f)
+
+running 3 tests
+test input::tests::reliable_and_pointer_counters_emit_the_last_identity_but_never_wrap ... ok
+test input::tests::deadline_overflow_is_terminal_and_metadata_storage_is_fixed ... ok
+test input::tests::click_barrier_exhaustion_cannot_revalidate_an_old_pointer_sequence ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/input_roundtrip.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-client/0ed3c2f9e1919823/out/input_roundtrip-0ed3c2f9e1919823)
+
+running 14 tests
+test every_view_generation_is_fenced_and_clock_regression_is_terminal ... ok
+test actual_codecs_host_barriers_and_separate_sequences_prevent_pointer_rewind ... ok
+test foreign_future_conflicting_and_action_specific_invalid_results_do_not_free_slots ... ok
+test grant_ticket_heartbeat_and_decode_do_not_replace_mapping_and_presentation ... ok
+test old_session_and_old_local_observation_never_enable_a_new_grant ... ok
+test physical_keys_committed_unicode_scroll_and_repeats_reach_the_host_separately ... ok
+test pointer_results_do_not_ack_actions_and_failed_pointer_results_stop_control ... ok
+test presentation_age_includes_network_uncertainty_and_time_waiting_to_present ... ok
+test receipt_timeout_does_not_erase_a_late_confirmed_effect ... ok
+test focus_suspend_disconnect_and_view_change_are_sticky_terminal_boundaries ... ok
+test encoding_failures_leave_counters_and_key_state_unconsumed ... ok
+test receipt_window_is_bounded_and_duplicates_cannot_free_new_pending_actions ... ok
+test qualified_unchanged_source_can_refresh_static_pixels_without_a_new_frame ... ok
+test uncertain_unicode_prefix_survives_close_and_cannot_be_reissued_with_a_new_ticket ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/presented_input.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-client/4e6eb6d40b3d92e1/out/presented_input-4e6eb6d40b3d92e1)
+
+running 8 tests
+test late_decoder_submission_never_becomes_an_input_ready_view ... ok
+test hidden_view_preserves_late_real_core_receipts_without_restoring_input ... ok
+test unknown_source_with_zero_timestamp_stops_without_waiting_for_old_pixels_to_expire ... ok
+test real_records_need_both_decode_and_visibility_before_input_encoding ... ok
+test static_observations_extend_source_deadline_without_new_video_or_polling_renewal ... ok
+test receiver_failure_is_checked_at_the_next_action_without_a_new_callback ... ok
+test new_unpresented_picture_cannot_reset_existing_view_age ... ok
+test generation_change_cannot_reuse_the_old_presented_grant ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 47 tests
+test authority::tests::close_and_revoke_are_terminal ... ok
+test authority::tests::controller_slot_is_busy_until_revoked_then_handoff_serializes ... ok
+test authority::tests::deadline_overflow_cannot_mint_a_saturated_challenge ... ok
+test authority::tests::delayed_challenge_response_after_expiry_does_not_resurrect ... ok
+[1m[92m     Running[0m unittests src/lib.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-core/fb77553d7f001152/out/fr_core-fb77553d7f001152)
+test authority::tests::control_cannot_outlive_observation ... ok
+test authority::tests::expired_observation_blocks_view_ready_and_grant ... ok
+test authority::tests::delayed_replies_do_not_shift_challenge_deadlines ... ok
+test authority::tests::diagnostic_output_does_not_depend_on_live_credentials ... ok
+test authority::tests::clock_regression_fences_instead_of_resurrecting_expired_input ... ok
+test authority::tests::first_frame_does_not_grant_control ... ok
+test authority::tests::old_observation_challenge_does_not_survive_a_new_grant ... ok
+test authority::tests::expired_controller_needs_explicit_cleanup_before_replacement ... ok
+test authority::tests::pending_challenge_is_not_overwritten_by_the_next_cadence_tick ... ok
+test authority::tests::refusal_clears_every_authority_path ... ok
+test authority::tests::stale_view_suspends_submission_without_dropping_the_lease ... ok
+test authority::tests::submission_check_holds_lease_ticket_expiry_and_readiness ... ok
+test authority::tests::suspend_fences_even_a_paused_clock_and_clears_challenges ... ok
+test authority::tests::ticket_lifetime_is_clamped_to_the_lease_authorization ... ok
+test authority::tests::resume_boundary_retires_a_lapsed_lease_across_a_clock_jump ... ok
+test ids::tests::generation_wire_round_trip ... ok
+test ids::tests::generation_exhaustion_refuses_to_wrap ... ok
+test authority::tests::resume_boundary_keeps_a_live_lease_but_can_expire_only_its_ticket ... ok
+test ids::tests::generations_start_at_initial_and_advance_monotonically ... ok
+test input_sequence::tests::a_gap_fences_instead_of_skipping_an_unknown_action ... ok
+test input_sequence::tests::duplicates_before_and_after_completion_never_readmit ... ok
+test ids::tests::unpredictable_ids_round_trip_and_compare_by_value ... ok
+test input_sequence::tests::exhausted_sequences_cannot_wrap_into_old_actions ... ok
+test input_sequence::tests::expiry_after_admission_is_recorded_without_a_fresh_ticket_retry ... ok
+test input_sequence::tests::failed_or_uncertain_outcomes_fence_all_dependent_actions ... ok
+test input_sequence::tests::fence_does_not_fabricate_completion_of_an_outstanding_effect ... ok
+test input_sequence::tests::foreign_lease_never_consumes_or_finishes_an_action ... ok
+test input_sequence::tests::preceding_action_must_finish_before_the_next_is_admitted ... ok
+test input_sequence::tests::receipt_capacity_is_bounded ... ok
+test input_sequence::tests::receipt_eviction_never_lowers_the_consumed_floor ... ok
+test input_sequence::tests::wrong_or_duplicate_completion_cannot_change_a_receipt ... ok
+test limits::tests::absolute_ceilings_match_the_plan ... ok
+test limits::tests::dimension_validation_enforces_axis_pixels_and_zero_rules ... ok
+test limits::tests::length_validators_accept_boundary_and_refuse_above ... ok
+test limits::tests::negotiation_takes_the_fieldwise_minimum ... ok
+test limits::tests::overrides_only_negotiate_downward ... ok
+test limits::tests::per_viewer_budget_floor_follows_the_selected_access_unit_ceiling ... ok
+test limits::tests::per_viewer_budget_floor_is_one_maximal_access_unit ... ok
+test limits::tests::error_display_is_specific_and_loggable ... ok
+test limits::tests::surface_bytes_are_checked_and_alignment_padding_counts ... ok
+test limits::tests::reassembly_window_floor_and_ceiling_hold ... ok
+test time::tests::instant_arithmetic_is_checked ... ok
+test time::tests::millis_conversion_is_checked ... ok
+
+test result: ok. 47 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+[1m[92m     Running[0m tests/input_monitor.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-core/c84cebe81338596f/out/input_monitor-c84cebe81338596f)
+test concurrent_observer_sample_cannot_regress_the_authority_writer_clock ... ok
+test monitor_is_terminal_after_owner_drop_and_cannot_rebind_a_new_owner ... ok
+test monitor_tracks_both_renewals_but_never_renews_on_traffic_or_ticket_expiry ... ok
+test expiry_progresses_while_native_preparation_is_blocked ... ok
+test expiry_progresses_during_irreversible_native_submission_without_fabricating_rollback ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+[1m[92m     Running[0m tests/input_preparation.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-core/9f1c982b99bc6802/out/input_preparation-9f1c982b99bc6802)
+test expiry_between_repeat_release_and_press_reports_partial_without_replay ... ok
+test repeats_are_two_individually_authorized_native_operations ... ok
+test final_expiry_cancels_platform_preparation_without_submission ... ok
+test unwinding_prepare_cancels_preparation_and_fences_input ... ok
+test unwinding_submit_cancels_preparation_but_preserves_possible_press_cleanup ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m unittests src/lib.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-lab/a9f1d4e4414d1fbc/out/fr_lab-a9f1d4e4414d1fbc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 6 tests
+test renewed_control_does_not_bypass_observation_expiry ... ok
+test healthy_delivery_authorizes_before_the_ticket_deadline ... ok
+test connect_approval_view_control_and_close_drive_production_transitions ... ok
+test late_observation_response_cannot_resurrect_expired_observation ... ok
+[1m[92m     Running[0m tests/scenarios.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-lab/1716b1f129ee47a5/out/scenarios-1716b1f129ee47a5)
+test resume_fences_authority_before_old_input_is_drained ... ok
+test stalled_delivery_checks_the_actual_submission_clock ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 11 tests
+test invalid_faults_lengths_and_overflow_refuse_before_allocation ... ok
+test receiver_panic_consumes_uncertain_packet_and_closes_transport ... ok
+test trace_exhaustion_neither_advances_time_nor_hides_pending_delivery ... ok
+[1m[92m     Running[0m tests/transport.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-lab/8b99ce74a565851d/out/transport-8b99ce74a565851d)
+test cancellation_and_reconnect_reject_already_committed_old_datagrams ... ok
+test advance_reserves_complete_evidence_before_any_callback ... ok
+test normal_progression_services_each_due_time_with_stable_ties ... ok
+test scripted_bidirectional_delivery_has_stable_tie_breaks ... ok
+test duplicate_admission_is_atomic_and_counts_bytes ... ok
+test empty_payloads_consume_slots_and_metadata ... ok
+test debug_and_failure_output_exclude_payloads ... ok
+test seeded_loss_duplicate_reorder_replays_identically ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 32 tests
+test access_unit::tests::debug_output_is_independent_of_pixel_content ... ok
+test access_unit::tests::frame_id_advances_and_refuses_to_wrap ... ok
+test access_unit::tests::access_unit_validates_length_and_nonempty ... ok
+[1m[92m     Running[0m unittests src/lib.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-media/8986e7865469b031/out/fr_media-8986e7865469b031)
+test access_unit::tests::predicted_frames_carry_their_reference ... ok
+test access_unit::tests::large_payload_debug_output_stays_bounded ... ok
+test capabilities::tests::capabilities_report_probed_support ... ok
+test capabilities::tests::session_admission_bounds_concurrency ... ok
+test capabilities::tests::probe_cache_explicit_invalidation_clears_the_device ... ok
+test codec::tests::encode_request_defaults_to_no_forced_idr ... ok
+test capabilities::tests::probe_cache_hits_exact_identity_and_misses_after_reset ... ok
+test codec::tests::terminal_errors_are_classified ... ok
+test config::tests::baseline_config_refuses_hdr_but_accepts_sdr ... ok
+test config::tests::coded_geometry_validates_alignment_and_crop ... ok
+test config::tests::gop_policy_rejects_zero_frame_rate ... ok
+test config::tests::hdr_detection_is_correct ... ok
+test config::tests::visible_geometry_budgets_coded_padding_and_checked_rounding ... ok
+test hevc::tests::bounded_golomb_and_emulation_prevention_are_fail_closed ... ok
+test hevc::tests::actual_encoder_headers_establish_idr_then_one_previous_picture ... ok
+test hevc::tests::early_resource_and_color_checks_reject_false_declarations ... ok
+test hevc::tests::exact_configuration_admits_parameters_without_inventing_decoded_history ... ok
+test hevc::tests::debug_output_contains_no_parameter_or_screen_content ... ok
+test hevc::tests::private_decoder_startup_binds_the_record_generation_and_geometry ... ok
+test hevc::tests::failed_au_never_installs_parameters_or_advances_poc ... ok
+test surface::tests::packed_formats_report_bytes_per_pixel ... ok
+test hevc::tests::freeze_all_parameter_bytes_even_across_recovery_idrs ... ok
+test worker::tests::terminal_sequence_never_wraps ... ok
+test surface::tests::copy_ledger_counts_by_kind_and_reports_readback_freedom ... ok
+test hevc::tests::reject_cra_b_slices_multiple_pictures_and_nonzero_layers ... ok
+test hevc::tests::native_backpressure_can_discard_a_candidate_without_consuming_it ... ok
+test hevc::tests::every_parameter_truncation_and_oversize_is_rejected ... ok
+test hevc::tests::decoder_record_rejects_truncation_header_disagreement_and_resource_demands ... ok
+test hevc::tests::malformed_framing_and_extra_parameter_sets_do_not_panic ... ok
+
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 9 tests
+test decoder_rejects_mismatched_configuration_generation ... ok
+test device_loss_is_terminal_not_retryable ... ok
+test backpressure_requires_drain_then_accepts_again ... ok
+test first_output_after_configure_is_an_idr ... ok
+test force_idr_produces_an_idr_mid_stream ... ok
+[1m[92m     Running[0m tests/contract.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-media/9058cd302da3be84/out/contract-9058cd302da3be84)
+test encoder_must_be_configured_before_submit ... ok
+test wrong_backend_surface_is_refused ... ok
+test decoder_requires_idr_first_after_configure ... ok
+test full_encode_decode_loop_preserves_frame_identity ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 15 tests
+test decoder_binding_requires_matching_admitted_configuration_and_limits ... ok
+[1m[92m     Running[0m tests/delivery_receive.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-media/d08bbe893ac9fa83/out/delivery_receive-d08bbe893ac9fa83)
+test clock_faults_close_and_binding_or_epoch_reuse_cannot_reopen ... ok
+test held_decoder_inputs_remain_charged_after_close_and_generation_replacement ... ok
+test out_of_order_duplicates_reassemble_once_without_extra_budget ... ok
+test reliable_announcement_detects_an_entirely_lost_final_frame ... ok
+test configured_recovery_and_decode_are_distinct_non_circular_milestones ... ok
+test stale_for_display_reference_still_unlocks_fresh_dependent_picture ... ok
+test stale_bindings_allocate_nothing_and_do_not_break_current_stream ... ok
+test decode_failure_never_promotes_dependents_and_idle_timer_ends_recovery ... ok
+test conflicting_duplicate_fences_the_chain_and_frees_pending_buffers ... ok
+test decoder_owner_rejects_equal_numeric_receivers_and_retired_epochs ... ok
+test changed_descriptor_is_not_a_second_picture_with_the_same_id ... ok
+test recovery_refuses_gaps_and_never_exposes_a_partial_idr ... ok
+test repair_requests_select_only_missing_fragments_and_stop_at_retry_limit ... ok
+test picture_count_includes_completed_but_not_released_decoder_inputs ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 12 tests
+[1m[92m     Running[0m tests/delivery_roundtrip.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-media/3001601e37bdaf36/out/delivery_roundtrip-3001601e37bdaf36)
+test actual_vector_capacity_and_picture_count_are_admitted ... ok
+test a_too_small_output_buffer_does_not_consume_an_original_packet ... ok
+test bad_reference_and_counter_wrap_cannot_create_an_ambiguous_chain ... ok
+test final_write_rejects_foreign_and_replaced_original_and_repair_offers ... ok
+test expiry_of_an_unsent_original_fences_its_dependents ... ok
+test final_write_services_unsent_predecessor_expiry_and_exact_deadline ... ok
+test repair_byte_budget_survives_recovery_generation_replacement ... ok
+test repair_lifetime_never_extends_and_expired_ids_cannot_be_reinserted ... ok
+test repair_ranges_are_checked_against_the_actual_cached_picture ... ok
+test sender_cache_is_not_limited_to_twelve_pictures_at_sixty_fps ... ok
+test repairing_an_older_reference_unblocks_two_complete_pictures_in_order ... ok
+test sender_receiver_roundtrip_recovers_reordered_dropped_and_final_frame_packets ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+
+running 17 tests
+test drift_is_rounded_up_and_expiry_is_exclusive ... ok
+test clock_regression_closes_and_new_host_boot_cannot_replace_clock ... ok
+test decode_and_submit_are_not_visible_readiness ... ok
+test impossible_captured_refresh_and_descriptor_changes_are_terminal ... ok
+test foreign_generations_and_closed_or_hidden_views_cannot_be_reanimated ... ok
+test a_stale_network_arrival_is_not_a_fresh_source ... ok
+test clock_origins_and_asymmetric_exchange_never_use_half_rtt ... ok
+test progress_for_a_newer_unseen_picture_does_not_bless_old_pixels ... ok
+test new_unseen_picture_cannot_repair_unknown_evidence_for_the_visible_picture ... ok
+test shared_budget_does_not_allow_a_foreign_picture_to_certify_decode ... ok
+test successful_decode_token_does_not_release_borrowed_buffer_or_ack_twice ... ok
+test receiver_failure_drop_and_numeric_binding_reuse_invalidate_visibility ... ok
+[1m[92m     Running[0m tests/freshness.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-media/6c5384538cee4a6b/out/freshness-6c5384538cee4a6b)
+test clock_overflow_bad_policy_and_invalid_boot_are_refused ... ok
+test verified_static_source_refreshes_observation_but_not_pixels ... ok
+test announcing_new_pixels_preserves_but_never_renews_the_visible_sources_last_check ... ok
+test heartbeat_unknown_source_and_duplicates_do_not_refresh_pixels ... ok
+test slow_decode_cannot_reuse_fresh_at_dequeue_snapshot ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 7 tests
+[1m[92m     Running[0m tests/hevc_framing.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-media/57fd1f102ef6b6c0/out/hevc_framing-57fd1f102ef6b6c0)
+test browser_samples_remove_parameter_sets_and_recovery_repeats_exact_description ... ok
+test canonical_roundtrip_and_both_admission_paths_agree ... ok
+test length_fields_are_checked_before_slicing_or_allocating ... ok
+test mixed_start_codes_and_annex_b_zero_padding_normalize_once ... ok
+test hvcc_and_codec_identifier_come_from_the_admitted_stream ... ok
+test nal_count_and_expanded_output_have_independent_bounds ... ok
+test native_conversion_refuses_hidden_start_codes_even_after_slice_headers ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 8 tests
+test decoder_startup_bounds_are_checked_before_reading_configuration_bytes ... ok
+test encoded_units_keep_all_metadata_without_debugging_content ... ok
+test epoch_sequence_and_exhaustion_never_replay_requests ... ok
+test independent_header_fixture_and_every_truncation ... ok
+test oversized_announcements_refuse_before_reading_a_body ... ok
+[1m[92m     Running[0m tests/worker_protocol.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-media/a85516f288c1549a/out/worker_protocol-a85516f288c1549a)
+test role_kinds_and_configurations_are_exact ... ok
+test empty_invalid_reference_and_reserved_bits_refuse ... ok
+test unchanged_capture_has_exact_bounded_bytes_and_cannot_reference_the_future ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 10 tests
+test input::tests::only_explicit_local_display_selectors_are_accepted ... ok
+test linux::tests::malformed_annex_b_and_non_baseline_vcl_are_refused ... ok
+test linux::tests::invalid_geometry_and_stale_frames_refuse_before_native_submission ... ok
+[1m[92m     Running[0m unittests src/lib.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-native/ac4c378481cdab50/out/fr_native-ac4c378481cdab50)
+test linux::admission_tests::native_delivery_is_canonical_and_browser_samples_share_admitted_configuration ... ok
+test linux::admission_tests::exact_native_configuration_has_no_output_or_reference_before_first_idr ... ok
+test linux::admission_tests::changed_recovery_parameters_do_not_replace_the_live_configuration ... ok
+test linux::admission_tests::wrong_sps_geometry_and_missing_sets_refuse_before_foreign_state_changes ... ok
+test linux::admission_tests::actual_decoder_backpressure_retries_do_not_consume_admission ... ok
+test linux::tests::real_software_hevc_encode_decode_keeps_frame_identity ... ok
+test linux::admission_tests::coded_padding_is_admitted_but_only_visible_pixels_are_presented ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.49s
+
+[1m[92m     Running[0m unittests src/bin/media_worker.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-native/32dba866464f6124/out/fr_media_worker-32dba866464f6124)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/client_x11.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-native/297010355cbac8a5/out/client_x11-297010355cbac8a5)
+
+running 2 tests
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+test timed_out_client_collects_late_real_submission_without_reopening_or_losing_cleanup ... ok
+test client_bytes_native_drag_receipt_and_old_pointer_then_stale_view_cleanup ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+[1m[92m     Running[0m tests/input_agent_result_x11.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-native/3b65ff69722ae703/out/input_agent_result_x11-3b65ff69722ae703)
+
+running 4 tests
+test runtime_idle_expiry_releases_real_keys_drag_and_restores_repeat ... ok
+test cancellation_during_real_xkb_preparation_never_submits_or_strands_repeat_state ... ok
+test runtime_lifecycle_revocation_releases_real_drag_without_another_packet ... ok
+test blocked_xkb_preparation_expires_independently_without_certifying_cleanup ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.21s
+
+[1m[92m     Running[0m tests/input_agent_x11.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-native/c5bec3cb1463d3d5/out/input_agent_x11-c5bec3cb1463d3d5)
+
+running 5 tests
+_XSERVTrans_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+SocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+test dropping_the_client_with_held_input_triggers_real_native_cleanup ... ok
+test mismatched_geometry_or_unimplemented_native_capability_refuses_before_input ... ok
+test local_revoke_releases_before_a_second_native_controller_is_admitted ... ok
+test actual_idle_expiry_releases_key_and_drag_and_restores_repeat ... ok
+test unresponsive_x_server_cannot_block_authority_expiry_or_free_the_controller_slot ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.06s
+
+[1m[92m     Running[0m tests/input_concurrency.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-native/9d4e93b8626545e9/out/input_concurrency-9d4e93b8626545e9)
+
+running 1 test
+test concurrent_extension_connections_and_teardown_preserve_native_memory ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+[1m[92m     Running[0m tests/input_quic.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-native/aa6dd47535576837/out/input_quic-aa6dd47535576837)
+
+running 9 tests
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+test failed_connection_admission_closes_before_native_effects ... ok
+test ordered_release_wins_native_slot_over_an_already_buffered_pointer ... ok
+test local_authority_commands_share_native_ownership_without_becoming_network_input ... ok
+test real_client_quic_native_shift_drag_release_and_returned_receipts ... ok
+test receipt_backpressure_retains_identity_and_cannot_hold_a_revoked_drag ... ok
+test dropping_an_unpolled_network_drive_revokes_and_releases_native_input ... ok
+test foreign_native_lease_is_refused_not_rewritten_into_a_successful_wire_receipt ... ok
+test malformed_action_payload_revokes_the_attachment_without_a_native_effect ... ok
+test closed_or_replaced_connection_cannot_retain_control_or_receive_old_results ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+[1m[92m     Running[0m tests/input_x11.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-native/bae8c3bc3c8a9000/out/input_x11-bae8c3bc3c8a9000)
+
+running 4 tests
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+test stale_generation_and_off_display_input_do_not_move_the_server_pointer ... ok
+test native_preparation_is_required_and_text_is_not_guessed ... ok
+test revoke_after_actual_motion_prevents_the_following_button_press ... ok
+test real_pointer_drag_barriers_duplicates_and_expiry_cleanup ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+[1m[92m     Running[0m tests/keyboard_x11.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-native/3cf1b2f2afc898e6/out/keyboard_x11-3cf1b2f2afc898e6)
+
+running 9 tests
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTrans_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+SocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTrans_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+SocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+test expired_after_xkb_preparation_never_presses_and_restores_repeat ... ok
+test preexisting_key_press_is_not_taken_over_or_released ... ok
+test local_revoke_during_native_preparation_cancels_without_input ... ok
+test native_repeat_expiry_between_release_and_press_is_partial_not_replayed ... ok
+test remapped_characters_do_not_move_physical_press_or_held_release ... ok
+test a_preexisting_local_drag_is_not_claimed_or_released_by_another_native_owner ... ok
+test native_owner_drop_releases_a_drag_and_keyboard_without_an_explicit_cleanup_call ... ok
+test swapped_button_mapping_preserves_logical_clicks_and_all_five_buttons ... ok
+test wire_to_authority_to_real_keys_repeat_pointer_and_cleanup ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s
+
+[1m[92m     Running[0m tests/media_quic.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-native/af735b6844a5d0de/out/media_quic-af735b6844a5d0de)
+
+running 6 tests
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+test revoke_between_actual_quic_admissions_closes_retained_media_and_connection ... ok
+test route_binding_direction_and_kinds_cannot_be_substituted ... ok
+test dropped_live_drive_is_terminal_for_media_and_quic_without_another_poll ... ok
+test native_quic_progress_recovers_an_entire_lost_final_picture_before_idle ... ok
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+test native_capture_hevc_quic_and_visible_readback_survive_actual_backpressure ... ok
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+test native_quic_selective_repair_preserves_a_dropped_reference_fragment ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.82s
+
+[1m[92m     Running[0m tests/presentation_input.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-native/9e0f64879ad1e1ab/out/presentation_input-9e0f64879ad1e1ab)
+
+running 10 tests
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+test actual_hevc_final_fragment_loss_repairs_without_a_later_frame_and_idle_cache_expires ... ok
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+test actual_hevc_late_repaired_reference_unlocks_a_fresh_dependent_without_presenting_old_pixels ... ok
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+test actual_hevc_lost_final_picture_is_announced_and_repaired_before_idle ... ok
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+test actual_hevc_partial_recovery_is_fenced_then_fresh_idr_and_dependent_are_visible ... ok
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+test dropping_native_decode_fences_receiver_and_forbids_recovery_on_dead_worker ... ok
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+test canceled_native_stop_cannot_rebind_before_receiver_watchdog_runs ... ok
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+test native_presenter_refuses_foreign_receiver_without_consuming_either_picture ... ok
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+test captured_video_visible_readback_input_receipt_and_idle_stale_cleanup ... ok
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+test delayed_native_decode_receipt_cannot_enable_input_on_an_old_display_deadline ... ok
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+test failed_native_startup_never_configures_receiver_and_drop_invalidates_view ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.20s
+
+[1m[92m     Running[0m tests/supervised_media.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-native/8d02d854fd111914/out/supervised_media-8d02d854fd111914)
+
+running 1 test
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+test authority_to_supervised_capture_wire_and_presentation_then_revoke ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+[1m[92m     Running[0m tests/worker_process.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-native/a55d5dd8929fea2d/out/worker_process-a55d5dd8929fea2d)
+
+running 6 tests
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTrans_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+SocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed
+_XSERVTransMakeAllCOTSServerListeners: server already running
+media_worker_refused=WrongState
+test pending_native_capture_cannot_certify_unchanged_and_clock_faults_are_terminal ... ok
+media_worker_refused=WrongRole
+media_worker_refused=media_worker_refused=NativeFailure
+WrongState
+test wrong_role_refuses_before_capture_and_exits ... ok
+test decoder_startup_without_exact_parameters_is_terminal_before_decode ... ok
+media_worker_refused=WrongEpoch
+test repeated_configuration_and_wrong_epoch_are_terminal ... ok
+test real_capture_skips_static_encoding_but_preserves_changed_and_forced_idr_chain ... ok
+test distinct_processes_capture_encode_decode_and_present_changing_desktop ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s
+
+[1m[92m     Running[0m unittests src/lib.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-tailnet/88d423a4e22e24a7/out/fr_tailnet-88d423a4e22e24a7)
+
+running 25 tests
+test local::tests::changed_identity_backend_and_known_key_expiry_refuse ... ok
+test local::tests::grant_union_is_bounded_and_cannot_ignore_unknown_restrictions ... ok
+test local::tests::dropped_started_refresh_cannot_leave_an_admission_active ... ok
+test local::tests::admission_proof_cannot_be_moved_to_a_different_local_authority_instance ... ok
+test local::tests::actual_http_rejects_oversize_compression_redirects_and_truncation ... ok
+test local::tests::ipv6_source_and_own_address_prefixes_are_checked_exactly ... ok
+test local::tests::go_expiry_timestamp_is_checked_and_clamps_local_authorization ... ok
+test local::tests::machine_approval_requires_positive_evidence_even_with_an_app_grant ... ok
+test local::tests::inconsistent_snapshots_retry_once_without_unbounded_work ... ok
+test local::tests::installed_linux_1_102_3_projection_preserves_the_live_refusal ... ok
+test local::tests::routed_sources_cannot_borrow_a_subnet_routers_identity ... ok
+test local::tests::read_only_admission_does_not_turn_a_control_refusal_into_observation_revocation ... ok
+test local::tests::admission_owner_drop_revocation_and_cancellation_stop_every_clone ... ok
+test local::tests::same_user_default_different_owners_and_tagged_hosts_have_explicit_scope ... ok
+test local::tests::shared_in_and_external_sharees_are_refused_even_with_grants ... ok
+test local::tests::source_membership_is_not_inferred_from_names_prefixes_or_node_capabilities ... ok
+test local::tests::root_peer_credentials_are_verified_before_sending_any_query ... ok
+test local::tests::real_unix_http_snapshot_has_exact_source_binding_and_exclusive_expiry ... ok
+test local::tests::revocation_during_refresh_cannot_be_overwritten_by_a_successful_response ... ok
+test local::tests::capability_removal_permission_changes_and_identity_switch_close_old_admission ... ok
+test local::tests::truncation_duplicates_and_oversized_metadata_never_admit ... ok
+test local::tests::unchanged_revalidation_extends_only_an_unexpired_owned_admission ... ok
+test local::tests::expired_shared_admission_is_terminal_without_additional_network_traffic ... ok
+test local::tests::delayed_snapshot_cannot_slide_issued_deadline_and_expired_proof_cannot_renew ... ok
+test local::tests::cancellation_timeout_and_dropped_future_release_single_lookup_credit ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.61s
+
+[1m[92m     Running[0m unittests src/lib.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-transport/61110da167e1a528/out/fr_transport-61110da167e1a528)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/native_quic.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-transport/98dce087936f49d2/out/native_quic-98dce087936f49d2)
+
+running 13 tests
+test final_authority_refusal_and_expired_send_never_admit_bytes ... ok
+test datagram_cap_rejects_before_native_fatal_path_and_delivers_exact_boundary ... ok
+test parallel_action_streams_and_wrong_initiators_are_refused_before_admission ... ok
+test backpressure_retains_original_record_until_retry_and_native_acks_release_batch ... ok
+test cancelling_or_dropping_a_live_io_wait_prevents_connection_reuse ... ok
+test mixed_actions_keep_one_ordered_stream_and_share_binding_with_results_and_pointer ... ok
+test authenticated_stream_reassembles_large_record_and_coalesced_records ... ok
+test exhausted_bulk_pool_cannot_consume_critical_storage_and_critical_runs_first ... ok
+test blocked_bulk_stream_cannot_pin_acknowledged_critical_storage ... ok
+test critical_credit_is_reserved_in_the_actual_native_connection_window ... ok
+test production_media_packetizer_and_receiver_run_over_native_quic ... ok
+test stalled_complete_record_expires_without_a_new_packet ... ok
+test hostname_and_application_protocol_are_actually_verified ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.09s
+
+[1m[92m     Running[0m unittests src/lib.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-wire/fc6ee99800da0375/out/fr_wire-fc6ee99800da0375)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/input_result.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-wire/18adaef6f1f63b40/out/input_result-18adaef6f1f63b40)
+
+running 10 tests
+test conversion_keeps_actual_prefix_and_never_promotes_to_observed ... ok
+test inconsistent_receipts_cannot_erase_effects_or_invent_observation ... ok
+test negotiated_byte_caps_and_output_storage_are_enforced_before_writes ... ok
+test optional_extensions_are_bounded_and_required_extensions_refuse ... ok
+test malformed_envelope_and_scalar_values_fail_closed ... ok
+test stable_reason_codes_cover_authority_sequence_and_platform_refusals ... ok
+test authenticated_direction_delivery_and_epoch_binding_are_required ... ok
+test independent_fixtures_pin_every_outcome_and_stage ... ok
+test rejects_every_truncation_and_trailing_data ... ok
+test every_single_byte_mutation_is_refused_or_remains_canonical ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+
+running 16 tests
+test eviction_never_readmits_and_foreign_credentials_never_consume ... ok
+test presses_repeats_releases_and_replays_use_one_owner ... ok
+test modes_require_fresh_tickets_and_relative_checkpoints_are_cumulative ... ok
+test independent_revoke_during_preflight_and_between_text_calls ... ok
+test known_refused_press_does_not_fabricate_held_state ... ok
+test sequence_gaps_fence_pointer_and_release_held_state ... ok
+test suspend_focus_loss_and_clock_regression_are_terminal ... ok
+test position_then_expired_button_reports_the_committed_prefix ... ok
+test text_is_scalar_bounded_and_unknown_suffix_keeps_confirmed_prefix ... ok
+test every_view_generation_and_off_display_coordinates_refuse ... ok
+test mode_changes_do_not_revalidate_old_pointer_packets ... ok
+test unsupported_text_repeat_and_view_only_never_inject ... ok
+test expired_after_preflight_never_reaches_native_submission ... ok
+test pointer_gaps_do_not_gap_actions_and_click_barriers_never_regress ... ok
+test unknown_press_and_panic_preserve_release_obligations ... ok
+test watchdog_expiry_and_failed_cleanup_remain_explicit ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 11 tests
+test host_commands_and_unreliable_actions_are_refused ... ok
+test exact_text_and_destination_limits_are_enforced ... ok
+test independent_golden_records_are_exact_and_text_is_borrowed ... ok
+test diagnostics_do_not_depend_on_input_content_or_credentials ... ok
+test malformed_values_utf8_lengths_and_credentials_never_allocate ... ok
+test signed_display_bounds_refuse_edges_without_clamping ... ok
+test key_page_bytes_count_toward_record_and_destination_limits ... ok
+test legacy_implicit_page_records_remain_rejected_evidence ... ok
+test every_truncation_and_trailing_byte_refuses ... ok
+test page_usage_pairs_preserve_every_admitted_key_and_transition ... ok
+[1m[92m     Running[0m tests/input_submission.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-wire/24157e6f8feb22a2/out/input_submission-24157e6f8feb22a2)
+[1m[92m     Running[0m tests/input_wire.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-wire/dda6a99f224432b0/out/input_wire-dda6a99f224432b0)
+test physical_keys_require_the_explicit_keyboard_page ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+[1m[92m     Running[0m tests/media_wire.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-wire/0f943ed0f0ea014a/out/media_wire-0f943ed0f0ea014a)
+
+running 10 tests
+test fragment_geometry_and_dependencies_are_checked ... ok
+test every_truncation_is_refused ... ok
+test framing_refuses_bad_magic_version_flags_binding_and_channel ... ok
+test payloads_never_appear_in_debug_output ... ok
+test golden_fragment_is_byte_exact_and_borrowed ... ok
+test optional_extensions_skip_but_required_and_duplicate_tags_refuse ... ok
+test encoder_respects_actual_packet_and_destination_limits ... ok
+test predicted_fragments_round_trip_including_short_tail ... ok
+test repair_ranges_are_bounded_sorted_and_nonoverlapping ... ok
+test recovery_chunks_and_progress_round_trip ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/negotiation.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-wire/4578f7fcc39f91cf/out/negotiation-4578f7fcc39f91cf)
+
+running 5 tests
+test capability_intersection_preserves_required_semantics_and_downward_limits ... ok
+test binding_ack_and_extensions_cannot_change_the_selected_session ... ok
+test malformed_collections_profiles_and_boundaries_refuse_before_unbounded_work ... ok
+test zero_binding_stream_is_explicit_bounded_and_never_accepts_input_or_media ... ok
+test golden_hello_and_all_message_roundtrips ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/stream.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/fr-wire/bb65e0ade47f4980/out/stream-bb65e0ade47f4980)
+
+running 10 tests
+test attached_stream_keeps_ordinary_record_limits ... ok
+test coalesced_records_stop_at_one_and_backpressure_never_discards_bytes ... ok
+test eof_in_any_prefix_and_clock_faults_are_terminal ... ok
+test malformed_or_huge_header_fails_before_payload_allocation_and_never_resyncs ... ok
+test idle_stream_uses_no_heap_and_header_size_counts_toward_limit ... ok
+test partial_header_body_and_ready_record_have_nonrenewable_exclusive_deadlines ... ok
+test every_possible_split_and_bytewise_delivery_preserve_real_records ... ok
+test diagnostic_formatting_is_independent_of_sensitive_record_bytes ... ok
+test negotiation_overlimit_header_refuses_without_allocation_and_stays_failed ... ok
+test negotiation_exact_boundary_and_smaller_caller_limits_include_the_header ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m unittests src/lib.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/frd/b97218275b0cc4e3/out/frd-b97218275b0cc4e3)
+
+running 1 test
+test worker::tests::elapsed_rearmed_watchdog_is_never_polled_after_completion ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/input_agent.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/frd/115db79ea8e6482d/out/input_agent-115db79ea8e6482d)
+
+running 12 tests
+test dropping_an_unpolled_response_fences_but_does_not_erase_a_completed_receipt ... ok
+test await_response_and_watchdog_together_on_the_real_runtime ... ok
+test controller_reservation_survives_blocking_native_destructor ... ok
+test driver_drop_before_first_poll_stops_the_native_owner_and_cleans_up ... ok
+test native_panic_preserves_a_text_prefix_instead_of_fabricating_rollback ... ok
+test malformed_oversized_and_wrong_channel_records_do_not_consume_the_slot ... ok
+test one_outstanding_includes_an_uncollected_reply_and_old_actions_never_retry ... ok
+test local_authority_commands_use_the_session_clock_without_implicit_traffic_renewal ... ok
+test blocked_native_preparation_does_not_retain_authority_or_allow_handoff ... ok
+test idle_expiry_releases_without_another_record_then_allows_new_controller ... ok
+test blocked_entered_native_call_times_out_honestly_and_later_retains_its_receipt ... ok
+test native_cleanup_failure_quarantines_until_explicit_local_retry ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.01s
+
+[1m[92m     Running[0m tests/input_agent_cancellation.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/frd/5c2613b29f1f37f3/out/input_agent_cancellation-5c2613b29f1f37f3)
+
+running 2 tests
+test cancellation_between_text_scalars_keeps_only_the_submitted_prefix ... ok
+test cancellation_in_preflight_refuses_press_even_before_watchdog_is_scheduled ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m     Running[0m tests/input_agent_results.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/frd/24c989b2f5513a78/out/input_agent_results-24c989b2f5513a78)
+
+running 6 tests
+test wire_results_retain_original_binding_and_distinguish_pointer_sequence_space ... ok
+test dropping_projected_wait_revokes_but_retains_completed_result_and_context ... ok
+test selecting_input_projection_never_consumes_an_authority_reply ... ok
+test panic_receipt_preserves_confirmed_text_prefix_in_the_existing_wire_codec ... ok
+test late_receipt_does_not_take_the_successor_controllers_binding ... ok
+test evicted_receipts_do_not_become_fabricated_zero_effect_wire_results ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+[1m[92m     Running[0m tests/input_quic_lifecycle.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/frd/93245e6df8a684e0/out/input_quic_lifecycle-93245e6df8a684e0)
+
+running 4 tests
+test peer_fin_preserves_a_late_irreversible_effect_and_its_release ... ok
+test peer_reset_fences_blocked_preparation_before_the_native_call_returns ... ok
+test peer_reset_preserves_a_late_irreversible_effect_and_its_release ... ok
+test peer_fin_fences_blocked_preparation_before_the_native_call_returns ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+[1m[92m     Running[0m tests/input_watchdog.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/frd/c945258646798bf5/out/input_watchdog-c945258646798bf5)
+
+running 9 tests
+test ticket_expiry_is_not_lease_expiry_and_renewals_do_not_slide_with_polling ... ok
+test local_revoke_fences_synchronously_wakes_and_keeps_first_reason ... ok
+test control_is_content_free_and_thread_safe ... ok
+test another_runtime_ambient_clock_cannot_take_over_the_timer ... ok
+test drop_even_before_first_poll_revokes_and_ancient_handles_cannot_rebind ... ok
+test cancellation_is_terminal_and_cannot_be_renewed_away ... ok
+test clock_regression_fences_and_spurious_polls_retain_only_one_timer ... ok
+test dropping_a_polled_watchdog_cancels_its_timer ... ok
+test actual_runtime_expires_without_any_input_or_renewal_traffic ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+[1m[92m     Running[0m tests/media_authority.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/frd/ad7dfb09ff0c87a9/out/media_authority-ad7dfb09ff0c87a9)
+
+running 3 tests
+test recovery_fences_old_offers_preserves_authority_and_requires_a_fresh_idr ... ok
+test suspend_fences_shared_authority_and_no_unapproved_session_can_construct_a_gate ... ok
+test expired_authority_blocks_already_prepared_packets_and_delayed_renewal ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+[1m[92m     Running[0m tests/media_egress.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/frd/53204d74f73ab90b/out/media_egress-53204d74f73ab90b)
+
+running 7 tests
+test guard_rechecks_revocation_inside_native_preparation_and_error_is_terminal ... ok
+test abandoning_subscription_does_not_revoke_shared_observation_or_other_viewers ... ok
+test revoke_stops_pending_packet_without_invoking_transport ... ok
+test backpressure_preserves_every_recovery_chunk_and_original_deadline ... ok
+test idle_tick_releases_expired_pending_work_without_another_send ... ok
+test packet_expiry_during_idle_tick_is_not_confused_with_live_authority ... ok
+test expired_pending_packet_cannot_obtain_a_fresh_queue_lifetime ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+[1m[92m     Running[0m tests/worker_supervision.rs (/data/tmp/rch/franken_remote/.rch-target-vmi1149989-pool-3b9e82b7cc0b1e588e49e6dacbf5bac3/debug/build/frd/1d8663f23548ef02/out/worker_supervision-1d8663f23548ef02)
+
+running 5 tests
+test launch_is_local_only_and_deadlines_cannot_be_unbounded ... ok
+test real_pipe_exchange_and_acknowledged_stop_reap_the_child ... ok
+test cancel_while_waiting_and_dropping_polled_future_both_kill ... ok
+test forged_sequence_oversize_and_crash_fail_without_body_allocation_or_retry ... ok
+test deadline_and_partial_reply_poison_instead_of_retrying ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+[1m[92m   Doc-tests[0m fr_client
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m fr_core
+
+running 3 tests
+test crates/fr-core/src/ids.rs - ids (line 19) - compile fail ... ok
+test crates/fr-core/src/ids.rs - ids (line 25) - compile fail ... ok
+test crates/fr-core/src/authority.rs - authority::SessionAuthority (line 134) - compile fail ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+[1m[92m   Doc-tests[0m fr_lab
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m fr_media
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m fr_native
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m fr_tailnet
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m fr_transport
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m fr_wire
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+[1m[92m   Doc-tests[0m frd
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+  [2m2026-09-09T13:39:12.691636Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=0 in 59735ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1206 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:39:12.706351Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1297 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:39:12.706379Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/tmp/rch/franken_remote/1906c5d7c01e70b8 on vmi1149989[0m
+    [2;3mat[0m rch/src/transfer.rs:4388 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:39:14.668703Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 1962ms (1 files, 974 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:4443 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-09T13:39:14.668761Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mArtifacts retrieved: 1 files, 974 bytes in 1962ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1329 [2;3mon[0m ThreadId(1)
+
+[W] Worker: vmi1149989 | Job: j-30013507080552477
+[T] Total: 67.7s (sync 6.0s, build 59.7s, artifacts 2.0s)
+^ Sync: 2.8 MB in 6.0s (475.8 KB/s)
+[C] Compile: 59.7s
+v Artifacts: 974 B in 2.0s (496 B/s)
+[T] Cache: MISS
++-------------- [OK] Build Successful --------------+
+| Duration: 59.7s (^ 1040% slower vs previous 5.2s) |
+| Artifacts: 1 files (974 B)                        |
+| Worker: vmi1149989                                |
+| Cache: MISS (warming cache)                       |
+| Time: 2026-09-09 13:39:14                         |
++---------------------------------------------------+
+[RCH] remote vmi1149989 (70.7s)
+[RCH] clean-overlay receipt: base=02cabc951820e330198aee456e2f0aa8fa694bd3 overlay-fingerprint=ee5b083779b4beddd4295ac1fc2ca588f910d824e31fd5e0787c2b0383fb361c
+{"api_version":"1.0","command":"env 'CARGO_HOME=/root/.cargo' cargo test --workspace --all-features --locked -j 2","outcome":"completed","location":"remote","worker_id":"vmi1149989","remote_exit_code":0,"duration_ms":70728,"timing":{"classify":null,"select":null,"sync_up":6049,"exec":59735,"sync_down":1962,"cleanup":null,"total":null},"result_dirs":[]}

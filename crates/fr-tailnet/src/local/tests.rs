@@ -1,5 +1,6 @@
 //! Synthetic authority fixtures over real Unix/HTTP and the real runtime.
-//! These are not captured Tailscale sharing fixtures or live-tailnet evidence.
+//! One explicitly identified projected capture preserves a live refusal shape;
+//! replaying it here remains fixture evidence, not a live sharing qualification.
 use super::*;
 use crate::{
     DESKTOP_CAPABILITY, Permissions, Scope,
@@ -355,8 +356,73 @@ fn changed_identity_backend_and_known_key_expiry_refuse() {
     bad["Node"]["MachineAuthorized"] = json!(false);
     assert_eq!(
         evaluate_fixture(&s, &bad, Scope::Tailnet),
+        Err(Error::MachineNotAuthorized)
+    );
+}
+#[test]
+fn machine_approval_requires_positive_evidence_even_with_an_app_grant() {
+    let (status, mut who) = fixtures();
+    for approval in [None, Some(json!(null)), Some(json!(false))] {
+        let node = who["Node"].as_object_mut().unwrap();
+        if let Some(value) = approval {
+            node.insert("MachineAuthorized".into(), value);
+        } else {
+            node.remove("MachineAuthorized");
+        }
+        assert_eq!(
+            evaluate_fixture(&status, &who, Scope::OwnUser),
+            Err(Error::MachineNotAuthorized)
+        );
+    }
+    who["Node"]["MachineAuthorized"] = json!("true");
+    assert_eq!(
+        evaluate_fixture(&status, &who, Scope::OwnUser),
+        Err(Error::MalformedMetadata)
+    );
+    who["Node"]["MachineAuthorized"] = json!(true);
+    assert!(evaluate_fixture(&status, &who, Scope::OwnUser).is_ok());
+    who["CapMap"] = json!(null);
+    assert_eq!(
+        evaluate_fixture(&status, &who, Scope::OwnUser),
         Err(Error::CapabilityDenied)
     );
+}
+#[test]
+fn installed_linux_1_102_3_projection_preserves_the_live_refusal() {
+    let status: Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/linux-1.102.3/status.json"
+    ))
+    .unwrap();
+    let who: Value = serde_json::from_str(include_str!(
+        "../../tests/fixtures/linux-1.102.3/whois.json"
+    ))
+    .unwrap();
+    assert!(
+        !who["Node"]
+            .as_object()
+            .unwrap()
+            .contains_key("MachineAuthorized")
+    );
+    assert_eq!(who.get("CapMap"), Some(&Value::Null));
+    for scope in [Scope::OwnUser, Scope::Tailnet] {
+        let server = Server::fixture(&status, &who, false);
+        runtime().block_on(async {
+            let cx = Cx::current().unwrap();
+            let result = server
+                .client
+                .authorize_app_capability(
+                    &cx,
+                    endpoints(),
+                    GrantPolicy {
+                        scope,
+                        ..Default::default()
+                    },
+                )
+                .await;
+            assert!(matches!(result, Err(Error::MachineNotAuthorized)));
+            assert_eq!(server.calls.load(Ordering::SeqCst), 3);
+        });
+    }
 }
 #[test]
 fn grant_union_is_bounded_and_cannot_ignore_unknown_restrictions() {

@@ -1,0 +1,1 @@
+6 invalid invocations exited1 with usage-only stderr; loopback lookup exited2 with InvalidEndpoint. No live metadata needed for these negative cases.

@@ -1,0 +1,37 @@
+{
+  "BackendState": "Running",
+  "CurrentTailnet": {
+    "MagicDNSSuffix": "fixture.ts.net",
+    "Name": "fixture.invalid"
+  },
+  "Peer": {
+    "nodekey:2222222222222222222222222222222222222222222222222222222222222222": {
+      "ID": "n-2",
+      "InNetworkMap": true,
+      "KeyExpiry": "2027-02-19T01:13:05Z",
+      "NodeID": 2,
+      "PublicKey": "nodekey:2222222222222222222222222222222222222222222222222222222222222222",
+      "TailscaleIPs": [
+        "100.64.0.2",
+        "fd7a:115c:a1e0::2"
+      ],
+      "UserID": 7
+    }
+  },
+  "Self": {
+    "ID": "n-1",
+    "InNetworkMap": true,
+    "NodeID": 1,
+    "PublicKey": "nodekey:1111111111111111111111111111111111111111111111111111111111111111",
+    "TailscaleIPs": [
+      "100.64.0.1",
+      "fd7a:115c:a1e0::1"
+    ],
+    "UserID": 7
+  },
+  "TailscaleIPs": [
+    "100.64.0.1",
+    "fd7a:115c:a1e0::1"
+  ],
+  "Version": "1.102.3-t9329c3677-ga522f65e9"
+}

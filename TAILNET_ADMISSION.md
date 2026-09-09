@@ -170,10 +170,26 @@ artifact output. Build unprivileged; only this explicitly synthetic fixture
 binary needs root to exercise the production peer-credential check. It does not
 connect to the installed daemon, mutate Tailscale policy or inject OS input.
 
+## Installed Linux refusal qualification
+
+The read-only [`localapi_check`](crates/fr-tailnet/examples/localapi_check.rs)
+probe now exercises the production adapter against an installed daemon. On
+Linux Tailscale 1.102.3, the tested peer's WhoIs omitted `MachineAuthorized`
+and returned a null application `CapMap`. Admission remains refused in both
+scopes. `MachineNotAuthorized` identifies missing positive machine approval
+separately from a missing application grant (`CapabilityDenied`); no check is
+relaxed. The [qualification record](spikes/tailnet-identity/README.md) gives
+pinned upstream semantics, sanitized fixture provenance and reproduction.
+
+This establishes a live negative result, not successful configured-profile
+admission, same-tailnet membership or transport ingress qualification.
+
 ## Remaining qualification
 
-No live Tailscale credentials or administrative policy were available. Captured
-sharing/version fixtures, zero-setup membership semantics, protected-interface
+The earlier integration used synthetic authority fixtures. An installed Linux
+daemon is now available, but no desktop app grant or administrative sharing
+fixture matrix has been qualified. Broader captured sharing/version fixtures,
+zero-setup membership semantics, protected-interface
 listener binding, browser origin bootstrap, complete network/session startup,
 macOS/Windows LocalAPI variants, and OS lifecycle wiring remain open. None of the
 above declares an installable unattended desktop or closes those phase gates.
