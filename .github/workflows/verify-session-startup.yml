@@ -23,33 +23,48 @@ jobs:
         run: |
           rustup show active-toolchain
           sudo apt-get update
-          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
-      - name: Stage exact reviewed bootstrap patch without branch writes
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl iproute2 util-linux
+      - name: Stage exact reviewed session sources without branch writes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 - <<'PY'
-          import base64, hashlib, json, os, subprocess
+          import base64, hashlib, json, lzma, os, subprocess
           from pathlib import Path
           before = {
-              'crates/fr-transport/src/quic.rs': 'c39295f631dec417fef48e547ca4a5972c1ae376',
-              'crates/fr-transport/tests/native_quic.rs': '8d66342550abeca609d663402b99695990346da1',
+              'crates/fr-transport/src/quic.rs': 'a80a7b1e9c5b6c0b6abdc9337573563a9b8ca347',
+              'crates/fr-transport/src/quic/negotiation.rs': None,
+              'crates/fr-transport/tests/support/mod.rs': 'a2447be9f9a6417c593e0e48a70d9906fc072287',
+              'crates/frd/examples/native_session_check.rs': None,
+              'crates/frd/src/lib.rs': 'fe08b684d1c6a94643f0eced6b8588229b3769ef',
+              'crates/frd/src/session.rs': None,
+              'crates/frd/src/session/tests.rs': None,
           }
           after = {
-              'crates/fr-transport/src/quic.rs': 'a80a7b1e9c5b6c0b6abdc9337573563a9b8ca347',
-              'crates/fr-transport/src/quic/startup.rs': 'ec516f3a0a29d20034ff7542a35f7ffd1b5adfd9',
-              'crates/fr-transport/tests/native_quic.rs': '0e1e881e6ce0fb4b459c56d7fc77649c4a29e015',
+              'crates/fr-transport/src/quic.rs': '33577c17379ad4163e41ff700ef5d7acaf82a9a9',
+              'crates/fr-transport/src/quic/negotiation.rs': '434189e9c9efa81450a7aab0ea1b7a769ba3e90d',
+              'crates/fr-transport/tests/support/mod.rs': '851d5dcbcf38b44664ed2c0480f93d85030c1735',
+              'crates/frd/examples/native_session_check.rs': 'ff1052312b5dc7942b4dcd3da3efbd0ae4f5c585',
+              'crates/frd/src/lib.rs': 'f7764f9b5bf59882964f1ab4f1135d7733dbe671',
+              'crates/frd/src/session.rs': '76a5796adf7a42f903de64603e6ad6f3fbee78a0',
+              'crates/frd/src/session/tests.rs': 'd04249cda48d33996e2cdf357c10ab1741da5f56',
           }
           def sha(data):
               return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
           for path, oid in before.items():
-              assert sha(Path(path).read_bytes()) == oid, f'Concurrent source changed: {path}'
-          assert not Path('crates/fr-transport/src/quic/startup.rs').exists()
-          oid = 'aacbd1aa5f745f6f29efc7727d9b798bc391505c'
+              if oid is None:
+                  assert not Path(path).exists(), f'Concurrent source exists: {path}'
+              else:
+                  assert sha(Path(path).read_bytes()) == oid, f'Concurrent source changed: {path}'
+          oid = '405e173c8859358738226d92a5da7dd571fb3fc9'
           blob = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
-          data = base64.b64decode(blob['content'])
-          assert sha(data) == oid
-          patch = Path(os.environ['RUNNER_TEMP'], 'bootstrap.patch')
+          raw = base64.b64decode(blob['content'])
+          assert len(raw) == 12988 and sha(raw) == oid
+          decoder = lzma.LZMADecompressor()
+          data = decoder.decompress(raw, max_length=100001)
+          assert decoder.eof and not decoder.unused_data
+          assert len(data) == 67462 and sha(data) == '7b7109a95ef087fd1f76550b749cb281cad6001c'
+          patch = Path(os.environ['RUNNER_TEMP'], 'session.patch')
           patch.write_bytes(data)
           stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
           assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(after)
@@ -59,11 +74,27 @@ jobs:
               assert sha(Path(path).read_bytes()) == oid, path
           Path(os.environ['RUNNER_TEMP'], 'verified-paths.json').write_text(json.dumps(after))
           PY
-      - name: Verify full workspace and actual native UDP TLS tests
+      - name: Verify full workspace and native UDP TLS session tests
         run: |
           ./scripts/verify.sh fast
           ./scripts/verify.sh docs
           git diff --check
+      - name: Check actual LocalAPI to QUIC session handoff in an isolated namespace
+        run: |
+          cargo build -p frd --example native_session_check --locked --message-format=json > "$RUNNER_TEMP/session-example.jsonl"
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          rows = [json.loads(line) for line in Path(os.environ['RUNNER_TEMP'], 'session-example.jsonl').read_text().splitlines() if line.startswith('{')]
+          paths = {row['executable'] for row in rows if row.get('executable') and row.get('target', {}).get('name') == 'native_session_check'}
+          assert len(paths) == 1
+          executable = Path(next(iter(paths))).resolve(strict=True)
+          assert executable.is_relative_to(Path('target').resolve())
+          # Root authenticates this fixture's Unix peer only. Private namespace
+          # addresses are synthetic; this is not installed Tailscale or TUN proof.
+          script = 'ip link set lo up; ip addr add 100.64.0.1/32 dev lo; ip addr add 100.64.0.2/32 dev lo; exec "$1"'
+          subprocess.run(['sudo', 'unshare', '--net', '--', 'sh', '-eu', '-c', script, 'sh', str(executable)], check=True)
+          PY
       - name: Export exact verified source blobs for explicit publication
         env:
           GH_TOKEN: ${{ github.token }}
