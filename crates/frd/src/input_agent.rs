@@ -388,6 +388,13 @@ pub struct Agent {
     response_context: Option<ResultContext>,
 }
 impl Agent {
+    /// Locally installed channel, never read from an input payload.
+    pub const fn channel_binding(&self) -> u32 {
+        self.route.binding
+    }
+    pub const fn protocol_limits(&self) -> ProtocolLimits {
+        self.route.limits
+    }
     pub fn control(&self) -> Control {
         self.shared.control.clone()
     }

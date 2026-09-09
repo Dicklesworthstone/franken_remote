@@ -437,6 +437,11 @@ impl QuicRecords {
         }
         result
     }
+    /// Service cancellation, admission and retained-record deadlines without
+    /// reading another stream or waiting for network traffic.
+    pub fn tick(&mut self, cx: &Cx, mut authorize: impl FnMut() -> bool) -> Result<(), Error> {
+        self.check(cx, &mut authorize).map(|_| ())
+    }
     /// All validation precedes the copy; the authority callback and clock are
     /// checked again before bounded admission. Reliable records are sliced into
     /// native stream writes by `drive`, with authority/deadline checks there too.
