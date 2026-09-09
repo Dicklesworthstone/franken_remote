@@ -7,14 +7,12 @@ mod linux {
     use fr_media::worker::{self, Backend, Configuration, Error, Kind, Record, Role, Sequence};
     use fr_native::{
         EncodeBackend, HevcDecoder, HevcEncoder, NativeError, X11Surface, bind_worker_parent,
+        capture::{CaptureOutput, ChangeAwareCapture},
     };
     use std::io;
 
     enum Media {
-        Capture {
-            surface: X11Surface,
-            codec: HevcEncoder,
-        },
+        Capture(ChangeAwareCapture),
         Present {
             surface: X11Surface,
             codec: HevcDecoder,
@@ -53,7 +51,7 @@ mod linux {
                     configuration.bitrate,
                 )
                 .map_err(native)?;
-                Media::Capture { surface, codec }
+                Media::Capture(ChangeAwareCapture::new(surface, codec))
             }
             Role::Present => Media::Present {
                 surface: X11Surface::presenter(
@@ -71,7 +69,7 @@ mod linux {
     impl Media {
         fn poll(&mut self, verify: bool) -> Result<(Kind, Vec<u8>), Error> {
             match self {
-                Self::Capture { codec, .. } => match codec.poll_output() {
+                Self::Capture(capture) => match capture.poll_output() {
                     Ok(unit) => Ok((Kind::Unit, worker::unit_payload(&unit)?)),
                     Err(NativeError::NeedInput) => Ok((Kind::NeedInput, Vec::new())),
                     Err(e) => Err(native(e)),
@@ -108,15 +106,22 @@ mod linux {
             verify: bool,
         ) -> Result<(Kind, Vec<u8>), Error> {
             match request.header.kind {
-                Kind::Capture => {
-                    let Self::Capture { surface, codec } = self else {
+                Kind::Capture | Kind::CaptureIfChanged => {
+                    let Self::Capture(capture) = self else {
                         return Err(Error::WrongRole);
                     };
                     let (id, capture_lower_bound, force_idr) =
                         worker::parse_capture(request.body())?;
-                    let pixels = surface.snapshot().map_err(native)?;
-                    match codec.submit(&pixels, id, capture_lower_bound, force_idr) {
-                        Ok(()) => self.poll(verify),
+                    match capture.capture(
+                        id,
+                        capture_lower_bound,
+                        force_idr,
+                        request.header.kind == Kind::CaptureIfChanged,
+                    ) {
+                        Ok(CaptureOutput::Submitted) => self.poll(verify),
+                        Ok(CaptureOutput::Unchanged(evidence)) => {
+                            Ok((Kind::Unchanged, evidence.encode()?))
+                        }
                         Err(NativeError::NeedDrain) => Ok((Kind::NeedDrain, Vec::new())),
                         Err(e) => Err(native(e)),
                     }

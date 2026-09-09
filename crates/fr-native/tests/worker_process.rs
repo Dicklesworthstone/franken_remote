@@ -214,3 +214,125 @@ fn repeated_configuration_and_wrong_epoch_are_terminal() {
     );
     assert!(!worker.child.wait().unwrap().success());
 }
+
+#[test]
+fn real_capture_skips_static_encoding_but_preserves_changed_and_forced_idr_chain() {
+    let display = Display::start();
+    let limits = configuration().limits().unwrap();
+    let mut surface = X11Surface::presenter(Some(&display.name), 320, 240, limits).unwrap();
+    let mut pixels = vec![0; 320 * 240 * 4];
+    for p in pixels.as_chunks_mut::<4>().0 {
+        p.copy_from_slice(&[25, 75, 125, 255]);
+    }
+    surface
+        .present(&BgraFrame::new(320, 240, pixels.clone(), &limits).unwrap())
+        .unwrap();
+    let mut worker = Worker::start(&display, Role::Capture);
+    worker.configure();
+    let first = worker.transact(
+        Kind::CaptureIfChanged,
+        capture_payload(FrameId::FIRST, 100, false),
+    );
+    assert_eq!(first.header.kind, Kind::Unit);
+    assert!(parse_unit(first.into_body(), &limits).unwrap().is_idr());
+    for candidate in 1..=24 {
+        let reply = worker.transact(
+            Kind::CaptureIfChanged,
+            capture_payload(FrameId::from_raw(candidate), 100 + candidate, false),
+        );
+        assert_eq!(reply.header.kind, Kind::Unchanged);
+        assert_eq!(
+            UnchangedCapture::decode(reply.body()).unwrap(),
+            UnchangedCapture {
+                candidate: FrameId::from_raw(candidate),
+                reference: FrameId::FIRST,
+                observed_micros: 100 + candidate,
+            }
+        );
+        assert_eq!(
+            worker.transact(Kind::Poll, vec![]).header.kind,
+            Kind::NeedInput
+        );
+    }
+    // One changed pixel is enough; a sparse sampling comparator would miss it.
+    pixels[12345 * 4 + 1] = 230;
+    surface
+        .present(&BgraFrame::new(320, 240, pixels, &limits).unwrap())
+        .unwrap();
+    let changed = worker.transact(
+        Kind::CaptureIfChanged,
+        capture_payload(FrameId::from_raw(25), 125, false),
+    );
+    assert_eq!(changed.header.kind, Kind::Unit);
+    let changed = parse_unit(changed.into_body(), &limits).unwrap();
+    assert_eq!(changed.frame(), FrameId::from_raw(25));
+    assert_eq!(
+        changed.kind(),
+        fr_media::access_unit::FrameKind::Predicted {
+            references: FrameId::FIRST
+        }
+    );
+    let forced = worker.transact(
+        Kind::CaptureIfChanged,
+        capture_payload(FrameId::from_raw(26), 126, true),
+    );
+    assert_eq!(forced.header.kind, Kind::Unit);
+    let forced = parse_unit(forced.into_body(), &limits).unwrap();
+    assert!(forced.is_idr());
+    assert_eq!(forced.frame(), FrameId::from_raw(26));
+    let idle = worker.transact(
+        Kind::CaptureIfChanged,
+        capture_payload(FrameId::from_raw(27), 127, false),
+    );
+    assert_eq!(
+        UnchangedCapture::decode(idle.body()).unwrap().reference,
+        forced.frame()
+    );
+    worker.stop();
+}
+
+#[test]
+fn pending_native_capture_cannot_certify_unchanged_and_clock_faults_are_terminal() {
+    use fr_native::{
+        EncodeBackend, HevcEncoder, NativeError,
+        capture::{CaptureOutput, ChangeAwareCapture},
+    };
+    let display = Display::start();
+    let c = configuration();
+    let surface = X11Surface::capture(Some(&display.name), c.limits().unwrap()).unwrap();
+    let codec = HevcEncoder::new(
+        c.codec().unwrap(),
+        c.limits().unwrap(),
+        EncodeBackend::SoftwareExplicit,
+        u32::from(c.fps),
+        c.bitrate,
+    )
+    .unwrap();
+    let mut capture = ChangeAwareCapture::new(surface, codec);
+    assert_eq!(
+        capture.capture(FrameId::FIRST, 100, false, true),
+        Ok(CaptureOutput::Submitted)
+    );
+    assert_eq!(
+        capture.capture(FrameId::from_raw(1), 101, false, true),
+        Err(NativeError::NeedDrain)
+    );
+    let first = capture.poll_output().unwrap();
+    assert!(first.is_idr());
+    assert_eq!(
+        capture.capture(FrameId::from_raw(1), 101, false, true),
+        Ok(CaptureOutput::Unchanged(UnchangedCapture {
+            candidate: FrameId::from_raw(1),
+            reference: FrameId::FIRST,
+            observed_micros: 101,
+        }))
+    );
+    assert_eq!(
+        capture.capture(FrameId::from_raw(2), 99, false, true),
+        Err(NativeError::StaleGeneration)
+    );
+    assert_eq!(
+        capture.capture(FrameId::from_raw(3), 102, false, true),
+        Err(NativeError::Closed)
+    );
+}
