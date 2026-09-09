@@ -12,3 +12,6 @@ fr-media.workspace = true
 fr-wire.workspace = true
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fr-transport.workspace = true

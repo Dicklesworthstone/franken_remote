@@ -603,6 +603,7 @@ dependencies = [
  "fr-client",
  "fr-core",
  "fr-media",
+ "fr-transport",
  "fr-wire",
  "frd",
 ]
@@ -661,6 +662,7 @@ dependencies = [
  "asupersync",
  "fr-core",
  "fr-media",
+ "fr-transport",
  "fr-wire",
 ]
 
