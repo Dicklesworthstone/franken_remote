@@ -3,8 +3,8 @@ use asupersync::{
     cx::Cx,
     io::{AsyncReadExt, AsyncWriteExt},
     process::{
-        Child, ChildStdin, ChildStdout, Command, ExitStatus, ProcessGroupMode, ProcessSignalTarget,
-        Stdio,
+        Child, ChildStdin, ChildStdout, Command, ExitStatus, ProcessError, ProcessGroupMode,
+        ProcessSignalTarget, Stdio,
     },
     runtime::{Runtime, reactor::IoReactorBackend},
     time::sleep_until,
@@ -28,7 +28,7 @@ pub enum Error {
     Cancelled,
     Deadline,
     ClockRegression,
-    SpawnFailed,
+    SpawnFailed(SpawnFailure),
     PipeFailed,
     PeerClosed,
     Protocol(worker::Error),
@@ -42,6 +42,35 @@ impl fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
+
+/// Bounded local diagnostics: no executable paths or library error strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnFailure {
+    Io {
+        kind: std::io::ErrorKind,
+        raw_os_error: Option<i32>,
+    },
+    NotFound,
+    PermissionDenied,
+    Signaled(i32),
+    Unsupported,
+    InvalidConfiguration,
+}
+impl From<ProcessError> for SpawnFailure {
+    fn from(error: ProcessError) -> Self {
+        match error {
+            ProcessError::Io(error) => Self::Io {
+                kind: error.kind(),
+                raw_os_error: error.raw_os_error(),
+            },
+            ProcessError::NotFound(_) => Self::NotFound,
+            ProcessError::PermissionDenied(_) => Self::PermissionDenied,
+            ProcessError::Signaled(signal) => Self::Signaled(signal),
+            ProcessError::Unsupported(_) => Self::Unsupported,
+            ProcessError::InvalidConfiguration(_) => Self::InvalidConfiguration,
+        }
+    }
+}
 impl From<worker::Error> for Error {
     fn from(e: worker::Error) -> Self {
         Self::Protocol(e)
@@ -280,7 +309,9 @@ impl Worker {
         }
         // Spawn is a bounded-count local syscall, not codec setup. The child
         // performs all native initialization behind its private Configure RPC.
-        let mut child = command.spawn().map_err(|_| Error::SpawnFailed)?;
+        let mut child = command
+            .spawn()
+            .map_err(|error| Error::SpawnFailed(error.into()))?;
         let input = child.stdin().ok_or(Error::PipeFailed)?;
         let output = child.stdout().ok_or(Error::PipeFailed)?;
         let mut worker = Self {
