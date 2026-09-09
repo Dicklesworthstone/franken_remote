@@ -126,6 +126,100 @@ fn configured_recovery_and_decode_are_distinct_non_circular_milestones() {
     assert_eq!(predicted.descriptor().frame, 1);
     assert_eq!(predicted.bytes(), payload());
 }
+
+#[test]
+fn decoder_owner_rejects_equal_numeric_receivers_and_retired_epochs() {
+    let c = config();
+    let budget = MediaBudget::new(c.limits.protocol()).unwrap();
+    let mut receiver = ReceivePipeline::new(c, budget.clone()).unwrap();
+    let mut foreign = ReceivePipeline::new(c, budget.clone()).unwrap();
+    let binding = receiver
+        .bind_decoder(c.epoch.configuration, c.limits.protocol(), 0)
+        .unwrap();
+    assert_eq!(binding.check(&receiver), Ok(()));
+    assert_eq!(binding.check(&foreign), Err(DeliveryError::DecodeMismatch));
+    assert_eq!(
+        binding.check_recovery(&foreign),
+        Err(DeliveryError::DecodeMismatch)
+    );
+    assert_eq!(foreign.state(), ReceiveState::AwaitingConfiguration);
+    assert_eq!(budget.usage(), BudgetUsage::default());
+    // Loss invalidates the existing epoch but leaves a same-owner recovery path.
+    assert_eq!(
+        receiver.tick(c.policy.recovery_budget_micros),
+        Err(DeliveryError::RecoveryExpired)
+    );
+    assert_eq!(binding.check(&receiver), Err(DeliveryError::DecodeMismatch));
+    assert_eq!(binding.check_recovery(&receiver), Ok(()));
+    receiver
+        .replace(
+            MediaEpoch {
+                recovery: RecoveryGeneration::from_raw(2),
+                ..c.epoch
+            },
+            MediaBindings::new(5, 6, 7, 8).unwrap(),
+            c.policy.recovery_budget_micros,
+        )
+        .unwrap();
+    assert_eq!(
+        binding.check_recovery(&receiver),
+        Err(DeliveryError::DecodeMismatch)
+    );
+    let mut replacement = receiver
+        .bind_decoder(
+            c.epoch.configuration,
+            c.limits.protocol(),
+            c.policy.recovery_budget_micros,
+        )
+        .unwrap();
+    replacement.revoke();
+    assert_eq!(
+        replacement.check_recovery(&receiver),
+        Err(DeliveryError::WrongState)
+    );
+    assert_eq!(
+        receiver.tick(c.policy.recovery_budget_micros),
+        Err(DeliveryError::WrongState)
+    );
+    assert_eq!(receiver.state(), ReceiveState::Closed);
+    assert_eq!(
+        replacement.check_recovery(&receiver),
+        Err(DeliveryError::WrongState)
+    );
+    foreign.close();
+}
+
+#[test]
+fn decoder_binding_requires_matching_admitted_configuration_and_limits() {
+    let c = config();
+    let mut receiver =
+        ReceivePipeline::new(c, MediaBudget::new(c.limits.protocol()).unwrap()).unwrap();
+    assert_eq!(
+        receiver.check_decoder_configuration(
+            CodecConfigurationGeneration::from_raw(2),
+            c.limits.protocol()
+        ),
+        Err(DeliveryError::StaleGeneration)
+    );
+    let smaller = ProtocolLimits::with_overrides(LimitOverrides {
+        max_encoded_access_unit_bytes: Some(1024),
+        ..LimitOverrides::default()
+    })
+    .unwrap();
+    assert_eq!(
+        receiver.check_decoder_configuration(c.epoch.configuration, &smaller),
+        Err(DeliveryError::ResourceLimit)
+    );
+    assert_eq!(receiver.state(), ReceiveState::AwaitingConfiguration);
+    assert_eq!(receiver.budget_usage(), BudgetUsage::default());
+    receiver
+        .bind_decoder(c.epoch.configuration, c.limits.protocol(), 0)
+        .unwrap();
+    assert_eq!(
+        receiver.check_decoder_configuration(c.epoch.configuration, c.limits.protocol()),
+        Err(DeliveryError::WrongState)
+    );
+}
 #[test]
 fn out_of_order_duplicates_reassemble_once_without_extra_budget() {
     let c = config();

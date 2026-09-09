@@ -449,3 +449,96 @@ native tests ran through RCH separately. Logs are
 `/tmp/fr-bootstrap-ubs-c-explicit.txt`; earlier failed/excluded logs are retained
 under the same prefix. Independent review covered source and retained output,
 not another independent native execution.
+
+## Native decoder and receiver ownership
+
+The next `fr-p0-recovery-authority-d7d` slice binds a native presenter to the
+exact local receiving subscription before it accepts pictures. Matching numeric
+codec generations alone previously allowed `present_next` to consume another
+receiver's picture through the wrong decoder history. `Presenter::start` now
+accepts an unconfigured receiver, checks its configuration generation and admitted
+limits before launching, opens the exact HEVC configuration, and only then binds
+and advances that receiver to `AwaitingRecovery`. A failed or abandoned startup
+closes the attempted receiver; it never reports decoder readiness.
+
+`DecoderBinding` shares the receiver's existing scope fence without allocating
+another identity. It is not cloneable. Every native submission checks that
+identity before dequeuing, and successful completion checks it again before
+issuing a decode receipt. A foreign receiver with identical numeric bindings is
+refused without consuming either queue or damaging the healthy decoder. An
+external replacement has a different scope and cannot be silently adopted.
+
+Same-configuration recovery is explicit through `Presenter::recover`. It requires
+the same receiver owner and a running worker. Receiver chain failure may admit a
+new recovery epoch, but decoder-owner revocation is permanent: an inline flag
+prevents a canceled stop or failed reap from reopening the owner before the
+receiver's watchdog runs. Closed receivers and poisoned decoders cannot recover
+through a fabricated configured acknowledgement. Native DPB admission and
+compressed receiver budgets remain distinct; this slice requires identical
+selected protocol limits and does not add broader configuration negotiation.
+
+Cancellation during a complete decode operation fences the receiver and all its
+view receipts before aborting the native worker. Compressed pictures held outside
+the queue keep their reservations until released. Stop, abort and presenter drop
+also fence receipts. The raw mutable decoder-worker accessor was replaced with
+bounded stop/reap operations, so presentation submissions cannot bypass the
+receiver binding through that API. Native effects submitted before cancellation
+remain possible; fencing future work is not rollback of an X11 effect.
+
+The three native consumers (`presentation_input`, `supervised_media`, and the
+newly landed `media_quic`) use this startup join. Their existing frame, pixel,
+repair, deadline and cleanup assertions remain. New controls cover equal-ID
+foreign receivers containing actual HEVC, failed child launch, presenter drop,
+and canceled stop followed immediately by attempted recovery. The dropped-future
+witness pauses only its owned real decoder child and confirms kernel stopped
+state before polling; the child cannot race the test by finishing first, and the
+normal worker kill/reap path terminates it while stopped. The pure delivery tests
+separately exercise shared-budget identity, generation/limit mismatch, failed
+chain recovery, external replacement and revocation without an intervening tick.
+
+This establishes a local native ownership join, not authenticated tailnet
+subscription admission or the public `DecoderConfiguration` / `DecoderConfigured`
+wire messages. The original Phase 0 acceptance and earlier unexplained native
+presentation deadline failures remain open. No deadline, retry count, scanner
+rule, protocol requirement or golden fixture was relaxed.
+
+Validation on 2026-09-09 used base `ed14f732f60423603c3f8638009efc133bfa484c`
+plus the eight changed Rust paths in this slice. The final RCH overlay fingerprint
+was `cb656cd71caf7741a00a6853dc5275d2bd78466b6011e2f278bba719905a4d45`.
+All compilation ran remotely on `vmi1149989`, with `nightly-2026-08-31`,
+`CARGO_HOME=/root/.cargo`, and `-j2`.
+
+| Check | Terminal evidence |
+|---|---|
+| Workspace/all-targets/all-features/locked check | RCH `j-30012848524493013`, exit 0 |
+| Same strict Clippy with `-D warnings` | RCH `j-30012848524493014`, exit 0 |
+| Workspace/all-features/locked tests, `--no-fail-fast -- --nocapture` | RCH `j-30012848524493015`, exit 0; 367 passed, 0 failed, 0 ignored or filtered, across 52 harnesses |
+| Workspace/all-features/locked example tests | RCH `j-30012848524493016`, exit 0; 2 passed across 4 harnesses |
+| Nonbuilding format, docs and diff whitespace checks | Local exit 0 |
+| Installed UBS Rust scan of the eight changed Rust files | Exit 1; 34 critical, 1438 warnings, 90 info |
+
+The final test pass does not establish repeatable deadline performance. On the
+same final Rust source, RCH `j-30012848524493008` failed the existing late-reference
+case with `Input(Stopped(ViewStale))`; its logged pre-repair time was 152175 us.
+RCH `j-30012848524493010` failed the existing final-fragment case with
+`Media(QueueExpired)`: the receipt was observed at 242557 us and visible readback
+at 252070 us, beyond the 241423 us display deadline. All four new native ownership
+tests passed in both failed runs. Fixture serialization and explicit worker
+reaping were already present; the cause of those timing failures is unresolved.
+The final run continued past any failing harness to cover the entire workspace;
+no test was filtered, serialized differently, or given a longer deadline.
+
+The 34 UBS critical matches were source-reviewed as eight deliberate test panic
+oracles, six public metadata comparisons, and twenty media/IPC decode calls
+misclassified as JWT handling. This is a finding classification, not a passing
+scanner or full verification lane. The Rust module hash remains
+`89d2b1e9bad572cb372eac0c4b6ec61583441e40b57f78981474f2b1686ec410`.
+UBS build subprocesses were disabled; the separate RCH commands supplied compile
+and test evidence. No scanner rules or suppressions changed.
+
+Logs remain at `/tmp/fr-sept9-{check-final,clippy-final,tests-complete,examples-final}.log`,
+the failed runs at `/tmp/fr-sept9-tests-final{,2}.log`, and the scanner result at
+`/tmp/fr-sept9-ubs-gate.{txt,json}`. Earlier compile and new-test-oracle failures
+are retained under the same prefix. Independent review covered the source and
+retained results, not another native execution. `fr-p0-recovery-authority-d7d`
+and `fr-xtask-verify-count-7vq` remain open against their original acceptance.

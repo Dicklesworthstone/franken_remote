@@ -173,7 +173,7 @@ impl MediaNetwork {
         )
         .unwrap();
         let sender = QuicEgress::new(Egress::new(subscription), routes);
-        let mut receiver = ReceivePipeline::new(
+        let receiver = ReceivePipeline::new(
             ReceiveConfig {
                 limits: wire,
                 bindings,
@@ -187,7 +187,6 @@ impl MediaNetwork {
             MediaBudget::new(&limits).unwrap(),
         )
         .unwrap();
-        receiver.decoder_configured(network::clock(cx)).unwrap();
         Self {
             control,
             pair,
@@ -339,16 +338,17 @@ impl Native {
         guard
             .validate_length_prefixed(bootstrap.bytes(), true)
             .unwrap();
+        let mut network = MediaNetwork::new(cx, control).await;
         let presenter = Presenter::start(
             cx,
             Launch::new(binary, &viewer.name, None, Role::Present, 22).unwrap(),
             cfg,
             &guard.decoder_record().unwrap(),
+            &mut network.receiver,
         )
         .await
         .unwrap();
         let readback = X11Surface::capture(Some(&viewer.name), limits).unwrap();
-        let network = MediaNetwork::new(cx, control).await;
         Self {
             source,
             capture,
@@ -412,29 +412,40 @@ impl Native {
         self.network.pair.client.close();
         self.network.pair.server.close();
         assert_eq!(self.network.sender.cache_usage().bytes, 0);
-        for worker in [self.capture.worker_mut(), self.presenter.worker_mut()] {
+        let worker = self.capture.worker_mut();
+        worker
+            .request(
+                cx,
+                Kind::Stop,
+                vec![],
+                Deadline::after(cx, Duration::from_millis(500)).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
             worker
-                .request(
-                    cx,
-                    Kind::Stop,
-                    vec![],
-                    Deadline::after(cx, Duration::from_millis(500)).unwrap(),
-                )
+                .reap(cx, Deadline::after(cx, Duration::from_millis(500)).unwrap())
                 .await
-                .unwrap();
-            assert!(
-                worker
-                    .reap(cx, Deadline::after(cx, Duration::from_millis(500)).unwrap())
-                    .await
-                    .unwrap()
-                    .success()
-            );
-        }
+                .unwrap()
+                .success()
+        );
+
+        self.presenter
+            .stop(cx, Deadline::after(cx, Duration::from_millis(500)).unwrap())
+            .await
+            .unwrap();
+        assert!(
+            self.presenter
+                .reap(cx, Deadline::after(cx, Duration::from_millis(500)).unwrap())
+                .await
+                .unwrap()
+                .success()
+        );
     }
 }
 async fn scenario(loss: Loss) {
     let cx = Cx::current().unwrap();
-    let mut native = Native::start(&cx).await;
+    let mut native = Box::pin(Native::start(&cx)).await;
     for index in 1..=6 {
         native.frame(&cx, index, loss).await;
     }

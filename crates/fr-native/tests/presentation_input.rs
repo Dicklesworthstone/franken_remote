@@ -166,24 +166,35 @@ fn run(scenario: impl std::future::Future<Output = ()>) {
     runtime().block_on(scenario);
 }
 async fn close_media(cx: &Cx, capture: &mut CaptureSource, presenter: &mut Presenter) {
-    for worker in [capture.worker_mut(), presenter.worker_mut()] {
+    let worker = capture.worker_mut();
+    worker
+        .request(
+            cx,
+            Kind::Stop,
+            vec![],
+            Deadline::after(cx, Duration::from_millis(500)).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
         worker
-            .request(
-                cx,
-                Kind::Stop,
-                vec![],
-                Deadline::after(cx, Duration::from_millis(500)).unwrap(),
-            )
+            .reap(cx, Deadline::after(cx, Duration::from_millis(500)).unwrap())
             .await
-            .unwrap();
-        assert!(
-            worker
-                .reap(cx, Deadline::after(cx, Duration::from_millis(500)).unwrap())
-                .await
-                .unwrap()
-                .success()
-        );
-    }
+            .unwrap()
+            .success()
+    );
+
+    presenter
+        .stop(cx, Deadline::after(cx, Duration::from_millis(500)).unwrap())
+        .await
+        .unwrap();
+    assert!(
+        presenter
+            .reap(cx, Deadline::after(cx, Duration::from_millis(500)).unwrap())
+            .await
+            .unwrap()
+            .success()
+    );
 }
 struct Video {
     source: X11Surface,
@@ -242,14 +253,6 @@ async fn prepare(source_server: &Server, viewer_server: &Server, cx: &Cx) -> Vid
     .await
     .unwrap();
     let record = bootstrap_record(&mut capture, &control, cfg).await;
-    let presenter = Presenter::start(
-        cx,
-        Launch::new(binary, &viewer_server.name, None, Role::Present, 12).unwrap(),
-        cfg,
-        &record,
-    )
-    .await
-    .unwrap();
     let wire = MediaLimits::new(limits, 1150, 16384, 64).unwrap();
     let bindings = MediaBindings::new(1, 2, 3, 4).unwrap();
     let epoch = MediaEpoch {
@@ -274,7 +277,15 @@ async fn prepare(source_server: &Server, viewer_server: &Server, cx: &Cx) -> Vid
         MediaBudget::new(&limits).unwrap(),
     )
     .unwrap();
-    receiver.decoder_configured(now(cx).0).unwrap();
+    let presenter = Presenter::start(
+        cx,
+        Launch::new(binary, &viewer_server.name, None, Role::Present, 12).unwrap(),
+        cfg,
+        &record,
+        &mut receiver,
+    )
+    .await
+    .unwrap();
     let observer = X11Pointer::open(&source_server.name).unwrap();
     let input = InputClient::new(
         credentials(),
@@ -1030,8 +1041,10 @@ fn replace_recovery(video: &mut Video, cx: &Cx, generation: u64, first_binding: 
     )
     .unwrap();
     video.subscription.recover(epoch, bindings).unwrap();
-    video.receiver.replace(epoch, bindings, now(cx).0).unwrap();
-    video.receiver.decoder_configured(now(cx).0).unwrap();
+    video
+        .presenter
+        .recover(cx, &mut video.receiver, epoch, bindings)
+        .unwrap();
 }
 async fn recovered_frame(
     video: &mut Video,
@@ -1174,4 +1187,282 @@ fn actual_hevc_partial_recovery_is_fenced_then_fresh_idr_and_dependent_are_visib
         );
         expire_cache_and_close(&mut video, &cx).await;
     });
+}
+
+fn receiver_config(wire: MediaLimits) -> ReceiveConfig {
+    ReceiveConfig {
+        limits: wire,
+        bindings: MediaBindings::new(1, 2, 3, 4).unwrap(),
+        epoch: MediaEpoch {
+            configuration: config().generation,
+            recovery: RecoveryGeneration::INITIAL,
+        },
+        policy: ReceivePolicy::default(),
+    }
+}
+async fn queue_first_picture(video: &mut Video, cx: &Cx) -> Vec<(Channel, Vec<u8>)> {
+    paint_pattern(video, 0);
+    let unit = video.capture.capture(&video.control, true).await.unwrap();
+    assert!(unit.is_idr());
+    assert_eq!(unit.frame().as_raw(), 1);
+    video.subscription.enqueue(unit).unwrap();
+    let mut packets = Vec::new();
+    let mut packet = [0; 1150];
+    while let Some(offer) = video.subscription.next_packet(&mut packet).unwrap() {
+        video.subscription.authorize_write(&offer).unwrap();
+        receive_packet(video, &offer, &packet[..offer.byte_len()], cx);
+        packets.push((offer.channel(), packet[..offer.byte_len()].to_vec()));
+    }
+    assert_eq!(video.receiver.budget_usage().pictures, 1);
+    packets
+}
+#[test]
+fn native_presenter_refuses_foreign_receiver_without_consuming_either_picture() {
+    run(async {
+        let source = Server::start();
+        let viewer = Server::start();
+        let cx = Cx::current().unwrap();
+        let mut video = prepare(&source, &viewer, &cx).await;
+        let c = receiver_config(video.wire);
+        let mut foreign =
+            ReceivePipeline::new(c, MediaBudget::new(c.limits.protocol()).unwrap()).unwrap();
+        // Only this adversarial receiver is manually advanced. It must never
+        // reach the real decoder despite matching every numeric configuration.
+        foreign.decoder_configured(now(&cx).0).unwrap();
+        let mut output =
+            X11Surface::capture(Some(&viewer.name), config().limits().unwrap()).unwrap();
+        let worker_id = video.presenter.worker_id();
+        let packets = queue_first_picture(&mut video, &cx).await;
+        for (channel, packet) in &packets {
+            foreign.receive(*channel, packet, now(&cx).0).unwrap();
+        }
+        let before = (
+            video.receiver.budget_usage(),
+            foreign.budget_usage(),
+            foreign.state(),
+        );
+        assert!(matches!(
+            video.presenter.present_next(&cx, &mut foreign).await,
+            Err(frd::media::Error::Receiver(DeliveryError::DecodeMismatch))
+        ));
+        assert_eq!(
+            (
+                video.receiver.budget_usage(),
+                foreign.budget_usage(),
+                foreign.state()
+            ),
+            before
+        );
+        assert_eq!(video.presenter.worker_id(), worker_id);
+        present_visible(&mut video, &mut output, &cx, 1, marker(0)).await;
+        assert!(video.client.tick(now(&cx)).unwrap());
+        close_media(&cx, &mut video.capture, &mut video.presenter).await;
+        assert!(matches!(
+            video.client.tick(now(&cx)),
+            Err(fr_client::input::presentation::Error::Media(
+                ViewError::StaleBinding
+            ))
+        ));
+        assert_eq!(video.client.stopped(), Some(StopReason::ViewStale));
+        assert_eq!(
+            video.receiver.tick(now(&cx).0),
+            Err(DeliveryError::WrongState)
+        );
+        assert_eq!(video.receiver.state(), ReceiveState::Closed);
+    });
+}
+#[test]
+fn dropping_native_decode_fences_receiver_and_forbids_recovery_on_dead_worker() {
+    run(async {
+        use std::{
+            future::{Future, poll_fn},
+            pin::pin,
+            task::Poll,
+        };
+        let source = Server::start();
+        let viewer = Server::start();
+        let cx = Cx::current().unwrap();
+        let mut video = prepare(&source, &viewer, &cx).await;
+        pause_decoder(&video.presenter);
+        queue_first_picture(&mut video, &cx).await;
+        {
+            let mut operation = pin!(video.presenter.present_next(&cx, &mut video.receiver));
+            poll_fn(|task| {
+                assert!(operation.as_mut().poll(task).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            // No completion receipt exists. Any native effect already submitted
+            // is unknown, not claimed rolled back by dropping the operation.
+        }
+        assert_eq!(video.receiver.state(), ReceiveState::Closed);
+        assert_eq!(video.receiver.budget_usage(), BudgetUsage::default());
+        assert!(video.client.tick(now(&cx)).is_err());
+        assert!(
+            video
+                .presenter
+                .recover(
+                    &cx,
+                    &mut video.receiver,
+                    MediaEpoch {
+                        configuration: config().generation,
+                        recovery: RecoveryGeneration::from_raw(2)
+                    },
+                    MediaBindings::new(5, 6, 7, 8).unwrap()
+                )
+                .is_err()
+        );
+        assert!(
+            !video
+                .presenter
+                .reap(
+                    &cx,
+                    Deadline::after(&cx, Duration::from_millis(500)).unwrap()
+                )
+                .await
+                .unwrap()
+                .success()
+        );
+        video.capture.worker_mut().abort();
+        video
+            .capture
+            .worker_mut()
+            .reap(
+                &cx,
+                Deadline::after(&cx, Duration::from_millis(500)).unwrap(),
+            )
+            .await
+            .unwrap();
+    });
+}
+#[test]
+fn failed_native_startup_never_configures_receiver_and_drop_invalidates_view() {
+    run(async {
+        let source = Server::start();
+        let viewer = Server::start();
+        let cx = Cx::current().unwrap();
+        let mut video = prepare(&source, &viewer, &cx).await;
+        let record = bootstrap_record(&mut video.capture, &video.control, config()).await;
+        let c = receiver_config(video.wire);
+        let mut receiver =
+            ReceivePipeline::new(c, MediaBudget::new(c.limits.protocol()).unwrap()).unwrap();
+        // A real failed child launch must not leave a configured receiver. The
+        // missing executable is a failure witness, not a mock decoder backend.
+        let missing =
+            std::env::temp_dir().join(format!("fr-missing-decoder-{}", std::process::id()));
+        assert!(!missing.exists());
+        let launch = Launch::new(&missing, &viewer.name, None, Role::Present, 99).unwrap();
+        assert!(matches!(
+            Presenter::start(&cx, launch, config(), &record, &mut receiver).await,
+            Err(frd::media::Error::Worker(frd::worker::Error::SpawnFailed))
+        ));
+        assert_eq!(receiver.state(), ReceiveState::Closed);
+        assert_eq!(receiver.budget_usage(), BudgetUsage::default());
+        drop(video.presenter);
+        assert!(matches!(
+            video.client.tick(now(&cx)),
+            Err(fr_client::input::presentation::Error::Media(
+                ViewError::StaleBinding
+            ))
+        ));
+        assert_eq!(video.client.stopped(), Some(StopReason::ViewStale));
+        assert_eq!(
+            video.receiver.tick(now(&cx).0),
+            Err(DeliveryError::WrongState)
+        );
+        video.capture.worker_mut().abort();
+        video
+            .capture
+            .worker_mut()
+            .reap(
+                &cx,
+                Deadline::after(&cx, Duration::from_millis(500)).unwrap(),
+            )
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
+fn canceled_native_stop_cannot_rebind_before_receiver_watchdog_runs() {
+    run(async {
+        let source = Server::start();
+        let viewer = Server::start();
+        let cx = Cx::current().unwrap();
+        let mut video = prepare(&source, &viewer, &cx).await;
+        // This context owns only the stop attempt. The healthy cleanup clock
+        // remains available to prove no new recovery can reauthorize this owner.
+        let cancel_runtime = runtime();
+        let cancelled = cancel_runtime.request_cx_with_budget(Budget::INFINITE);
+        let until = Deadline::after(&cancelled, Duration::from_millis(500)).unwrap();
+        cancelled.cancel_fast(asupersync::types::CancelKind::User);
+        assert!(matches!(
+            video.presenter.stop(&cancelled, until).await,
+            Err(frd::media::Error::Worker(frd::worker::Error::Cancelled))
+        ));
+        // Deliberately NO receiver.tick between revocation and rebind attempt.
+        assert!(
+            video
+                .presenter
+                .recover(
+                    &cx,
+                    &mut video.receiver,
+                    MediaEpoch {
+                        configuration: config().generation,
+                        recovery: RecoveryGeneration::from_raw(2)
+                    },
+                    MediaBindings::new(5, 6, 7, 8).unwrap()
+                )
+                .is_err()
+        );
+        assert!(
+            !video
+                .presenter
+                .reap(
+                    &cx,
+                    Deadline::after(&cx, Duration::from_millis(500)).unwrap()
+                )
+                .await
+                .unwrap()
+                .success()
+        );
+        assert!(video.client.tick(now(&cx)).is_err());
+        video.capture.worker_mut().abort();
+        video
+            .capture
+            .worker_mut()
+            .reap(
+                &cx,
+                Deadline::after(&cx, Duration::from_millis(500)).unwrap(),
+            )
+            .await
+            .unwrap();
+    });
+}
+
+// Stop only the decoder child owned by this Presenter. Confirm kernel stop
+// state before polling; speed of a real worker cannot turn the drop witness
+// into an already-completed operation. Presenter/Worker Drop sends SIGKILL even
+// during unwinding, which also terminates a stopped child without resuming it.
+fn pause_decoder(presenter: &Presenter) {
+    let pid = presenter.worker_id().unwrap();
+    assert!(
+        Command::new("kill")
+            .args(["-STOP", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let until = std::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+        if status.lines().any(|line| line.starts_with("State:\tT")) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < until,
+            "owned decoder did not stop"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
 }

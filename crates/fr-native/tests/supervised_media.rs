@@ -117,10 +117,6 @@ fn authority_to_supervised_capture_wire_and_presentation_then_revoke() {
             .unwrap();
         let record = admission.decoder_record().unwrap();
         drop(bootstrap);
-        let launch = Launch::new(image, &viewer_display.name, None, Role::Present, 12).unwrap();
-        let mut presenter = Presenter::start(&cleanup, launch, config, &record)
-            .await
-            .unwrap();
         let wire = MediaLimits::new(limits, 1150, 16384, 64).unwrap();
         let bindings = MediaBindings::new(1, 2, 3, 4).unwrap();
         let epoch = MediaEpoch {
@@ -146,8 +142,9 @@ fn authority_to_supervised_capture_wire_and_presentation_then_revoke() {
             budget.clone(),
         )
         .unwrap();
-        receiver
-            .decoder_configured(host_now(&cleanup).unwrap().as_micros())
+        let launch = Launch::new(image, &viewer_display.name, None, Role::Present, 12).unwrap();
+        let mut presenter = Presenter::start(&cleanup, launch, config, &record, &mut receiver)
+            .await
             .unwrap();
         let mut output = X11Surface::capture(Some(&viewer_display.name), limits).unwrap();
         exercise_pair(
@@ -246,25 +243,42 @@ async fn exercise_pair(
 }
 
 async fn stop_workers(cleanup: &Cx, capture: &mut CaptureSource, presenter: &mut Presenter) {
-    for worker in [capture.worker_mut(), presenter.worker_mut()] {
+    let worker = capture.worker_mut();
+    worker
+        .request(
+            cleanup,
+            Kind::Stop,
+            vec![],
+            Deadline::after(cleanup, Duration::from_millis(500)).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
         worker
-            .request(
+            .reap(
                 cleanup,
-                Kind::Stop,
-                vec![],
-                Deadline::after(cleanup, Duration::from_millis(500)).unwrap(),
+                Deadline::after(cleanup, Duration::from_millis(500)).unwrap()
             )
             .await
-            .unwrap();
-        assert!(
-            worker
-                .reap(
-                    cleanup,
-                    Deadline::after(cleanup, Duration::from_millis(500)).unwrap()
-                )
-                .await
-                .unwrap()
-                .success()
-        );
-    }
+            .unwrap()
+            .success()
+    );
+
+    presenter
+        .stop(
+            cleanup,
+            Deadline::after(cleanup, Duration::from_millis(500)).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        presenter
+            .reap(
+                cleanup,
+                Deadline::after(cleanup, Duration::from_millis(500)).unwrap()
+            )
+            .await
+            .unwrap()
+            .success()
+    );
 }

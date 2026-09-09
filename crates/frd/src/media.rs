@@ -14,8 +14,8 @@ use fr_core::{
 use fr_media::{
     access_unit::{EncodedAccessUnit, FrameId, FrameKind},
     delivery::{
-        BudgetUsage, DecodedFrame, DeliveryMode, MediaBindings, MediaEpoch, PacketOffer,
-        ReceivePipeline, SendCache, SendError, SendPolicy,
+        BudgetUsage, DecodedFrame, DecoderBinding, DeliveryError, DeliveryMode, MediaBindings,
+        MediaEpoch, PacketOffer, ReceivePipeline, SendCache, SendError, SendPolicy,
     },
     worker::{Configuration, Kind, Role, capture_payload, parse_unit, unit_parts},
 };
@@ -33,6 +33,7 @@ pub enum Error {
     InvalidFrame,
     Backpressure,
     Delivery,
+    Receiver(DeliveryError),
     Poisoned,
 }
 impl fmt::Display for Error {
@@ -364,6 +365,7 @@ pub struct PresentationReceipt {
 pub struct Presenter {
     worker: Worker,
     configuration: Configuration,
+    binding: DecoderBinding,
 }
 impl Presenter {
     pub async fn start(
@@ -371,7 +373,13 @@ impl Presenter {
         launch: Launch,
         configuration: Configuration,
         record: &fr_media::hevc::DecoderRecord,
+        receiver: &mut ReceivePipeline,
     ) -> Result<Self, Error> {
+        let limits = configuration.limits()?;
+        receiver
+            .check_decoder_configuration(configuration.generation, &limits)
+            .map_err(Error::Receiver)?;
+        let mut receiving = ReceiveOperation::new(receiver);
         let worker = Worker::start_decoder(
             cx,
             launch,
@@ -383,23 +391,70 @@ impl Presenter {
         if worker.role() != Role::Present {
             return Err(Error::InvalidFrame);
         }
+        let binding = receiving
+            .receiver
+            .bind_decoder(configuration.generation, &limits, host_now(cx)?.as_micros())
+            .map_err(Error::Receiver)?;
+        receiving.completed = true;
         Ok(Self {
             worker,
             configuration,
+            binding,
         })
+    }
+    /// Reuse this running decoder for a new IDR under the SAME receiver and
+    /// codec configuration. The caller first fences input and old transport
+    /// sends. A failed chain may recover; a foreign/replaced/closed receiver or
+    /// poisoned worker cannot acquire a fabricated configured acknowledgement.
+    pub fn recover(
+        &mut self,
+        cx: &Cx,
+        receiver: &mut ReceivePipeline,
+        epoch: MediaEpoch,
+        bindings: MediaBindings,
+    ) -> Result<(), Error> {
+        self.binding
+            .check_recovery(receiver)
+            .map_err(Error::Receiver)?;
+        if self.worker.state() != worker::State::Running {
+            return Err(worker::Error::Unavailable.into());
+        }
+        if epoch.configuration != self.configuration.generation {
+            return Err(Error::InvalidFrame);
+        }
+        cx.checkpoint().map_err(|_| worker::Error::Cancelled)?;
+        let now = host_now(cx)?.as_micros();
+        receiver
+            .replace(epoch, bindings, now)
+            .map_err(Error::Receiver)?;
+        let mut receiving = ReceiveOperation::new(receiver);
+        self.binding = receiving
+            .receiver
+            .bind_decoder(
+                self.configuration.generation,
+                &self.configuration.limits()?,
+                now,
+            )
+            .map_err(Error::Receiver)?;
+        receiving.completed = true;
+        Ok(())
     }
     pub async fn present_next(
         &mut self,
         cx: &Cx,
         receiver: &mut ReceivePipeline,
     ) -> Result<Option<PresentationReceipt>, Error> {
+        self.binding.check(receiver).map_err(Error::Receiver)?;
         let now = host_now(cx)?.as_micros();
         let Some(picture) = receiver.take_decodable(now).map_err(|_| Error::Delivery)? else {
             return Ok(None);
         };
+        let mut operation = MediaOperation::new(&mut self.worker);
+        // Declared after the worker guard so cancellation fences receiver/view
+        // receipts before aborting native work. No committed OS effect rolls back.
+        let mut receiving = ReceiveOperation::new(receiver);
         let d = picture.descriptor();
         if picture.epoch().configuration != self.configuration.generation {
-            receiver.close();
             return Err(Error::InvalidFrame);
         }
         let kind = d.reference.map_or(
@@ -420,7 +475,6 @@ impl Presenter {
             picture.bytes(),
         )?;
         let display = picture.within_display_queue_budget();
-        let mut operation = MediaOperation::new(&mut self.worker);
         let result = async {
             let deadline = Deadline::after(cx, Duration::from_millis(200))?;
             let mut reply = operation
@@ -465,9 +519,14 @@ impl Presenter {
         let completed_at = host_now(cx)?.as_micros();
         match result {
             Ok(frame) => {
-                let decoded = receiver
+                self.binding
+                    .check(receiving.receiver)
+                    .map_err(Error::Receiver)?;
+                let decoded = receiving
+                    .receiver
                     .complete_decode(&picture, completed_at)
                     .map_err(|_| Error::Delivery)?;
+                receiving.completed = true;
                 operation.completed = true;
                 Ok(Some(PresentationReceipt {
                     frame,
@@ -480,13 +539,67 @@ impl Presenter {
                 }))
             }
             Err(error) => {
-                let _ = receiver.acknowledge_decode(&picture, false, completed_at);
+                let _ = receiving
+                    .receiver
+                    .acknowledge_decode(&picture, false, completed_at);
                 Err(error)
             }
         }
     }
-    pub fn worker_mut(&mut self) -> &mut Worker {
-        &mut self.worker
+    /// Fence view receipts before stopping native work. No raw worker access is
+    /// exposed: decoder submissions always pass through the bound receiver.
+    pub async fn stop(&mut self, cx: &Cx, deadline: Deadline) -> Result<(), Error> {
+        self.binding.revoke();
+        let mut operation = MediaOperation::new(&mut self.worker);
+        operation
+            .worker
+            .request(cx, Kind::Stop, vec![], deadline)
+            .await?;
+        operation.completed = true;
+        Ok(())
+    }
+    pub async fn reap(
+        &mut self,
+        cx: &Cx,
+        deadline: Deadline,
+    ) -> Result<asupersync::process::ExitStatus, Error> {
+        self.binding.revoke();
+        Ok(self.worker.reap(cx, deadline).await?)
+    }
+    pub fn abort(&mut self) {
+        self.binding.revoke();
+        self.worker.abort();
+    }
+    pub fn worker_id(&self) -> Option<u32> {
+        self.worker.id()
+    }
+}
+impl Drop for Presenter {
+    fn drop(&mut self) {
+        self.binding.revoke();
+        self.worker.abort();
+    }
+}
+/// Until a complete startup/decode transition, dropping its future invalidates
+/// the receiving scope and releases queued reservations. External picture
+/// owners keep their own charged bytes until they release them.
+struct ReceiveOperation<'a> {
+    receiver: &'a mut ReceivePipeline,
+    completed: bool,
+}
+impl<'a> ReceiveOperation<'a> {
+    fn new(receiver: &'a mut ReceivePipeline) -> Self {
+        Self {
+            receiver,
+            completed: false,
+        }
+    }
+}
+impl Drop for ReceiveOperation<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.receiver.close();
+        }
     }
 }
 /// Keep cancellation terminal across the WHOLE codec operation, including

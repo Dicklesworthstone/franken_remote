@@ -14,6 +14,47 @@ use std::sync::{
 };
 
 const SLOTS: usize = ProtocolLimits::REASSEMBLY_WINDOW_CEILING as usize;
+
+/// Identity of the receiver epoch configured by a decoder owner. Numeric
+/// generation equality cannot substitute for this local ownership binding.
+/// This contains no media and adds no allocation: it shares the existing fence.
+#[derive(Debug)]
+pub struct DecoderBinding {
+    scope: Arc<AtomicBool>,
+    revoked: bool,
+}
+impl DecoderBinding {
+    pub fn check(&self, receiver: &ReceivePipeline) -> Result<(), DeliveryError> {
+        if self.revoked
+            || !Arc::ptr_eq(&self.scope, &receiver.scope)
+            || !self.scope.load(Ordering::Acquire)
+        {
+            return Err(DeliveryError::DecodeMismatch);
+        }
+        Ok(())
+    }
+    /// A failed chain may recover under its existing decoder owner. An external
+    /// replacement has a different scope; a closed receiver remains terminal.
+    pub fn check_recovery(&self, receiver: &ReceivePipeline) -> Result<(), DeliveryError> {
+        if !Arc::ptr_eq(&self.scope, &receiver.scope) {
+            return Err(DeliveryError::DecodeMismatch);
+        }
+        if self.revoked
+            || matches!(
+                receiver.state,
+                ReceiveState::Closed | ReceiveState::AwaitingConfiguration
+            )
+        {
+            return Err(DeliveryError::WrongState);
+        }
+        Ok(())
+    }
+    /// Fence callbacks and view receipts before the decoder owner is destroyed.
+    pub fn revoke(&mut self) {
+        self.revoked = true;
+        self.scope.store(false, Ordering::Release);
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReceivePolicy {
     pub display_budget_micros: u64,
@@ -363,6 +404,40 @@ impl ReceivePipeline {
     pub fn budget_usage(&self) -> super::BudgetUsage {
         self.budget.usage()
     }
+    /// Preflight before opening a foreign decoder. This native slice requires
+    /// the same admitted limits; it never enlarges the receiver's reservation.
+    pub fn check_decoder_configuration(
+        &self,
+        generation: fr_core::ids::CodecConfigurationGeneration,
+        limits: &ProtocolLimits,
+    ) -> Result<(), DeliveryError> {
+        if self.state != ReceiveState::AwaitingConfiguration || !self.scope.load(Ordering::Acquire)
+        {
+            return Err(DeliveryError::WrongState);
+        }
+        if generation != self.config.epoch.configuration {
+            return Err(DeliveryError::StaleGeneration);
+        }
+        if limits != self.config.limits.protocol() {
+            return Err(DeliveryError::ResourceLimit);
+        }
+        Ok(())
+    }
+    /// The trusted decoder owner calls this ONLY after actual API setup. The
+    /// returned token must guard every subsequent submission and recovery.
+    pub fn bind_decoder(
+        &mut self,
+        generation: fr_core::ids::CodecConfigurationGeneration,
+        limits: &ProtocolLimits,
+        now: u64,
+    ) -> Result<DecoderBinding, DeliveryError> {
+        self.check_decoder_configuration(generation, limits)?;
+        self.decoder_configured(now)?;
+        Ok(DecoderBinding {
+            scope: self.scope.clone(),
+            revoked: false,
+        })
+    }
     /// Called only after the real decoder API is configured and its resources
     /// admitted. This does not wait for a frame or establish visible readiness.
     pub fn decoder_configured(&mut self, now: u64) -> Result<(), DeliveryError> {
@@ -692,6 +767,15 @@ impl ReceivePipeline {
     /// Call at `next_deadline` even when no more packets arrive (final-frame loss).
     pub fn tick(&mut self, now: u64) -> Result<(), DeliveryError> {
         self.check_clock(now)?;
+        if !self.scope.load(Ordering::Acquire)
+            && !matches!(
+                self.state,
+                ReceiveState::NeedsRecovery | ReceiveState::Closed
+            )
+        {
+            self.close();
+            return Err(DeliveryError::WrongState);
+        }
         if matches!(
             self.state,
             ReceiveState::NeedsRecovery | ReceiveState::Closed

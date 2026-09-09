@@ -348,7 +348,7 @@ fn production_media_packetizer_and_receiver_run_over_native_quic() {
             let mut out = [0; 1150];
             let mut pending = send.next_packet(clock(&cx), &mut out).unwrap();
             for _ in 0..500 {
-                if let Some(offer) = pending {
+                if let Some(offer) = pending.as_ref() {
                     let route = match offer.channel() {
                         Channel::Video => Route::Datagram(p.video),
                         Channel::Recovery => Route::Stream(p.host_routes[1]),
