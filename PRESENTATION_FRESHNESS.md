@@ -542,3 +542,40 @@ the failed runs at `/tmp/fr-sept9-tests-final{,2}.log`, and the scanner result a
 are retained under the same prefix. Independent review covered the source and
 retained results, not another native execution. `fr-p0-recovery-authority-d7d`
 and `fr-xtask-verify-count-7vq` remain open against their original acceptance.
+
+### Integration with the concurrent QUIC input change
+
+Ownership source commit `c682d48a37c034bd06b778e22bccbe45fe08d871` was merged
+with peer commit `3bc311d` at `f374a11461815c489f4619831ec13df88f514f7d`.
+The peer change adds separate bounded critical/bulk send storage. The native
+consumer retains each class's byte and record bounds, exact presentation/readback
+assertions, and the receiver-bound startup and teardown above.
+
+Independent source review found one incoming protocol mismatch: `InputActions`
+admitted unimplemented `HeldState` (`0x0046`) and refused implemented `InputMode`
+(`0x0047`); the new mixed-action test repeated that expectation. The protocol and
+wire codec already assign those kinds correctly. Correcting the test first
+produced `WrongRoute` on `InputMode` in RCH `j-30012848524493023` (exit 101, one
+failed test). The selector now admits the existing ordered `InputMode` and
+refuses `HeldState`; no protocol kind or payload implementation was added.
+
+The corrected combined source is the merge above plus the two transport source/
+test paths, RCH overlay
+`b309bdd5787add463649b1f0d775aa89f9fe4799b762b1997979035164ee4dbe`.
+RCH `j-30012848524493026` ran the complete workspace/all-features/locked suite
+with `--no-fail-fast -- --nocapture`: exit 0, 372 passed, zero failed/ignored/
+filtered across 52 harnesses. This includes the corrected mixed-action test and
+all native ownership tests. Check `j-30012848524493027` and strict all-targets/
+all-features Clippy `j-30012848524493029` exited 0. Example tests
+`j-30012848524493030` exited 0, with two passed across four harnesses. Nonbuilding
+format, docs and diff checks also passed on the combined tree.
+
+The combined 11-file UBS Rust scan remains exit 1: 39 critical, 1779 warnings,
+125 info. The five additional critical matches are four public channel-binding
+comparisons and a deliberate blocked-consumer test panic. The earlier native
+deadline failures remain unresolved. The peer-reported Asupersync receive-window
+failure in [QUIC_INPUT.md](QUIC_INPUT.md) is recorded on existing upstream Bead
+`fr-5nb`; this integration did not reproduce or repair that failure. Retained
+combined-run logs use `/tmp/fr-sept9-integrated-*-final.log` and
+`/tmp/fr-sept9-integrated-ubs-final.{txt,json}`. Source review is not another
+independent native execution or completion of Phase 0.

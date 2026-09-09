@@ -72,7 +72,9 @@ impl Messages {
     fn contains(self, kind: u16) -> bool {
         match self {
             Self::Exact(expected) => kind == expected,
-            Self::InputActions => matches!(kind, 0x0040 | 0x0041 | 0x0043..=0x0046),
+            // HeldState (0x0046) is not implemented; InputMode (0x0047)
+            // is an ordered action in the existing fr-wire input codec.
+            Self::InputActions => matches!(kind, 0x0040 | 0x0041 | 0x0043..=0x0045 | 0x0047),
         }
     }
 }
