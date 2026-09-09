@@ -1,0 +1,49 @@
+[Parsed_testsrc2_0 @ 0x88cc20180] size:1920x1080 rate:30/1 duration:-1.000000 sar:1/1
+Input #0, lavfi, from 'testsrc2=size=1920x1080:rate=30':
+  Duration: N/A, start: 0.000000, bitrate: N/A
+  Stream #0:0: Video: wrapped_avframe, 1 reference frame, yuv420p, 1920x1080 [SAR 1:1 DAR 16:9], 30 fps, 30 tbr, 30 tbn
+[out#0/hevc @ 0x88cc20480] No explicit maps, mapping streams automatically...
+[vost#0:0/hevc_videotoolbox @ 0x88c81c000] Created video stream from input stream 0:0
+Stream mapping:
+  Stream #0:0 -> #0:0 (wrapped_avframe (native) -> hevc (hevc_videotoolbox))
+[vost#0:0/hevc_videotoolbox @ 0x88c81c000] Starting thread...
+[vf#0:0 @ 0x88d418000] Starting thread...
+[vist#0:0/wrapped_avframe @ 0x88d004180] [dec:wrapped_avframe @ 0x88c804280] Starting thread...
+[in#0/lavfi @ 0x88c804000] Starting thread...
+[graph -1 input from stream 0:0 @ 0x88cc20d80] w:1920 h:1080 pixfmt:yuv420p tb:1/30 fr:30/1 sar:1/1 csp:unknown range:unknown alpha:unspecified
+[auto_scale_0 @ 0x88cc21080] w:iw h:ih flags:'' interl:0
+[Parsed_format_0 @ 0x88cc20cc0] auto-inserting filter 'auto_scale_0' between the filter 'graph -1 input from stream 0:0' and the filter 'Parsed_format_0'
+[auto_scale_0 @ 0x88cc21080] w:1920 h:1080 fmt:yuv420p csp:unknown range:unknown sar:1/1 -> w:1920 h:1080 fmt:nv12 csp:unknown range:tv sar:1/1 flags:0x00000004
+[auto_scale_0 @ 0x88cc21080] [framesync @ 0x88d40c510] Selected 1/30 time base
+[auto_scale_0 @ 0x88cc21080] [framesync @ 0x88d40c510] Sync level 1
+[graph -1 input from stream 0:0 @ 0x88cc20d80] video frame properties congruent with link at pts_time: 0
+[hevc_videotoolbox @ 0x88c814a80] This device does not support the max_ref_frames option. Value ignored.
+Output #0, hevc, to 'probe.hevc':
+  Metadata:
+    encoder         : Lavf62.12.102
+  Stream #0:0: Video: hevc, 1 reference frame, nv12(tv, progressive), 1920x1080 [SAR 1:1 DAR 16:9], q=2-31, 8000 kb/s, 30 fps, 30 tbn
+    Metadata:
+      encoder         : Lavc62.28.102 hevc_videotoolbox
+[out#0/hevc @ 0x88cc20480] Starting thread...
+[vf#0:0 @ 0x88d418000] All consumers returned EOF
+[vf#0:0 @ 0x88d418000] Terminating thread with return code 0 (success)
+[vist#0:0/wrapped_avframe @ 0x88d004180] [dec:wrapped_avframe @ 0x88c804280] Decoder returned EOF, finishing
+[vist#0:0/wrapped_avframe @ 0x88d004180] [dec:wrapped_avframe @ 0x88c804280] Terminating thread with return code 0 (success)
+[vist#0:0/wrapped_avframe @ 0x88d004180] All consumers of this stream are done
+[in#0/lavfi @ 0x88c804000] All consumers are done
+[in#0/lavfi @ 0x88c804000] Terminating thread with return code 0 (success)
+[vost#0:0/hevc_videotoolbox @ 0x88c81c000] [enc:hevc_videotoolbox @ 0x88c8081c0] Encoder thread received EOF
+[vost#0:0/hevc_videotoolbox @ 0x88c81c000] Terminating thread with return code 0 (success)
+[out#0/hevc @ 0x88cc20480] All streams finished
+[out#0/hevc @ 0x88cc20480] Terminating thread with return code 0 (success)
+[AVIOContext @ 0x88c8043c0] Statistics: 2019326 bytes written, 0 seeks, 8 writeouts
+[out#0/hevc @ 0x88cc20480] Output file #0 (probe.hevc):
+[out#0/hevc @ 0x88cc20480]   Output stream #0:0 (video): 60 frames encoded; 60 packets muxed (2019326 bytes);
+[out#0/hevc @ 0x88cc20480]   Total: 60 packets (2019326 bytes) muxed
+[out#0/hevc @ 0x88cc20480] video:1972KiB audio:0KiB subtitle:0KiB other streams:0KiB global headers:0KiB muxing overhead: 0.000000%
+frame=   60 fps=0.0 q=-0.0 Lsize=    1972KiB time=00:00:01.96 bitrate=8214.2kbits/s speed=4.26x elapsed=0:00:00.46
+[in#0/lavfi @ 0x88c804000] Input file #0 (testsrc2=size=1920x1080:rate=30):
+[in#0/lavfi @ 0x88c804000]   Input stream #0:0 (video): 73 packets read (30952 bytes); 64 frames decoded; 0 decode errors;
+[in#0/lavfi @ 0x88c804000]   Total: 73 packets (30952 bytes) demuxed
+
+Exiting with exit code 0

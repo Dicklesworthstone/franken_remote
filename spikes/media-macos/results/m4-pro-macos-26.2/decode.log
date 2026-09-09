@@ -1,0 +1,43 @@
+[vist#0:0/hevc @ 0x784810480] Selecting decoder 'hevc' because of requested hwaccel method videotoolbox
+Input #0, hevc, from 'probe.hevc':
+  Duration: N/A, bitrate: N/A
+  Stream #0:0: Video: hevc (Main), 1 reference frame, yuv420p(tv, left), 1920x1080 [SAR 1:1 DAR 16:9], 25 fps, 1200k tbr, 1200k tbn
+[out#0/null @ 0x7848203c0] No explicit maps, mapping streams automatically...
+[vost#0:0/wrapped_avframe @ 0x78489c300] Created video stream from input stream 0:0
+Stream mapping:
+  Stream #0:0 -> #0:0 (hevc (native) -> wrapped_avframe (native))
+[vost#0:0/wrapped_avframe @ 0x78489c300] Starting thread...
+[vf#0:0 @ 0x785064000] Starting thread...
+[vist#0:0/hevc @ 0x784810480] [dec:hevc @ 0x784818280] Starting thread...
+[in#0/hevc @ 0x784818000] Starting thread...
+[graph -1 input from stream 0:0 @ 0x784821f80] w:1920 h:1080 pixfmt:videotoolbox_vld tb:1/1200000 fr:25/1 sar:1/1 csp:unknown range:tv alpha:unspecified
+[graph -1 input from stream 0:0 @ 0x784821f80] video frame properties congruent with link at pts_time: 0
+Output #0, null, to 'pipe:':
+  Metadata:
+    encoder         : Lavf62.12.102
+  Stream #0:0: Video: wrapped_avframe, 1 reference frame, videotoolbox_vld(tv, progressive, left), 1920x1080 [SAR 1:1 DAR 16:9], q=2-31, 200 kb/s, 25 fps, 25 tbn
+    Metadata:
+      encoder         : Lavc62.28.102 wrapped_avframe
+[out#0/null @ 0x7848203c0] Starting thread...
+[in#0/hevc @ 0x784818000] EOF while reading input
+[in#0/hevc @ 0x784818000] Terminating thread with return code 0 (success)
+[vist#0:0/hevc @ 0x784810480] [dec:hevc @ 0x784818280] Decoder thread received EOF packet
+[vist#0:0/hevc @ 0x784810480] [dec:hevc @ 0x784818280] Decoder returned EOF, finishing
+[vost#0:0/wrapped_avframe @ 0x78489c300] [enc:wrapped_avframe @ 0x78540c2a0] Encoder thread received EOF
+[vost#0:0/wrapped_avframe @ 0x78489c300] Terminating thread with return code 0 (success)
+[out#0/null @ 0x7848203c0] All streams finished
+[out#0/null @ 0x7848203c0] Terminating thread with return code 0 (success)
+[vf#0:0 @ 0x785064000] All consumers returned EOF
+[vf#0:0 @ 0x785064000] Terminating thread with return code 0 (success)
+[vist#0:0/hevc @ 0x784810480] [dec:hevc @ 0x784818280] Terminating thread with return code 0 (success)
+[out#0/null @ 0x7848203c0] Output file #0 (pipe:):
+[out#0/null @ 0x7848203c0]   Output stream #0:0 (video): 60 frames encoded; 60 packets muxed (25440 bytes);
+[out#0/null @ 0x7848203c0]   Total: 60 packets (25440 bytes) muxed
+[out#0/null @ 0x7848203c0] video:25KiB audio:0KiB subtitle:0KiB other streams:0KiB global headers:0KiB muxing overhead: unknown
+frame=   60 fps=0.0 q=-0.0 Lsize=N/A time=00:00:02.36 bitrate=N/A speed=10.4x elapsed=0:00:00.22
+[in#0/hevc @ 0x784818000] Input file #0 (probe.hevc):
+[in#0/hevc @ 0x784818000]   Input stream #0:0 (video): 60 packets read (2019326 bytes); 60 frames decoded; 0 decode errors;
+[in#0/hevc @ 0x784818000]   Total: 60 packets (2019326 bytes) demuxed
+[AVIOContext @ 0x784818140] Statistics: 2019326 bytes read, 0 seeks
+
+Exiting with exit code 0

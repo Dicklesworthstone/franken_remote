@@ -1,0 +1,28 @@
+{
+  "bytes": 2019326,
+  "nal_types": {
+    "32": 1,
+    "33": 1,
+    "34": 1,
+    "39": 1,
+    "20": 1,
+    "1": 59
+  },
+  "first_vcl": 20,
+  "stream": {
+    "codec_name": "hevc",
+    "profile": "Main",
+    "width": 1920,
+    "height": 1080,
+    "has_b_frames": 0,
+    "pix_fmt": "yuv420p",
+    "refs": 1
+  },
+  "reference_limit_request": "ignored",
+  "decode_reported_frames": 60,
+  "frame_types": {
+    "I": 1,
+    "P": 59
+  },
+  "scope": "header inventory and FFmpeg inspection, not full HEVC admission"
+}

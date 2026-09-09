@@ -1,0 +1,2 @@
+screen_capture_preflight_granted=False
+scope=invoking execution context; no permission request or capture performed
