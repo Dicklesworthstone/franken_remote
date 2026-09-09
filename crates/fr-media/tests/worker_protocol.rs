@@ -188,3 +188,57 @@ fn empty_invalid_reference_and_reserved_bits_refuse() {
     p[24..32].copy_from_slice(&2_u64.to_be_bytes());
     assert!(parse_unit(p, &l).is_err());
 }
+
+#[test]
+fn unchanged_capture_has_exact_bounded_bytes_and_cannot_reference_the_future() {
+    let evidence = UnchangedCapture {
+        candidate: FrameId::from_raw(9),
+        reference: FrameId::from_raw(2),
+        observed_micros: 0x0102_0304_0506_0708,
+    };
+    let bytes = [
+        0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 2, 1, 2, 3, 4, 5, 6, 7, 8,
+    ];
+    assert_eq!(evidence.encode().unwrap(), bytes);
+    assert_eq!(UnchangedCapture::decode(&bytes), Ok(evidence));
+    for end in 0..bytes.len() {
+        assert_eq!(
+            UnchangedCapture::decode(&bytes[..end]),
+            Err(Error::Malformed)
+        );
+    }
+    assert!(UnchangedCapture::decode(&[0; 25]).is_err());
+    for reference in [9, 10, u64::MAX] {
+        assert!(
+            UnchangedCapture {
+                reference: FrameId::from_raw(reference),
+                ..evidence
+            }
+            .encode()
+            .is_err()
+        );
+        let mut malformed = bytes;
+        malformed[8..16].copy_from_slice(&reference.to_be_bytes());
+        assert!(UnchangedCapture::decode(&malformed).is_err());
+    }
+    for (kind, length, code) in [
+        (Kind::CaptureIfChanged, 17, 7_u16),
+        (Kind::Unchanged, 24, 265),
+    ] {
+        let h = Header {
+            kind,
+            identity: id(),
+            length,
+        };
+        let wire = h.encode(&ProtocolLimits::ABSOLUTE).unwrap();
+        assert_eq!(&wire[6..8], &code.to_be_bytes());
+        assert_eq!(Header::decode(&wire, &ProtocolLimits::ABSOLUTE), Ok(h));
+        for length in [0, 1, 16, 18, 23, 25, usize::MAX] {
+            assert!(
+                Header { length, ..h }
+                    .encode(&ProtocolLimits::ABSOLUTE)
+                    .is_err()
+            );
+        }
+    }
+}

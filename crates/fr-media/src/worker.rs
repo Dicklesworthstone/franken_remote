@@ -28,6 +28,7 @@ pub enum Kind {
     Present = 4,
     Stop = 5,
     Decode = 6,
+    CaptureIfChanged = 7,
     Ready = 257,
     Unit = 258,
     NeedInput = 259,
@@ -36,6 +37,7 @@ pub enum Kind {
     Stopped = 262,
     Refused = 263,
     Decoded = 264,
+    Unchanged = 265,
 }
 impl Kind {
     fn parse(n: u16) -> Result<Self, Error> {
@@ -46,6 +48,7 @@ impl Kind {
             4 => Self::Present,
             5 => Self::Stop,
             6 => Self::Decode,
+            7 => Self::CaptureIfChanged,
             257 => Self::Ready,
             258 => Self::Unit,
             259 => Self::NeedInput,
@@ -54,6 +57,7 @@ impl Kind {
             262 => Self::Stopped,
             263 => Self::Refused,
             264 => Self::Decoded,
+            265 => Self::Unchanged,
             _ => return Err(Error::Malformed),
         })
     }
@@ -63,7 +67,8 @@ impl Kind {
     fn accepts_length(self, length: usize, limits: &ProtocolLimits) -> bool {
         match self {
             Self::Configure | Self::Ready => length == CONFIG_BYTES,
-            Self::Capture => length == 17,
+            Self::Capture | Self::CaptureIfChanged => length == 17,
+            Self::Unchanged => length == 24,
             Self::Poll | Self::Stop | Self::NeedInput | Self::NeedDrain | Self::Stopped => {
                 length == 0
             }
@@ -358,6 +363,40 @@ impl Sequence {
         Ok(())
     }
 }
+/// A completed full-source comparison, not a heartbeat. The candidate identity
+/// belongs to the request; `reference` is the last picture actually encoded.
+/// Only the parent bound to this worker may turn it into network progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnchangedCapture {
+    pub candidate: FrameId,
+    pub reference: FrameId,
+    pub observed_micros: u64,
+}
+impl UnchangedCapture {
+    pub fn encode(self) -> Result<Vec<u8>, Error> {
+        if self.reference >= self.candidate {
+            return Err(Error::Malformed);
+        }
+        let mut bytes = Vec::with_capacity(24);
+        bytes.extend_from_slice(&self.candidate.as_raw().to_be_bytes());
+        bytes.extend_from_slice(&self.reference.as_raw().to_be_bytes());
+        bytes.extend_from_slice(&self.observed_micros.to_be_bytes());
+        Ok(bytes)
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        let b: &[u8; 24] = bytes.try_into().map_err(|_| Error::Malformed)?;
+        let value = Self {
+            candidate: FrameId::from_raw(u64::from_be_bytes(b[..8].try_into().unwrap())),
+            reference: FrameId::from_raw(u64::from_be_bytes(b[8..16].try_into().unwrap())),
+            observed_micros: u64::from_be_bytes(b[16..].try_into().unwrap()),
+        };
+        if value.reference >= value.candidate {
+            return Err(Error::Malformed);
+        }
+        Ok(value)
+    }
+}
+
 pub fn capture_payload(frame: FrameId, capture_lower_bound: u64, force_idr: bool) -> Vec<u8> {
     let mut b = Vec::with_capacity(17);
     b.extend_from_slice(&frame.as_raw().to_be_bytes());
