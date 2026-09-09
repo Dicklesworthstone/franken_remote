@@ -1,73 +1,91 @@
-name: Review source maintenance
-
-# Review-only: no commit/ref/PR writes. Suggested source remains subject to
-# review and normal repository verification before it is adopted.
-# Current review: complete sender/receiver media-delivery integration.
+name: Verify reviewed tailnet admission
 on:
   workflow_dispatch:
   push:
     branches: [main]
     paths: ['.github/workflows/source-maintenance.yml']
-
 permissions:
   contents: write
 
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+
 jobs:
-  suggest:
+  verify:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Check out exact source
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
-      - name: Install pinned toolchain
+      - name: Install pinned compiler
         run: rustup show active-toolchain
-      - name: Apply machine-applicable source suggestions
-        run: |
-          export RCH_CARGO_WRAPPER_BYPASS=1
-          cargo fix --workspace --all-targets --all-features --locked --allow-dirty --allow-staged
-          cargo clippy --fix --workspace --all-targets --all-features --locked --allow-dirty --allow-staged -- -D warnings
-          cargo fmt --all
-      - name: Verify suggested source
-        run: ./scripts/verify.sh fast
-      - name: Retain reviewable source blobs and diff
-        if: always()
+      - name: Stage exact reviewed new source without branch writes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          git diff --check
-          git diff --stat
-          git diff -- crates
           python3 - <<'PY'
-          import base64, json, os, subprocess
+          import base64,hashlib,json,os,subprocess
           from pathlib import Path
-          paths = subprocess.check_output(['git', 'diff', '--name-only', '-z']).decode().split('\0')
-          for path in filter(None, paths):
-              if not path.startswith('crates/') or not path.endswith('.rs'):
-                  raise SystemExit(f'Unexpected maintenance path: {path}')
-              data = Path(path).read_bytes()
-              body = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()})
-              result = subprocess.run(
-                  ['gh', 'api', '--method', 'POST', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', '--input', '-'],
-                  input=body, text=True, capture_output=True, check=True)
-              print(json.dumps({'path': path, 'sha': json.loads(result.stdout)['sha'], 'source_commit': os.environ['GITHUB_SHA']}))
+          repo=os.environ['GITHUB_REPOSITORY']
+          def get(endpoint):
+              return json.loads(subprocess.check_output(['gh','api',f'repos/{repo}/{endpoint}']))
+          def sha(data):
+              return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
+          tree=get('git/trees/b2ebb0a4230b35626e745eedf670b88d35818168?recursive=1')
+          assert not tree.get('truncated')
+          entries=[e for e in tree['tree'] if e['type']=='blob']
+          expected={
+              'crates/fr-tailnet/Cargo.toml':'c5eb79a238a18d4570cd144512de1ff6436f1065',
+              'crates/fr-tailnet/src/lib.rs':'41f0a4b8fe6d9a894c932bb1cf59a1150500971d',
+              'crates/fr-tailnet/src/local.rs':'142534ee27ca35c53d0c8fda80c00b9742c6f5d7',
+              'crates/fr-tailnet/src/metadata.rs':'5b1fedce7ed4213ef3a661b491f7d50606ee20b7',
+              'crates/fr-tailnet/src/expiry.rs':'976933e911c301fbe9f3384c2c7465f0255ee109',
+              'crates/fr-tailnet/src/local/tests.rs':'ffe30214a4b77ac357f80ae10195162e956a0eb9',
+          }
+          assert {e['path']:e['sha'] for e in entries}==expected
+          for entry in entries:
+              target=Path(entry['path'])
+              assert not target.exists(),f'Concurrent source already present: {target}'
+              data=base64.b64decode(get('git/blobs/'+entry['sha'])['content'])
+              assert sha(data)==entry['sha']
+              target.parent.mkdir(parents=True,exist_ok=True)
+              target.write_bytes(data)
+          root=Path('Cargo.toml')
+          text=root.read_text()
+          anchor='fr-wire = { path = "crates/fr-wire" }'
+          assert text.count(anchor)==1 and 'fr-tailnet = ' not in text
+          additions='\nfr-tailnet = { path = "crates/fr-tailnet" }'
+          for name in ['serde','serde_json']:
+              if not any(line.startswith(name+' = ') for line in text.splitlines()):
+                  additions+='\n'+name+' = "1"'
+          root.write_text(text.replace(anchor,anchor+additions))
+          paths=list(expected)+['Cargo.toml','Cargo.lock']
+          Path(os.environ['RUNNER_TEMP'],'tailnet-paths.json').write_text(json.dumps(paths))
+          print('STAGED_ON',os.environ['GITHUB_SHA'])
           PY
-      - name: Package reproducible offline review inputs
-        if: always() && github.event_name == 'workflow_dispatch'
+          cargo metadata --format-version=1 > "$RUNNER_TEMP/tailnet-metadata.json"
+          git diff -- Cargo.toml Cargo.lock
+      - name: Verify real LocalAPI boundary and strict source checks
         run: |
-          mkdir -p "$RUNNER_TEMP/fr-review"
-          git ls-files -z | tar --null -T - -czf "$RUNNER_TEMP/fr-review/source.tar.gz"
-          sysroot="$(rustc --print sysroot)"
-          tar -czf "$RUNNER_TEMP/fr-review/rust-toolchain.tar.gz" -C "$sysroot" bin lib
-          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/fr-review/source-commit.txt"
-          (cd "$RUNNER_TEMP/fr-review" && sha256sum *.tar.gz > SHA256SUMS)
-      - name: Retain offline verification bundle
-        if: always() && github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: offline-media-review
-          path: ${{ runner.temp }}/fr-review/
-          retention-days: 1
-          compression-level: 0
-          if-no-files-found: error
+          cargo fmt --all --check
+          cargo test -p fr-tailnet --locked
+          cargo clippy -p fr-tailnet --all-targets --locked -- -D warnings
+          git diff --check
+      - name: Retain exact verified source objects for explicit commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64,json,os,subprocess
+          from pathlib import Path
+          paths=json.loads(Path(os.environ['RUNNER_TEMP'],'tailnet-paths.json').read_text())
+          for path in paths:
+              data=Path(path).read_bytes()
+              body=json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()})
+              result=subprocess.run(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,capture_output=True,check=True)
+              print(json.dumps({'path':path,'sha':json.loads(result.stdout)['sha'],'verified_against':os.environ['GITHUB_SHA']}))
+          PY
