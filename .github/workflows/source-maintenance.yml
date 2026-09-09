@@ -1,4 +1,4 @@
-name: Verify reviewed tailnet admission
+name: Verify reviewed admission integration
 on:
   workflow_dispatch:
   push:
@@ -6,24 +6,25 @@ on:
     paths: ['.github/workflows/source-maintenance.yml']
 permissions:
   contents: write
-
 env:
   CARGO_BUILD_JOBS: '1'
   CARGO_PROFILE_DEV_DEBUG: '0'
   CARGO_PROFILE_TEST_DEBUG: '0'
   CARGO_INCREMENTAL: '0'
-
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
-      - name: Install pinned compiler
-        run: rustup show active-toolchain
-      - name: Stage exact reviewed new source without branch writes
+      - name: Install pinned compiler and native SDKs
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
+      - name: Stage exact reviewed source without branch writes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -31,61 +32,64 @@ jobs:
           import base64,hashlib,json,os,subprocess
           from pathlib import Path
           repo=os.environ['GITHUB_REPOSITORY']
-          def get(endpoint):
-              return json.loads(subprocess.check_output(['gh','api',f'repos/{repo}/{endpoint}']))
           def sha(data):
               return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
-          tree=get('git/trees/b2ebb0a4230b35626e745eedf670b88d35818168?recursive=1')
-          assert not tree.get('truncated')
-          entries=[e for e in tree['tree'] if e['type']=='blob']
-          expected={
-              'crates/fr-tailnet/Cargo.toml':'c5eb79a238a18d4570cd144512de1ff6436f1065',
-              'crates/fr-tailnet/src/lib.rs':'41f0a4b8fe6d9a894c932bb1cf59a1150500971d',
-              'crates/fr-tailnet/src/local.rs':'142534ee27ca35c53d0c8fda80c00b9742c6f5d7',
-              'crates/fr-tailnet/src/metadata.rs':'5b1fedce7ed4213ef3a661b491f7d50606ee20b7',
-              'crates/fr-tailnet/src/expiry.rs':'976933e911c301fbe9f3384c2c7465f0255ee109',
-              'crates/fr-tailnet/src/local/tests.rs':'ffe30214a4b77ac357f80ae10195162e956a0eb9',
+          def read_blob(oid):
+              raw=json.loads(subprocess.check_output(['gh','api',f'repos/{repo}/git/blobs/{oid}']))
+              data=base64.b64decode(raw['content'])
+              assert sha(data)==oid
+              return data
+          changed=['crates/fr-tailnet/src/lib.rs','crates/fr-tailnet/src/local.rs','crates/fr-tailnet/src/local/tests.rs','crates/frd/Cargo.toml','crates/frd/src/media.rs','Cargo.lock']
+          new={
+              'crates/fr-tailnet/src/lease.rs':'a71a4611e817d2a39806296b47601acbae91cdc1',
+              'crates/frd/examples/tailnet_media_check.rs':'598390a5c828dcdeea323f05d8621881270a9b08',
           }
-          assert {e['path']:e['sha'] for e in entries}==expected
-          for entry in entries:
-              target=Path(entry['path'])
-              assert not target.exists(),f'Concurrent source already present: {target}'
-              data=base64.b64decode(get('git/blobs/'+entry['sha'])['content'])
-              assert sha(data)==entry['sha']
+          before={p:sha(Path(p).read_bytes()) for p in changed}
+          patch=Path(os.environ['RUNNER_TEMP'],'admission.patch')
+          patch.write_bytes(read_blob('566af0f39167df4ef8815e8b9a06a56ed5eb6241'))
+          actual=set(subprocess.check_output(['git','apply','--numstat',str(patch)],text=True).splitlines())
+          assert {line.split('\t',2)[2] for line in actual}==set(changed)
+          subprocess.run(['git','apply','--check',str(patch)],check=True)
+          subprocess.run(['git','apply',str(patch)],check=True)
+          for path,oid in new.items():
+              target=Path(path)
+              assert not target.exists(),f'Concurrent source exists: {target}'
               target.parent.mkdir(parents=True,exist_ok=True)
-              target.write_bytes(data)
-          root=Path('Cargo.toml')
-          text=root.read_text()
-          anchor='fr-wire = { path = "crates/fr-wire" }'
-          assert text.count(anchor)==1 and 'fr-tailnet = ' not in text
-          additions='\nfr-tailnet = { path = "crates/fr-tailnet" }'
-          for name in ['serde','serde_json']:
-              if not any(line.startswith(name+' = ') for line in text.splitlines()):
-                  additions+='\n'+name+' = "1"'
-          root.write_text(text.replace(anchor,anchor+additions))
-          paths=list(expected)+['Cargo.toml','Cargo.lock']
-          Path(os.environ['RUNNER_TEMP'],'tailnet-paths.json').write_text(json.dumps(paths))
-          print('STAGED_ON',os.environ['GITHUB_SHA'])
+              target.write_bytes(read_blob(oid))
+          paths=changed+list(new)
+          Path(os.environ['RUNNER_TEMP'],'admission-paths.json').write_text(json.dumps(paths))
+          Path(os.environ['RUNNER_TEMP'],'admission-before.json').write_text(json.dumps(before))
+          print(json.dumps({'staged_on':os.environ['GITHUB_SHA'],'before':before}))
           PY
-          cargo metadata --format-version=1 > "$RUNNER_TEMP/tailnet-metadata.json"
-          git diff -- Cargo.toml Cargo.lock
-      - name: Verify real LocalAPI boundary and strict source checks
+          cargo metadata --locked --format-version=1 > "$RUNNER_TEMP/admission-metadata.json"
+      - name: Verify committed workspace plus exact admission changes
         run: |
-          cargo fmt --all --check
-          cargo test -p fr-tailnet --locked
-          cargo clippy -p fr-tailnet --all-targets --locked -- -D warnings
+          ./scripts/verify.sh fast
+          ./scripts/verify.sh docs
+          cargo build -p frd --example tailnet_media_check --locked --message-format=json > "$RUNNER_TEMP/example-build.jsonl"
+          python3 - <<'PY'
+          import json,os,subprocess
+          from pathlib import Path
+          artifacts=[json.loads(line) for line in Path(os.environ['RUNNER_TEMP'],'example-build.jsonl').read_text().splitlines() if line.startswith('{')]
+          paths={x['executable'] for x in artifacts if x.get('executable') and x.get('target',{}).get('name')=='tailnet_media_check'}
+          assert len(paths)==1
+          executable=Path(next(iter(paths))).resolve(strict=True)
+          assert executable.is_relative_to(Path('target').resolve())
+          subprocess.run(['sudo','--',str(executable)],check=True)
+          PY
           git diff --check
-      - name: Retain exact verified source objects for explicit commit
+      - name: Retain exact verified source for explicit publication
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 - <<'PY'
           import base64,json,os,subprocess
           from pathlib import Path
-          paths=json.loads(Path(os.environ['RUNNER_TEMP'],'tailnet-paths.json').read_text())
+          paths=json.loads(Path(os.environ['RUNNER_TEMP'],'admission-paths.json').read_text())
+          before=json.loads(Path(os.environ['RUNNER_TEMP'],'admission-before.json').read_text())
           for path in paths:
               data=Path(path).read_bytes()
               body=json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()})
               result=subprocess.run(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,capture_output=True,check=True)
-              print(json.dumps({'path':path,'sha':json.loads(result.stdout)['sha'],'verified_against':os.environ['GITHUB_SHA']}))
+              print(json.dumps({'path':path,'before':before.get(path),'sha':json.loads(result.stdout)['sha'],'verified_against':os.environ['GITHUB_SHA']}))
           PY
