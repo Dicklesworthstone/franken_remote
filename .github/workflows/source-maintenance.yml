@@ -58,12 +58,12 @@ jobs:
           # A drive slice is not a delivery acknowledgement. The correction waits
           # for the actual reply and requires its exact rejection, not a timeout.
           fix=Path(os.environ['RUNNER_TEMP'],'decoder-arrival.patch')
-          fix.write_bytes(blob('7ea3e7e4fa73b0cae86286cd53122455eea5a770'))
+          fix.write_bytes(blob('974fbb86f7a88ab0ca63e9b058494677e666778d'))
           actual=subprocess.check_output(['git','apply','--numstat',str(fix)],text=True)
           assert {line.split('\t',2)[2] for line in actual.splitlines()}=={'crates/fr-native/tests/decoder_startup.rs'}
           subprocess.run(['git','apply','--check',str(fix)],check=True)
           subprocess.run(['git','apply',str(fix)],check=True)
-          expected['crates/fr-native/tests/decoder_startup.rs']=(None,'1b17ed0258cc20b0b0525f7125029f11c5ce1b04')
+          expected['crates/fr-native/tests/decoder_startup.rs']=(None,'35ba834e6cf00c09e141dde3989a28a3b469d18f')
           for p,(before,after) in expected.items(): assert sha(Path(p).read_bytes())==after,p
           Path(os.environ['RUNNER_TEMP'],'decoder-paths.json').write_text(json.dumps(expected))
           print('Candidate hashes verified on',os.environ['GITHUB_SHA'])
