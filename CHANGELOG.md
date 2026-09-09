@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-09-09 — Installed Tailscale admission through final media/input effects
+
+- `a1e3c1`: implement the Linux installed-LocalAPI boundary with root Unix peer credentials, bounded Asupersync HTTP, consistent status/WhoIs snapshots, exact node addresses, explicit sharing scope and per-connection app-capability grants. No prefix/DNS membership inference, embedded VPN, new runtime, policy mutation or public listener.
+- `204e952`: add a single owned admission lifetime with shared non-renewing checks. Expiry, revoke, dropped owner/refresh, identity changes and permission changes are terminal. Bind approved observation, capture deadlines and the existing prepared-media final-send guard to that lifetime.
+- Connect the same gate to `Seat::start_admitted`, canonical input enqueue/idle service, and every post-preparation native submission check. Read-only grants never invoke the native input factory; already submitted effects keep their original receipts and release-only cleanup.
+
+The initial admission sources passed clean CI run 34314791348. The exact shared-lifetime/media objects passed full pinned-toolchain workspace verification, docs, 23 LocalAPI/lifetime tests and five root-owned synthetic media scenarios in run 34315921329. Local input-extension checks passed all eight media/input scenarios, strict first-party/test Clippy and 36 existing owner/watchdog/egress regressions. Removing only the final post-preparation gate caused the unchanged input scenario to fail on a revoked key press. The full input-extension run is 34318181209, separately revision-bound.
+
+These fixtures exercise real Unix/HTTP/peer credentials and the production policy/owners with synthetic authority metadata, opaque media packet bytes and a recording input sink. They do not establish live Tailscale sharing semantics, TUN ingress, OS input effects or a complete network session. Primary Asupersync QUIC and concurrent decoder/critical-stream work are preserved. See [TAILNET_ADMISSION.md](TAILNET_ADMISSION.md) for the explicit app-grant profile, integration, evidence and remaining gates.
+
 ## Native HEVC over primary Asupersync QUIC
 
 - `52bd52d`: retain one exact prepared media record across transport backpressure, with unchanged owner-bound packet identity and deadline. Service cache and pending-record expiry on idle turns; terminal close releases viewer-owned storage without revoking another viewer's observation.

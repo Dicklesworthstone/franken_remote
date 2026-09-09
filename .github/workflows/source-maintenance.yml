@@ -1,73 +1,76 @@
-name: Review source maintenance
-
-# Review-only: no commit/ref/PR writes. Suggested source remains subject to
-# review and normal repository verification before it is adopted.
-# Current review: complete sender/receiver media-delivery integration.
+name: Verify reviewed native negotiation
 on:
   workflow_dispatch:
   push:
     branches: [main]
     paths: ['.github/workflows/source-maintenance.yml']
-
 permissions:
   contents: write
-
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
 jobs:
-  suggest:
+  verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
-      - name: Check out exact source
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
-      - name: Install pinned toolchain
-        run: rustup show active-toolchain
-      - name: Apply machine-applicable source suggestions
-        run: |
-          export RCH_CARGO_WRAPPER_BYPASS=1
-          cargo fix --workspace --all-targets --all-features --locked --allow-dirty --allow-staged
-          cargo clippy --fix --workspace --all-targets --all-features --locked --allow-dirty --allow-staged -- -D warnings
-          cargo fmt --all
-      - name: Verify suggested source
-        run: ./scripts/verify.sh fast
-      - name: Retain reviewable source blobs and diff
-        if: always()
+      - name: Stage exact reviewed negotiation source without ref writes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          git diff --check
-          git diff --stat
-          git diff -- crates
           python3 - <<'PY'
-          import base64, json, os, subprocess
+          import base64,gzip,hashlib,json,os,subprocess
           from pathlib import Path
-          paths = subprocess.check_output(['git', 'diff', '--name-only', '-z']).decode().split('\0')
-          for path in filter(None, paths):
-              if not path.startswith('crates/') or not path.endswith('.rs'):
-                  raise SystemExit(f'Unexpected maintenance path: {path}')
-              data = Path(path).read_bytes()
-              body = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()})
-              result = subprocess.run(
-                  ['gh', 'api', '--method', 'POST', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', '--input', '-'],
-                  input=body, text=True, capture_output=True, check=True)
-              print(json.dumps({'path': path, 'sha': json.loads(result.stdout)['sha'], 'source_commit': os.environ['GITHUB_SHA']}))
+          expected={
+            'PROTOCOL_NEGOTIATION.md':(None,'71419c1699ef01334c6230c89c56424b3c2ff302'),
+            'crates/fr-wire/src/lib.rs':('965723ff9c95cbe74eef5d12bde3976385c1efcf','b6315428f11974a7d212f0bcf8c8476fa81a72a7'),
+            'crates/fr-wire/src/negotiation.rs':(None,'364c64645b888226ec9174898ee8f50fb53b7ddf'),
+            'crates/fr-wire/src/record.rs':('9614b7316bc8e710df2a5e1079b73523f8afb43a','dd13f9205c4c5d876fb44bf4999f9b41348270a6'),
+            'crates/fr-wire/src/stream.rs':('4ed0d87098c145d984782200fd904e9a94f31ed6','d1d296c5798ba6c89f27c36977fd65e7db8e4922'),
+            'crates/fr-wire/tests/negotiation.rs':(None,'129f8e1e9c82abfc4dc2029df2e942b25251acd9'),
+          }
+          def sha(data): return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
+          for p,(before,after) in expected.items():
+            assert (sha(Path(p).read_bytes()) if Path(p).exists() else None)==before,p
+          raw=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/21c13d2cac0ee4e59544318d4a191626ba078c2e']))
+          patch=gzip.decompress(base64.b64decode(raw['content']))
+          assert hashlib.sha256(patch).hexdigest()=='3608e3b9f0934c8cdf2b849c81e69790a3f1fb79a021a96973618a27e8d508e2'
+          path=Path(os.environ['RUNNER_TEMP'],'negotiation.patch');path.write_bytes(patch)
+          actual=subprocess.check_output(['git','apply','--numstat',str(path)],text=True)
+          assert {line.split('\t',2)[2] for line in actual.splitlines()}==set(expected)
+          subprocess.run(['git','apply','--check',str(path)],check=True)
+          subprocess.run(['git','apply',str(path)],check=True)
+          for p,(before,after) in expected.items(): assert sha(Path(p).read_bytes())==after,p
+          Path(os.environ['RUNNER_TEMP'],'negotiation-paths.json').write_text(json.dumps(expected))
           PY
-      - name: Package reproducible offline review inputs
-        if: always() && github.event_name == 'workflow_dispatch'
+      - name: Install pinned compiler and native SDKs
         run: |
-          mkdir -p "$RUNNER_TEMP/fr-review"
-          git ls-files -z | tar --null -T - -czf "$RUNNER_TEMP/fr-review/source.tar.gz"
-          sysroot="$(rustc --print sysroot)"
-          tar -czf "$RUNNER_TEMP/fr-review/rust-toolchain.tar.gz" -C "$sysroot" bin lib
-          printf '%s\n' "$GITHUB_SHA" > "$RUNNER_TEMP/fr-review/source-commit.txt"
-          (cd "$RUNNER_TEMP/fr-review" && sha256sum *.tar.gz > SHA256SUMS)
-      - name: Retain offline verification bundle
-        if: always() && github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: offline-media-review
-          path: ${{ runner.temp }}/fr-review/
-          retention-days: 1
-          compression-level: 0
-          if-no-files-found: error
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
+      - name: Verify full candidate workspace
+        run: |
+          ./scripts/verify.sh fast
+          ./scripts/verify.sh docs
+          git diff --check
+      - name: Export exact verified source objects without changing branches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64,hashlib,json,os,subprocess
+          from pathlib import Path
+          expected=json.loads(Path(os.environ['RUNNER_TEMP'],'negotiation-paths.json').read_text())
+          for path,(before,after) in expected.items():
+            data=Path(path).read_bytes()
+            assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()==after
+            body=json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()})
+            result=subprocess.run(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,capture_output=True,check=True)
+            assert json.loads(result.stdout)['sha']==after
+            print(json.dumps({'path':path,'before':before,'sha':after,'verified_against':os.environ['GITHUB_SHA']}))
+          PY

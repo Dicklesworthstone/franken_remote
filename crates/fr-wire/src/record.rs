@@ -93,6 +93,12 @@ impl MediaLimits {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum Kind {
+    ClientHello = 0x0001,
+    HostCapabilities = 0x0002,
+    SelectedConfiguration = 0x0003,
+    ApprovalRequired = 0x0010,
+    SessionOpened = 0x0011,
+    BindingAccepted = 0x001c,
     Recovery = 0x0032,
     Fragment = 0x0034,
     Repair = 0x0035,
@@ -107,8 +113,24 @@ pub enum Kind {
     InputResult = 0x0048,
 }
 impl Kind {
+    pub(crate) const fn initial(self) -> bool {
+        matches!(
+            self,
+            Self::ClientHello
+                | Self::HostCapabilities
+                | Self::SelectedConfiguration
+                | Self::ApprovalRequired
+                | Self::SessionOpened
+        )
+    }
     fn parse(value: u16) -> Result<Self, WireError> {
         match value {
+            0x0001 => Ok(Self::ClientHello),
+            0x0002 => Ok(Self::HostCapabilities),
+            0x0003 => Ok(Self::SelectedConfiguration),
+            0x0010 => Ok(Self::ApprovalRequired),
+            0x0011 => Ok(Self::SessionOpened),
+            0x001c => Ok(Self::BindingAccepted),
             0x0032 => Ok(Self::Recovery),
             0x0034 => Ok(Self::Fragment),
             0x0035 => Ok(Self::Repair),
@@ -130,7 +152,13 @@ impl Kind {
             Self::Fragment => Some(Channel::Video),
             Self::Repair => Some(Channel::Control),
             Self::Progress => Some(Channel::MediaConfig),
-            Self::Key
+            Self::ClientHello
+            | Self::HostCapabilities
+            | Self::SelectedConfiguration
+            | Self::ApprovalRequired
+            | Self::SessionOpened
+            | Self::BindingAccepted
+            | Self::Key
             | Self::Button
             | Self::Pointer
             | Self::Relative
@@ -199,7 +227,7 @@ impl<'a> Record<'a> {
         let payload_len = usize::try_from(r.u32()?).map_err(|_| WireError::ArithmeticOverflow)?;
         let received_binding = r.u32()?;
         let ext_len = usize::try_from(r.u32()?).map_err(|_| WireError::ArithmeticOverflow)?;
-        if binding == 0 || received_binding != binding {
+        if (binding == 0 && !kind.initial()) || received_binding != binding {
             return Err(WireError::InvalidBinding);
         }
         if kind.channel() != channel {
@@ -330,7 +358,7 @@ impl<'a> Writer<'a> {
         let total = HEADER_BYTES
             .checked_add(payload)
             .ok_or(WireError::ArithmeticOverflow)?;
-        if binding == 0 {
+        if binding == 0 && !kind.initial() {
             return Err(WireError::InvalidBinding);
         }
         if total > maximum {

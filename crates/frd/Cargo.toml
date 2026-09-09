@@ -15,3 +15,4 @@ workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fr-transport.workspace = true
+fr-tailnet.workspace = true

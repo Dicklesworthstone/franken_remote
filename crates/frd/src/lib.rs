@@ -16,3 +16,6 @@ pub mod media_egress;
 
 #[cfg(target_os = "linux")]
 pub mod media_quic;
+
+#[cfg(target_os = "linux")]
+pub mod input_quic;

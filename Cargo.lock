@@ -609,6 +609,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fr-tailnet"
+version = "0.1.0"
+dependencies = [
+ "asupersync",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "fr-transport"
 version = "0.1.0"
 dependencies = [
@@ -662,6 +671,7 @@ dependencies = [
  "asupersync",
  "fr-core",
  "fr-media",
+ "fr-tailnet",
  "fr-transport",
  "fr-wire",
 ]
