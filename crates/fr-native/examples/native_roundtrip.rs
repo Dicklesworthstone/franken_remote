@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         let mut packet = [0; 1_150];
         while let Some(offer) = send.next_packet(now, &mut packet)? {
-            receive.receive(offer.channel, &packet[..offer.byte_len], now)?;
+            receive.receive(offer.channel(), &packet[..offer.byte_len()], now)?;
         }
         let picture = receive
             .take_decodable(now)?

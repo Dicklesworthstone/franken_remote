@@ -316,11 +316,11 @@ async fn scenario(delay_receipt: bool) {
         subscription.authorize_write(&offer).unwrap();
         let at = now(&cx);
         receiver
-            .receive(offer.channel, &packet[..offer.byte_len], at.0)
+            .receive(offer.channel(), &packet[..offer.byte_len()], at.0)
             .unwrap();
-        if offer.channel == Channel::MediaConfig {
+        if offer.channel() == Channel::MediaConfig {
             client
-                .progress(&packet[..offer.byte_len], &wire, at)
+                .progress(&packet[..offer.byte_len()], &wire, at)
                 .unwrap();
         }
     }
@@ -467,10 +467,13 @@ fn check_bounds(video: &Video, counts: &mut RecoveryCounts) {
     counts.peak_sender_bytes = counts.peak_sender_bytes.max(send.bytes);
     counts.peak_receiver_bytes = counts.peak_receiver_bytes.max(receive.bytes);
 }
-fn receive_packet(video: &mut Video, offer: PacketOffer, packet: &[u8], cx: &Cx) {
+fn receive_packet(video: &mut Video, offer: &PacketOffer, packet: &[u8], cx: &Cx) {
     let at = now(cx);
-    video.receiver.receive(offer.channel, packet, at.0).unwrap();
-    if offer.channel == Channel::MediaConfig {
+    video
+        .receiver
+        .receive(offer.channel(), packet, at.0)
+        .unwrap();
+    if offer.channel() == Channel::MediaConfig {
         video.client.progress(packet, &video.wire, at).unwrap();
     }
 }
@@ -482,9 +485,9 @@ fn flush_fragments(
 ) {
     for entry in held.iter_mut().rev() {
         if let Some((offer, packet)) = entry.take() {
-            receive_packet(video, offer, &packet[..offer.byte_len], cx);
+            receive_packet(video, &offer, &packet[..offer.byte_len()], cx);
             let before = video.receiver.budget_usage();
-            receive_packet(video, offer, &packet[..offer.byte_len], cx);
+            receive_packet(video, &offer, &packet[..offer.byte_len()], cx);
             assert_eq!(
                 video.receiver.budget_usage(),
                 before,
@@ -499,14 +502,18 @@ fn impaired_transfer(video: &mut Video, loss: Option<Loss>, counts: &mut Recover
     let mut packet = [0; 1150];
     // The fault injector itself has exactly four inline records, including
     // their metadata. It never accumulates a whole encoded picture's packets.
-    let mut held = [None; 4];
+    let mut held = core::array::from_fn(|_| None);
     let mut held_count = 0;
     while let Some(offer) = video.subscription.next_packet(&mut packet).unwrap() {
         video.subscription.authorize_write(&offer).unwrap();
-        if offer.channel == Channel::Video {
-            let record =
-                fr_wire::Record::decode(&packet[..offer.byte_len], &video.wire, 1, Channel::Video)
-                    .unwrap();
+        if offer.channel() == Channel::Video {
+            let record = fr_wire::Record::decode(
+                &packet[..offer.byte_len()],
+                &video.wire,
+                1,
+                Channel::Video,
+            )
+            .unwrap();
             let fragment = fr_wire::decode_fragment(record, &video.wire).unwrap();
             let total = fragment.descriptor.fragment_count().unwrap();
             assert!(
@@ -532,10 +539,10 @@ fn impaired_transfer(video: &mut Video, loss: Option<Loss>, counts: &mut Recover
             }
         } else {
             assert!(matches!(
-                offer.channel,
+                offer.channel(),
                 Channel::MediaConfig | Channel::Recovery
             ));
-            receive_packet(video, offer, &packet[..offer.byte_len], cx);
+            receive_packet(video, &offer, &packet[..offer.byte_len()], cx);
             check_bounds(video, counts);
         }
     }
@@ -553,6 +560,26 @@ async fn capture_pattern(
     phase: u8,
     counts: &mut RecoveryCounts,
 ) -> (usize, u64) {
+    paint_pattern(video, phase);
+    let unit = video.capture.capture(&video.control, false).await.unwrap();
+    assert!(
+        !unit.is_idr(),
+        "repair must exercise a predictive HEVC picture"
+    );
+    let bytes = unit.bytes().len();
+    let frame = unit.frame().as_raw();
+    assert!(bytes > video.wire.fragment_stride() as usize);
+    counts.encoded_bytes += bytes;
+    let before = video.subscription.cache_usage().bytes;
+    video.subscription.enqueue(unit).unwrap();
+    assert!(
+        video.subscription.cache_usage().bytes > before + bytes,
+        "cache omitted picture metadata"
+    );
+    check_bounds(video, counts);
+    (bytes, frame)
+}
+fn paint_pattern(video: &mut Video, phase: u8) {
     let limits = config().limits().unwrap();
     let mut pixels = vec![0; 320 * 240 * 4];
     for (index, pixel) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
@@ -573,23 +600,6 @@ async fn capture_pattern(
         .source
         .present(&BgraFrame::new(320, 240, pixels, &limits).unwrap())
         .unwrap();
-    let unit = video.capture.capture(&video.control, false).await.unwrap();
-    assert!(
-        !unit.is_idr(),
-        "repair must exercise a predictive HEVC picture"
-    );
-    let bytes = unit.bytes().len();
-    let frame = unit.frame().as_raw();
-    assert!(bytes > video.wire.fragment_stride() as usize);
-    counts.encoded_bytes += bytes;
-    let before = video.subscription.cache_usage().bytes;
-    video.subscription.enqueue(unit).unwrap();
-    assert!(
-        video.subscription.cache_usage().bytes > before + bytes,
-        "cache omitted picture metadata"
-    );
-    check_bounds(video, counts);
-    (bytes, frame)
 }
 async fn sleep_until(cx: &Cx, until: u64) {
     let remaining = until.saturating_sub(now(cx).0);
@@ -659,11 +669,11 @@ async fn repair_missing(video: &mut Video, counts: &mut RecoveryCounts, cx: &Cx)
         "repair rate limit not enforced"
     );
     while let Some(offer) = video.subscription.next_repair(&mut packet).unwrap() {
-        assert_eq!(offer.channel, Channel::Video);
+        assert_eq!(offer.channel(), Channel::Video);
         video.subscription.authorize_write(&offer).unwrap();
-        receive_packet(video, offer, &packet[..offer.byte_len], cx);
+        receive_packet(video, &offer, &packet[..offer.byte_len()], cx);
         counts.repair_fragments += 1;
-        counts.repair_wire_bytes += offer.byte_len;
+        counts.repair_wire_bytes += offer.byte_len();
         check_bounds(video, counts);
     }
     assert!(counts.repair_wire_bytes <= SendPolicy::default().repair_bytes_per_window);
@@ -728,13 +738,13 @@ async fn observe_pressed(observer: &mut X11Pointer, agent: &Agent, cx: &Cx) {
             "press observation after {elapsed} us: control stopped {:?}, state {state:?}",
             agent.control().reason()
         );
-        if state == (DesktopPoint { x: 30, y: 40 }, 256) {
-            return;
-        }
         assert!(
             elapsed < 50_000,
             "press not observed after {elapsed} us: {state:?}"
         );
+        if state == (DesktopPoint { x: 30, y: 40 }, 256) {
+            return;
+        }
         asupersync::time::sleep(cx.timer_driver().unwrap().now(), Duration::from_millis(1)).await;
     }
 }
@@ -973,4 +983,162 @@ fn actual_hevc_lost_final_picture_is_announced_and_repaired_before_idle() {
 #[test]
 fn actual_hevc_late_repaired_reference_unlocks_a_fresh_dependent_without_presenting_old_pixels() {
     run(recovery_case(Loss::EveryFifth, true));
+}
+
+// Local fixture routing for an already decoded, unchanged native configuration.
+// This is NOT the missing exact-hvcC DecoderConfiguration/Configured handshake.
+fn replace_recovery(video: &mut Video, cx: &Cx, generation: u64, first_binding: u32) {
+    let epoch = MediaEpoch {
+        configuration: config().generation,
+        recovery: RecoveryGeneration::from_raw(generation),
+    };
+    let bindings = MediaBindings::new(
+        first_binding,
+        first_binding + 1,
+        first_binding + 2,
+        first_binding + 3,
+    )
+    .unwrap();
+    video.subscription.recover(epoch, bindings).unwrap();
+    video.receiver.replace(epoch, bindings, now(cx).0).unwrap();
+    video.receiver.decoder_configured(now(cx).0).unwrap();
+}
+async fn recovered_frame(
+    video: &mut Video,
+    output: &mut X11Surface,
+    cx: &Cx,
+    frame: u64,
+    phase: u8,
+) {
+    // Both reliable chunks and datagrams use this fixture's 1150-byte cap.
+    let mut packet = [0; 1150];
+    while let Some(offer) = video.subscription.next_packet(&mut packet).unwrap() {
+        video.subscription.authorize_write(&offer).unwrap();
+        video
+            .receiver
+            .receive(offer.channel(), &packet[..offer.byte_len()], now(cx).0)
+            .unwrap();
+    }
+    let receipt = video
+        .presenter
+        .present_next(cx, &mut video.receiver)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.frame.as_raw(), frame);
+    assert_eq!(receipt.stage, PresentationStage::SubmittedToCompositor);
+    assert_eq!(
+        receipt.decoded.epoch().recovery,
+        RecoveryGeneration::from_raw(2)
+    );
+    let image = output.snapshot().unwrap();
+    for (x, y) in [(144, 108), (160, 120), (176, 132)] {
+        assert!(
+            image.pixels()[4 * (y * 320 + x)..][..3]
+                .iter()
+                .zip(marker(phase))
+                .all(|(&actual, expected)| actual.abs_diff(expected) < 10)
+        );
+    }
+    assert_eq!(video.receiver.state(), ReceiveState::Streaming);
+    assert_eq!(video.receiver.budget_usage(), BudgetUsage::default());
+    assert!(
+        video.client.stopped().is_some(),
+        "new media resurrected old input view"
+    );
+}
+fn deliver_next(video: &mut Video, cx: &Cx, packet: &mut [u8]) -> PacketOffer {
+    let offer = video.subscription.next_packet(packet).unwrap().unwrap();
+    video.subscription.authorize_write(&offer).unwrap();
+    video
+        .receiver
+        .receive(offer.channel(), &packet[..offer.byte_len()], now(cx).0)
+        .unwrap();
+    offer
+}
+#[test]
+fn actual_hevc_partial_recovery_is_fenced_then_fresh_idr_and_dependent_are_visible() {
+    run(async {
+        let source = Server::start();
+        let viewer = Server::start();
+        let cx = Cx::current().unwrap();
+        let mut video = prepare(&source, &viewer, &cx).await;
+        let mut output =
+            X11Surface::capture(Some(&viewer.name), config().limits().unwrap()).unwrap();
+        let initial = video.capture.capture(&video.control, false).await.unwrap();
+        video.subscription.enqueue(initial).unwrap();
+        let mut counts = RecoveryCounts::default();
+        impaired_transfer(&mut video, None, &mut counts, &cx);
+        let visible = present_visible(&mut video, &mut output, &cx, 0, [40, 80, 180, 255]).await;
+        replace_recovery(&mut video, &cx, 1, 5);
+        assert!(video.client.tick(now(&cx)).is_err());
+        paint_pattern(&mut video, 0);
+        let partial = video.capture.capture(&video.control, true).await.unwrap();
+        assert!(partial.is_idr());
+        let partial_bytes = partial.bytes().len();
+        // Require a genuinely multi-chunk encoded IDR; no padding or fake AU.
+        assert!(partial_bytes > video.wire.record_bytes());
+        video.subscription.enqueue(partial).unwrap();
+        let mut packet = [0; 1150];
+        let progress = deliver_next(&mut video, &cx, &mut packet);
+        assert_eq!(progress.channel(), Channel::MediaConfig);
+        let old = deliver_next(&mut video, &cx, &mut packet);
+        assert_eq!(old.channel(), Channel::Recovery);
+        let partial_charge = video.receiver.budget_usage();
+        assert!(partial_charge.bytes > partial_bytes);
+        assert_eq!(partial_charge.pictures, 1);
+        assert!(
+            video
+                .presenter
+                .present_next(&cx, &mut video.receiver)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(output.snapshot().unwrap().pixels(), visible);
+        // Model a reset of this reliable recovery stream. Discarding the old
+        // remaining chunks cannot discard or silently complete a decoder input.
+        replace_recovery(&mut video, &cx, 2, 9);
+        assert_eq!(video.subscription.cache_usage(), BudgetUsage::default());
+        assert_eq!(video.receiver.budget_usage(), BudgetUsage::default());
+        assert_eq!(
+            video.subscription.authorize_write(&old),
+            Err(frd::media::Error::Send(SendError::Delivery(
+                DeliveryError::StaleGeneration
+            )))
+        );
+        assert_eq!(
+            video
+                .receiver
+                .receive(old.channel(), &packet[..old.byte_len()], now(&cx).0),
+            Err(DeliveryError::StaleGeneration)
+        );
+        paint_pattern(&mut video, 1);
+        let fresh = video.capture.capture(&video.control, true).await.unwrap();
+        assert!(fresh.is_idr());
+        let fresh_frame = fresh.frame().as_raw();
+        assert_eq!(fresh_frame, 2, "shared capture identity restarted");
+        let fresh_bytes = fresh.bytes().len();
+        video.subscription.enqueue(fresh).unwrap();
+        recovered_frame(&mut video, &mut output, &cx, fresh_frame, 1).await;
+        paint_pattern(&mut video, 0);
+        let dependent = video.capture.capture(&video.control, false).await.unwrap();
+        assert_eq!(
+            dependent.kind(),
+            fr_media::access_unit::FrameKind::Predicted {
+                references: fr_media::access_unit::FrameId::from_raw(fresh_frame)
+            }
+        );
+        let dependent_frame = dependent.frame().as_raw();
+        let dependent_bytes = dependent.bytes().len();
+        video.subscription.enqueue(dependent).unwrap();
+        recovered_frame(&mut video, &mut output, &cx, dependent_frame, 0).await;
+        println!(
+            "recovery_replacement partial_idr_bytes={partial_bytes} partial_receiver_charge={} fresh_idr_bytes={fresh_bytes} dependent_bytes={dependent_bytes} retained_old_record_bytes={} record_scratch_bytes=1150 subscription_fixed_bytes={} sender_identity_allocations=1",
+            partial_charge.bytes,
+            old.byte_len(),
+            std::mem::size_of::<Subscription>()
+        );
+        expire_cache_and_close(&mut video, &cx).await;
+    });
 }

@@ -37,7 +37,8 @@ fn originals(cache: &mut SendCache, now: u64) -> Vec<(PacketOffer, Vec<u8>)> {
     let mut packets = Vec::new();
     let mut out = [0; 1_150];
     while let Some(offer) = cache.next_packet(now, &mut out).unwrap() {
-        packets.push((offer, out[..offer.byte_len].to_vec()));
+        let bytes = out[..offer.byte_len()].to_vec();
+        packets.push((offer, bytes));
     }
     packets
 }
@@ -55,9 +56,9 @@ fn bootstrap(c: ReceiveConfig, policy: SendPolicy) -> (SendCache, ReceivePipelin
         )
         .unwrap();
     let packets = originals(&mut sender, 0);
-    assert_eq!(packets[0].0.channel, Channel::MediaConfig);
+    assert_eq!(packets[0].0.channel(), Channel::MediaConfig);
     for (offer, bytes) in packets {
-        receiver.receive(offer.channel, &bytes, 0).unwrap();
+        receiver.receive(offer.channel(), &bytes, 0).unwrap();
     }
     let picture = receiver.take_decodable(0).unwrap().unwrap();
     assert_eq!(picture.bytes(), vec![9; 3_000]);
@@ -104,12 +105,12 @@ fn sender_receiver_roundtrip_recovers_reordered_dropped_and_final_frame_packets(
         let packets = originals(&mut sender, now);
         for (index, (offer, packet)) in packets.iter().enumerate().rev() {
             // All final-picture datagrams are lost; reliable progress remains.
-            if offer.channel == Channel::Video && (frame == 40 || index % 3 == 0) {
+            if offer.channel() == Channel::Video && (frame == 40 || index % 3 == 0) {
                 continue;
             }
-            receiver.receive(offer.channel, packet, now).unwrap();
-            if offer.channel == Channel::Video {
-                receiver.receive(offer.channel, packet, now).unwrap();
+            receiver.receive(offer.channel(), packet, now).unwrap();
+            if offer.channel() == Channel::Video {
+                receiver.receive(offer.channel(), packet, now).unwrap();
             }
         }
         assert!(receiver.take_decodable(now).unwrap().is_none());
@@ -121,9 +122,9 @@ fn sender_receiver_roundtrip_recovers_reordered_dropped_and_final_frame_packets(
             .queue_repair(&out[..request_len], now + 20_000)
             .unwrap();
         while let Some(offer) = sender.next_repair_packet(now + 30_000, &mut out).unwrap() {
-            assert!(offer.send_by_micros > now + 30_000);
+            assert!(offer.send_by_micros() > now + 30_000);
             receiver
-                .receive(offer.channel, &out[..offer.byte_len], now + 30_000)
+                .receive(offer.channel(), &out[..offer.byte_len()], now + 30_000)
                 .unwrap();
             repairs += 1;
         }
@@ -150,15 +151,15 @@ fn repairing_an_older_reference_unblocks_two_complete_pictures_in_order() {
         .push(first, vec![1; 3_000], DeliveryMode::Datagrams, 10)
         .unwrap();
     for (offer, packet) in originals(&mut sender, 10) {
-        if offer.channel == Channel::MediaConfig {
-            receiver.receive(offer.channel, &packet, 10).unwrap();
+        if offer.channel() == Channel::MediaConfig {
+            receiver.receive(offer.channel(), &packet, 10).unwrap();
         }
     }
     sender
         .push(second, vec![2; 3_000], DeliveryMode::Datagrams, 20)
         .unwrap();
     for (offer, packet) in originals(&mut sender, 20) {
-        receiver.receive(offer.channel, &packet, 20).unwrap();
+        receiver.receive(offer.channel(), &packet, 20).unwrap();
     }
     assert!(receiver.take_decodable(20).unwrap().is_none());
     let mut out = [0; 1_150];
@@ -166,7 +167,7 @@ fn repairing_an_older_reference_unblocks_two_complete_pictures_in_order() {
     sender.queue_repair(&out[..n], 60_000).unwrap();
     while let Some(offer) = sender.next_repair_packet(70_000, &mut out).unwrap() {
         receiver
-            .receive(offer.channel, &out[..offer.byte_len], 70_000)
+            .receive(offer.channel(), &out[..offer.byte_len()], 70_000)
             .unwrap();
     }
     for frame in [1_u64, 2] {
@@ -229,7 +230,7 @@ fn repair_ranges_are_checked_against_the_actual_cached_picture() {
         .unwrap();
     let fragment = decode_fragment(
         Record::decode(
-            &out[..offer.byte_len],
+            &out[..offer.byte_len()],
             &c.limits,
             c.bindings.for_channel(Channel::Video),
             Channel::Video,
@@ -352,7 +353,7 @@ fn repair_byte_budget_survives_recovery_generation_replacement() {
             .next_repair_packet(20_000, &mut out)
             .unwrap()
             .unwrap()
-            .byte_len,
+            .byte_len(),
         1_150
     );
     assert_eq!(
@@ -410,7 +411,131 @@ fn a_too_small_output_buffer_does_not_consume_an_original_packet() {
         Err(SendError::Wire(WireError::BufferTooSmall))
     );
     let offer = sender.next_packet(0, &mut [0; 1_150]).unwrap().unwrap();
-    assert_eq!(offer.channel, Channel::MediaConfig);
+    assert_eq!(offer.channel(), Channel::MediaConfig);
+}
+
+#[test]
+fn final_write_rejects_foreign_and_replaced_original_and_repair_offers() {
+    let c = config();
+    let (mut cache, _) = bootstrap(c, SendPolicy::default());
+    cache
+        .push(
+            progress(1, 3_000, 1),
+            vec![1; 3_000],
+            DeliveryMode::Datagrams,
+            1,
+        )
+        .unwrap();
+    let packets = originals(&mut cache, 1);
+    let original = &packets[1].0;
+    cache.authorize_write(original, 1).unwrap();
+    let (mut foreign, _) = bootstrap(c, SendPolicy::default());
+    assert_eq!(
+        foreign.authorize_write(original, 1),
+        Err(SendError::Delivery(DeliveryError::StaleGeneration))
+    );
+    cache
+        .queue_repair(&repair_packet(1, 0, 1, 3, c), 20_000)
+        .unwrap();
+    let repair = cache
+        .next_repair_packet(20_000, &mut [0; 1_150])
+        .unwrap()
+        .unwrap();
+    cache.authorize_write(&repair, 20_000).unwrap();
+    let epoch = MediaEpoch {
+        recovery: RecoveryGeneration::from_raw(1),
+        ..c.epoch
+    };
+    // A refused replacement leaves the current cache and offers usable.
+    assert_eq!(
+        cache.replace(epoch, MediaBindings::new(4, 5, 6, 7).unwrap(), 20_001),
+        Err(SendError::Delivery(DeliveryError::StaleGeneration))
+    );
+    cache.authorize_write(original, 20_001).unwrap();
+    cache
+        .replace(epoch, MediaBindings::new(5, 6, 7, 8).unwrap(), 20_002)
+        .unwrap();
+    assert_eq!(cache.cached_bytes(), 0);
+    for offer in [original, &repair] {
+        assert_eq!(
+            cache.authorize_write(offer, 20_002),
+            Err(SendError::Delivery(DeliveryError::StaleGeneration))
+        );
+    }
+    cache
+        .push(
+            progress(0, 3_000, 20_002),
+            vec![2; 3_000],
+            DeliveryMode::Recovery,
+            20_002,
+        )
+        .unwrap();
+    let fresh = cache.next_packet(20_002, &mut [0; 1_150]).unwrap().unwrap();
+    cache.authorize_write(&fresh, 20_002).unwrap();
+    cache.close();
+    assert_eq!(
+        cache.authorize_write(&fresh, 20_003),
+        Err(SendError::Closed)
+    );
+}
+
+#[test]
+fn final_write_services_unsent_predecessor_expiry_and_exact_deadline() {
+    let c = config();
+    // All original chunks were prepared: cache expiry alone does not fence the
+    // chain, but the retained offer still ends at its exact exclusive deadline.
+    let mut complete = sender(c, SendPolicy::default());
+    complete
+        .push(progress(0, 100, 0), vec![0; 100], DeliveryMode::Recovery, 0)
+        .unwrap();
+    let packets = originals(&mut complete, 0);
+    let offered = &packets[1].0;
+    complete.authorize_write(offered, 1_999_999).unwrap();
+    assert_eq!(
+        complete.authorize_write(offered, 2_000_000),
+        Err(SendError::OriginalExpired)
+    );
+    assert!(!complete.needs_recovery());
+    // Partly unsent originals instead fence the whole chain on expiry.
+    let (mut fresh_cache, _) = bootstrap(c, SendPolicy::default());
+    fresh_cache
+        .push(
+            progress(1, 3_000, 1),
+            vec![1; 3_000],
+            DeliveryMode::Datagrams,
+            1,
+        )
+        .unwrap();
+    let offer = fresh_cache
+        .next_packet(1, &mut [0; 1_150])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        fresh_cache.authorize_write(&offer, 250_001),
+        Err(SendError::OriginalExpired)
+    );
+    assert!(fresh_cache.needs_recovery());
+    // Retain a fully prepared recovery offer, then leave the next P unit unsent.
+    let mut early = sender(c, SendPolicy::default());
+    early
+        .push(progress(0, 100, 0), vec![0; 100], DeliveryMode::Recovery, 0)
+        .unwrap();
+    let packets = originals(&mut early, 0);
+    let old = &packets[1].0;
+    early
+        .push(
+            progress(1, 3_000, 1),
+            vec![1; 3_000],
+            DeliveryMode::Datagrams,
+            1,
+        )
+        .unwrap();
+    assert!(old.send_by_micros() > 250_001);
+    assert_eq!(
+        early.authorize_write(old, 250_001),
+        Err(SendError::OriginalExpired)
+    );
+    assert_eq!(early.cached_bytes(), 0);
 }
 #[test]
 fn bad_reference_and_counter_wrap_cannot_create_an_ambiguous_chain() {

@@ -73,8 +73,8 @@ fn flush_reorder(
     counts: &mut Counts,
 ) -> Result<(), Box<dyn Error>> {
     while let Some((offer, bytes)) = held.pop() {
-        receiver.receive(offer.channel, &bytes, now)?;
-        receiver.receive(offer.channel, &bytes, now)?;
+        receiver.receive(offer.channel(), &bytes, now)?;
+        receiver.receive(offer.channel(), &bytes, now)?;
         counts.duplicates += 1;
     }
     Ok(())
@@ -91,24 +91,25 @@ fn transfer(
     let mut held = Vec::with_capacity(4);
     while let Some(offer) = sender.next_packet(now, &mut out)? {
         counts.originals += 1;
-        if offer.channel == Channel::Video {
+        if offer.channel() == Channel::Video {
             if final_frame || counts.originals.is_multiple_of(5) {
                 counts.dropped += 1;
                 continue;
             }
-            held.push((offer, out[..offer.byte_len].to_vec()));
+            let bytes = out[..offer.byte_len()].to_vec();
+            held.push((offer, bytes));
             if held.len() == 4 {
                 flush_reorder(receiver, &mut held, now, counts)?;
             }
         } else {
-            receiver.receive(offer.channel, &out[..offer.byte_len], now)?;
+            receiver.receive(offer.channel(), &out[..offer.byte_len()], now)?;
         }
     }
     flush_reorder(receiver, &mut held, now, counts)?;
     if let Some(n) = receiver.repair_request(now + 20_000, &mut out)? {
         sender.queue_repair(&out[..n], now + 20_000)?;
         while let Some(offer) = sender.next_repair_packet(now + 30_000, &mut out)? {
-            receiver.receive(offer.channel, &out[..offer.byte_len], now + 30_000)?;
+            receiver.receive(offer.channel(), &out[..offer.byte_len()], now + 30_000)?;
             counts.repairs += 1;
         }
     }

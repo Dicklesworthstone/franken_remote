@@ -57,8 +57,8 @@ Visible pixel age and trustworthy source-observation age are separate. A genuine
 `QualifiedUnchanged` record for the exact visible picture can refresh source age
 without making those old pixels newly captured. Progress for an unpresented newer
 picture cannot bless old pixels. Duplicate/reordered observations, decode
-callbacks and polling do not slide deadlines. This slice consumes verified static
-source evidence; it does not yet implement an idle raw-capture comparator.
+callbacks and polling do not slide deadlines. The native worker now implements an exact X11 snapshot comparator; the
+broker freshness path still needs to consume its unchanged-capture replies.
 
 ## Verification scope
 
@@ -210,3 +210,110 @@ panic guards, one public fragment-index comparison misclassified as secret
 equality, and three HEVC/binary-record methods misclassified as JWT decoding.
 That review does not change the scanner exit or qualify the full verification
 gate. No scanner rules, suppressions, or project requirements were changed.
+
+
+## Subscription recovery and final-write fencing
+
+The broker can now install an admitted newer recovery generation and new channel
+bindings through `Subscription::recover`, while retaining the same codec
+configuration, capture worker and increasing capture frame IDs. This consumes
+`SendCache::replace`, preserving the existing repair window and spending; it does
+not construct a replacement cache to obtain a fresh allowance. Configuration
+changes refuse here because they require a separately configured native worker.
+The next admitted unit must be an IDR and uses the dedicated reliable channel.
+The owner remains responsible for fencing input/view authority and abandoning
+old transport sends before installing the matching receiver bindings.
+
+`PacketOffer` metadata is immutable. Each offer carries the identity of its
+originating cache and the generation in which it was prepared. Final write
+admission now checks those identities and services the whole cache's expiry.
+This rejects offers from another cache even when numeric bindings match, old
+original/repair offers after replacement, and a still-unexpired offer when an
+unsent predecessor has invalidated the chain. Preparing a packet never certifies
+transport delivery. The transport still owns bounded pending buffers and
+congestion admission and must call authorization immediately before writing the
+unchanged bytes.
+
+The added native experiment starts with a genuinely decoded and visibly checked
+stream. It delivers only the first chunk of a new real IDR, checks that no decoder
+receipt or changed pixels result, then models abandonment of that recovery
+stream. Replacement clears incomplete receiver/cache reservations, refuses the
+old packet at both final write and receive, and leaves the old input view stopped.
+The existing capture and presentation processes then encode/decode a fresh forced
+IDR and its subsequent real dependent P picture. Independent X11 readback checks
+both expected frame markers. No native input lease is installed in this new case;
+the earlier real ticket-expiry and local-revoke experiments remain separate.
+
+This is local supervised software HEVC with modeled stream abandonment, not
+actual transport-reset interoperability, optical scanout, GPU qualification, or
+the normative startup wire handshake. The fixture's same-configuration receiver
+acknowledgement uses an already configured/decoded worker. Worker `Ready` alone
+does not establish exact-hvcC `DecoderConfigured`: exact bootstrap configuration
+exchange and admission remain outstanding. Shared-viewer IDR coalescing, new
+configuration ownership, the fps/horizon window choice and large-IDR/slow-link
+operating envelopes also remain on `fr-p0-recovery-authority-d7d`.
+
+The sender adds one fixed `Arc<()>` identity allocation per cache lifetime,
+shared by its bounded pending offers and reused across recovery generations.
+It contains the reference counters, not encoded payload. This heap control block
+and allocator overhead are separate from `size_of::<Subscription>()` and the
+reported compressed-buffer charges. Dropped caches can retain that one block
+while their queued offers exist; replacement does not allocate another block.
+The fixture retains one old 1,150-byte record and uses a separate 1,150-byte
+transfer scratch buffer. It retains no growing packet history.
+
+The merged baseline at `3a9b23a` failed the old immediate button-observation
+assertion in remote job `j-30012848524492937`: an API-submission receipt arrived
+before the independent observer reported the press. Source review found that
+submission uses `XFlush` on another X11 connection, which does not certify that
+observer's readback. The corrected fixture polls only for the exact pointer and
+held-button state, requires live authority, and refuses at 50 ms; it never
+resends input or extends source, ticket or lease deadlines. The original log does
+not conclusively distinguish cross-connection ordering from intervening cleanup.
+The first corrected full run (`j-30012848524492938`) passed 329 tests; this is a
+corrected observation oracle, not a production latency fix. The earlier
+unexplained visibility-stage failure remains retained above.
+
+Final RCH verification used base `96df80be9068cce3f4652ee47989269f7aa28d5a`
+plus this change's eight explicit Rust overlays, fingerprint
+`284f107d20a47ebd8a2fc389a6d865278241daf9719bb8ee7c765d273665ea69`,
+on `vmi1149989` with `CARGO_HOME=/root/.cargo` and the pinned toolchain:
+
+| Gate | Remote job | Result |
+|---|---|---|
+| Workspace/all-targets/all-features check, locked | `j-30012848524492947` | exit 0 |
+| Same strict Clippy, `-D warnings` | `j-30012848524492945` | exit 0 |
+| Workspace/all-features tests, locked | `j-30012848524492946` | exit 0; 333 passed, 0 failed, 0 ignored |
+| Workspace example tests, same features | `j-30012848524492948` | exit 0; 2 passed |
+
+Formatting and the repository docs lane passed separately without compilation.
+An earlier Clippy run rejected a 102-line native test; the duplicated record
+transfer operation was extracted without changing assertions or allowing the lint.
+
+The final native recovery case measured a 30,472-byte partial IDR with 30,760
+charged receiver bytes, followed by a 37,797-byte fresh IDR and a 24,873-byte
+dependent picture. Both fresh frames passed the existing marker color tolerance.
+The retained old record and transfer scratch each occupied 1,150 bytes;
+`Subscription` occupied 8,080 inline bytes plus its separately bounded sender
+identity allocation. These are buffer/metadata observations, not total RSS or a
+latency operating point. Earlier loss-experiment sizes above remain tied to their
+original revision; the offer representation has since grown.
+
+Reproduce the Rust tests from the committed revision on the qualified worker:
+
+```sh
+RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1149989 RCH_QUEUE_WHEN_BUSY=0 \
+  rch --json exec --base HEAD --clean-overlay --no-overlay -- \
+  env CARGO_HOME=/root/.cargo cargo test -j 2 --workspace --all-features --locked -- --nocapture
+```
+
+UBS on the eight changed Rust files still exits 1: 24 critical, 928 warnings,
+and 71 informational findings. All 24 critical sites were separately reviewed:
+11 media mode/channel/stride/epoch/frame comparisons were classified as secret
+comparisons, 10 HEVC/FRD0 decode operations as JWT handling, and three native-test
+receipt guards as production panics. This explains the findings without changing
+the scanner's failed result. Its Rust build subprocesses were disabled only to
+route compilation through the explicit RCH gates above; no analysis rule or
+suppression changed. Full verification and Phase 0 closure are not claimed.
+Logs remain under `/tmp/fr-resume-`: `tests-final.log`, `check-final.log`,
+`clippy-final2.log`, `examples-final.log`, and `ubs-final.txt`/`ubs-final.json`.

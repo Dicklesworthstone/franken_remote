@@ -90,3 +90,72 @@ fn suspend_fences_shared_authority_and_no_unapproved_session_can_construct_a_gat
         assert!(other.issue_challenge(1).is_err());
     });
 }
+
+#[test]
+fn recovery_fences_old_offers_preserves_authority_and_requires_a_fresh_idr() {
+    let r = RuntimeBuilder::new().worker_threads(1).build().unwrap();
+    let cx = r.request_cx_with_budget(Budget::INFINITE);
+    r.block_on(async {
+        let control = gate(cx.clone(), 3_000_000);
+        let mut subscription = subscriber(control.clone());
+        subscription.enqueue(unit(&cx)).unwrap();
+        let mut bytes = [0; 1150];
+        let old = subscription.next_packet(&mut bytes).unwrap().unwrap();
+        let epoch = MediaEpoch {
+            configuration: CodecConfigurationGeneration::INITIAL,
+            recovery: RecoveryGeneration::from_raw(1),
+        };
+        let bindings = MediaBindings::new(5, 6, 7, 8).unwrap();
+        assert!(
+            subscription
+                .recover(
+                    MediaEpoch {
+                        configuration: CodecConfigurationGeneration::from_raw(1),
+                        ..epoch
+                    },
+                    bindings
+                )
+                .is_err()
+        );
+        subscription.authorize_write(&old).unwrap();
+        subscription.recover(epoch, bindings).unwrap();
+        assert!(subscription.authorize_write(&old).is_err());
+        assert_eq!(subscription.cache_usage().bytes, 0);
+        control.check().unwrap();
+        let predicted = EncodedAccessUnit::new(
+            &ProtocolLimits::ABSOLUTE,
+            FrameId::from_raw(1),
+            FrameKind::Predicted {
+                references: FrameId::FIRST,
+            },
+            epoch.configuration,
+            host_now(&cx).unwrap().as_micros(),
+            vec![1; 100],
+        )
+        .unwrap();
+        assert_eq!(
+            subscription.enqueue(predicted),
+            Err(frd::media::Error::InvalidFrame)
+        );
+        subscription.enqueue(unit(&cx)).unwrap();
+        let progress = subscription.next_packet(&mut bytes).unwrap().unwrap();
+        assert_eq!(progress.channel(), fr_wire::Channel::MediaConfig);
+        subscription.authorize_write(&progress).unwrap();
+        let recovery = subscription.next_packet(&mut bytes).unwrap().unwrap();
+        assert_eq!(recovery.channel(), fr_wire::Channel::Recovery);
+        subscription.authorize_write(&recovery).unwrap();
+        control.revoke();
+        assert!(subscription.authorize_write(&recovery).is_err());
+        assert!(
+            subscription
+                .recover(
+                    MediaEpoch {
+                        recovery: RecoveryGeneration::from_raw(2),
+                        ..epoch
+                    },
+                    MediaBindings::new(9, 10, 11, 12).unwrap()
+                )
+                .is_err()
+        );
+    });
+}

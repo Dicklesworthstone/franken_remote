@@ -285,10 +285,28 @@ impl Subscription {
         let now = self.control.check()?;
         Ok(self.cache.next_packet(now.as_micros(), out)?)
     }
-    pub fn authorize_write(&self, offer: &PacketOffer) -> Result<(), Error> {
-        if self.control.check()?.as_micros() >= offer.send_by_micros {
-            return Err(worker::Error::Deadline.into());
+    pub fn authorize_write(&mut self, offer: &PacketOffer) -> Result<(), Error> {
+        self.cache
+            .authorize_write(offer, self.control.check()?.as_micros())?;
+        Ok(())
+    }
+    /// Install an admitted recovery generation for this viewer only. The
+    /// caller first fences its old input/view and abandons old transport sends,
+    /// then installs matching receiver/channel bindings. The shared capture
+    /// worker and healthy subscribers retain their own lifetimes.
+    ///
+    /// Only recovery within the same codec configuration is supported here;
+    /// configuration changes require a separately configured worker. Retained
+    /// repair spending is never replenished. The next enqueue must be an IDR
+    /// and uses the dedicated reliable recovery channel.
+    pub fn recover(&mut self, epoch: MediaEpoch, bindings: MediaBindings) -> Result<(), Error> {
+        let now = self.control.check()?;
+        if epoch.configuration != self.epoch.configuration {
+            return Err(Error::InvalidFrame);
         }
+        self.cache.replace(epoch, bindings, now.as_micros())?;
+        self.epoch = epoch;
+        self.first = true;
         Ok(())
     }
     pub fn queue_repair(&mut self, bytes: &[u8]) -> Result<(), Error> {

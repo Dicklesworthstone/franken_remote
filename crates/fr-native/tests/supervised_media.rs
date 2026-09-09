@@ -188,8 +188,8 @@ async fn exercise_pair(
             subscription.authorize_write(&offer).unwrap();
             receiver
                 .receive(
-                    offer.channel,
-                    &packet[..offer.byte_len],
+                    offer.channel(),
+                    &packet[..offer.byte_len()],
                     host_now(&cleanup).unwrap().as_micros(),
                 )
                 .unwrap();

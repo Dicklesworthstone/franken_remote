@@ -5,6 +5,7 @@ use fr_wire::{
     Channel, Fragment, MediaLimits, Progress, Record, RecoveryChunk, RepairRange, WireError,
     decode_repair, encode_fragment, encode_progress, encode_recovery,
 };
+use std::sync::Arc;
 
 const CACHE_SLOTS: usize = 64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,15 +95,43 @@ pub enum DeliveryMode {
     Datagrams,
 }
 /// A successfully encoded record, not confirmation of transport delivery.
-/// Retain at most the admitted bounded transport work and check `send_by` again
-/// before writing; congestion admission is still the QUIC adapter's job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Retain at most the admitted bounded transport work and call
+/// `SendCache::authorize_write` immediately before writing the unchanged bytes.
+/// Congestion admission is still the transport adapter's job. Each offer owns
+/// one reference to the cache's fixed identity allocation, never media payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PacketOffer {
-    pub channel: Channel,
-    pub byte_len: usize,
-    pub frame: u64,
-    pub send_by_micros: u64,
+    channel: Channel,
+    byte_len: usize,
+    frame: u64,
+    send_by_micros: u64,
+    origin: OfferOrigin,
 }
+impl PacketOffer {
+    pub const fn channel(&self) -> Channel {
+        self.channel
+    }
+    pub const fn byte_len(&self) -> usize {
+        self.byte_len
+    }
+    pub const fn frame(&self) -> u64 {
+        self.frame
+    }
+    pub const fn send_by_micros(&self) -> u64 {
+        self.send_by_micros
+    }
+}
+#[derive(Debug, Clone)]
+struct OfferOrigin {
+    owner: Arc<()>,
+    epoch: MediaEpoch,
+}
+impl PartialEq for OfferOrigin {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.owner, &other.owner) && self.epoch == other.epoch
+    }
+}
+impl Eq for OfferOrigin {}
 
 struct CachedPicture {
     progress: Progress,
@@ -148,6 +177,9 @@ struct RepairJob {
 /// into push; no frame clone or packet FIFO is created. The 32-picture default
 /// is deliberately separate from receiver W: 250 ms at 60 fps exceeds W=12.
 pub struct SendCache {
+    // One fixed Arc control block per cache, shared by bounded queued offers.
+    // Replacement reuses it: old generations never accumulate new identities.
+    owner: Arc<()>,
     limits: MediaLimits,
     bindings: MediaBindings,
     epoch: MediaEpoch,
@@ -183,6 +215,7 @@ impl SendCache {
     ) -> Result<Self, SendError> {
         policy.validate(&limits)?;
         Ok(Self {
+            owner: Arc::new(()),
             limits,
             bindings,
             epoch,
@@ -343,6 +376,10 @@ impl SendCache {
             byte_len: n,
             frame,
             send_by_micros: p.send_by,
+            origin: OfferOrigin {
+                owner: self.owner.clone(),
+                epoch: self.epoch,
+            },
         }))
     }
     /// Accept one bounded repair job from an already authorized control channel.
@@ -427,6 +464,10 @@ impl SendCache {
             byte_len: n,
             frame: job.frame,
             send_by_micros: p.send_by,
+            origin: OfferOrigin {
+                owner: self.owner.clone(),
+                epoch: self.epoch,
+            },
         };
         self.repair_spent += n;
         let job = self.repair.as_mut().expect("present");
@@ -440,6 +481,19 @@ impl SendCache {
             }
         }
         Ok(Some(offer))
+    }
+    /// Recheck this exact cache/generation and its entire chain immediately
+    /// before transport submission. Preparing a packet is not authorization to
+    /// send after replacement, close, or an unsent predecessor's expiry.
+    pub fn authorize_write(&mut self, offer: &PacketOffer, now: u64) -> Result<(), SendError> {
+        self.tick(now)?;
+        if !Arc::ptr_eq(&self.owner, &offer.origin.owner) || self.epoch != offer.origin.epoch {
+            return Err(DeliveryError::StaleGeneration.into());
+        }
+        if now >= offer.send_by_micros {
+            return Err(SendError::OriginalExpired);
+        }
+        Ok(())
     }
     /// Expire by the insertion deadline, even on an idle connection. Losing an
     /// unsent reference fences all its dependents instead of sending a broken chain.
