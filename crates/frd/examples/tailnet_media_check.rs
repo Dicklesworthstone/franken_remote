@@ -45,6 +45,7 @@ mod linux {
         api: LocalApi,
         stop: Arc<AtomicBool>,
         denied: Arc<AtomicBool>,
+        input_allowed: Arc<AtomicBool>,
         task: Option<JoinHandle<()>>,
     }
     impl Fixture {
@@ -62,6 +63,8 @@ mod linux {
             let api = LocalApi::new(path).unwrap();
             let stop = Arc::new(AtomicBool::new(false));
             let denied = Arc::new(AtomicBool::new(false));
+            let input_allowed = Arc::new(AtomicBool::new(false));
+            let input_permission = input_allowed.clone();
             let (end, changed) = (stop.clone(), denied.clone());
             let task = thread::spawn(move || {
                 let host_key = format!("nodekey:{}", "1".repeat(64));
@@ -107,8 +110,9 @@ mod linux {
                             "{}".to_owned()
                         } else {
                             format!(
-                                r#"{{"{}":[{{"version":1,"observe":true,"control":false}}]}}"#,
-                                fr_tailnet::DESKTOP_CAPABILITY
+                                r#"{{"{}":[{{"version":1,"observe":true,"control":{}}}]}}"#,
+                                fr_tailnet::DESKTOP_CAPABILITY,
+                                input_permission.load(Ordering::Acquire)
                             )
                         };
                         format!(
@@ -131,6 +135,7 @@ mod linux {
                 api,
                 stop,
                 denied,
+                input_allowed,
                 task: Some(task),
             }
         }
@@ -267,6 +272,177 @@ mod linux {
         assert!(control.renew(challenge).is_err());
         assert!(control.deadline(Duration::from_secs(2)).is_err());
     }
+
+    fn input_credentials() -> fr_core::input::InputCredentials {
+        use fr_core::{
+            ids::{
+                DisplayGeometryGeneration, InputLeaseId, InputTicketId, ViewportMappingGeneration,
+            },
+            input::{InputCredentials, InputView},
+        };
+        InputCredentials {
+            session: RemoteSessionId::from_raw(1),
+            lease: InputLeaseId::from_raw(2),
+            ticket: InputTicketId::from_raw(3),
+            view: InputView {
+                geometry: DisplayGeometryGeneration::INITIAL,
+                viewport: ViewportMappingGeneration::INITIAL,
+                configuration: CodecConfigurationGeneration::INITIAL,
+                recovery: RecoveryGeneration::INITIAL,
+            },
+        }
+    }
+    fn input_session(cx: &Cx) -> fr_core::input_submission::InputSession {
+        use fr_core::{
+            input::{DesktopPoint, InputBounds},
+            input_submission::{Capabilities, Capability, InputSession},
+        };
+        let now = host_now(cx).unwrap();
+        let c = input_credentials();
+        let mut a = SessionAuthority::new(c.session, AuthorityPolicy::plan_defaults());
+        a.mark_capabilities_checked().unwrap();
+        a.authorize_observation(now).unwrap();
+        a.mark_view_ready(now).unwrap();
+        a.grant_lease(c.lease, now).unwrap();
+        a.issue_input_ticket(c.lease, c.ticket, now).unwrap();
+        InputSession::new(
+            a,
+            c,
+            InputBounds::new(DesktopPoint { x: 0, y: 0 }, 320, 240).unwrap(),
+            Capabilities::default().with(Capability::Keys),
+            now,
+        )
+        .unwrap()
+    }
+    struct RecordingInput {
+        effects: Arc<std::sync::Mutex<Vec<fr_core::input_submission::Operation>>>,
+        gate: fr_tailnet::Lease,
+        revoke_in_prepare: bool,
+    }
+    impl fr_core::input_submission::InputSink for RecordingInput {
+        fn prepare(
+            &mut self,
+            _: fr_core::input_submission::Operation,
+        ) -> Result<(), fr_core::input_submission::PlatformError> {
+            if self.revoke_in_prepare {
+                self.gate.revoke();
+            }
+            Ok(())
+        }
+        fn submit(
+            &mut self,
+            operation: fr_core::input_submission::Operation,
+        ) -> fr_core::input_submission::Submission {
+            self.effects.lock().unwrap().push(operation);
+            fr_core::input_submission::Submission::Submitted
+        }
+    }
+    use fr_core::{
+        input::{InputEvent, InputRequest, KeyTransition, PhysicalKey},
+        input_submission::{Dispatch, Operation},
+    };
+    use fr_wire::input::{InputDelivery, InputDirection, encode_input};
+    use frd::input_agent::{Reply, Route, Seat};
+    async fn input_scenario(fixture: &Fixture, cx: Cx, addresses: ConnectionAddresses, case: u8) {
+        let proof = fixture
+            .api
+            .authorize_app_capability(&cx, addresses, GrantPolicy::default())
+            .await
+            .unwrap();
+        let owner = Admission::new(fixture.api.clone(), cx.clone(), proof).unwrap();
+        let gate = owner.lease();
+        let seat = Seat::default();
+        let effects = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = effects.clone();
+        let constructed = Arc::new(AtomicBool::new(false));
+        let made = constructed.clone();
+        let sink_gate = gate.clone();
+        let started = seat.start_admitted(
+            cx.clone(),
+            input_session(&cx),
+            Route::new(7, ProtocolLimits::ABSOLUTE),
+            gate.clone(),
+            move || {
+                made.store(true, Ordering::Release);
+                Ok(RecordingInput {
+                    effects: recorded,
+                    gate: sink_gate,
+                    revoke_in_prepare: case == 2,
+                })
+            },
+            |_| true,
+        );
+        if case == 0 {
+            assert!(matches!(
+                started,
+                Err(frd::input_agent::Error::Admission(
+                    fr_tailnet::Error::CapabilityDenied
+                ))
+            ));
+            assert!(!constructed.load(Ordering::Acquire));
+            assert!(!seat.is_occupied());
+            assert!(gate.observe().is_ok());
+            return;
+        }
+        let (mut agent, driver) = started.unwrap();
+        let key = PhysicalKey::new(4).unwrap();
+        let mut bytes = [0; 256];
+        let count = encode_input(
+            InputRequest {
+                credentials: input_credentials(),
+                sequence: 0,
+                event: InputEvent::Key {
+                    key,
+                    transition: KeyTransition::Press,
+                },
+            },
+            &mut bytes,
+            &ProtocolLimits::ABSOLUTE,
+            7,
+            InputDirection::ViewerToHost,
+            InputDelivery::Reliable,
+        )
+        .unwrap();
+        agent
+            .submit(&bytes[..count], InputDelivery::Reliable)
+            .unwrap();
+        let reply = agent.response().await.unwrap();
+        if case == 1 {
+            assert!(matches!(reply, Reply::Input(Ok(Dispatch::Completed(_)))));
+            assert!(effects.lock().unwrap().contains(&Operation::Key {
+                key,
+                transition: KeyTransition::Press
+            }));
+            owner.revoke();
+        } else {
+            assert!(!effects.lock().unwrap().iter().any(|op| matches!(
+                op,
+                Operation::Key {
+                    transition: KeyTransition::Press,
+                    ..
+                }
+            )));
+        }
+        let shutdown = driver.await;
+        assert!(
+            shutdown
+                .exit
+                .is_some_and(frd::input_agent::Exit::handoff_safe)
+        );
+        assert!(!seat.is_occupied());
+        if case == 1 {
+            assert!(effects.lock().unwrap().contains(&Operation::Key {
+                key,
+                transition: KeyTransition::Release
+            }));
+        }
+        assert!(gate.control().is_err());
+        assert!(
+            agent
+                .submit(&bytes[..count], InputDelivery::Reliable)
+                .is_err()
+        );
+    }
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         if UnixStream::pair()?.0.peer_cred()?.uid != 0 {
             return Err("run this opt-in synthetic fixture as root; no production peer-credential bypass exists".into());
@@ -285,8 +461,14 @@ mod linux {
             fixture.denied.store(false, Ordering::Release);
             runtime.block_on(scenario(&fixture, cx, addresses, case));
         }
+        for case in 0..3 {
+            fixture.denied.store(false, Ordering::Release);
+            fixture.input_allowed.store(case != 0, Ordering::Release);
+            let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+            runtime.block_on(input_scenario(&fixture, cx, addresses, case));
+        }
         println!(
-            "PASS: 5 root-credential LocalAPI -> admission -> pending-media/final-send scenarios; synthetic metadata and opaque packet bytes, no live tailnet/codec claim"
+            "PASS: 5 media and 3 input LocalAPI admission scenarios; real root peer credentials, synthetic metadata/recording input sink, no live tailnet/codec/OS-input claim"
         );
         Ok(())
     }

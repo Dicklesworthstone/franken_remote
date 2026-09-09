@@ -75,6 +75,59 @@ impl Seat {
         F: FnOnce() -> Result<S, PlatformError> + Send + 'static,
         C: FnMut(&mut S) -> bool + Send + 'static,
     {
+        self.start_inner(
+            cx,
+            session,
+            route,
+            factory,
+            native_cleanup,
+            AdmissionGate::default(),
+        )
+    }
+    /// Start only with a currently control-capable installed-Tailscale admission.
+    /// This does not create local consent, a control lease, a view or a ticket.
+    /// The containing session keeps `Admission` alive and refreshes it independently.
+    #[cfg(target_os = "linux")]
+    pub fn start_admitted<S, F, C>(
+        &self,
+        cx: Cx,
+        session: InputSession,
+        route: Route,
+        admission: fr_tailnet::Lease,
+        factory: F,
+        native_cleanup: C,
+    ) -> Result<(Agent, Driver), Error>
+    where
+        S: InputSink + 'static,
+        F: FnOnce() -> Result<S, PlatformError> + Send + 'static,
+        C: FnMut(&mut S) -> bool + Send + 'static,
+    {
+        admission.control().map_err(Error::Admission)?;
+        self.start_inner(
+            cx,
+            session,
+            route,
+            factory,
+            native_cleanup,
+            AdmissionGate {
+                tailnet: Some(admission),
+            },
+        )
+    }
+    fn start_inner<S, F, C>(
+        &self,
+        cx: Cx,
+        session: InputSession,
+        route: Route,
+        factory: F,
+        native_cleanup: C,
+        admission: AdmissionGate,
+    ) -> Result<(Agent, Driver), Error>
+    where
+        S: InputSink + 'static,
+        F: FnOnce() -> Result<S, PlatformError> + Send + 'static,
+        C: FnMut(&mut S) -> bool + Send + 'static,
+    {
         if self
             .0
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -93,6 +146,7 @@ impl Seat {
         let shared = Arc::new(Shared {
             mailbox: Mutex::new(Mailbox::default()),
             control: control.clone(),
+            admission,
         });
         let driver = cx
             .timer_driver()
@@ -182,6 +236,8 @@ pub enum Error {
     RecordTooLarge,
     Wire(WireError),
     Clock(input_watchdog::Error),
+    #[cfg(target_os = "linux")]
+    Admission(fr_tailnet::Error),
 }
 /// These commands are issued by the local authenticated session owner, not
 /// arbitrary remote requests. Receipt of traffic never implicitly renews.
@@ -271,11 +327,33 @@ struct Mailbox {
     reply_waker: Option<Waker>,
     driver_waker: Option<Waker>,
 }
+#[derive(Default)]
+struct AdmissionGate {
+    #[cfg(target_os = "linux")]
+    tailnet: Option<fr_tailnet::Lease>,
+}
+impl AdmissionGate {
+    fn permitted(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(lease) = &self.tailnet {
+            return lease.control().is_ok();
+        }
+        true
+    }
+}
 struct Shared {
+    admission: AdmissionGate,
     mailbox: Mutex<Mailbox>,
     control: Control,
 }
 impl Shared {
+    fn check_admission(&self) {
+        // Only a finite in-memory gate is checked here; no LocalAPI I/O or
+        // mailbox lock. Revocation precedes waking/draining the native owner.
+        if !self.admission.permitted() {
+            self.control.stop(StopReason::AuthorityEnded);
+        }
+    }
     fn lock(&self) -> std::sync::MutexGuard<'_, Mailbox> {
         // Only bounded assignments occur under this lock, never caller code,
         // native code, policy callbacks, clock reads, waker callbacks or awaits.
@@ -327,6 +405,7 @@ impl Agent {
     /// At most one record exists until its reply is collected, even if native
     /// submission already finished. Validate before copying any untrusted bytes.
     pub fn submit(&mut self, bytes: &[u8], delivery: InputDelivery) -> Result<(), Error> {
+        self.shared.check_admission();
         if self.shared.control.is_stopped() {
             return Err(Error::Stopped);
         }
@@ -364,6 +443,7 @@ impl Agent {
         Ok(())
     }
     fn enqueue(&mut self, command: Command) -> Result<(), Error> {
+        self.shared.check_admission();
         {
             let mut m = self.shared.lock();
             if self.shared.control.is_stopped() || m.exit.is_some() {
@@ -504,6 +584,7 @@ impl Future for Driver {
         if let Some(done) = this.done {
             return Poll::Ready(done);
         }
+        this.shared.check_admission();
         this.shared.lock().driver_waker = Some(task.waker().clone());
         let Poll::Ready(reason) = Pin::new(&mut this.watchdog).poll(task) else {
             return Poll::Pending;
@@ -591,6 +672,7 @@ fn native_loop<S: InputSink, F: FnOnce() -> Result<S, PlatformError>, C: FnMut(&
     shared.lock().phase = Phase::Running;
     let mut last = None;
     loop {
+        shared.check_admission();
         let now = input_watchdog::host_now(cx).expect("captured Cx retains its timer");
         if cx.checkpoint().is_err() {
             shared.control.stop(StopReason::Cancelled);
@@ -681,6 +763,7 @@ fn execute<S: InputSink>(
                 reliable_sequence = Some(request.sequence);
             }
             Reply::Input(session.dispatch(request, sink, || {
+                shared.check_admission();
                 // This callback runs AFTER every native preparation. The
                 // independent watchdog may not yet have been scheduled after
                 // parent cancellation; never let that lag authorize a press
@@ -692,6 +775,7 @@ fn execute<S: InputSink>(
             }))
         }
         CommandKind::Authority(command) => {
+            shared.check_admission();
             if cx.checkpoint().is_err() {
                 shared.control.stop(StopReason::Cancelled);
             }
