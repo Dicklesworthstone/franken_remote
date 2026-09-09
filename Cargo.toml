@@ -30,6 +30,9 @@ fr-core = { path = "crates/fr-core" }
 fr-lab = { path = "crates/fr-lab" }
 fr-media = { path = "crates/fr-media" }
 fr-wire = { path = "crates/fr-wire" }
+fr-tailnet = { path = "crates/fr-tailnet" }
+serde = "1"
+serde_json = "1"
 fr-transport = { path = "crates/fr-transport" }
 fr-native = { path = "crates/fr-native" }
 frd = { path = "crates/frd" }
