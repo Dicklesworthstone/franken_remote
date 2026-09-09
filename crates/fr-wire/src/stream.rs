@@ -1,10 +1,10 @@
-//! Incremental framing for an already attached reliable FRD0 stream.
+//! Incremental framing for initial control and attached reliable FRD0 streams.
 //!
 //! QUIC reads are byte chunks, not records. This owner retains at most one
 //! bounded record across arbitrary read boundaries. It never scans for a new
 //! magic after failure and never allocates an unvalidated advertised length.
 //! A complete record still needs its message codec, direction, and live session
-//! checks. This does not implement the zero-binding negotiation channel.
+//! checks. Framing alone does not implement the negotiation state machine.
 use crate::{HEADER_BYTES, WireError};
 use core::fmt;
 use fr_core::limits::ProtocolLimits;
@@ -60,8 +60,14 @@ impl RecordStream {
         Self::new_inner(maximum, binding, lifetime_micros)
     }
     /// Initial control only. Zero binding never admits media or input records.
+    /// The complete record is capped at the smaller of `maximum` and the
+    /// negotiation codec's limit, including before payload allocation.
     pub fn negotiation(maximum: usize, lifetime_micros: u64) -> Result<Self, StreamError> {
-        Self::new_inner(maximum, 0, lifetime_micros)
+        Self::new_inner(
+            maximum.min(crate::negotiation::MAX_RECORD),
+            0,
+            lifetime_micros,
+        )
     }
     fn new_inner(maximum: usize, binding: u32, lifetime_micros: u64) -> Result<Self, StreamError> {
         if !(HEADER_BYTES..=ProtocolLimits::ABSOLUTE.max_control_message_bytes() as usize)

@@ -1,8 +1,8 @@
 use fr_core::limits::ProtocolLimits;
 use fr_wire::stream::{RecordStream, StreamError};
 use fr_wire::{
-    Channel, FrameDescriptor, MediaLimits, PipelineState, Progress, Record, SourceObservation,
-    WireError, decode_progress, encode_progress,
+    Channel, FrameDescriptor, HEADER_BYTES, Kind, MediaLimits, PipelineState, Progress, Record,
+    SourceObservation, WireError, decode_progress, encode_progress,
 };
 fn packet() -> Vec<u8> {
     let mut bytes = vec![0; 128];
@@ -32,6 +32,82 @@ fn limits() -> MediaLimits {
 }
 fn stream() -> RecordStream {
     RecordStream::new(1150, 17, 5000).unwrap()
+}
+// Header-only framing witnesses; message payload validation remains separate.
+fn announced_header(total: usize, kind: Kind, binding: u32) -> [u8; HEADER_BYTES] {
+    let mut header = [0; HEADER_BYTES];
+    header[..4].copy_from_slice(b"FRD0");
+    header[6..8].copy_from_slice(&(kind as u16).to_be_bytes());
+    header[12..16].copy_from_slice(&u32::try_from(total - HEADER_BYTES).unwrap().to_be_bytes());
+    header[16..20].copy_from_slice(&binding.to_be_bytes());
+    header
+}
+#[test]
+fn negotiation_overlimit_header_refuses_without_allocation_and_stays_failed() {
+    let header = announced_header(4097, Kind::ClientHello, 0);
+    for maximum in [4096, 65536] {
+        let mut s = RecordStream::negotiation(maximum, 100).unwrap();
+        assert_eq!(s.push(&header[..23], 0), Ok(23));
+        assert_eq!(s.allocated_bytes(), 0);
+        assert_eq!(
+            s.push(&header[23..], 1),
+            Err(StreamError::Wire(WireError::ResourceLimit))
+        );
+        assert_eq!(s.allocated_bytes(), 0);
+        assert_eq!(
+            s.push(&announced_header(128, Kind::ClientHello, 0), 2),
+            Err(StreamError::Wire(WireError::ResourceLimit))
+        );
+        assert_eq!(s.allocated_bytes(), 0);
+    }
+}
+#[test]
+fn negotiation_exact_boundary_and_smaller_caller_limits_include_the_header() {
+    for (maximum, total) in [(65536, 4096), (4096, 4096), (128, 128), (24, 24)] {
+        let mut s = RecordStream::negotiation(maximum, 100).unwrap();
+        let header = announced_header(total, Kind::ClientHello, 0);
+        assert_eq!(s.push(&header, 0), Ok(HEADER_BYTES));
+        assert_eq!(s.allocated_bytes(), total);
+        assert_eq!(s.buffered_bytes(), HEADER_BYTES);
+        if total > HEADER_BYTES {
+            assert_eq!(s.frame(1), Ok(None));
+            assert_eq!(
+                s.push(&vec![0; total - HEADER_BYTES], 1),
+                Ok(total - HEADER_BYTES)
+            );
+        }
+        assert_eq!(s.frame(2).unwrap().unwrap().len(), total);
+        s.consume(2).unwrap();
+        assert_eq!(
+            s.push(&announced_header(total + 1, Kind::ClientHello, 0), 3),
+            Err(StreamError::Wire(WireError::ResourceLimit))
+        );
+        assert_eq!(s.allocated_bytes(), 0);
+    }
+    for (maximum, lifetime) in [(23, 100), (24, 0), (24, 5_000_001)] {
+        assert!(matches!(
+            RecordStream::negotiation(maximum, lifetime),
+            Err(StreamError::InvalidPolicy)
+        ));
+    }
+}
+#[test]
+fn attached_stream_keeps_ordinary_record_limits() {
+    for total in [4097, 65536] {
+        let mut s = RecordStream::new(65536, 17, 100).unwrap();
+        assert_eq!(
+            s.push(&announced_header(total, Kind::Progress, 17), 0),
+            Ok(HEADER_BYTES)
+        );
+        assert_eq!(s.allocated_bytes(), total);
+        assert_eq!(s.frame(1), Ok(None));
+    }
+    let mut s = RecordStream::new(65536, 17, 100).unwrap();
+    assert_eq!(
+        s.push(&announced_header(65537, Kind::Progress, 17), 0),
+        Err(StreamError::Wire(WireError::ResourceLimit))
+    );
+    assert_eq!(s.allocated_bytes(), 0);
 }
 #[test]
 fn every_possible_split_and_bytewise_delivery_preserve_real_records() {
