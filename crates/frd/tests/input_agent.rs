@@ -330,8 +330,9 @@ fn blocked_native_preparation_does_not_retain_authority_or_allow_handoff() {
     assert!(!a.control().is_stopped());
     clock.advance_to(Time::from_millis(100));
     let _ = timer.process_timers();
-    eventually(|| a.control().is_stopped());
+    eventually(|| a.control().reason().is_some());
     assert_eq!(a.control().reason(), Some(StopReason::AuthorityEnded));
+    assert!(a.control().is_stopped());
     assert!(seat.is_occupied());
     let other = runtime();
     let other_cx = other.request_cx_with_budget(Budget::INFINITE);
