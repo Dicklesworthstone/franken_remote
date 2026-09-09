@@ -80,8 +80,35 @@ jobs:
           subprocess.run(['git', 'apply', str(patch)], check=True)
           for path, expected in after.items():
               assert sha(Path(path).read_bytes()) == expected, path
+          route_test = Path('crates/fr-transport/tests/native_quic.rs')
+          data = route_test.read_bytes()
+          assert sha(data) == '0e1e881e6ce0fb4b459c56d7fc77649c4a29e015'
+          replacements = [
+              (b'// fr-wire::input. Distinct markers expose cross-kind stream reordering.\n        let frames: Vec<_> = [0x40, 0x41, 0x45, 0x44, 0x43, 0x47, 0x40]', b'// the fr-wire action and HeldState codecs. Distinct markers expose\n        // cross-kind stream reordering, including release-only reconciliation.\n        let frames: Vec<_> = [0x40, 0x41, 0x45, 0x46, 0x44, 0x43, 0x47, 0x40]'),
+              (b'for forbidden in [0x42, 0x46, 0x48, 0x32, 0xffff]', b'for forbidden in [0x42, 0x48, 0x49, 0x32, 0xffff]'),
+          ]
+          for old, new in replacements:
+              assert data.count(old) == 1
+              data = data.replace(old, new)
+          assert sha(data) == 'bfb651debabba9e7709463f8d6c5ff716302a2ab'
+          route_test.write_bytes(data)
+          after[str(route_test)] = sha(data)
           Path(os.environ['RUNNER_TEMP'], 'held-state-paths.json').write_text(json.dumps(after))
           PY
+      - name: Retain exact candidate source for review
+        run: |
+          mkdir -p "$RUNNER_TEMP/held-candidate"
+          tar --exclude='./.git' --exclude='./target' -czf "$RUNNER_TEMP/held-candidate/source.tar.gz" .
+          cp "$RUNNER_TEMP/held-state-paths.json" "$RUNNER_TEMP/held-candidate/paths.json"
+          git rev-parse HEAD > "$RUNNER_TEMP/held-candidate/base-commit.txt"
+          (cd "$RUNNER_TEMP/held-candidate" && sha256sum source.tar.gz > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: held-state-reviewed-candidate
+          path: ${{ runner.temp }}/held-candidate/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
       - name: Verify complete workspace and real X11 QUIC reconciliation
         run: |
           ./scripts/verify.sh fast
