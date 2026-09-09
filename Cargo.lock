@@ -669,6 +669,7 @@ name = "frd"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "fr-client",
  "fr-core",
  "fr-media",
  "fr-tailnet",

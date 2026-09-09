@@ -14,5 +14,6 @@ fr-wire.workspace = true
 workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+fr-client.workspace = true
 fr-transport.workspace = true
 fr-tailnet.workspace = true

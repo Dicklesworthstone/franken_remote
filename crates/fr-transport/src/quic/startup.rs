@@ -1,8 +1,8 @@
 //! One bounded native control pair, transitioned in place after negotiation.
 //! No second socket, retransmission engine, or application authentication mode.
 use super::{
-    Cx, Error, HEADER_BYTES, Messages, NativeQuicUdpConnection, Policy, Priority, QuicRecords,
-    RecordStream, Route, StreamId, StreamRole, StreamRoute,
+    ConnectionBinding, Cx, Error, HEADER_BYTES, Messages, NativeQuicUdpConnection, Policy,
+    Priority, QuicRecords, RecordStream, Route, StreamId, StreamRole, StreamRoute,
 };
 use std::net::SocketAddr;
 
@@ -14,6 +14,31 @@ pub struct ControlRoutes {
     pub inbound: StreamRoute,
 }
 impl QuicRecords {
+    /// Claim clock exchange state once for this actual connection, including
+    /// after an earlier attachment is dropped. Reusing sequence one on the same
+    /// connection could accept a delayed reply as a new measurement.
+    pub fn claim_clock(&mut self, routes: ControlRoutes) -> Result<ConnectionBinding, Error> {
+        if self.is_closed() {
+            return Err(Error::Closed);
+        }
+        if self.clock_attached
+            || routes.inbound.outbound
+            || !routes.outbound.outbound
+            || routes.inbound.binding == 0
+            || routes.inbound.binding != routes.outbound.binding
+            || [routes.inbound, routes.outbound].iter().any(|r| {
+                r.messages != Messages::SessionControl
+                    || r.priority != Priority::Critical
+                    || r.maximum < fr_wire::clock::REPLY_BYTES
+                    || !self.has_route(Route::Stream(*r))
+            })
+            || self.receive_ended(routes.inbound)?
+        {
+            return Err(Error::WrongRoute);
+        }
+        self.clock_attached = true;
+        Ok(self.binding())
+    }
     /// Adopt a fresh, TLS-established native connection for startup only.
     /// The listener must already enforce tailnet ingress. The session owner
     /// obtains `LocalAPI` admission before sending or consuming application data.

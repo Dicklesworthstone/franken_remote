@@ -80,7 +80,7 @@ impl Messages {
         match self {
             Self::Exact(expected) => kind == expected,
             Self::Negotiation => matches!(kind, 0x0001..=0x0003 | 0x0010 | 0x0011),
-            Self::SessionControl => matches!(kind, 0x0012..=0x001e),
+            Self::SessionControl => matches!(kind, 0x0012..=0x001e | 0x0084 | 0x0085),
             // HeldState (0x0046) is not implemented; InputMode (0x0047)
             // is an ordered action in the existing fr-wire input codec.
             Self::InputActions => matches!(kind, 0x0040 | 0x0041 | 0x0043..=0x0045 | 0x0047),
@@ -221,6 +221,7 @@ pub struct ConnectionBinding(Weak<()>);
 /// Asupersync still owns congestion/loss recovery and its qualification gates.
 pub struct QuicRecords {
     identity: Arc<()>,
+    clock_attached: bool,
     native: Option<NativeQuicUdpConnection>,
     streams: Vec<StreamRoute>,
     datagrams: Vec<DatagramRoute>,
@@ -330,6 +331,7 @@ impl QuicRecords {
         }
         Ok(Self {
             identity: Arc::new(()),
+            clock_attached: false,
             native: Some(native),
             streams: streams.to_vec(),
             datagrams: datagrams.to_vec(),
