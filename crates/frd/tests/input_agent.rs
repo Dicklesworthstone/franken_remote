@@ -1,7 +1,8 @@
 use asupersync::{
     cx::Cx,
     runtime::{Runtime, RuntimeBuilder},
-    types::Budget,
+    time::{TimerDriverHandle, VirtualClock},
+    types::{Budget, Time},
 };
 use fr_core::{
     authority::{AuthorityPolicy, SessionAuthority},
@@ -293,7 +294,13 @@ fn one_outstanding_includes_an_uncollected_reply_and_old_actions_never_retry() {
 }
 #[test]
 fn blocked_native_preparation_does_not_retain_authority_or_allow_handoff() {
-    let r = runtime();
+    let clock = Arc::new(VirtualClock::new());
+    let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+    let r = RuntimeBuilder::new()
+        .worker_threads(1)
+        .with_timer_driver(timer.clone())
+        .build()
+        .unwrap();
     let cx = r.request_cx_with_budget(Budget::INFINITE);
     let trace_state = trace();
     let factory = trace_state.clone();
@@ -317,7 +324,14 @@ fn blocked_native_preparation_does_not_retain_authority_or_allow_handoff() {
     a.submit(&bytes(0, key(true)), InputDelivery::Reliable)
         .unwrap();
     rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    // Native preparation must enter while its original 50 ms ticket is live.
+    // Expire the 100 ms authority only after that synchronization point, so
+    // runner scheduling cannot turn this into a pre-admission refusal test.
+    assert!(!a.control().is_stopped());
+    clock.advance_to(Time::from_millis(100));
+    let _ = timer.process_timers();
     eventually(|| a.control().is_stopped());
+    assert_eq!(a.control().reason(), Some(StopReason::AuthorityEnded));
     assert!(seat.is_occupied());
     let other = runtime();
     let other_cx = other.request_cx_with_budget(Budget::INFINITE);
