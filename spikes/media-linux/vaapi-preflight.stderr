@@ -1,0 +1,11 @@
+[VAAPI @ 0x559caae6da40] libva: VA-API version 1.24.0
+[VAAPI @ 0x559caae6da40] libva: Trying to open /usr/lib/dri/iHD_drv_video.so
+[VAAPI @ 0x559caae6da40] libva: va_openDriver() returns -1
+[VAAPI @ 0x559caae6da40] libva: Trying to open /usr/lib/dri/i965_drv_video.so
+[VAAPI @ 0x559caae6da40] libva: va_openDriver() returns -1
+[VAAPI @ 0x559caae6da40] Failed to initialise VAAPI connection: -1 (unknown libva error).
+Device creation failed: -5.
+Failed to set value 'vaapi=probe:/dev/dri/renderD128' for option 'init_hw_device': Input/output error
+Error parsing global options: Input/output error
+
+Exiting with exit code -5
