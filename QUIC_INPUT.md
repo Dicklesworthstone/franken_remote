@@ -50,3 +50,10 @@ required, alongside the existing independent-peer and tailnet qualification work
 
 No public desktop listener, authentication bootstrap, second QUIC stack, runtime,
 protocol kind, input grant, OS permission bypass or completed phase gate is added.
+
+## Native effect integration
+
+The canonical QUIC-to-native input bridge, exact returned receipts and peer
+FIN/RESET fencing are implemented in `frd::input_quic`. See
+[QUIC_NATIVE_INPUT.md](QUIC_NATIVE_INPUT.md) for ownership, native backpressure,
+closing-drain behavior, actual X11/UDP tests and remaining qualification gates.
