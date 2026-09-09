@@ -204,7 +204,13 @@ impl CaptureSource {
             last_capture: None,
         })
     }
+    /// Retire provenance for future results before unrestricted worker access.
+    /// This borrow can replace the child or its codec history. Resuming source-
+    /// bound delivery requires a fresh encoded IDR and a new/recovered
+    /// subscription; an unchanged reply cannot bridge this ownership boundary.
     pub fn worker_mut(&mut self) -> &mut Worker {
+        self.source = Arc::new(());
+        self.last_capture = None;
         &mut self.worker
     }
 }
