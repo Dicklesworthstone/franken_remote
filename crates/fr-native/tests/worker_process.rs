@@ -92,6 +92,34 @@ impl Worker {
         assert_eq!(response.header.identity, identity);
         response
     }
+    fn configure_decoder(&mut self) {
+        let cfg = configuration();
+        let limits = cfg.limits().unwrap();
+        let mut encoder = fr_native::HevcEncoder::new(
+            cfg.codec().unwrap(),
+            limits,
+            fr_native::EncodeBackend::SoftwareExplicit,
+            u32::from(cfg.fps),
+            cfg.bitrate,
+        )
+        .unwrap();
+        let pixels =
+            BgraFrame::new(cfg.width, cfg.height, vec![0; 320 * 240 * 4], &limits).unwrap();
+        encoder.submit(&pixels, FrameId::FIRST, 0, true).unwrap();
+        let unit = encoder.poll_output().unwrap();
+        let mut admission =
+            fr_media::hevc::HevcGuard::new(cfg.codec().unwrap(), limits, 4).unwrap();
+        admission
+            .validate_length_prefixed(unit.bytes(), true)
+            .unwrap();
+        let body = cfg
+            .encode_decoder(&admission.decoder_record().unwrap())
+            .unwrap();
+        assert_eq!(
+            self.transact(Kind::ConfigureDecoder, body).header.kind,
+            Kind::DecoderReady
+        );
+    }
     fn configure(&mut self) {
         assert_eq!(
             self.transact(Kind::Configure, configuration().encode().unwrap())
@@ -132,7 +160,6 @@ fn distinct_processes_capture_encode_decode_and_present_changing_desktop() {
     let mut capture = Worker::start(&source_display, Role::Capture);
     capture.configure();
     let mut viewer = Worker::start(&viewer_display, Role::Present);
-    viewer.configure();
     assert_ne!(capture.child.id(), viewer.child.id());
     assert_ne!(capture.child.id(), std::process::id());
     let mut observed = X11Surface::capture(Some(&viewer_display.name), limits).unwrap();
@@ -158,6 +185,24 @@ fn distinct_processes_capture_encode_decode_and_present_changing_desktop() {
         let unit = parse_unit(response.into_body(), &limits).unwrap();
         assert_eq!(unit.frame().as_raw(), frame);
         assert_eq!(unit.is_idr(), frame == 0 || frame == 4);
+        if frame == 0 {
+            let mut admission =
+                fr_media::hevc::HevcGuard::new(configuration().codec().unwrap(), limits, 4)
+                    .unwrap();
+            admission
+                .validate_length_prefixed(unit.bytes(), true)
+                .unwrap();
+            let payload = configuration()
+                .encode_decoder(&admission.decoder_record().unwrap())
+                .unwrap();
+            let ready = viewer.transact(Kind::ConfigureDecoder, payload.clone());
+            assert_eq!(ready.header.kind, Kind::DecoderReady);
+            assert_eq!(ready.body(), payload);
+            assert_eq!(
+                viewer.transact(Kind::Poll, vec![]).header.kind,
+                Kind::NeedInput
+            );
+        }
         let shown = viewer.transact(Kind::Present, unit_payload(&unit).unwrap());
         assert_eq!(shown.header.kind, Kind::Presented);
         assert_eq!(shown.body(), frame.to_be_bytes());
@@ -174,7 +219,7 @@ fn distinct_processes_capture_encode_decode_and_present_changing_desktop() {
 fn wrong_role_refuses_before_capture_and_exits() {
     let display = Display::start();
     let mut viewer = Worker::start(&display, Role::Present);
-    viewer.configure();
+    viewer.configure_decoder();
     let response = viewer.transact(Kind::Capture, capture_payload(FrameId::FIRST, 0, false));
     assert_eq!(response.header.kind, Kind::Refused);
     assert_eq!(response.body(), (Error::WrongRole as u16).to_be_bytes());
@@ -184,7 +229,7 @@ fn wrong_role_refuses_before_capture_and_exits() {
 fn repeated_configuration_and_wrong_epoch_are_terminal() {
     let display = Display::start();
     let mut worker = Worker::start(&display, Role::Present);
-    worker.configure();
+    worker.configure_decoder();
     assert_eq!(
         worker
             .transact(Kind::Configure, configuration().encode().unwrap())
@@ -194,7 +239,7 @@ fn repeated_configuration_and_wrong_epoch_are_terminal() {
     );
     assert!(!worker.child.wait().unwrap().success());
     let mut worker = Worker::start(&display, Role::Present);
-    worker.configure();
+    worker.configure_decoder();
     Record::new(
         Kind::Stop,
         Identity {
@@ -335,4 +380,20 @@ fn pending_native_capture_cannot_certify_unchanged_and_clock_faults_are_terminal
         capture.capture(FrameId::from_raw(3), 102, false, true),
         Err(NativeError::Closed)
     );
+}
+
+#[test]
+fn decoder_startup_without_exact_parameters_is_terminal_before_decode() {
+    let display = Display::start();
+    let mut viewer = Worker::start(&display, Role::Present);
+    let reply = viewer.transact(Kind::Configure, configuration().encode().unwrap());
+    assert_eq!(reply.header.kind, Kind::Refused);
+    assert_eq!(reply.body(), (Error::WrongState as u16).to_be_bytes());
+    assert!(!viewer.child.wait().unwrap().success());
+    let mut viewer = Worker::start(&display, Role::Present);
+    let mut body = configuration().encode().unwrap();
+    body.extend_from_slice(&[0; 23]);
+    let reply = viewer.transact(Kind::ConfigureDecoder, body);
+    assert_eq!(reply.header.kind, Kind::Refused);
+    assert!(!viewer.child.wait().unwrap().success());
 }

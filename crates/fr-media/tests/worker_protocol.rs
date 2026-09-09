@@ -242,3 +242,41 @@ fn unchanged_capture_has_exact_bounded_bytes_and_cannot_reference_the_future() {
         }
     }
 }
+
+#[test]
+fn decoder_startup_bounds_are_checked_before_reading_configuration_bytes() {
+    let limits = ProtocolLimits::ABSOLUTE;
+    let maximum = 28 + fr_media::hevc::MAX_DECODER_RECORD_BYTES;
+    for (kind, code) in [(Kind::ConfigureDecoder, 8_u16), (Kind::DecoderReady, 266)] {
+        let h = Header {
+            kind,
+            identity: id(),
+            length: maximum,
+        };
+        let mut bytes = h.encode(&limits).unwrap();
+        assert_eq!(&bytes[6..8], &code.to_be_bytes());
+        assert_eq!(Header::decode(&bytes, &limits), Ok(h));
+        for length in [0, 28, 50, maximum + 1, u32::MAX as usize] {
+            bytes[32..].copy_from_slice(&u32::try_from(length).unwrap().to_be_bytes());
+            // Header-only input would yield Io if any oversized body were read.
+            assert_eq!(
+                Record::read(&mut Cursor::new(bytes), &limits).unwrap_err(),
+                Error::ResourceLimit
+            );
+        }
+    }
+    let mut body = config().encode().unwrap();
+    body.extend_from_slice(&[0; 23]);
+    let (configuration, record) = Configuration::decode_decoder(&body).unwrap();
+    assert_eq!(configuration, config());
+    assert_eq!(record.len(), 23);
+    assert!(
+        fr_media::hevc::HevcGuard::from_decoder_record(
+            configuration.codec().unwrap(),
+            limits,
+            4,
+            record
+        )
+        .is_err()
+    );
+}

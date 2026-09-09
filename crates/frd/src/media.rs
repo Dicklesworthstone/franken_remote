@@ -366,11 +366,13 @@ impl Presenter {
         cx: &Cx,
         launch: Launch,
         configuration: Configuration,
+        record: &fr_media::hevc::DecoderRecord,
     ) -> Result<Self, Error> {
-        let worker = Worker::start(
+        let worker = Worker::start_decoder(
             cx,
             launch,
             configuration,
+            record,
             Deadline::after(cx, Duration::from_secs(2))?,
         )
         .await?;

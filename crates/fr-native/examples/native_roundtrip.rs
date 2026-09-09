@@ -9,7 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         config::{CodecConfiguration, CodedGeometry, ColorInfo, GopPolicy},
         delivery::{DeliveryMode, MediaBindings, MediaEpoch},
     };
-    use fr_native::{HevcDecoder, HevcEncoder, X11Surface};
+    use fr_native::{HevcEncoder, X11Surface};
     use fr_wire::{FrameDescriptor, MediaLimits, PipelineState, Progress, SourceObservation};
     let backend = backend()?;
     let limits = ProtocolLimits::ABSOLUTE;
@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         GopPolicy::baseline_for_frame_rate(30)?,
     )?;
     let mut encoder = HevcEncoder::new(config, limits, backend, 30, 4_000_000)?;
-    let mut decoder = HevcDecoder::new(config, limits)?;
+    let mut decoder = None;
     let mut output = X11Surface::presenter(None, w, h, limits)?;
     let mut source = X11Surface::presenter(None, w, h, limits)?;
     let wire = MediaLimits::new(limits, 1_150, 16_384, 64)?;
@@ -42,6 +42,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let now = n * 33_333;
         encoder.submit(&captured, FrameId::from_raw(n), now, false)?;
         let unit = encoder.poll_output()?;
+        if decoder.is_none() {
+            decoder = Some(configure_decoder(config, limits, &unit)?);
+            receive.decoder_configured(now)?;
+        }
+        let decoder = decoder.as_mut().ok_or("decoder unconfigured")?;
         let descriptor = FrameDescriptor {
             frame: n,
             total_bytes: u32::try_from(unit.bytes().len())?,
@@ -85,11 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("native decode identity mismatch".into());
         }
         receive.acknowledge_decode(&picture, true, now)?;
-        output.present(&rendered)?;
-        let presented = output.snapshot()?;
-        if presented.pixels() != rendered.pixels() {
-            return Err("X11 readback differs from rendered BGRA presentation".into());
-        }
+        present_and_verify(&mut output, &rendered)?;
         drop(picture);
         if budget.usage().pictures != 0 {
             return Err("compressed decoder ownership not released".into());
@@ -99,6 +100,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "native_capture_encode_delivery_decode_present=passed frames=12 backend={backend:?} surface=CPU-staged display=X11 evidence=X11-readback not_optical=true"
     );
     Ok(())
+}
+#[cfg(target_os = "linux")]
+fn present_and_verify(
+    output: &mut fr_native::X11Surface,
+    rendered: &fr_native::BgraFrame,
+) -> Result<(), Box<dyn std::error::Error>> {
+    output.present(rendered)?;
+    if output.snapshot()?.pixels() != rendered.pixels() {
+        return Err("X11 readback differs from rendered BGRA presentation".into());
+    }
+    Ok(())
+}
+#[cfg(target_os = "linux")]
+fn configure_decoder(
+    config: fr_media::config::CodecConfiguration,
+    limits: fr_core::limits::ProtocolLimits,
+    bootstrap: &fr_media::access_unit::EncodedAccessUnit,
+) -> Result<fr_native::HevcDecoder, Box<dyn std::error::Error>> {
+    let mut admission = fr_media::hevc::HevcGuard::new(config, limits, 4)?;
+    admission.validate_length_prefixed(bootstrap.bytes(), true)?;
+    Ok(fr_native::HevcDecoder::new(
+        config,
+        limits,
+        admission.decoder_record()?.bytes(),
+    )?)
 }
 #[cfg(not(target_os = "linux"))]
 fn main() {
@@ -145,7 +171,7 @@ fn delivery(
     };
     let send = SendCache::new(wire, bindings, epoch, SendPolicy::default())?;
     let budget = MediaBudget::new(wire.protocol())?;
-    let mut receive = ReceivePipeline::new(
+    let receive = ReceivePipeline::new(
         ReceiveConfig {
             limits: wire,
             bindings,
@@ -154,7 +180,6 @@ fn delivery(
         },
         budget.clone(),
     )?;
-    receive.decoder_configured(0)?;
     Ok((send, receive, budget))
 }
 

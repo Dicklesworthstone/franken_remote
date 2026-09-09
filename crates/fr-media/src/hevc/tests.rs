@@ -268,3 +268,117 @@ fn debug_output_contains_no_parameter_or_screen_content() {
     assert!(!debug.contains("4001"));
     assert!(!debug.contains("[64, 1"));
 }
+
+#[test]
+fn exact_configuration_admits_parameters_without_inventing_decoded_history() {
+    let mut encoder = guard();
+    encoder.validate_annex_b(&startup(), true).unwrap();
+    let record = encoder.decoder_record().unwrap();
+    let mut decoder = HevcGuard::from_decoder_record(
+        config(320, 240),
+        ProtocolLimits::ABSOLUTE,
+        4,
+        record.bytes(),
+    )
+    .unwrap();
+    assert_eq!(decoder.decoder_record().unwrap().bytes(), record.bytes());
+    assert_eq!(decoder.last_poc, None);
+    assert_eq!(decoder.available_history, 0);
+    assert!(decoder.validate_annex_b(&au(&[&hex(P1)]), false).is_err());
+    assert_eq!(decoder.last_poc, None);
+    decoder.validate_annex_b(&startup(), true).unwrap();
+    decoder.validate_annex_b(&au(&[&hex(P1)]), false).unwrap();
+    assert_eq!(decoder.last_poc, Some(1));
+}
+
+#[test]
+fn decoder_record_rejects_truncation_header_disagreement_and_resource_demands() {
+    let mut encoder = guard();
+    encoder.validate_annex_b(&startup(), true).unwrap();
+    let record = encoder.decoder_record().unwrap();
+    let admit = |bytes: &[u8]| {
+        HevcGuard::from_decoder_record(config(320, 240), ProtocolLimits::ABSOLUTE, 4, bytes)
+    };
+    for len in 0..record.bytes().len() {
+        assert!(admit(&record.bytes()[..len]).is_err(), "truncation {len}");
+    }
+    for byte in 0..23 {
+        for bit in 0..8 {
+            let mut changed = record.bytes().to_vec();
+            changed[byte] ^= 1 << bit;
+            assert!(admit(&changed).is_err(), "header byte {byte} bit {bit}");
+        }
+    }
+    for byte in [23, 24, 25, 28] {
+        let mut changed = record.bytes().to_vec();
+        changed[byte] ^= 2;
+        assert!(admit(&changed).is_err(), "array count/type byte {byte}");
+    }
+    let mut changed = record.bytes().to_vec();
+    changed[26..28].copy_from_slice(&4097_u16.to_be_bytes());
+    assert_eq!(admit(&changed).unwrap_err(), HevcError::Limit);
+    let mut trailing = record.bytes().to_vec();
+    trailing.push(0);
+    assert_eq!(admit(&trailing).unwrap_err(), HevcError::Framing);
+    assert_eq!(
+        admit(&vec![0; MAX_DECODER_RECORD_BYTES + 1]).unwrap_err(),
+        HevcError::Limit
+    );
+    assert_eq!(
+        HevcGuard::from_decoder_record(
+            config(640, 240),
+            ProtocolLimits::ABSOLUTE,
+            4,
+            record.bytes()
+        )
+        .unwrap_err(),
+        HevcError::GeometryMismatch
+    );
+    assert_eq!(
+        HevcGuard::from_decoder_record(
+            config(320, 240),
+            ProtocolLimits::ABSOLUTE,
+            2,
+            record.bytes()
+        )
+        .unwrap_err(),
+        HevcError::DpbLimit
+    );
+}
+
+#[test]
+fn private_decoder_startup_binds_the_record_generation_and_geometry() {
+    let mut guard = guard();
+    guard.validate_annex_b(&startup(), true).unwrap();
+    let record = guard.decoder_record().unwrap();
+    let configuration = crate::worker::Configuration {
+        width: 320,
+        height: 240,
+        fps: 30,
+        backend: crate::worker::Backend::SoftwareExplicit,
+        bitrate: 2_000_000,
+        max_access_unit_bytes: 1024 * 1024,
+        generation: record.generation(),
+    };
+    let body = configuration.encode_decoder(&record).unwrap();
+    assert_eq!(
+        crate::worker::Configuration::decode_decoder(&body).unwrap(),
+        (configuration, record.bytes())
+    );
+    assert_eq!(
+        crate::worker::Configuration {
+            generation: CodecConfigurationGeneration::from_raw(1),
+            ..configuration
+        }
+        .encode_decoder(&record),
+        Err(crate::worker::Error::WrongEpoch)
+    );
+    assert_eq!(
+        crate::worker::Configuration {
+            width: 640,
+            ..configuration
+        }
+        .encode_decoder(&record),
+        Err(crate::worker::Error::Unsupported)
+    );
+}

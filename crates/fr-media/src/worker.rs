@@ -29,6 +29,7 @@ pub enum Kind {
     Stop = 5,
     Decode = 6,
     CaptureIfChanged = 7,
+    ConfigureDecoder = 8,
     Ready = 257,
     Unit = 258,
     NeedInput = 259,
@@ -38,6 +39,7 @@ pub enum Kind {
     Refused = 263,
     Decoded = 264,
     Unchanged = 265,
+    DecoderReady = 266,
 }
 impl Kind {
     fn parse(n: u16) -> Result<Self, Error> {
@@ -49,6 +51,7 @@ impl Kind {
             5 => Self::Stop,
             6 => Self::Decode,
             7 => Self::CaptureIfChanged,
+            8 => Self::ConfigureDecoder,
             257 => Self::Ready,
             258 => Self::Unit,
             259 => Self::NeedInput,
@@ -58,6 +61,7 @@ impl Kind {
             263 => Self::Refused,
             264 => Self::Decoded,
             265 => Self::Unchanged,
+            266 => Self::DecoderReady,
             _ => return Err(Error::Malformed),
         })
     }
@@ -67,6 +71,11 @@ impl Kind {
     fn accepts_length(self, length: usize, limits: &ProtocolLimits) -> bool {
         match self {
             Self::Configure | Self::Ready => length == CONFIG_BYTES,
+            Self::ConfigureDecoder | Self::DecoderReady => {
+                (CONFIG_BYTES + 23..=CONFIG_BYTES + crate::hevc::MAX_DECODER_RECORD_BYTES)
+                    .contains(&length)
+                    && length <= limits.max_control_message_bytes() as usize
+            }
             Self::Capture | Self::CaptureIfChanged => length == 17,
             Self::Unchanged => length == 24,
             Self::Poll | Self::Stop | Self::NeedInput | Self::NeedDrain | Self::Stopped => {
@@ -265,6 +274,31 @@ pub struct Configuration {
     pub generation: CodecConfigurationGeneration,
 }
 impl Configuration {
+    /// Private decoder startup binds exact hvcC to the admitted configuration.
+    /// The worker independently revalidates the body before any decoder FFI.
+    pub fn encode_decoder(self, record: &crate::hevc::DecoderRecord) -> Result<Vec<u8>, Error> {
+        if record.generation() != self.generation {
+            return Err(Error::WrongEpoch);
+        }
+        let mut body = self.encode()?;
+        crate::hevc::HevcGuard::from_decoder_record(
+            self.codec()?,
+            self.limits()?,
+            4,
+            record.bytes(),
+        )
+        .map_err(|_| Error::Unsupported)?;
+        body.try_reserve_exact(record.bytes().len())
+            .map_err(|_| Error::Allocation)?;
+        body.extend_from_slice(record.bytes());
+        Ok(body)
+    }
+    pub fn decode_decoder(body: &[u8]) -> Result<(Self, &[u8]), Error> {
+        if !Kind::ConfigureDecoder.accepts_length(body.len(), &ProtocolLimits::ABSOLUTE) {
+            return Err(Error::ResourceLimit);
+        }
+        Ok((Self::decode(&body[..CONFIG_BYTES])?, &body[CONFIG_BYTES..]))
+    }
     pub fn limits(self) -> Result<ProtocolLimits, Error> {
         ProtocolLimits::with_overrides(LimitOverrides {
             max_encoded_access_unit_bytes: Some(self.max_access_unit_bytes),

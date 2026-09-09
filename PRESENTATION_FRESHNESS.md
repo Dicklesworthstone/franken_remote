@@ -248,8 +248,9 @@ This is local supervised software HEVC with modeled stream abandonment, not
 actual transport-reset interoperability, optical scanout, GPU qualification, or
 the normative startup wire handshake. The fixture's same-configuration receiver
 acknowledgement uses an already configured/decoded worker. Worker `Ready` alone
-does not establish exact-hvcC `DecoderConfigured`: exact bootstrap configuration
-exchange and admission remain outstanding. Shared-viewer IDR coalescing, new
+does not establish normative `DecoderConfigured`. Exact native startup admission
+was still outstanding at this experiment's source revision; the subsequent
+private-worker implementation is recorded below. Shared-viewer IDR coalescing, new
 configuration ownership, the fps/horizon window choice and large-IDR/slow-link
 operating envelopes also remain on `fr-p0-recovery-authority-d7d`.
 
@@ -317,3 +318,134 @@ route compilation through the explicit RCH gates above; no analysis rule or
 suppression changed. Full verification and Phase 0 closure are not claimed.
 Logs remain under `/tmp/fr-resume-`: `tests-final.log`, `check-final.log`,
 `clippy-final2.log`, `examples-final.log`, and `ubs-final.txt`/`ubs-final.json`.
+
+## Exact native decoder startup
+
+The next slice on `fr-p0-recovery-authority-d7d` joins exact HEVC configuration to
+real decoder setup in the existing private process path (plan §12.3 and protocol
+§7). `HevcGuard::from_decoder_record` admits the canonical hvcC emitted by the
+existing writer, validates VPS/SPS/PPS, geometry/crop, color and DPB, and freezes
+all parameter bytes. It creates no picture/reference history: a P picture still
+refuses until an actual IDR is accepted. Existing browser hvc1 output and golden
+fixtures are unchanged; native AUs retain their explicit in-band parameter sets.
+
+`Presenter::start` now requires the exact record. A distinct private FRW0
+`ConfigureDecoder` (8) carries the 28-byte configuration envelope followed by
+hvcC. The native presentation worker independently validates it before opening
+FFmpeg, copies it into padded native-owned extradata, then returns `DecoderReady`
+(266) with the exact payload. Legacy `Configure` without parameter sets refuses
+for a presentation worker. Epoch, sequence, exact-echo, operation deadline and
+cancellation checks remain in the existing supervisor. `DecoderReady` confirms
+API configuration only: polling before the first AU returns `NeedInput`.
+
+The decoder submits canonical four-byte-length-prefixed packets to match hvcC
+mode. This follows the [FFmpeg n8.0 extradata parser](https://raw.githubusercontent.com/FFmpeg/FFmpeg/n8.0/libavcodec/hevc/parse.c)
+and [packet decoder](https://raw.githubusercontent.com/FFmpeg/FFmpeg/n8.0/libavcodec/hevc/hevcdec.c);
+retaining the previous Annex B conversion after hvcC configuration would select
+incompatible framing. Native EAGAIN still commits neither admission history nor
+frame identity. The real coded-padding, changed-parameter, missing-set and
+backpressure cases retain their assertions.
+
+Bounds are explicit before allocation: three arrays, one NAL each, at most 4096
+bytes per NAL; hvcC at most 12,326 bytes; private body at most 12,354 bytes and
+header plus body at most 12,390 bytes, also constrained by the control-message
+limit. The guard retains at most 12,288 parameter bytes plus its fixed owner and
+three vector descriptors. Canonical comparison temporarily creates one bounded
+record and codec identifier. Parent startup retains the expected body, request
+copy and response while exchanging, each separately bounded; the caller's record
+and native padded copy are additional owners. These are bounds on these buffers,
+not a total codec/process/GPU memory measurement or allocator-overhead claim.
+
+The `presentation_input` and `supervised_media` fixtures capture one real bootstrap frame to obtain the
+record, release it without publishing, configure the worker, then capture a fresh
+forced IDR. The shared frame counter advances: bootstrap 0, first visible IDR 1;
+the partial-recovery case uses incomplete IDR 2, fresh recovery IDR 3 and dependent
+P picture 4. No capture timestamp is rewritten and no freshness deadline grows.
+
+The clean baseline at `27cc6fa27fb57151e73a02f15f98fbad1e5786fb` exposed a local
+supervisor bug: its watchdog could poll a freshly reset Sleep to completion and
+then poll the same completed future again. `bounded` now polls the timer once per
+turn, resets it and wakes the task to register the next wait. A virtual-clock
+regression advances 20 ms during the first operation poll and forces the former
+race without wall-clock sleeps. This fixes that concrete local contract violation;
+the baseline lacked a backtrace, and the earlier unexplained visibility-deadline
+failure remains a separate open finding.
+
+This is private-worker startup and supervised software HEVC on X11/Xvfb. The
+normative `DecoderConfiguration`/`DecoderConfigured` network messages, binding to
+an authenticated receiving subscription, wire milestone timeouts and independent
+transport-reset qualification remain open. Wrong/partial replies on the new
+startup kind are source-reviewed through the common exchange checks; existing
+forged/partial/cancellation tests exercise that exchange using a hostile child,
+not independent decoder interoperability. Shared-viewer IDR coalescing, coordinated
+configuration changes, fps/horizon-derived windows, large-IDR/slow-link envelopes,
+hardware qualification and an enforced media sandbox are not established here.
+
+The native fixture's actual bootstrap was 2,521 encoded bytes and 110 hvcC bytes
+(private configuration body 138 bytes). It was never published as a fresh view.
+The retained recovery fixture now produced a 31,674-byte partial IDR with 31,962
+receiver charged bytes, followed by the 37,797-byte fresh IDR and 24,873-byte P
+picture. These are software-encoder outputs for this fixture, not padded stand-ins
+for the still-outstanding large-IDR operating-envelope experiments.
+
+Negative evidence retained for this slice:
+
+- RCH `j-30012848524492964`, clean baseline27cc6fa: full workspace exit 101,
+  `Sleep polled after completion` in the final-fragment test. The later
+  virtual-clock regression covers the source-proven supervisor race.
+- `92965`: the attempted backtrace command selected `linux-media` but omitted
+  `linux-input-agent`; its zero-test exit 0 is excluded from all validation counts.
+- Clippy92967/92968/92970/92971/92972 refused a manual range, an unused local,
+  and example/fixture functions over 100 lines. Helpers were extracted with all
+  assertions/error propagation retained; no lint suppression was added.
+- Full workspace92974: exit 101 when the final-fragment test's real X11 readback
+  reached `client.visible` after the original display deadline (`QueueExpired`).
+  Added receipt-observation/readback/visible timestamps and original-deadline
+  diagnostics, preserving the failure oracle. Diagnostic92976 and final92979
+  each passed 340 tests. No deadline was enlarged, and those passes do not explain
+  or fix that timing failure or the earlier92923 visibility failure.
+
+The installed UBS 5.3.13 Rust scan still fails. Source review classifies its
+critical findings as media/IPC decode operations mistaken for JWT processing,
+public enums/indices mistaken for secret comparisons, and test panic oracles.
+That classification is not a passing scanner gate. The installed C/C++ module's
+initial `--only=c` wrapper run selected zero files; it is excluded. Running its
+documented `--include-ext=c --paths-from=/tmp/fr-bootstrap-c-paths.txt` option
+then scanned the actual bridge: zero critical, three warnings, 23 info. The warnings
+are context-limited allocation findings: encoder and decoder owners release in
+`fr_encoder_free`/`fr_decoder_free`, and the pixel allocation is attached to `XImage::data` and released by
+`XDestroyImage`. No scanner rule was edited and
+no sanitizer/hardware claim follows from this scan.
+
+Final verification used strict remote RCH worker `vmi1149989`,
+`RCH_REQUIRE_REMOTE=1`, `RCH_QUEUE_WHEN_BUSY=0`, `CARGO_HOME=/root/.cargo`, and
+nightly-2026-08-31. Base `27cc6fa27fb57151e73a02f15f98fbad1e5786fb` plus the
+15 explicit changed Rust/C paths produced fingerprint
+`104b6301d9a38185bd58ec63e53a453db0e9c0dc03cf1b5dcbc1bcf4e0224f22`.
+The source commit is recorded on the owning bead; reproducible clean-commit
+RCH runs should use `--base <that commit> --clean-overlay --no-overlay`.
+
+| Gate | Terminal evidence |
+|---|---|
+| Workspace/all-targets/all-features/locked check | RCH92980, remote exit 0 |
+| Same strict Clippy with `-D warnings` | RCH92981, remote exit 0 |
+| Workspace/all-features/locked tests | RCH92979, remote exit 0;340 passed, 0 failed, 0 ignored across 47 harnesses |
+| Workspace/all-features/locked example tests | RCH92982, remote exit 0;2 passed, 0 failed across 4 harnesses |
+| Nonbuilding format check, docs links and diff whitespace | local exit 0 |
+| Installed UBS Rust scan, 14 changed Rust files | exit 1; 34 critical, 1172 warnings, 167 info |
+| Installed C/C++ module, explicit `.c` extension and one bridge path | exit 0; 1 file, 0 critical, 3 warnings, 23 info; default critical threshold |
+
+The 34 Rust critical sites were source-reviewed: 23 media/IPC decode/name matches,
+5 public enum/index comparisons, and6 deliberate test panic oracles (including the
+new deadline diagnostic). This does not waive the failed Rust scanner/full gate.
+The installed Rust module hash was
+`89d2b1e9bad572cb372eac0c4b6ec61583441e40b57f78981474f2b1686ec410`;
+C/C++ module hash
+`f054b77189ac66e81fa5c918d4605430272ccb67d9c875f126673182fda85805`.
+UBS build subprocesses were disabled (`UBS_SKIP_RUST_BUILD=1`); compilation and
+native tests ran through RCH separately. Logs are
+`/tmp/fr-bootstrap-{tests-final2,check-final2,clippy-final3,examples}.log`,
+`/tmp/fr-bootstrap-ubs-final3.{txt,json}`, and
+`/tmp/fr-bootstrap-ubs-c-explicit.txt`; earlier failed/excluded logs are retained
+under the same prefix. Independent review covered source and retained output,
+not another independent native execution.

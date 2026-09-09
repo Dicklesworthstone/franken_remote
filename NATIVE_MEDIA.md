@@ -26,11 +26,14 @@ not permission to reinterpret stale dimensions. Diagnostic formatting omits pixe
 foreign library logs are suppressed inside the media process in favor of typed
 categories, not reflected into protocol messages.
 
-**Decoder boundary:** this first adapter accepts locally generated/independently
-validated baseline access units. Its NAL-role check is not a complete VPS/SPS/PPS
-or DPB validator. Do not expose it to arbitrary network media until that validator
-and worker containment are joined. Likewise no Tailscale, OS permission bypass,
-Wayland support, authority lease, or input injection is implemented by this crate.
+**Decoder boundary:** the safe HEVC guard validates exact canonical hvcC,
+VPS/SPS/PPS, coded/cropped geometry, color and DPB demands before native decoder
+configuration. It freezes parameter identities and separately validates every
+complete AU before submission; configuration alone creates no reference history.
+The private presentation worker requires this configuration before acknowledging
+API readiness. See [the startup evidence](PRESENTATION_FRESHNESS.md#exact-native-decoder-startup).
+This is a deliberately narrow baseline, not CABAC validation, a security sandbox,
+hardware qualification or an authenticated network session.
 
 ## Build and reproduce
 

@@ -18,7 +18,7 @@ use nal::{AnnexB, Nal};
 
 pub mod framing;
 mod record;
-pub use record::{DecoderRecord, Hvc1AccessUnit};
+pub use record::{DecoderRecord, Hvc1AccessUnit, MAX_DECODER_RECORD_BYTES};
 use std::sync::Arc;
 
 mod nal;

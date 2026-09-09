@@ -27,7 +27,11 @@ mod linux {
             _ => Error::NativeFailure,
         }
     }
-    fn open(role: Role, configuration: Configuration) -> Result<Media, Error> {
+    fn open(
+        role: Role,
+        configuration: Configuration,
+        record: Option<&[u8]>,
+    ) -> Result<Media, Error> {
         let limits = configuration.limits()?;
         let config = configuration.codec()?;
         Ok(match role {
@@ -61,7 +65,8 @@ mod linux {
                     limits,
                 )
                 .map_err(native)?,
-                codec: HevcDecoder::new(config, limits).map_err(native)?,
+                codec: HevcDecoder::new(config, limits, record.ok_or(Error::WrongState)?)
+                    .map_err(native)?,
                 display_next: None,
             },
         })
@@ -185,11 +190,13 @@ mod linux {
         let first_identity = first.header.identity;
         let mut sequence = Sequence::new(first_identity.epoch)?;
         sequence.accept(first.header)?;
-        if first.header.kind != Kind::Configure {
-            return Err(Error::WrongState);
-        }
-        let initialized =
-            Configuration::decode(first.body()).and_then(|c| open(role, c).map(|m| (c, m)));
+        let initialized = match (role, first.header.kind) {
+            (Role::Capture, Kind::Configure) => Configuration::decode(first.body())
+                .and_then(|c| open(role, c, None).map(|m| (c, m))),
+            (Role::Present, Kind::ConfigureDecoder) => Configuration::decode_decoder(first.body())
+                .and_then(|(c, record)| open(role, c, Some(record)).map(|m| (c, m))),
+            _ => Err(Error::WrongState),
+        };
         let (configuration, mut media) = match initialized {
             Ok(value) => value,
             Err(error) => {
@@ -205,9 +212,13 @@ mod linux {
         };
         let limits = configuration.limits()?;
         Record::new(
-            Kind::Ready,
+            if role == Role::Present {
+                Kind::DecoderReady
+            } else {
+                Kind::Ready
+            },
             first_identity,
-            configuration.encode()?,
+            first.into_body(),
             &limits,
         )?
         .write(&mut output, &limits)?;

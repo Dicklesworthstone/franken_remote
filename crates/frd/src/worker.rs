@@ -182,9 +182,10 @@ async fn bounded<T>(
             let next =
                 Time::from_nanos(current.as_nanos().saturating_add(10_000_000)).min(deadline.0);
             timer.as_mut().get_mut().reset(next);
-            if timer.as_mut().poll(task).is_ready() {
-                task.waker().wake_by_ref();
-            }
+            // reset clears the registration. Re-enter to register the new sleep,
+            // never poll it twice here: time may already have passed `next`, and
+            // a second Ready would leave a completed Sleep for the next turn.
+            task.waker().wake_by_ref();
         }
         Poll::Pending
     })
@@ -219,8 +220,41 @@ impl Worker {
         configuration: Configuration,
         deadline: Deadline,
     ) -> Result<Self, Error> {
-        runtime_ready(cx)?;
         let body = configuration.encode()?;
+        Self::start_with_body(cx, launch, configuration, body, Kind::Configure, deadline).await
+    }
+    /// Configure a real presentation decoder with exact admitted parameter sets.
+    /// The private echo confirms API setup only, never decode or visibility.
+    pub async fn start_decoder(
+        cx: &Cx,
+        launch: Launch,
+        configuration: Configuration,
+        record: &fr_media::hevc::DecoderRecord,
+        deadline: Deadline,
+    ) -> Result<Self, Error> {
+        if launch.role != Role::Present {
+            return Err(Error::Protocol(worker::Error::WrongRole));
+        }
+        let body = configuration.encode_decoder(record)?;
+        Self::start_with_body(
+            cx,
+            launch,
+            configuration,
+            body,
+            Kind::ConfigureDecoder,
+            deadline,
+        )
+        .await
+    }
+    async fn start_with_body(
+        cx: &Cx,
+        launch: Launch,
+        configuration: Configuration,
+        body: Vec<u8>,
+        kind: Kind,
+        deadline: Deadline,
+    ) -> Result<Self, Error> {
+        runtime_ready(cx)?;
         let limits = configuration.limits()?;
         if now(cx)? >= deadline.0 {
             return Err(Error::Deadline);
@@ -262,11 +296,14 @@ impl Worker {
             state: State::Starting,
             exit: None,
         };
-        let result = worker
-            .exchange(cx, Kind::Configure, body.clone(), deadline)
-            .await;
+        let result = worker.exchange(cx, kind, body.clone(), deadline).await;
+        let expected = if kind == Kind::ConfigureDecoder {
+            Kind::DecoderReady
+        } else {
+            Kind::Ready
+        };
         match result {
-            Ok(reply) if reply.header.kind == Kind::Ready && reply.body() == body => {
+            Ok(reply) if reply.header.kind == expected && reply.body() == body => {
                 worker.state = State::Running;
                 Ok(worker)
             }
@@ -439,6 +476,7 @@ fn allowed_reply(request: Kind, reply: Kind) -> bool {
     reply == Kind::Refused
         || match request {
             Kind::Configure => reply == Kind::Ready,
+            Kind::ConfigureDecoder => reply == Kind::DecoderReady,
             Kind::Capture => matches!(reply, Kind::Unit | Kind::NeedInput | Kind::NeedDrain),
             Kind::Present => matches!(reply, Kind::Presented | Kind::NeedInput | Kind::NeedDrain),
             Kind::Decode => matches!(reply, Kind::Decoded | Kind::NeedInput | Kind::NeedDrain),
@@ -449,4 +487,48 @@ fn allowed_reply(request: Kind, reply: Kind) -> bool {
             Kind::Stop => reply == Kind::Stopped,
             _ => false,
         }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use asupersync::{
+        runtime::RuntimeBuilder,
+        time::{TimerDriverHandle, VirtualClock},
+    };
+    use std::sync::Arc;
+
+    #[test]
+    fn elapsed_rearmed_watchdog_is_never_polled_after_completion() {
+        let clock = Arc::new(VirtualClock::new());
+        let runtime = RuntimeBuilder::current_thread()
+            .with_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(&clock)))
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let deadline = Deadline::after(&cx, Duration::from_secs(1)).unwrap();
+            let mut polls = 0;
+            let result = bounded(
+                &cx,
+                deadline,
+                poll_fn(|_| {
+                    polls += 1;
+                    match polls {
+                        1 => {
+                            // I/O polling may consume the entire next watchdog interval.
+                            // Advancing lab time forces that race without sleeping.
+                            clock.advance(20_000_000);
+                            Poll::Pending
+                        }
+                        2 => Poll::Pending,
+                        _ => Poll::Ready(Ok::<(), Error>(())),
+                    }
+                }),
+            )
+            .await;
+            assert_eq!(result, Ok(()));
+            assert_eq!(polls, 3);
+        });
+    }
 }

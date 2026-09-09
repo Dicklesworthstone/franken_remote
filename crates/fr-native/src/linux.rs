@@ -8,10 +8,7 @@ use fr_core::{ids::RecoveryGeneration, limits::ProtocolLimits};
 use fr_media::{
     access_unit::{EncodedAccessUnit, FrameId, FrameKind},
     config::{CodecConfiguration, ColorInfo},
-    hevc::{
-        HevcGuard,
-        framing::{annex_b_to_length_prefixed, length_prefixed_to_annex_b},
-    },
+    hevc::{HevcGuard, framing::annex_b_to_length_prefixed},
 };
 use std::{collections::VecDeque, ffi::CString, rc::Rc};
 
@@ -39,6 +36,8 @@ unsafe extern "C" {
         h: c_int,
         coded_w: c_int,
         coded_h: c_int,
+        configuration: *const u8,
+        configuration_len: usize,
         out: *mut *mut c_void,
     ) -> c_int;
     fn fr_decoder_free(p: *mut c_void);
@@ -382,24 +381,31 @@ pub struct HevcDecoder {
     _thread: PhantomData<Rc<()>>,
 }
 impl HevcDecoder {
-    pub fn new(config: CodecConfiguration, limits: ProtocolLimits) -> Result<Self, NativeError> {
-        initialize()?;
+    pub fn new(
+        config: CodecConfiguration,
+        limits: ProtocolLimits,
+        record: &[u8],
+    ) -> Result<Self, NativeError> {
         let g = config.geometry();
         frame_len(g.coded_width(), g.coded_height(), &limits)?;
         frame_len(g.crop_width(), g.crop_height(), &limits)?;
         if config.color() != ColorInfo::sdr_bt709() {
             return Err(NativeError::InvalidConfiguration);
         }
-        let admission =
-            HevcGuard::new(config, limits, 4).map_err(|_| NativeError::InvalidConfiguration)?;
+        let admission = HevcGuard::from_decoder_record(config, limits, 4, record)
+            .map_err(|_| NativeError::InvalidConfiguration)?;
+        initialize()?;
         let mut ptr = core::ptr::null_mut();
-        // SAFETY: bounded dimensions and writable out pointer; no Rust pointer retained.
+        // SAFETY: dimensions/parameter sets/resource demands admitted before FFI.
+        // Bridge copies the exact record into padded native-owned extradata.
         status(unsafe {
             fr_decoder_new(
                 c_int::try_from(g.crop_width()).map_err(|_| NativeError::InvalidConfiguration)?,
                 c_int::try_from(g.crop_height()).map_err(|_| NativeError::InvalidConfiguration)?,
                 c_int::try_from(g.coded_width()).map_err(|_| NativeError::InvalidConfiguration)?,
                 c_int::try_from(g.coded_height()).map_err(|_| NativeError::InvalidConfiguration)?,
+                record.as_ptr(),
+                record.len(),
                 &raw mut ptr,
             )
         })?;
@@ -445,8 +451,9 @@ impl HevcDecoder {
         admission
             .validate_length_prefixed(unit.bytes(), idr)
             .map_err(|_| NativeError::UnsupportedBitstream)?;
-        let bytes = length_prefixed_to_annex_b(unit.bytes(), self.limits)
-            .map_err(|_| NativeError::UnsupportedBitstream)?;
+        // hvcC selects length-prefixed packets in FFmpeg. Preserve canonical
+        // four-byte framing rather than switching this configured stream to Annex B.
+        let bytes = unit.bytes();
         // SAFETY: bridge copies into av_new_packet's padded reference-counted storage before returning.
         match status(unsafe {
             fr_decoder_send(
@@ -657,7 +664,7 @@ mod tests {
             1_000_000,
         )
         .unwrap();
-        let mut decoder = HevcDecoder::new(configuration, limits).unwrap();
+        let mut decoder = None;
         for n in 0..4 {
             let source = BgraFrame::new(
                 64,
@@ -672,6 +679,21 @@ mod tests {
             let au = encoder.poll_output().unwrap();
             assert_eq!(au.frame().as_raw(), n);
             assert_eq!(au.is_idr(), n == 0 || n == 2);
+            if decoder.is_none() {
+                let mut admission = HevcGuard::new(configuration, limits, 4).unwrap();
+                admission
+                    .validate_length_prefixed(au.bytes(), true)
+                    .unwrap();
+                decoder = Some(
+                    HevcDecoder::new(
+                        configuration,
+                        limits,
+                        admission.decoder_record().unwrap().bytes(),
+                    )
+                    .unwrap(),
+                );
+            }
+            let decoder = decoder.as_mut().unwrap();
             decoder.submit(&au).unwrap();
             let (id, pixels) = decoder.poll_output().unwrap();
             assert_eq!(id, au.frame());

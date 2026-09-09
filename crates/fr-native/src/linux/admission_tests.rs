@@ -1,6 +1,7 @@
 use super::*;
 use fr_core::ids::CodecConfigurationGeneration;
 use fr_media::config::{CodedGeometry, GopPolicy};
+use fr_media::hevc::framing::length_prefixed_to_annex_b;
 
 fn configuration(width: u32) -> CodecConfiguration {
     CodecConfiguration::new_baseline(
@@ -37,6 +38,12 @@ fn encoded(width: u32, count: u64) -> Vec<EncodedAccessUnit> {
         })
         .collect()
 }
+fn decoder_for(config: CodecConfiguration, unit: &EncodedAccessUnit) -> HevcDecoder {
+    let limits = ProtocolLimits::ABSOLUTE;
+    let mut guard = HevcGuard::new(config, limits, 4).unwrap();
+    guard.validate_length_prefixed(unit.bytes(), true).unwrap();
+    HevcDecoder::new(config, limits, guard.decoder_record().unwrap().bytes()).unwrap()
+}
 fn replace(unit: &EncodedAccessUnit, bytes: Vec<u8>) -> EncodedAccessUnit {
     EncodedAccessUnit::new(
         &ProtocolLimits::ABSOLUTE,
@@ -51,10 +58,9 @@ fn replace(unit: &EncodedAccessUnit, bytes: Vec<u8>) -> EncodedAccessUnit {
 
 #[test]
 fn wrong_sps_geometry_and_missing_sets_refuse_before_foreign_state_changes() {
-    let limits = ProtocolLimits::ABSOLUTE;
     let valid = encoded(64, 1).pop().unwrap();
     let larger = encoded(128, 1).pop().unwrap();
-    let mut decoder = HevcDecoder::new(configuration(64), limits).unwrap();
+    let mut decoder = decoder_for(configuration(64), &valid);
     assert_eq!(
         decoder.submit(&larger),
         Err(NativeError::UnsupportedBitstream)
@@ -77,7 +83,7 @@ fn wrong_sps_geometry_and_missing_sets_refuse_before_foreign_state_changes() {
 #[test]
 fn changed_recovery_parameters_do_not_replace_the_live_configuration() {
     let units = encoded(64, 4);
-    let mut decoder = HevcDecoder::new(configuration(64), ProtocolLimits::ABSOLUTE).unwrap();
+    let mut decoder = decoder_for(configuration(64), &units[0]);
     for unit in &units[..2] {
         decoder.submit(unit).unwrap();
         assert_eq!(decoder.poll_output().unwrap().0, unit.frame());
@@ -109,7 +115,7 @@ fn changed_recovery_parameters_do_not_replace_the_live_configuration() {
 #[test]
 fn actual_decoder_backpressure_retries_do_not_consume_admission() {
     let units = encoded(64, 8);
-    let mut decoder = HevcDecoder::new(configuration(64), ProtocolLimits::ABSOLUTE).unwrap();
+    let mut decoder = decoder_for(configuration(64), &units[0]);
     let mut received = 0;
     let mut retries = 0;
     for unit in &units {
@@ -160,7 +166,7 @@ fn coded_padding_is_admitted_but_only_visible_pixels_are_presented() {
             4_000_000,
         )
         .unwrap();
-        let mut decoder = HevcDecoder::new(config, limits).unwrap();
+        let mut decoder = None;
         for n in 0..3 {
             let pixels =
                 vec![u8::try_from(n * 30).unwrap(); usize::try_from(width * height * 4).unwrap()];
@@ -169,6 +175,7 @@ fn coded_padding_is_admitted_but_only_visible_pixels_are_presented() {
                 .submit(&frame, FrameId::from_raw(n), n * 33_333, n == 2)
                 .unwrap();
             let unit = encoder.poll_output().unwrap();
+            let decoder = decoder.get_or_insert_with(|| decoder_for(config, &unit));
             decoder.submit(&unit).unwrap_or_else(|error| {
                 panic!("decoder submit refused {width}x{height} frame {n}: {error:?}")
             });
@@ -185,7 +192,7 @@ fn native_delivery_is_canonical_and_browser_samples_share_admitted_configuration
     let units = encoded(64, 4);
     let limits = ProtocolLimits::ABSOLUTE;
     let mut browser = HevcGuard::new(configuration(64), limits, 4).unwrap();
-    let mut decoder = HevcDecoder::new(configuration(64), limits).unwrap();
+    let mut decoder = decoder_for(configuration(64), &units[0]);
     for unit in &units {
         let annex_b = length_prefixed_to_annex_b(unit.bytes(), limits).unwrap();
         assert_eq!(
@@ -208,6 +215,41 @@ fn native_delivery_is_canonical_and_browser_samples_share_admitted_configuration
         } else {
             assert_eq!(sample.bytes(), unit.bytes());
         }
+        decoder.submit(unit).unwrap();
+        assert_eq!(decoder.poll_output().unwrap().0, unit.frame());
+    }
+}
+
+#[test]
+fn exact_native_configuration_has_no_output_or_reference_before_first_idr() {
+    let units = encoded(64, 2);
+    let config = configuration(64);
+    let limits = ProtocolLimits::ABSOLUTE;
+    let mut guard = HevcGuard::new(config, limits, 4).unwrap();
+    guard
+        .validate_length_prefixed(units[0].bytes(), true)
+        .unwrap();
+    let record = guard.decoder_record().unwrap();
+    assert!(matches!(
+        HevcDecoder::new(configuration(128), limits, record.bytes()),
+        Err(NativeError::InvalidConfiguration)
+    ));
+    for bytes in [&[][..], &record.bytes()[..record.bytes().len() - 1]] {
+        assert!(matches!(
+            HevcDecoder::new(config, limits, bytes),
+            Err(NativeError::InvalidConfiguration)
+        ));
+    }
+    let mut decoder = HevcDecoder::new(config, limits, record.bytes()).unwrap();
+    assert_eq!(decoder.last, None);
+    assert!(decoder.pending.is_empty());
+    assert!(matches!(decoder.poll_output(), Err(NativeError::NeedInput)));
+    assert_eq!(
+        decoder.submit(&units[1]),
+        Err(NativeError::UnsupportedBitstream)
+    );
+    assert_eq!(decoder.last, None);
+    for unit in &units {
         decoder.submit(unit).unwrap();
         assert_eq!(decoder.poll_output().unwrap().0, unit.frame());
     }

@@ -5,9 +5,13 @@ use super::{HevcError, HevcGuard, PictureInfo, framing};
 use core::fmt::{self, Write};
 use fr_core::ids::CodecConfigurationGeneration;
 
+/// Three parameter arrays with one bounded 4096-byte NAL each.
+pub const MAX_DECODER_RECORD_BYTES: usize = 23 + 3 * (5 + 4096);
+
 /// An exact `hvcC` payload (not an MP4 box) and fully qualified `hvc1` identifier.
-/// Use only with samples returned by `HevcGuard::prepare_hvc1`, which remove
-/// parameter sets. Browser support still requires an actual capability probe.
+/// The `hvc1` identifier applies only to `prepare_hvc1` samples, which remove
+/// parameter sets. Native adapters may use the record bytes with their explicit
+/// in-band-parameter-set contract; that does not label those samples `hvc1`.
 pub struct DecoderRecord {
     bytes: Vec<u8>,
     codec: String,
@@ -62,7 +66,58 @@ impl fmt::Debug for Hvc1AccessUnit {
     }
 }
 impl HevcGuard {
-    /// Generates the exact configuration established by a successfully admitted
+    /// Admit the exact canonical configuration emitted by `decoder_record`.
+    /// This establishes parameter identity, geometry, color and resource bounds,
+    /// but NO decoded/reference history. The first submitted picture must be IDR.
+    pub fn from_decoder_record(
+        config: crate::config::CodecConfiguration,
+        limits: fr_core::limits::ProtocolLimits,
+        max_decoded_pictures: u8,
+        record: &[u8],
+    ) -> Result<Self, HevcError> {
+        if record.len() > MAX_DECODER_RECORD_BYTES {
+            return Err(HevcError::Limit);
+        }
+        limits
+            .validate_control_message_len(record.len())
+            .map_err(|_| HevcError::Limit)?;
+        if record.len() < 23 {
+            return Err(HevcError::Truncated);
+        }
+        let mut guard = Self::new(config, limits, max_decoded_pictures)?;
+        let mut offset = 23;
+        let mut sets = [None; 3];
+        for (slot, kind) in sets.iter_mut().zip(32_u8..=34) {
+            let header = record.get(offset..offset + 5).ok_or(HevcError::Truncated)?;
+            if header[..3] != [0x80 | kind, 0, 1] {
+                return Err(HevcError::UnsupportedSyntax);
+            }
+            let length = usize::from(u16::from_be_bytes([header[3], header[4]]));
+            if !(2..=4096).contains(&length) {
+                return Err(HevcError::Limit);
+            }
+            offset += 5;
+            let nal = record
+                .get(offset..offset + length)
+                .ok_or(HevcError::Truncated)?;
+            if super::nal::Nal::new(nal)?.kind != kind {
+                return Err(HevcError::ParameterSetReference);
+            }
+            *slot = Some(nal);
+            offset += length;
+        }
+        if offset != record.len() {
+            return Err(HevcError::Framing);
+        }
+        guard.sets = Some(std::sync::Arc::new(guard.parse_sets(sets)?));
+        // Compare every header field against actual admitted SPS facts and the
+        // fixed baseline. No alternate lengths, extra arrays or hidden profile.
+        if guard.decoder_record()?.bytes() != record {
+            return Err(HevcError::UnsupportedSyntax);
+        }
+        Ok(guard)
+    }
+    /// Generates the exact configuration established by an admitted record or
     /// IDR. No configuration is fabricated from desired encoder settings.
     pub fn decoder_record(&self) -> Result<DecoderRecord, HevcError> {
         let sets = self.sets.as_ref().ok_or(HevcError::MissingParameterSet)?;

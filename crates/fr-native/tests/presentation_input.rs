@@ -196,6 +196,28 @@ struct Video {
     observer: X11Pointer,
     wire: MediaLimits,
 }
+async fn bootstrap_record(
+    capture: &mut CaptureSource,
+    control: &ObservationControl,
+    cfg: Configuration,
+) -> fr_media::hevc::DecoderRecord {
+    // A real bounded bootstrap obtains parameter sets; it is never relabelled
+    // as a fresh observation after the decoder startup delay.
+    let bootstrap = capture.capture(control, true).await.unwrap();
+    let mut admission =
+        fr_media::hevc::HevcGuard::new(cfg.codec().unwrap(), cfg.limits().unwrap(), 4).unwrap();
+    admission
+        .validate_length_prefixed(bootstrap.bytes(), true)
+        .unwrap();
+    let record = admission.decoder_record().unwrap();
+    eprintln!(
+        "decoder_bootstrap frame={} encoded_bytes={} hvcc_bytes={} published=false",
+        bootstrap.frame().as_raw(),
+        bootstrap.bytes().len(),
+        record.bytes().len()
+    );
+    record
+}
 async fn prepare(source_server: &Server, viewer_server: &Server, cx: &Cx) -> Video {
     let cfg = config();
     let limits = cfg.limits().unwrap();
@@ -212,17 +234,19 @@ async fn prepare(source_server: &Server, viewer_server: &Server, cx: &Cx) -> Vid
     auth.authorize_observation(host_now(cx).unwrap()).unwrap();
     let control = ObservationControl::new(cx.clone(), auth).unwrap();
     let binary = Path::new(env!("CARGO_BIN_EXE_fr-media-worker"));
-    let capture = CaptureSource::start(
+    let mut capture = CaptureSource::start(
         &control,
         Launch::new(binary, &source_server.name, None, Role::Capture, 11).unwrap(),
         cfg,
     )
     .await
     .unwrap();
+    let record = bootstrap_record(&mut capture, &control, cfg).await;
     let presenter = Presenter::start(
         cx,
         Launch::new(binary, &viewer_server.name, None, Role::Present, 12).unwrap(),
         cfg,
+        &record,
     )
     .await
     .unwrap();
@@ -309,7 +333,7 @@ async fn scenario(delay_receipt: bool) {
         wire,
     } = prepare(&source_server, &viewer_server, &cx).await;
     let limits = config().limits().unwrap();
-    let unit = capture.capture(&control, false).await.unwrap();
+    let unit = capture.capture(&control, true).await.unwrap();
     subscription.enqueue(unit).unwrap();
     let mut packet = [0; 1150];
     while let Some(offer) = subscription.next_packet(&mut packet).unwrap() {
@@ -629,12 +653,15 @@ async fn present_visible(
         now(cx).0,
         receipt.decoded.display_deadline_us()
     );
+    let display_deadline = receipt.decoded.display_deadline_us();
+    let receipt_observed_at = now(cx).0;
     let frame = receipt.frame.as_raw();
     assert_eq!(frame, expected_frame);
     video
         .client
         .decoded(receipt.decoded, true, now(cx))
         .unwrap();
+    let readback_started = now(cx).0;
     let pixels = output.snapshot().unwrap().pixels().to_vec();
     for (x, y) in [(144, 108), (160, 120), (176, 132)] {
         let p = &pixels[4 * (y * 320 + x)..][..3];
@@ -645,7 +672,10 @@ async fn present_visible(
             "wrong source frame is visible"
         );
     }
-    video.client.visible(frame, now(cx)).unwrap();
+    let visible_at = now(cx);
+    video.client.visible(frame, visible_at).unwrap_or_else(|error| {
+        panic!("visible frame {frame} refused: {error:?}; receipt_observed_us={receipt_observed_at} readback_start_us={readback_started} visible_us={} display_deadline_us={display_deadline}", visible_at.0)
+    });
     assert_eq!(video.receiver.budget_usage(), BudgetUsage::default());
     pixels
 }
@@ -873,7 +903,7 @@ async fn recovery_case(loss: Loss, late_reference: bool) {
     let mut video = prepare(&source, &viewer, &cx).await;
     let mut output = X11Surface::capture(Some(&viewer.name), config().limits().unwrap()).unwrap();
     let mut counts = RecoveryCounts::default();
-    let bootstrap = video.capture.capture(&video.control, false).await.unwrap();
+    let bootstrap = video.capture.capture(&video.control, true).await.unwrap();
     assert!(bootstrap.is_idr());
     let bootstrap_frame = bootstrap.frame().as_raw();
     video.subscription.enqueue(bootstrap).unwrap();
@@ -1065,11 +1095,11 @@ fn actual_hevc_partial_recovery_is_fenced_then_fresh_idr_and_dependent_are_visib
         let mut video = prepare(&source, &viewer, &cx).await;
         let mut output =
             X11Surface::capture(Some(&viewer.name), config().limits().unwrap()).unwrap();
-        let initial = video.capture.capture(&video.control, false).await.unwrap();
+        let initial = video.capture.capture(&video.control, true).await.unwrap();
         video.subscription.enqueue(initial).unwrap();
         let mut counts = RecoveryCounts::default();
         impaired_transfer(&mut video, None, &mut counts, &cx);
-        let visible = present_visible(&mut video, &mut output, &cx, 0, [40, 80, 180, 255]).await;
+        let visible = present_visible(&mut video, &mut output, &cx, 1, [40, 80, 180, 255]).await;
         replace_recovery(&mut video, &cx, 1, 5);
         assert!(video.client.tick(now(&cx)).is_err());
         paint_pattern(&mut video, 0);
@@ -1117,7 +1147,10 @@ fn actual_hevc_partial_recovery_is_fenced_then_fresh_idr_and_dependent_are_visib
         let fresh = video.capture.capture(&video.control, true).await.unwrap();
         assert!(fresh.is_idr());
         let fresh_frame = fresh.frame().as_raw();
-        assert_eq!(fresh_frame, 2, "shared capture identity restarted");
+        assert_eq!(
+            fresh_frame, 3,
+            "bootstrap consumes frame zero; shared capture identity restarted"
+        );
         let fresh_bytes = fresh.bytes().len();
         video.subscription.enqueue(fresh).unwrap();
         recovered_frame(&mut video, &mut output, &cx, fresh_frame, 1).await;

@@ -109,8 +109,18 @@ fn authority_to_supervised_capture_wire_and_presentation_then_revoke() {
         let mut capture = CaptureSource::start(&control, launch, config)
             .await
             .unwrap();
+        let bootstrap = capture.capture(&control, true).await.unwrap();
+        let mut admission =
+            fr_media::hevc::HevcGuard::new(config.codec().unwrap(), limits, 4).unwrap();
+        admission
+            .validate_length_prefixed(bootstrap.bytes(), true)
+            .unwrap();
+        let record = admission.decoder_record().unwrap();
+        drop(bootstrap);
         let launch = Launch::new(image, &viewer_display.name, None, Role::Present, 12).unwrap();
-        let mut presenter = Presenter::start(&cleanup, launch, config).await.unwrap();
+        let mut presenter = Presenter::start(&cleanup, launch, config, &record)
+            .await
+            .unwrap();
         let wire = MediaLimits::new(limits, 1150, 16384, 64).unwrap();
         let bindings = MediaBindings::new(1, 2, 3, 4).unwrap();
         let epoch = MediaEpoch {
@@ -180,8 +190,11 @@ async fn exercise_pair(
     let mut previous = None;
     for frame in 0..8_u8 {
         source.present(&pattern(frame, &limits)).unwrap();
-        let unit = capture.capture(control, frame == 4).await.unwrap();
-        assert_eq!(unit.frame().as_raw(), u64::from(frame));
+        let unit = capture
+            .capture(control, frame == 0 || frame == 4)
+            .await
+            .unwrap();
+        assert_eq!(unit.frame().as_raw(), u64::from(frame) + 1);
         subscription.enqueue(unit).unwrap();
         let mut packet = [0; 1150];
         while let Some(offer) = subscription.next_packet(&mut packet).unwrap() {
@@ -206,7 +219,7 @@ async fn exercise_pair(
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(receipt.frame.as_raw(), u64::from(frame));
+        assert_eq!(receipt.frame.as_raw(), u64::from(frame) + 1);
         assert_eq!(
             receipt.stage,
             if frame == 3 {
