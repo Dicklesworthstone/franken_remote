@@ -5,6 +5,7 @@ use fr_core::{
     ids::{CodecConfigurationGeneration, RecoveryGeneration, RemoteSessionId},
 };
 use fr_media::{
+    access_unit::FrameId,
     delivery::{
         MediaBindings, MediaBudget, MediaEpoch, ReceiveConfig, ReceivePipeline, ReceivePolicy,
         SendPolicy,
@@ -15,9 +16,10 @@ use fr_native::{BgraFrame, X11Surface};
 use fr_wire::MediaLimits;
 use frd::{
     media::{
-        CaptureSource, ObservationControl, PresentationStage, Presenter, Subscription, host_now,
+        CaptureSource, Error as MediaError, ObservationControl, PresentationStage, Presenter,
+        Subscription, host_now,
     },
-    worker::{Deadline, Launch},
+    worker::{Deadline, Launch, State},
 };
 use std::{
     io::{BufRead, BufReader},
@@ -78,6 +80,145 @@ fn pattern(frame: u8, limits: &fr_core::limits::ProtocolLimits) -> BgraFrame {
         p.copy_from_slice(&[u8::try_from(i % 200).unwrap(), 40, frame * 25, 255]);
     }
     BgraFrame::new(320, 240, pixels, limits).unwrap()
+}
+#[test]
+fn mutable_worker_access_fences_swapped_capture_provenance() {
+    let displays = [Display::start(), Display::start()];
+    let limits = configuration().limits().unwrap();
+    let mut surfaces = displays.each_ref().map(|display| {
+        X11Surface::presenter(Some(&display.name), 320, 240, limits).unwrap()
+    });
+    surfaces[0].present(&pattern(1, &limits)).unwrap();
+    surfaces[1].present(&pattern(7, &limits)).unwrap();
+    assert_ne!(
+        surfaces[0].snapshot().unwrap().pixels(),
+        surfaces[1].snapshot().unwrap().pixels(),
+        "the real capture sources must show different pixels"
+    );
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(1)
+        .blocking_threads(1, 2)
+        .enable_platform_reactor(true)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let cleanup = Cx::current().unwrap();
+        for force_idr in [false, true] {
+            let session = runtime.request_cx_with_budget(Budget::INFINITE);
+            let mut authority = SessionAuthority::new(
+                RemoteSessionId::from_raw(66),
+                AuthorityPolicy::plan_defaults(),
+            );
+            authority.mark_capabilities_checked().unwrap();
+            authority
+                .authorize_observation(host_now(&session).unwrap())
+                .unwrap();
+            let control = ObservationControl::new(session, authority).unwrap();
+            verify_swapped_capture(&control, &cleanup, &displays, force_idr).await;
+            control.revoke();
+        }
+    });
+}
+
+async fn verify_swapped_capture(
+    control: &ObservationControl,
+    cleanup: &Cx,
+    displays: &[Display; 2],
+    force_idr: bool,
+) {
+    let config = configuration();
+    let limits = config.limits().unwrap();
+    let image = Path::new(env!("CARGO_BIN_EXE_fr-media-worker"));
+    let launch_a = Launch::new(image, &displays[0].name, None, Role::Capture, 11).unwrap();
+    let launch_b = Launch::new(image, &displays[1].name, None, Role::Capture, 12).unwrap();
+    let mut a = CaptureSource::start(control, launch_a, config).await.unwrap();
+    let mut b = CaptureSource::start(control, launch_b, config).await.unwrap();
+    let initial_a = a.capture_if_changed(control, true).await.unwrap();
+    let initial_b = b.capture_if_changed(control, true).await.unwrap();
+    for initial in [&initial_a, &initial_b] {
+        assert_eq!(initial.frame(), FrameId::FIRST);
+        let encoded = initial.encoded().unwrap();
+        assert!(encoded.is_idr());
+        assert_eq!(encoded.config_generation(), config.generation);
+    }
+    let mut subscription = Subscription::new(
+        control.clone(),
+        MediaLimits::new(limits, 1150, 16384, 64).unwrap(),
+        MediaBindings::new(1, 2, 3, 4).unwrap(),
+        MediaEpoch {
+            configuration: config.generation,
+            recovery: RecoveryGeneration::INITIAL,
+        },
+        SendPolicy::default(),
+    )
+    .unwrap();
+    subscription.enqueue_capture(initial_a).unwrap();
+    let unchanged = a.capture_if_changed(control, false).await.unwrap();
+    assert!(unchanged.is_unchanged());
+    assert_eq!(unchanged.frame(), FrameId::FIRST);
+    subscription.enqueue_capture(unchanged).unwrap();
+
+    // Safe mutable access can replace the actual native worker without changing
+    // either wrapper's configuration or numeric frame history.
+    std::mem::swap(a.worker_mut(), b.worker_mut());
+    let result = a.capture_if_changed(control, force_idr).await;
+    if force_idr {
+        // Fresh pixels from the replacement may establish a NEW source, but the
+        // previous subscription must not silently adopt them under its old proof.
+        let replacement = result.unwrap();
+        assert!(replacement.encoded().unwrap().is_idr());
+        assert_eq!(replacement.frame(), FrameId::from_raw(2));
+        assert!(matches!(
+            subscription.enqueue_capture(replacement),
+            Err(MediaError::InvalidFrame)
+        ));
+    } else {
+        // B's real comparison refers to B's frame zero, not A's different pixels.
+        assert!(
+            matches!(&result, Err(MediaError::InvalidFrame)),
+            "swapped worker minted an old-source observation: {result:?}"
+        );
+        assert!(matches!(
+            a.capture_if_changed(control, false).await,
+            Err(MediaError::Worker(frd::worker::Error::Unavailable))
+        ));
+    }
+    finish_swapped_capture(cleanup, &mut a, force_idr).await;
+    finish_swapped_capture(cleanup, &mut b, true).await;
+}
+
+async fn finish_swapped_capture(cleanup: &Cx, capture: &mut CaptureSource, running: bool) {
+    let worker = capture.worker_mut();
+    assert_eq!(
+        worker.state(),
+        if running {
+            State::Running
+        } else {
+            State::Poisoned
+        }
+    );
+    if running {
+        worker
+            .request(
+                cleanup,
+                Kind::Stop,
+                vec![],
+                Deadline::after(cleanup, Duration::from_millis(500)).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        worker
+            .reap(
+                cleanup,
+                Deadline::after(cleanup, Duration::from_millis(500)).unwrap()
+            )
+            .await
+            .unwrap()
+            .success(),
+        running
+    );
 }
 #[test]
 fn authority_to_supervised_capture_wire_and_presentation_then_revoke() {
