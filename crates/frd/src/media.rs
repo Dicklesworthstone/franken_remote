@@ -28,6 +28,7 @@ use std::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Authority(AuthorityError),
+    Admission(fr_tailnet::Error),
     Worker(worker::Error),
     Send(SendError),
     InvalidFrame,
@@ -69,6 +70,7 @@ pub fn host_now(cx: &Cx) -> Result<HostInstant, Error> {
 pub struct ObservationControl {
     authority: Arc<Mutex<SessionAuthority>>,
     cx: Cx,
+    admission: Option<fr_tailnet::Lease>,
 }
 impl ObservationControl {
     pub fn new(cx: Cx, mut authority: SessionAuthority) -> Result<Self, Error> {
@@ -78,10 +80,38 @@ impl ObservationControl {
         Ok(Self {
             authority: Arc::new(Mutex::new(authority)),
             cx,
+            admission: None,
         })
+    }
+    /// Bind the already locally approved application authority to live Tailscale
+    /// admission. Lookup success alone is not local consent or media readiness.
+    /// The caller retains the non-cloneable admission owner and refreshes it.
+    pub fn new_admitted(
+        cx: Cx,
+        authority: SessionAuthority,
+        admission: fr_tailnet::Lease,
+    ) -> Result<Self, Error> {
+        admission.observe().map_err(Error::Admission)?;
+        let mut control = Self::new(cx, authority)?;
+        control.admission = Some(admission);
+        control.check()?;
+        Ok(control)
+    }
+    fn admission_deadline(&self) -> Result<Option<u64>, Error> {
+        let Some(admission) = &self.admission else {
+            return Ok(None);
+        };
+        match admission.observe() {
+            Ok(until) => Ok(Some(until)),
+            Err(error) => {
+                self.revoke();
+                Err(Error::Admission(error))
+            }
+        }
     }
     pub fn check(&self) -> Result<HostInstant, Error> {
         self.cx.checkpoint().map_err(|_| worker::Error::Cancelled)?;
+        self.admission_deadline()?;
         let mut authority = self.authority.lock().map_err(|_| Error::Poisoned)?;
         let now = host_now(&self.cx)?;
         authority
@@ -90,29 +120,35 @@ impl ObservationControl {
         Ok(now)
     }
     pub fn deadline(&self, maximum: Duration) -> Result<Deadline, Error> {
+        let peer_until = self.admission_deadline()?;
         let mut authority = self.authority.lock().map_err(|_| Error::Poisoned)?;
         let until = authority
             .observation_deadline(host_now(&self.cx)?)
             .map_err(Error::Authority)?;
-        let nanos = until
-            .as_micros()
-            .checked_mul(1000)
-            .ok_or(worker::Error::Deadline)?;
+        let until = peer_until.map_or(until.as_micros(), |peer| peer.min(until.as_micros()));
+        let nanos = until.checked_mul(1000).ok_or(worker::Error::Deadline)?;
         Ok(Deadline::after(&self.cx, maximum)?.capped_at(Time::from_nanos(nanos)))
     }
     pub fn revoke(&self) {
+        if let Some(admission) = &self.admission {
+            admission.revoke();
+        }
         if let Ok(mut a) = self.authority.lock() {
             a.close();
         }
         self.cx.cancel_fast(CancelKind::User);
     }
     pub fn suspend(&self) {
+        if let Some(admission) = &self.admission {
+            admission.revoke();
+        }
         if let Ok(mut a) = self.authority.lock() {
             a.invalidate_for_suspend();
         }
         self.cx.cancel_fast(CancelKind::ParentCancelled);
     }
     pub fn issue_challenge(&self, nonce: u128) -> Result<HostInstant, Error> {
+        self.check()?;
         self.authority
             .lock()
             .map_err(|_| Error::Poisoned)?
@@ -120,6 +156,7 @@ impl ObservationControl {
             .map_err(Error::Authority)
     }
     pub fn renew(&self, nonce: u128) -> Result<HostInstant, Error> {
+        self.check()?;
         self.authority
             .lock()
             .map_err(|_| Error::Poisoned)?

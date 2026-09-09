@@ -225,7 +225,7 @@ impl LocalApi {
         Ok((response.body, credentials))
     }
 }
-fn now(cx: &Cx) -> Result<u64, Error> {
+pub(crate) fn now(cx: &Cx) -> Result<u64, Error> {
     cx.checkpoint().map_err(|_| Error::Cancelled)?;
     Ok(cx
         .timer_driver()

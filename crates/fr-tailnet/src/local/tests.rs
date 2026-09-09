@@ -646,3 +646,235 @@ fn go_expiry_timestamp_is_checked_and_clamps_local_authorization() {
         );
     });
 }
+
+#[test]
+fn admission_owner_drop_revocation_and_cancellation_stop_every_clone() {
+    for action in 0..3 {
+        let (s, w) = fixtures();
+        let server = Server::fixture(&s, &w, false);
+        runtime().block_on(async {
+            let cx = Cx::current().unwrap();
+            let proof = server
+                .client
+                .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
+                .await
+                .unwrap();
+            let owner = crate::Admission::new(server.client.clone(), cx.clone(), proof).unwrap();
+            let gate = owner.lease();
+            let other = gate.clone();
+            assert!(gate.observe().is_ok());
+            assert!(other.control().is_ok());
+            match action {
+                0 => drop(owner),
+                1 => {
+                    owner.revoke();
+                    assert!(gate.check().is_err());
+                }
+                _ => {
+                    cx.cancel_fast(CancelKind::User);
+                    assert_eq!(gate.check(), Err(Error::Cancelled));
+                }
+            }
+            assert!(gate.observe().is_err());
+            assert!(other.control().is_err());
+        });
+    }
+}
+#[test]
+fn admission_proof_cannot_be_moved_to_a_different_local_authority_instance() {
+    let (s, w) = fixtures();
+    let server = Server::fixture(&s, &w, false);
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let proof = server
+            .client
+            .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
+            .await
+            .unwrap();
+        let mut foreign = LocalApi::new(&*server.client.path).unwrap();
+        foreign.daemon_uid = server.client.daemon_uid;
+        assert_eq!(
+            crate::Admission::new(foreign, cx, proof).unwrap_err(),
+            Error::IdentityChanged
+        );
+    });
+}
+#[test]
+fn unchanged_revalidation_extends_only_an_unexpired_owned_admission() {
+    let (s, w) = fixtures();
+    let replies = (0..3)
+        .flat_map(|_| {
+            [
+                response(&s, false),
+                response(&w, false),
+                response(&s, false),
+            ]
+        })
+        .collect();
+    let server = Server::new(replies, Duration::ZERO);
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let proof = server
+            .client
+            .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
+            .await
+            .unwrap();
+        let original = proof.expires_us();
+        let mut owner = crate::Admission::new(server.client.clone(), cx.clone(), proof).unwrap();
+        let gate = owner.lease();
+        sleep(cx.timer_driver().unwrap().now(), Duration::from_millis(15)).await;
+        owner.refresh().await.unwrap();
+        assert!(gate.observe().unwrap() > original);
+        assert_eq!(gate.addresses(), endpoints());
+        assert_eq!(server.calls.load(Ordering::SeqCst), 6);
+        owner.revoke();
+        assert_eq!(owner.refresh().await, Err(Error::Revoked));
+        assert_eq!(server.calls.load(Ordering::SeqCst), 6);
+    });
+}
+#[test]
+fn capability_removal_permission_changes_and_identity_switch_close_old_admission() {
+    for change in 0..4 {
+        let (s, w) = fixtures();
+        let mut next = s.clone();
+        let mut who = w.clone();
+        match change {
+            0 => who["CapMap"] = json!({}),
+            1 => who["CapMap"][DESKTOP_CAPABILITY][0]["control"] = json!(false),
+            2 => next["Self"]["ID"] = json!("different-host"),
+            _ => next["Version"] = json!("different-daemon-version"),
+        }
+        let server = Server::new(
+            vec![
+                response(&s, false),
+                response(&w, false),
+                response(&s, false),
+                response(&next, false),
+                response(&who, false),
+                response(&next, false),
+            ],
+            Duration::ZERO,
+        );
+        runtime().block_on(async {
+            let cx = Cx::current().unwrap();
+            let proof = server
+                .client
+                .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
+                .await
+                .unwrap();
+            let mut owner = crate::Admission::new(server.client.clone(), cx, proof).unwrap();
+            let lease = owner.lease();
+            assert!(owner.refresh().await.is_err());
+            assert!(lease.observe().is_err());
+            assert!(lease.control().is_err());
+        });
+    }
+}
+#[test]
+fn read_only_admission_does_not_turn_a_control_refusal_into_observation_revocation() {
+    let (s, mut w) = fixtures();
+    w["CapMap"][DESKTOP_CAPABILITY][0]["control"] = json!(false);
+    let server = Server::fixture(&s, &w, false);
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let proof = server
+            .client
+            .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
+            .await
+            .unwrap();
+        let owner = crate::Admission::new(server.client.clone(), cx, proof).unwrap();
+        let lease = owner.lease();
+        assert_eq!(lease.control(), Err(Error::CapabilityDenied));
+        assert!(lease.observe().is_ok());
+    });
+}
+#[test]
+fn expired_shared_admission_is_terminal_without_additional_network_traffic() {
+    let (s, w) = fixtures();
+    let server = Server::fixture(&s, &w, false);
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let proof = server
+            .client
+            .authorize_app_capability(
+                &cx,
+                endpoints(),
+                GrantPolicy {
+                    validity: Duration::from_millis(120),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let mut owner = crate::Admission::new(server.client.clone(), cx.clone(), proof).unwrap();
+        let gate = owner.lease();
+        sleep(cx.timer_driver().unwrap().now(), Duration::from_millis(160)).await;
+        assert_eq!(gate.observe(), Err(Error::Expired));
+        assert_eq!(owner.refresh().await, Err(Error::Expired));
+        assert_eq!(server.calls.load(Ordering::SeqCst), 3);
+    });
+}
+#[test]
+fn dropped_started_refresh_cannot_leave_an_admission_active() {
+    let (s, w) = fixtures();
+    let server = Server::new(
+        vec![
+            response(&s, false),
+            response(&w, false),
+            response(&s, false),
+        ],
+        Duration::ZERO,
+    );
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let proof = server
+            .client
+            .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
+            .await
+            .unwrap();
+        let mut owner = crate::Admission::new(server.client.clone(), cx, proof).unwrap();
+        let gate = owner.lease();
+        let mut refresh = Box::pin(owner.refresh());
+        poll_fn(|task| {
+            assert!(refresh.as_mut().poll(task).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(refresh);
+        assert_eq!(gate.observe(), Err(Error::Revoked));
+        assert!(!server.client.busy.load(Ordering::Acquire));
+    });
+}
+#[test]
+fn revocation_during_refresh_cannot_be_overwritten_by_a_successful_response() {
+    let (s, w) = fixtures();
+    let replies = (0..2)
+        .flat_map(|_| {
+            [
+                response(&s, false),
+                response(&w, false),
+                response(&s, false),
+            ]
+        })
+        .collect();
+    let server = Server::new(replies, Duration::ZERO);
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let proof = server
+            .client
+            .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
+            .await
+            .unwrap();
+        let mut owner = crate::Admission::new(server.client.clone(), cx, proof).unwrap();
+        let gate = owner.lease();
+        let mut refresh = Box::pin(owner.refresh());
+        poll_fn(|task| {
+            assert!(refresh.as_mut().poll(task).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        gate.revoke();
+        assert_eq!(refresh.await, Err(Error::Revoked));
+        assert_eq!(gate.observe(), Err(Error::Revoked));
+    });
+}

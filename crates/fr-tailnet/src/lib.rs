@@ -4,6 +4,10 @@
 //! It does NOT guess zero-setup same-tailnet membership from names or addresses.
 mod expiry;
 #[cfg(target_os = "linux")]
+mod lease;
+#[cfg(target_os = "linux")]
+pub use lease::{Admission, Lease};
+#[cfg(target_os = "linux")]
 mod local;
 mod metadata;
 #[cfg(target_os = "linux")]
@@ -41,6 +45,7 @@ pub enum Error {
     Clock,
     Expired,
     IdentityChanged,
+    Revoked,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

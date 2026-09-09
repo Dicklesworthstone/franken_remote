@@ -671,6 +671,7 @@ dependencies = [
  "asupersync",
  "fr-core",
  "fr-media",
+ "fr-tailnet",
  "fr-transport",
  "fr-wire",
 ]
