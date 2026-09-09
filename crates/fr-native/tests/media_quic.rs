@@ -15,7 +15,7 @@ use fr_media::{
     worker::{Backend, Configuration, Kind, Role},
 };
 use fr_native::{BgraFrame, X11Surface};
-use fr_transport::quic::{self, Disposition, Policy, Route, StreamRoute};
+use fr_transport::quic::{self, Disposition, Messages, Policy, Route, StreamRoute};
 use fr_wire::{Channel, MediaLimits, Record, decode_fragment};
 use frd::{
     media::{
@@ -146,6 +146,7 @@ impl MediaNetwork {
         let limits = cfg.limits().unwrap();
         let policy = Policy {
             retained_send_records: 1,
+            critical_send_records: 1,
             ..Policy::default()
         };
         let mut pair = network::pair(cx, policy).await;
@@ -231,8 +232,14 @@ impl MediaNetwork {
             .counts
             .peak_transport_bytes
             .max(usage.retained_send_upper_bound);
-        assert!(usage.retained_send_records <= 1);
-        assert!(usage.retained_send_upper_bound <= Policy::default().retained_send_bytes);
+        assert!(usage.critical_send_records <= 1);
+        assert!(usage.retained_send_records - usage.critical_send_records <= 1);
+        assert!(usage.retained_send_records <= 2);
+        assert!(usage.critical_send_bytes <= Policy::default().critical_send_bytes);
+        assert!(
+            usage.retained_send_upper_bound - usage.critical_send_bytes
+                <= Policy::default().retained_send_bytes
+        );
     }
     fn receive(&mut self, cx: &Cx, loss: &mut FrameLoss) {
         self.pair
@@ -487,6 +494,7 @@ async fn sender_fixture(cx: &Cx) -> (QuicEgress, network::Pair, ObservationContr
         cx,
         Policy {
             retained_send_records: 1,
+            critical_send_records: 1,
             ..Policy::default()
         },
     )
@@ -539,6 +547,14 @@ fn revoke_between_actual_quic_admissions_closes_retained_media_and_connection() 
     let cx = runtime.request_cx_with_budget(Budget::INFINITE);
     runtime.block_on(async {
         let (mut sender, mut pair, control, _) = sender_fixture(&cx).await;
+        assert!(matches!(
+            sender
+                .transmit(&cx, &mut pair.server, Lane::Original)
+                .unwrap(),
+            Progress::Accepted(_)
+        ));
+        // Progress and bulk each have their own one-record reservation. Both
+        // admit once; the next recovery chunk must remain owned under pressure.
         assert!(matches!(
             sender
                 .transmit(&cx, &mut pair.server, Lane::Original)
@@ -610,7 +626,7 @@ fn route_binding_direction_and_kinds_cannot_be_substituted() {
                 ..pair.host_routes[0]
             },
             StreamRoute {
-                kind: 0x35,
+                messages: Messages::Exact(0x35),
                 ..pair.host_routes[0]
             },
             StreamRoute {

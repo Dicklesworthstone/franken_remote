@@ -11,7 +11,9 @@ use asupersync::{
     runtime::{Runtime, RuntimeBuilder},
     time::timeout,
 };
-use fr_transport::quic::{ALPN, DatagramRoute, Policy, QuicRecords, StreamRoute};
+use fr_transport::quic::{
+    ALPN, DatagramRoute, Messages, Policy, Priority, QuicRecords, StreamRoute,
+};
 use std::{
     future::{Future, poll_fn},
     path::{Path, PathBuf},
@@ -94,14 +96,23 @@ pub fn native_pair<'a>(
     name: &'a str,
     alpn: &'a [u8],
 ) -> Pin<Box<impl Future<Output = (NativeResult, NativeResult)> + 'a>> {
+    native_pair_with_windows(cx, name, alpn, 65536, 524_288)
+}
+pub fn native_pair_with_windows<'a>(
+    cx: &'a Cx,
+    name: &'a str,
+    alpn: &'a [u8],
+    stream_window: u64,
+    connection_window: u64,
+) -> Pin<Box<impl Future<Output = (NativeResult, NativeResult)> + 'a>> {
     Box::pin(async move {
         let cfg = NativeQuicConnectionConfig {
             max_local_bidi: 0,
             max_local_uni: 8,
-            send_window: 65536,
-            recv_window: 65536,
-            connection_send_limit: 524_288,
-            connection_recv_limit: 524_288,
+            send_window: stream_window,
+            recv_window: stream_window,
+            connection_send_limit: connection_window,
+            connection_recv_limit: connection_window,
             max_datagram_frame_size: 1200,
             ..Default::default()
         };
@@ -205,21 +216,24 @@ pub fn pair(cx: &Cx, policy: Policy) -> Pin<Box<impl Future<Output = Pair> + '_>
             StreamRoute {
                 stream: progress,
                 binding: 3,
-                kind: 0x37,
+                messages: Messages::Exact(0x37),
+                priority: Priority::Critical,
                 outbound: true,
                 maximum: 1150,
             },
             StreamRoute {
                 stream: recovery,
                 binding: 2,
-                kind: 0x32,
+                messages: Messages::Exact(0x32),
+                priority: Priority::Bulk,
                 outbound: true,
                 maximum: 65536.min(policy.retained_send_bytes),
             },
             StreamRoute {
                 stream: repair,
                 binding: 4,
-                kind: 0x35,
+                messages: Messages::Exact(0x35),
+                priority: Priority::Critical,
                 outbound: false,
                 maximum: 1150,
             },
