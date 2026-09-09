@@ -944,3 +944,106 @@ fn revocation_during_refresh_cannot_be_overwritten_by_a_successful_response() {
         assert_eq!(gate.observe(), Err(Error::Revoked));
     });
 }
+
+#[test]
+fn cancellation_pulse_rearms_after_time_advances_inside_operation_poll() {
+    use asupersync::time::{TimerDriverHandle, VirtualClock};
+    use std::task::{Context, Wake, Waker};
+    struct Wakes(AtomicUsize);
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let clock = Arc::new(VirtualClock::new());
+    let driver = TimerDriverHandle::with_virtual_clock(clock.clone());
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(1)
+        .with_timer_driver(driver.clone())
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let cx = Cx::current().unwrap();
+        let ready = AtomicBool::new(false);
+        let mut first = true;
+        let operation = poll_fn(|_| {
+            if first {
+                first = false;
+                // Both the initial 10 ms pulse and a replacement based on the
+                // pre-operation timestamp have expired before polling resumes.
+                clock.advance_to(Time::from_millis(20));
+            }
+            if ready.load(Ordering::Relaxed) {
+                Poll::Ready(Ok(17))
+            } else {
+                Poll::Pending
+            }
+        });
+        let notifications = Arc::new(Wakes(AtomicUsize::new(0)));
+        let waker = Waker::from(notifications.clone());
+        let mut task = Context::from_waker(&waker);
+        let timers = driver.pending_count();
+        let mut request = pin!(bounded(&cx, Duration::from_millis(100), operation));
+        assert_eq!(request.as_mut().poll(&mut task), Poll::Pending);
+        assert_eq!(request.as_mut().poll(&mut task), Poll::Pending);
+        assert!(notifications.0.load(Ordering::Relaxed) > 0);
+        assert_eq!(request.as_mut().poll(&mut task), Poll::Pending);
+        assert_eq!(driver.pending_count(), timers + 1);
+        ready.store(true, Ordering::Relaxed);
+        assert_eq!(request.as_mut().poll(&mut task), Poll::Ready(Ok(17)));
+        assert_eq!(driver.pending_count(), timers);
+    });
+}
+
+#[test]
+fn rearmed_cancellation_pulse_preserves_terminal_checks_and_drop_cleanup() {
+    use asupersync::time::{TimerDriverHandle, VirtualClock};
+    use std::task::{Context, Waker};
+    for terminal in 0..4 {
+        let clock = Arc::new(VirtualClock::new());
+        let driver = TimerDriverHandle::with_virtual_clock(clock.clone());
+        RuntimeBuilder::new()
+            .worker_threads(1)
+            .with_timer_driver(driver.clone())
+            .build()
+            .unwrap()
+            .block_on(async {
+                let cx = Cx::current().unwrap();
+                let mut first = true;
+                let operation = poll_fn(|_| {
+                    if first {
+                        first = false;
+                        clock.advance_to(Time::from_millis(20));
+                    }
+                    Poll::<Result<(), Error>>::Pending
+                });
+                let timers = driver.pending_count();
+                let mut request = Box::pin(bounded(&cx, Duration::from_millis(100), operation));
+                let mut task = Context::from_waker(Waker::noop());
+                for _ in 0..3 {
+                    assert_eq!(request.as_mut().poll(&mut task), Poll::Pending);
+                }
+                assert_eq!(driver.pending_count(), timers + 1);
+                let expected = match terminal {
+                    0 => {
+                        clock.advance_to(Time::from_millis(100));
+                        Some(Error::Timeout)
+                    }
+                    1 => {
+                        cx.cancel_fast(CancelKind::User);
+                        Some(Error::Cancelled)
+                    }
+                    2 => {
+                        clock.set(Time::from_millis(10));
+                        Some(Error::Clock)
+                    }
+                    _ => None,
+                };
+                if let Some(error) = expected {
+                    assert_eq!(request.as_mut().poll(&mut task), Poll::Ready(Err(error)));
+                }
+                drop(request);
+                assert_eq!(driver.pending_count(), timers);
+            });
+    }
+}

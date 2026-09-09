@@ -15,7 +15,7 @@ use std::{
     fmt,
     future::{Future, poll_fn},
     path::{Path, PathBuf},
-    pin::{Pin, pin},
+    pin::pin,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -280,8 +280,11 @@ async fn bounded<T>(
                 Time::from_nanos(current * 1000),
                 Duration::from_micros((end - current).min(10_000)),
             ));
-            // Register the replacement timer before yielding again.
-            let _ = Pin::as_mut(&mut pulse).poll(task);
+            // Time may have advanced during the operation poll, so this new
+            // pulse can already be ready. Poll it on the next turn, where its
+            // result is handled, rather than discarding Ready and repolling a
+            // completed Sleep. The wake also ensures registration is not lost.
+            task.waker().wake_by_ref();
         }
         Poll::Pending
     })
