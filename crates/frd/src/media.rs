@@ -242,6 +242,10 @@ impl Subscription {
             first: true,
         })
     }
+    /// Exact record bound used by this subscription's packetizer.
+    pub const fn record_bytes(&self) -> usize {
+        self.limits.record_bytes()
+    }
     pub fn enqueue(&mut self, unit: EncodedAccessUnit) -> Result<(), Error> {
         let now = self.control.check()?;
         if unit.config_generation() != self.epoch.configuration
