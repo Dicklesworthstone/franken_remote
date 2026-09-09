@@ -14,8 +14,8 @@ use fr_core::{
 use fr_media::{
     access_unit::{EncodedAccessUnit, FrameId, FrameKind},
     delivery::{
-        DeliveryMode, MediaBindings, MediaEpoch, PacketOffer, ReceivePipeline, SendCache,
-        SendError, SendPolicy,
+        DecodedFrame, DeliveryMode, MediaBindings, MediaEpoch, PacketOffer, ReceivePipeline,
+        SendCache, SendError, SendPolicy,
     },
     worker::{Configuration, Kind, Role, capture_payload, parse_unit, unit_parts},
 };
@@ -310,10 +310,13 @@ pub enum PresentationStage {
     DecodedOnly,
     SubmittedToCompositor,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct PresentationReceipt {
     pub frame: FrameId,
     pub stage: PresentationStage,
+    /// Bound successful-decode completion. Consume this in the view tracker;
+    /// neither this receipt nor compositor submission certifies visibility.
+    pub decoded: DecodedFrame,
 }
 pub struct Presenter {
     worker: Worker,
@@ -414,13 +417,16 @@ impl Presenter {
             }
         }
         .await;
-        let ack = receiver.acknowledge_decode(&picture, result.is_ok(), host_now(cx)?.as_micros());
+        let completed_at = host_now(cx)?.as_micros();
         match result {
             Ok(frame) => {
-                ack.map_err(|_| Error::Delivery)?;
+                let decoded = receiver
+                    .complete_decode(&picture, completed_at)
+                    .map_err(|_| Error::Delivery)?;
                 operation.completed = true;
                 Ok(Some(PresentationReceipt {
                     frame,
+                    decoded,
                     stage: if display {
                         PresentationStage::SubmittedToCompositor
                     } else {
@@ -428,7 +434,10 @@ impl Presenter {
                     },
                 }))
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                let _ = receiver.acknowledge_decode(&picture, false, completed_at);
+                Err(error)
+            }
         }
     }
     pub fn worker_mut(&mut self) -> &mut Worker {
