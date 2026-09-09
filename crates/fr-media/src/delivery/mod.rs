@@ -10,7 +10,8 @@ pub use send::{DeliveryMode, PacketOffer, SendCache, SendError, SendPolicy};
 
 pub use budget::{BudgetUsage, MediaBudget};
 pub use receive::{
-    ReceiveConfig, ReceivePipeline, ReceivePolicy, ReceiveState, ReceiveUpdate, ReceivedPicture,
+    DecodedFrame, ReceiveConfig, ReceivePipeline, ReceivePolicy, ReceiveState, ReceiveUpdate,
+    ReceivedPicture,
 };
 
 use core::fmt;
