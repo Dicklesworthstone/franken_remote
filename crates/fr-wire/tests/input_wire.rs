@@ -41,7 +41,7 @@ fn fixtures() -> Vec<(InputEvent<'static>, Vec<u8>)> {
                 key: PhysicalKey::new(4).unwrap(),
                 transition: KeyTransition::Press,
             },
-            hex(include_str!("fixtures/input/key.hex")),
+            hex(include_str!("fixtures/input/key_page_usage.hex")),
         ),
         (
             InputEvent::Button {
@@ -126,6 +126,130 @@ fn every_truncation_and_trailing_byte_refuses() {
         assert_eq!(decode(&b), Err(WireError::TrailingBytes));
     }
 }
+
+#[test]
+fn physical_keys_require_the_explicit_keyboard_page() {
+    let mut bytes = hex(include_str!("fixtures/input/key_page_usage.hex"));
+    assert_eq!(bytes.len(), 117);
+    assert_eq!(&bytes[12..16], &93_u32.to_be_bytes());
+    assert_eq!(&bytes[112..], &[0, 7, 0, 4, 1]);
+    // The page is a full big-endian u16, not a truncated byte or an inferred
+    // default. Every other page must refuse even when the usage is admitted.
+    for page in 0..=u16::MAX {
+        bytes[112..114].copy_from_slice(&page.to_be_bytes());
+        if page == 7 {
+            assert_eq!(decode(&bytes).unwrap(), request(fixtures()[0].0));
+        } else {
+            assert_eq!(decode(&bytes), Err(WireError::InvalidValue));
+        }
+    }
+}
+
+#[test]
+fn legacy_implicit_page_records_remain_rejected_evidence() {
+    // Original d9f8ea7 bytes are intentionally retained unchanged, not
+    // regenerated. No admitted legacy key may be misread as a new record.
+    let mut legacy = hex(include_str!("fixtures/input/key.hex"));
+    assert_eq!(legacy.len(), 115);
+    assert_eq!(&legacy[112..], &[0, 4, 1]);
+    assert_eq!(decode(&legacy), Err(WireError::InvalidValue));
+    for usage in (4_u16..=0xa4).chain(0xe0..=0xe7) {
+        legacy[112..114].copy_from_slice(&usage.to_be_bytes());
+        for transition in 0..=2 {
+            legacy[114] = transition;
+            assert!(decode(&legacy).is_err());
+        }
+    }
+}
+
+#[test]
+fn page_usage_pairs_preserve_every_admitted_key_and_transition() {
+    for usage in (4..=0xa4).chain(0xe0..=0xe7) {
+        for transition in [
+            KeyTransition::Release,
+            KeyTransition::Press,
+            KeyTransition::Repeat,
+        ] {
+            let request = request(InputEvent::Key {
+                key: PhysicalKey::new(usage).unwrap(),
+                transition,
+            });
+            let mut bytes = [0; 117];
+            assert_eq!(
+                encode_input(
+                    request,
+                    &mut bytes,
+                    &ProtocolLimits::ABSOLUTE,
+                    9,
+                    InputDirection::ViewerToHost,
+                    InputDelivery::Reliable,
+                ),
+                Ok(117)
+            );
+            assert_eq!(&bytes[112..114], &[0, 7]);
+            assert_eq!(&bytes[114..116], &usage.to_be_bytes());
+            assert_eq!(decode(&bytes), Ok(request));
+        }
+    }
+    for usage in [0_u16, 3, 0xa5, 0xdf, 0xe8, u16::MAX] {
+        let mut bytes = hex(include_str!("fixtures/input/key_page_usage.hex"));
+        bytes[114..116].copy_from_slice(&usage.to_be_bytes());
+        assert_eq!(decode(&bytes), Err(WireError::InvalidValue));
+    }
+}
+
+#[test]
+fn key_page_bytes_count_toward_record_and_destination_limits() {
+    let event = fixtures()[0].0;
+    let expected = hex(include_str!("fixtures/input/key_page_usage.hex"));
+    let mut bytes = [42; 117];
+    for maximum in [115, 116, 117] {
+        let limits = ProtocolLimits::with_overrides(LimitOverrides {
+            max_control_message_bytes: Some(maximum),
+            ..LimitOverrides::default()
+        })
+        .unwrap();
+        let result = encode_input(
+            request(event),
+            &mut bytes,
+            &limits,
+            9,
+            InputDirection::ViewerToHost,
+            InputDelivery::Reliable,
+        );
+        let parsed = decode_input(
+            &expected,
+            &limits,
+            9,
+            InputDirection::ViewerToHost,
+            InputDelivery::Reliable,
+        );
+        if maximum == 117 {
+            assert_eq!(result, Ok(117));
+            assert_eq!(bytes.as_slice(), expected);
+            assert_eq!(parsed, Ok(request(event)));
+        } else {
+            assert_eq!(result, Err(WireError::ResourceLimit));
+            assert_eq!(bytes, [42; 117]);
+            assert_eq!(parsed, Err(WireError::ResourceLimit));
+        }
+    }
+    for size in [115, 116] {
+        let mut out = [42; 117];
+        assert_eq!(
+            encode_input(
+                request(event),
+                &mut out[..size],
+                &ProtocolLimits::ABSOLUTE,
+                9,
+                InputDirection::ViewerToHost,
+                InputDelivery::Reliable,
+            ),
+            Err(WireError::BufferTooSmall)
+        );
+        assert_eq!(out, [42; 117]);
+    }
+}
 #[test]
 fn host_commands_and_unreliable_actions_are_refused() {
     for (event, bytes) in fixtures() {
@@ -164,10 +288,10 @@ fn host_commands_and_unreliable_actions_are_refused() {
 #[test]
 fn malformed_values_utf8_lengths_and_credentials_never_allocate() {
     let mut key = fixtures().remove(0).1;
-    key[114] = 3;
+    key[116] = 3;
     assert_eq!(decode(&key), Err(WireError::InvalidValue));
-    key[114] = 1;
-    key[113] = 0;
+    key[116] = 1;
+    key[115] = 0;
     assert_eq!(decode(&key), Err(WireError::InvalidValue));
     let mut button = fixtures().remove(1).1;
     button[113] = 2;

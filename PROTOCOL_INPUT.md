@@ -36,7 +36,7 @@ focus and input mode immediately before each OS submission.
 
 | Kind | Body |
 |---|---|
-| 0x0040 KeyTransition | Physical keyboard usage u16; transition u8 (0 release, 1 press, 2 client-owned repeat) |
+| 0x0040 KeyTransition | HID usage-page u16 (0x0007); physical keyboard usage u16; transition u8 (0 release, 1 press, 2 client-owned repeat) |
 | 0x0041 ButtonTransition | Button u8 (1 primary, 2 secondary, 3 middle, 4 back, 5 forward); pressed boolean u8; x/y i32; pointer barrier u64 |
 | 0x0042 PointerState | x/y i32 |
 | 0x0043 RelativeCheckpoint | Input-mode epoch u64; cumulative x/y i64 |
@@ -45,7 +45,9 @@ focus and input mode immediately before each OS submission.
 | 0x0047 InputMode | Mode u8 (0 absolute, 1 relative); new input-mode epoch u64 |
 
 Physical keys use keyboard/keypad usage page 0x07, with the deliberately bounded
-v0 subset 0x04–0xA4 and 0xE0–0xE7. They are not Unicode, keysyms or OS keycodes.
+v0 subset 0x04–0xA4 and 0xE0–0xE7. The explicit page is checked before constructing
+a core `PhysicalKey`; any other page refuses with `InvalidValue`, even if its
+usage number is admitted on page 0x07. They are not Unicode, keysyms or OS keycodes.
 The platform adapter must map physical positions or refuse them. Committed text
 is an independent, explicitly qualified capability, never layout guessing or
 clipboard substitution. Coordinates are already transformed host desktop pixels;
@@ -61,6 +63,24 @@ HeldState remains specified but unimplemented. InputResult uses the separate
 receipt payload below. Unknown kinds are refused rather than claimed implemented.
 Wire validity alone is not proof of input authorization, native injection, live
 QUIC interoperability, or a usable controlled desktop.
+
+### KeyTransition draft compatibility correction (fr-rmk)
+
+PROTOCOL.md §2 requires a `u16` HID usage-page plus `u16` usage. The original
+`d9f8ea7` implementation and this payload document omitted the page. The codec
+now follows the normative pair: offsets 112–113 in the complete record hold
+`00 07`, 114–115 hold the usage, and 116 holds the transition. The complete
+record is 117 bytes (93-byte payload), including both page bytes in destination
+and negotiated record limits. `key_page_usage.hex` independently specifies these
+bytes. The original 115-byte `key.hex` is retained unchanged as negative evidence;
+tests reject that layout for every previously admitted key and transition.
+
+This fixes a nonconforming implementation of the existing unfrozen v0 contract;
+it does not change the normative protocol, application version 0, or kind 0x0040.
+There is no compatibility decoder for the implicit-page draft. Endpoints using
+that old layout must be updated together and establish a new session; old action
+bytes are never translated or replayed with a renewed ticket. No released or
+independently qualified interoperability window is claimed for either draft.
 
 ## InputResult (0x0048)
 

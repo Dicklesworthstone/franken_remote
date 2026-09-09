@@ -232,6 +232,7 @@ fn authenticated_direction_delivery_and_epoch_binding_are_required() {
         .is_err()
     );
     assert!(decode(&hex(include_str!("fixtures/input/key.hex"))).is_err());
+    assert!(decode(&hex(include_str!("fixtures/input/key_page_usage.hex"))).is_err());
 }
 
 #[test]

@@ -78,10 +78,15 @@ It remains retained negative evidence, superseded by the detached run above.
 session response transport remain open. Evicted receipts, obsolete pointer state
 and missing process replies cannot be converted into fabricated zero-effect
 results. `fr-fr-wire-framing-i0u` remains in progress with its original acceptance
-criteria. Its new dependency `fr-rmk` records an existing contradiction:
-PROTOCOL.md requires an explicit HID page/usage pair, while the key codec and
-PROTOCOL_INPUT.md use an implicit keyboard page. Existing key bytes are preserved
-pending explicit resolution under the repository's constitutional hierarchy.
+criteria. The `fr-rmk` correction makes KeyTransition follow PROTOCOL.md §2's
+explicit HID page/usage pair. The codec emits and checks page 0x0007, preserves
+the core's admitted usage subset, and charges the complete 117-byte record.
+The original implicit-page `key.hex` remains unchanged as rejection evidence;
+`key_page_usage.hex` specifies the normative bytes. The
+[draft compatibility rationale](PROTOCOL_INPUT.md#keytransition-draft-compatibility-correction-fr-rmk)
+keeps application version 0 and rejects the nonconforming legacy layout without
+adding a compatibility decoder. This repair does not complete the framing bead
+or establish native input or live wire qualification.
 
 ## Earlier input framing, final submission, and native X11 effects
 

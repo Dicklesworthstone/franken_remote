@@ -17,6 +17,9 @@ use fr_core::{
 
 /// Session, lease, ticket (16 bytes each), four generations and sequence (u64).
 pub const INPUT_PREFIX_BYTES: usize = 88;
+// PhysicalKey admits only the keyboard/keypad subset. PROTOCOL.md section 2
+// still requires its page explicitly on the wire; other pages cannot alias it.
+const KEYBOARD_USAGE_PAGE: u16 = 0x0007;
 /// Per-action UTF-8 ceiling. Whole clipboard transfers are a different channel.
 pub const MAX_TEXT_BYTES: usize = fr_core::input::MAX_COMMITTED_TEXT_BYTES;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,15 +114,20 @@ pub fn decode_input<'a>(
     };
     let sequence = r.u64()?;
     let event = match k {
-        Kind::Key => InputEvent::Key {
-            key: PhysicalKey::new(r.u16()?).ok_or(WireError::InvalidValue)?,
-            transition: match r.u8()? {
-                0 => KeyTransition::Release,
-                1 => KeyTransition::Press,
-                2 => KeyTransition::Repeat,
-                _ => return Err(WireError::InvalidValue),
-            },
-        },
+        Kind::Key => {
+            if r.u16()? != KEYBOARD_USAGE_PAGE {
+                return Err(WireError::InvalidValue);
+            }
+            InputEvent::Key {
+                key: PhysicalKey::new(r.u16()?).ok_or(WireError::InvalidValue)?,
+                transition: match r.u8()? {
+                    0 => KeyTransition::Release,
+                    1 => KeyTransition::Press,
+                    2 => KeyTransition::Repeat,
+                    _ => return Err(WireError::InvalidValue),
+                },
+            }
+        }
         Kind::Button => InputEvent::Button {
             button: match r.u8()? {
                 1 => PointerButton::Primary,
@@ -188,7 +196,7 @@ pub fn encode_input(
     let k = kind(request.event);
     validate_route(direction, delivery, k)?;
     let size = match request.event {
-        InputEvent::Key { .. } => 3,
+        InputEvent::Key { .. } => 5,
         InputEvent::Button { .. } => 18,
         InputEvent::Pointer { .. } => 8,
         InputEvent::Relative { .. } => 24,
@@ -223,6 +231,7 @@ pub fn encode_input(
     }
     match request.event {
         InputEvent::Key { key, transition } => {
+            w.u16(KEYBOARD_USAGE_PAGE)?;
             w.u16(key.usage())?;
             w.u8(transition as u8)?;
         }
