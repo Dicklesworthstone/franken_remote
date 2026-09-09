@@ -150,6 +150,7 @@ pub struct ViewTracker {
     last_decoded: Option<u64>,
     pending: Option<Candidate>,
     visible: Option<FrameDescriptor>,
+    visible_source: Option<(u64, SourceObservation)>,
     progress: Option<Progress>,
     serial: u64,
     closed: bool,
@@ -179,6 +180,7 @@ impl ViewTracker {
             last_decoded: None,
             pending: None,
             visible: None,
+            visible_source: None,
             progress: None,
             serial: 0,
             closed: false,
@@ -260,6 +262,9 @@ impl ViewTracker {
         {
             return self.fail(Error::InvalidProgress);
         }
+        if self.visible == Some(p.descriptor) {
+            self.visible_source = Some((p.observed_micros, p.observation));
+        }
         self.progress = Some(p);
         self.bump()?;
         Ok(())
@@ -293,6 +298,7 @@ impl ViewTracker {
         self.last_decoded = Some(descriptor.frame);
         if submitted {
             self.visible = None;
+            self.visible_source = None;
         }
         self.pending = submitted.then_some(Candidate {
             descriptor,
@@ -311,10 +317,22 @@ impl ViewTracker {
         }
         self.pending = None;
         self.visible = None;
+        self.visible_source = None;
         if now_us >= candidate.display_until_us {
             return Err(Error::QueueExpired);
         }
         self.visible = Some(candidate.descriptor);
+        self.visible_source = Some(
+            self.progress
+                .filter(|p| p.descriptor == candidate.descriptor)
+                .map_or(
+                    (
+                        candidate.descriptor.capture_micros,
+                        SourceObservation::Captured,
+                    ),
+                    |p| (p.observed_micros, p.observation),
+                ),
+        );
         self.bump()?;
         self.evidence(now_us)
     }
@@ -330,12 +348,14 @@ impl ViewTracker {
         {
             return Err(Error::SourceUnknown);
         }
-        // Progress for an unpresented newer picture cannot bless old pixels.
-        let (observed, source) = if p.descriptor == shown {
-            (p.observed_micros, p.observation)
-        } else {
-            (shown.capture_micros, SourceObservation::Captured)
-        };
+        // A new announcement neither discards the last qualified check of the
+        // still-visible source nor refreshes it with another picture's time.
+        // Retain only this fixed stamp; its original age keeps increasing until
+        // that exact picture is verified again or replaced by visible pixels.
+        let (observed, source) = self.visible_source.ok_or(Error::SourceUnknown)?;
+        if source == SourceObservation::Unknown {
+            return Err(Error::SourceUnknown);
+        }
         let pixel_age_upper_us = self.clock.age_upper_us(shown.capture_micros, now_us)?;
         let source_age_upper_us = self.clock.age_upper_us(observed, now_us)?;
         if source_age_upper_us >= self.max_source_age_us {
@@ -354,6 +374,7 @@ impl ViewTracker {
     pub fn hide(&mut self) {
         self.pending = None;
         self.visible = None;
+        self.visible_source = None;
     }
     pub fn close(&mut self) {
         self.hide();

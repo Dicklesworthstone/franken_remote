@@ -438,3 +438,80 @@ fn shared_budget_does_not_allow_a_foreign_picture_to_certify_decode() {
     assert!(second.complete_decode(&b, 101).is_ok());
     assert!(first.complete_decode(&a, 101).is_ok());
 }
+
+#[test]
+fn announcing_new_pixels_preserves_but_never_renews_the_visible_sources_last_check() {
+    let (_receiver, mut view, limits, shown) = shown();
+    progress(
+        &mut view,
+        limits,
+        shown,
+        1_220_000,
+        SourceObservation::QualifiedUnchanged,
+        230_000,
+    )
+    .unwrap();
+    let next = FrameDescriptor {
+        frame: 1,
+        reference: Some(0),
+        capture_micros: 1_290_000,
+        ..shown
+    };
+    progress(
+        &mut view,
+        limits,
+        next,
+        next.capture_micros,
+        SourceObservation::Captured,
+        300_000,
+    )
+    .unwrap();
+    let evidence = view.evidence(300_000).unwrap();
+    assert_eq!(evidence.frame, shown.frame);
+    assert_eq!(evidence.pixel_age_upper_us, 295_000);
+    assert_eq!(evidence.source_age_upper_us, 80_000);
+    assert_eq!(evidence.source, SourceObservation::QualifiedUnchanged);
+    // A fresh observation of the NEXT unseen picture cannot slide the OLD
+    // visible source's deadline, even though its own clock sample is newer.
+    progress(
+        &mut view,
+        limits,
+        next,
+        1_440_000,
+        SourceObservation::QualifiedUnchanged,
+        450_000,
+    )
+    .unwrap();
+    assert_eq!(view.evidence(450_000).unwrap().source_age_upper_us, 230_000);
+    assert_eq!(view.evidence(470_000), Err(Error::SourceStale));
+}
+
+#[test]
+fn new_unseen_picture_cannot_repair_unknown_evidence_for_the_visible_picture() {
+    let (_receiver, mut view, limits, shown) = shown();
+    progress(
+        &mut view,
+        limits,
+        shown,
+        0,
+        SourceObservation::Unknown,
+        27_000,
+    )
+    .unwrap();
+    let next = FrameDescriptor {
+        frame: 1,
+        reference: Some(0),
+        capture_micros: 1_028_000,
+        ..shown
+    };
+    progress(
+        &mut view,
+        limits,
+        next,
+        next.capture_micros,
+        SourceObservation::Captured,
+        29_000,
+    )
+    .unwrap();
+    assert_eq!(view.evidence(29_000), Err(Error::SourceUnknown));
+}
