@@ -1,4 +1,4 @@
-name: Verify reviewed native negotiation
+name: Verify reviewed startup and renewal composition
 on:
   workflow_dispatch:
   push:
@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
-      - name: Stage exact reviewed negotiation source without ref writes
+      - name: Stage exact reviewed composition without ref writes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -27,26 +27,26 @@ jobs:
           import base64,gzip,hashlib,json,os,subprocess
           from pathlib import Path
           expected={
-            'PROTOCOL_NEGOTIATION.md':(None,'71419c1699ef01334c6230c89c56424b3c2ff302'),
-            'crates/fr-wire/src/lib.rs':('965723ff9c95cbe74eef5d12bde3976385c1efcf','b6315428f11974a7d212f0bcf8c8476fa81a72a7'),
-            'crates/fr-wire/src/negotiation.rs':(None,'364c64645b888226ec9174898ee8f50fb53b7ddf'),
-            'crates/fr-wire/src/record.rs':('9614b7316bc8e710df2a5e1079b73523f8afb43a','dd13f9205c4c5d876fb44bf4999f9b41348270a6'),
-            'crates/fr-wire/src/stream.rs':('4ed0d87098c145d984782200fd904e9a94f31ed6','d1d296c5798ba6c89f27c36977fd65e7db8e4922'),
-            'crates/fr-wire/tests/negotiation.rs':(None,'129f8e1e9c82abfc4dc2029df2e942b25251acd9'),
+            'crates/frd/src/session_startup.rs':('17906386e147df1ff2b1a52bd9a0679f2811e079','aecaaf0eddd77558af2c520fa1bf4dfaec668ec7'),
+            'crates/frd/src/session_startup/tests.rs':('b98d3f738b96d50da9c3578fbf1641892b9fd7da','9b7a3ddb8914b7719df80dd4b2171c37ded20ea2'),
+            'crates/frd/Cargo.toml':('e50608b160fec2757a37878dfdfa0722bef916c0','57bb39b5454970ada5ca393d306741cc4801b48b'),
+            'Cargo.lock':('2f56f837689a139973f688736efe2631e5508725','76ef6c280438ca67b8dd1d5c6e69b03187f4fdb2'),
           }
           def sha(data): return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
           for p,(before,after) in expected.items():
-            assert (sha(Path(p).read_bytes()) if Path(p).exists() else None)==before,p
-          raw=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/21c13d2cac0ee4e59544318d4a191626ba078c2e']))
-          patch=gzip.decompress(base64.b64decode(raw['content']))
-          assert hashlib.sha256(patch).hexdigest()=='3608e3b9f0934c8cdf2b849c81e69790a3f1fb79a021a96973618a27e8d508e2'
-          path=Path(os.environ['RUNNER_TEMP'],'negotiation.patch');path.write_bytes(patch)
+            assert sha(Path(p).read_bytes())==before,p
+          raw=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/c234806a62491d88bbe156bcfb8bea436da7df1c']))
+          compressed=base64.b64decode(raw['content'])
+          assert sha(compressed)=='c234806a62491d88bbe156bcfb8bea436da7df1c'
+          patch=gzip.decompress(compressed)
+          assert hashlib.sha256(patch).hexdigest()=='fdae794c23a2594563f4a83f369e64a77244092ca7080a3f117f4c950245f659'
+          path=Path(os.environ['RUNNER_TEMP'],'composition.patch');path.write_bytes(patch)
           actual=subprocess.check_output(['git','apply','--numstat',str(path)],text=True)
           assert {line.split('\t',2)[2] for line in actual.splitlines()}==set(expected)
           subprocess.run(['git','apply','--check',str(path)],check=True)
           subprocess.run(['git','apply',str(path)],check=True)
           for p,(before,after) in expected.items(): assert sha(Path(p).read_bytes())==after,p
-          Path(os.environ['RUNNER_TEMP'],'negotiation-paths.json').write_text(json.dumps(expected))
+          Path(os.environ['RUNNER_TEMP'],'composition-paths.json').write_text(json.dumps(expected))
           PY
       - name: Install pinned compiler and native SDKs
         run: |
@@ -65,7 +65,7 @@ jobs:
           python3 - <<'PY'
           import base64,hashlib,json,os,subprocess
           from pathlib import Path
-          expected=json.loads(Path(os.environ['RUNNER_TEMP'],'negotiation-paths.json').read_text())
+          expected=json.loads(Path(os.environ['RUNNER_TEMP'],'composition-paths.json').read_text())
           for path,(before,after) in expected.items():
             data=Path(path).read_bytes()
             assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()==after
