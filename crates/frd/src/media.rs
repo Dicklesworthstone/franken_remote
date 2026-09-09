@@ -27,6 +27,7 @@ use std::{
 };
 mod capture_update;
 pub mod clock;
+pub mod decoder_startup;
 pub mod renewal;
 pub use capture_update::CaptureUpdate;
 
