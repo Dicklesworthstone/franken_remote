@@ -368,3 +368,54 @@ fn replaced_lease_with_reused_numeric_id_never_revalidates_the_old_native_owner(
         InputOutcome::SubmittedToOs
     );
 }
+
+#[test]
+fn original_grant_publication_checks_ticket_and_exact_native_lifetime() {
+    let (a, native, renewal) = setup();
+    let monitor = native.monitor();
+    let c = credentials();
+    assert_eq!(monitor.authorize_ticket(c.ticket, at(0)), Ok(()));
+    assert_eq!(monitor.authorize_ticket(c.ticket, at(999_999)), Ok(()));
+    assert_eq!(
+        monitor.authorize_ticket(c.ticket, at(1_000_000)),
+        Err(Refusal::Authority(AuthorityError::TicketExpired))
+    );
+    // An expired ticket does not by itself claim native cleanup or revoke keys.
+    assert!(!monitor.is_revoked());
+    {
+        let mut a = a.lock().unwrap();
+        a.revoke_lease();
+        a.grant_lease(c.lease, at(1_000_001)).unwrap();
+        a.issue_input_ticket(c.lease, c.ticket, at(1_000_001))
+            .unwrap();
+    }
+    assert_eq!(
+        monitor.authorize_ticket(c.ticket, at(1_000_002)),
+        Err(Refusal::Authority(AuthorityError::StaleLease))
+    );
+    drop(renewal);
+    assert_eq!(
+        monitor.authorize_ticket(c.ticket, at(1_000_002)),
+        Err(Refusal::Revoked)
+    );
+}
+#[test]
+fn grant_publication_does_not_regress_shared_time_or_restore_invalidated_tickets() {
+    let (a, native, _renewal) = setup();
+    let monitor = native.monitor();
+    let c = credentials();
+    a.lock()
+        .unwrap()
+        .authorize_observation_delivery(at(100))
+        .unwrap();
+    assert_eq!(monitor.authorize_ticket(c.ticket, at(50)), Ok(()));
+    {
+        let mut a = a.lock().unwrap();
+        a.mark_view_stale();
+        a.mark_view_ready(at(101)).unwrap();
+    }
+    assert_eq!(
+        monitor.authorize_ticket(c.ticket, at(102)),
+        Err(Refusal::Authority(AuthorityError::TicketInvalid))
+    );
+}

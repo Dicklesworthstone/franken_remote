@@ -28,6 +28,7 @@ use std::{
 mod capture_update;
 pub mod clock;
 pub mod decoder_startup;
+mod grant;
 pub mod renewal;
 pub use capture_update::CaptureUpdate;
 
@@ -78,6 +79,7 @@ pub struct ObservationControl {
     cx: Cx,
     admission: Option<fr_tailnet::Lease>,
     renewal_attached: Arc<std::sync::atomic::AtomicBool>,
+    control_grant_attached: Arc<std::sync::atomic::AtomicBool>,
 }
 impl ObservationControl {
     pub fn new(cx: Cx, mut authority: SessionAuthority) -> Result<Self, Error> {
@@ -89,6 +91,7 @@ impl ObservationControl {
             cx,
             admission: None,
             renewal_attached: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            control_grant_attached: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         })
     }
     /// Bind the already locally approved application authority to live Tailscale

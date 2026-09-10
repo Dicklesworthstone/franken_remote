@@ -179,6 +179,16 @@ impl InputMonitor {
         }
         result
     }
+    /// Read-only final check for publishing this native owner's original grant.
+    /// The retained owner identity must still match, including after revocation
+    /// or a replacement grant with deliberately equal numeric credentials.
+    /// An overtaken clock sample cannot move the shared authority backwards.
+    pub fn authorize_ticket(&self, ticket: InputTicketId, now: HostInstant) -> Result<(), Refusal> {
+        self.with(|a| {
+            let at = a.serialized_time(now);
+            a.authorize_submission(self.lease, ticket, at)
+        })
+    }
     fn with_time<T>(
         &self,
         clock: &mut HostInstant,

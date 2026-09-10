@@ -23,6 +23,7 @@ use fr_wire::{
 use std::{cell::Cell, time::Duration};
 
 pub mod control;
+pub mod grant;
 mod ticket;
 
 const RECEIPT_LIFETIME_US: u64 = 1_000_000;

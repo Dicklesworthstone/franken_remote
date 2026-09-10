@@ -811,3 +811,6 @@ mod ticket;
 
 #[path = "input_quic/control.rs"]
 mod control;
+
+#[path = "input_quic/broker.rs"]
+mod broker;
