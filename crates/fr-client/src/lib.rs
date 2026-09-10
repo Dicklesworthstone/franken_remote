@@ -8,3 +8,6 @@ pub mod input;
 
 /// Shared native session startup, independent of the windowing/transport adapter.
 pub mod startup;
+
+/// One-use initial input-grant negotiation.
+pub mod control_grant;

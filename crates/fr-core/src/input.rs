@@ -65,6 +65,15 @@ impl InputBounds {
             height,
         })
     }
+    pub const fn origin(self) -> DesktopPoint {
+        self.origin
+    }
+    pub const fn width(self) -> u32 {
+        self.width
+    }
+    pub const fn height(self) -> u32 {
+        self.height
+    }
     pub fn contains(self, point: DesktopPoint) -> bool {
         let x = i64::from(point.x) - i64::from(self.origin.x);
         let y = i64::from(point.y) - i64::from(self.origin.y);

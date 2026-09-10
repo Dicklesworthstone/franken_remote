@@ -26,3 +26,6 @@ pub use media::{
 pub use record::{Channel, HEADER_BYTES, Kind, MediaLimits, Record, WireError};
 
 pub mod input_ticket;
+
+/// Initial control requests and locally approved grants.
+pub mod control;

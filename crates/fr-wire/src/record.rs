@@ -98,6 +98,8 @@ pub enum Kind {
     SelectedConfiguration = 0x0003,
     ApprovalRequired = 0x0010,
     SessionOpened = 0x0011,
+    ControlRequest = 0x0012,
+    LeaseGranted = 0x0013,
     Challenge = 0x0015,
     ChallengeResponse = 0x0016,
     InputTicket = 0x0017,
@@ -143,6 +145,8 @@ impl Kind {
             0x0003 => Ok(Self::SelectedConfiguration),
             0x0010 => Ok(Self::ApprovalRequired),
             0x0011 => Ok(Self::SessionOpened),
+            0x0012 => Ok(Self::ControlRequest),
+            0x0013 => Ok(Self::LeaseGranted),
             0x0015 => Ok(Self::Challenge),
             0x0016 => Ok(Self::ChallengeResponse),
             0x0017 => Ok(Self::InputTicket),
@@ -186,6 +190,8 @@ impl Kind {
             | Self::SelectedConfiguration
             | Self::ApprovalRequired
             | Self::SessionOpened
+            | Self::ControlRequest
+            | Self::LeaseGranted
             | Self::Challenge
             | Self::ChallengeResponse
             | Self::InputTicket
