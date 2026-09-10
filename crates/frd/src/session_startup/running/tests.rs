@@ -553,3 +553,92 @@ fn actual_negotiated_session_attaches_configuration_while_renewal_continues() {
         assert!(control.check().is_err());
     });
 }
+
+#[test]
+fn display_choice_uses_running_sessions_while_observation_renews_past_initial_grant() {
+    run(|c, h| async move {
+        use fr_wire::display::{Catalog, Display};
+        let (mut host, mut viewer) = pair_with_capabilities(
+            &c,
+            &h,
+            vec![fr_wire::negotiation::Capability {
+                name: fr_wire::display::CAPABILITY.into(),
+                version: 1,
+                required: true,
+            }],
+        )
+        .await;
+        let output = Display {
+            handle: 91,
+            geometry: DisplayGeometryGeneration::INITIAL,
+            x: -320,
+            y: 0,
+            pixel_width: 320,
+            pixel_height: 240,
+            logical_width: 320,
+            logical_height: 240,
+            scale_numerator: 1,
+            scale_denominator: 1,
+            rotation: 0,
+        };
+        let catalog = Catalog::new(1, &[output], &host.selection().limits).unwrap();
+        let control = host.observation().unwrap();
+        let initial = control
+            .deadline(Duration::from_secs(3))
+            .unwrap()
+            .time()
+            .as_nanos()
+            / 1000;
+        let mut hs = host
+            .select_display(catalog, Duration::from_secs(5))
+            .unwrap();
+        let mut vs = viewer.select_display(Duration::from_secs(5)).unwrap();
+        let mut sequence = 0;
+        // A human can pause on the catalog. Keep the same parent driver alive
+        // across actual renewals instead of using selection traffic as renewal.
+        while now(&h).unwrap() < initial + 50_000 {
+            hs.transmit(host.io().unwrap().0).unwrap();
+            let (a, b) = Box::pin(support::both(
+                host.drive(
+                    Duration::from_millis(5),
+                    || nonce(&mut sequence),
+                    |_, _| Ok(Disposition::Blocked),
+                ),
+                viewer.drive(Duration::from_millis(5), |_, _| Ok(Disposition::Blocked)),
+            ))
+            .await;
+            a.unwrap();
+            b.unwrap();
+            hs.dispatch(host.io().unwrap().0).unwrap();
+            vs.dispatch(viewer.io().unwrap().0).unwrap();
+        }
+        assert!(host.renewed_until().unwrap().as_micros() > initial);
+        assert_eq!(vs.catalog(viewer.io().unwrap().0).unwrap(), Some(&catalog));
+        assert!(!hs.is_complete());
+        assert!(!vs.is_complete());
+        vs.choose(viewer.io().unwrap().0, output.handle).unwrap();
+        while !hs.is_complete() {
+            vs.transmit(viewer.io().unwrap().0).unwrap();
+            let (a, b) = Box::pin(support::both(
+                host.drive(
+                    Duration::from_millis(2),
+                    || nonce(&mut sequence),
+                    |_, _| Ok(Disposition::Blocked),
+                ),
+                viewer.drive(Duration::from_millis(2), |_, _| Ok(Disposition::Blocked)),
+            ))
+            .await;
+            a.unwrap();
+            b.unwrap();
+            hs.dispatch(host.io().unwrap().0).unwrap();
+        }
+        let hs = hs.finish(host.io().unwrap().0).unwrap();
+        let vs = vs.finish(viewer.io().unwrap().0).unwrap();
+        let expected = hs.binding(host.io().unwrap().0, 8).unwrap();
+        vs.check_binding(viewer.io().unwrap().0, expected).unwrap();
+        assert!(control.check().is_ok());
+        drop(hs);
+        assert!(control.check().is_err());
+        assert!(host.check().is_err());
+    });
+}

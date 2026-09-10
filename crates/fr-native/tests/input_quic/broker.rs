@@ -48,18 +48,45 @@ struct Setup {
 impl Setup {
     async fn new(cx: Cx, seat: Seat, policy: AuthorityPolicy, ready: bool) -> Self {
         let pair = pair_with_feedback(&cx, true).await;
+        Self::from_pair(cx, seat, policy, ready, pair, None)
+    }
+    async fn negotiated(
+        cx: Cx,
+        seat: Seat,
+        policy: AuthorityPolicy,
+        ready: bool,
+    ) -> (Self, frd::input_quic::NegotiatedInput) {
+        let (pair, host, viewer, selected) = super::negotiated::joined_selection(&cx).await;
+        let setup = Self::from_pair(cx, seat, policy, ready, pair, Some((host, selected)));
+        viewer
+            .check_request(&setup.pair.client, setup.request)
+            .unwrap();
+        (setup, viewer)
+    }
+    fn from_pair(
+        cx: Cx,
+        seat: Seat,
+        policy: AuthorityPolicy,
+        ready: bool,
+        pair: Pair,
+        attached: Option<(frd::input_quic::NegotiatedInput, Selection)>,
+    ) -> Self {
         let display = Display::new();
         let observer = X11Pointer::open(&display.name).unwrap();
         let request = Request {
-            parent: ControlBinding {
-                id: pair.control_routes.inbound.binding,
-                host_boot: HostBootId::from_raw(4),
-                os_session: OsSessionId::from_raw(5),
-                remote_session: credentials().session,
+            parent: if attached.is_some() {
+                super::negotiated::parent()
+            } else {
+                ControlBinding {
+                    id: pair.control_routes.inbound.binding,
+                    host_boot: HostBootId::from_raw(4),
+                    os_session: OsSessionId::from_raw(5),
+                    remote_session: credentials().session,
+                }
             },
             sequence: 0,
             target: Target {
-                display_binding: 12,
+                display_binding: if attached.is_some() { 6 } else { 12 },
                 view: credentials().view,
                 bounds: observer.bounds(),
                 capabilities: observer.capabilities(),
@@ -73,17 +100,29 @@ impl Setup {
             a.mark_view_ready(now).unwrap();
         }
         let observation = frd::media::ObservationControl::new(cx.clone(), a).unwrap();
-        let broker = GrantBroker::new(
-            observation.clone(),
-            &pair.server,
-            seat.clone(),
-            Scope {
-                parent: request.parent,
-                control: pair.control_routes,
-                selection: &selection(),
-            },
-            pair.routes,
-        )
+        let selected = attached.as_ref().map_or_else(selection, |(_, s)| s.clone());
+        let scope = Scope {
+            parent: request.parent,
+            control: pair.control_routes,
+            selection: &selected,
+        };
+        let broker = if let Some((proof, _)) = attached {
+            GrantBroker::from_negotiated(
+                observation.clone(),
+                &pair.server,
+                seat.clone(),
+                scope,
+                proof,
+            )
+        } else {
+            GrantBroker::new(
+                observation.clone(),
+                &pair.server,
+                seat.clone(),
+                scope,
+                pair.routes,
+            )
+        }
         .unwrap();
         let requester = fr_client::control_grant::RequestControl::new(
             request,
@@ -133,21 +172,30 @@ impl Setup {
     async fn request(&mut self) {
         let now = ClientInstant(network::clock(&self.cx));
         let deadline = self.requester.deadline().0;
-        let bytes = self.requester.pending(now).unwrap().unwrap();
-        self.pair
-            .client
-            .send(
+        let bytes = self.requester.pending(now).unwrap().unwrap().to_vec();
+        loop {
+            assert!(
+                network::clock(&self.cx) < deadline,
+                "request admission expired"
+            );
+            match self.pair.client.send(
                 &self.cx,
                 Route::Stream(StreamRoute {
                     outbound: true,
                     ..self.pair.control_routes.inbound
                 }),
-                bytes,
+                &bytes,
                 deadline,
                 || true,
-            )
+            ) {
+                Ok(()) => break,
+                Err(quic::Error::Backpressure) => self.pump().await,
+                Err(e) => panic!("request transport refusal: {e:?}"),
+            }
+        }
+        self.requester
+            .sent(ClientInstant(network::clock(&self.cx)))
             .unwrap();
-        self.requester.sent(now).unwrap();
         let until = Instant::now() + Duration::from_secs(2);
         while self.broker.request().is_none() {
             assert!(Instant::now() < until);
@@ -1056,3 +1104,6 @@ fn publication_rejects_already_buffered_input_without_requiring_another_receive_
         assert!(shutdown.handoff_safe());
     });
 }
+
+#[path = "broker/negotiated.rs"]
+mod negotiated_grant;

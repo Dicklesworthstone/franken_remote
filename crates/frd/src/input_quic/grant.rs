@@ -1,7 +1,7 @@
 //! Initial control grant over an existing authenticated connection. The broker
 //! reserves the OS share-session's Seat before minting authority, initializes the
 //! native owner outside the authority path, and publishes only after it is ready.
-use super::{QuicInput, Routes, ticket::TICKET_CADENCE_US};
+use super::{NegotiatedInput, QuicInput, Routes, ticket::TICKET_CADENCE_US};
 use crate::{
     input_agent::{self, AdmissionGate, Driver, Phase, Seat},
     input_watchdog::StopReason,
@@ -95,6 +95,7 @@ pub struct GrantBroker {
     parent: ControlBinding,
     control_routes: ControlRoutes,
     input_routes: Routes,
+    negotiated: Option<NegotiatedInput>,
     limits: ProtocolLimits,
     seat: Seat,
     floor: Option<u64>,
@@ -104,6 +105,24 @@ pub struct GrantBroker {
     terminal: bool,
 }
 impl GrantBroker {
+    /// Consume completed configuration/input negotiation on this same session.
+    /// Keep its non-cloneable proof throughout approval, native initialization
+    /// and grant publication. A request must name the exact negotiated display
+    /// and view; local consent and native readiness remain independently required.
+    pub fn from_negotiated(
+        observation: ObservationControl,
+        connection: &QuicRecords,
+        seat: Seat,
+        scope: Scope<'_>,
+        input: NegotiatedInput,
+    ) -> Result<Self, Error> {
+        let routes = input
+            .broker_routes(connection, scope.parent, scope.selection.limits)
+            .map_err(Error::Input)?;
+        let mut broker = Self::new(observation, connection, seat, scope, routes)?;
+        broker.negotiated = Some(input);
+        Ok(broker)
+    }
     pub fn new(
         observation: ObservationControl,
         connection: &QuicRecords,
@@ -185,6 +204,7 @@ impl GrantBroker {
             parent,
             control_routes: scope.control,
             input_routes,
+            negotiated: None,
             limits,
             seat,
             floor: None,
@@ -214,6 +234,11 @@ impl GrantBroker {
                 .map_err(Error::Transport)?
         {
             return Err(Error::PeerClosed);
+        }
+        if let Some(input) = &self.negotiated {
+            input
+                .broker_routes(connection, self.parent, self.limits)
+                .map_err(Error::Input)?;
         }
         if !self.admission.permitted() {
             return Err(Error::Stopped);
@@ -345,6 +370,13 @@ impl GrantBroker {
             InputDelivery::Reliable,
         )
         .map_err(Error::Wire)?;
+        if self
+            .negotiated
+            .as_ref()
+            .is_some_and(|input| !input.matches_request(request))
+        {
+            return Err(Error::TargetChanged);
+        }
         if self.floor.is_some_and(|floor| request.sequence <= floor) {
             return Err(Error::Replay);
         }

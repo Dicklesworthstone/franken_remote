@@ -259,6 +259,25 @@ pub struct ViewerSession {
     closed: bool,
 }
 impl ViewerSession {
+    /// Receive this approved session's display catalog without choosing a
+    /// default. The UI explicitly chooses a handle from the received catalog.
+    pub fn select_display(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<crate::display_selection::DisplaySelection, crate::display_selection::Error> {
+        use crate::display_selection::{DisplaySelection, Error as DisplayError};
+        self.check().map_err(|_| DisplayError::Closed)?;
+        DisplaySelection::viewer(
+            self.cx.clone(),
+            &mut self.transport,
+            fr_transport::quic::ChannelScope {
+                control: self.routes,
+                parent: self.opened.binding,
+                selection: &self.opened.selection,
+            },
+            timeout,
+        )
+    }
     /// Consume a binding offer from this session's authenticated control queue.
     /// The caller's dispatcher retains the bounded bytes and blocks that record
     /// until this method can reserve the actual native streams. It cannot use

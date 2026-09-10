@@ -120,6 +120,9 @@ impl ObservationControl {
             }
         }
     }
+    pub(crate) fn context(&self) -> Cx {
+        self.cx.clone()
+    }
     pub fn check(&self) -> Result<HostInstant, Error> {
         self.cx.checkpoint().map_err(|_| worker::Error::Cancelled)?;
         self.admission_deadline()?;

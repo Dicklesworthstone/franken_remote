@@ -1,0 +1,40 @@
+name: Verify display selection
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/verify-display-selection.yml'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'scripts/verify.sh'
+permissions:
+  contents: read
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Install pinned compiler and native SDKs
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
+      - name: Verify committed workspace and selected-display startup
+        run: |
+          ./scripts/verify.sh fast
+          ./scripts/verify.sh docs
+          cargo test -p frd --test display_selection --locked -- --nocapture
+          cargo test -p frd --lib session_startup --locked -- --nocapture
+          cargo test -p fr-native --all-features --test decoder_startup --locked -- --test-threads=4
+          git diff --exit-code

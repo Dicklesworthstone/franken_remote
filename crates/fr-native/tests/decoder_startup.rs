@@ -25,6 +25,7 @@ use fr_wire::{
     negotiation::{Capability, ControlBinding, Offer},
 };
 use frd::{
+    display_selection::{DisplaySelection, SelectedDisplay},
     media::{
         CaptureSource, ObservationControl,
         decoder_startup::{Error, Host, Setup, Viewer},
@@ -132,6 +133,39 @@ where
             .expect("decoder startup test exceeded bounded deadline");
     });
 }
+async fn control_link(cx: &Cx) -> (QuicRecords, QuicRecords, (StreamRoute, StreamRoute)) {
+    let (c, h) = network::native_pair(cx, "localhost", quic::ALPN).await;
+    let (mut c, mut h) = (c.unwrap(), h.unwrap());
+    // Only the session-control pair is installed by the startup fixture.
+    // No decoder, recovery, feedback or datagram route exists initially.
+    let config = StreamRoute {
+        stream: h.connection_mut().open_uni_stream(cx).unwrap(),
+        binding: 7,
+        messages: Messages::SessionControl,
+        priority: Priority::Critical,
+        outbound: true,
+        maximum: 4096,
+    };
+    let replies = StreamRoute {
+        stream: c.connection_mut().open_uni_stream(cx).unwrap(),
+        outbound: false,
+        ..config
+    };
+    let streams = [config, replies];
+    let reverse = streams.map(|r| StreamRoute {
+        outbound: !r.outbound,
+        ..r
+    });
+    let policy = Policy {
+        retained_send_records: 1,
+        critical_send_records: 1,
+        ..Policy::default()
+    };
+    let host = QuicRecords::new(h, cx, &streams, &[], policy).unwrap();
+    let client = QuicRecords::new(c, cx, &reverse, &[], policy).unwrap();
+    let control = (config, replies);
+    (host, client, control)
+}
 struct Link {
     client: QuicRecords,
     host: QuicRecords,
@@ -142,49 +176,61 @@ struct Link {
     receive: ReceiveConfig,
     host_channels: NegotiatedMedia,
     client_channels: NegotiatedMedia,
+    chosen: Option<(SelectedDisplay, SelectedDisplay)>,
 }
 impl Link {
     async fn new(cx: &Cx) -> Self {
-        let (c, h) = network::native_pair(cx, "localhost", quic::ALPN).await;
-        let (mut c, mut h) = (c.unwrap(), h.unwrap());
-        // Only the session-control pair is installed by the startup fixture.
-        // No decoder, recovery, feedback or datagram route exists initially.
-        let config = StreamRoute {
-            stream: h.connection_mut().open_uni_stream(cx).unwrap(),
-            binding: 7,
-            messages: Messages::SessionControl,
-            priority: Priority::Critical,
-            outbound: true,
-            maximum: 4096,
+        Self::with_choice(cx, None).await
+    }
+    async fn selected(cx: &Cx, source: &Source) -> Self {
+        // A real X11 root is queried in this native fixture, not dimensions from
+        // a peer. Desktop enumeration remains local; no pixel capture is sent.
+        let root = X11Surface::capture(
+            Some(&source.display.name),
+            configuration().limits().unwrap(),
+        )
+        .unwrap();
+        Self::with_choice(
+            cx,
+            Some((source.control.clone(), root.width(), root.height())),
+        )
+        .await
+    }
+    async fn with_choice(cx: &Cx, choice: Option<(ObservationControl, u32, u32)>) -> Self {
+        let (mut host, mut client, control) = control_link(cx).await;
+        let chosen = if let Some((observation, width, height)) = choice {
+            Some(
+                select_output(
+                    cx,
+                    &mut host,
+                    &mut client,
+                    control,
+                    observation,
+                    width,
+                    height,
+                )
+                .await,
+            )
+        } else {
+            None
         };
-        let replies = StreamRoute {
-            stream: c.connection_mut().open_uni_stream(cx).unwrap(),
-            outbound: false,
-            ..config
+        let target = if let Some((host_choice, viewer_choice)) = &chosen {
+            let target = host_choice.binding(&host, 8).unwrap();
+            viewer_choice.check_binding(&client, target).unwrap();
+            target
+        } else {
+            binding()
         };
-        let streams = [config, replies];
-        let reverse = streams.map(|r| StreamRoute {
-            outbound: !r.outbound,
-            ..r
-        });
-        let policy = Policy {
-            retained_send_records: 1,
-            critical_send_records: 1,
-            ..Policy::default()
-        };
-        let mut host = QuicRecords::new(h, cx, &streams, &[], policy).unwrap();
-        let mut client = QuicRecords::new(c, cx, &reverse, &[], policy).unwrap();
-        let control = (config, replies);
         let (hc, cc) = attach_role(
             cx,
             &mut host,
             &mut client,
             control,
             fr_wire::attachment::MediaRole::Configuration,
-            binding(),
+            target,
         )
         .await;
-        let mut recovery_binding = binding();
+        let mut recovery_binding = target;
         recovery_binding.parent.id = 9;
         let (hr, cr) = attach_role(
             cx,
@@ -195,7 +241,7 @@ impl Link {
             recovery_binding,
         )
         .await;
-        let mut video_binding = binding();
+        let mut video_binding = target;
         video_binding.parent.id = 10;
         let (hv, cv) = attach_role(
             cx,
@@ -244,12 +290,22 @@ impl Link {
             receive,
             host_channels,
             client_channels,
+            chosen,
         }
     }
     fn setup(&self, host: bool, timeout: Duration) -> Setup {
         let mut unselected = selected_attachment();
         unselected.capabilities.clear();
         assert!(Setup::new(binding(), self.config, self.replies, &unselected, timeout).is_err());
+        if let Some((h, v)) = &self.chosen {
+            return if host {
+                h.decoder_setup(&self.host, &self.host_channels, timeout)
+                    .unwrap()
+            } else {
+                v.decoder_setup(&self.client, &self.client_channels, timeout)
+                    .unwrap()
+            };
+        }
         if host {
             self.host_channels
                 .decoder_setup(&self.host, timeout)
@@ -327,7 +383,7 @@ struct Source {
     capture: CaptureSource,
     control: ObservationControl,
     surface: X11Surface,
-    _display: Display,
+    display: Display,
 }
 impl Source {
     async fn new(cx: &Cx) -> Self {
@@ -359,7 +415,7 @@ impl Source {
             capture,
             control,
             surface,
-            _display: display,
+            display,
         }
     }
     fn paint(&mut self, index: u8) -> [u8; 3] {
@@ -408,8 +464,8 @@ fn all_negotiated_channels_repair_the_entire_final_picture_without_another_captu
     run(|cx| media_path(cx, true));
 }
 async fn media_path(cx: Cx, lose_final_picture: bool) {
-    let mut link = Link::new(&cx).await;
     let mut source = Source::new(&cx).await;
+    let mut link = Link::selected(&cx, &source).await;
     let color = source.paint(3);
     let target = Display::start();
     let mut readback =
@@ -1143,6 +1199,172 @@ async fn attach_role(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn select_output(
+    cx: &Cx,
+    host: &mut QuicRecords,
+    client: &mut QuicRecords,
+    control: (StreamRoute, StreamRoute),
+    observation: ObservationControl,
+    width: u32,
+    height: u32,
+) -> (SelectedDisplay, SelectedDisplay) {
+    use fr_transport::quic::{ChannelScope, ControlRoutes};
+    use fr_wire::display::{Catalog, Display as Output};
+    let selection = selected_attachment();
+    let parent = ControlBinding {
+        id: control.0.binding,
+        ..binding().parent
+    };
+    let output = Output {
+        handle: binding().display,
+        geometry: binding().geometry,
+        x: 0,
+        y: 0,
+        pixel_width: width,
+        pixel_height: height,
+        logical_width: width,
+        logical_height: height,
+        scale_numerator: 1,
+        scale_denominator: 1,
+        rotation: 0,
+    };
+    let catalog = Catalog::new(1, &[output], &selection.limits).unwrap();
+    let mut h = DisplaySelection::host(
+        host,
+        ChannelScope {
+            control: ControlRoutes {
+                outbound: control.0,
+                inbound: control.1,
+            },
+            parent,
+            selection: &selection,
+        },
+        observation,
+        catalog,
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let mut v = DisplaySelection::viewer(
+        cx.clone(),
+        client,
+        ChannelScope {
+            control: ControlRoutes {
+                outbound: StreamRoute {
+                    outbound: true,
+                    ..control.1
+                },
+                inbound: StreamRoute {
+                    outbound: false,
+                    ..control.0
+                },
+            },
+            parent,
+            selection: &selection,
+        },
+        Duration::from_secs(2),
+    )
+    .unwrap();
+    let until = Instant::now() + Duration::from_secs(2);
+    while v.catalog(client).unwrap().is_none() {
+        assert!(Instant::now() < until);
+        h.transmit(host).unwrap();
+        drive_attachment(cx, host, client).await;
+        v.dispatch(client).unwrap();
+    }
+    assert!(
+        !v.is_complete(),
+        "a one-entry catalog cannot implicitly select"
+    );
+    let received = *v.catalog(client).unwrap().unwrap();
+    assert_eq!(received, catalog);
+    v.choose(client, received.displays()[0].handle).unwrap();
+    while !h.is_complete() {
+        assert!(Instant::now() < until);
+        v.transmit(client).unwrap();
+        drive_attachment(cx, host, client).await;
+        h.dispatch(host).unwrap();
+    }
+    (h.finish(host).unwrap(), v.finish(client).unwrap())
+}
+
+#[test]
+fn selected_dimensions_reject_an_otherwise_valid_hevc_stream_before_worker_launch() {
+    run(|cx| async move {
+        let mut source = Source::new(&cx).await;
+        let mut link = Link::with_choice(&cx, Some((source.control.clone(), 322, 240))).await;
+        source.paint(3);
+        let update = source
+            .capture
+            .capture_if_changed(&source.control, true)
+            .await
+            .unwrap();
+        // Simulate a hostile host using valid HEVC but lying about its selected
+        // output. The viewer must reject even if the opaque generation matches.
+        let unconstrained = link
+            .host_channels
+            .decoder_setup(&link.host, Duration::from_secs(2))
+            .unwrap();
+        let mut host = Host::new(
+            source.control.clone(),
+            &link.host,
+            unconstrained,
+            configuration(),
+            update,
+        )
+        .unwrap();
+        let bytes = link.configuration_bytes(&cx, &mut host).await;
+        let missing = Launch::new(
+            Path::new("/nonexistent/fr-display-guard-worker"),
+            ":0",
+            None,
+            Role::Present,
+            12,
+        )
+        .unwrap();
+        let result = Viewer::start(
+            cx,
+            &link.client,
+            link.setup(false, Duration::from_secs(1)),
+            &bytes,
+            missing,
+            link.receive,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(Error::UnsupportedConfiguration)),
+            "display mismatch must precede native launch"
+        );
+        assert!(host.take_recovery().unwrap().is_none());
+    });
+}
+
+#[test]
+fn host_selected_geometry_refuses_wrong_capture_and_selected_view_drop_revokes_media() {
+    run(|cx| async move {
+        let mut source = Source::new(&cx).await;
+        let mut link = Link::with_choice(&cx, Some((source.control.clone(), 322, 240))).await;
+        let update = source
+            .capture
+            .capture_if_changed(&source.control, true)
+            .await
+            .unwrap();
+        assert!(matches!(
+            Host::new(
+                source.control.clone(),
+                &link.host,
+                link.setup(true, Duration::from_secs(1)),
+                configuration(),
+                update
+            ),
+            Err(Error::UnsupportedConfiguration)
+        ));
+        assert!(source.control.check().is_ok());
+        drop(link.chosen.take());
+        assert!(source.control.check().is_err());
+    });
+}
+
 fn selected_attachment() -> fr_wire::negotiation::Selection {
     Offer {
         versions: vec![0],
@@ -1151,6 +1373,11 @@ fn selected_attachment() -> fr_wire::negotiation::Selection {
         role: fr_wire::negotiation::Role::Observe,
         limits: configuration().limits().unwrap(),
         capabilities: vec![
+            Capability {
+                name: fr_wire::display::CAPABILITY.into(),
+                version: 1,
+                required: true,
+            },
             Capability {
                 name: decoder::CAPABILITY.into(),
                 version: decoder::VERSION,

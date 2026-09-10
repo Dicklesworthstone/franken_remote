@@ -69,6 +69,7 @@ pub struct Setup {
     configuration: StreamRoute,
     replies: StreamRoute,
     timeout: Duration,
+    required_display: Option<(u32, u32)>,
 }
 impl Setup {
     pub fn new(
@@ -95,7 +96,15 @@ impl Setup {
             configuration,
             replies,
             timeout,
+            required_display: None,
         })
+    }
+    pub(crate) fn require_display(mut self, width: u32, height: u32) -> Result<Self, Error> {
+        self.limits
+            .validate_coded_dimensions(width, height)
+            .map_err(|_| Error::UnsupportedConfiguration)?;
+        self.required_display = Some((width, height));
+        Ok(self)
     }
 }
 impl fmt::Debug for Setup {
@@ -244,6 +253,12 @@ fn admit(bytes: &[u8], setup: Setup) -> Result<(Configuration, DecoderRecord), E
     else {
         return Err(Error::WrongState);
     };
+    if setup
+        .required_display
+        .is_some_and(|g| g != (c.crop_width, c.crop_height))
+    {
+        return Err(Error::UnsupportedConfiguration);
+    }
     let cfg = Configuration {
         width: c.crop_width,
         height: c.crop_height,
@@ -310,6 +325,12 @@ impl Host {
             != setup.binding.parent.remote_session
         {
             return Err(Error::InvalidRoutes);
+        }
+        if setup
+            .required_display
+            .is_some_and(|g| g != (cfg.width, cfg.height))
+        {
+            return Err(Error::UnsupportedConfiguration);
         }
         let unit = update.encoded().ok_or(Error::WrongState)?;
         if !unit.is_idr()
