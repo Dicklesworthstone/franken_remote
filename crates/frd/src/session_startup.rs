@@ -25,6 +25,9 @@ use std::{
     time::Duration,
 };
 
+mod running;
+pub use running::HostSession;
+
 mod viewer;
 pub use viewer::{Viewer, ViewerSession};
 
@@ -39,6 +42,7 @@ pub enum Error {
     InvalidConfiguration,
     ClientStartup(fr_client::startup::Error),
     ClientRenewal(fr_client::authority::Error),
+    Renewal(crate::media::renewal::Error),
     Admission(fr_tailnet::Error),
     Protocol(negotiation::Error),
     Transport(quic::Error),
