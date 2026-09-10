@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
-      - name: Stage exact reviewed wire candidate without ref writes
+      - name: Stage exact reviewed runtime source without ref writes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -27,39 +27,53 @@ jobs:
           import base64,hashlib,json,lzma,os,subprocess
           from pathlib import Path
           expected={
-            'crates/fr-wire/src/attachment.rs':(None,'fa1c827d22f137a59f0586c90eb7b977621fb848'),
-            'crates/fr-wire/src/lib.rs':('3f690ef86618039be3cc67eef92d5aad5f838fd8','0d644d968aa39e3875be5e9aa6494584bebc396b'),
-            'crates/fr-wire/src/record.rs':('9cb4d29a03c928918a402ef1e3f40937ab9f262d','4581739d745af04ff4fcd338afc1bc10e5f4bdf3'),
-            'crates/fr-wire/tests/attachment.rs':(None,'1fb516b6c733a2ee961d48991d4ff00e82c509db'),
-            'PROTOCOL_ATTACHMENT.md':(None,'16cebc6670e7699c42c23158fe771aaad204d741'),
+            'NATIVE_MEDIA_ATTACHMENT.md':(None,'364c87940d27cb5005e7e608c855bf18567bb712'),
+            'PROTOCOL_ATTACHMENT.md':('16cebc6670e7699c42c23158fe771aaad204d741','a68982013f531e9f5c79461be258012265ae781c'),
+            'QUIC_RECORDS.md':('1040d87feb08616e64ef1565587819b2c26c9ae0','3892652578a828f0cc84bd94f3d66f3f6c0f1e4b'),
+            'crates/fr-native/tests/decoder_startup.rs':('35ba834e6cf00c09e141dde3989a28a3b469d18f','d893aed34eb1de7e93e1f3edb52adb7ab6bad91e'),
+            'crates/fr-transport/src/quic.rs':('6cbe7e2a2ae533a26a41cd002d66d2cec2e949a6','7d93548c8e21379c22a084d56ce4d61fac8a2203'),
+            'crates/fr-transport/src/quic/attachment.rs':(None,'24369ba75679d7251ba40a1e59b94b52eec24c02'),
+            'crates/fr-transport/tests/media_attachment.rs':(None,'4e4acdad3347b8ccc1cbb4a9b35ded362c4b3a2a'),
+            'crates/frd/src/session_startup/running.rs':('ac07574fc9d50f5d59c10843b1c20d0ea7b4fda5','5eb04bf049c9cbcda18a1f0e49c96bcfa79048ba'),
+            'crates/frd/src/session_startup/running/tests.rs':('e8d6c23b226ce21faecb6e81b14e84e99bf6f4ee','3bb955abc9dbcfe8c802cbb752d09e012cb4d70f'),
+            'crates/frd/src/session_startup/viewer.rs':('a4411fd8a33f696e5afa643b66f9353c7e7511c1','a7eec1ca05eeeb2c4226d09377769df7ae2992a3'),
           }
           def sha(b): return hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest()
           for p,(before,after) in expected.items():
             assert (sha(Path(p).read_bytes()) if Path(p).exists() else None)==before,p
-          oid='813fabf62c60b5597fff0d15c6d5d94b1e2a596d'
-          row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
-          raw=base64.b64decode(row['content']);assert sha(raw)==oid and len(raw)==6764
-          decoder=lzma.LZMADecompressor();data=decoder.decompress(raw,max_length=25835)
-          assert decoder.eof and not decoder.unused_data and len(data)==25834
-          assert hashlib.sha256(data).hexdigest()=='802c532227d5ad23d0373577b6a2159ee585977e2ba12d28a01de590ef988a68'
-          patch=Path(os.environ['RUNNER_TEMP'],'attachment-wire.patch');patch.write_bytes(data)
+          parts=[('3798be303233881867115dde2304b210b984324a',7000),('f5d1b6f376a294a5a9429ad45cf9540b35ca8341',7000),('5667b2e56958237ff860a17597351b631357b54f',6904)]
+          encoded=[]
+          for oid,length in parts:
+            row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
+            part=base64.b64decode(row['content'])
+            assert len(part)==length and sha(part)==oid
+            encoded.append(part)
+          raw=base64.b64decode(b''.join(encoded),validate=True)
+          assert len(raw)==15676 and sha(raw)=='97d1a08552154c45995f69ada9d17384e8dd5ee1'
+          decoder=lzma.LZMADecompressor();data=decoder.decompress(raw,max_length=76632)
+          assert decoder.eof and not decoder.unused_data and len(data)==76631
+          assert hashlib.sha256(data).hexdigest()=='8a6724fb42259fccf20131b31ff032b55da2905c7306d4ed8f1b01f4e2e3e5b9'
+          patch=Path(os.environ['RUNNER_TEMP'],'attachment-runtime.patch');patch.write_bytes(data)
           stats=subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
           assert {line.split('\t',2)[2] for line in stats.splitlines()}==set(expected)
           subprocess.run(['git','apply','--check',str(patch)],check=True)
           subprocess.run(['git','apply',str(patch)],check=True)
           for p,(before,after) in expected.items(): assert sha(Path(p).read_bytes())==after,p
           Path(os.environ['RUNNER_TEMP'],'attachment-paths.json').write_text(json.dumps(expected))
+          print('Exact runtime candidate staged on',os.environ['GITHUB_SHA'])
           PY
       - name: Install pinned compiler and native SDKs
         run: |
           rustup show active-toolchain
           sudo apt-get update
           sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
-      - name: Verify complete workspace and attachment records
+      - name: Verify complete workspace and actual QUIC native attachment
         run: |
           ./scripts/verify.sh fast
           ./scripts/verify.sh docs
-          cargo test -p fr-wire --test attachment --locked
+          cargo test -p fr-transport --test media_attachment --locked -- --nocapture
+          cargo test -p frd session_startup --locked -- --nocapture
+          cargo test -p fr-native --features linux-media --test decoder_startup --locked -- --nocapture
           git diff --check
       - name: Export exact verified objects without ref writes
         env:
