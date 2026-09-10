@@ -1,0 +1,94 @@
+{
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+  "secureContext": true,
+  "visibility": "visible",
+  "screen": [
+    3072,
+    1728
+  ],
+  "devicePixelRatio": 2,
+  "geometry": [
+    3072,
+    1728
+  ],
+  "codec": "hvc1.1.6.L150.B0",
+  "hardwareAcceleration": "not tested (preference is not proof)",
+  "scope": "synthetic HEVC decode and canvas readback",
+  "physicalPresentation": "not tested",
+  "frames": [
+    {
+      "stage": "single_idr",
+      "timestamp": 0,
+      "decodedMs": 69.5,
+      "canvasHash": "b520bae2",
+      "drawnMs": 207.09999990463257
+    },
+    {
+      "stage": "p_after_idle",
+      "timestamp": 2000000,
+      "decodedMs": 2.5999999046325684,
+      "canvasHash": "3f18345b",
+      "drawnMs": 10.400000095367432
+    },
+    {
+      "stage": "burst",
+      "timestamp": 2066666,
+      "decodedMs": 20.399999618530273,
+      "canvasHash": "8d1434b7",
+      "drawnMs": 43.799999713897705
+    },
+    {
+      "stage": "burst",
+      "timestamp": 2099999,
+      "decodedMs": 41.799999713897705,
+      "canvasHash": "9372f3f7",
+      "drawnMs": 44.39999961853027
+    },
+    {
+      "stage": "burst",
+      "timestamp": 2133332,
+      "decodedMs": 43.30000019073486,
+      "canvasHash": "9fa8bc81",
+      "drawnMs": 46.09999990463257
+    },
+    {
+      "stage": "burst",
+      "timestamp": 2166665,
+      "decodedMs": 45.09999990463257,
+      "canvasHash": "1c21645e",
+      "drawnMs": 47.59999990463257
+    },
+    {
+      "stage": "low_cadence_p",
+      "timestamp": 3000000,
+      "decodedMs": 2.6000003814697266,
+      "canvasHash": "ac46ecd0",
+      "drawnMs": 13.200000286102295
+    },
+    {
+      "stage": "reset_recovery_idr",
+      "timestamp": 4000000,
+      "decodedMs": 2.200000286102295,
+      "canvasHash": "b520bae2",
+      "drawnMs": 4.200000286102295
+    },
+    {
+      "stage": "recovery_p",
+      "timestamp": 4033333,
+      "decodedMs": 1.6999998092651367,
+      "canvasHash": "3f18345b",
+      "drawnMs": 4.399999618530273
+    }
+  ],
+  "status": "passed",
+  "nativeDecoderSurfaceBounds": "not tested (decodeQueueSize excludes native surfaces)",
+  "configSupported": true,
+  "deltaAfterResetRefused": true,
+  "maxDecodeQueue": 1,
+  "maxRetainedFrames": 1,
+  "retainedAtEnd": 0,
+  "flushCalls": 0,
+  "headless": false,
+  "fixtureSha256": "daf21a79444b90f7ad990f92f44b7cc0c718f299715d0605db3a264992e5925f",
+  "probeSha256": "78493bac6f242220bdcff65b342b5071cfebeefaf4e923f841fcb2ee060f9ca4"
+}
