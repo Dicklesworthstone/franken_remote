@@ -259,6 +259,33 @@ pub struct ViewerSession {
     closed: bool,
 }
 impl ViewerSession {
+    /// Consume a binding offer from this session's authenticated control queue.
+    /// The caller's dispatcher retains the bounded bytes and blocks that record
+    /// until this method can reserve the actual native streams. It cannot use
+    /// another connection or silently enable an unnegotiated channel role.
+    pub fn accept_media_channel(
+        &mut self,
+        bytes: &[u8],
+        timeout: Duration,
+    ) -> Result<fr_transport::quic::MediaChannel, Error> {
+        self.check()?;
+        let cx = &self.cx;
+        let until = self.heard_until;
+        self.transport
+            .accept_media_channel(
+                cx,
+                fr_transport::quic::ChannelScope {
+                    control: self.routes,
+                    parent: self.opened.binding,
+                    selection: &self.opened.selection,
+                },
+                bytes,
+                timeout,
+                || now(cx).is_ok_and(|n| n < until),
+            )
+            .map_err(Error::Transport)
+    }
+
     fn new(
         cx: Cx,
         transport: QuicRecords,

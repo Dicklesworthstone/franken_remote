@@ -68,3 +68,7 @@ cargo clippy -p fr-wire --all-targets --locked -- -D warnings
 Related contracts: [PROTOCOL.md](PROTOCOL.md),
 [PROTOCOL_NEGOTIATION.md](PROTOCOL_NEGOTIATION.md),
 [PROTOCOL_DECODER.md](PROTOCOL_DECODER.md).
+
+The configuration-role runtime join is implemented and tested in
+[NATIVE_MEDIA_ATTACHMENT.md](NATIVE_MEDIA_ATTACHMENT.md); other roles still
+require separate runtime implementations.

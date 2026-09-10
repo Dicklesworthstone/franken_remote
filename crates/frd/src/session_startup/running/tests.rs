@@ -32,6 +32,13 @@ where
     });
 }
 async fn pair(c: &Cx, h: &Cx) -> (HostSession, ViewerSession) {
+    pair_with_capabilities(c, h, vec![]).await
+}
+async fn pair_with_capabilities(
+    c: &Cx,
+    h: &Cx,
+    capabilities: Vec<fr_wire::negotiation::Capability>,
+) -> (HostSession, ViewerSession) {
     let cfg = Configuration {
         offer: Offer {
             versions: vec![0],
@@ -39,7 +46,7 @@ async fn pair(c: &Cx, h: &Cx) -> (HostSession, ViewerSession) {
             profile_version: 0,
             role: Role::RequestControl,
             limits: ProtocolLimits::ABSOLUTE,
-            capabilities: vec![],
+            capabilities,
         },
         binding: ControlBinding {
             id: 7,
@@ -440,5 +447,109 @@ fn dropping_a_polled_host_turn_closes_authority_without_another_service_call() {
         assert!(dropped_pending, "no actual I/O wait was exercised");
         assert!(control.check().is_err());
         assert!(host.opened.transport.is_closed());
+    });
+}
+
+#[test]
+fn actual_negotiated_session_attaches_configuration_while_renewal_continues() {
+    run(|c, h| async move {
+        let (mut host, mut viewer) = pair_with_capabilities(
+            &c,
+            &h,
+            vec![fr_wire::negotiation::Capability {
+                name: fr_wire::attachment::CAPABILITY.into(),
+                version: 1,
+                required: true,
+            }],
+        )
+        .await;
+        let binding = fr_wire::decoder::Binding {
+            parent: ControlBinding {
+                id: 8,
+                ..host.binding()
+            },
+            display: 9,
+            geometry: DisplayGeometryGeneration::INITIAL,
+            configuration: CodecConfigurationGeneration::INITIAL,
+            recovery: RecoveryGeneration::INITIAL,
+            viewport: ViewportMappingGeneration::INITIAL,
+        };
+        let control = host.observation().unwrap();
+        let mut hs = host
+            .offer_media_channel(fr_transport::quic::ChannelRequest {
+                binding,
+                ticket: fr_wire::attachment::Ticket(99),
+                timeout: Duration::from_secs(2),
+            })
+            .unwrap();
+        let mut cs = None;
+        let mut sequence = 1;
+        let until = now(&h).unwrap() + 2_000_000;
+        loop {
+            assert!(now(&h).unwrap() < until);
+            hs.transmit(host.io().unwrap().0, &h, || control.check().is_ok())
+                .unwrap();
+            if let Some(client) = &mut cs {
+                fr_transport::quic::MediaChannel::transmit(
+                    client,
+                    viewer.io().unwrap().0,
+                    &c,
+                    || c.checkpoint().is_ok(),
+                )
+                .unwrap();
+            }
+            let mut offer = None;
+            let (a, b) = Box::pin(support::both(
+                host.drive(
+                    Duration::from_millis(1),
+                    || nonce(&mut sequence),
+                    |_, _| Ok(Disposition::Blocked),
+                ),
+                viewer.drive(Duration::from_millis(1), |route, bytes| {
+                    if cs.is_none()
+                        && matches!(route, Route::Stream(r) if r.binding==7)
+                        && bytes[6..8] == 0x001b_u16.to_be_bytes()
+                    {
+                        assert!(offer.is_none());
+                        offer = Some(bytes.to_vec());
+                        Ok(Disposition::Consumed)
+                    } else {
+                        Ok(Disposition::Blocked)
+                    }
+                }),
+            ))
+            .await;
+            a.unwrap();
+            b.unwrap();
+            if let Some(bytes) = offer {
+                cs = Some(
+                    viewer
+                        .accept_media_channel(&bytes, Duration::from_secs(2))
+                        .unwrap(),
+                );
+            }
+            hs.dispatch(host.io().unwrap().0, &h, || control.check().is_ok())
+                .unwrap();
+            if let Some(client) = &mut cs {
+                client
+                    .dispatch(viewer.io().unwrap().0, &c, || c.checkpoint().is_ok())
+                    .unwrap();
+                let a = hs
+                    .finish(host.io().unwrap().0, &h, || control.check().is_ok())
+                    .unwrap();
+                let b = client
+                    .finish(viewer.io().unwrap().0, &c, || c.checkpoint().is_ok())
+                    .unwrap();
+                if let (Some(a), Some(b)) = (a, b) {
+                    assert_eq!(a.descriptor, b.descriptor);
+                    assert_eq!(a.outbound.stream, b.inbound.stream);
+                    break;
+                }
+            }
+        }
+        assert!(host.renewed_until().is_some());
+        assert!(control.check().is_ok());
+        host.close();
+        assert!(control.check().is_err());
     });
 }

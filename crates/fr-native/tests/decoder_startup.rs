@@ -92,7 +92,7 @@ fn configuration() -> Configuration {
 fn binding() -> Binding {
     Binding {
         parent: ControlBinding {
-            id: 7,
+            id: 8,
             host_boot: HostBootId::from_raw(1),
             os_session: OsSessionId::from_raw(2),
             remote_session: RemoteSessionId::from_raw(3),
@@ -162,7 +162,7 @@ impl Link {
         let config = route(
             config,
             7,
-            Messages::Exact(0x30),
+            Messages::SessionControl,
             Priority::Critical,
             true,
             4096,
@@ -170,10 +170,10 @@ impl Link {
         let replies = route(
             replies,
             7,
-            Messages::DecoderReplies,
+            Messages::SessionControl,
             Priority::Critical,
             false,
-            256,
+            4096,
         );
         let progress = route(
             progress,
@@ -214,8 +214,8 @@ impl Link {
             critical_send_records: 1,
             ..Policy::default()
         };
-        let host = QuicRecords::new(h, cx, &streams, &[video], policy).unwrap();
-        let client = QuicRecords::new(
+        let mut host = QuicRecords::new(h, cx, &streams, &[video], policy).unwrap();
+        let mut client = QuicRecords::new(
             c,
             cx,
             &reverse,
@@ -226,6 +226,10 @@ impl Link {
             policy,
         )
         .unwrap();
+        // Configuration routes are no longer supplied as local ready-made
+        // fixtures. Negotiate their binding and attach through actual QUIC.
+        let (config, replies) =
+            attach_configuration(cx, &mut host, &mut client, config, replies).await;
         let bindings = MediaBindings::new(1, 2, 3, 4).unwrap();
         let media = Routes::new(bindings, progress, recovery, video, repair).unwrap();
         let wire = MediaLimits::new(configuration().limits().unwrap(), 1150, 16384, 64).unwrap();
@@ -807,15 +811,22 @@ fn genuine_transport_backpressure_preserves_configuration_and_original_deadline(
             &mut buffer,
         )
         .unwrap();
-        link.host
-            .send(
+        // The real attachment ACK may still hold the one-record critical slot.
+        // Admit the synthetic pressure record only after those bytes drain;
+        // keep the same absolute startup deadline throughout this setup.
+        loop {
+            match link.host.send(
                 &cx,
                 Route::Stream(link.progress),
                 &buffer[..n],
                 deadline,
                 || true,
-            )
-            .unwrap();
+            ) {
+                Ok(()) => break,
+                Err(quic::Error::Backpressure) => link.drive(&cx).await,
+                Err(e) => panic!("pressure setup failed: {e:?}"),
+            }
+        }
         assert!(!host.transmit(&mut link.host).unwrap());
         assert!(!host.transmit(&mut link.host).unwrap());
         assert_eq!(host.deadline_us(), deadline);
@@ -860,13 +871,16 @@ fn equal_numeric_routes_on_another_connection_cannot_take_over_startup() {
         let mut source = Source::new(&cx).await;
         let mut host = source.host(&link, Duration::from_secs(2)).await;
         let mut other = Link::new(&cx).await;
+        // Attachment may leave its genuine ACK in native retransmission ownership.
+        // Rejection must preserve EVERY queue charge, not assume an empty link.
+        let before = other.host.usage();
         assert!(matches!(
             host.transmit(&mut other.host),
             Err(Error::ForeignConnection)
         ));
         assert!(host.take_recovery().is_err());
         assert!(source.control.check().is_ok());
-        assert_eq!(other.host.usage().retained_send_records, 0);
+        assert_eq!(other.host.usage(), before);
     });
 }
 #[test]
@@ -909,4 +923,134 @@ fn local_cancellation_before_ack_aborts_and_reaps_without_releasing_host_pixels(
         assert!(viewer.worker_id().is_none());
         assert!(source.control.check().is_ok());
     });
+}
+
+async fn attach_configuration(
+    cx: &Cx,
+    host: &mut QuicRecords,
+    client: &mut QuicRecords,
+    config: StreamRoute,
+    replies: StreamRoute,
+) -> (StreamRoute, StreamRoute) {
+    use fr_transport::quic::{ChannelRequest, ChannelScope, ControlRoutes};
+    use fr_wire::attachment::Ticket;
+    let selection = selected_attachment();
+    let parent = ControlBinding {
+        id: 7,
+        ..binding().parent
+    };
+    let hc = ControlRoutes {
+        outbound: config,
+        inbound: replies,
+    };
+    let cc = ControlRoutes {
+        outbound: StreamRoute {
+            outbound: true,
+            ..replies
+        },
+        inbound: StreamRoute {
+            outbound: false,
+            ..config
+        },
+    };
+    let mut h = host
+        .offer_media_channel(
+            cx,
+            ChannelScope {
+                control: hc,
+                parent,
+                selection: &selection,
+            },
+            ChannelRequest {
+                binding: binding(),
+                ticket: Ticket(0xa771),
+                timeout: Duration::from_secs(2),
+            },
+            || true,
+        )
+        .unwrap();
+    let mut c = None;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "configuration channel attachment stalled"
+        );
+        h.transmit(host, cx, || true).unwrap();
+        if let Some(viewer) = &mut c {
+            fr_transport::quic::MediaChannel::transmit(viewer, client, cx, || true).unwrap();
+        }
+        drive_attachment(cx, host, client).await;
+        if c.is_none() {
+            let mut offer = None;
+            let ready = std::cell::Cell::new(true);
+            client
+                .receive_ready(
+                    cx,
+                    || true,
+                    |r| ready.get() && r == Route::Stream(cc.inbound),
+                    |_, bytes| {
+                        ready.set(false);
+                        offer = Some(bytes.to_vec());
+                        Ok(Disposition::Consumed)
+                    },
+                )
+                .unwrap();
+            if let Some(bytes) = offer {
+                c = Some(
+                    client
+                        .accept_media_channel(
+                            cx,
+                            ChannelScope {
+                                control: cc,
+                                parent,
+                                selection: &selection,
+                            },
+                            &bytes,
+                            Duration::from_secs(2),
+                            || true,
+                        )
+                        .unwrap(),
+                );
+            }
+        }
+        h.dispatch(host, cx, || true).unwrap();
+        if let Some(viewer) = &mut c {
+            viewer.dispatch(client, cx, || true).unwrap();
+            if let (Some(h), Some(v)) = (
+                h.finish(host, cx, || true).unwrap(),
+                viewer.finish(client, cx, || true).unwrap(),
+            ) {
+                assert_eq!(h.descriptor, v.descriptor);
+                return (h.outbound, h.inbound);
+            }
+        }
+    }
+}
+
+fn selected_attachment() -> fr_wire::negotiation::Selection {
+    Offer {
+        versions: vec![0],
+        profile: 1,
+        profile_version: 0,
+        role: fr_wire::negotiation::Role::Observe,
+        limits: configuration().limits().unwrap(),
+        capabilities: vec![Capability {
+            name: fr_wire::attachment::CAPABILITY.into(),
+            version: 1,
+            required: true,
+        }],
+    }
+    .select()
+    .unwrap()
+}
+
+async fn drive_attachment(cx: &Cx, host: &mut QuicRecords, client: &mut QuicRecords) {
+    let (a, b) = Box::pin(network::both(
+        host.drive(cx, Duration::from_millis(1), || true),
+        client.drive(cx, Duration::from_millis(1), || true),
+    ))
+    .await;
+    a.unwrap();
+    b.unwrap();
 }

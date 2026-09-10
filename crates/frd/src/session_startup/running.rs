@@ -39,6 +39,30 @@ impl OpenedSession {
     }
 }
 impl HostSession {
+    /// Allocate a ticketed native configuration pair on this admitted session.
+    /// The local view and unpredictable ticket are supplied by the host owner;
+    /// this does not authorize a new display or create input/decoder readiness.
+    pub fn offer_media_channel(
+        &mut self,
+        request: fr_transport::quic::ChannelRequest,
+    ) -> Result<fr_transport::quic::MediaChannel, Error> {
+        self.check()?;
+        let control = self.opened.control.clone();
+        self.opened
+            .transport
+            .offer_media_channel(
+                &self.opened.cx,
+                fr_transport::quic::ChannelScope {
+                    control: self.opened.routes,
+                    parent: self.opened.binding,
+                    selection: &self.opened.selected,
+                },
+                request,
+                || control.check().is_ok(),
+            )
+            .map_err(Error::Transport)
+    }
+
     pub fn check(&mut self) -> Result<(), Error> {
         self.opened.check()
     }

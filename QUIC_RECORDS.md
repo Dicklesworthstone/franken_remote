@@ -13,7 +13,7 @@ states, another ALPN, previously used outgoing streams, invalid directions,
 duplicate bindings, and overly large native receive windows. Routes come from
 the admitted local session owner, never from a peer's claimed role.
 
-This slice supports up to eight bound unidirectional reliable streams and four
+The adapter supports up to sixteen bound unidirectional reliable streams and four
 bound datagram routes. Each route has one exact message kind. This implements
 the media progress/recovery/repair split, not the still-incomplete negotiation,
 zero-binding bootstrap, all-kinds control stream, or multi-client listener.
@@ -115,3 +115,6 @@ This advances `fr-p1-fr-transport-pug` and `fr-fr-wire-framing-i0u`. Their wider
 acceptance criteria remain open. External interoperability, real tailnet paths,
 concurrent admission, session negotiation and the upstream QUIC fixes continue
 to require their own qualification; this slice does not take over that work.
+
+Ticketed native configuration/reply pairs and their shared route ceiling are
+implemented in [NATIVE_MEDIA_ATTACHMENT.md](NATIVE_MEDIA_ATTACHMENT.md).

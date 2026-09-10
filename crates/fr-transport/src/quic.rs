@@ -19,11 +19,14 @@ use std::{
     time::Duration,
 };
 
+mod attachment;
+pub use attachment::{AttachedChannel, ChannelRequest, ChannelScope, MediaChannel};
+
 mod startup;
 pub use startup::ControlRoutes;
 
 pub const ALPN: &[u8] = b"fr-remote/0";
-const MAX_STREAMS: usize = 8;
+const MAX_STREAMS: usize = 16;
 const MAX_DATAGRAMS: usize = 4;
 const TURN_RECORDS: usize = 16;
 /// Upper bound from the pinned native 1200-byte protected packet profile:
@@ -228,6 +231,7 @@ pub struct ConnectionBinding(Weak<()>);
 pub struct QuicRecords {
     identity: Arc<()>,
     clock_attached: bool,
+    attachments: Vec<attachment::Reservation>,
     native: Option<NativeQuicUdpConnection>,
     streams: Vec<StreamRoute>,
     datagrams: Vec<DatagramRoute>,
@@ -338,6 +342,7 @@ impl QuicRecords {
         Ok(Self {
             identity: Arc::new(()),
             clock_attached: false,
+            attachments: Vec::new(),
             native: Some(native),
             streams: streams.to_vec(),
             datagrams: datagrams.to_vec(),
@@ -458,6 +463,9 @@ impl QuicRecords {
                 return Err(Error::Clock);
             }
             self.last_now = Some(now);
+            if self.attachments.iter().any(|r| r.expired(now)) {
+                return Err(Error::Expired);
+            }
             if self
                 .senders
                 .iter()
@@ -855,7 +863,13 @@ impl QuicRecords {
                 })?;
             } else {
                 let s = &mut self.inbound[which];
-                if s.fin || !ready(Route::Stream(s.route)) {
+                if s.fin
+                    || !ready(Route::Stream(s.route))
+                    || self
+                        .attachments
+                        .iter()
+                        .any(|r| r.inbound == s.route.stream && !r.readable())
+                {
                     continue;
                 }
                 if s.framing.frame(current)?.is_none() {
