@@ -23,28 +23,85 @@ jobs:
         run: |
           rustup show active-toolchain
           sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
-      - name: Stage exact reviewed ticket overlap
+      - name: Stage exact native ticket delivery
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 - <<'PY'
           import base64, hashlib, json, lzma, os, subprocess
           from pathlib import Path
-          before = {'crates/fr-core/src/authority.rs': '880c5102b253f09fda6aefca259719f5380194cf', 'crates/fr-core/src/input_submission.rs': 'd5d25a4fbdf70c5503d31ce067a0b01156c5c533', 'crates/fr-core/tests/ticket_renewal.rs': None}
-          after = {'crates/fr-core/src/authority.rs': '0d5b07790e7a40139da160baab055f5db70e981b', 'crates/fr-core/src/input_submission.rs': '7b3b04e59e335d13eb40a6b45d17c2beea034216', 'crates/fr-core/tests/ticket_renewal.rs': 'c656fa9c35c1b444fbb88da13457c5059c6031d3'}
+          before = {
+              'INPUT_TICKET_RENEWAL.md': None,
+              'PROTOCOL_INPUT.md': 'eeaeeef86b6e66c7d3a2a036edae026b2ab2d724',
+              'crates/fr-client/src/input.rs': '476765153d845cb1bf8c2c93daab8553eb0fb96f',
+              'crates/fr-client/src/input/presentation.rs': '637f25f82d416fc863b7094902f0a82a7e162f88',
+              'crates/fr-client/src/input/ticket.rs': None,
+              'crates/fr-client/tests/input_ticket.rs': None,
+              'crates/fr-core/src/input_submission.rs': '7b3b04e59e335d13eb40a6b45d17c2beea034216',
+              'crates/fr-media/src/freshness.rs': 'bd5dfb98abc3f61b7d13e948983ab37a44f785a3',
+              'crates/fr-media/tests/clock_deadline.rs': None,
+              'crates/fr-native/tests/input_quic.rs': '91e2d27a21f2ecc53e6e388c58921d3d11988fe3',
+              'crates/fr-native/tests/input_quic/ticket.rs': None,
+              'crates/fr-transport/src/quic.rs': '1e588b18ea791efad4108d03f9b25a7b92af9d26',
+              'crates/fr-wire/src/input_ticket.rs': None,
+              'crates/fr-wire/src/lib.rs': '7b1a5ca1fc93190fe78df88842e1c1f002b6bdef',
+              'crates/fr-wire/src/record.rs': 'd101498de2fa3a522fa39940eddb4ec0cb0e190e',
+              'crates/fr-wire/tests/input_ticket.rs': None,
+              'crates/frd/src/input_agent.rs': 'f9e63e9e09613ae630c82226eed634aa028db994',
+              'crates/frd/src/input_agent/result.rs': 'fe55fe2a7722bc3ee16a02a0d165e69549be8943',
+              'crates/frd/src/input_quic.rs': '3d0bab1bb3519471bafd4ad94cfe8bf4c44ef396',
+              'crates/frd/src/input_quic/ticket.rs': None,
+          }
+          after = {
+              'INPUT_TICKET_RENEWAL.md': '590d8766eb15ea053913d5e1a3f7140bd3cb4819',
+              'PROTOCOL_INPUT.md': 'dccea81b0e256dac5cf1274547ed777dad37e61d',
+              'crates/fr-client/src/input.rs': '0b5d8ac95132c5ad5894220aeadd6825e8182231',
+              'crates/fr-client/src/input/presentation.rs': '9060f23671e4dd316cc0728bb83b6cde591d5132',
+              'crates/fr-client/src/input/ticket.rs': 'ed0ac9b102507c353fea5c2956eaf6da8a6763e4',
+              'crates/fr-client/tests/input_ticket.rs': '42fcfeaaa367c1bb3283680169dc9a66b9720fe6',
+              'crates/fr-core/src/input_submission.rs': '7441a6acaa82fb011f1a5842f9861293c6b7da79',
+              'crates/fr-media/src/freshness.rs': 'd8094e870aa84b07a47dbc9086ebb825b4dc457b',
+              'crates/fr-media/tests/clock_deadline.rs': 'ba457ab2b281384e95d93011dfb35c9b0357e2b8',
+              'crates/fr-native/tests/input_quic.rs': '5f6162ea13d7335cdf2ea6b5ff5679dc615e3d96',
+              'crates/fr-native/tests/input_quic/ticket.rs': '9c6f5a6d5fccb59bc0baf3343b848b7ddf7e06e3',
+              'crates/fr-transport/src/quic.rs': '6cbe7e2a2ae533a26a41cd002d66d2cec2e949a6',
+              'crates/fr-wire/src/input_ticket.rs': '8f95dbe27b611fdd1b89f6681f2b27158ec135fc',
+              'crates/fr-wire/src/lib.rs': '3f690ef86618039be3cc67eef92d5aad5f838fd8',
+              'crates/fr-wire/src/record.rs': '9cb4d29a03c928918a402ef1e3f40937ab9f262d',
+              'crates/fr-wire/tests/input_ticket.rs': 'a7336664480becb7184a49670cc991d7aa38d8f8',
+              'crates/frd/src/input_agent.rs': '8c2e9400bcc32d2b4ba51a6e31dfafb0f8a0e675',
+              'crates/frd/src/input_agent/result.rs': '8479600a140ed22d6731d54dd7c81c33ec4ff6c3',
+              'crates/frd/src/input_quic.rs': 'e0ce35a35a62069b4b99b2246a8d7186d296a930',
+              'crates/frd/src/input_quic/ticket.rs': '1c4d50407f9d6d05f2364dd5951fd9b1c2957f33',
+          }
           def sha(data):
               return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
+          assert sha(Path('crates/fr-core/src/authority.rs').read_bytes()) == '0d5b07790e7a40139da160baab055f5db70e981b'
           for path, expected in before.items():
-              assert (sha(Path(path).read_bytes()) if Path(path).exists() else None) == expected, path
-          oid = '347708ba695af9bfc89a4306a6abd465aa01c801'
-          row = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
-          raw = base64.b64decode(row['content'])
-          assert len(raw) == 4144 and sha(raw) == oid
+              actual = sha(Path(path).read_bytes()) if Path(path).exists() else None
+              assert actual == expected, f'Concurrent change: {path}'
+          parts = [
+              (5600, '03bb4dc936e6c293ca8f4c839c3e608989f2e668'),
+              (1800, '5f196c6f526bfae534641fc39f6e1f1070fc7246'),
+              (1800, '778198a975f3f8af0ca9968b04474bc7e8ef8bc7'),
+              (1800, 'af7c0485b1b6312a9cf6d28f82fb4c6b8b320c31'),
+              (1800, 'a64376f1dba86dbd15676d92359d119e3c29e050'),
+              (1800, 'b076c4d7fcecb980a79ade753caa6aa58eded739'),
+              (1800, 'f26ca1a1c9d67f7141dbf82199eb0816e3b93017'),
+              (196, '7cd1d539baac0312e3eb22f1b31ef91e9139868b'),
+          ]
+          raw = bytearray()
+          for size, oid in parts:
+              row = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
+              part = base64.b64decode(row['content'])
+              assert len(part) == size and sha(part) == oid
+              raw.extend(part)
+          assert len(raw) == 16596 and sha(raw) == '2c37cda0017054e9f9d60cec9ccf60c701ba312e'
           decoder = lzma.LZMADecompressor()
-          data = decoder.decompress(raw, max_length=16436)
-          assert decoder.eof and not decoder.unused_data and len(data) == 16435
-          assert hashlib.sha256(data).hexdigest() == '6fdbf073d4f09b58f2e2ac254e6a89b99124cb3be25343f242caae122738f5bc'
-          patch = Path(os.environ['RUNNER_TEMP'], 'ticket-core.patch')
+          data = decoder.decompress(raw, max_length=74347)
+          assert decoder.eof and not decoder.unused_data and len(data) == 74346
+          assert hashlib.sha256(data).hexdigest() == '83aeeaded7e04fed4ecdaf71bce9167c426eaf7be600d5389c1570f1c7d1433a'
+          patch = Path(os.environ['RUNNER_TEMP'], 'ticket-network.patch')
           patch.write_bytes(data)
           stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
           assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(after)
