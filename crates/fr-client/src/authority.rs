@@ -4,9 +4,7 @@ use crate::input::ClientInstant;
 use fr_core::limits::ProtocolLimits;
 use fr_wire::{
     WireError,
-    authority::{
-        self, Binding, Message, OBSERVATION_CHALLENGE_BYTES, OBSERVATION_RESPONSE_BYTES, Scope,
-    },
+    authority::{self, Binding, MAX_AUTHORITY_BYTES, Message, OBSERVATION_CHALLENGE_BYTES, Scope},
     input::{InputDelivery, InputDirection},
 };
 
@@ -26,13 +24,15 @@ pub enum Error {
 /// neither fresh presentation evidence nor a control grant. Host time is opaque.
 pub struct ObservationResponder {
     binding: Binding,
+    scope: Scope,
+    length: usize,
     limits: ProtocolLimits,
     clock: ClientInstant,
     nonce: Option<u128>,
     host_deadline: u64,
     until: Option<ClientInstant>,
     stopped: bool,
-    bytes: [u8; OBSERVATION_RESPONSE_BYTES],
+    bytes: [u8; MAX_AUTHORITY_BYTES],
 }
 impl ObservationResponder {
     pub fn new(
@@ -40,21 +40,46 @@ impl ObservationResponder {
         limits: ProtocolLimits,
         now: ClientInstant,
     ) -> Result<Self, Error> {
+        Self::with_scope(binding, Scope::Observation, limits, now)
+    }
+    pub(crate) fn for_control(
+        binding: Binding,
+        lease: fr_core::ids::InputLeaseId,
+        limits: ProtocolLimits,
+        now: ClientInstant,
+    ) -> Result<Self, Error> {
+        if lease.as_raw() == 0 {
+            return Err(Error::InvalidConfiguration);
+        }
+        Self::with_scope(binding, Scope::Control(lease), limits, now)
+    }
+    fn with_scope(
+        binding: Binding,
+        scope: Scope,
+        limits: ProtocolLimits,
+        now: ClientInstant,
+    ) -> Result<Self, Error> {
+        let required = match scope {
+            Scope::Observation => OBSERVATION_CHALLENGE_BYTES,
+            Scope::Control(_) => MAX_AUTHORITY_BYTES,
+        };
         if binding.channel == 0
             || binding.session.as_raw() == 0
-            || (limits.max_control_message_bytes() as usize) < OBSERVATION_CHALLENGE_BYTES
+            || (limits.max_control_message_bytes() as usize) < required
         {
             return Err(Error::InvalidConfiguration);
         }
         Ok(Self {
             binding,
+            scope,
+            length: 0,
             limits,
             clock: now,
             nonce: None,
             host_deadline: 0,
             until: None,
             stopped: false,
-            bytes: [0; OBSERVATION_RESPONSE_BYTES],
+            bytes: [0; MAX_AUTHORITY_BYTES],
         })
     }
     pub fn stop(&mut self) {
@@ -100,13 +125,16 @@ impl ObservationResponder {
             Err(error) => return self.fail(Error::Wire(error)),
         };
         let Message::Challenge {
-            scope: Scope::Observation,
+            scope,
             nonce,
             deadline_micros,
         } = message
         else {
             return self.fail(Error::WrongScope);
         };
+        if scope != self.scope {
+            return self.fail(Error::WrongScope);
+        }
         // Host issue-time deadlines advance at the renewal cadence. Replaying an
         // earlier challenge cannot replace the outstanding response or revive it.
         if self.nonce == Some(nonce) || deadline_micros <= self.host_deadline {
@@ -115,9 +143,9 @@ impl ObservationResponder {
         let Some(until) = now.0.checked_add(1_000_000).map(ClientInstant) else {
             return self.fail(Error::Clock);
         };
-        authority::encode(
+        self.length = authority::encode(
             Message::Response {
-                scope: Scope::Observation,
+                scope: self.scope,
                 nonce,
             },
             self.binding,
@@ -139,7 +167,7 @@ impl ObservationResponder {
     }
     pub fn pending(&mut self, now: ClientInstant) -> Result<Option<&[u8]>, Error> {
         self.tick(now)?;
-        Ok(self.until.map(|_| self.bytes.as_slice()))
+        Ok(self.until.map(|_| &self.bytes[..self.length]))
     }
     /// Consume ONLY after the transport has accepted these exact bytes. A failed
     /// send does not change the deadline; transport failure must stop the session.

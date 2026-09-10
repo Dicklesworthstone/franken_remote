@@ -381,3 +381,47 @@ fn generation_change_cannot_reuse_the_old_presented_grant() {
             .is_err()
     );
 }
+
+#[test]
+fn lost_media_receiver_invalidates_a_pending_control_response_before_send() {
+    let (mut receiver, mut input, limits) = setup();
+    decoded(&mut receiver, &mut input, limits, 30_000);
+    input.visible(0, ClientInstant(30_000)).unwrap();
+    input
+        .enable_control_renewal(11, ClientInstant(30_000))
+        .unwrap();
+    let mut bytes = [0; authority::MAX_AUTHORITY_BYTES];
+    let n = authority::encode(
+        authority::Message::Challenge {
+            scope: authority::Scope::Control(credentials().lease),
+            nonce: 7,
+            deadline_micros: 4_000_000,
+        },
+        authority::Binding {
+            channel: 11,
+            session: credentials().session,
+        },
+        &ProtocolLimits::ABSOLUTE,
+        &mut bytes,
+        InputDirection::HostToViewer,
+        InputDelivery::Reliable,
+    )
+    .unwrap();
+    input
+        .accept_control_challenge(&bytes[..n], ClientInstant(30_000))
+        .unwrap();
+    assert!(
+        input
+            .pending_control_response(ClientInstant(30_000))
+            .unwrap()
+            .is_some()
+    );
+    drop(receiver);
+    assert!(
+        input
+            .pending_control_response(ClientInstant(30_001))
+            .is_err()
+    );
+    assert!(input.stopped().is_some());
+    assert_eq!(input.control_response_deadline(), None);
+}

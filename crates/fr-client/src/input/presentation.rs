@@ -87,6 +87,44 @@ impl PresentedInput {
         self.input.accept_ticket(bytes, clock, now)?;
         Ok(())
     }
+    pub fn enable_control_renewal(
+        &mut self,
+        channel: u32,
+        now: ClientInstant,
+    ) -> Result<(), Error> {
+        self.input
+            .enable_control_renewal(channel, now)
+            .map_err(Error::Input)
+    }
+    pub fn accept_control_challenge(
+        &mut self,
+        bytes: &[u8],
+        now: ClientInstant,
+    ) -> Result<(), Error> {
+        if !self.tick(now)? {
+            return Err(Error::Input(super::Error::NoPresentedView));
+        }
+        self.input
+            .accept_control_challenge(bytes, now)
+            .map_err(Error::Input)
+    }
+    pub fn control_response_deadline(&self) -> Option<ClientInstant> {
+        self.input.control_response_deadline()
+    }
+    pub fn pending_control_response(&mut self, now: ClientInstant) -> Result<Option<&[u8]>, Error> {
+        if !self.tick(now)? {
+            return Err(Error::Input(super::Error::NoPresentedView));
+        }
+        self.input
+            .pending_control_response(now)
+            .map_err(Error::Input)
+    }
+    pub fn control_response_sent(&mut self, now: ClientInstant) -> Result<(), Error> {
+        if !self.tick(now)? {
+            return Err(Error::Input(super::Error::NoPresentedView));
+        }
+        self.input.control_response_sent(now).map_err(Error::Input)
+    }
     pub fn stopped(&self) -> Option<StopReason> {
         self.input.stopped()
     }

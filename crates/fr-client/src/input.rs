@@ -2,6 +2,7 @@
 //! and terminal host receipts. Encoding consumes an identity: send those bytes
 //! once through the bounded authenticated transport, or stop this owner. Never
 //! regenerate an uncertain action with a fresh ticket. Only metadata is retained.
+mod control;
 pub mod held;
 pub mod ticket;
 use fr_core::{
@@ -83,6 +84,7 @@ pub enum StopReason {
     ActionFailed,
     InvalidReceipt,
     InvalidTicket,
+    InvalidControl,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -97,6 +99,7 @@ pub enum Error {
     InvalidTransition,
     Backpressure,
     TicketExpired,
+    Control(crate::authority::Error),
     Wire(WireError),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +150,7 @@ pub struct InputClient {
     receipts: [Option<InputResult>; MAX_PENDING_ACTIONS],
     receipt_cursor: usize,
     ticket_state: Option<ticket::State>,
+    control_response: Option<crate::authority::ObservationResponder>,
     keys: [bool; 256],
     buttons: [bool; 5],
 }
@@ -196,12 +200,16 @@ impl InputClient {
             receipts: [None; MAX_PENDING_ACTIONS],
             receipt_cursor: 0,
             ticket_state: None,
+            control_response: None,
             keys: [false; 256],
             buttons: [false; 5],
         })
     }
     pub fn stop(&mut self, reason: StopReason) {
         self.stopped.get_or_insert(reason);
+        if let Some(response) = &mut self.control_response {
+            response.stop();
+        }
     }
     pub const fn stopped(&self) -> Option<StopReason> {
         self.stopped
@@ -223,6 +231,12 @@ impl InputClient {
             return self.fail(StopReason::ClockRegression);
         }
         self.clock = now;
+        if let Some(response) = &mut self.control_response
+            && let Err(error) = response.tick(now)
+        {
+            self.stop(StopReason::InvalidControl);
+            return Err(Error::Control(error));
+        }
         if self.pending.iter().flatten().any(|p| now >= p.deadline) {
             return self.fail(StopReason::ReceiptTimeout);
         }
