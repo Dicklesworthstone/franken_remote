@@ -152,6 +152,10 @@ impl ControlRenewal {
         }
         Ok(())
     }
+    /// Recheck the retained native authority immediately before shared UDP I/O.
+    pub(crate) fn permitted(&mut self) -> bool {
+        self.sample().is_ok()
+    }
     fn sample(&mut self) -> Result<HostInstant, Error> {
         if self.control.is_stopped() || self.cx.checkpoint().is_err() || !self.admission.permitted()
         {

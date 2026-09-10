@@ -9,8 +9,32 @@ use fr_transport::quic::{ControlRoutes, Disposition, QuicRecords, Route};
 use fr_wire::negotiation::{ControlBinding, Selection};
 use std::{future::Future, pin::pin, task::Poll, time::Duration};
 
+mod controlled;
+pub use controlled::ControlledHost;
+
 const REFRESH_MARGIN_US: u64 = 500_000;
 const MAX_TURN: Duration = Duration::from_millis(100);
+
+/// Synchronous, bounded application work, serviced during admission refresh as
+/// well as ordinary I/O. No native calls or blocking callbacks belong here.
+trait Services {
+    fn permitted(&mut self) -> bool {
+        true
+    }
+    fn maintain<N: FnMut() -> Result<u128, ()>>(
+        &mut self,
+        _transport: &mut QuicRecords,
+        _nonce: &mut N,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+    fn receive(&mut self, route: Route, bytes: &[u8]) -> Result<Disposition, ()>;
+}
+impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> Services for F {
+    fn receive(&mut self, route: Route, bytes: &[u8]) -> Result<Disposition, ()> {
+        self(route, bytes)
+    }
+}
 
 /// Owns the actual admitted host session and its sole observation-renewal owner.
 /// Drive this task during idle as well as active video. The callback only admits
@@ -204,7 +228,7 @@ impl HostSession {
         &mut self,
         wait: Duration,
         fresh_nonce: &mut impl FnMut() -> Result<u128, ()>,
-        other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+        other: &mut impl Services,
     ) -> Result<(), Error> {
         if wait > MAX_TURN {
             return Err(Error::InvalidConfiguration);
@@ -237,7 +261,7 @@ impl HostSession {
             .await?;
         } else {
             self.renewal
-                .drive(&mut self.opened.transport, wait)
+                .drive_checked(&mut self.opened.transport, wait, || other.permitted())
                 .await
                 .map_err(Error::Renewal)?;
         }
@@ -271,13 +295,19 @@ fn service(
     renewal: &mut ObservationRenewal,
     transport: &mut QuicRecords,
     nonce: &mut impl FnMut() -> Result<u128, ()>,
-    other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+    other: &mut impl Services,
 ) -> Result<(), Error> {
-    // Receive the prior response before issuing another challenge. Other records
-    // stay in their ordered stream and cannot silently become renewals.
-    renewal.receive(transport, other).map_err(Error::Renewal)?;
-    renewal.service(transport, nonce).map_err(Error::Renewal)?;
-    Ok(())
+    // Application maintenance runs on both sides of observation dispatch: a
+    // control response ahead of an observation response must not prevent either
+    // owner from progressing, and no application work waits on LocalAPI I/O.
+    other.maintain(transport, nonce)?;
+    renewal
+        .receive(transport, |route, bytes| other.receive(route, bytes))
+        .map_err(Error::Renewal)?;
+    renewal
+        .service(transport, &mut *nonce)
+        .map_err(Error::Renewal)?;
+    other.maintain(transport, nonce)
 }
 #[derive(Clone, Copy)]
 struct RefreshTurn<'a> {
@@ -295,7 +325,7 @@ async fn pump_refresh(
     refresh: impl Future<Output = Result<(), Error>>,
     turn: RefreshTurn<'_>,
     nonce: &mut impl FnMut() -> Result<u128, ()>,
-    other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+    other: &mut impl Services,
 ) -> Result<(), Error> {
     let cx = turn.cx;
     let control = turn.control;
@@ -314,7 +344,7 @@ async fn pump_refresh(
             .wait
             .min(Duration::from_micros(turn.until.saturating_sub(current)));
         {
-            let mut io = pin!(renewal.drive(transport, wait));
+            let mut io = pin!(renewal.drive_checked(transport, wait, || other.permitted()));
             std::future::poll_fn(|task| {
                 if !refreshed {
                     let before = now(cx)?;

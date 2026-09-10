@@ -17,7 +17,7 @@ use std::{
     },
     time::Instant,
 };
-fn run<F, Fut>(f: F)
+pub(super) fn run<F, Fut>(f: F)
 where
     F: FnOnce(Cx, Cx) -> Fut,
     Fut: Future<Output = ()>,
@@ -38,6 +38,14 @@ async fn pair_with_capabilities(
     c: &Cx,
     h: &Cx,
     capabilities: Vec<fr_wire::negotiation::Capability>,
+) -> (HostSession, ViewerSession) {
+    pair_initialized(c, h, capabilities, |_| {}).await
+}
+pub(super) async fn pair_initialized(
+    c: &Cx,
+    h: &Cx,
+    capabilities: Vec<fr_wire::negotiation::Capability>,
+    initialize: impl FnOnce(&mut Host),
 ) -> (HostSession, ViewerSession) {
     let cfg = Configuration {
         offer: Offer {
@@ -86,6 +94,7 @@ async fn pair_with_capabilities(
         a.unwrap();
         b.unwrap();
     }
+    initialize(&mut h);
     (
         h.finish().unwrap().into_running().unwrap(),
         viewer.finish().unwrap(),
@@ -243,7 +252,7 @@ fn delayed_refresh_keeps_real_udp_and_application_dispatch_running() {
                 refresh,
                 step,
                 &mut || nonce(&mut n),
-                &mut |_, record| {
+                &mut |_: Route, record: &[u8]| {
                     assert!(
                         !done.load(Ordering::Acquire),
                         "network blocked behind the refresh"

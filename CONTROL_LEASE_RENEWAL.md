@@ -80,8 +80,10 @@ dropping an unpolled drive future is covered by the same guard.
 
 The containing session must service observation, control and input fairly, on
 idle turns as well as packet arrivals, and poll the native Driver independently.
+The [persistent controlled host](CONTROLLED_HOST_SESSION.md) now composes those
+service owners, including during admission refresh, without another native queue.
 Each receive handler leaves unrelated messages unread when its delegate reports
-backpressure. This adapter is not an autonomously running session loop.
+backpressure. The low-level ControlRenewal adapter starts no autonomous task.
 
 ## Viewer lifecycle and view gating
 

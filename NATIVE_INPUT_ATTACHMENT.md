@@ -160,3 +160,11 @@ Related: [PROTOCOL_ATTACHMENT.md](PROTOCOL_ATTACHMENT.md),
 [PROTOCOL_INPUT.md](PROTOCOL_INPUT.md), [QUIC_NATIVE_INPUT.md](QUIC_NATIVE_INPUT.md),
 [CONTROL_LEASE_RENEWAL.md](CONTROL_LEASE_RENEWAL.md),
 [SESSION_DRIVERS.md](SESSION_DRIVERS.md).
+
+## Persistent host service
+
+After the native join, `HostSession::into_controlled` consumes the same initialized
+input owner into the [persistent controlled host](CONTROLLED_HOST_SESSION.md).
+It services input results, tickets and control renewal alongside observation and
+admission refresh. Keep polling the original native Driver independently; this
+composition creates no new grant, permission, presentation evidence or OS sink.

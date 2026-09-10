@@ -218,6 +218,12 @@ impl QuicInput {
             last_ticket: None,
         })
     }
+    pub(crate) const fn protocol_limits(&self) -> ProtocolLimits {
+        self.limits
+    }
+    pub(crate) const fn routes(&self) -> Routes {
+        self.routes
+    }
     pub fn control(&self) -> Control {
         self.agent.control()
     }

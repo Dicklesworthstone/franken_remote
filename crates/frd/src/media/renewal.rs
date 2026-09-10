@@ -309,6 +309,17 @@ impl ObservationRenewal {
         connection: &'a mut QuicRecords,
         wait: Duration,
     ) -> impl std::future::Future<Output = Result<(), Error>> + 'a {
+        self.drive_checked(connection, wait, || true)
+    }
+    /// A controlled session shares this connection with input feedback. Its
+    /// native authority must remain valid at UDP submission, not merely when
+    /// records were queued before an admission refresh or an I/O wait.
+    pub(crate) fn drive_checked<'a>(
+        &'a self,
+        connection: &'a mut QuicRecords,
+        wait: Duration,
+        mut permitted: impl FnMut() -> bool + 'a,
+    ) -> impl std::future::Future<Output = Result<(), Error>> + 'a {
         let bound = self.bound(connection);
         let guard = bound
             .is_ok()
@@ -318,10 +329,15 @@ impl ObservationRenewal {
             let mut io = guard.expect("matching connection installs guard");
             self.live(io.connection)?;
             io.connection
-                .drive(&self.control.cx, wait, || self.control.check().is_ok())
+                .drive(&self.control.cx, wait, || {
+                    permitted() && self.control.check().is_ok()
+                })
                 .await
                 .map_err(Error::Transport)?;
             self.live(io.connection)?;
+            if !permitted() {
+                return Err(Error::Transport(TransportError::Unauthorized));
+            }
             io.complete = true;
             Ok(())
         }

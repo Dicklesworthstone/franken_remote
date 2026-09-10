@@ -26,7 +26,7 @@ use std::{
 };
 
 mod running;
-pub use running::HostSession;
+pub use running::{ControlledHost, HostSession};
 
 mod viewer;
 pub use viewer::{Viewer, ViewerSession};
@@ -41,6 +41,8 @@ const CONSUMED: u8 = 5;
 pub enum Error {
     InvalidConfiguration,
     ClientStartup(fr_client::startup::Error),
+    Input(crate::input_quic::Error),
+    ControlRenewal(crate::input_quic::control::Error),
     ClientRenewal(fr_client::authority::Error),
     Renewal(crate::media::renewal::Error),
     Admission(fr_tailnet::Error),
