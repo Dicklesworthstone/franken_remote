@@ -27,15 +27,27 @@ jobs:
           import base64, hashlib, json, lzma, os, subprocess
           from pathlib import Path
           def sha(data): return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
-          oid = 'f795ed6a28cdfe5519ebe49f8fe3df4867eeb8ae'
-          row = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
-          raw = base64.b64decode(row['content'])
-          assert len(raw) == 18136 and sha(raw) == oid
+          def blob(oid, size):
+              row = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
+              raw = base64.b64decode(row['content'])
+              assert len(raw) == size and sha(raw) == oid
+              return raw
+          raw = blob('f795ed6a28cdfe5519ebe49f8fe3df4867eeb8ae', 18136)
           decoder = lzma.LZMADecompressor()
           data = decoder.decompress(base64.b64decode(raw, validate=True), max_length=65207)
           assert decoder.eof and not decoder.unused_data and len(data) == 65206
           assert hashlib.sha256(data).hexdigest() == '91c8dd4b51ea224f5bc0bc5176860c204666ac15c54dac2a4f0bd4b36f333608'
           candidate = json.loads(data)
+          replacement = json.loads(blob('3e8f31ae12b9bedfca5038faf064dec00f11cf7b', 1675))
+          path = replacement['path']
+          assert path == 'crates/frd/src/session_startup/running.rs'
+          prefix = f'diff --git a/{path} b/{path}\n'
+          sections = ['diff --git' + part for part in candidate['patch'].split('diff --git')[1:]]
+          assert sum(part.startswith(prefix) for part in sections) == 1
+          assert replacement['patch'].startswith(prefix)
+          candidate['patch'] = ''.join(replacement['patch'] if part.startswith(prefix) else part for part in sections)
+          candidate['before'][path] = replacement['before']
+          candidate['after'][path] = replacement['after']
           assert len(candidate['after']) == 11 and set(candidate['before']) == set(candidate['after'])
           for path, expected in candidate['before'].items():
               assert path.startswith('crates/') and '..' not in Path(path).parts
