@@ -1,0 +1,90 @@
+name: Verify negotiated native input join
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/verify-negotiated-input-join.yml']
+permissions:
+  contents: write
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Stage exact reconciled input sources without ref writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64,hashlib,json,lzma,os,subprocess
+          from pathlib import Path
+          expected={
+            'NATIVE_INPUT_ATTACHMENT.md':(None,'5a7cfa4fcf3d0249c423116f9e61f7f0d12f723d'),
+            'crates/fr-native/tests/input_quic.rs':('8d988fcabe84e646ab5ac628021184409ff04de6','7fb4153c20708332b2457d5548287dfe3babf920'),
+            'crates/fr-native/tests/input_quic/negotiated.rs':(None,'9545c41d3ed45c66e1c9bcaa2f3e824cb103b021'),
+            'crates/fr-transport/src/quic/attachment.rs':('45b5a84ac940f8e98beb3ee99360c674c7e24a21','7be2f207cfb87425db5858f2cf996a249b0e4630'),
+            'crates/fr-transport/tests/media_attachment.rs':('189aa448746ac78e7d4d09dcc06056c93058cd82','4b380ab00ee819d655789e9619a27606c9ee71d8'),
+            'crates/fr-transport/tests/media_attachment/input.rs':(None,'57357342de2286a10f2ff6f9fed48281ae9718f2'),
+            'crates/fr-wire/src/attachment.rs':('6ae2f9dee2a6112533a790b3ebb7d0b9753f875a','99f948cf62d19873aeea1da1f4735b22f4db5a16'),
+            'crates/fr-wire/tests/attachment.rs':('1fb516b6c733a2ee961d48991d4ff00e82c509db','fd8e5ac5cde28fdd4103c3549bfc5b4d5ee93d42'),
+            'crates/frd/src/input_agent.rs':('1d1a1346871fc74c45b9765b5981dc21a649b2d0','6f390f5356feff8de7df2fcdf17bed65701c3bf6'),
+            'crates/frd/src/input_quic.rs':('1e53edd58ac3b5ccbeca419b6f4c4755a89f29b4','460b8caffde4a99e61798ece3b7eba1591db849f'),
+            'crates/frd/src/input_quic/negotiated.rs':(None,'5f45ae4d7b1fbd9faddd9e1f94e359ca9a05b88b'),
+          }
+          def sha(b): return hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest()
+          for p,(before,after) in expected.items():
+            assert (sha(Path(p).read_bytes()) if Path(p).exists() else None)==before,p
+          parts=[]
+          for oid in ['cd82cb5951161f6b6727b604d97a05e4b7d37878','2bd198ddb0f4d6c7c7017b9fe3fc13db696a4527']:
+            row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
+            b=base64.b64decode(row['content'])
+            assert len(b)==10736 and sha(b)==oid
+            parts.append(b)
+          decoder=lzma.LZMADecompressor()
+          data=decoder.decompress(base64.b64decode(b''.join(parts),validate=True),max_length=71420)
+          assert decoder.eof and not decoder.unused_data and len(data)==71419
+          assert hashlib.sha256(data).hexdigest()=='d88e9bcd2f497d186107e12b7d47a93fb26b83c9b13b01df5ffc3893699314d0'
+          patch=Path(os.environ['RUNNER_TEMP'],'negotiated-input.patch');patch.write_bytes(data)
+          stats=subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
+          assert {line.split('\t',2)[2] for line in stats.splitlines()}==set(expected)
+          subprocess.run(['git','apply','--check',str(patch)],check=True)
+          subprocess.run(['git','apply',str(patch)],check=True)
+          for p,(before,after) in expected.items(): assert sha(Path(p).read_bytes())==after,p
+          Path(os.environ['RUNNER_TEMP'],'negotiated-input-paths.json').write_text(json.dumps(expected))
+          PY
+      - name: Install pinned compiler and native SDKs
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
+      - name: Verify workspace and negotiated native input
+        run: |
+          ./scripts/verify.sh fast
+          ./scripts/verify.sh docs
+          cargo test -p fr-wire --test attachment --locked
+          cargo test -p fr-transport --test media_attachment --locked -- --nocapture
+          cargo test -p fr-native --features linux-input-agent --test input_quic --locked -- --nocapture
+          git diff --check
+      - name: Retain exact verified source blobs without ref writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64,hashlib,json,os,subprocess
+          from pathlib import Path
+          for p,(before,after) in json.loads(Path(os.environ['RUNNER_TEMP'],'negotiated-input-paths.json').read_text()).items():
+            b=Path(p).read_bytes()
+            assert hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest()==after
+            body=json.dumps({'encoding':'base64','content':base64.b64encode(b).decode()})
+            result=subprocess.run(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,capture_output=True,check=True)
+            assert json.loads(result.stdout)['sha']==after
+            print(json.dumps({'path':p,'sha':after,'verified_against':os.environ['GITHUB_SHA']}))
+          PY
