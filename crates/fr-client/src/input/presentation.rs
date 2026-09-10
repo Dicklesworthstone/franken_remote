@@ -72,6 +72,21 @@ impl PresentedInput {
             active: false,
         })
     }
+    /// A network ticket still needs independent media-derived freshness. Late
+    /// receipts can be collected after stop, but a ticket cannot clear that stop.
+    pub fn accept_ticket(
+        &mut self,
+        bytes: &[u8],
+        clock: ClockCorrelation,
+        now: ClientInstant,
+    ) -> Result<(), Error> {
+        if clock.host_boot() != self.view.host_boot() {
+            self.stop(StopReason::InvalidTicket);
+            return Err(Error::Media(freshness::Error::StaleBinding));
+        }
+        self.input.accept_ticket(bytes, clock, now)?;
+        Ok(())
+    }
     pub fn stopped(&self) -> Option<StopReason> {
         self.input.stopped()
     }
@@ -210,6 +225,19 @@ impl PresentedInput {
             return Err(Error::Input(super::Error::NoPresentedView));
         }
         self.input.action(action, out, now).map_err(Error::Input)
+    }
+    /// Use actual local platform held state. This never bypasses terminal view
+    /// or receiver failure; those still require independent host revocation.
+    pub fn reconcile_held(
+        &mut self,
+        observed: fr_core::held_state::HeldState,
+        out: &mut [u8],
+        now: ClientInstant,
+    ) -> Result<Option<super::held::EncodedHeldState>, Error> {
+        self.tick(now)?;
+        self.input
+            .reconcile_held(observed, out, now)
+            .map_err(Error::Input)
     }
     /// Drain real receipts even after view failure; confirmed effects are not
     /// rolled back by losing presentation and actions are never regenerated.

@@ -132,6 +132,11 @@ impl ObservationResponder {
         self.until = Some(until);
         Ok(())
     }
+    /// Original local send deadline, including time spent under backpressure.
+    /// It is never a host authorization deadline or a fresh receipt-time TTL.
+    pub const fn response_deadline(&self) -> Option<ClientInstant> {
+        self.until
+    }
     pub fn pending(&mut self, now: ClientInstant) -> Result<Option<&[u8]>, Error> {
         self.tick(now)?;
         Ok(self.until.map(|_| self.bytes.as_slice()))

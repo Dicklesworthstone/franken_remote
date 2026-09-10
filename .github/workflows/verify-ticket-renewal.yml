@@ -1,19 +1,15 @@
-name: Verify network decoder startup
+name: Verify input ticket renewal
 on:
   workflow_dispatch:
   push:
     branches: [main]
     paths:
-      - '.github/workflows/source-maintenance.yml'
-      - 'crates/fr-wire/src/decoder.rs'
-      - 'crates/fr-wire/src/record.rs'
-      - 'crates/fr-wire/tests/decoder.rs'
-      - 'crates/frd/src/media.rs'
-      - 'crates/frd/src/media/decoder_startup.rs'
-      - 'crates/fr-native/tests/decoder_startup.rs'
-      - 'crates/fr-transport/src/quic.rs'
+      - '.github/workflows/verify-ticket-renewal.yml'
+      - 'crates/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'scripts/verify.sh'
 permissions:
   contents: read
 env:
@@ -32,16 +28,9 @@ jobs:
       - name: Install pinned compiler and native SDKs
         run: |
           rustup show active-toolchain
-          sudo apt-get update
           sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
-      - name: Verify exact committed workspace
+      - name: Verify committed workspace and native input renewal
         run: |
           ./scripts/verify.sh fast
           ./scripts/verify.sh docs
-      - name: Exercise actual network configuration and native decoder startup
-        run: |
-          cargo test -p fr-native --features linux-media --test decoder_startup --locked -- --nocapture
-      - name: Confirm verification did not modify tracked source
-        run: |
           git diff --exit-code
-          git diff --cached --exit-code

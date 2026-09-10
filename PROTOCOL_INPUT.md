@@ -197,3 +197,10 @@ substitutes the current controller's binding, and returns explicit non-record
 outcomes when a receipt does not exist. See
 [INPUT_AGENT_RESULTS.md](INPUT_AGENT_RESULTS.md) for lifecycle and cancellation
 behavior. No new wire record or observed-effect claim is introduced.
+
+## Native input ticket renewal
+
+The implemented `InputTicket` record and same-owner QUIC feedback path are
+specified in [INPUT_TICKET_RENEWAL.md](INPUT_TICKET_RENEWAL.md). Renewal preserves
+bounded in-flight credentials and their original expiries without resetting
+input sequences, creating a control lease or supplying view-readiness evidence.

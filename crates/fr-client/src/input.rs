@@ -2,6 +2,8 @@
 //! and terminal host receipts. Encoding consumes an identity: send those bytes
 //! once through the bounded authenticated transport, or stop this owner. Never
 //! regenerate an uncertain action with a fresh ticket. Only metadata is retained.
+pub mod held;
+pub mod ticket;
 use fr_core::{
     ids::{InputTicketId, RemoteSessionId},
     input::{
@@ -80,6 +82,7 @@ pub enum StopReason {
     ReceiptTimeout,
     ActionFailed,
     InvalidReceipt,
+    InvalidTicket,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -93,6 +96,7 @@ pub enum Error {
     OutOfBounds,
     InvalidTransition,
     Backpressure,
+    TicketExpired,
     Wire(WireError),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,9 +141,12 @@ pub struct InputClient {
     view_until: Option<ClientInstant>,
     next_action: Option<u64>,
     next_pointer: Option<u64>,
+    next_held: Option<u64>,
+    held_after: Option<ClientInstant>,
     pending: [Option<Pending>; MAX_PENDING_ACTIONS],
     receipts: [Option<InputResult>; MAX_PENDING_ACTIONS],
     receipt_cursor: usize,
+    ticket_state: Option<ticket::State>,
     keys: [bool; 256],
     buttons: [bool; 5],
 }
@@ -183,9 +190,12 @@ impl InputClient {
             view_until: None,
             next_action: Some(0),
             next_pointer: Some(0),
+            next_held: Some(0),
+            held_after: None,
             pending: [None; MAX_PENDING_ACTIONS],
             receipts: [None; MAX_PENDING_ACTIONS],
             receipt_cursor: 0,
+            ticket_state: None,
             keys: [false; 256],
             buttons: [false; 5],
         })
@@ -288,6 +298,9 @@ impl InputClient {
     /// pending action identities nor reopens stopped or unready control.
     pub fn ticket(&mut self, ticket: InputTicketId, now: ClientInstant) -> Result<(), Error> {
         self.tick(now)?;
+        if self.ticket_state.is_some() {
+            return self.fail(StopReason::InvalidTicket);
+        }
         if ticket.as_raw() == 0 {
             return Err(Error::InvalidConfiguration);
         }
@@ -296,6 +309,9 @@ impl InputClient {
     }
     fn ready(&mut self, now: ClientInstant) -> Result<(), Error> {
         self.tick(now)?;
+        if self.ticket_state.is_some_and(|s| now.0 >= s.until_us) {
+            return Err(Error::TicketExpired);
+        }
         if !self.mapped {
             return Err(Error::MappingUnconfirmed);
         }

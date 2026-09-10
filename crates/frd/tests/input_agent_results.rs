@@ -455,3 +455,6 @@ fn evicted_receipts_do_not_become_fabricated_zero_effect_wire_results() {
     agent.control().stop(StopReason::LocalRevoke);
     assert!(rt.block_on(driver).handoff_safe());
 }
+
+#[path = "input_agent_results/held.rs"]
+mod held;

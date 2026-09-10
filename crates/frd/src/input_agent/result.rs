@@ -57,7 +57,12 @@ impl ResultContext {
             Reply::CancelledBeforeStart => InputReply::CancelledBeforeStart,
             Reply::NativePanic { receipt: None } => InputReply::NativePanicWithoutReceipt,
             Reply::InitializationFailed(error) => InputReply::InitializationFailed(error),
-            Reply::Authority(_) => return Err(Error::NotInputCommand),
+            Reply::Ticket(_)
+            | Reply::Authority(_)
+            | Reply::Reconciliation(_)
+            | Reply::ReconciliationPanic { .. } => {
+                return Err(Error::NotInputCommand);
+            }
         })
     }
 }

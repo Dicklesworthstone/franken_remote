@@ -70,6 +70,10 @@ impl From<StreamError> for Error {
 pub enum Messages {
     Exact(u16),
     InputActions,
+    /// Host tickets and terminal input results on the same reliable feedback lane.
+    InputFeedback,
+    /// Decoder configuration and first-frame acknowledgements, one ordered lane.
+    DecoderReplies,
     /// Initial native control only, before the host installs a binding.
     Negotiation,
     /// Bound connection control. The session codec still checks kind/state.
@@ -79,11 +83,13 @@ impl Messages {
     fn contains(self, kind: u16) -> bool {
         match self {
             Self::Exact(expected) => kind == expected,
+            Self::InputFeedback => matches!(kind, 0x0017 | 0x0048),
+            Self::DecoderReplies => matches!(kind, 0x0031 | 0x0033),
             Self::Negotiation => matches!(kind, 0x0001..=0x0003 | 0x0010 | 0x0011),
             Self::SessionControl => matches!(kind, 0x0012..=0x001e | 0x0084 | 0x0085),
-            // HeldState (0x0046) is not implemented; InputMode (0x0047)
-            // is an ordered action in the existing fr-wire input codec.
-            Self::InputActions => matches!(kind, 0x0040 | 0x0041 | 0x0043..=0x0045 | 0x0047),
+            // Release-only HeldState and InputMode share the ordered action
+            // stream. Neither pointer datagrams nor results enter this lane.
+            Self::InputActions => matches!(kind, 0x0040 | 0x0041 | 0x0043..=0x0047),
         }
     }
 }

@@ -202,3 +202,79 @@ fn cancellation_between_text_scalars_keeps_only_the_submitted_prefix() {
         1,
     );
 }
+
+use fr_core::held_state::{HeldState, HeldStateRequest};
+fn held_record(next_action: u64) -> [u8; fr_wire::held_state::HELD_STATE_BYTES] {
+    let c = credentials();
+    let mut bytes = [0; fr_wire::held_state::HELD_STATE_BYTES];
+    let n = fr_wire::held_state::encode(
+        HeldStateRequest {
+            session: c.session,
+            lease: c.lease,
+            sequence: 0,
+            next_action,
+            held: HeldState::empty(),
+        },
+        &mut bytes,
+        &ProtocolLimits::ABSOLUTE,
+        7,
+        InputDirection::ViewerToHost,
+        InputDelivery::Reliable,
+    )
+    .unwrap();
+    assert_eq!(n, bytes.len());
+    bytes
+}
+#[test]
+fn backpressured_snapshot_cannot_replace_the_original_action_result_binding() {
+    let rt = runtime();
+    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    let effects = Arc::new(Mutex::new(Vec::new()));
+    let seat = Seat::default();
+    let native_cx = cx.clone();
+    let (mut agent, driver) = seat
+        .start(
+            cx.clone(),
+            session(&cx, 3_000_000),
+            Route::new(7, ProtocolLimits::ABSOLUTE),
+            move || {
+                Ok(CancelInPrepare {
+                    cx: native_cx,
+                    prepares: 0,
+                    cancel_at: usize::MAX,
+                    effects,
+                    restored: Arc::new(AtomicUsize::new(0)),
+                })
+            },
+            |_| true,
+        )
+        .unwrap();
+    agent
+        .submit(&bytes(0, key(true)), InputDelivery::Reliable)
+        .unwrap();
+    assert_eq!(
+        agent.reconcile_held(&held_record(1)),
+        Err(frd::input_agent::Error::Backpressure)
+    );
+    let result = rt.block_on(agent.input_response().unwrap()).unwrap();
+    let frd::input_agent::InputReply::Record(result) = result else {
+        panic!("uncollected action result was replaced")
+    };
+    assert_eq!(result.binding.session, credentials().session);
+    assert_eq!(result.binding.lease, credentials().lease);
+    assert_eq!(result.sequence, 0);
+    assert_eq!(result.outcome, InputOutcome::SubmittedToOs);
+    agent.reconcile_held(&held_record(1)).unwrap();
+    assert!(matches!(
+        reply(&mut agent),
+        Reply::Reconciliation(Ok(Reconciliation {
+            submitted_releases: 1,
+            refusal: None,
+            ..
+        }))
+    ));
+    agent
+        .control()
+        .stop(frd::input_watchdog::StopReason::LocalRevoke);
+    assert!(rt.block_on(driver).handoff_safe());
+}

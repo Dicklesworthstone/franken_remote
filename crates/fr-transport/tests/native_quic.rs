@@ -591,8 +591,9 @@ fn mixed_actions_keep_one_ordered_stream_and_share_binding_with_results_and_poin
         let cx = Cx::current().unwrap();
         let mut p = input_pair(&cx, Policy::default()).await;
         // The transport checks class/framing; action payload semantics stay in
-        // fr-wire::input. Distinct markers expose cross-kind stream reordering.
-        let frames: Vec<_> = [0x40, 0x41, 0x45, 0x44, 0x43, 0x47, 0x40]
+        // the fr-wire action and HeldState codecs. Distinct markers expose
+        // cross-kind stream reordering, including release-only reconciliation.
+        let frames: Vec<_> = [0x40, 0x41, 0x45, 0x46, 0x44, 0x43, 0x47, 0x40]
             .iter()
             .enumerate()
             .map(|(i, kind)| record(7, *kind, 128, u8::try_from(i).unwrap()))
@@ -608,7 +609,7 @@ fn mixed_actions_keep_one_ordered_stream_and_share_binding_with_results_and_poin
                 )
                 .unwrap();
         }
-        for forbidden in [0x42, 0x46, 0x48, 0x32, 0xffff] {
+        for forbidden in [0x42, 0x48, 0x49, 0x32, 0xffff] {
             assert_eq!(
                 p.client.send(
                     &cx,

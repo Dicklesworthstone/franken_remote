@@ -23,7 +23,7 @@ use asupersync::{
 use fr_core::{
     ids::InputTicketId,
     input_submission::{
-        Cleanup, Dispatch, InputSession, InputSink, PlatformError, Receipt, Refusal,
+        Cleanup, Dispatch, InputSession, InputSink, PlatformError, Receipt, Reconciliation, Refusal,
     },
     limits::ProtocolLimits,
     time::HostInstant,
@@ -254,6 +254,9 @@ pub enum AuthorityCommand {
 pub enum Reply {
     Input(Result<Dispatch, Refusal>),
     Authority(Result<HostInstant, Refusal>),
+    Ticket(Result<fr_wire::input_ticket::Ticket, Refusal>),
+    Reconciliation(Result<Reconciliation, Refusal>),
+    ReconciliationPanic { report: Option<Reconciliation> },
     CancelledBeforeStart,
     NativePanic { receipt: Option<Receipt> },
     InitializationFailed(PlatformError),
@@ -293,6 +296,11 @@ impl Shutdown {
 
 enum CommandKind {
     Input(InputDelivery),
+    Reconcile,
+    Ticket {
+        ticket: InputTicketId,
+        sequence: u64,
+    },
     Authority(AuthorityCommand),
 }
 // Fixed inline record storage bounds payload AND metadata; no per-record heap
@@ -438,6 +446,50 @@ impl Agent {
         // Mutate only after successful admission. A refused second command
         // must never replace the original uncollected result's binding.
         self.response_context = Some(context);
+        Ok(())
+    }
+    /// Queue a release-only snapshot in the SAME bounded slot as native input.
+    /// It cannot create a press, renew control, or masquerade as an `InputResult`.
+    pub fn reconcile_held(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        self.shared.check_admission();
+        if self.shared.control.is_stopped() {
+            return Err(Error::Stopped);
+        }
+        if bytes.len() > MAX_INPUT_RECORD_BYTES {
+            return Err(Error::RecordTooLarge);
+        }
+        fr_wire::held_state::decode(
+            bytes,
+            &self.route.limits,
+            self.route.binding,
+            InputDirection::ViewerToHost,
+            InputDelivery::Reliable,
+        )
+        .map_err(Error::Wire)?;
+        let mut command = Command {
+            kind: CommandKind::Reconcile,
+            bytes: [0; MAX_INPUT_RECORD_BYTES],
+            length: bytes.len(),
+        };
+        command.bytes[..bytes.len()].copy_from_slice(bytes);
+        self.enqueue(command)?;
+        self.response_context = None;
+        Ok(())
+    }
+    /// Issue a ticket on the canonical native owner and return its actual
+    /// issuance clock, deadline and immutable input scope. No caller-supplied
+    /// session or generation can relabel the resulting credential.
+    pub fn issue_ticket_record(
+        &mut self,
+        ticket: InputTicketId,
+        sequence: u64,
+    ) -> Result<(), Error> {
+        self.enqueue(Command {
+            kind: CommandKind::Ticket { ticket, sequence },
+            bytes: [0; MAX_INPUT_RECORD_BYTES],
+            length: 0,
+        })?;
+        self.response_context = None;
         Ok(())
     }
     pub fn authority(&mut self, command: AuthorityCommand) -> Result<(), Error> {
@@ -756,6 +808,7 @@ fn execute<S: InputSink>(
     shared: &Shared,
 ) {
     let mut reliable_sequence = None;
+    let reconciling = matches!(command.kind, CommandKind::Reconcile);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match command.kind {
         CommandKind::Input(delivery) => {
             let request = decode_input(
@@ -781,6 +834,38 @@ fn execute<S: InputSink>(
                 input_watchdog::host_now(cx).expect("captured timer")
             }))
         }
+        CommandKind::Reconcile => {
+            let request = fr_wire::held_state::decode(
+                &command.bytes[..command.length],
+                &route.limits,
+                route.binding,
+                InputDirection::ViewerToHost,
+                InputDelivery::Reliable,
+            )
+            .expect("immutable held-state record was validated before admission");
+            Reply::Reconciliation(session.reconcile_held(request, sink, || {
+                shared.check_admission();
+                if cx.checkpoint().is_err() {
+                    shared.control.stop(StopReason::Cancelled);
+                }
+                input_watchdog::host_now(cx).expect("captured timer")
+            }))
+        }
+        CommandKind::Ticket { ticket, sequence } => {
+            shared.check_admission();
+            if cx.checkpoint().is_err() {
+                shared.control.stop(StopReason::Cancelled);
+            }
+            let now = input_watchdog::host_now(cx).expect("captured timer");
+            Reply::Ticket(session.issue_ticket(ticket, now).map(|until| {
+                fr_wire::input_ticket::Ticket {
+                    credentials: session.ticket_credentials(ticket),
+                    sequence,
+                    issued_at_us: now.as_micros(),
+                    expires_at_us: until.as_micros(),
+                }
+            }))
+        }
         CommandKind::Authority(command) => {
             shared.check_admission();
             if cx.checkpoint().is_err() {
@@ -800,8 +885,14 @@ fn execute<S: InputSink>(
     }));
     let reply = result.unwrap_or_else(|_| {
         shared.control.stop(StopReason::NativeFailure);
-        Reply::NativePanic {
-            receipt: reliable_sequence.and_then(|s| session.retained_receipt(s)),
+        if reconciling {
+            Reply::ReconciliationPanic {
+                report: session.retained_reconciliation(),
+            }
+        } else {
+            Reply::NativePanic {
+                receipt: reliable_sequence.and_then(|s| session.retained_receipt(s)),
+            }
         }
     });
     shared.reply(reply);

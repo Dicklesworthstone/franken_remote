@@ -100,8 +100,12 @@ pub enum Kind {
     SessionOpened = 0x0011,
     Challenge = 0x0015,
     ChallengeResponse = 0x0016,
+    InputTicket = 0x0017,
     BindingAccepted = 0x001c,
+    DecoderConfiguration = 0x0030,
+    DecoderConfigured = 0x0031,
     Recovery = 0x0032,
+    FirstFrameDecoded = 0x0033,
     Fragment = 0x0034,
     Repair = 0x0035,
     Progress = 0x0037,
@@ -111,6 +115,7 @@ pub enum Kind {
     Relative = 0x0043,
     Scroll = 0x0044,
     Text = 0x0045,
+    HeldState = 0x0046,
     InputMode = 0x0047,
     InputResult = 0x0048,
     ClockProbe = 0x0084,
@@ -136,8 +141,12 @@ impl Kind {
             0x0011 => Ok(Self::SessionOpened),
             0x0015 => Ok(Self::Challenge),
             0x0016 => Ok(Self::ChallengeResponse),
+            0x0017 => Ok(Self::InputTicket),
             0x001c => Ok(Self::BindingAccepted),
+            0x0030 => Ok(Self::DecoderConfiguration),
+            0x0031 => Ok(Self::DecoderConfigured),
             0x0032 => Ok(Self::Recovery),
+            0x0033 => Ok(Self::FirstFrameDecoded),
             0x0034 => Ok(Self::Fragment),
             0x0035 => Ok(Self::Repair),
             0x0037 => Ok(Self::Progress),
@@ -147,6 +156,7 @@ impl Kind {
             0x0043 => Ok(Self::Relative),
             0x0044 => Ok(Self::Scroll),
             0x0045 => Ok(Self::Text),
+            0x0046 => Ok(Self::HeldState),
             0x0047 => Ok(Self::InputMode),
             0x0048 => Ok(Self::InputResult),
             0x0084 => Ok(Self::ClockProbe),
@@ -159,7 +169,10 @@ impl Kind {
             Self::Recovery => Some(Channel::Recovery),
             Self::Fragment => Some(Channel::Video),
             Self::Repair => Some(Channel::Control),
-            Self::Progress => Some(Channel::MediaConfig),
+            Self::Progress
+            | Self::DecoderConfiguration
+            | Self::DecoderConfigured
+            | Self::FirstFrameDecoded => Some(Channel::MediaConfig),
             Self::ClientHello
             | Self::HostCapabilities
             | Self::SelectedConfiguration
@@ -167,12 +180,14 @@ impl Kind {
             | Self::SessionOpened
             | Self::Challenge
             | Self::ChallengeResponse
+            | Self::InputTicket
             | Self::BindingAccepted
             | Self::Key
             | Self::Button
             | Self::Pointer
             | Self::Relative
             | Self::Scroll
+            | Self::HeldState
             | Self::Text
             | Self::InputMode
             | Self::InputResult

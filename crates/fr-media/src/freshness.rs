@@ -95,6 +95,20 @@ impl ClockCorrelation {
         self.valid_until_us
     }
 
+    /// Conservative local expiry for a host deadline. Include the entire
+    /// exchange interval and future drift; receipt cannot start a new TTL.
+    pub fn deadline_lower_us(&self, host_deadline_us: u64, now_us: u64) -> Result<u64, Error> {
+        let latest_host = self.age_upper_us(0, now_us)?;
+        let remaining = host_deadline_us.saturating_sub(latest_host);
+        let delta =
+            u128::from(remaining) * 1_000_000 / (1_000_000 + u128::from(self.policy.drift_ppm));
+        let delta = u64::try_from(delta).map_err(|_| Error::ClockOverflow)?;
+        now_us
+            .checked_add(delta)
+            .map(|until| until.min(self.valid_until_us))
+            .ok_or(Error::ClockOverflow)
+    }
+
     /// Conservative age upper bound at viewer time `now_us`. The ENTIRE exchange
     /// latency is uncertainty, not RTT/2. A delayed response never resets age.
     /// Arithmetic uses u128 so unrelated u64 origins cannot wrap or saturate fresh.
@@ -185,6 +199,9 @@ impl ViewTracker {
             serial: 0,
             closed: false,
         })
+    }
+    pub const fn host_boot(&self) -> HostBootId {
+        self.clock.host_boot()
     }
     pub const fn epoch(&self) -> MediaEpoch {
         self.epoch

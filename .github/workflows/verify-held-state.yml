@@ -1,0 +1,30 @@
+name: Verify held-state reconciliation
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/verify-held-state.yml', 'crates/fr-core/src/held_state.rs', 'crates/fr-core/src/input_submission/**', 'crates/fr-wire/src/held_state.rs', 'crates/fr-client/src/input/**', 'crates/frd/src/input_agent*', 'crates/frd/src/input_agent/**', 'crates/frd/tests/input_agent*', 'crates/frd/tests/input_agent_results/**', 'crates/fr-native/tests/input_quic*', 'crates/fr-native/tests/input_quic/**', 'crates/fr-transport/src/quic.rs']
+permissions:
+  contents: read
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Install pinned compiler and native SDKs
+        run: |
+          rustup show active-toolchain
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
+      - name: Verify committed workspace and real X11 QUIC reconciliation
+        run: |
+          ./scripts/verify.sh fast
+          ./scripts/verify.sh docs
+          git diff --exit-code

@@ -25,6 +25,12 @@ use std::{
     time::Duration,
 };
 
+mod running;
+pub use running::HostSession;
+
+mod viewer;
+pub use viewer::{Viewer, ViewerSession};
+
 const WAITING: u8 = 1;
 const ALLOWED: u8 = 2;
 const DENIED: u8 = 3;
@@ -34,6 +40,9 @@ const CONSUMED: u8 = 5;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     InvalidConfiguration,
+    ClientStartup(fr_client::startup::Error),
+    ClientRenewal(fr_client::authority::Error),
+    Renewal(crate::media::renewal::Error),
     Admission(fr_tailnet::Error),
     Protocol(negotiation::Error),
     Transport(quic::Error),

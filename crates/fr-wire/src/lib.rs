@@ -7,6 +7,8 @@
 
 pub mod authority;
 pub mod clock;
+pub mod decoder;
+pub mod held_state;
 pub mod input;
 pub mod input_result;
 mod media;
@@ -21,3 +23,5 @@ pub use media::{
     encode_repair,
 };
 pub use record::{Channel, HEADER_BYTES, Kind, MediaLimits, Record, WireError};
+
+pub mod input_ticket;
