@@ -1,6 +1,6 @@
 // Synthetic-media qualification only; no host capture, transport or authority.
 async function probe() {
-  const fixture = await (await fetch('/fixture.json')).json();
+  const fixture = await (await fetch('/fixture.json', {signal: AbortSignal.timeout(3000)})).json();
   const bytes = value => Uint8Array.from(atob(value), c => c.charCodeAt(0));
   const report = {
     userAgent: navigator.userAgent, secureContext: isSecureContext,
@@ -123,6 +123,19 @@ async function probe() {
   }
   return report;
 }
-probe().then(report => fetch('/result', {
-  method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(report),
-}));
+async function main() {
+  let report;
+  try { report = await probe(); }
+  catch (error) { report = {status: 'failed', reason: error.name, scope: 'probe setup'}; }
+  try {
+    const response = await fetch('/result', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(report), signal: AbortSignal.timeout(3000),
+    });
+    if (!response.ok) throw new Error('result_delivery_failed');
+  } catch {
+    // The runner reports its own bounded result timeout if delivery fails.
+    document.body.textContent = 'Probe result delivery failed.';
+  }
+}
+main();

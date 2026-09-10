@@ -19,65 +19,65 @@
     {
       "stage": "single_idr",
       "timestamp": 0,
-      "decodedMs": 69.5,
+      "decodedMs": 111.10000038146973,
       "canvasHash": "b520bae2",
-      "drawnMs": 207.09999990463257
+      "drawnMs": 204.40000009536743
     },
     {
       "stage": "p_after_idle",
       "timestamp": 2000000,
-      "decodedMs": 2.5999999046325684,
+      "decodedMs": 2.4000000953674316,
       "canvasHash": "3f18345b",
-      "drawnMs": 10.400000095367432
+      "drawnMs": 4.900000095367432
     },
     {
       "stage": "burst",
       "timestamp": 2066666,
-      "decodedMs": 20.399999618530273,
+      "decodedMs": 6.200000286102295,
       "canvasHash": "8d1434b7",
-      "drawnMs": 43.799999713897705
+      "drawnMs": 24.200000286102295
     },
     {
       "stage": "burst",
       "timestamp": 2099999,
-      "decodedMs": 41.799999713897705,
+      "decodedMs": 23.40000009536743,
       "canvasHash": "9372f3f7",
-      "drawnMs": 44.39999961853027
+      "drawnMs": 27.600000381469727
     },
     {
       "stage": "burst",
       "timestamp": 2133332,
-      "decodedMs": 43.30000019073486,
+      "decodedMs": 25.100000381469727,
       "canvasHash": "9fa8bc81",
-      "drawnMs": 46.09999990463257
+      "drawnMs": 27
     },
     {
       "stage": "burst",
       "timestamp": 2166665,
-      "decodedMs": 45.09999990463257,
+      "decodedMs": 24.899999618530273,
       "canvasHash": "1c21645e",
-      "drawnMs": 47.59999990463257
+      "drawnMs": 26.899999618530273
     },
     {
       "stage": "low_cadence_p",
       "timestamp": 3000000,
-      "decodedMs": 2.6000003814697266,
+      "decodedMs": 2.200000286102295,
       "canvasHash": "ac46ecd0",
-      "drawnMs": 13.200000286102295
+      "drawnMs": 4.200000286102295
     },
     {
       "stage": "reset_recovery_idr",
       "timestamp": 4000000,
-      "decodedMs": 2.200000286102295,
+      "decodedMs": 2.3000001907348633,
       "canvasHash": "b520bae2",
-      "drawnMs": 4.200000286102295
+      "drawnMs": 10.900000095367432
     },
     {
       "stage": "recovery_p",
       "timestamp": 4033333,
-      "decodedMs": 1.6999998092651367,
+      "decodedMs": 1.799999713897705,
       "canvasHash": "3f18345b",
-      "drawnMs": 4.399999618530273
+      "drawnMs": 11.299999713897705
     }
   ],
   "status": "passed",
@@ -89,6 +89,7 @@
   "retainedAtEnd": 0,
   "flushCalls": 0,
   "headless": false,
-  "fixtureSha256": "daf21a79444b90f7ad990f92f44b7cc0c718f299715d0605db3a264992e5925f",
-  "probeSha256": "78493bac6f242220bdcff65b342b5071cfebeefaf4e923f841fcb2ee060f9ca4"
+  "fixtureSha256": "3b9c4691dc36f3b797a89a829ec669e6ccbf657e4598e3a802ecef44c0630e27",
+  "probeSha256": "dfd5712ad6aed1c3ba629e86daaeaf9b9a25600610236adadcbc16ee13b9cedf",
+  "runnerSha256": "697f2538267d4ee6ef54b43e84894f76575ebf6eb45ca914760023b4deafdc7c"
 }
