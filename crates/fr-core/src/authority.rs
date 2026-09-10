@@ -150,6 +150,7 @@ pub struct SessionAuthority {
     observation_until: Option<HostInstant>,
     readiness: ViewReadiness,
     lease: Option<Lease>,
+    native_owner: Option<std::sync::Arc<()>>,
     observation_challenge: Option<Challenge>,
     control_challenge: Option<Challenge>,
     last_checked: Option<HostInstant>,
@@ -196,6 +197,7 @@ impl SessionAuthority {
             observation_until: None,
             readiness: ViewReadiness::Unready,
             lease: None,
+            native_owner: None,
             observation_challenge: None,
             control_challenge: None,
             last_checked: None,
@@ -506,6 +508,7 @@ impl SessionAuthority {
     /// and buttons; this does not claim that OS cleanup has completed.
     pub fn revoke_lease(&mut self) {
         self.lease = None;
+        self.native_owner = None;
         self.control_challenge = None;
     }
 
@@ -597,6 +600,7 @@ impl SessionAuthority {
         self.observation_until = None;
         self.readiness = ViewReadiness::Unready;
         self.lease = None;
+        self.native_owner = None;
         self.observation_challenge = None;
         self.control_challenge = None;
     }
@@ -608,6 +612,27 @@ impl SessionAuthority {
         }
     }
 
+    /// One native owner per explicit grant. Retain the claim after owner drop;
+    /// recreating a replay ledger must require a new locally approved lease.
+    pub(crate) fn claim_native_owner(
+        &mut self,
+        lease: InputLeaseId,
+    ) -> Result<std::sync::Arc<()>, AuthorityError> {
+        if self.lease_id() != Some(lease) {
+            return Err(AuthorityError::StaleLease);
+        }
+        if self.native_owner.is_some() {
+            return Err(AuthorityError::ControllerBusy);
+        }
+        let owner = std::sync::Arc::new(());
+        self.native_owner = Some(owner.clone());
+        Ok(owner)
+    }
+    pub(crate) fn is_native_owner(&self, owner: &std::sync::Arc<()>) -> bool {
+        self.native_owner
+            .as_ref()
+            .is_some_and(|current| std::sync::Arc::ptr_eq(current, owner))
+    }
     /// Clock samples taken before acquiring the shared pure-policy lock may be
     /// overtaken by another participant. Each participant checks its OWN samples
     /// for regression before using this conservative serialization point.

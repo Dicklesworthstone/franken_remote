@@ -151,6 +151,7 @@ pub struct InputMonitor {
     authority: Arc<Mutex<SessionAuthority>>,
     revoke: RevokeHandle,
     lease: InputLeaseId,
+    native_owner: Arc<()>,
 }
 impl InputMonitor {
     pub fn revoke(&self) {
@@ -208,7 +209,9 @@ impl InputMonitor {
         if self.is_revoked() {
             return Err(Refusal::Revoked);
         }
-        if authority.lease_id() != Some(self.lease) {
+        if authority.lease_id() != Some(self.lease)
+            || !authority.is_native_owner(&self.native_owner)
+        {
             return Err(Refusal::Authority(AuthorityError::StaleLease));
         }
         f(&mut authority).map_err(Refusal::Authority)
@@ -308,7 +311,7 @@ impl InputSession {
         capabilities: Capabilities,
         now: HostInstant,
     ) -> Result<Self, Refusal> {
-        {
+        let native_owner = {
             let mut authority = shared.lock().map_err(|_| Refusal::AuthorityUnavailable)?;
             if authority.session() != credentials.session {
                 return Err(Refusal::StaleSession);
@@ -317,12 +320,16 @@ impl InputSession {
             authority
                 .authorize_submission(credentials.lease, credentials.ticket, at)
                 .map_err(Refusal::Authority)?;
-        }
+            authority
+                .claim_native_owner(credentials.lease)
+                .map_err(Refusal::Authority)?
+        };
         let revoke = RevokeHandle(Arc::new(AtomicBool::new(false)));
         let authority = InputMonitor {
             authority: shared,
             revoke: revoke.clone(),
             lease: credentials.lease,
+            native_owner,
         };
         Ok(Self {
             authority,

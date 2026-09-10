@@ -297,3 +297,6 @@ fn peer_fin_preserves_a_late_irreversible_effect_and_its_release() {
 fn peer_reset_preserves_a_late_irreversible_effect_and_its_release() {
     terminated_while_blocked(true, true);
 }
+
+#[path = "input_quic_lifecycle/control.rs"]
+mod control;

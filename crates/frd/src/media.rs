@@ -127,6 +127,49 @@ impl ObservationControl {
             .map_err(Error::Authority)?;
         Ok(now)
     }
+    /// Join an already locally granted native input lease to this exact approved
+    /// observation owner. No copy, new grant, readiness claim or admission is
+    /// created. The containing OS share-session must reserve its single Seat and
+    /// use this owner's runtime clock for the native agent and network driver.
+    pub fn input_session(
+        &self,
+        credentials: fr_core::input::InputCredentials,
+        bounds: fr_core::input::InputBounds,
+        capabilities: fr_core::input_submission::Capabilities,
+    ) -> Result<fr_core::input_submission::InputSession, fr_core::input_submission::Refusal> {
+        self.check()
+            .map_err(|_| fr_core::input_submission::Refusal::Revoked)?;
+        if let Some(admission) = &self.admission {
+            admission
+                .control()
+                .map_err(|_| fr_core::input_submission::Refusal::Revoked)?;
+        }
+        fr_core::input_submission::InputSession::from_shared_authority(
+            self.authority.clone(),
+            credentials,
+            bounds,
+            capabilities,
+            host_now(&self.cx).map_err(|_| fr_core::input_submission::Refusal::Revoked)?,
+        )
+    }
+    pub(crate) fn check_control(&self) -> Result<HostInstant, Error> {
+        self.check()?;
+        if let Some(admission) = &self.admission {
+            admission.control().map_err(Error::Admission)?;
+        }
+        let mut authority = self.authority.lock().map_err(|_| Error::Poisoned)?;
+        let now = host_now(&self.cx)?;
+        if !authority.has_live_control(now) {
+            return Err(Error::Authority(AuthorityError::NoLease));
+        }
+        Ok(now)
+    }
+    pub(crate) fn owns_control_lease(
+        &self,
+        lease: &fr_core::input_submission::ControlLease,
+    ) -> bool {
+        lease.uses_authority(&self.authority)
+    }
     pub fn deadline(&self, maximum: Duration) -> Result<Deadline, Error> {
         let peer_until = self.admission_deadline()?;
         let mut authority = self.authority.lock().map_err(|_| Error::Poisoned)?;

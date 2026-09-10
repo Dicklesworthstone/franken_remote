@@ -309,3 +309,62 @@ fn renewal_and_revoke_progress_while_native_preparation_is_blocked() {
 fn renewal_and_revoke_progress_while_native_submission_is_blocked() {
     blocked(true);
 }
+
+#[test]
+fn shared_native_attachment_is_single_use_even_after_owner_stop_and_drop() {
+    let (a, mut native, renewal) = setup();
+    let attach = || {
+        InputSession::from_shared_authority(
+            a.clone(),
+            credentials(),
+            InputBounds::new(DesktopPoint { x: 0, y: 0 }, 320, 240).unwrap(),
+            Capabilities::default(),
+            at(0),
+        )
+    };
+    assert!(matches!(
+        attach(),
+        Err(Refusal::Authority(AuthorityError::ControllerBusy))
+    ));
+    native.revoke();
+    assert!(matches!(
+        attach(),
+        Err(Refusal::Authority(AuthorityError::ControllerBusy))
+    ));
+    drop(native);
+    drop(renewal);
+    assert!(matches!(
+        attach(),
+        Err(Refusal::Authority(AuthorityError::ControllerBusy))
+    ));
+}
+#[test]
+fn replaced_lease_with_reused_numeric_id_never_revalidates_the_old_native_owner() {
+    let (a, native, mut old) = setup();
+    {
+        let mut a = a.lock().unwrap();
+        a.revoke_lease();
+        a.grant_lease(credentials().lease, at(1)).unwrap();
+        a.issue_input_ticket(credentials().lease, credentials().ticket, at(1))
+            .unwrap();
+    }
+    let mut replacement = InputSession::from_shared_authority(
+        a,
+        credentials(),
+        InputBounds::new(DesktopPoint { x: 0, y: 0 }, 320, 240).unwrap(),
+        Capabilities::default().with(Capability::Keys),
+        at(1),
+    )
+    .unwrap();
+    let mut fresh = replacement.take_control_lease().unwrap();
+    assert!(old.challenge(10, at(2)).is_err());
+    assert!(native.monitor().deadline(at(2)).is_err());
+    drop(native);
+    drop(old);
+    assert!(fresh.challenge(11, at(2)).is_ok());
+    assert!(fresh.respond(11, at(3)).is_ok());
+    assert_eq!(
+        press(&mut replacement, credentials().ticket, 4).outcome,
+        InputOutcome::SubmittedToOs
+    );
+}

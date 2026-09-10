@@ -143,6 +143,14 @@ impl Seat {
             }
         };
         let control = watchdog.control();
+        #[cfg(target_os = "linux")]
+        let (session, control_lease) = {
+            let mut session = session;
+            let control = session.take_control_lease();
+            (session, control)
+        };
+        #[cfg(target_os = "linux")]
+        let authority_cx = cx.clone();
         let shared = Arc::new(Shared {
             mailbox: Mutex::new(Mailbox::default()),
             control: control.clone(),
@@ -199,6 +207,10 @@ impl Seat {
             native: native.clone(),
             route,
             response_context: None,
+            #[cfg(target_os = "linux")]
+            control_lease,
+            #[cfg(target_os = "linux")]
+            authority_cx,
         };
         let driver = Driver {
             watchdog,
@@ -335,13 +347,13 @@ struct Mailbox {
     reply_waker: Option<Waker>,
     driver_waker: Option<Waker>,
 }
-#[derive(Default)]
-struct AdmissionGate {
+#[derive(Default, Clone)]
+pub(crate) struct AdmissionGate {
     #[cfg(target_os = "linux")]
     tailnet: Option<fr_tailnet::Lease>,
 }
 impl AdmissionGate {
-    fn permitted(&self) -> bool {
+    pub(crate) fn permitted(&self) -> bool {
         #[cfg(target_os = "linux")]
         if let Some(lease) = &self.tailnet {
             return lease.control().is_ok();
@@ -394,8 +406,36 @@ pub struct Agent {
     native: Thread,
     route: Route,
     response_context: Option<ResultContext>,
+    #[cfg(target_os = "linux")]
+    control_lease: Option<fr_core::input_submission::ControlLease>,
+    #[cfg(target_os = "linux")]
+    authority_cx: Cx,
 }
 impl Agent {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn take_control_lease(
+        &mut self,
+        observation: &crate::media::ObservationControl,
+    ) -> Option<(fr_core::input_submission::ControlLease, Cx, AdmissionGate)> {
+        self.shared.check_admission();
+        if self.shared.control.is_stopped() {
+            return None;
+        }
+        if !self
+            .control_lease
+            .as_ref()
+            .is_some_and(|lease| observation.owns_control_lease(lease))
+        {
+            return None;
+        }
+        self.control_lease.take().map(|lease| {
+            (
+                lease,
+                self.authority_cx.clone(),
+                self.shared.admission.clone(),
+            )
+        })
+    }
     /// Locally installed channel, never read from an input payload.
     pub const fn channel_binding(&self) -> u32 {
         self.route.binding
@@ -857,14 +897,16 @@ fn execute<S: InputSink>(
                 shared.control.stop(StopReason::Cancelled);
             }
             let now = input_watchdog::host_now(cx).expect("captured timer");
-            Reply::Ticket(session.issue_ticket(ticket, now).map(|until| {
-                fr_wire::input_ticket::Ticket {
-                    credentials: session.ticket_credentials(ticket),
-                    sequence,
-                    issued_at_us: now.as_micros(),
-                    expires_at_us: until.as_micros(),
-                }
-            }))
+            Reply::Ticket(
+                session
+                    .issue_ticket_timed(ticket, now)
+                    .map(|(issued, until)| fr_wire::input_ticket::Ticket {
+                        credentials: session.ticket_credentials(ticket),
+                        sequence,
+                        issued_at_us: issued.as_micros(),
+                        expires_at_us: until.as_micros(),
+                    }),
+            )
         }
         CommandKind::Authority(command) => {
             shared.check_admission();

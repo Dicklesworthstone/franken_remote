@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-09-10 — Native control-lease renewal
+
+Join observation delivery and native input to the same approved authority and
+renew control outside the native-call mailbox. Preserve original challenge
+expiry, independent revoke/cleanup, fixed transport storage, action receipts and
+all ticket/view boundaries. A consumed native attachment cannot reset its replay
+ledger; old owners remain fenced even across reused numeric lease identities.
+
+The viewer's control responder belongs to its input/view lifetime, not generic
+network liveness. Real UDP/TLS and X11 tests keep observation, control and tickets
+alive beyond the initial lease, and verify releases, expiry, replay, backpressure
+and cancellation while native calls are blocked. See
+[CONTROL_LEASE_RENEWAL.md](CONTROL_LEASE_RENEWAL.md) for exact integration and
+verification scope. Initial grants and the complete application loop are not
+claimed implemented. No Asupersync pin or dependency changes.
+
 ## 2026-09-09 — Observation renewal over session control
 
 - `d6b01fc`: implement the bounded Challenge/ChallengeResponse codecs and a one-response viewer owner. Preserve full session/scope bindings, opaque host deadlines, exact bytes across backpressure, replay refusal and redacted diagnostics.

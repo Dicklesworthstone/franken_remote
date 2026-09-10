@@ -13,7 +13,6 @@ use fr_core::{
     ids::*,
     input::*,
     input_sequence::InputOutcome,
-    input_submission::InputSession,
     limits::ProtocolLimits,
 };
 use fr_native::{input::X11Pointer, input_agent::start_x11};
@@ -93,6 +92,7 @@ struct Pair {
     pointer: DatagramRoute,
     auxiliary: StreamRoute,
     routes: Routes,
+    control_routes: quic::ControlRoutes,
 }
 async fn pair(cx: &Cx) -> Pair {
     pair_with_feedback(cx, false).await
@@ -132,6 +132,9 @@ async fn pair_with_feedback(cx: &Cx, feedback: bool) -> Pair {
         outbound: true,
         maximum: 128,
     };
+    let control_routes = control_pair(cx, &mut client, &mut server);
+    let control_out = control_routes.outbound;
+    let control_in = control_routes.inbound;
     let pointer = DatagramRoute {
         binding: 7,
         kind: 0x42,
@@ -158,6 +161,14 @@ async fn pair_with_feedback(cx: &Cx, feedback: bool) -> Pair {
                 actions,
                 StreamRoute {
                     outbound: false,
+                    ..control_out
+                },
+                StreamRoute {
+                    outbound: true,
+                    ..control_in
+                },
+                StreamRoute {
+                    outbound: false,
                     ..results
                 },
                 StreamRoute {
@@ -172,7 +183,7 @@ async fn pair_with_feedback(cx: &Cx, feedback: bool) -> Pair {
         server: QuicRecords::new(
             server,
             cx,
-            &[incoming, results, auxiliary],
+            &[incoming, results, auxiliary, control_out, control_in],
             &[incoming_pointer],
             policy,
         )
@@ -181,6 +192,30 @@ async fn pair_with_feedback(cx: &Cx, feedback: bool) -> Pair {
         pointer,
         auxiliary,
         routes,
+        control_routes,
+    }
+}
+fn control_pair(
+    cx: &Cx,
+    client: &mut asupersync::net::quic_native::NativeQuicUdpConnection,
+    server: &mut asupersync::net::quic_native::NativeQuicUdpConnection,
+) -> quic::ControlRoutes {
+    let control_out = StreamRoute {
+        stream: server.connection_mut().open_uni_stream(cx).unwrap(),
+        binding: 11,
+        messages: Messages::SessionControl,
+        priority: Priority::Critical,
+        outbound: true,
+        maximum: 512,
+    };
+    let control_in = StreamRoute {
+        stream: client.connection_mut().open_uni_stream(cx).unwrap(),
+        outbound: false,
+        ..control_out
+    };
+    quic::ControlRoutes {
+        outbound: control_out,
+        inbound: control_in,
     }
 }
 struct Fixture {
@@ -189,6 +224,7 @@ struct Fixture {
     input: QuicInput,
     client: InputClient,
     observer: X11Pointer,
+    observation: frd::media::ObservationControl,
     seat: Seat,
     driver: Option<Driver>,
     receipts: Vec<InputResult>,
@@ -215,14 +251,10 @@ impl Fixture {
         authority
             .issue_input_ticket(c.lease, c.ticket, now)
             .unwrap();
-        let session = InputSession::new(
-            authority,
-            c,
-            observer.bounds(),
-            observer.capabilities(),
-            now,
-        )
-        .unwrap();
+        let observation = frd::media::ObservationControl::new(cx.clone(), authority).unwrap();
+        let session = observation
+            .input_session(c, observer.bounds(), observer.capabilities())
+            .unwrap();
         let seat = Seat::default();
         let (agent, driver) = start_x11(
             &seat,
@@ -281,6 +313,7 @@ impl Fixture {
             input,
             client,
             observer,
+            observation,
             seat,
             driver: Some(driver),
             receipts: vec![],
@@ -775,3 +808,6 @@ mod held;
 
 #[path = "input_quic/ticket.rs"]
 mod ticket;
+
+#[path = "input_quic/control.rs"]
+mod control;

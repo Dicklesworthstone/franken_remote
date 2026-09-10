@@ -119,6 +119,7 @@ Local runtime verification rebuilds first-party crates against matching retained
 Asupersync TLS dependencies and the pinned compiler, rather than freshly building
 every external dependency. The full-workspace candidate verification is recorded
 separately in the publication commit. No Asupersync dependency/release change is
-needed by this implementation. Controller-specific lease challenge coordination,
-platform input sampling and the complete desktop application loop remain separate
-integration work; this feature does not close those broader qualification gates.
+needed by this implementation. Controller-specific lease challenge coordination is now connected separately in
+[CONTROL_LEASE_RENEWAL.md](CONTROL_LEASE_RENEWAL.md). Initial broker grants,
+platform input sampling and the complete desktop application loop still require
+integration; neither feature closes those broader qualification gates.
