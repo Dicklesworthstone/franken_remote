@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
-      - name: Stage exact negotiated broker implementation
+      - name: Stage exact persistent session broker implementation
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -27,20 +27,20 @@ jobs:
           import base64, hashlib, json, lzma, os, subprocess
           from pathlib import Path
           def sha(data): return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
-          oid = '8794b05eaaf8ba7bffa881f1e45d0956b710e65a'
+          oid = 'a9aafb3bfd7e7bc846d00ca0604f36289e7819b4'
           row = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
           raw = base64.b64decode(row['content'])
-          assert len(raw) == 8840 and sha(raw) == oid
+          assert len(raw) == 10280 and sha(raw) == oid
           decoder = lzma.LZMADecompressor()
-          data = decoder.decompress(base64.b64decode(raw, validate=True), max_length=27444)
-          assert decoder.eof and not decoder.unused_data and len(data) == 27443
-          assert hashlib.sha256(data).hexdigest() == 'fe691b40f3d4e77bb950426885d21f896df42d8eacdb8834103edaf8797bce7d'
+          data = decoder.decompress(base64.b64decode(raw, validate=True), max_length=31696)
+          assert decoder.eof and not decoder.unused_data and len(data) == 31695
+          assert hashlib.sha256(data).hexdigest() == '6ff0a7d256360c242559083615ebda8237ea416d47b8754f224be540fbc542a4'
           candidate = json.loads(data)
           assert len(candidate['after']) == 6 and set(candidate['before']) == set(candidate['after'])
           for path, expected in candidate['before'].items():
               assert path.startswith('crates/') and '..' not in Path(path).parts
               assert (sha(Path(path).read_bytes()) if Path(path).exists() else None) == expected, path
-          patch = Path(os.environ['RUNNER_TEMP'], 'negotiated-broker.patch')
+          patch = Path(os.environ['RUNNER_TEMP'], 'session-broker.patch')
           patch.write_text(candidate['patch'])
           stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
           assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(candidate['after'])
@@ -48,14 +48,14 @@ jobs:
           subprocess.run(['git', 'apply', str(patch)], check=True)
           for path, expected in candidate['after'].items():
               assert sha(Path(path).read_bytes()) == expected, path
-          Path(os.environ['RUNNER_TEMP'], 'negotiated-broker-paths.json').write_text(json.dumps(candidate['after']))
+          Path(os.environ['RUNNER_TEMP'], 'session-broker-paths.json').write_text(json.dumps(candidate['after']))
           PY
       - name: Install pinned compiler and native SDKs
         run: |
           rustup show active-toolchain
           sudo apt-get update
           sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
-      - name: Verify full workspace and real negotiated grants
+      - name: Verify full workspace and actual session/native grants
         run: |
           ./scripts/verify.sh fast
           cargo test -p fr-native --all-features --test input_quic --locked -- --test-threads=4
@@ -68,7 +68,7 @@ jobs:
           python3 - <<'PY'
           import base64, hashlib, json, os, subprocess
           from pathlib import Path
-          for path, expected in json.loads(Path(os.environ['RUNNER_TEMP'], 'negotiated-broker-paths.json').read_text()).items():
+          for path, expected in json.loads(Path(os.environ['RUNNER_TEMP'], 'session-broker-paths.json').read_text()).items():
               data = Path(path).read_bytes()
               assert hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest() == expected, path
               body = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()})
