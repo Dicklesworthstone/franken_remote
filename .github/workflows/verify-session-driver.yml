@@ -19,33 +19,33 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
-      - name: Stage exact reviewed viewer source without ref writes
+      - name: Stage exact reviewed host source without ref writes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 - <<'PY'
           import base64, hashlib, json, lzma, os, subprocess
           from pathlib import Path
-          before = {'crates/fr-client/src/authority.rs':'ce878937a9a4aac1e25610252b4d28afc6bcdfa9','crates/frd/src/session_startup.rs':'17906386e147df1ff2b1a52bd9a0679f2811e079','crates/frd/src/session_startup/tests.rs':'b98d3f738b96d50da9c3578fbf1641892b9fd7da','crates/frd/src/session_startup/viewer.rs':None,'crates/frd/src/session_startup/viewer/tests.rs':None}
-          after = {'crates/fr-client/src/authority.rs':'f75f88e6448c222b5f7739de73c60a68a25aab30','crates/frd/src/session_startup.rs':'39ecb0012f882016fdf82a2df33f454cadeb72fe','crates/frd/src/session_startup/tests.rs':'d5dee62caf974e73482675b103d0e9d2dc5a7369','crates/frd/src/session_startup/viewer.rs':'a4411fd8a33f696e5afa643b66f9353c7e7511c1','crates/frd/src/session_startup/viewer/tests.rs':'633307ee901f496122704c35010dafe1cd9d41f3'}
+          before = {'crates/frd/src/session_startup.rs':'39ecb0012f882016fdf82a2df33f454cadeb72fe','crates/frd/src/session_startup/running.rs':None,'crates/frd/src/session_startup/running/tests.rs':None}
+          after = {'crates/frd/src/session_startup.rs':'191ff3cf050aeb8eecac8116d07cf397bdabec7a','crates/frd/src/session_startup/running.rs':'ac07574fc9d50f5d59c10843b1c20d0ea7b4fda5','crates/frd/src/session_startup/running/tests.rs':'e8d6c23b226ce21faecb6e81b14e84e99bf6f4ee'}
           def sha(data): return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
           for path, expected in before.items():
               assert (sha(Path(path).read_bytes()) if Path(path).exists() else None) == expected, path
-          oid = 'dafec110a2dfa71c0a308f68c0b47b9d3bf7632b'
+          oid = 'b8c8d6f65b76ad2b59e89111f4816d68566af9bd'
           row = json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
           raw = base64.b64decode(row['content'])
-          assert len(raw) == 7444 and sha(raw) == oid
+          assert len(raw) == 6256 and sha(raw) == oid
           decoder = lzma.LZMADecompressor()
-          data = decoder.decompress(raw, max_length=34262)
-          assert decoder.eof and not decoder.unused_data and len(data) == 34261
-          assert hashlib.sha256(data).hexdigest() == '58b9645d0eac92c7dae1b236c245eb7789cb3a57b45ba88c36c16d4eaa9f8a55'
-          patch = Path(os.environ['RUNNER_TEMP'],'viewer.patch'); patch.write_bytes(data)
+          data = decoder.decompress(raw, max_length=26136)
+          assert decoder.eof and not decoder.unused_data and len(data) == 26135
+          assert hashlib.sha256(data).hexdigest() == '050871aaaa5ccc350fa5b92f28b8998656d0d8c4886a02610c586ddaedc5ed94'
+          patch = Path(os.environ['RUNNER_TEMP'],'host.patch'); patch.write_bytes(data)
           stats = subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
           assert {line.split('\t',2)[2] for line in stats.splitlines()} == set(after)
           subprocess.run(['git','apply','--check',str(patch)],check=True)
           subprocess.run(['git','apply',str(patch)],check=True)
           for path, expected in after.items(): assert sha(Path(path).read_bytes()) == expected, path
-          Path(os.environ['RUNNER_TEMP'],'viewer-paths.json').write_text(json.dumps(after))
+          Path(os.environ['RUNNER_TEMP'],'host-paths.json').write_text(json.dumps(after))
           PY
       - name: Install pinned compiler and native SDKs
         run: |
@@ -65,7 +65,7 @@ jobs:
           python3 - <<'PY'
           import base64, hashlib, json, os, subprocess
           from pathlib import Path
-          for path, expected in json.loads(Path(os.environ['RUNNER_TEMP'],'viewer-paths.json').read_text()).items():
+          for path, expected in json.loads(Path(os.environ['RUNNER_TEMP'],'host-paths.json').read_text()).items():
               data = Path(path).read_bytes()
               assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest() == expected
               body = json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()})
