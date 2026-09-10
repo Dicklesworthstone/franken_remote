@@ -239,6 +239,9 @@ impl Fixture {
     }
     async fn new_options(cx: Cx, feedback: bool) -> Self {
         let pair = pair_with_feedback(&cx, feedback).await;
+        Self::from_pair(cx, pair, None)
+    }
+    fn from_pair(cx: Cx, pair: Pair, attached: Option<frd::input_quic::NegotiatedInput>) -> Self {
         let display = Display::new();
         let observer = X11Pointer::open(&display.name).unwrap();
         let now = host_now(&cx).unwrap();
@@ -264,7 +267,12 @@ impl Fixture {
             &display.name,
         )
         .unwrap();
-        let input = QuicInput::new(cx.clone(), agent, &pair.server, pair.routes).unwrap();
+        let input = match attached {
+            Some(join) => join
+                .into_host(cx.clone(), agent, &pair.server, &observation)
+                .unwrap(),
+            None => QuicInput::new(cx.clone(), agent, &pair.server, pair.routes).unwrap(),
+        };
         let time = ClientInstant(network::clock(&cx));
         let mut client = InputClient::new(
             c,
@@ -357,6 +365,9 @@ impl Fixture {
         s.unwrap();
     }
     fn receive(&mut self) {
+        self.receive_using(None);
+    }
+    fn receive_using(&mut self, joined: Option<&frd::input_quic::NegotiatedInput>) {
         self.input
             .receive(
                 &mut self.pair.server,
@@ -370,45 +381,56 @@ impl Fixture {
             outbound: false,
             ..self.pair.routes.results()
         });
-        self.pair
-            .client
-            .receive(
-                &self.cx,
-                || true,
-                |r, bytes| {
-                    if r == results {
-                        if bytes.get(6..8) == Some(&0x0017u16.to_be_bytes()) {
-                            let ticket = fr_wire::input_ticket::decode(
-                                bytes,
-                                &ProtocolLimits::ABSOLUTE,
-                                7,
-                                InputDirection::HostToViewer,
-                                InputDelivery::Reliable,
-                            )
-                            .unwrap();
-                            self.client.accept_ticket(bytes, self.clock, now).unwrap();
-                            self.tickets.push(ticket);
-                            return Ok(Disposition::Consumed);
-                        }
-                        match self.client.result(bytes, now).unwrap() {
-                            ResultEvent::Completed(r) | ResultEvent::Pointer(r) => {
-                                self.receipts.push(r);
-                            }
-                            ResultEvent::Duplicate(_) | ResultEvent::Unretained => {}
-                        }
+        let mut receive = |r, bytes: &[u8]| {
+            if r == results {
+                if bytes.get(6..8) == Some(&0x0017u16.to_be_bytes()) {
+                    let ticket = fr_wire::input_ticket::decode(
+                        bytes,
+                        &ProtocolLimits::ABSOLUTE,
+                        7,
+                        InputDirection::HostToViewer,
+                        InputDelivery::Reliable,
+                    )
+                    .unwrap();
+                    self.client.accept_ticket(bytes, self.clock, now).unwrap();
+                    self.tickets.push(ticket);
+                    return Ok(Disposition::Consumed);
+                }
+                match self.client.result(bytes, now).unwrap() {
+                    ResultEvent::Completed(r) | ResultEvent::Pointer(r) => {
+                        self.receipts.push(r);
                     }
-                    Ok(Disposition::Consumed)
-                },
-            )
-            .unwrap();
+                    ResultEvent::Duplicate(_) | ResultEvent::Unretained => {}
+                }
+            }
+            Ok(Disposition::Consumed)
+        };
+        if let Some(joined) = joined {
+            joined
+                .receive_ready(
+                    &self.cx,
+                    &mut self.pair.client,
+                    || true,
+                    |bytes| receive(results, bytes),
+                )
+                .unwrap();
+        } else {
+            self.pair
+                .client
+                .receive(&self.cx, || true, receive)
+                .unwrap();
+        }
     }
     async fn turn(&mut self) -> Progress {
+        self.turn_with(None).await
+    }
+    async fn turn_with(&mut self, joined: Option<&frd::input_quic::NegotiatedInput>) -> Progress {
         let p = self.input.service(&mut self.pair.server, || true).unwrap();
         if p == Progress::ObsoletePointer {
             self.obsolete_pointers += 1;
         }
         self.io().await;
-        self.receive();
+        self.receive_using(joined);
         p
     }
     async fn until_receipts(&mut self, n: usize) {
@@ -502,9 +524,42 @@ fn ordered_release_wins_native_slot_over_an_already_buffered_pointer() {
             let release = f.action(button(false));
             f.send(&pointer, Route::Datagram(f.pair.pointer));
             f.send(&release, Route::Stream(f.pair.actions));
-            // Receive neither input lane until BOTH records are in native QUIC.
-            for _ in 0..8 {
+            // Retain both exact records before testing scheduler priority. A
+            // fixed number of I/O turns does not establish stream readiness.
+            let action_route = Route::Stream(StreamRoute {
+                outbound: false,
+                ..f.pair.actions
+            });
+            let pointer_route = Route::Datagram(DatagramRoute {
+                outbound: false,
+                ..f.pair.pointer
+            });
+            let (mut action_ready, mut pointer_ready) = (false, false);
+            let until = Instant::now() + Duration::from_secs(1);
+            while !action_ready || !pointer_ready {
+                assert!(Instant::now() < until, "both input records did not arrive");
                 f.io().await;
+                assert_eq!(
+                    f.pair
+                        .server
+                        .receive_ready(
+                            &f.cx,
+                            || true,
+                            |r| r == action_route || r == pointer_route,
+                            |r, bytes| {
+                                if r == action_route {
+                                    assert_eq!(bytes, release);
+                                    action_ready = true;
+                                } else {
+                                    assert_eq!(bytes, pointer);
+                                    pointer_ready = true;
+                                }
+                                Ok(Disposition::Blocked)
+                            },
+                        )
+                        .unwrap(),
+                    0,
+                );
             }
             assert_eq!(
                 f.input
@@ -814,3 +869,5 @@ mod control;
 
 #[path = "input_quic/broker.rs"]
 mod broker;
+#[path = "input_quic/negotiated.rs"]
+mod negotiated;

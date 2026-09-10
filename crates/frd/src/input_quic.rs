@@ -24,6 +24,8 @@ use std::{cell::Cell, time::Duration};
 
 pub mod control;
 pub mod grant;
+mod negotiated;
+pub use negotiated::NegotiatedInput;
 mod ticket;
 
 const RECEIPT_LIFETIME_US: u64 = 1_000_000;

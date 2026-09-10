@@ -163,6 +163,13 @@ impl SeatReservation {
         };
         let control = watchdog.control();
         #[cfg(target_os = "linux")]
+        let input_scope = {
+            // Only the immutable session/view are retained. This does not issue
+            // a ticket; the zero placeholder never leaves this expression.
+            let scope = session.ticket_credentials(InputTicketId::from_raw(0));
+            (scope.session, scope.view)
+        };
+        #[cfg(target_os = "linux")]
         let (session, control_lease) = {
             let mut session = session;
             let control = session.take_control_lease();
@@ -228,6 +235,8 @@ impl SeatReservation {
             native: native.clone(),
             route,
             response_context: None,
+            #[cfg(target_os = "linux")]
+            input_scope,
             #[cfg(target_os = "linux")]
             control_lease,
             #[cfg(target_os = "linux")]
@@ -428,11 +437,28 @@ pub struct Agent {
     route: Route,
     response_context: Option<ResultContext>,
     #[cfg(target_os = "linux")]
+    input_scope: (fr_core::ids::RemoteSessionId, fr_core::input::InputView),
+    #[cfg(target_os = "linux")]
     control_lease: Option<fr_core::input_submission::ControlLease>,
     #[cfg(target_os = "linux")]
     authority_cx: Cx,
 }
 impl Agent {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn matches_observation_view(
+        &self,
+        observation: &crate::media::ObservationControl,
+        session: fr_core::ids::RemoteSessionId,
+        view: fr_core::input::InputView,
+    ) -> bool {
+        self.shared.check_admission();
+        !self.shared.control.is_stopped()
+            && self.input_scope == (session, view)
+            && self
+                .control_lease
+                .as_ref()
+                .is_some_and(|lease| observation.owns_control_lease(lease))
+    }
     #[cfg(target_os = "linux")]
     pub(crate) fn take_control_lease(
         &mut self,
