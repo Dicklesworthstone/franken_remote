@@ -1,0 +1,77 @@
+name: Verify native media attachment
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/verify-media-attachment.yml']
+permissions:
+  contents: write
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Stage exact reviewed wire candidate without ref writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64,hashlib,json,lzma,os,subprocess
+          from pathlib import Path
+          expected={
+            'crates/fr-wire/src/attachment.rs':(None,'fa1c827d22f137a59f0586c90eb7b977621fb848'),
+            'crates/fr-wire/src/lib.rs':('3f690ef86618039be3cc67eef92d5aad5f838fd8','0d644d968aa39e3875be5e9aa6494584bebc396b'),
+            'crates/fr-wire/src/record.rs':('9cb4d29a03c928918a402ef1e3f40937ab9f262d','4581739d745af04ff4fcd338afc1bc10e5f4bdf3'),
+            'crates/fr-wire/tests/attachment.rs':(None,'1fb516b6c733a2ee961d48991d4ff00e82c509db'),
+            'PROTOCOL_ATTACHMENT.md':(None,'16cebc6670e7699c42c23158fe771aaad204d741'),
+          }
+          def sha(b): return hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest()
+          for p,(before,after) in expected.items():
+            assert (sha(Path(p).read_bytes()) if Path(p).exists() else None)==before,p
+          oid='813fabf62c60b5597fff0d15c6d5d94b1e2a596d'
+          row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
+          raw=base64.b64decode(row['content']);assert sha(raw)==oid and len(raw)==6764
+          decoder=lzma.LZMADecompressor();data=decoder.decompress(raw,max_length=25835)
+          assert decoder.eof and not decoder.unused_data and len(data)==25834
+          assert hashlib.sha256(data).hexdigest()=='802c532227d5ad23d0373577b6a2159ee585977e2ba12d28a01de590ef988a68'
+          patch=Path(os.environ['RUNNER_TEMP'],'attachment-wire.patch');patch.write_bytes(data)
+          stats=subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
+          assert {line.split('\t',2)[2] for line in stats.splitlines()}==set(expected)
+          subprocess.run(['git','apply','--check',str(patch)],check=True)
+          subprocess.run(['git','apply',str(patch)],check=True)
+          for p,(before,after) in expected.items(): assert sha(Path(p).read_bytes())==after,p
+          Path(os.environ['RUNNER_TEMP'],'attachment-paths.json').write_text(json.dumps(expected))
+          PY
+      - name: Install pinned compiler and native SDKs
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
+      - name: Verify complete workspace and attachment records
+        run: |
+          ./scripts/verify.sh fast
+          ./scripts/verify.sh docs
+          cargo test -p fr-wire --test attachment --locked
+          git diff --check
+      - name: Export exact verified objects without ref writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64,hashlib,json,os,subprocess
+          from pathlib import Path
+          for p,(before,after) in json.loads(Path(os.environ['RUNNER_TEMP'],'attachment-paths.json').read_text()).items():
+            b=Path(p).read_bytes();assert hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest()==after
+            body=json.dumps({'encoding':'base64','content':base64.b64encode(b).decode()})
+            result=subprocess.run(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,capture_output=True,check=True)
+            assert json.loads(result.stdout)['sha']==after
+            print(json.dumps({'path':p,'sha':after,'verified_against':os.environ['GITHUB_SHA']}))
+          PY
