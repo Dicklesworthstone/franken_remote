@@ -1,0 +1,80 @@
+name: Verify controlled host session
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/verify-controlled-host.yml']
+permissions:
+  contents: write
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Stage exact reconciled host implementation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, subprocess
+          from pathlib import Path
+          def sha(b): return hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest()
+          encoded = bytearray()
+          for oid, length in [('9159fc931ee52848abe78dafba6a655d3cd75a6f',6500),('6236cabaaf8c92cd8af8880c115cd471bcd06017',6500),('eac14b3294648a2a1d435ec5819d3dc164c59650',6468)]:
+              row = json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
+              raw = base64.b64decode(row['content'])
+              assert len(raw) == length and sha(raw) == oid
+              encoded.extend(raw)
+          assert sha(encoded) == 'db7e84a1ffd45d5bbd1557223eca7e7eb46213af'
+          decoder = lzma.LZMADecompressor()
+          data = decoder.decompress(base64.b64decode(encoded,validate=True),max_length=64268)
+          assert decoder.eof and not decoder.unused_data and len(data) == 64267
+          assert hashlib.sha256(data).hexdigest() == '2b308346446acd81e50b2114128b66070e2ee7d0897613f44e860919c93aeb8c'
+          candidate = json.loads(data)
+          assert len(candidate['after']) == 11 and set(candidate['before']) == set(candidate['after'])
+          for path, expected in candidate['before'].items():
+              assert (path.startswith('crates/frd/') or path in ['CONTROLLED_HOST_SESSION.md','CONTROL_LEASE_RENEWAL.md','NATIVE_INPUT_ATTACHMENT.md']) and '..' not in Path(path).parts
+              assert (sha(Path(path).read_bytes()) if Path(path).exists() else None) == expected, f'Concurrent source change: {path}'
+          patch = Path(os.environ['RUNNER_TEMP'],'controlled-host.patch')
+          patch.write_text(candidate['patch'])
+          stats = subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
+          assert {line.split('\t',2)[2] for line in stats.splitlines()} == set(candidate['after'])
+          subprocess.run(['git','apply','--check',str(patch)],check=True)
+          subprocess.run(['git','apply',str(patch)],check=True)
+          for path, expected in candidate['after'].items(): assert sha(Path(path).read_bytes()) == expected, path
+          Path(os.environ['RUNNER_TEMP'],'controlled-host-paths.json').write_text(json.dumps(candidate['after']))
+          PY
+      - name: Install pinned compiler and native SDKs
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
+      - name: Verify full workspace and controlled session
+        run: |
+          ./scripts/verify.sh fast
+          cargo test -p frd --lib --locked -- --test-threads=4
+          ./scripts/verify.sh docs
+          git diff --check
+      - name: Retain verified source objects without ref writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, subprocess
+          from pathlib import Path
+          for path, expected in json.loads(Path(os.environ['RUNNER_TEMP'],'controlled-host-paths.json').read_text()).items():
+              b = Path(path).read_bytes()
+              assert hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest() == expected, path
+              body = json.dumps({'encoding':'base64','content':base64.b64encode(b).decode()})
+              row = json.loads(subprocess.check_output(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True))
+              assert row['sha'] == expected, path
+              print(json.dumps({'path':path,'sha':expected,'verified_against':os.environ['GITHUB_SHA']}))
+          PY
