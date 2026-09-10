@@ -1,0 +1,79 @@
+name: Verify display selection
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/verify-display-selection.yml']
+permissions:
+  contents: write
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Stage exact selected-display implementation without ref writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, subprocess
+          from pathlib import Path
+          def sha(data): return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
+          oid = 'f795ed6a28cdfe5519ebe49f8fe3df4867eeb8ae'
+          row = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
+          raw = base64.b64decode(row['content'])
+          assert len(raw) == 18136 and sha(raw) == oid
+          decoder = lzma.LZMADecompressor()
+          data = decoder.decompress(base64.b64decode(raw, validate=True), max_length=65207)
+          assert decoder.eof and not decoder.unused_data and len(data) == 65206
+          assert hashlib.sha256(data).hexdigest() == '91c8dd4b51ea224f5bc0bc5176860c204666ac15c54dac2a4f0bd4b36f333608'
+          candidate = json.loads(data)
+          assert len(candidate['after']) == 11 and set(candidate['before']) == set(candidate['after'])
+          for path, expected in candidate['before'].items():
+              assert path.startswith('crates/') and '..' not in Path(path).parts
+              assert (sha(Path(path).read_bytes()) if Path(path).exists() else None) == expected, path
+          patch = Path(os.environ['RUNNER_TEMP'], 'display-selection.patch')
+          patch.write_text(candidate['patch'])
+          stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
+          assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(candidate['after'])
+          subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
+          subprocess.run(['git', 'apply', str(patch)], check=True)
+          for path, expected in candidate['after'].items(): assert sha(Path(path).read_bytes()) == expected, path
+          Path(os.environ['RUNNER_TEMP'], 'display-selection-paths.json').write_text(json.dumps(candidate['after']))
+          PY
+      - name: Install pinned compiler and native SDKs
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
+      - name: Verify workspace and actual selected-display startup
+        run: |
+          ./scripts/verify.sh fast
+          ./scripts/verify.sh docs
+          cargo test -p frd --test display_selection --locked -- --nocapture
+          cargo test -p frd --lib session_startup --locked -- --nocapture
+          cargo test -p fr-native --all-features --test decoder_startup --locked -- --test-threads=4
+          git diff --check
+      - name: Retain only exact verified source blobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, subprocess
+          from pathlib import Path
+          for path, expected in json.loads(Path(os.environ['RUNNER_TEMP'], 'display-selection-paths.json').read_text()).items():
+              data = Path(path).read_bytes()
+              assert hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest() == expected
+              body = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()})
+              result = subprocess.run(['gh', 'api', '--method', 'POST', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', '--input', '-'], input=body, text=True, capture_output=True, check=True)
+              assert json.loads(result.stdout)['sha'] == expected
+              print(json.dumps({'path': path, 'sha': expected, 'verified_against': os.environ['GITHUB_SHA']}))
+          PY
