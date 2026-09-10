@@ -1,0 +1,67 @@
+name: Verify broker control grants
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/verify-broker-control.yml']
+permissions:
+  contents: write
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Stage exact reviewed reservation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, subprocess
+          from pathlib import Path
+          def sha(b): return hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest()
+          p='crates/frd/src/input_agent.rs'
+          assert sha(Path(p).read_bytes())=='87f22b35f71e4ac1f434263da5f4fa5a340b0334'
+          oid='23ced7fbdc062ea5440b4696812d6ed2b0225d1c'
+          row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
+          raw=base64.b64decode(row['content']); assert sha(raw)==oid
+          dec=lzma.LZMADecompressor()
+          patch=dec.decompress(base64.b64decode(raw,validate=True),max_length=5484)
+          assert dec.eof and not dec.unused_data and len(patch)==5483
+          assert hashlib.sha256(patch).hexdigest()=='60c19c06aa9f0d8a1860d9c06cb2d998cf654ee85b9043341568db45637be4e0'
+          subprocess.run(['git','apply','--check','-'],input=patch,check=True)
+          subprocess.run(['git','apply','-'],input=patch,check=True)
+          assert sha(Path(p).read_bytes())=='1d1a1346871fc74c45b9765b5981dc21a649b2d0'
+          PY
+      - name: Install pinned compiler and native SDKs
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
+      - name: Verify full workspace
+        run: |
+          ./scripts/verify.sh fast
+          ./scripts/verify.sh docs
+          git diff --check
+      - name: Export verified source object without ref writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, subprocess
+          from pathlib import Path
+          p='crates/frd/src/input_agent.rs'; b=Path(p).read_bytes()
+          expected='1d1a1346871fc74c45b9765b5981dc21a649b2d0'
+          assert hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest()==expected
+          body=json.dumps({'encoding':'base64','content':base64.b64encode(b).decode()})
+          row=json.loads(subprocess.check_output(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True))
+          assert row['sha']==expected
+          print(json.dumps({'path':p,'sha':expected,'verified_against':os.environ['GITHUB_SHA']}))
+          PY
