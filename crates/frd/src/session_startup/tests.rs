@@ -17,7 +17,7 @@ use std::{
 };
 #[allow(dead_code)]
 #[path = "../../../fr-transport/tests/support/mod.rs"]
-mod support;
+pub(super) mod support;
 
 fn config(approval: bool) -> Configuration {
     Configuration {
