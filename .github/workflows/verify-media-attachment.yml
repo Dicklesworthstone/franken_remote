@@ -39,14 +39,16 @@ jobs:
             'crates/frd/src/session_startup/viewer.rs':('a4411fd8a33f696e5afa643b66f9353c7e7511c1','a7eec1ca05eeeb2c4226d09377769df7ae2992a3'),
           }
           def sha(b): return hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest()
+          def blob(oid):
+            row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
+            b=base64.b64decode(row['content']);assert sha(b)==oid
+            return b
           for p,(before,after) in expected.items():
             assert (sha(Path(p).read_bytes()) if Path(p).exists() else None)==before,p
           parts=[('3798be303233881867115dde2304b210b984324a',7000),('f5d1b6f376a294a5a9429ad45cf9540b35ca8341',7000),('5667b2e56958237ff860a17597351b631357b54f',6904)]
           encoded=[]
           for oid,length in parts:
-            row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
-            part=base64.b64decode(row['content'])
-            assert len(part)==length and sha(part)==oid
+            part=blob(oid);assert len(part)==length
             encoded.append(part)
           raw=base64.b64decode(b''.join(encoded),validate=True)
           assert len(raw)==15676 and sha(raw)=='97d1a08552154c45995f69ada9d17384e8dd5ee1'
@@ -58,6 +60,17 @@ jobs:
           assert {line.split('\t',2)[2] for line in stats.splitlines()}==set(expected)
           subprocess.run(['git','apply','--check',str(patch)],check=True)
           subprocess.run(['git','apply',str(patch)],check=True)
+          for p,(before,after) in expected.items(): assert sha(Path(p).read_bytes())==after,p
+          # A completed attachment can still own unacknowledged native bytes.
+          # Preserve full queue equality on foreign rejection, and admit pressure
+          # only after prior handshake bytes drain under the unchanged deadline.
+          fix=Path(os.environ['RUNNER_TEMP'],'attachment-retention.patch')
+          fix.write_bytes(blob('34bedd48e13a00697378fe9d11fcf30aa919eea6'))
+          stats=subprocess.check_output(['git','apply','--numstat',str(fix)],text=True)
+          assert {line.split('\t',2)[2] for line in stats.splitlines()}=={'crates/fr-native/tests/decoder_startup.rs'}
+          subprocess.run(['git','apply','--check',str(fix)],check=True)
+          subprocess.run(['git','apply',str(fix)],check=True)
+          expected['crates/fr-native/tests/decoder_startup.rs']=('35ba834e6cf00c09e141dde3989a28a3b469d18f','47da3d4a883831ff3ce4a5f1c76a666c8f3fdebc')
           for p,(before,after) in expected.items(): assert sha(Path(p).read_bytes())==after,p
           Path(os.environ['RUNNER_TEMP'],'attachment-paths.json').write_text(json.dumps(expected))
           print('Exact runtime candidate staged on',os.environ['GITHUB_SHA'])
