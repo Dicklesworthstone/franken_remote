@@ -47,6 +47,21 @@ use std::{
 const NATIVE_POLL: Duration = Duration::from_millis(10);
 const DRAIN_POLL_NS: u64 = 10_000_000;
 
+/// Synchronous broker reservation, kept private so an idle peer cannot hold it.
+/// Before native launch, dropping it releases the slot. After launch only the
+/// native finalizer may release it, after cleanup AND destructor completion.
+pub(crate) struct SeatReservation {
+    seat: Seat,
+    owned: bool,
+}
+impl Drop for SeatReservation {
+    fn drop(&mut self) {
+        if self.owned {
+            self.seat.0.store(false, Ordering::Release);
+        }
+    }
+}
+
 /// The containing OS share-session owner must share this same seat with ALL
 /// contenders. A fresh seat is not a way to bypass uncertain prior cleanup.
 #[derive(Clone, Default)]
@@ -54,6 +69,16 @@ pub struct Seat(Arc<AtomicBool>);
 impl Seat {
     pub fn is_occupied(&self) -> bool {
         self.0.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn reserve(&self) -> Result<SeatReservation, Error> {
+        self.0
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| Error::SeatBusy)?;
+        Ok(SeatReservation {
+            seat: self.clone(),
+            owned: true,
+        })
     }
 
     /// Takes ownership of an already locally admitted session. `factory` must
@@ -75,7 +100,7 @@ impl Seat {
         F: FnOnce() -> Result<S, PlatformError> + Send + 'static,
         C: FnMut(&mut S) -> bool + Send + 'static,
     {
-        self.start_inner(
+        self.reserve()?.start(
             cx,
             session,
             route,
@@ -103,7 +128,7 @@ impl Seat {
         C: FnMut(&mut S) -> bool + Send + 'static,
     {
         admission.control().map_err(Error::Admission)?;
-        self.start_inner(
+        self.reserve()?.start(
             cx,
             session,
             route,
@@ -114,8 +139,10 @@ impl Seat {
             },
         )
     }
-    fn start_inner<S, F, C>(
-        &self,
+}
+impl SeatReservation {
+    pub(crate) fn start<S, F, C>(
+        mut self,
         cx: Cx,
         session: InputSession,
         route: Route,
@@ -128,17 +155,9 @@ impl Seat {
         F: FnOnce() -> Result<S, PlatformError> + Send + 'static,
         C: FnMut(&mut S) -> bool + Send + 'static,
     {
-        if self
-            .0
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(Error::SeatBusy);
-        }
         let watchdog = match Watchdog::new(cx.clone(), session.monitor()) {
             Ok(w) => w,
             Err(e) => {
-                self.0.store(false, Ordering::Release);
                 return Err(Error::Clock(e));
             }
         };
@@ -160,7 +179,7 @@ impl Seat {
             .timer_driver()
             .expect("watchdog checked the same Cx timer");
         let runner = shared.clone();
-        let seat = self.clone();
+        let seat = self.seat.clone();
         let clock = driver.clone();
         let worker = thread::Builder::new()
             .name("fr-input-native".into())
@@ -195,9 +214,11 @@ impl Seat {
                 wake(wakes.1);
             });
         let Ok(worker) = worker else {
-            self.0.store(false, Ordering::Release);
             return Err(Error::ThreadSpawn);
         };
+        // Transfer exactly once. The worker may already have finished and freed
+        // the slot; this reservation must never clear a successor's claim.
+        self.owned = false;
         let native = worker.thread().clone();
         // The native finalizer owns the reservation even after either public
         // handle is dropped. Thread detach is NOT a successful shutdown claim.
@@ -350,7 +371,7 @@ struct Mailbox {
 #[derive(Default, Clone)]
 pub(crate) struct AdmissionGate {
     #[cfg(target_os = "linux")]
-    tailnet: Option<fr_tailnet::Lease>,
+    pub(crate) tailnet: Option<fr_tailnet::Lease>,
 }
 impl AdmissionGate {
     pub(crate) fn permitted(&self) -> bool {
@@ -938,4 +959,36 @@ fn execute<S: InputSink>(
         }
     });
     shared.reply(reply);
+}
+
+#[cfg(test)]
+mod reservation_tests {
+    use super::*;
+
+    #[test]
+    fn broker_reservation_excludes_all_seat_clones_before_authority_is_created() {
+        let seat = Seat::default();
+        let other = seat.clone();
+        let reservation = seat.reserve().unwrap();
+        assert!(seat.is_occupied());
+        assert!(matches!(other.reserve(), Err(Error::SeatBusy)));
+        drop(reservation);
+        assert!(!seat.is_occupied());
+        assert!(other.reserve().is_ok());
+    }
+
+    #[test]
+    fn failed_or_panicking_preparation_releases_only_its_own_reservation() {
+        let seat = Seat::default();
+        let failed = std::panic::catch_unwind(|| {
+            let _reserved = seat.reserve().unwrap();
+            panic!("test-only broker preparation failure");
+        });
+        assert!(failed.is_err());
+        assert!(!seat.is_occupied());
+        let successor = seat.reserve().unwrap();
+        assert!(matches!(seat.reserve(), Err(Error::SeatBusy)));
+        drop(successor);
+        assert!(!seat.is_occupied());
+    }
 }
