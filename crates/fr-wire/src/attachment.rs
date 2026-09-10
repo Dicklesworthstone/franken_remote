@@ -1,4 +1,4 @@
-//! Native media channel binding and one-use attachment records. The negotiated
+//! Native channel binding and one-use attachment records. The negotiated
 //! native profile uses two actual unidirectional streams per logical channel.
 //! These codecs confer no authority and do not allocate or install transport.
 use crate::{
@@ -23,30 +23,42 @@ pub const VERSION: u16 = 1;
 /// Configuration-only peers must not select this additional capability.
 pub const DELIVERY_CAPABILITY: &str = "native-media-delivery";
 pub const DELIVERY_VERSION: u16 = 1;
+/// Adds one ordered input stream, reverse feedback and pointer datagrams.
+/// Channel attachment is not a control grant; a live native input owner is still
+/// required before any received action can be submitted to the OS.
+pub const INPUT_CAPABILITY: &str = "native-input-attachment";
+pub const INPUT_VERSION: u16 = 1;
 pub const BINDING_RECORD_BYTES: usize = HEADER_BYTES + 118;
 pub const GRANT_RECORD_BYTES: usize = BINDING_RECORD_BYTES + 44;
 
-/// Primary data direction is host-to-viewer. Each channel also has a reliable
-/// reverse lane for its role-specific acknowledgements or repair requests.
+/// Media flows host-to-viewer; input flows viewer-to-host. Every role also
+/// owns a reliable reverse lane. Existing media discriminants remain unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MediaRole {
     Configuration = 1,
     Recovery = 2,
     Video = 3,
+    Input = 4,
 }
 impl MediaRole {
+    /// Wire direction: 1 = host-to-viewer, 2 = viewer-to-host. This describes
+    /// application data, not the fixed directions of the attachment handshake.
+    pub const fn primary_direction(self) -> u8 {
+        if matches!(self, Self::Input) { 2 } else { 1 }
+    }
     fn read(v: u8) -> Result<Self, WireError> {
         match v {
             1 => Ok(Self::Configuration),
             2 => Ok(Self::Recovery),
             3 => Ok(Self::Video),
+            4 => Ok(Self::Input),
             _ => Err(WireError::InvalidValue),
         }
     }
 }
-/// A complete immutable, observation-only media tuple. No absent input lease
-/// is represented by a zero-valued lease. Stream IDs are adapter allocations,
+/// A complete immutable view tuple. This describes channels, not authority.
+/// An input lease is granted separately, never represented by a zero placeholder. Stream IDs are adapter allocations,
 /// not hard-coded assignments of a role to a particular QUIC stream number.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Descriptor {
@@ -193,7 +205,7 @@ fn write_descriptor(w: &mut Writer<'_>, d: Descriptor) -> Result<(), WireError> 
         w.u64(n)?;
     }
     w.u8(d.role as u8)?;
-    w.u8(1)?; // The primary media direction is always host -> viewer.
+    w.u8(d.role.primary_direction())?;
     w.u64(d.host_stream)?;
     w.u64(d.viewer_stream)
 }
@@ -217,7 +229,7 @@ fn read_descriptor(r: &mut Reader<'_>) -> Result<Descriptor, WireError> {
         viewport: ViewportMappingGeneration::from_raw(r.u64()?),
     };
     let role = MediaRole::read(r.u8()?)?;
-    if r.u8()? != 1 {
+    if r.u8()? != role.primary_direction() {
         return Err(WireError::WrongRole);
     }
     Ok(Descriptor {

@@ -259,3 +259,81 @@ fn bootstrap_never_accepts_attachment_and_debug_redacts_secrets() {
         assert!(!text.contains(&grant().ticket.0.to_string()));
     }
 }
+
+#[test]
+fn input_role_has_independent_golden_direction_without_changing_media_bytes() {
+    let d = Descriptor {
+        role: MediaRole::Input,
+        ..descriptor()
+    };
+    let mut expected = header(0x1b, 118, 7);
+    expected.extend(8u32.to_be_bytes());
+    for n in [11u128, 12, 13, 14] {
+        expected.extend(n.to_be_bytes());
+    }
+    expected.extend([0; 32]);
+    expected.extend([4, 2]);
+    expected.extend(7u64.to_be_bytes());
+    expected.extend(6u64.to_be_bytes());
+    assert_eq!(encoded(Message::Binding(d)), expected);
+    assert_eq!(
+        decode(&expected, parent(), 7, &L, D::HostToViewer, T::Reliable),
+        Ok(Message::Binding(d))
+    );
+    // Neither direction nor role may be inferred from the stream initiator.
+    for role in [
+        MediaRole::Configuration,
+        MediaRole::Recovery,
+        MediaRole::Video,
+        MediaRole::Input,
+    ] {
+        let mut bytes = encoded(Message::Binding(Descriptor {
+            role,
+            ..descriptor()
+        }));
+        bytes[125] = if role == MediaRole::Input { 1 } else { 2 };
+        assert!(decode(&bytes, parent(), 7, &L, D::HostToViewer, T::Reliable).is_err());
+    }
+    for end in 0..expected.len() {
+        assert!(
+            decode(
+                &expected[..end],
+                parent(),
+                7,
+                &L,
+                D::HostToViewer,
+                T::Reliable
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn input_tickets_keep_the_exact_role_and_original_handshake_directions() {
+    let g = Grant {
+        descriptor: Descriptor {
+            role: MediaRole::Input,
+            ..descriptor()
+        },
+        ..grant()
+    };
+    for (m, channel, direction) in [
+        (Message::Ticket(g), 7, D::HostToViewer),
+        (Message::Attach(g), 8, D::ViewerToHost),
+        (Message::Attached(g), 8, D::HostToViewer),
+    ] {
+        let bytes = encoded(m);
+        assert_eq!(
+            decode(&bytes, parent(), channel, &L, direction, T::Reliable),
+            Ok(m)
+        );
+        assert!(decode(&bytes, parent(), channel, &L, direction, T::Datagram).is_err());
+        let wrong = if direction == D::HostToViewer {
+            D::ViewerToHost
+        } else {
+            D::HostToViewer
+        };
+        assert!(decode(&bytes, parent(), channel, &L, wrong, T::Reliable).is_err());
+    }
+}

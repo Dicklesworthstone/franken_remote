@@ -37,6 +37,7 @@ pub(super) struct Reservation {
     until: u64,
     ticket: Option<Ticket>,
     pub(super) inbound: StreamId,
+    role: MediaRole,
     pub(super) binding: u32,
     pub(super) datagram_maximum: Option<usize>,
 }
@@ -76,7 +77,7 @@ pub struct AttachedChannel {
     pub outbound: StreamRoute,
     pub inbound: StreamRoute,
     pub byte_allowance: u64,
-    /// Only the Video role activates a datagram route, after attachment ACK.
+    /// Video and Input activate their role-specific datagram only after ACK.
     pub datagram: Option<DatagramRoute>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,15 +168,33 @@ fn duration_us(duration: Duration) -> Result<u64, Error> {
     Ok(us)
 }
 fn validate_role(scope: &ChannelScope<'_>, role: MediaRole) -> Result<(), Error> {
-    if role != MediaRole::Configuration
-        && !scope.selection.capabilities.iter().any(|c| {
-            c.name == attachment::DELIVERY_CAPABILITY && c.version == attachment::DELIVERY_VERSION
-        })
+    let (name, version) = match role {
+        MediaRole::Configuration => return Ok(()),
+        MediaRole::Recovery | MediaRole::Video => (
+            attachment::DELIVERY_CAPABILITY,
+            attachment::DELIVERY_VERSION,
+        ),
+        MediaRole::Input => {
+            if scope.selection.role != fr_wire::negotiation::Role::RequestControl {
+                return Err(Error::WrongRoute);
+            }
+            (attachment::INPUT_CAPABILITY, attachment::INPUT_VERSION)
+        }
+    };
+    if !scope
+        .selection
+        .capabilities
+        .iter()
+        .any(|c| c.name == name && c.version == version)
     {
         return Err(Error::WrongRoute);
     }
     Ok(())
 }
+fn has_datagram(role: MediaRole) -> bool {
+    matches!(role, MediaRole::Video | MediaRole::Input)
+}
+
 fn priority(role: MediaRole, host_direction: bool) -> Priority {
     if role == MediaRole::Recovery && host_direction {
         Priority::Bulk
@@ -191,6 +210,8 @@ fn messages(role: MediaRole, host_direction: bool) -> Messages {
         (MediaRole::Recovery, false) => Messages::NoApplication,
         (MediaRole::Video, true) => Messages::Exact(0x37),
         (MediaRole::Video, false) => Messages::Exact(0x35),
+        (MediaRole::Input, true) => Messages::InputFeedback,
+        (MediaRole::Input, false) => Messages::InputActions,
     }
 }
 impl QuicRecords {
@@ -204,6 +225,7 @@ impl QuicRecords {
             // The same advertised cap bounds progress, repairs AND video.
             // A smaller peer/record ceiling cannot be bypassed via DATAGRAM.
             MediaRole::Video => base.min(self.policy.datagram_record_bytes as u64),
+            MediaRole::Input => base.min(fr_wire::input::MAX_INPUT_RECORD_BYTES as u64),
         }
     }
     fn next_uni(&self, role: StreamRole) -> Result<StreamId, Error> {
@@ -250,7 +272,18 @@ impl QuicRecords {
         {
             return Err(Error::WrongRoute);
         }
-        if d.role == MediaRole::Video && self.datagrams.len() >= MAX_DATAGRAMS {
+        // A second input stream would create a parallel action ordering domain.
+        // Even abandoned/retired input reservations remain consumed on this connection.
+        if d.role == MediaRole::Input
+            && (self.attachments.iter().any(|r| r.role == MediaRole::Input)
+                || self
+                    .streams
+                    .iter()
+                    .any(|r| r.messages == Messages::InputActions))
+        {
+            return Err(Error::WrongRoute);
+        }
+        if has_datagram(d.role) && self.datagrams.len() >= MAX_DATAGRAMS {
             return Err(Error::Backpressure);
         }
         let role = self.role()?;
@@ -292,7 +325,7 @@ impl QuicRecords {
         self.attachments
             .try_reserve_exact(1)
             .map_err(|_| Error::Allocation)?;
-        if d.role == MediaRole::Video {
+        if has_datagram(d.role) {
             self.datagrams
                 .try_reserve_exact(1)
                 .map_err(|_| Error::Allocation)?;
@@ -385,9 +418,13 @@ impl QuicRecords {
             until,
             ticket,
             inbound: inbound.stream,
+            role: d.role,
             binding: d.binding.parent.id,
-            datagram_maximum: (d.role == MediaRole::Video)
-                .then_some(usize::try_from(allowance).map_err(|_| Error::TooLarge)?),
+            datagram_maximum: has_datagram(d.role).then_some(
+                usize::try_from(allowance)
+                    .map_err(|_| Error::TooLarge)?
+                    .min(self.policy.datagram_record_bytes),
+            ),
         });
         Ok((ControlRoutes { outbound, inbound }, state))
     }
@@ -402,8 +439,8 @@ impl QuicRecords {
     ) -> Result<MediaChannel, Error> {
         self.offer_media_role(cx, scope, request, MediaRole::Configuration, authorize)
     }
-    /// Negotiate a concrete media role. Recovery/video additionally require the
-    /// native-media-delivery capability; no role is selected from record flags.
+    /// Negotiate an exact channel role. Input additionally requires control
+    /// intent and native-input-attachment. Attachment itself never grants a lease.
     pub fn offer_media_role(
         &mut self,
         cx: &Cx,
@@ -562,6 +599,12 @@ impl MediaChannel {
     pub fn completed_limits(&self, q: &QuicRecords) -> Result<ProtocolLimits, Error> {
         self.completed_on(q)?;
         Ok(self.limits)
+    }
+    /// The established control scope retained by this exact completed owner.
+    /// Auxiliary routes cannot borrow a different session's equal numeric IDs.
+    pub fn completed_parent(&self, q: &QuicRecords) -> Result<ControlBinding, Error> {
+        self.completed_on(q)?;
+        Ok(self.parent)
     }
     pub fn is_complete(&self) -> bool {
         self.phase == Phase::Complete
@@ -858,10 +901,11 @@ impl MediaChannel {
                 maximum,
                 ..self.pair.inbound
             };
-            let datagram = (self.descriptor.role == MediaRole::Video).then_some(DatagramRoute {
+            let input = self.descriptor.role == MediaRole::Input;
+            let datagram = has_datagram(self.descriptor.role).then_some(DatagramRoute {
                 binding: self.descriptor.binding.parent.id,
-                kind: 0x34,
-                outbound: self.host,
+                kind: if input { 0x42 } else { 0x34 },
+                outbound: if input { !self.host } else { self.host },
             });
             if datagram.is_some() && q.datagrams.len() >= MAX_DATAGRAMS {
                 return Err(Error::Backpressure);
@@ -890,7 +934,8 @@ impl MediaChannel {
             q.inbound[slot].framing = framing;
             q.senders[sender].route = outbound;
             if let Some(route) = datagram {
-                q.attachments[reservation].datagram_maximum = Some(maximum);
+                q.attachments[reservation].datagram_maximum =
+                    Some(maximum.min(q.policy.datagram_record_bytes));
                 q.datagrams.push(route);
             }
             self.pair = ControlRoutes { outbound, inbound };
