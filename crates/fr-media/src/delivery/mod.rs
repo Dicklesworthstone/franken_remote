@@ -48,8 +48,10 @@ impl fmt::Display for DeliveryError {
 }
 impl core::error::Error for DeliveryError {}
 
-/// Distinct, already installed channel bindings for one receiving subscription.
-/// These IDs are not credentials. The session layer owns their complete tuples.
+/// Already installed channel bindings for one receiving subscription. Legacy
+/// layouts use four distinct IDs; negotiated delivery shares the video binding
+/// with its progress/repair pair. Kind, direction and transport still distinguish
+/// those lanes. These IDs are not credentials: the session owns the full tuples.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MediaBindings {
     video: u32,
@@ -75,6 +77,22 @@ impl MediaBindings {
             recovery,
             progress,
             repair,
+        })
+    }
+    /// The negotiated Video role owns datagrams and its reliable progress/repair
+    /// pair. Recovery has a separate binding and bulk stream. Call only after
+    /// attaching both roles to the same authorized view and connection; numeric
+    /// IDs alone do not establish that admission. The legacy constructor remains
+    /// strict, so accidental aliasing cannot silently select this layout.
+    pub fn negotiated(video: u32, recovery: u32) -> Result<Self, DeliveryError> {
+        if video == 0 || recovery == 0 || video == recovery {
+            return Err(DeliveryError::StaleGeneration);
+        }
+        Ok(Self {
+            video,
+            recovery,
+            progress: video,
+            repair: video,
         })
     }
     pub const fn for_channel(self, channel: Channel) -> u32 {
