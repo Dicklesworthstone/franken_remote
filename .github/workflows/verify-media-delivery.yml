@@ -1,0 +1,81 @@
+name: Verify negotiated media delivery
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/verify-media-delivery.yml']
+permissions:
+  contents: write
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Stage the exact reviewed media transport increment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64,hashlib,json,lzma,os,subprocess
+          from pathlib import Path
+          expected={
+            'crates/fr-wire/src/attachment.rs':('fa1c827d22f137a59f0586c90eb7b977621fb848','6ae2f9dee2a6112533a790b3ebb7d0b9753f875a'),
+            'crates/fr-transport/src/quic.rs':('7d93548c8e21379c22a084d56ce4d61fac8a2203','f952b2e2d9698c3250299127102c4ce4cb25774b'),
+            'crates/fr-transport/src/quic/attachment.rs':('24369ba75679d7251ba40a1e59b94b52eec24c02','69d6ac61ce4b9b34a7bcff0cdf289993531a4e09'),
+            'crates/fr-transport/tests/media_attachment.rs':('4e4acdad3347b8ccc1cbb4a9b35ded362c4b3a2a','189aa448746ac78e7d4d09dcc06056c93058cd82'),
+            'crates/fr-transport/tests/media_attachment/delivery.rs':(None,'312cf4cc4cae56c92d33b4b8bb1ab315b2a7ba00'),
+            'crates/frd/src/session_startup/running.rs':('5eb04bf049c9cbcda18a1f0e49c96bcfa79048ba','526d64817c05ffd545c75201243b90ab27b47070'),
+          }
+          def sha(b): return hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest()
+          for p,(before,after) in expected.items():
+            assert (sha(Path(p).read_bytes()) if Path(p).exists() else None)==before,p
+          oid='ce8b1425603cef16df8439c251b2797939c611c8'
+          row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
+          encoded=base64.b64decode(row['content'])
+          assert len(encoded)==9548 and sha(encoded)==oid
+          decoder=lzma.LZMADecompressor()
+          data=decoder.decompress(base64.b64decode(encoded,validate=True),max_length=31012)
+          assert decoder.eof and not decoder.unused_data and len(data)==31011
+          assert hashlib.sha256(data).hexdigest()=='c39eac3fa35dde49007e70239cc30364dd45dd6335d5878919be61195c20778c'
+          patch=Path(os.environ['RUNNER_TEMP'],'media-transport.patch');patch.write_bytes(data)
+          stats=subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
+          assert {line.split('\t',2)[2] for line in stats.splitlines()}==set(expected)
+          subprocess.run(['git','apply','--check',str(patch)],check=True)
+          subprocess.run(['git','apply',str(patch)],check=True)
+          for p,(before,after) in expected.items(): assert sha(Path(p).read_bytes())==after,p
+          Path(os.environ['RUNNER_TEMP'],'media-transport-paths.json').write_text(json.dumps(expected))
+          PY
+      - name: Install pinned compiler and native SDKs
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
+      - name: Verify full workspace and negotiated delivery transport
+        run: |
+          ./scripts/verify.sh fast
+          ./scripts/verify.sh docs
+          cargo test -p fr-transport --test media_attachment --locked -- --nocapture
+          git diff --check
+      - name: Retain exact verified source objects without ref writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64,hashlib,json,os,subprocess
+          from pathlib import Path
+          for p,(before,after) in json.loads(Path(os.environ['RUNNER_TEMP'],'media-transport-paths.json').read_text()).items():
+            b=Path(p).read_bytes()
+            assert hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest()==after
+            body=json.dumps({'encoding':'base64','content':base64.b64encode(b).decode()})
+            result=subprocess.run(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,capture_output=True,check=True)
+            assert json.loads(result.stdout)['sha']==after
+            print(json.dumps({'path':p,'sha':after,'verified_against':os.environ['GITHUB_SHA']}))
+          PY
