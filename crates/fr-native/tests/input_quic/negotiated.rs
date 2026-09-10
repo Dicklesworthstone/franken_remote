@@ -11,7 +11,7 @@ use fr_wire::{
 };
 use frd::input_quic::NegotiatedInput;
 
-fn parent() -> ControlBinding {
+pub(super) fn parent() -> ControlBinding {
     ControlBinding {
         id: 5,
         host_boot: HostBootId::from_raw(4),
@@ -54,6 +54,11 @@ impl Attaching {
             role: Role::RequestControl,
             limits: ProtocolLimits::ABSOLUTE,
             capabilities: vec![
+                Capability {
+                    name: frd::input_quic::grant::CAPABILITY.into(),
+                    version: 1,
+                    required: true,
+                },
                 Capability {
                     name: attachment::INPUT_CAPABILITY.into(),
                     version: 1,
@@ -156,6 +161,12 @@ impl Attaching {
     }
 }
 async fn joined(cx: &Cx) -> (Pair, NegotiatedInput, NegotiatedInput) {
+    let (pair, host, viewer, _) = joined_selection(cx).await;
+    (pair, host, viewer)
+}
+pub(super) async fn joined_selection(
+    cx: &Cx,
+) -> (Pair, NegotiatedInput, NegotiatedInput, Selection) {
     let mut l = Attaching::new(cx).await;
     let (hc, cc) = l.attach(cx, MediaRole::Configuration, 6).await;
     let (hi, ci) = l.attach(cx, MediaRole::Input, 7).await;
@@ -184,6 +195,7 @@ async fn joined(cx: &Cx) -> (Pair, NegotiatedInput, NegotiatedInput) {
         },
         host,
         viewer,
+        l.selection,
     )
 }
 fn send(f: &mut Fixture, viewer: &NegotiatedInput, bytes: &[u8]) {

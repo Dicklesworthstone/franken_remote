@@ -117,13 +117,29 @@ impl NegotiatedInput {
     /// still match that operation's locally selected, probed target.
     pub fn check_request(&self, q: &QuicRecords, request: Request) -> Result<(), Error> {
         self.checked(q)?;
-        if request.parent != self.parent
-            || request.target.display_binding != self.configuration.descriptor.binding.parent.id
-            || request.target.view != view(self.input.descriptor().binding)
-        {
+        if !self.matches_request(request) {
             return Err(Error::InvalidRoutes);
         }
         Ok(())
+    }
+    pub(super) fn matches_request(&self, request: Request) -> bool {
+        request.parent == self.parent
+            && request.target.display_binding == self.configuration.descriptor.binding.parent.id
+            && request.target.view == view(self.input.descriptor().binding)
+    }
+    /// Validate the retained proof before the broker consumes its one-time
+    /// observation attachment. Equal numeric routes are not a substitute.
+    pub(super) fn broker_routes(
+        &self,
+        q: &QuicRecords,
+        parent: ControlBinding,
+        limits: ProtocolLimits,
+    ) -> Result<Routes, Error> {
+        if parent != self.parent || limits != self.limits {
+            return Err(Error::InvalidRoutes);
+        }
+        let attached = self.checked(q)?;
+        Routes::new(attached.inbound, attached.outbound, attached.datagram)
     }
     /// Attach an already granted native agent, not a factory supplied by a peer.
     /// It must own the exact same observation authority and mapped view. This

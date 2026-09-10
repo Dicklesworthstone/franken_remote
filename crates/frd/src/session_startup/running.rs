@@ -65,6 +65,33 @@ impl HostSession {
             input,
         )
     }
+    /// Initial control over the completed input attachment, rather than caller-
+    /// installed routes. The retained host identity, selection and observation
+    /// are this running session's; neither channel negotiation nor a request
+    /// supplies local consent, a ready view, or an already-granted lease.
+    pub fn negotiated_control_broker(
+        &mut self,
+        seat: crate::input_agent::Seat,
+        input: crate::input_quic::NegotiatedInput,
+    ) -> Result<crate::input_quic::grant::GrantBroker, crate::input_quic::grant::Error> {
+        use crate::input_quic::grant::{Error as GrantError, GrantBroker, Scope};
+        self.check().map_err(|_| GrantError::Stopped)?;
+        self.opened
+            .peer
+            .check(&self.opened.cx, fr_wire::negotiation::Role::RequestControl)
+            .map_err(|_| GrantError::NotNegotiated)?;
+        GrantBroker::from_negotiated(
+            self.opened.control.clone(),
+            &self.opened.transport,
+            seat,
+            Scope {
+                parent: self.opened.binding,
+                control: self.opened.routes,
+                selection: &self.opened.selected,
+            },
+            input,
+        )
+    }
     /// Allocate a ticketed native configuration pair on this admitted session.
     /// The local view and unpredictable ticket are supplied by the host owner;
     /// this does not authorize a new display or create input/decoder readiness.
