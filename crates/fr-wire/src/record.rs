@@ -101,6 +101,10 @@ pub enum Kind {
     Challenge = 0x0015,
     ChallengeResponse = 0x0016,
     InputTicket = 0x0017,
+    ChannelTicket = 0x0018,
+    ChannelAttach = 0x0019,
+    ChannelAttached = 0x001a,
+    StreamBinding = 0x001b,
     BindingAccepted = 0x001c,
     DecoderConfiguration = 0x0030,
     DecoderConfigured = 0x0031,
@@ -142,6 +146,10 @@ impl Kind {
             0x0015 => Ok(Self::Challenge),
             0x0016 => Ok(Self::ChallengeResponse),
             0x0017 => Ok(Self::InputTicket),
+            0x0018 => Ok(Self::ChannelTicket),
+            0x0019 => Ok(Self::ChannelAttach),
+            0x001a => Ok(Self::ChannelAttached),
+            0x001b => Ok(Self::StreamBinding),
             0x001c => Ok(Self::BindingAccepted),
             0x0030 => Ok(Self::DecoderConfiguration),
             0x0031 => Ok(Self::DecoderConfigured),
@@ -181,6 +189,10 @@ impl Kind {
             | Self::Challenge
             | Self::ChallengeResponse
             | Self::InputTicket
+            | Self::ChannelTicket
+            | Self::ChannelAttach
+            | Self::ChannelAttached
+            | Self::StreamBinding
             | Self::BindingAccepted
             | Self::Key
             | Self::Button
