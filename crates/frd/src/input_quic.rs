@@ -18,8 +18,11 @@ use fr_wire::{
     Kind, WireError,
     input::{InputDelivery, InputDirection, MAX_INPUT_RECORD_BYTES},
     input_result::{INPUT_RESULT_BYTES, InputResult, encode_input_result},
+    input_ticket::{INPUT_TICKET_BYTES, Ticket},
 };
 use std::{cell::Cell, time::Duration};
+
+mod ticket;
 
 const RECEIPT_LIFETIME_US: u64 = 1_000_000;
 
@@ -30,6 +33,9 @@ pub enum Error {
     WrongConnection,
     Closed,
     Clock,
+    InvalidTicketId,
+    TicketRefused(Refusal),
+    TicketExpired,
     Agent(input_agent::Error),
     Transport(quic::Error),
     Wire(WireError),
@@ -58,7 +64,11 @@ impl Routes {
             || actions.binding != results.binding
             || actions.stream == results.stream
             || actions.messages != Messages::InputActions
-            || results.messages != Messages::Exact(0x0048)
+            || !matches!(
+                results.messages,
+                Messages::Exact(0x0048) | Messages::InputFeedback
+            )
+            || (results.messages == Messages::InputFeedback && results.maximum < INPUT_TICKET_BYTES)
             || actions.priority != Priority::Critical
             || results.priority != Priority::Critical
             || actions.maximum > MAX_INPUT_RECORD_BYTES
@@ -99,6 +109,9 @@ pub enum Progress {
     Idle,
     NativePending,
     ReceiptBackpressure,
+    TicketBackpressure,
+    /// Transport admission only; the viewer must still validate expiry/view.
+    TicketQueued(Ticket),
     /// QUIC accepted these receipt bytes. This is not peer delivery or an
     /// upgrade of the receipt's native submission stage to observation.
     ReceiptQueued(InputResult),
@@ -113,14 +126,35 @@ enum Command {
     Input,
     Reconcile,
     Authority,
+    Ticket,
+}
+#[derive(Clone, Copy)]
+enum Feedback {
+    Result(InputResult),
+    Ticket(Ticket),
 }
 struct Pending {
-    result: InputResult,
-    bytes: [u8; INPUT_RESULT_BYTES],
+    feedback: Feedback,
+    bytes: [u8; INPUT_TICKET_BYTES],
+    length: usize,
     until: u64,
 }
+impl Pending {
+    const fn backpressure(&self) -> Progress {
+        match self.feedback {
+            Feedback::Result(_) => Progress::ReceiptBackpressure,
+            Feedback::Ticket(_) => Progress::TicketBackpressure,
+        }
+    }
+    const fn queued(&self) -> Progress {
+        match self.feedback {
+            Feedback::Result(result) => Progress::ReceiptQueued(result),
+            Feedback::Ticket(ticket) => Progress::TicketQueued(ticket),
+        }
+    }
+}
 /// Owns ONE agent, one connection identity, and at most one fixed-size unsent
-/// receipt. While a command or receipt is pending, no further native input is
+/// feedback record. While a command or feedback is pending, no further native input is
 /// admitted. The bounded QUIC receiver retains/backpressures those records.
 /// Late results stay available locally even when the connection is lost.
 pub struct QuicInput {
@@ -133,6 +167,9 @@ pub struct QuicInput {
     pending: Option<Pending>,
     last_reply: Option<InputReply>,
     last_reconciliation: Option<Reply>,
+    ticket_sequence: Option<u64>,
+    ticket_after_us: u64,
+    last_ticket: Option<fr_core::ids::InputTicketId>,
 }
 impl QuicInput {
     /// `cx` must be the same clock/authority region used to create the agent and
@@ -172,6 +209,9 @@ impl QuicInput {
             pending: None,
             last_reply: None,
             last_reconciliation: None,
+            ticket_sequence: Some(0),
+            ticket_after_us: 0,
+            last_ticket: None,
         })
     }
     pub fn control(&self) -> Control {
@@ -189,7 +229,10 @@ impl QuicInput {
         self.last_reconciliation
     }
     pub fn pending_receipt(&self) -> Option<InputResult> {
-        self.pending.as_ref().map(|p| p.result)
+        self.pending.as_ref().and_then(|p| match p.feedback {
+            Feedback::Result(result) => Some(result),
+            Feedback::Ticket(_) => None,
+        })
     }
     pub fn can_accept_input(&self) -> bool {
         self.command.is_none() && self.pending.is_none() && !self.control().is_stopped()
@@ -237,6 +280,7 @@ impl QuicInput {
                 };
                 Ok(Progress::Authority(result))
             }
+            Some(Command::Ticket) => self.collect_ticket(),
             Some(Command::Input) => {
                 let Some(reply) = self.agent.try_input_result().map_err(Error::Agent)? else {
                     return Ok(Progress::NativePending);
@@ -245,8 +289,8 @@ impl QuicInput {
                 self.last_reply = Some(reply);
                 match reply {
                     InputReply::Record(result) => {
-                        let mut bytes = [0; INPUT_RESULT_BYTES];
-                        encode_input_result(
+                        let mut bytes = [0; INPUT_TICKET_BYTES];
+                        let length = encode_input_result(
                             result,
                             &mut bytes,
                             &self.limits,
@@ -258,8 +302,9 @@ impl QuicInput {
                             self.cx.timer_driver().ok_or(Error::Clock)?.now().as_nanos() / 1000;
                         let until = until.checked_add(RECEIPT_LIFETIME_US).ok_or(Error::Clock)?;
                         self.pending = Some(Pending {
-                            result,
+                            feedback: Feedback::Result(result),
                             bytes,
+                            length,
                             until,
                         });
                         Ok(Progress::ReceiptBackpressure)
@@ -297,20 +342,37 @@ impl QuicInput {
         {
             self.control().stop(StopReason::ClientDisconnected);
         }
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|p| matches!(p.feedback, Feedback::Ticket(_)))
+        {
+            if self.control().is_stopped() {
+                self.pending = None;
+                return Err(Error::Closed);
+            }
+            let now = self.cx.timer_driver().ok_or(Error::Clock)?.now().as_nanos() / 1000;
+            if self.pending.as_ref().is_some_and(|p| now >= p.until) {
+                self.pending = None;
+                return Err(Error::TicketExpired);
+            }
+        }
+        let control = self.control();
         let progress = if let Some(pending) = &self.pending {
+            let ticket = matches!(pending.feedback, Feedback::Ticket(_));
             match io.connection.send(
                 &self.cx,
                 Route::Stream(self.routes.results),
-                &pending.bytes,
+                &pending.bytes[..pending.length],
                 pending.until,
-                &mut authorize,
+                || (!ticket || !control.is_stopped()) && authorize(),
             ) {
                 Ok(()) => {
-                    let result = pending.result;
+                    let progress = pending.queued();
                     self.pending = None;
-                    Progress::ReceiptQueued(result)
+                    progress
                 }
-                Err(quic::Error::Backpressure) => Progress::ReceiptBackpressure,
+                Err(quic::Error::Backpressure) => pending.backpressure(),
                 Err(e) => return Err(Error::Transport(e)),
             }
         } else if progress == Progress::Idle && self.control().is_stopped() {

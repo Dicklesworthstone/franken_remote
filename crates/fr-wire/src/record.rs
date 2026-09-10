@@ -100,6 +100,7 @@ pub enum Kind {
     SessionOpened = 0x0011,
     Challenge = 0x0015,
     ChallengeResponse = 0x0016,
+    InputTicket = 0x0017,
     BindingAccepted = 0x001c,
     DecoderConfiguration = 0x0030,
     DecoderConfigured = 0x0031,
@@ -140,6 +141,7 @@ impl Kind {
             0x0011 => Ok(Self::SessionOpened),
             0x0015 => Ok(Self::Challenge),
             0x0016 => Ok(Self::ChallengeResponse),
+            0x0017 => Ok(Self::InputTicket),
             0x001c => Ok(Self::BindingAccepted),
             0x0030 => Ok(Self::DecoderConfiguration),
             0x0031 => Ok(Self::DecoderConfigured),
@@ -178,6 +180,7 @@ impl Kind {
             | Self::SessionOpened
             | Self::Challenge
             | Self::ChallengeResponse
+            | Self::InputTicket
             | Self::BindingAccepted
             | Self::Key
             | Self::Button

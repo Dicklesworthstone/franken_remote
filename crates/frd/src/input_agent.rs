@@ -254,6 +254,7 @@ pub enum AuthorityCommand {
 pub enum Reply {
     Input(Result<Dispatch, Refusal>),
     Authority(Result<HostInstant, Refusal>),
+    Ticket(Result<fr_wire::input_ticket::Ticket, Refusal>),
     Reconciliation(Result<Reconciliation, Refusal>),
     ReconciliationPanic { report: Option<Reconciliation> },
     CancelledBeforeStart,
@@ -296,6 +297,10 @@ impl Shutdown {
 enum CommandKind {
     Input(InputDelivery),
     Reconcile,
+    Ticket {
+        ticket: InputTicketId,
+        sequence: u64,
+    },
     Authority(AuthorityCommand),
 }
 // Fixed inline record storage bounds payload AND metadata; no per-record heap
@@ -468,6 +473,22 @@ impl Agent {
         };
         command.bytes[..bytes.len()].copy_from_slice(bytes);
         self.enqueue(command)?;
+        self.response_context = None;
+        Ok(())
+    }
+    /// Issue a ticket on the canonical native owner and return its actual
+    /// issuance clock, deadline and immutable input scope. No caller-supplied
+    /// session or generation can relabel the resulting credential.
+    pub fn issue_ticket_record(
+        &mut self,
+        ticket: InputTicketId,
+        sequence: u64,
+    ) -> Result<(), Error> {
+        self.enqueue(Command {
+            kind: CommandKind::Ticket { ticket, sequence },
+            bytes: [0; MAX_INPUT_RECORD_BYTES],
+            length: 0,
+        })?;
         self.response_context = None;
         Ok(())
     }
@@ -828,6 +849,21 @@ fn execute<S: InputSink>(
                     shared.control.stop(StopReason::Cancelled);
                 }
                 input_watchdog::host_now(cx).expect("captured timer")
+            }))
+        }
+        CommandKind::Ticket { ticket, sequence } => {
+            shared.check_admission();
+            if cx.checkpoint().is_err() {
+                shared.control.stop(StopReason::Cancelled);
+            }
+            let now = input_watchdog::host_now(cx).expect("captured timer");
+            Reply::Ticket(session.issue_ticket(ticket, now).map(|until| {
+                fr_wire::input_ticket::Ticket {
+                    credentials: session.ticket_credentials(ticket),
+                    sequence,
+                    issued_at_us: now.as_micros(),
+                    expires_at_us: until.as_micros(),
+                }
             }))
         }
         CommandKind::Authority(command) => {

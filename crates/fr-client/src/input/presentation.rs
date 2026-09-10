@@ -72,6 +72,21 @@ impl PresentedInput {
             active: false,
         })
     }
+    /// A network ticket still needs independent media-derived freshness. Late
+    /// receipts can be collected after stop, but a ticket cannot clear that stop.
+    pub fn accept_ticket(
+        &mut self,
+        bytes: &[u8],
+        clock: ClockCorrelation,
+        now: ClientInstant,
+    ) -> Result<(), Error> {
+        if clock.host_boot() != self.view.host_boot() {
+            self.stop(StopReason::InvalidTicket);
+            return Err(Error::Media(freshness::Error::StaleBinding));
+        }
+        self.input.accept_ticket(bytes, clock, now)?;
+        Ok(())
+    }
     pub fn stopped(&self) -> Option<StopReason> {
         self.input.stopped()
     }

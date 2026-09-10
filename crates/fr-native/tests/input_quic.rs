@@ -95,6 +95,9 @@ struct Pair {
     routes: Routes,
 }
 async fn pair(cx: &Cx) -> Pair {
+    pair_with_feedback(cx, false).await
+}
+async fn pair_with_feedback(cx: &Cx, feedback: bool) -> Pair {
     let (client, server) = network::native_pair(cx, "localhost", ALPN).await;
     let (mut client, mut server) = (client.unwrap(), server.unwrap());
     let actions = StreamRoute {
@@ -108,10 +111,18 @@ async fn pair(cx: &Cx) -> Pair {
     let results = StreamRoute {
         stream: server.connection_mut().open_uni_stream(cx).unwrap(),
         binding: 7,
-        messages: Messages::Exact(0x48),
+        messages: if feedback {
+            Messages::InputFeedback
+        } else {
+            Messages::Exact(0x48)
+        },
         priority: Priority::Critical,
         outbound: true,
-        maximum: INPUT_RESULT_BYTES,
+        maximum: if feedback {
+            fr_wire::input_ticket::INPUT_TICKET_BYTES
+        } else {
+            INPUT_RESULT_BYTES
+        },
     };
     let auxiliary = StreamRoute {
         stream: server.connection_mut().open_uni_stream(cx).unwrap(),
@@ -181,12 +192,17 @@ struct Fixture {
     seat: Seat,
     driver: Option<Driver>,
     receipts: Vec<InputResult>,
+    tickets: Vec<fr_wire::input_ticket::Ticket>,
+    clock: fr_media::freshness::ClockCorrelation,
     obsolete_pointers: usize,
     _display: Display,
 }
 impl Fixture {
     async fn new(cx: Cx) -> Self {
-        let pair = pair(&cx).await;
+        Self::new_options(cx, false).await
+    }
+    async fn new_options(cx: Cx, feedback: bool) -> Self {
+        let pair = pair_with_feedback(&cx, feedback).await;
         let display = Display::new();
         let observer = X11Pointer::open(&display.name).unwrap();
         let now = host_now(&cx).unwrap();
@@ -244,6 +260,21 @@ impl Fixture {
                 time,
             )
             .unwrap();
+        // Both endpoints deliberately share this runtime clock in the fixture.
+        // This is not an authenticated cross-machine clock-exchange test.
+        let clock = fr_media::freshness::ClockCorrelation::new(
+            fr_media::freshness::ClockSample {
+                host_boot: HostBootId::from_raw(4),
+                client_sent_us: time.0,
+                host_sample_us: time.0,
+                client_received_us: time.0,
+            },
+            fr_media::freshness::ClockPolicy {
+                drift_ppm: 0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         Self {
             cx,
             pair,
@@ -253,6 +284,8 @@ impl Fixture {
             seat,
             driver: Some(driver),
             receipts: vec![],
+            tickets: vec![],
+            clock,
             obsolete_pointers: 0,
             _display: display,
         }
@@ -311,6 +344,19 @@ impl Fixture {
                 || true,
                 |r, bytes| {
                     if r == results {
+                        if bytes.get(6..8) == Some(&0x0017u16.to_be_bytes()) {
+                            let ticket = fr_wire::input_ticket::decode(
+                                bytes,
+                                &ProtocolLimits::ABSOLUTE,
+                                7,
+                                InputDirection::HostToViewer,
+                                InputDelivery::Reliable,
+                            )
+                            .unwrap();
+                            self.client.accept_ticket(bytes, self.clock, now).unwrap();
+                            self.tickets.push(ticket);
+                            return Ok(Disposition::Consumed);
+                        }
                         match self.client.result(bytes, now).unwrap() {
                             ResultEvent::Completed(r) | ResultEvent::Pointer(r) => {
                                 self.receipts.push(r);
@@ -726,3 +772,6 @@ fn malformed_action_payload_revokes_the_attachment_without_a_native_effect() {
 
 #[path = "input_quic/held.rs"]
 mod held;
+
+#[path = "input_quic/ticket.rs"]
+mod ticket;

@@ -297,6 +297,16 @@ impl InputSession {
             reconciliation: None,
         })
     }
+    /// Immutable scope of this already admitted native owner. Naming a ticket
+    /// here does not issue it; the authority must first accept `issue_ticket`.
+    pub fn ticket_credentials(&self, ticket: InputTicketId) -> InputCredentials {
+        InputCredentials {
+            session: self.session,
+            lease: self.lease,
+            ticket,
+            view: self.view,
+        }
+    }
     /// Immutable locally granted geometry for native factory validation.
     pub const fn bounds(&self) -> InputBounds {
         self.bounds
