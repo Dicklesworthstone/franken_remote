@@ -1,0 +1,75 @@
+name: Verify persistent session drivers
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/verify-session-driver.yml']
+permissions:
+  contents: write
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Stage exact reviewed viewer source without ref writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, subprocess
+          from pathlib import Path
+          before = {'crates/fr-client/src/authority.rs':'ce878937a9a4aac1e25610252b4d28afc6bcdfa9','crates/frd/src/session_startup.rs':'17906386e147df1ff2b1a52bd9a0679f2811e079','crates/frd/src/session_startup/tests.rs':'b98d3f738b96d50da9c3578fbf1641892b9fd7da','crates/frd/src/session_startup/viewer.rs':None,'crates/frd/src/session_startup/viewer/tests.rs':None}
+          after = {'crates/fr-client/src/authority.rs':'f75f88e6448c222b5f7739de73c60a68a25aab30','crates/frd/src/session_startup.rs':'39ecb0012f882016fdf82a2df33f454cadeb72fe','crates/frd/src/session_startup/tests.rs':'d5dee62caf974e73482675b103d0e9d2dc5a7369','crates/frd/src/session_startup/viewer.rs':'a4411fd8a33f696e5afa643b66f9353c7e7511c1','crates/frd/src/session_startup/viewer/tests.rs':'633307ee901f496122704c35010dafe1cd9d41f3'}
+          def sha(data): return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
+          for path, expected in before.items():
+              assert (sha(Path(path).read_bytes()) if Path(path).exists() else None) == expected, path
+          oid = 'dafec110a2dfa71c0a308f68c0b47b9d3bf7632b'
+          row = json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
+          raw = base64.b64decode(row['content'])
+          assert len(raw) == 7444 and sha(raw) == oid
+          decoder = lzma.LZMADecompressor()
+          data = decoder.decompress(raw, max_length=34262)
+          assert decoder.eof and not decoder.unused_data and len(data) == 34261
+          assert hashlib.sha256(data).hexdigest() == '58b9645d0eac92c7dae1b236c245eb7789cb3a57b45ba88c36c16d4eaa9f8a55'
+          patch = Path(os.environ['RUNNER_TEMP'],'viewer.patch'); patch.write_bytes(data)
+          stats = subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
+          assert {line.split('\t',2)[2] for line in stats.splitlines()} == set(after)
+          subprocess.run(['git','apply','--check',str(patch)],check=True)
+          subprocess.run(['git','apply',str(patch)],check=True)
+          for path, expected in after.items(): assert sha(Path(path).read_bytes()) == expected, path
+          Path(os.environ['RUNNER_TEMP'],'viewer-paths.json').write_text(json.dumps(after))
+          PY
+      - name: Install pinned compiler and native SDKs
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
+      - name: Verify complete candidate workspace and session drivers
+        run: |
+          ./scripts/verify.sh fast
+          ./scripts/verify.sh docs
+          cargo test -p frd session_startup --locked -- --nocapture
+          git diff --check
+      - name: Export exact verified source objects without ref writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, subprocess
+          from pathlib import Path
+          for path, expected in json.loads(Path(os.environ['RUNNER_TEMP'],'viewer-paths.json').read_text()).items():
+              data = Path(path).read_bytes()
+              assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest() == expected
+              body = json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()})
+              result = subprocess.run(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,capture_output=True,check=True)
+              assert json.loads(result.stdout)['sha'] == expected, path
+              print(json.dumps({'path':path,'sha':expected,'verified_against':os.environ['GITHUB_SHA']}))
+          PY
