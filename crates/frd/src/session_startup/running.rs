@@ -46,11 +46,19 @@ impl HostSession {
         &mut self,
         request: fr_transport::quic::ChannelRequest,
     ) -> Result<fr_transport::quic::MediaChannel, Error> {
+        self.offer_media_role(request, fr_wire::attachment::MediaRole::Configuration)
+    }
+    /// Attach recovery/video lanes without bypassing the admitted session owner.
+    pub fn offer_media_role(
+        &mut self,
+        request: fr_transport::quic::ChannelRequest,
+        role: fr_wire::attachment::MediaRole,
+    ) -> Result<fr_transport::quic::MediaChannel, Error> {
         self.check()?;
         let control = self.opened.control.clone();
         self.opened
             .transport
-            .offer_media_channel(
+            .offer_media_role(
                 &self.opened.cx,
                 fr_transport::quic::ChannelScope {
                     control: self.opened.routes,
@@ -58,6 +66,7 @@ impl HostSession {
                     selection: &self.opened.selected,
                 },
                 request,
+                role,
                 || control.check().is_ok(),
             )
             .map_err(Error::Transport)

@@ -71,6 +71,9 @@ impl From<StreamError> for Error {
 /// external effects. This is not a wildcard for unknown message classes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Messages {
+    /// Attachment completed, but this direction has no application payloads.
+    /// The stream remains owned and monitored for FIN/RESET, never recycled.
+    NoApplication,
     Exact(u16),
     InputActions,
     /// Host tickets and terminal input results on the same reliable feedback lane.
@@ -85,6 +88,7 @@ pub enum Messages {
 impl Messages {
     fn contains(self, kind: u16) -> bool {
         match self {
+            Self::NoApplication => false,
             Self::Exact(expected) => kind == expected,
             Self::InputFeedback => matches!(kind, 0x0017 | 0x0048),
             Self::DecoderReplies => matches!(kind, 0x0031 | 0x0033),
@@ -437,6 +441,13 @@ impl QuicRecords {
             critical_send_records: self.send_usage(Priority::Critical).1,
         }
     }
+    fn datagram_maximum(&self, route: DatagramRoute) -> usize {
+        self.attachments
+            .iter()
+            .find(|a| a.binding == route.binding)
+            .and_then(|a| a.datagram_maximum)
+            .unwrap_or(self.policy.datagram_record_bytes)
+    }
     fn send_usage(&self, priority: Priority) -> (usize, usize) {
         self.senders
             .iter()
@@ -534,7 +545,7 @@ impl QuicRecords {
                 }
                 validate_record(
                     bytes,
-                    self.policy.datagram_record_bytes,
+                    self.datagram_maximum(r),
                     r.binding,
                     Messages::Exact(r.kind),
                 )?;
@@ -818,7 +829,7 @@ impl QuicRecords {
             }
             validate_record(
                 &bytes,
-                self.policy.datagram_record_bytes,
+                self.datagram_maximum(route),
                 binding,
                 Messages::Exact(kind),
             )?;

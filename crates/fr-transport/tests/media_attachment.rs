@@ -648,3 +648,6 @@ fn decoder_reply_before_attachment_and_attachment_replay_after_promotion_refuse(
         );
     });
 }
+
+#[path = "media_attachment/delivery.rs"]
+mod delivery;

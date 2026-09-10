@@ -19,6 +19,10 @@ use fr_core::{
 
 pub const CAPABILITY: &str = "native-media-attachment";
 pub const VERSION: u16 = 1;
+/// Adds the recovery lane and the fixed video/progress/repair lane family.
+/// Configuration-only peers must not select this additional capability.
+pub const DELIVERY_CAPABILITY: &str = "native-media-delivery";
+pub const DELIVERY_VERSION: u16 = 1;
 pub const BINDING_RECORD_BYTES: usize = HEADER_BYTES + 118;
 pub const GRANT_RECORD_BYTES: usize = BINDING_RECORD_BYTES + 44;
 

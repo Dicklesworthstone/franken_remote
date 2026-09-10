@@ -1,10 +1,10 @@
-//! One-use native media-configuration attachment on an established control pair.
+//! One-use native media-channel attachment on an established control pair.
 //! Both directions are actual allocated QUIC streams. No app record is routed
 //! until the binding and attachment exchanges complete on this connection.
 use super::{
-    ConnectionBinding, ControlRoutes, Cx, Disposition, EmptySendState, Error, Inbound, MAX_STREAMS,
-    Messages, Priority, QuicRecords, RecordStream, Route, Sender, StreamId, StreamRole,
-    StreamRoute,
+    ConnectionBinding, ControlRoutes, Cx, DatagramRoute, Disposition, EmptySendState, Error,
+    Inbound, MAX_DATAGRAMS, MAX_STREAMS, Messages, Priority, QuicRecords, RecordStream, Route,
+    Sender, StreamId, StreamRole, StreamRoute,
 };
 use asupersync::bytes::Bytes;
 use fr_core::limits::ProtocolLimits;
@@ -37,6 +37,8 @@ pub(super) struct Reservation {
     until: u64,
     ticket: Option<Ticket>,
     pub(super) inbound: StreamId,
+    pub(super) binding: u32,
+    pub(super) datagram_maximum: Option<usize>,
 }
 impl Reservation {
     pub(super) fn readable(&self) -> bool {
@@ -66,7 +68,7 @@ pub struct ChannelRequest {
     pub ticket: Ticket,
     pub timeout: Duration,
 }
-/// Newly installed configuration/reply routes. They remain on the original
+/// Newly installed role-specific routes. They remain on the original
 /// connection and retain native flow-control and old-send reservations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AttachedChannel {
@@ -74,6 +76,8 @@ pub struct AttachedChannel {
     pub outbound: StreamRoute,
     pub inbound: StreamRoute,
     pub byte_allowance: u64,
+    /// Only the Video role activates a datagram route, after attachment ACK.
+    pub datagram: Option<DatagramRoute>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -105,6 +109,7 @@ pub struct MediaChannel {
     until: u64,
     result: Option<AttachedChannel>,
     receive_armed: bool,
+    allowance: u64,
 }
 impl fmt::Debug for MediaChannel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -161,7 +166,46 @@ fn duration_us(duration: Duration) -> Result<u64, Error> {
     }
     Ok(us)
 }
+fn validate_role(scope: &ChannelScope<'_>, role: MediaRole) -> Result<(), Error> {
+    if role != MediaRole::Configuration
+        && !scope.selection.capabilities.iter().any(|c| {
+            c.name == attachment::DELIVERY_CAPABILITY && c.version == attachment::DELIVERY_VERSION
+        })
+    {
+        return Err(Error::WrongRoute);
+    }
+    Ok(())
+}
+fn priority(role: MediaRole, host_direction: bool) -> Priority {
+    if role == MediaRole::Recovery && host_direction {
+        Priority::Bulk
+    } else {
+        Priority::Critical
+    }
+}
+fn messages(role: MediaRole, host_direction: bool) -> Messages {
+    match (role, host_direction) {
+        (MediaRole::Configuration, true) => Messages::Exact(0x30),
+        (MediaRole::Configuration, false) => Messages::DecoderReplies,
+        (MediaRole::Recovery, true) => Messages::Exact(0x32),
+        (MediaRole::Recovery, false) => Messages::NoApplication,
+        (MediaRole::Video, true) => Messages::Exact(0x37),
+        (MediaRole::Video, false) => Messages::Exact(0x35),
+    }
+}
 impl QuicRecords {
+    fn attachment_allowance(&self, limits: &ProtocolLimits, role: MediaRole) -> u64 {
+        let base = u64::from(limits.max_control_message_bytes())
+            .min(self.policy.stream_window)
+            .min(self.policy.critical_send_bytes as u64);
+        match role {
+            MediaRole::Configuration => base,
+            MediaRole::Recovery => base.min(self.policy.retained_send_bytes as u64),
+            // The same advertised cap bounds progress, repairs AND video.
+            // A smaller peer/record ceiling cannot be bypassed via DATAGRAM.
+            MediaRole::Video => base.min(self.policy.datagram_record_bytes as u64),
+        }
+    }
     fn next_uni(&self, role: StreamRole) -> Result<StreamId, Error> {
         let n = self
             .streams
@@ -200,12 +244,14 @@ impl QuicRecords {
                 .max()
                 .unwrap_or(0)
             || ticket.is_some_and(|t| self.attachments.iter().any(|r| r.ticket == Some(t)))
-            || d.role != MediaRole::Configuration
             || allowance < GRANT_RECORD_BYTES as u64
             || allowance > self.policy.stream_window
             || allowance > self.policy.critical_send_bytes as u64
         {
             return Err(Error::WrongRoute);
+        }
+        if d.role == MediaRole::Video && self.datagrams.len() >= MAX_DATAGRAMS {
+            return Err(Error::Backpressure);
         }
         let role = self.role()?;
         let (local, peer) = if role == StreamRole::Server {
@@ -223,6 +269,8 @@ impl QuicRecords {
         }
         Ok((role, local, peer))
     }
+    // Keep native reservation and all retained ownership in one transaction.
+    #[allow(clippy::too_many_lines)]
     fn reserve_pair(
         &mut self,
         cx: &Cx,
@@ -244,6 +292,11 @@ impl QuicRecords {
         self.attachments
             .try_reserve_exact(1)
             .map_err(|_| Error::Allocation)?;
+        if d.role == MediaRole::Video {
+            self.datagrams
+                .try_reserve_exact(1)
+                .map_err(|_| Error::Allocation)?;
+        }
         let outbound = StreamRoute {
             stream: StreamId(local),
             binding: d.binding.parent.id,
@@ -252,13 +305,14 @@ impl QuicRecords {
             } else {
                 0x19
             }),
-            priority: Priority::Critical,
+            priority: priority(d.role, role == StreamRole::Server),
             outbound: true,
             maximum: GRANT_RECORD_BYTES,
         };
         let inbound = StreamRoute {
             stream: StreamId(peer),
             outbound: false,
+            priority: priority(d.role, role == StreamRole::Client),
             messages: Messages::Exact(if role == StreamRole::Server {
                 0x19
             } else {
@@ -331,6 +385,9 @@ impl QuicRecords {
             until,
             ticket,
             inbound: inbound.stream,
+            binding: d.binding.parent.id,
+            datagram_maximum: (d.role == MediaRole::Video)
+                .then_some(usize::try_from(allowance).map_err(|_| Error::TooLarge)?),
         });
         Ok((ControlRoutes { outbound, inbound }, state))
     }
@@ -341,10 +398,23 @@ impl QuicRecords {
         cx: &Cx,
         scope: ChannelScope<'_>,
         request: ChannelRequest,
+        authorize: impl FnMut() -> bool,
+    ) -> Result<MediaChannel, Error> {
+        self.offer_media_role(cx, scope, request, MediaRole::Configuration, authorize)
+    }
+    /// Negotiate a concrete media role. Recovery/video additionally require the
+    /// native-media-delivery capability; no role is selected from record flags.
+    pub fn offer_media_role(
+        &mut self,
+        cx: &Cx,
+        scope: ChannelScope<'_>,
+        request: ChannelRequest,
+        role: MediaRole,
         mut authorize: impl FnMut() -> bool,
     ) -> Result<MediaChannel, Error> {
         let current = self.check(cx, &mut authorize)?;
         validate_scope(self, &scope)?;
+        validate_role(&scope, role)?;
         if self.role()? != StreamRole::Server || request.ticket.0 == 0 {
             return Err(Error::WrongRoute);
         }
@@ -353,16 +423,14 @@ impl QuicRecords {
             .ok_or(Error::Clock)?;
         let descriptor = Descriptor {
             binding: request.binding,
-            role: MediaRole::Configuration,
+            role,
             host_stream: self.next_uni(StreamRole::Server)?.0,
             viewer_stream: self.next_uni(StreamRole::Client)?.0,
         };
         descriptor
             .validate(scope.parent)
             .map_err(|_| Error::WrongRoute)?;
-        let allowance = u64::from(scope.selection.limits.max_control_message_bytes())
-            .min(self.policy.stream_window)
-            .min(self.policy.critical_send_bytes as u64);
+        let allowance = self.attachment_allowance(&scope.selection.limits, descriptor.role);
         let grant = Grant {
             descriptor,
             ticket: request.ticket,
@@ -382,6 +450,7 @@ impl QuicRecords {
             current,
             until,
             true,
+            allowance,
         );
         owner.grant = Some(grant);
         owner.stage(Message::Binding(descriptor))?;
@@ -418,12 +487,20 @@ impl QuicRecords {
         let until = current
             .checked_add(duration_us(timeout)?)
             .ok_or(Error::Clock)?;
-        let allowance = u64::from(scope.selection.limits.max_control_message_bytes())
-            .min(self.policy.stream_window)
-            .min(self.policy.critical_send_bytes as u64);
+        validate_role(&scope, d.role)?;
+        let allowance = self.attachment_allowance(&scope.selection.limits, d.role);
         let (pair, state) = self.reserve_pair(cx, d, until, None, allowance)?;
-        let mut owner =
-            MediaChannel::new(self.binding(), state, scope, pair, d, current, until, false);
+        let mut owner = MediaChannel::new(
+            self.binding(),
+            state,
+            scope,
+            pair,
+            d,
+            current,
+            until,
+            false,
+            allowance,
+        );
         owner.stage(Message::Accepted(d.binding.parent.id))?;
         owner.check(self, cx, &mut authorize)?;
         Ok(owner)
@@ -440,6 +517,7 @@ impl MediaChannel {
         last: u64,
         until: u64,
         host: bool,
+        allowance: u64,
     ) -> Self {
         Self {
             connection,
@@ -458,6 +536,7 @@ impl MediaChannel {
             until,
             result: None,
             receive_armed: !host,
+            allowance,
         }
     }
     pub const fn deadline_us(&self) -> u64 {
@@ -465,6 +544,18 @@ impl MediaChannel {
     }
     pub const fn descriptor(&self) -> Descriptor {
         self.descriptor
+    }
+    /// Read completed routes only from their original, still-live connection.
+    /// Numeric route equality on another connection is not completion evidence.
+    pub fn completed_on(&self, q: &QuicRecords) -> Result<AttachedChannel, Error> {
+        if self.phase != Phase::Complete
+            || self.state.load(Ordering::Acquire) != ACTIVE
+            || !q.is_bound_to(&self.connection)
+            || q.is_closed()
+        {
+            return Err(Error::WrongRoute);
+        }
+        self.result.ok_or(Error::WrongRoute)
     }
     pub fn is_complete(&self) -> bool {
         self.phase == Phase::Complete
@@ -683,7 +774,8 @@ impl MediaChannel {
             }
             (false, Phase::Ticket, Message::Ticket(g)) if g.descriptor == self.descriptor => {
                 // Host time is deliberately not compared to viewer time.
-                if g.byte_allowance < GRANT_RECORD_BYTES as u64 {
+                if g.byte_allowance < GRANT_RECORD_BYTES as u64 || g.byte_allowance > self.allowance
+                {
                     return Err(Error::TooLarge);
                 }
                 self.grant = Some(g);
@@ -699,6 +791,7 @@ impl MediaChannel {
     }
     /// Complete in place, after the ACK's old stream bytes are staged. Retained
     /// native retransmission bytes keep their original deadlines and charges.
+    #[allow(clippy::too_many_lines)]
     pub fn finish(
         &mut self,
         q: &mut QuicRecords,
@@ -750,23 +843,28 @@ impl MediaChannel {
                 return Err(Error::TooLarge);
             }
             let outbound = StreamRoute {
-                messages: if self.host {
-                    Messages::Exact(0x30)
-                } else {
-                    Messages::DecoderReplies
-                },
+                messages: messages(self.descriptor.role, self.host),
                 maximum,
                 ..self.pair.outbound
             };
             let inbound = StreamRoute {
-                messages: if self.host {
-                    Messages::DecoderReplies
-                } else {
-                    Messages::Exact(0x30)
-                },
+                messages: messages(self.descriptor.role, !self.host),
                 maximum,
                 ..self.pair.inbound
             };
+            let datagram = (self.descriptor.role == MediaRole::Video).then_some(DatagramRoute {
+                binding: self.descriptor.binding.parent.id,
+                kind: 0x34,
+                outbound: self.host,
+            });
+            if datagram.is_some() && q.datagrams.len() >= MAX_DATAGRAMS {
+                return Err(Error::Backpressure);
+            }
+            let reservation = q
+                .attachments
+                .iter()
+                .position(|a| Arc::ptr_eq(&a.state, &self.state))
+                .ok_or(Error::WrongRoute)?;
             let framing =
                 RecordStream::new(maximum, inbound.binding, q.policy.record_lifetime_micros)?;
             let sender = q
@@ -785,6 +883,10 @@ impl MediaChannel {
             q.inbound[slot].route = inbound;
             q.inbound[slot].framing = framing;
             q.senders[sender].route = outbound;
+            if let Some(route) = datagram {
+                q.attachments[reservation].datagram_maximum = Some(maximum);
+                q.datagrams.push(route);
+            }
             self.pair = ControlRoutes { outbound, inbound };
             self.state.store(ACTIVE, Ordering::Release);
             self.phase = Phase::Complete;
@@ -793,6 +895,7 @@ impl MediaChannel {
                 outbound,
                 inbound,
                 byte_allowance: grant.byte_allowance,
+                datagram,
             });
             self.grant = None;
             Ok(self.result)
