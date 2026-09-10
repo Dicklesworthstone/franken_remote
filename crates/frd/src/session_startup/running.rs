@@ -39,6 +39,28 @@ impl OpenedSession {
     }
 }
 impl HostSession {
+    /// Publish a locally enumerated, approved disclosure scope and retain the
+    /// resulting choice while media runs. Enumeration must not block this owner.
+    /// Continue driving this session and dispatch display records between turns.
+    pub fn select_display(
+        &mut self,
+        catalog: fr_wire::display::Catalog,
+        timeout: Duration,
+    ) -> Result<crate::display_selection::DisplaySelection, crate::display_selection::Error> {
+        use crate::display_selection::{DisplaySelection, Error as DisplayError};
+        self.check().map_err(|_| DisplayError::Closed)?;
+        DisplaySelection::host(
+            &mut self.opened.transport,
+            fr_transport::quic::ChannelScope {
+                control: self.opened.routes,
+                parent: self.opened.binding,
+                selection: &self.opened.selected,
+            },
+            self.opened.control.clone(),
+            catalog,
+            timeout,
+        )
+    }
     /// Join an initial-grant broker to this actual negotiated owner. Input routes
     /// must already be explicitly authenticated/installed on the same connection;
     /// this does not silently add input routes, consent or view readiness.

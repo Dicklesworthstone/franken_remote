@@ -93,7 +93,9 @@ impl Messages {
             Self::InputFeedback => matches!(kind, 0x0017 | 0x0048),
             Self::DecoderReplies => matches!(kind, 0x0031 | 0x0033),
             Self::Negotiation => matches!(kind, 0x0001..=0x0003 | 0x0010 | 0x0011),
-            Self::SessionControl => matches!(kind, 0x0012..=0x001e | 0x0084 | 0x0085),
+            Self::SessionControl => {
+                matches!(kind, 0x0012..=0x001e | 0x0020 | 0x0022 | 0x0084 | 0x0085)
+            }
             // Release-only HeldState and InputMode share the ordered action
             // stream. Neither pointer datagrams nor results enter this lane.
             Self::InputActions => matches!(kind, 0x0040 | 0x0041 | 0x0043..=0x0047),
@@ -235,6 +237,7 @@ pub struct ConnectionBinding(Weak<()>);
 pub struct QuicRecords {
     identity: Arc<()>,
     clock_attached: bool,
+    display_selection_claimed: bool,
     attachments: Vec<attachment::Reservation>,
     native: Option<NativeQuicUdpConnection>,
     streams: Vec<StreamRoute>,
@@ -346,6 +349,7 @@ impl QuicRecords {
         Ok(Self {
             identity: Arc::new(()),
             clock_attached: false,
+            display_selection_claimed: false,
             attachments: Vec::new(),
             native: Some(native),
             streams: streams.to_vec(),

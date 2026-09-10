@@ -39,6 +39,33 @@ impl QuicRecords {
         self.clock_attached = true;
         Ok(self.binding())
     }
+    /// Reserve the one initial display-choice exchange on this control pair.
+    /// Destruction never permits replay of another catalog on the same session.
+    pub fn claim_display_selection(
+        &mut self,
+        routes: ControlRoutes,
+    ) -> Result<ConnectionBinding, Error> {
+        if self.is_closed() {
+            return Err(Error::Closed);
+        }
+        if self.display_selection_claimed
+            || routes.inbound.outbound
+            || !routes.outbound.outbound
+            || routes.inbound.binding == 0
+            || routes.inbound.binding != routes.outbound.binding
+            || [routes.inbound, routes.outbound].iter().any(|r| {
+                r.messages != Messages::SessionControl
+                    || r.priority != Priority::Critical
+                    || r.maximum < fr_wire::display::SELECT_BYTES
+                    || !self.has_route(Route::Stream(*r))
+            })
+            || self.receive_ended(routes.inbound)?
+        {
+            return Err(Error::WrongRoute);
+        }
+        self.display_selection_claimed = true;
+        Ok(self.binding())
+    }
     /// Adopt a fresh, TLS-established native connection for startup only.
     /// The listener must already enforce tailnet ingress. The session owner
     /// obtains `LocalAPI` admission before sending or consuming application data.
