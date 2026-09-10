@@ -99,7 +99,47 @@ All nine existing native decoder-startup tests now use the ticket-negotiated
 configuration pair. They retain actual X11 capture, supervised software HEVC,
 network configuration, first-frame readback and a dependent P picture after
 handoff. Their other media routes remain explicit fixtures. Existing malformed
-configuration, cancellation, expiry and backpressure assertions are unchanged.
+configuration, cancellation and expiry refusals remain required. Two test-setup
+assumptions were corrected for the genuine attachment ACK still occupying QUIC: a
+foreign-connection refusal preserves the entire prior queue accounting, and the
+pressure fixture waits for real admission before testing backpressure. Neither
+change resets a deadline, changes production code or substitutes timeout for a
+specific rejection.
+
+## Published source and retained verification
+
+The bounded wire records were published in `24788e1eff192a75e5402d4f2ca742912b7256ec`.
+The runtime, session integration and native test migration were published in
+`1c733934bed6cabdb8f793e206f075af4b78ba4a`, preserving concurrent control-renewal
+work through `184e0092eaf713aab84d298dbcd5cfc760b098f5`.
+
+[Run 34474629312](https://github.com/Dicklesworthstone/franken_remote/actions/runs/34474629312)
+verified the exact five wire source objects. The corrected runtime's exact ten
+source objects passed full pinned-toolchain formatting, workspace compilation,
+strict Clippy, tests and documentation checks in
+[run 34478447265](https://github.com/Dicklesworthstone/franken_remote/actions/runs/34478447265),
+including explicit runs of all nine live attachment tests, all 26 session-startup
+tests and all nine native decoder-startup tests. The workflow staged only the
+hash-checked reviewed patch, then exported the matching source objects after
+success. Its base was `8d0befc`, before concurrent client/control-renewal publication;
+that evidence does not automatically cover later combined checkouts. The retained
+first runtime candidate run `34477797403` failed on the queue-empty test assumption
+above; it is not counted as passing evidence.
+
+Locally, the final nine native tests passed ten four-thread repetitions. The nine
+attachment, 26 session and nine native tests also passed three combined parallel
+runs. Sixteen existing live-QUIC regressions passed, as did the earlier 320-test
+core/wire/media/client Cargo selection, which predates the concurrent client
+changes. Selected first-party and test Clippy checks passed. These are separate
+selections and repetitions, not an invented full-suite count.
+
+A negative control removed only ticket-identity comparison from a separate source
+copy. The unchanged forged-ticket test then failed; the production implementation
+passed. Deadline, tuple, transport and application-refusal assertions were retained.
+
+The finalized workflow checks committed source read-only, without candidate
+patches, source-object writes, elevated token permissions or branch mutations.
+UBS and Beads tooling were unavailable; no issue, task or phase was closed.
 
 Reproduce on the pinned compiler with native SDKs installed:
 

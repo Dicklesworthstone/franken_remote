@@ -3,9 +3,20 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['.github/workflows/verify-media-attachment.yml']
+    paths:
+      - '.github/workflows/verify-media-attachment.yml'
+      - 'crates/fr-wire/**'
+      - 'crates/fr-transport/**'
+      - 'crates/frd/src/session_startup/**'
+      - 'crates/frd/src/session_startup.rs'
+      - 'crates/frd/src/media/**'
+      - 'crates/frd/src/media.rs'
+      - 'crates/fr-native/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
 permissions:
-  contents: write
+  contents: read
 env:
   CARGO_BUILD_JOBS: '1'
   CARGO_PROFILE_DEV_DEBUG: '0'
@@ -19,86 +30,21 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
-      - name: Stage exact reviewed runtime source without ref writes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import base64,hashlib,json,lzma,os,subprocess
-          from pathlib import Path
-          expected={
-            'NATIVE_MEDIA_ATTACHMENT.md':(None,'364c87940d27cb5005e7e608c855bf18567bb712'),
-            'PROTOCOL_ATTACHMENT.md':('16cebc6670e7699c42c23158fe771aaad204d741','a68982013f531e9f5c79461be258012265ae781c'),
-            'QUIC_RECORDS.md':('1040d87feb08616e64ef1565587819b2c26c9ae0','3892652578a828f0cc84bd94f3d66f3f6c0f1e4b'),
-            'crates/fr-native/tests/decoder_startup.rs':('35ba834e6cf00c09e141dde3989a28a3b469d18f','d893aed34eb1de7e93e1f3edb52adb7ab6bad91e'),
-            'crates/fr-transport/src/quic.rs':('6cbe7e2a2ae533a26a41cd002d66d2cec2e949a6','7d93548c8e21379c22a084d56ce4d61fac8a2203'),
-            'crates/fr-transport/src/quic/attachment.rs':(None,'24369ba75679d7251ba40a1e59b94b52eec24c02'),
-            'crates/fr-transport/tests/media_attachment.rs':(None,'4e4acdad3347b8ccc1cbb4a9b35ded362c4b3a2a'),
-            'crates/frd/src/session_startup/running.rs':('ac07574fc9d50f5d59c10843b1c20d0ea7b4fda5','5eb04bf049c9cbcda18a1f0e49c96bcfa79048ba'),
-            'crates/frd/src/session_startup/running/tests.rs':('e8d6c23b226ce21faecb6e81b14e84e99bf6f4ee','3bb955abc9dbcfe8c802cbb752d09e012cb4d70f'),
-            'crates/frd/src/session_startup/viewer.rs':('a4411fd8a33f696e5afa643b66f9353c7e7511c1','a7eec1ca05eeeb2c4226d09377769df7ae2992a3'),
-          }
-          def sha(b): return hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest()
-          def blob(oid):
-            row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
-            b=base64.b64decode(row['content']);assert sha(b)==oid
-            return b
-          for p,(before,after) in expected.items():
-            assert (sha(Path(p).read_bytes()) if Path(p).exists() else None)==before,p
-          parts=[('3798be303233881867115dde2304b210b984324a',7000),('f5d1b6f376a294a5a9429ad45cf9540b35ca8341',7000),('5667b2e56958237ff860a17597351b631357b54f',6904)]
-          encoded=[]
-          for oid,length in parts:
-            part=blob(oid);assert len(part)==length
-            encoded.append(part)
-          raw=base64.b64decode(b''.join(encoded),validate=True)
-          assert len(raw)==15676 and sha(raw)=='97d1a08552154c45995f69ada9d17384e8dd5ee1'
-          decoder=lzma.LZMADecompressor();data=decoder.decompress(raw,max_length=76632)
-          assert decoder.eof and not decoder.unused_data and len(data)==76631
-          assert hashlib.sha256(data).hexdigest()=='8a6724fb42259fccf20131b31ff032b55da2905c7306d4ed8f1b01f4e2e3e5b9'
-          patch=Path(os.environ['RUNNER_TEMP'],'attachment-runtime.patch');patch.write_bytes(data)
-          stats=subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
-          assert {line.split('\t',2)[2] for line in stats.splitlines()}==set(expected)
-          subprocess.run(['git','apply','--check',str(patch)],check=True)
-          subprocess.run(['git','apply',str(patch)],check=True)
-          for p,(before,after) in expected.items(): assert sha(Path(p).read_bytes())==after,p
-          # A completed attachment can still own unacknowledged native bytes.
-          # Preserve full queue equality on foreign rejection, and admit pressure
-          # only after prior handshake bytes drain under the unchanged deadline.
-          fix=Path(os.environ['RUNNER_TEMP'],'attachment-retention.patch')
-          fix.write_bytes(blob('34bedd48e13a00697378fe9d11fcf30aa919eea6'))
-          stats=subprocess.check_output(['git','apply','--numstat',str(fix)],text=True)
-          assert {line.split('\t',2)[2] for line in stats.splitlines()}=={'crates/fr-native/tests/decoder_startup.rs'}
-          subprocess.run(['git','apply','--check',str(fix)],check=True)
-          subprocess.run(['git','apply',str(fix)],check=True)
-          expected['crates/fr-native/tests/decoder_startup.rs']=('35ba834e6cf00c09e141dde3989a28a3b469d18f','47da3d4a883831ff3ce4a5f1c76a666c8f3fdebc')
-          for p,(before,after) in expected.items(): assert sha(Path(p).read_bytes())==after,p
-          Path(os.environ['RUNNER_TEMP'],'attachment-paths.json').write_text(json.dumps(expected))
-          print('Exact runtime candidate staged on',os.environ['GITHUB_SHA'])
-          PY
       - name: Install pinned compiler and native SDKs
         run: |
           rustup show active-toolchain
           sudo apt-get update
           sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
-      - name: Verify complete workspace and actual QUIC native attachment
+      - name: Verify exact committed workspace
         run: |
           ./scripts/verify.sh fast
           ./scripts/verify.sh docs
+      - name: Exercise negotiated attachment through persistent sessions and native HEVC
+        run: |
           cargo test -p fr-transport --test media_attachment --locked -- --nocapture
           cargo test -p frd session_startup --locked -- --nocapture
           cargo test -p fr-native --features linux-media --test decoder_startup --locked -- --nocapture
-          git diff --check
-      - name: Export exact verified objects without ref writes
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Confirm verification did not change tracked source
         run: |
-          python3 - <<'PY'
-          import base64,hashlib,json,os,subprocess
-          from pathlib import Path
-          for p,(before,after) in json.loads(Path(os.environ['RUNNER_TEMP'],'attachment-paths.json').read_text()).items():
-            b=Path(p).read_bytes();assert hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest()==after
-            body=json.dumps({'encoding':'base64','content':base64.b64encode(b).decode()})
-            result=subprocess.run(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,capture_output=True,check=True)
-            assert json.loads(result.stdout)['sha']==after
-            print(json.dumps({'path':p,'sha':after,'verified_against':os.environ['GITHUB_SHA']}))
-          PY
+          git diff --exit-code
+          git diff --cached --exit-code
