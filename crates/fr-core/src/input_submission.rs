@@ -15,7 +15,9 @@ use crate::{
     },
     time::HostInstant,
 };
+mod control;
 mod held;
+pub use control::ControlLease;
 use core::fmt;
 pub use held::{Reconciliation, ReconciliationOutcome};
 use std::sync::{
@@ -148,6 +150,7 @@ impl RevokeHandle {
 pub struct InputMonitor {
     authority: Arc<Mutex<SessionAuthority>>,
     revoke: RevokeHandle,
+    lease: InputLeaseId,
 }
 impl InputMonitor {
     pub fn revoke(&self) {
@@ -175,6 +178,22 @@ impl InputMonitor {
         }
         result
     }
+    fn with_time<T>(
+        &self,
+        clock: &mut HostInstant,
+        sampled: HostInstant,
+        f: impl FnOnce(&mut SessionAuthority, HostInstant) -> Result<T, AuthorityError>,
+    ) -> Result<T, Refusal> {
+        if sampled < *clock {
+            self.revoke();
+            return Err(Refusal::Authority(AuthorityError::ClockRegression));
+        }
+        *clock = sampled;
+        self.with(|authority| {
+            let now = authority.serialized_time(sampled);
+            f(authority, now)
+        })
+    }
     fn with<T>(
         &self,
         f: impl FnOnce(&mut SessionAuthority) -> Result<T, AuthorityError>,
@@ -188,6 +207,9 @@ impl InputMonitor {
         })?;
         if self.is_revoked() {
             return Err(Refusal::Revoked);
+        }
+        if authority.lease_id() != Some(self.lease) {
+            return Err(Refusal::Authority(AuthorityError::StaleLease));
         }
         f(&mut authority).map_err(Refusal::Authority)
     }
@@ -255,25 +277,52 @@ pub struct InputSession {
     cumulative: (i64, i64),
     reconciliation_floor: Option<u64>,
     reconciliation: Option<Reconciliation>,
+    clock: HostInstant,
+    control_taken: bool,
 }
 impl InputSession {
     pub fn new(
-        mut authority: SessionAuthority,
+        authority: SessionAuthority,
         credentials: InputCredentials,
         bounds: InputBounds,
         capabilities: Capabilities,
         now: HostInstant,
     ) -> Result<Self, Refusal> {
-        if authority.session() != credentials.session {
-            return Err(Refusal::StaleSession);
+        Self::from_shared_authority(
+            Arc::new(Mutex::new(authority)),
+            credentials,
+            bounds,
+            capabilities,
+            now,
+        )
+    }
+    /// Attach native input to the SAME locally approved authority used by media.
+    /// This neither grants a lease nor marks a view ready. The local OS-session
+    /// owner must reserve the single native seat and retain the shared authority;
+    /// callers must use one host-monotonic clock domain across all participants.
+    /// The mutex protects pure policy only, never caller clocks or native calls.
+    pub fn from_shared_authority(
+        shared: Arc<Mutex<SessionAuthority>>,
+        credentials: InputCredentials,
+        bounds: InputBounds,
+        capabilities: Capabilities,
+        now: HostInstant,
+    ) -> Result<Self, Refusal> {
+        {
+            let mut authority = shared.lock().map_err(|_| Refusal::AuthorityUnavailable)?;
+            if authority.session() != credentials.session {
+                return Err(Refusal::StaleSession);
+            }
+            let at = authority.serialized_time(now);
+            authority
+                .authorize_submission(credentials.lease, credentials.ticket, at)
+                .map_err(Refusal::Authority)?;
         }
-        authority
-            .authorize_submission(credentials.lease, credentials.ticket, now)
-            .map_err(Refusal::Authority)?;
         let revoke = RevokeHandle(Arc::new(AtomicBool::new(false)));
         let authority = InputMonitor {
-            authority: Arc::new(Mutex::new(authority)),
+            authority: shared,
             revoke: revoke.clone(),
+            lease: credentials.lease,
         };
         Ok(Self {
             authority,
@@ -295,6 +344,8 @@ impl InputSession {
             cumulative: (0, 0),
             reconciliation_floor: None,
             reconciliation: None,
+            clock: now,
+            control_taken: false,
         })
     }
     /// Immutable scope of this already admitted native owner. Naming a ticket
@@ -340,8 +391,9 @@ impl InputSession {
         now: HostInstant,
     ) -> Result<HostInstant, Refusal> {
         self.check_active()?;
-        self.authority
-            .with(|a| a.issue_observation_challenge(nonce, now))
+        self.authority.with_time(&mut self.clock, now, |a, at| {
+            a.issue_observation_challenge(nonce, at)
+        })
     }
     pub fn renew_observation(
         &mut self,
@@ -349,8 +401,9 @@ impl InputSession {
         now: HostInstant,
     ) -> Result<HostInstant, Refusal> {
         self.check_active()?;
-        self.authority
-            .with(|a| a.respond_observation_challenge(nonce, now))
+        self.authority.with_time(&mut self.clock, now, |a, at| {
+            a.respond_observation_challenge(nonce, at)
+        })
     }
     pub fn issue_control_challenge(
         &mut self,
@@ -358,13 +411,15 @@ impl InputSession {
         now: HostInstant,
     ) -> Result<HostInstant, Refusal> {
         self.check_active()?;
-        self.authority
-            .with(|a| a.issue_control_challenge(nonce, now))
+        self.authority.with_time(&mut self.clock, now, |a, at| {
+            a.issue_control_challenge(nonce, at)
+        })
     }
     pub fn renew_control(&mut self, nonce: u128, now: HostInstant) -> Result<HostInstant, Refusal> {
         self.check_active()?;
-        self.authority
-            .with(|a| a.respond_control_challenge(self.lease, nonce, now))
+        self.authority.with_time(&mut self.clock, now, |a, at| {
+            a.respond_control_challenge(self.lease, nonce, at)
+        })
     }
     /// The local authority supplies a fresh unpredictable ID. This is NOT an
     /// automatic retry API: consumed actions remain consumed after renewal.
@@ -373,11 +428,21 @@ impl InputSession {
         ticket: InputTicketId,
         now: HostInstant,
     ) -> Result<HostInstant, Refusal> {
+        self.issue_ticket_timed(ticket, now).map(|(_, until)| until)
+    }
+    /// The serialization-time issuance sample and its actual exclusive expiry.
+    /// A competing authority writer may overtake a pre-lock native sample; wire
+    /// metadata must use the same effective time as the policy, never invent a TTL.
+    pub fn issue_ticket_timed(
+        &mut self,
+        ticket: InputTicketId,
+        now: HostInstant,
+    ) -> Result<(HostInstant, HostInstant), Refusal> {
         self.check_active()?;
-        let until = self
-            .authority
-            .with(|a| a.issue_input_ticket(self.lease, ticket, now))?;
-        Ok(until)
+        self.authority.with_time(&mut self.clock, now, |a, at| {
+            a.issue_input_ticket(self.lease, ticket, at)
+                .map(|until| (at, until))
+        })
     }
     /// Service independently during idle, not only when a packet arrives.
     /// Ticket expiry rejects actions; lease/view expiry additionally ends held
@@ -386,7 +451,7 @@ impl InputSession {
         if self.revoke.is_revoked()
             || !self
                 .authority
-                .with(|a| Ok(a.has_live_control(now)))
+                .with_time(&mut self.clock, now, |a, at| Ok(a.has_live_control(at)))
                 .unwrap_or(false)
         {
             self.revoke();
@@ -535,8 +600,9 @@ impl InputSession {
         if credentials.view != self.view {
             return Err(Refusal::StaleView);
         }
-        self.authority
-            .with(|a| a.authorize_submission(self.lease, credentials.ticket, now))
+        self.authority.with_time(&mut self.clock, now, |a, at| {
+            a.authorize_submission(self.lease, credentials.ticket, at)
+        })
     }
     fn require(&self, cap: Capability) -> Result<(), Refusal> {
         if self.capabilities.contains(cap) {

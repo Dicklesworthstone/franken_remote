@@ -608,6 +608,17 @@ impl SessionAuthority {
         }
     }
 
+    /// Clock samples taken before acquiring the shared pure-policy lock may be
+    /// overtaken by another participant. Each participant checks its OWN samples
+    /// for regression before using this conservative serialization point.
+    pub(crate) fn serialized_time(&self, sampled: HostInstant) -> HostInstant {
+        self.last_checked.map_or(sampled, |last| last.max(sampled))
+    }
+
+    pub(crate) fn lease_id(&self) -> Option<InputLeaseId> {
+        self.lease.map(|lease| lease.id)
+    }
+
     fn check_time(&mut self, now: HostInstant) -> Result<(), AuthorityError> {
         if self.clock_faulted || self.last_checked.is_some_and(|previous| now < previous) {
             self.clock_faulted = true;

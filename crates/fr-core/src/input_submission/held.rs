@@ -142,10 +142,10 @@ impl InputSession {
         }
         (operations, count)
     }
-    fn check_reconciliation(&self, now: HostInstant) -> Result<(), Refusal> {
+    fn check_reconciliation(&mut self, now: HostInstant) -> Result<(), Refusal> {
         self.check_active()?;
-        self.authority.with(|a| {
-            if a.has_live_control(now) {
+        self.authority.with_time(&mut self.clock, now, |a, at| {
+            if a.has_live_control(at) {
                 Ok(())
             } else {
                 Err(AuthorityError::NoLease)
