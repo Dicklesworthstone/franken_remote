@@ -5,7 +5,8 @@ on:
     branches: [main]
     paths: ['.github/workflows/verify-initial-control.yml']
 permissions:
-  contents: write
+  contents: read
+  actions: read
 env:
   CARGO_BUILD_JOBS: '1'
   CARGO_PROFILE_DEV_DEBUG: '0'
@@ -19,22 +20,21 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
-      - name: Install pinned compiler and native SDKs
-        run: |
-          rustup show active-toolchain
-          sudo apt-get update
-          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
-      - name: Stage exact initial control implementation
+      - name: Recover and check exact reviewed grant source
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 - <<'PY'
-          import base64, hashlib, json, lzma, os, subprocess
+          import base64, hashlib, json, lzma, os, subprocess, tarfile
           from pathlib import Path
           def sha(data):
               return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
+          repo = os.environ['GITHUB_REPOSITORY']
+          verified = json.loads(subprocess.check_output(['gh', 'api', f'repos/{repo}/actions/runs/34490282918']))
+          assert verified['head_sha'] == '597ebfb89e015304462a9540f0b60d5970785d36'
+          assert verified['status'] == 'completed' and verified['conclusion'] == 'success'
           oid = '8f1b576bac40cf09f05d4236bdda9c8cdce87a6b'
-          row = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
+          row = json.loads(subprocess.check_output(['gh', 'api', f'repos/{repo}/git/blobs/{oid}']))
           raw = base64.b64decode(row['content'])
           assert len(raw) == 7936 and sha(raw) == oid
           decoder = lzma.LZMADecompressor()
@@ -43,37 +43,40 @@ jobs:
           assert hashlib.sha256(data).hexdigest() == '66dd5e93f93af9afb71c49ab877b53f573d1f06f0f77842e766d2cbb86d56330'
           candidate = json.loads(data)
           assert len(candidate['after']) == 8
+          out = Path(os.environ['RUNNER_TEMP'], 'grant-review')
+          out.mkdir()
+          (out / 'candidate.json').write_bytes(data)
+          (out / 'verification.json').write_text(json.dumps({'run': verified['id'], 'conclusion': verified['conclusion'], 'verified_commit': verified['head_sha'], 'current_base': os.environ['GITHUB_SHA']}))
+          subprocess.run(['git', 'archive', '--format=tar.gz', '-o', str(out / 'base.tar.gz'), 'HEAD'], check=True)
           for path, expected in candidate['before'].items():
               assert path.startswith('crates/') and '..' not in Path(path).parts
               actual = sha(Path(path).read_bytes()) if Path(path).exists() else None
               assert actual == expected, f'Concurrent source change: {path}'
-          patch = Path(os.environ['RUNNER_TEMP'], 'initial-control.patch')
+          patch = out / 'initial-control.patch'
           patch.write_text(candidate['patch'])
           stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
           assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(candidate['after'])
           subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
           subprocess.run(['git', 'apply', str(patch)], check=True)
-          for path, expected in candidate['after'].items():
-              assert sha(Path(path).read_bytes()) == expected, path
-          Path(os.environ['RUNNER_TEMP'], 'initial-control-paths.json').write_text(json.dumps(candidate['after']))
+          with tarfile.open(out / 'changed-source.tar.gz', 'w:gz') as archive:
+              for path, expected in candidate['after'].items():
+                  assert sha(Path(path).read_bytes()) == expected, path
+                  archive.add(path, arcname=path)
+          print(json.dumps({'before': candidate['before'], 'after': candidate['after']}, indent=2))
           PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: initial-control-reviewed-source
+          path: ${{ runner.temp }}/grant-review/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Install pinned compiler and native SDKs
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
       - name: Verify complete workspace
         run: |
           ./scripts/verify.sh fast
           ./scripts/verify.sh docs
           git diff --check
-      - name: Export verified objects without ref writes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import base64, hashlib, json, os, subprocess
-          from pathlib import Path
-          for path, expected in json.loads(Path(os.environ['RUNNER_TEMP'], 'initial-control-paths.json').read_text()).items():
-              data = Path(path).read_bytes()
-              assert hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest() == expected
-              body = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()})
-              result = subprocess.run(['gh', 'api', '--method', 'POST', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', '--input', '-'], input=body, text=True, capture_output=True, check=True)
-              assert json.loads(result.stdout)['sha'] == expected, path
-              print(json.dumps({'path': path, 'sha': expected, 'verified_against': os.environ['GITHUB_SHA']}))
-          PY
