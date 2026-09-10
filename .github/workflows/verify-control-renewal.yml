@@ -3,9 +3,19 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['.github/workflows/verify-control-renewal.yml']
+    paths:
+      - '.github/workflows/verify-control-renewal.yml'
+      - 'crates/fr-core/**'
+      - 'crates/fr-wire/**'
+      - 'crates/fr-client/**'
+      - 'crates/frd/**'
+      - 'crates/fr-native/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'CONTROL_LEASE_RENEWAL.md'
 permissions:
-  contents: write
+  contents: read
 env:
   CARGO_BUILD_JOBS: '1'
   CARGO_PROFILE_DEV_DEBUG: '0'
@@ -23,100 +33,8 @@ jobs:
         run: |
           rustup show active-toolchain
           sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
-      - name: Stage exact native control renewal integration
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import base64, hashlib, json, lzma, os, subprocess
-          from pathlib import Path
-          before = {
-              'CHANGELOG.md': '4af2280e3bc96954c963d7c4d0f1548831498323',
-              'CONTROL_LEASE_RENEWAL.md': None,
-              'INPUT_TICKET_RENEWAL.md': '590d8766eb15ea053913d5e1a3f7140bd3cb4819',
-              'crates/fr-client/src/authority.rs': 'f75f88e6448c222b5f7739de73c60a68a25aab30',
-              'crates/fr-client/src/input.rs': '0b5d8ac95132c5ad5894220aeadd6825e8182231',
-              'crates/fr-client/src/input/control.rs': None,
-              'crates/fr-client/src/input/presentation.rs': '9060f23671e4dd316cc0728bb83b6cde591d5132',
-              'crates/fr-client/tests/control_renewal.rs': None,
-              'crates/fr-client/tests/presented_input.rs': '265a72d9493b425f367657723eec8004e699f4e1',
-              'crates/fr-core/src/authority.rs': 'd88053ee107a5423eeec5bb1722433657fbb7584',
-              'crates/fr-core/src/input_submission.rs': 'a1f65edf3ff85ed0b8a84510c3ab99eb74fd8ab2',
-              'crates/fr-core/tests/shared_control.rs': 'ceb1f9ff86acdb97d427b5a8f5dbbaa8e43d8ec9',
-              'crates/fr-native/tests/input_quic.rs': '5f6162ea13d7335cdf2ea6b5ff5679dc615e3d96',
-              'crates/fr-native/tests/input_quic/control.rs': None,
-              'crates/frd/src/input_agent.rs': '8c2e9400bcc32d2b4ba51a6e31dfafb0f8a0e675',
-              'crates/frd/src/input_quic.rs': 'e0ce35a35a62069b4b99b2246a8d7186d296a930',
-              'crates/frd/src/input_quic/control.rs': None,
-              'crates/frd/src/media.rs': 'aa2f0bd27b25d58b63c26ca485bf7348e5e700d2',
-              'crates/frd/tests/input_quic_lifecycle.rs': 'ec3ca827682cfe3a8fab9a00adb261ebcddadeb7',
-              'crates/frd/tests/input_quic_lifecycle/control.rs': None,
-          }
-          after = {
-              'CHANGELOG.md': 'f48a9edc68560fbbe5d9d651140f30f6f823c67a',
-              'CONTROL_LEASE_RENEWAL.md': '88b59897ec73fdda525216b4b24eb218d2c55b51',
-              'INPUT_TICKET_RENEWAL.md': '9071141b73579d7b734e429330738b6d52cd25f1',
-              'crates/fr-client/src/authority.rs': '9c9168678c261921b3cc7d62176cd0e07d060c3a',
-              'crates/fr-client/src/input.rs': '80ebe9e936b2d65552ae3ab2f3fac4516b6e3677',
-              'crates/fr-client/src/input/control.rs': '78490f5cacef3550f2be2f9179fb73aca199e69a',
-              'crates/fr-client/src/input/presentation.rs': 'f1bc1692bc99e3c5fe5aed188a8ea21c535ea821',
-              'crates/fr-client/tests/control_renewal.rs': 'a71cc6a092a5c7dcc8b2040635f41906008e2021',
-              'crates/fr-client/tests/presented_input.rs': '957c84a4eaab24c0b04955039d0529fff813c42d',
-              'crates/fr-core/src/authority.rs': 'b69051dcdfd5709448cb40f7136b4f1da49b6010',
-              'crates/fr-core/src/input_submission.rs': 'f1774965b34139ba6f750f0bdffeafe841bcbe2b',
-              'crates/fr-core/tests/shared_control.rs': 'eba0c2e4415e701245fc3609ebcb9137afa882b1',
-              'crates/fr-native/tests/input_quic.rs': '33773be483e5f1c8b846443756d5c0fb3ab4c867',
-              'crates/fr-native/tests/input_quic/control.rs': '237042f4dcbaffbfaa212416ddc60ea34745a1bb',
-              'crates/frd/src/input_agent.rs': '87f22b35f71e4ac1f434263da5f4fa5a340b0334',
-              'crates/frd/src/input_quic.rs': '83b875caf42d005595e8211d3a04d4fac48a27cf',
-              'crates/frd/src/input_quic/control.rs': 'cf2f75f7624e0a5e761c325788bd55b7c7a3f97f',
-              'crates/frd/src/media.rs': 'c4f027603517d310748ca4cd41ea38e2ae4e5879',
-              'crates/frd/tests/input_quic_lifecycle.rs': '319d4d28cd36a9054a2bce7cdbf33e4668408674',
-              'crates/frd/tests/input_quic_lifecycle/control.rs': 'b1d11708fb6d445b03a5ee54a9fe3b6c60701cc6',
-          }
-          def sha(data):
-              return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
-          for path, expected in before.items():
-              assert (sha(Path(path).read_bytes()) if Path(path).exists() else None) == expected, path
-          parts = [('943f9aa4e0d4b17e7c4851b94a93341a7e6c1301', 6144), ('3ccb5dc03958cc4e17ab2c8c2c5f0acadd283edd', 6144), ('338f66bbc5514b0383495ad4299154491c5e058e', 6144), ('8ba7aaed8086c68caeaf9cd28ffbc2cb476d2796', 3000)]
-          raw = bytearray()
-          for oid, size in parts:
-              row = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
-              part = base64.b64decode(row['content'])
-              assert len(part) == size and sha(part) == oid
-              raw.extend(part)
-          assert len(raw) == 21432 and sha(raw) == '5c5621e45c448700a39278a1903374f38e59ea90'
-          decoder = lzma.LZMADecompressor(memlimit=134217728)
-          data = decoder.decompress(raw, max_length=103849)
-          assert decoder.eof and not decoder.unused_data and len(data) == 103848
-          assert hashlib.sha256(data).hexdigest() == '73b3d1e3f8c3840e28bb0b60a64b2332ad43e61efd5a5e9d8344f8016b598481'
-          patch = Path(os.environ['RUNNER_TEMP'], 'control-network.patch')
-          patch.write_bytes(data)
-          stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
-          assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(after)
-          subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
-          subprocess.run(['git', 'apply', str(patch)], check=True)
-          for path, expected in after.items():
-              assert sha(Path(path).read_bytes()) == expected, path
-          Path(os.environ['RUNNER_TEMP'], 'control-paths.json').write_text(json.dumps(after))
-          PY
-      - name: Verify complete workspace
+      - name: Verify committed workspace and native control renewal
         run: |
           ./scripts/verify.sh fast
           ./scripts/verify.sh docs
-          git diff --check
-      - name: Export verified objects without ref writes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import base64, hashlib, json, os, subprocess
-          from pathlib import Path
-          for path, expected in json.loads(Path(os.environ['RUNNER_TEMP'], 'control-paths.json').read_text()).items():
-              data = Path(path).read_bytes()
-              assert hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest() == expected
-              body = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()})
-              result = subprocess.run(['gh', 'api', '--method', 'POST', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', '--input', '-'], input=body, text=True, capture_output=True, check=True)
-              assert json.loads(result.stdout)['sha'] == expected, path
-              print(json.dumps({'path': path, 'sha': expected, 'verified_against': os.environ['GITHUB_SHA']}))
-          PY
+          git diff --exit-code
