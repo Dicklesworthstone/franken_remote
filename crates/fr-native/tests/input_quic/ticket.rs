@@ -19,6 +19,29 @@ async fn until_tickets(f: &mut Fixture, n: usize) {
         f.turn().await;
     }
 }
+async fn observe_shift(f: &mut Fixture, pressed: bool) {
+    // SubmittedToOs means XFlush, not that this separate observer connection
+    // has seen XTest processing. As in presentation_input::observe_pressed,
+    // wait only for observation: no action replay, renewal or deadline change.
+    let started = network::clock(&f.cx);
+    loop {
+        let state = f.observer.query_pointer().unwrap().1 & 1;
+        let elapsed = network::clock(&f.cx).checked_sub(started).unwrap();
+        assert!(
+            !f.input.control().is_stopped(),
+            "Shift observation after {elapsed} us: control stopped {:?}, state {state}",
+            f.input.control().reason()
+        );
+        assert!(
+            elapsed < 50_000,
+            "Shift not observed after {elapsed} us: {state}"
+        );
+        if state == u32::from(pressed) {
+            return;
+        }
+        asupersync::time::sleep(f.cx.now(), Duration::from_millis(1)).await;
+    }
+}
 fn occupy_feedback(f: &mut Fixture) {
     f.pair
         .server
@@ -62,7 +85,7 @@ fn native_rollover_preserves_old_in_flight_press_and_updates_only_future_actions
             f.send(&old, Route::Stream(f.pair.actions));
             f.until_receipts(1).await;
             assert_eq!(f.receipts[0].outcome, InputOutcome::SubmittedToOs);
-            assert_eq!(f.observer.query_pointer().unwrap().1 & 1, 1);
+            observe_shift(&mut f, true).await;
             let release = f.action(shift(KeyTransition::Release));
             let decoded = fr_wire::input::decode_input(
                 &release,
@@ -76,7 +99,7 @@ fn native_rollover_preserves_old_in_flight_press_and_updates_only_future_actions
             assert_eq!(decoded.sequence, 1);
             f.send(&release, Route::Stream(f.pair.actions));
             f.until_receipts(2).await;
-            assert_eq!(f.observer.query_pointer().unwrap().1 & 1, 0);
+            observe_shift(&mut f, false).await;
             f.input.control().stop(StopReason::LocalRevoke);
             f.cleared().await;
         }))
