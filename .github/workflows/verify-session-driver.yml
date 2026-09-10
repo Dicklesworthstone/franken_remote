@@ -3,9 +3,17 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['.github/workflows/verify-session-driver.yml']
+    paths:
+      - '.github/workflows/verify-session-driver.yml'
+      - 'crates/frd/src/session_startup.rs'
+      - 'crates/frd/src/session_startup/**'
+      - 'crates/fr-client/src/authority.rs'
+      - 'crates/frd/src/media/renewal.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'SESSION_DRIVERS.md'
 permissions:
-  contents: write
+  contents: read
 env:
   CARGO_BUILD_JOBS: '1'
   CARGO_PROFILE_DEV_DEBUG: '0'
@@ -19,57 +27,17 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
-      - name: Stage exact reviewed host source without ref writes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import base64, hashlib, json, lzma, os, subprocess
-          from pathlib import Path
-          before = {'crates/frd/src/session_startup.rs':'39ecb0012f882016fdf82a2df33f454cadeb72fe','crates/frd/src/session_startup/running.rs':None,'crates/frd/src/session_startup/running/tests.rs':None}
-          after = {'crates/frd/src/session_startup.rs':'191ff3cf050aeb8eecac8116d07cf397bdabec7a','crates/frd/src/session_startup/running.rs':'ac07574fc9d50f5d59c10843b1c20d0ea7b4fda5','crates/frd/src/session_startup/running/tests.rs':'e8d6c23b226ce21faecb6e81b14e84e99bf6f4ee'}
-          def sha(data): return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
-          for path, expected in before.items():
-              assert (sha(Path(path).read_bytes()) if Path(path).exists() else None) == expected, path
-          oid = 'b8c8d6f65b76ad2b59e89111f4816d68566af9bd'
-          row = json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
-          raw = base64.b64decode(row['content'])
-          assert len(raw) == 6256 and sha(raw) == oid
-          decoder = lzma.LZMADecompressor()
-          data = decoder.decompress(raw, max_length=26136)
-          assert decoder.eof and not decoder.unused_data and len(data) == 26135
-          assert hashlib.sha256(data).hexdigest() == '050871aaaa5ccc350fa5b92f28b8998656d0d8c4886a02610c586ddaedc5ed94'
-          patch = Path(os.environ['RUNNER_TEMP'],'host.patch'); patch.write_bytes(data)
-          stats = subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
-          assert {line.split('\t',2)[2] for line in stats.splitlines()} == set(after)
-          subprocess.run(['git','apply','--check',str(patch)],check=True)
-          subprocess.run(['git','apply',str(patch)],check=True)
-          for path, expected in after.items(): assert sha(Path(path).read_bytes()) == expected, path
-          Path(os.environ['RUNNER_TEMP'],'host-paths.json').write_text(json.dumps(after))
-          PY
       - name: Install pinned compiler and native SDKs
         run: |
           rustup show active-toolchain
           sudo apt-get update
           sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
-      - name: Verify complete candidate workspace and session drivers
+      - name: Verify exact committed workspace and session drivers
         run: |
           ./scripts/verify.sh fast
           ./scripts/verify.sh docs
           cargo test -p frd session_startup --locked -- --nocapture
-          git diff --check
-      - name: Export exact verified source objects without ref writes
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Confirm verification did not modify tracked source
         run: |
-          python3 - <<'PY'
-          import base64, hashlib, json, os, subprocess
-          from pathlib import Path
-          for path, expected in json.loads(Path(os.environ['RUNNER_TEMP'],'host-paths.json').read_text()).items():
-              data = Path(path).read_bytes()
-              assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest() == expected
-              body = json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()})
-              result = subprocess.run(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,capture_output=True,check=True)
-              assert json.loads(result.stdout)['sha'] == expected, path
-              print(json.dumps({'path':path,'sha':expected,'verified_against':os.environ['GITHUB_SHA']}))
-          PY
+          git diff --exit-code
+          git diff --cached --exit-code
