@@ -23,7 +23,9 @@ pub use media::{
     decode_recovery, decode_repair, encode_fragment, encode_progress, encode_recovery,
     encode_repair,
 };
-pub use record::{Channel, HEADER_BYTES, Kind, MediaLimits, Record, WireError};
+pub use record::{
+    Channel, HEADER_BYTES, Kind, MAX_FRAGMENTS, MAX_REPAIR_RANGES, MediaLimits, Record, WireError,
+};
 
 pub mod input_ticket;
 

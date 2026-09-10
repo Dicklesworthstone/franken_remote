@@ -1,6 +1,9 @@
 //! The existing media packet owner joined to the sole Asupersync QUIC adapter.
 //! Session admission installs these routes. This module creates no listener,
 //! identity, input authority, second packet queue, or independent congestion loop.
+mod negotiated;
+pub use negotiated::NegotiatedMedia;
+
 use crate::{
     media,
     media_egress::{Admission, Egress, EgressError, Lane, Progress},
@@ -19,6 +22,7 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     InvalidRoutes,
+    ForeignConnection,
     Media(media::Error),
     Transport(quic::Error),
     Allocation,
@@ -116,14 +120,44 @@ pub enum RepairAdmission {
 /// Retains the canonical Egress, not a competing media sender. The surrounding
 /// session owns the QUIC connection, runs input/watchdog work independently, and
 /// dispatches other channel kinds; media never gains input authority.
-#[derive(Debug)]
 pub struct QuicEgress {
     egress: Egress,
     routes: Routes,
+    connection: Option<quic::ConnectionBinding>,
+}
+impl std::fmt::Debug for QuicEgress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QuicEgress")
+            .field("egress", &self.egress)
+            .field("routes", &self.routes)
+            .field("connection_bound", &self.connection.is_some())
+            .finish()
+    }
 }
 impl QuicEgress {
     pub const fn new(egress: Egress, routes: Routes) -> Self {
-        Self { egress, routes }
+        Self {
+            egress,
+            routes,
+            connection: None,
+        }
+    }
+    /// Negotiated senders cannot be redirected to a connection with matching
+    /// numeric routes. Reject before touching that unrelated connection's queues.
+    fn check_connection(&mut self, transport: &QuicRecords) -> Result<(), Error> {
+        if self
+            .connection
+            .as_ref()
+            .is_some_and(|b| !transport.is_bound_to(b))
+        {
+            self.close();
+            return Err(Error::ForeignConnection);
+        }
+        if transport.is_closed() {
+            self.close();
+            return Err(Error::Closed);
+        }
+        Ok(())
     }
     pub fn enqueue(&mut self, frame: EncodedAccessUnit) -> Result<(), Error> {
         self.tick()?;
@@ -164,6 +198,7 @@ impl QuicEgress {
         transport: &mut QuicRecords,
         lane: Lane,
     ) -> Result<Progress, Error> {
+        self.check_connection(transport)?;
         let routes = self.routes;
         let result = self.egress.transmit(lane, |offer, bytes, guard| {
             let route = routes.outbound(offer.channel())?;
@@ -199,6 +234,7 @@ impl QuicEgress {
         transport: &mut QuicRecords,
         wait: Duration,
     ) -> Result<(), Error> {
+        self.check_connection(transport)?;
         let mut operation = DriveGuard {
             egress: &mut self.egress,
             transport,
@@ -217,6 +253,15 @@ impl QuicEgress {
     /// Invoke from the session's already-authorized synchronous dispatch, never
     /// by treating any control-channel payload as a repair request. The existing
     /// cache validates framing, generation, ranges, rate and reference lifetime.
+    pub fn repair_on(
+        &mut self,
+        transport: &QuicRecords,
+        route: Route,
+        bytes: &[u8],
+    ) -> Result<RepairAdmission, Error> {
+        self.check_connection(transport)?;
+        self.repair(route, bytes)
+    }
     pub fn repair(&mut self, route: Route, bytes: &[u8]) -> Result<RepairAdmission, Error> {
         self.tick()?;
         if route != Route::Stream(self.routes.repair) {

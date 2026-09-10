@@ -127,6 +127,10 @@ impl ObservationControl {
             .map_err(Error::Authority)?;
         Ok(now)
     }
+    /// Routing metadata must never borrow another approved session's authority.
+    pub(crate) fn belongs_to_session(&self, session: fr_core::ids::RemoteSessionId) -> bool {
+        self.authority.lock().is_ok_and(|a| a.session() == session)
+    }
     /// Join an already locally granted native input lease to this exact approved
     /// observation owner. No copy, new grant, readiness claim or admission is
     /// created. The containing OS share-session must reserve its single Seat and

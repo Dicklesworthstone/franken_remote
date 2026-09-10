@@ -1,7 +1,7 @@
 #![cfg(all(target_os = "linux", feature = "linux-media"))]
 //! Real X11 capture, network-carried configuration, supervised HEVC and UDP/TLS.
-//! Tailnet admission, capability selection and channel attachment are local test
-//! fixtures; these tests do NOT qualify a network-facing listener or full login.
+//! Tailnet admission and capability selection use explicit local fixtures. All
+//! media channels attach over QUIC; no public listener or full login is claimed.
 #[path = "../../fr-transport/tests/support/mod.rs"]
 #[allow(dead_code)]
 mod network;
@@ -16,7 +16,7 @@ use fr_media::{
 };
 use fr_native::{BgraFrame, X11Surface};
 use fr_transport::quic::{
-    self, DatagramRoute, Disposition, Messages, Policy, Priority, QuicRecords, Route, StreamRoute,
+    self, Disposition, Messages, Policy, Priority, QuicRecords, Route, StreamRoute,
 };
 use fr_wire::{
     Channel, MediaLimits,
@@ -26,11 +26,11 @@ use fr_wire::{
 };
 use frd::{
     media::{
-        CaptureSource, ObservationControl, Subscription,
+        CaptureSource, ObservationControl,
         decoder_startup::{Error, Host, Setup, Viewer},
     },
-    media_egress::{Egress, Lane},
-    media_quic::{QuicEgress, Routes},
+    media_egress::{Lane, Progress},
+    media_quic::{NegotiatedMedia, QuicEgress, RepairAdmission},
     worker::Launch,
 };
 use std::{
@@ -138,152 +138,127 @@ struct Link {
     config: StreamRoute,
     progress: StreamRoute,
     replies: StreamRoute,
-    media: Routes,
     wire: MediaLimits,
     receive: ReceiveConfig,
+    host_channels: NegotiatedMedia,
+    client_channels: NegotiatedMedia,
 }
 impl Link {
     async fn new(cx: &Cx) -> Self {
         let (c, h) = network::native_pair(cx, "localhost", quic::ALPN).await;
         let (mut c, mut h) = (c.unwrap(), h.unwrap());
-        let config = h.connection_mut().open_uni_stream(cx).unwrap();
-        let recovery = h.connection_mut().open_uni_stream(cx).unwrap();
-        let progress = h.connection_mut().open_uni_stream(cx).unwrap();
-        let replies = c.connection_mut().open_uni_stream(cx).unwrap();
-        let repair = c.connection_mut().open_uni_stream(cx).unwrap();
-        let route = |stream, binding, messages, priority, outbound, maximum| StreamRoute {
-            stream,
-            binding,
-            messages,
-            priority,
-            outbound,
-            maximum,
+        // Only the session-control pair is installed by the startup fixture.
+        // No decoder, recovery, feedback or datagram route exists initially.
+        let config = StreamRoute {
+            stream: h.connection_mut().open_uni_stream(cx).unwrap(),
+            binding: 7,
+            messages: Messages::SessionControl,
+            priority: Priority::Critical,
+            outbound: true,
+            maximum: 4096,
         };
-        let config = route(
-            config,
-            7,
-            Messages::SessionControl,
-            Priority::Critical,
-            true,
-            4096,
-        );
-        let replies = route(
-            replies,
-            7,
-            Messages::SessionControl,
-            Priority::Critical,
-            false,
-            4096,
-        );
-        let progress = route(
-            progress,
-            3,
-            Messages::Exact(0x37),
-            Priority::Critical,
-            true,
-            1150,
-        );
-        let recovery = route(
-            recovery,
-            2,
-            Messages::Exact(0x32),
-            Priority::Bulk,
-            true,
-            65536,
-        );
-        let repair = route(
-            repair,
-            4,
-            Messages::Exact(0x35),
-            Priority::Critical,
-            false,
-            1150,
-        );
-        let streams = [config, replies, progress, recovery, repair];
+        let replies = StreamRoute {
+            stream: c.connection_mut().open_uni_stream(cx).unwrap(),
+            outbound: false,
+            ..config
+        };
+        let streams = [config, replies];
         let reverse = streams.map(|r| StreamRoute {
             outbound: !r.outbound,
             ..r
         });
-        let video = DatagramRoute {
-            binding: 1,
-            kind: 0x34,
-            outbound: true,
-        };
         let policy = Policy {
             retained_send_records: 1,
             critical_send_records: 1,
             ..Policy::default()
         };
-        let mut host = QuicRecords::new(h, cx, &streams, &[video], policy).unwrap();
-        let mut client = QuicRecords::new(
-            c,
+        let mut host = QuicRecords::new(h, cx, &streams, &[], policy).unwrap();
+        let mut client = QuicRecords::new(c, cx, &reverse, &[], policy).unwrap();
+        let control = (config, replies);
+        let (hc, cc) = attach_role(
             cx,
-            &reverse,
-            &[DatagramRoute {
-                outbound: false,
-                ..video
-            }],
-            policy,
+            &mut host,
+            &mut client,
+            control,
+            fr_wire::attachment::MediaRole::Configuration,
+            binding(),
         )
-        .unwrap();
-        // Configuration routes are no longer supplied as local ready-made
-        // fixtures. Negotiate their binding and attach through actual QUIC.
-        let (config, replies) =
-            attach_configuration(cx, &mut host, &mut client, config, replies).await;
-        let bindings = MediaBindings::new(1, 2, 3, 4).unwrap();
-        let media = Routes::new(bindings, progress, recovery, video, repair).unwrap();
-        let wire = MediaLimits::new(configuration().limits().unwrap(), 1150, 16384, 64).unwrap();
-        let receive = receiving(wire, bindings);
+        .await;
+        let mut recovery_binding = binding();
+        recovery_binding.parent.id = 9;
+        let (hr, cr) = attach_role(
+            cx,
+            &mut host,
+            &mut client,
+            control,
+            fr_wire::attachment::MediaRole::Recovery,
+            recovery_binding,
+        )
+        .await;
+        let mut video_binding = binding();
+        video_binding.parent.id = 10;
+        let (hv, cv) = attach_role(
+            cx,
+            &mut host,
+            &mut client,
+            control,
+            fr_wire::attachment::MediaRole::Video,
+            video_binding,
+        )
+        .await;
+        let selection = selected_attachment();
+        let host_channels = NegotiatedMedia::new(&host, &selection, &hc, &hr, &hv).unwrap();
+        let client_channels = NegotiatedMedia::new(&client, &selection, &cc, &cr, &cv).unwrap();
+        assert!(NegotiatedMedia::new(&host, &selection, &hc, &hr, &cv).is_err());
+        assert!(NegotiatedMedia::new(&host, &selection, &hc, &hv, &hr).is_err());
+        let mut altered = selection.clone();
+        altered.limits =
+            fr_core::limits::ProtocolLimits::with_overrides(fr_core::limits::LimitOverrides {
+                max_control_message_bytes: Some(512),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(NegotiatedMedia::new(&host, &altered, &hc, &hr, &hv).is_err());
+        let (cfg, vid) = (
+            hc.completed_on(&host).unwrap(),
+            hv.completed_on(&host).unwrap(),
+        );
+        let wire = host_channels.limits();
+        assert_eq!(wire.record_bytes(), 1150);
+        let receive = client_channels
+            .receiver_config(
+                &client,
+                ReceivePolicy {
+                    display_budget_micros: 250_000,
+                    ..ReceivePolicy::default()
+                },
+            )
+            .unwrap();
         Self {
             client,
             host,
-            config,
-            progress,
-            replies,
-            media,
+            config: cfg.outbound,
+            replies: cfg.inbound,
+            progress: vid.outbound,
             wire,
             receive,
+            host_channels,
+            client_channels,
         }
     }
     fn setup(&self, host: bool, timeout: Duration) -> Setup {
-        let mut selection = Offer {
-            versions: vec![0],
-            profile: 1,
-            profile_version: 0,
-            role: fr_wire::negotiation::Role::Observe,
-            limits: configuration().limits().unwrap(),
-            capabilities: vec![Capability {
-                name: decoder::CAPABILITY.into(),
-                version: decoder::VERSION,
-                required: true,
-            }],
+        let mut unselected = selected_attachment();
+        unselected.capabilities.clear();
+        assert!(Setup::new(binding(), self.config, self.replies, &unselected, timeout).is_err());
+        if host {
+            self.host_channels
+                .decoder_setup(&self.host, timeout)
+                .unwrap()
+        } else {
+            self.client_channels
+                .decoder_setup(&self.client, timeout)
+                .unwrap()
         }
-        .select()
-        .unwrap();
-        // Also prove that the constructor cannot enable an unnegotiated extension.
-        let selected = selection.clone();
-        selection.capabilities.clear();
-        assert!(Setup::new(binding(), self.config, self.replies, &selection, timeout).is_err());
-        let reverse = |r: StreamRoute| StreamRoute {
-            outbound: !r.outbound,
-            ..r
-        };
-        Setup::new(
-            binding(),
-            if host {
-                self.config
-            } else {
-                reverse(self.config)
-            },
-            if host {
-                self.replies
-            } else {
-                reverse(self.replies)
-            },
-            &selected,
-            timeout,
-        )
-        .unwrap()
     }
     async fn drive(&mut self, cx: &Cx) {
         let (a, b) = Box::pin(network::both(
@@ -346,20 +321,6 @@ impl Link {
             }
         }
         self.drive(cx).await;
-    }
-}
-fn receiving(wire: MediaLimits, bindings: MediaBindings) -> ReceiveConfig {
-    ReceiveConfig {
-        limits: wire,
-        bindings,
-        epoch: MediaEpoch {
-            configuration: configuration().generation,
-            recovery: RecoveryGeneration::INITIAL,
-        },
-        policy: ReceivePolicy {
-            display_budget_micros: 250_000,
-            ..ReceivePolicy::default()
-        },
     }
 }
 struct Source {
@@ -440,97 +401,95 @@ fn assert_pixel(readback: &mut X11Surface, color: [u8; 3]) {
 }
 #[test]
 fn actual_network_configuration_precedes_idr_and_survives_handoff_to_regular_media() {
-    run(|cx| async move {
-        let mut link = Link::new(&cx).await;
-        let mut source = Source::new(&cx).await;
-        let color = source.paint(3);
-        let target = Display::start();
-        let mut readback =
-            X11Surface::capture(Some(&target.name), configuration().limits().unwrap()).unwrap();
-        let mut host = source.host(&link, Duration::from_secs(2)).await;
-        let bytes = link.configuration_bytes(&cx, &mut host).await;
-        let mut viewer = Viewer::start(
-            cx.clone(),
-            &link.client,
-            link.setup(false, Duration::from_secs(2)),
-            &bytes,
-            launch(&target, 12, Role::Present),
-            link.receive,
-        )
-        .await
-        .unwrap();
-        assert!(!viewer.is_complete());
-        assert!(host.take_recovery().unwrap().is_none());
-        assert!(viewer.transmit(&mut link.client).unwrap());
-        let recovery = loop {
-            link.drive(&cx).await;
-            host.dispatch(&mut link.host).unwrap();
-            if let Some(update) = host.take_recovery().unwrap() {
-                break update;
-            }
-        };
-        let first = recovery.frame();
-        let subscription = Subscription::new(
-            source.control.clone(),
-            link.wire,
-            link.receive.bindings,
-            link.receive.epoch,
-            SendPolicy::default(),
-        )
-        .unwrap();
-        let mut sender = QuicEgress::new(Egress::new(subscription), link.media);
-        sender.enqueue_capture(recovery).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let receipt = loop {
-            assert!(Instant::now() < deadline, "first IDR not decoded");
-            host.check_transport(&link.host).unwrap();
-            sender
-                .transmit(&cx, &mut link.host, Lane::Original)
-                .unwrap();
-            link.drive(&cx).await;
-            let routes = link.media;
-            link.client
-                .receive_ready(
-                    &cx,
-                    || true,
-                    |r| routes.viewer_channel(r).is_ok(),
-                    |r, b| {
-                        viewer
-                            .receive_media(routes.viewer_channel(r).unwrap(), b)
-                            .unwrap();
-                        Ok(Disposition::Consumed)
-                    },
-                )
-                .unwrap();
-            if let Some(receipt) = viewer.present_first().await.unwrap() {
-                break receipt;
-            }
-        };
-        assert_eq!(receipt.frame, first);
-        assert!(!host.is_complete());
-        assert_pixel(&mut readback, color);
-        loop {
-            if viewer.transmit(&mut link.client).unwrap() {
-                break;
-            }
-            link.drive(&cx).await;
+    run(|cx| media_path(cx, false));
+}
+#[test]
+fn all_negotiated_channels_repair_the_entire_final_picture_without_another_capture() {
+    run(|cx| media_path(cx, true));
+}
+async fn media_path(cx: Cx, lose_final_picture: bool) {
+    let mut link = Link::new(&cx).await;
+    let mut source = Source::new(&cx).await;
+    let color = source.paint(3);
+    let target = Display::start();
+    let mut readback =
+        X11Surface::capture(Some(&target.name), configuration().limits().unwrap()).unwrap();
+    let mut host = source.host(&link, Duration::from_secs(2)).await;
+    let bytes = link.configuration_bytes(&cx, &mut host).await;
+    let mut viewer = Viewer::start(
+        cx.clone(),
+        &link.client,
+        link.setup(false, Duration::from_secs(2)),
+        &bytes,
+        launch(&target, 12, Role::Present),
+        link.receive,
+    )
+    .await
+    .unwrap();
+    assert!(!viewer.is_complete());
+    assert!(host.take_recovery().unwrap().is_none());
+    assert!(viewer.transmit(&mut link.client).unwrap());
+    let recovery = loop {
+        link.drive(&cx).await;
+        host.dispatch(&mut link.host).unwrap();
+        if let Some(update) = host.take_recovery().unwrap() {
+            break update;
         }
-        while !host.is_complete() {
-            link.drive(&cx).await;
-            host.dispatch(&mut link.host).unwrap();
+    };
+    let first = recovery.frame();
+    let mut sender = link
+        .host_channels
+        .sender(&link.host, source.control.clone(), SendPolicy::default())
+        .unwrap();
+    sender.enqueue_capture(recovery).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let receipt = loop {
+        assert!(Instant::now() < deadline, "first IDR not decoded");
+        host.check_transport(&link.host).unwrap();
+        sender
+            .transmit(&cx, &mut link.host, Lane::Original)
+            .unwrap();
+        link.drive(&cx).await;
+        link.client_channels
+            .receive_ready(
+                &cx,
+                &mut link.client,
+                || true,
+                |channel, b| {
+                    viewer.receive_media(channel, b).unwrap();
+                    Ok(Disposition::Consumed)
+                },
+            )
+            .unwrap();
+        if let Some(receipt) = viewer.present_first().await.unwrap() {
+            break receipt;
         }
-        assert!(viewer.is_complete());
-        followup(
-            &cx,
-            &mut link,
-            &mut source,
-            &mut sender,
-            viewer.finish().unwrap(),
-            &mut readback,
-        )
-        .await;
-        assert!(source.control.check().is_ok());
-    });
+    };
+    assert_eq!(receipt.frame, first);
+    assert!(!host.is_complete());
+    assert_pixel(&mut readback, color);
+    loop {
+        if viewer.transmit(&mut link.client).unwrap() {
+            break;
+        }
+        link.drive(&cx).await;
+    }
+    while !host.is_complete() {
+        link.drive(&cx).await;
+        host.dispatch(&mut link.host).unwrap();
+    }
+    assert!(viewer.is_complete());
+    followup(
+        &cx,
+        &mut link,
+        &mut source,
+        &mut sender,
+        viewer.finish().unwrap(),
+        &mut readback,
+        lose_final_picture,
+    )
+    .await;
+    assert!(source.control.check().is_ok());
 }
 async fn followup(
     cx: &Cx,
@@ -539,6 +498,7 @@ async fn followup(
     sender: &mut QuicEgress,
     presentation: (frd::media::Presenter, ReceivePipeline),
     readback: &mut X11Surface,
+    lose_final_picture: bool,
 ) {
     let (mut presenter, mut receiver) = presentation;
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -551,31 +511,95 @@ async fn followup(
     assert!(!next.encoded().unwrap().is_idr());
     let next_id = next.frame();
     sender.enqueue_capture(next).unwrap();
+    let mut original_done = false;
+    let mut repairs = 0;
+    let mut dropped = 0;
+    let mut pending_repair: Option<(Vec<u8>, u64)> = None;
+    let mut reply = vec![0; link.wire.record_bytes()];
+    let host_repair = Route::Stream(link.host_channels.repair_stream(&link.host).unwrap());
+    let viewer_repair = Route::Stream(link.client_channels.repair_stream(&link.client).unwrap());
     loop {
         assert!(
             Instant::now() < deadline,
             "dependent frame not decoded after handoff"
         );
-        sender.transmit(cx, &mut link.host, Lane::Original).unwrap();
+        if !original_done {
+            original_done =
+                sender.transmit(cx, &mut link.host, Lane::Original).unwrap() == Progress::Idle;
+        }
+        if original_done && repairs != 0 {
+            sender.transmit(cx, &mut link.host, Lane::Repair).unwrap();
+        }
         link.drive(cx).await;
-        let routes = link.media;
-        link.client
+        link.client_channels
             .receive_ready(
                 cx,
+                &mut link.client,
                 || true,
-                |r| routes.viewer_channel(r).is_ok(),
-                |r, b| {
-                    receiver
-                        .receive(routes.viewer_channel(r).unwrap(), b, network::clock(cx))
-                        .unwrap();
+                |channel, b| {
+                    // Loss is applied AFTER actual QUIC reception, never faked at the
+                    // packetizer. No new capture occurs after this dependent picture.
+                    if lose_final_picture && channel == Channel::Video && repairs == 0 {
+                        dropped += 1;
+                        return Ok(Disposition::Consumed);
+                    }
+                    receiver.receive(channel, b, network::clock(cx)).unwrap();
                     Ok(Disposition::Consumed)
                 },
             )
             .unwrap();
+        // One retained repair request, with its original deadline. Backpressure
+        // cannot advance the receiver's repair cursor or produce another request.
+        if original_done
+            && pending_repair.is_none()
+            && let Some(n) = receiver
+                .repair_request(network::clock(cx), &mut reply)
+                .unwrap()
+        {
+            pending_repair = Some((reply[..n].to_vec(), network::clock(cx) + 80_000));
+        }
+        if let Some((bytes, until)) = &pending_repair {
+            match link.client.send(cx, viewer_repair, bytes, *until, || true) {
+                Ok(()) => pending_repair = None,
+                Err(quic::Error::Backpressure) => (),
+                other => panic!("repair send refused: {other:?}"),
+            }
+        }
+        // Leave all unrelated session records in the transport. A single bounded
+        // slot moves this request out of the borrowed callback before owner use.
+        let mut request = None;
+        link.host
+            .receive_ready(
+                cx,
+                || source.control.check().is_ok(),
+                |r| r == host_repair,
+                |r, b| {
+                    if request.is_some() {
+                        return Ok(Disposition::Blocked);
+                    }
+                    request = Some((r, b.to_vec()));
+                    Ok(Disposition::Consumed)
+                },
+            )
+            .unwrap();
+        if let Some((route, bytes)) = request {
+            assert_eq!(
+                sender.repair_on(&link.host, route, &bytes).unwrap(),
+                RepairAdmission::Queued
+            );
+            repairs += 1;
+        }
         if let Some(r) = presenter.present_next(cx, &mut receiver).await.unwrap() {
             assert_eq!(r.frame, next_id);
             break;
         }
+    }
+    if lose_final_picture {
+        assert!(dropped > 0);
+        assert!(repairs > 0);
+    } else {
+        assert_eq!(dropped, 0);
+        assert_eq!(repairs, 0);
     }
     assert_pixel(readback, color);
 }
@@ -806,7 +830,7 @@ fn genuine_transport_backpressure_preserves_configuration_and_original_deadline(
                 observation: fr_wire::SourceObservation::Unknown,
                 pipeline: fr_wire::PipelineState::Running,
             },
-            3,
+            link.progress.binding,
             &link.wire,
             &mut buffer,
         )
@@ -884,6 +908,91 @@ fn equal_numeric_routes_on_another_connection_cannot_take_over_startup() {
     });
 }
 #[test]
+fn negotiated_media_owners_refuse_foreign_connections_without_touching_their_queues() {
+    run(|cx| async move {
+        let link = Link::new(&cx).await;
+        let mut other = Link::new(&cx).await;
+        let mut source = Source::new(&cx).await;
+        source.paint(4);
+        let capture = source
+            .capture
+            .capture_if_changed(&source.control, true)
+            .await
+            .unwrap();
+        let mut sender = link
+            .host_channels
+            .sender(&link.host, source.control.clone(), SendPolicy::default())
+            .unwrap();
+        sender.enqueue_capture(capture).unwrap();
+        let before = other.host.usage();
+        assert_eq!(
+            sender.transmit(&cx, &mut other.host, Lane::Original),
+            Err(frd::media_quic::Error::ForeignConnection)
+        );
+        assert!(sender.is_closed());
+        assert_eq!(sender.cache_usage().bytes, 0);
+        assert_eq!(other.host.usage(), before);
+        assert!(!other.host.is_closed());
+        let before = other.client.usage();
+        let mut dispatched = false;
+        assert_eq!(
+            link.client_channels.receive_ready(
+                &cx,
+                &mut other.client,
+                || true,
+                |_, _| {
+                    dispatched = true;
+                    Ok(Disposition::Consumed)
+                }
+            ),
+            Err(frd::media_quic::Error::ForeignConnection)
+        );
+        assert!(!dispatched);
+        assert_eq!(other.client.usage(), before);
+        assert!(!other.client.is_closed());
+        assert!(source.control.check().is_ok());
+        // A second sender also rejects foreign repair dispatch before parsing.
+        let mut sender = link
+            .host_channels
+            .sender(&link.host, source.control.clone(), SendPolicy::default())
+            .unwrap();
+        let before = other.host.usage();
+        let route = Route::Stream(other.host_channels.repair_stream(&other.host).unwrap());
+        assert_eq!(
+            sender.repair_on(&other.host, route, &[]),
+            Err(frd::media_quic::Error::ForeignConnection)
+        );
+        assert!(sender.is_closed());
+        assert_eq!(other.host.usage(), before);
+    });
+}
+
+#[test]
+fn negotiated_sender_cannot_borrow_another_sessions_approved_observation() {
+    run(|cx| async move {
+        let link = Link::new(&cx).await;
+        let mut authority = SessionAuthority::new(
+            RemoteSessionId::from_raw(99),
+            AuthorityPolicy::plan_defaults(),
+        );
+        authority.mark_capabilities_checked().unwrap();
+        authority
+            .authorize_observation(frd::media::host_now(&cx).unwrap())
+            .unwrap();
+        let foreign = ObservationControl::new(cx.clone(), authority).unwrap();
+        let before = link.host.usage();
+        assert!(matches!(
+            link.host_channels
+                .sender(&link.host, foreign.clone(), SendPolicy::default()),
+            Err(frd::media_quic::Error::InvalidRoutes)
+        ));
+        assert_eq!(link.host.usage(), before);
+        assert!(foreign.check().is_ok());
+        assert!(!link.host.is_closed());
+    });
+}
+
+#[test]
 fn local_cancellation_before_ack_aborts_and_reaps_without_releasing_host_pixels() {
     let runtime = RuntimeBuilder::new()
         .worker_threads(2)
@@ -925,15 +1034,20 @@ fn local_cancellation_before_ack_aborts_and_reaps_without_releasing_host_pixels(
     });
 }
 
-async fn attach_configuration(
+async fn attach_role(
     cx: &Cx,
     host: &mut QuicRecords,
     client: &mut QuicRecords,
-    config: StreamRoute,
-    replies: StreamRoute,
-) -> (StreamRoute, StreamRoute) {
+    control: (StreamRoute, StreamRoute),
+    role: fr_wire::attachment::MediaRole,
+    target: Binding,
+) -> (
+    fr_transport::quic::MediaChannel,
+    fr_transport::quic::MediaChannel,
+) {
     use fr_transport::quic::{ChannelRequest, ChannelScope, ControlRoutes};
     use fr_wire::attachment::Ticket;
+    let (config, replies) = control;
     let selection = selected_attachment();
     let parent = ControlBinding {
         id: 7,
@@ -954,7 +1068,7 @@ async fn attach_configuration(
         },
     };
     let mut h = host
-        .offer_media_channel(
+        .offer_media_role(
             cx,
             ChannelScope {
                 control: hc,
@@ -962,10 +1076,11 @@ async fn attach_configuration(
                 selection: &selection,
             },
             ChannelRequest {
-                binding: binding(),
-                ticket: Ticket(0xa771),
+                binding: target,
+                ticket: Ticket(0xa770 + u128::from(target.parent.id)),
                 timeout: Duration::from_secs(2),
             },
+            role,
             || true,
         )
         .unwrap();
@@ -1017,12 +1132,12 @@ async fn attach_configuration(
         h.dispatch(host, cx, || true).unwrap();
         if let Some(viewer) = &mut c {
             viewer.dispatch(client, cx, || true).unwrap();
-            if let (Some(h), Some(v)) = (
+            if let (Some(hp), Some(vp)) = (
                 h.finish(host, cx, || true).unwrap(),
                 viewer.finish(client, cx, || true).unwrap(),
             ) {
-                assert_eq!(h.descriptor, v.descriptor);
-                return (h.outbound, h.inbound);
+                assert_eq!(hp.descriptor, vp.descriptor);
+                return (h, c.take().unwrap());
             }
         }
     }
@@ -1035,11 +1150,23 @@ fn selected_attachment() -> fr_wire::negotiation::Selection {
         profile_version: 0,
         role: fr_wire::negotiation::Role::Observe,
         limits: configuration().limits().unwrap(),
-        capabilities: vec![Capability {
-            name: fr_wire::attachment::CAPABILITY.into(),
-            version: 1,
-            required: true,
-        }],
+        capabilities: vec![
+            Capability {
+                name: decoder::CAPABILITY.into(),
+                version: decoder::VERSION,
+                required: true,
+            },
+            Capability {
+                name: fr_wire::attachment::CAPABILITY.into(),
+                version: 1,
+                required: true,
+            },
+            Capability {
+                name: fr_wire::attachment::DELIVERY_CAPABILITY.into(),
+                version: 1,
+                required: true,
+            },
+        ],
     }
     .select()
     .unwrap()

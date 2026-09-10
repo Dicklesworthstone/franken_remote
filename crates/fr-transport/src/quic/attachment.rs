@@ -557,6 +557,12 @@ impl MediaChannel {
         }
         self.result.ok_or(Error::WrongRoute)
     }
+    /// The protocol limits retained by this completed attachment. Joining media
+    /// roles cannot replace these with a newly invented or widened selection.
+    pub fn completed_limits(&self, q: &QuicRecords) -> Result<ProtocolLimits, Error> {
+        self.completed_on(q)?;
+        Ok(self.limits)
+    }
     pub fn is_complete(&self) -> bool {
         self.phase == Phase::Complete
     }
