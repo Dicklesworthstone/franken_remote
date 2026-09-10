@@ -252,7 +252,6 @@ pub struct InputSession {
     pointer_floor: Option<u64>,
     mode: PointerMode,
     mode_epoch: u64,
-    mode_ticket: Option<InputTicketId>,
     cumulative: (i64, i64),
     reconciliation_floor: Option<u64>,
     reconciliation: Option<Reconciliation>,
@@ -293,7 +292,6 @@ impl InputSession {
             pointer_floor: None,
             mode: PointerMode::Absolute,
             mode_epoch: 0,
-            mode_ticket: Some(credentials.ticket),
             cumulative: (0, 0),
             reconciliation_floor: None,
             reconciliation: None,
@@ -317,8 +315,6 @@ impl InputSession {
     pub fn revoke(&mut self) {
         self.revoke.revoke();
         self.ledger.fence();
-
-        self.mode_ticket = None;
     }
     /// Focus loss, view/configuration/mapping replacement and worker failure
     /// require a new grant. Restoring pixels never resurrects this input owner.
@@ -371,7 +367,6 @@ impl InputSession {
         let until = self
             .authority
             .with(|a| a.issue_input_ticket(self.lease, ticket, now))?;
-        self.mode_ticket = Some(ticket);
         Ok(until)
     }
     /// Service independently during idle, not only when a packet arrives.
@@ -529,9 +524,6 @@ impl InputSession {
         self.check_active()?;
         if credentials.view != self.view {
             return Err(Refusal::StaleView);
-        }
-        if self.mode_ticket != Some(credentials.ticket) {
-            return Err(Refusal::Authority(AuthorityError::TicketInvalid));
         }
         self.authority
             .with(|a| a.authorize_submission(self.lease, credentials.ticket, now))
@@ -797,7 +789,9 @@ impl Attempt<'_, '_> {
                 self.owner.cumulative = (0, 0);
                 // A new ticket binds the new mode. Old absolute datagrams do not
                 // carry a mode epoch, so they MUST NOT survive this transition.
-                self.owner.mode_ticket = None;
+                self.owner
+                    .authority
+                    .with(|a| a.invalidate_input_tickets(self.owner.lease))?;
                 Ok(())
             }
         }

@@ -84,6 +84,8 @@ pub enum AuthorityError {
     TicketInvalid,
     /// Ticket has reached its exclusive deadline.
     TicketExpired,
+    /// The fixed live-ticket set is full; no still-valid ticket is evicted.
+    TicketCapacity,
     /// No matching challenge is outstanding.
     ChallengeMismatch,
     /// An unexpired challenge is still awaiting its response.
@@ -117,8 +119,11 @@ struct Challenge {
 struct Lease {
     id: InputLeaseId,
     authorized_until: HostInstant,
-    ticket: Option<Ticket>,
+    tickets: [Option<Ticket>; MAX_LIVE_INPUT_TICKETS],
 }
+
+/// Bounded overlap for in-flight input during periodic ticket renewal.
+pub const MAX_LIVE_INPUT_TICKETS: usize = 8;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Ticket {
@@ -162,7 +167,9 @@ impl fmt::Debug for SessionAuthority {
             .field("has_lease", &self.lease.is_some())
             .field(
                 "has_ticket",
-                &self.lease.is_some_and(|lease| lease.ticket.is_some()),
+                &self
+                    .lease
+                    .is_some_and(|lease| lease.tickets.iter().any(Option::is_some)),
             )
             .field(
                 "observation_challenge_pending",
@@ -287,7 +294,7 @@ impl SessionAuthority {
             self.readiness = ViewReadiness::Stale;
         }
         if let Some(lease) = self.lease.as_mut() {
-            lease.ticket = None;
+            lease.tickets.fill(None);
         }
     }
 
@@ -346,7 +353,7 @@ impl SessionAuthority {
         self.lease = Some(Lease {
             id: lease_id,
             authorized_until: self.deadline_from(now)?,
-            ticket: None,
+            tickets: [None; MAX_LIVE_INPUT_TICKETS],
         });
         self.control_challenge = None;
         Ok(())
@@ -394,7 +401,8 @@ impl SessionAuthority {
     }
 
     /// Issues a new ticket, bounded by both observation and lease deadlines.
-    /// Replacing a ticket invalidates its predecessor; callers use fresh IDs.
+    /// Existing tickets retain their original exclusive deadlines. Callers use
+    /// fresh unpredictable IDs; live tickets are never evicted to admit another.
     pub fn issue_input_ticket(
         &mut self,
         lease_id: InputLeaseId,
@@ -413,7 +421,13 @@ impl SessionAuthority {
         if now >= lease.authorized_until {
             return Err(AuthorityError::LeaseExpired);
         }
-        if lease.ticket.is_some_and(|ticket| ticket.id == ticket_id) {
+        if ticket_id.as_raw() == 0
+            || lease
+                .tickets
+                .iter()
+                .flatten()
+                .any(|ticket| ticket.id == ticket_id)
+        {
             return Err(AuthorityError::TicketInvalid);
         }
         let uncapped = now
@@ -424,11 +438,31 @@ impl SessionAuthority {
             self.observation_until
                 .ok_or(AuthorityError::ObservationExpired)?,
         );
-        lease.ticket = Some(Ticket {
+        let slot = lease
+            .tickets
+            .iter_mut()
+            .find(|entry| entry.is_none_or(|ticket| now >= ticket.expires_at))
+            .ok_or(AuthorityError::TicketCapacity)?;
+        *slot = Some(Ticket {
             id: ticket_id,
             expires_at,
         });
         Ok(expires_at)
+    }
+
+    /// Invalidate every ticket at a mode/readiness boundary without renewing
+    /// or changing the lease. A ticket for an old mode must never become usable
+    /// merely because another ticket is issued after the transition.
+    pub fn invalidate_input_tickets(
+        &mut self,
+        lease_id: InputLeaseId,
+    ) -> Result<(), AuthorityError> {
+        let lease = self.lease.as_mut().ok_or(AuthorityError::NoLease)?;
+        if lease.id != lease_id {
+            return Err(AuthorityError::StaleLease);
+        }
+        lease.tickets.fill(None);
+        Ok(())
     }
 
     /// Final policy check immediately before OS submission. Mutation records
@@ -456,10 +490,12 @@ impl SessionAuthority {
         if now >= lease.authorized_until {
             return Err(AuthorityError::LeaseExpired);
         }
-        let ticket = lease.ticket.ok_or(AuthorityError::TicketInvalid)?;
-        if ticket.id != ticket_id {
-            return Err(AuthorityError::TicketInvalid);
-        }
+        let ticket = lease
+            .tickets
+            .iter()
+            .flatten()
+            .find(|ticket| ticket.id == ticket_id)
+            .ok_or(AuthorityError::TicketInvalid)?;
         if now >= ticket.expires_at {
             return Err(AuthorityError::TicketExpired);
         }
@@ -528,10 +564,12 @@ impl SessionAuthority {
         {
             self.revoke_lease();
         }
-        if let Some(lease) = self.lease.as_mut()
-            && lease.ticket.is_some_and(|ticket| now >= ticket.expires_at)
-        {
-            lease.ticket = None;
+        if let Some(lease) = self.lease.as_mut() {
+            for ticket in &mut lease.tickets {
+                if ticket.is_some_and(|ticket| now >= ticket.expires_at) {
+                    *ticket = None;
+                }
+            }
         }
         self.has_live_control(now)
     }
