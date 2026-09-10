@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
-      - name: Stage exact reviewed reservation
+      - name: Stage exact reviewed broker integration
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -27,41 +27,61 @@ jobs:
           import base64, hashlib, json, lzma, os, subprocess
           from pathlib import Path
           def sha(b): return hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest()
-          p='crates/frd/src/input_agent.rs'
-          assert sha(Path(p).read_bytes())=='87f22b35f71e4ac1f434263da5f4fa5a340b0334'
-          oid='23ced7fbdc062ea5440b4696812d6ed2b0225d1c'
-          row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
-          raw=base64.b64decode(row['content']); assert sha(raw)==oid
-          dec=lzma.LZMADecompressor()
-          patch=dec.decompress(base64.b64decode(raw,validate=True),max_length=5484)
-          assert dec.eof and not dec.unused_data and len(patch)==5483
-          assert hashlib.sha256(patch).hexdigest()=='60c19c06aa9f0d8a1860d9c06cb2d998cf654ee85b9043341568db45637be4e0'
-          subprocess.run(['git','apply','--check','-'],input=patch,check=True)
-          subprocess.run(['git','apply','-'],input=patch,check=True)
-          assert sha(Path(p).read_bytes())=='1d1a1346871fc74c45b9765b5981dc21a649b2d0'
+          parts = [
+              ('4b306c96096051ed8f72176b323355a807de09e3', 6000),
+              ('b131948f3fa557239dc5a07a2c28e4ae3b330d50', 6000),
+              ('6096a83a50dccfd5cd7b41dd01e649d22b3cb9fd', 6000),
+              ('66beae5d87ed009e1d4cce7c2ddd8071e5e4fe84', 4744),
+          ]
+          encoded = bytearray()
+          for oid, length in parts:
+              row = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
+              raw = base64.b64decode(row['content'])
+              assert len(raw) == length and sha(raw) == oid
+              encoded.extend(raw)
+          dec = lzma.LZMADecompressor()
+          data = dec.decompress(base64.b64decode(encoded, validate=True), max_length=86804)
+          assert dec.eof and not dec.unused_data and len(data) == 86803
+          assert hashlib.sha256(data).hexdigest() == '4ee657ebcaf3495c3c76949493bf3db00f60f42efce393d2e123971ca6587560'
+          candidate = json.loads(data)
+          assert len(candidate['after']) == 11 and set(candidate['before']) == set(candidate['after'])
+          for p, expected in candidate['before'].items():
+              assert (p.startswith('crates/') or p == 'BROKER_CONTROL_GRANT.md') and '..' not in Path(p).parts
+              assert (sha(Path(p).read_bytes()) if Path(p).exists() else None) == expected, f'Concurrent source change: {p}'
+          patch = Path(os.environ['RUNNER_TEMP'], 'broker-control.patch')
+          patch.write_text(candidate['patch'])
+          stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
+          assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(candidate['after'])
+          subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
+          subprocess.run(['git', 'apply', str(patch)], check=True)
+          for p, expected in candidate['after'].items():
+              assert sha(Path(p).read_bytes()) == expected, p
+          Path(os.environ['RUNNER_TEMP'], 'broker-control-paths.json').write_text(json.dumps(candidate['after']))
           PY
       - name: Install pinned compiler and native SDKs
         run: |
           rustup show active-toolchain
           sudo apt-get update
           sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
-      - name: Verify full workspace
+      - name: Verify full workspace and real native grants
         run: |
           ./scripts/verify.sh fast
+          cargo test -p fr-native --all-features --test input_quic --locked -- --test-threads=4
           ./scripts/verify.sh docs
           git diff --check
-      - name: Export verified source object without ref writes
+      - name: Export verified source objects without ref writes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 - <<'PY'
           import base64, hashlib, json, os, subprocess
           from pathlib import Path
-          p='crates/frd/src/input_agent.rs'; b=Path(p).read_bytes()
-          expected='1d1a1346871fc74c45b9765b5981dc21a649b2d0'
-          assert hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest()==expected
-          body=json.dumps({'encoding':'base64','content':base64.b64encode(b).decode()})
-          row=json.loads(subprocess.check_output(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True))
-          assert row['sha']==expected
-          print(json.dumps({'path':p,'sha':expected,'verified_against':os.environ['GITHUB_SHA']}))
+          paths = json.loads(Path(os.environ['RUNNER_TEMP'], 'broker-control-paths.json').read_text())
+          for p, expected in paths.items():
+              b = Path(p).read_bytes()
+              assert hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest() == expected, p
+              body = json.dumps({'encoding': 'base64', 'content': base64.b64encode(b).decode()})
+              row = json.loads(subprocess.check_output(['gh', 'api', '--method', 'POST', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', '--input', '-'], input=body, text=True))
+              assert row['sha'] == expected, p
+              print(json.dumps({'path': p, 'sha': expected, 'verified_against': os.environ['GITHUB_SHA']}))
           PY
