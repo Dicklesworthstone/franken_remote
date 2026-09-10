@@ -1,163 +1,202 @@
-# Ticketed native media-configuration attachment
+# Ticketed native media attachment and delivery
 
-The existing running host and viewer sessions can now negotiate an auxiliary
-configuration/reply pair on their **same Asupersync QUIC connection**. The pair
-is not supplied as a ready-made application route: binding acknowledgement,
-one-use ticket consumption and attachment acknowledgement precede its use.
-This is the configuration-channel join, not a complete remote-desktop app.
+The running host and viewer sessions negotiate configuration, recovery, and
+video/progress/repair channels on their **same Asupersync QUIC connection**. The
+native HEVC path now consumes those completed attachments instead of requiring
+preinstalled media routes. The initial session-control pair and identity/display
+fixtures remain supplied by the test harness; this is not yet a complete
+Tailscale-admitted remote-desktop application.
 
 ## Implemented exchange
 
+Each role uses the existing one-use attachment exchange:
+
 ```text
-host: reserve bounded native stream identities
-  -> StreamBinding on the admitted control channel
-viewer: validate parent/view/selection and allocate its local stream
-  -> BindingAccepted on the existing control channel
-host: arm the receive window only after the peer has opened its stream
-  -> ChannelTicket on the existing control channel
-viewer -> ChannelAttach as the first record on its new stream
-host: consume the exact ticket once
-  -> ChannelAttached as the first record on its new stream
-both: promote the same pair to DecoderConfiguration / DecoderReplies
+host -> StreamBinding on the admitted control channel
+viewer -> BindingAccepted after opening its actual stream
+host -> ChannelTicket after arming the receive window
+viewer -> ChannelAttach as the first record on its auxiliary stream
+host -> ChannelAttached as the first record on its auxiliary stream
+both -> activate only the exact negotiated message family
 ```
 
-`HostSession::offer_media_channel` takes its parent, selection, context and live
-observation check from the actual admitted owner. The locally selected view and
-unpredictable ticket still come from the qualified host, not a remote request.
-`ViewerSession::accept_media_channel` uses that viewer's existing connection,
-selection and responsiveness lifetime. Neither method admits a new peer, chooses
-a desktop, grants control, enables a decoder, or disables local approval.
+Configuration uses the `native-media-attachment` capability. Recovery and Video
+additionally require `native-media-delivery`; old configuration-only peers do
+not silently gain those roles. Stream identities are allocated, not fixed wire
+role numbers. `HostSession::offer_media_role` and
+`ViewerSession::accept_media_channel` retain their actual connection, selection,
+parent identity and observation checks. The locally selected display and
+unpredictable ticket are host-owned, never selected by an untrusted request.
 
-The non-cloneable `MediaChannel` in `fr-transport` owns one fixed 186-byte pending
-record. The underlying `QuicRecords` keeps its existing byte/count-bounded send
-ownership. Retrying backpressure preserves the original record and absolute
-local deadline. Host expiry is echoed unchanged; the viewer never translates
-host monotonic time into its own authority. The host checks the complete grant,
-including parent/display generations, stream IDs, ticket, credit and expiry.
+| Role | Host to viewer | Viewer to host | Delivery |
+|---|---|---|---|
+| Configuration | DecoderConfiguration | DecoderConfigured, FirstFrameDecoded | Critical reliable pair |
+| Recovery | RecoveryAccessUnit chunks | No application records | Bulk reliable host stream |
+| Video | Progress and video fragments | RepairRequest | Critical feedback pair plus bounded video datagrams |
 
-`transmit`, `dispatch` and `finish` operate on the original connection and require
-the containing session's live authorization guard. Continue the normal session
-driver between them, including while waiting for attachment: observation renewal
-and admission refresh must not stop. Attachment dispatch leaves unrelated control
-records with their original dispatcher. Application dispatch returns `Blocked`
-for attachment records awaiting this owner, rather than consuming or copying an
-unbounded history. No native capture or decoder call belongs in these callbacks.
+The Video role uses one binding across its datagrams and progress/repair pair.
+Record kind, native stream, direction and delivery class remain exact. Recovery
+has a distinct binding. `MediaBindings::negotiated(video, recovery)` explicitly
+represents this layout; the legacy four-ID constructor still rejects aliases.
+Neither constructor treats numeric IDs as authorization.
 
-The native stream allocator chooses the pair; fixed stream numbers are not a
-wire-level assignment to roles. The server delays MAX_STREAM_DATA for the new
-client-initiated stream until BindingAccepted: advertising it before the client
-opens the stream is an invalid ordering on the pinned transport. The server's
-unarmed reservation is skipped by ordinary receive dispatch without inventing
-native readiness. Once armed, both directions retain normal framing and expiry.
+## Joining completed channels to native media
 
-Only the exact attachment message family is routable before promotion. After
-promotion, old attachment routes no longer match; unrelated or replayed messages
-cannot masquerade as decoder replies. A stream's retained retransmission bytes
-keep their original charges and deadlines during promotion. Completion is not a
-reset, new socket, decoder configuration, or proof of visible pixels.
+`frd::media_quic::NegotiatedMedia` is constructed from three actual completed
+`MediaChannel` owners, not copied route descriptors. It requires the original
+live connection, correct roles, identical host/OS/remote-session and display,
+geometry, viewport, codec and recovery generations. The protocol limits retained
+by every attachment must equal the supplied session selection. A new selection
+cannot widen already-negotiated resources.
 
-## Bounds, failure and scope
+The joined owner supplies decoder setup, the host sender, viewer receive
+configuration, exact inbound media dispatch, and the repair stream. The shared
+packetizer ceiling is the minimum of the real recovery/video/feedback allowances,
+including the datagram cap. Decoder-configuration limits and compressed/decoded
+picture reservations remain separately enforced.
 
-Native reliable routes have a fixed 16-stream ceiling (previously eight), with
-at most seven auxiliary pairs alongside the two control streams. Static routes
-also count against this same ceiling. At most one attachment can be pending.
-Retired binding and host ticket identities remain reserved until connection
-closure; a second use refuses. Exhaustion refuses rather than recycling an ID.
-Connection and per-stream native flow-control ceilings are unchanged.
+The sender requires the approved observation owner for the matching remote
+session. It retains its original connection identity after construction, through
+send, drive and checked repair dispatch. Another connection with the same
+numeric route IDs cannot receive the prepared media packet. Refusal closes this
+sender's storage without touching the unrelated connection's queues or revoking
+another observation. Viewer dispatch similarly refuses a foreign connection
+before invoking an application callback.
 
-Attachment lasts at most two seconds. The host's original deadline is never
-renewed by approval, a packet, or a retransmission. Closing or dropping an
-unfinished owner marks its reservation terminal; the next checked connection
-operation, including idle service, closes the affected connection. The containing
-session still owns prompt input revocation, cleanup and lifecycle scheduling.
-Foreign connections, wrong parents/roles, malformed grants, permission loss and
-expired reservations refuse before additional application data is admitted.
+The native path now executes:
 
-The runtime implements **MediaRole::Configuration only**. Other syntactically
-valid wire roles explicitly refuse. Recovery, progress/repair, video datagram,
-input and other channels retain their existing local installation requirements.
-There is no wildcard role, automatic fallback, or alternate listener/runtime.
-The attached configuration pair is bounded to the smaller of negotiated control
-C, native receive-window capacity and critical sender capacity. Picture allowance
-is zero: compressed-frame and decoded-surface budgets remain separate.
+```text
+three ticket-negotiated roles
+  -> source-owned bootstrap HEVC IDR
+  -> network DecoderConfiguration
+  -> validate and configure supervised native decoder
+  -> network DecoderConfigured
+  -> retained IDR through negotiated bulk recovery
+  -> native decode, presentation and FirstFrameDecoded
+  -> hand off the same decoder and receiver
+  -> dependent video through negotiated datagrams
+  -> progress and selective repair on the negotiated feedback pair
+```
 
-## Executed tests
+Configuration, successful API configuration, decoding, presentation and control
+remain distinct. No media acknowledgement grants input authority. Attachment is
+not permission to choose a desktop, bypass local approval, enable audio, create
+an input lease or start arbitrary code. Native work stays outside synchronous
+transport callbacks and the session's independent authority path.
 
-The nine transport attachment tests use actual localhost UDP/TLS and the existing
-Asupersync endpoint. They cover successful exchange and in-place promotion,
-original deadlines, owner destruction, one-pending and seven-pair bounds,
-capability/parent rejection, duplicate ticket/binding refusal, a forged ticket on
-the actual stream, pre-attachment application refusal, invalid old routes after
-promotion, and genuine critical-queue backpressure with unrelated renewal traffic.
+## Bounds and failure behavior
 
-A session integration runs the production host/viewer negotiation and persistent
-drivers, negotiates the capability, attaches the pair, and checks that observation
-renewal continues. Its admission metadata and display identity are explicit
-private fixtures, not live Tailscale credentials or a new public fixture mode.
+`MediaChannel` retains one fixed 186-byte pending record. Backpressure preserves
+its bytes and original absolute deadline. Attachments last at most two seconds;
+packets, approvals and retries do not extend them. An abandoned incomplete owner
+marks its reservation terminal; the next checked connection operation, including
+idle service, closes that connection. Observation renewal and Tailscale refresh
+must continue while attachment waits.
 
-All nine existing native decoder-startup tests now use the ticket-negotiated
-configuration pair. They retain actual X11 capture, supervised software HEVC,
-network configuration, first-frame readback and a dependent P picture after
-handoff. Their other media routes remain explicit fixtures. Existing malformed
-configuration, cancellation and expiry refusals remain required. Two test-setup
-assumptions were corrected for the genuine attachment ACK still occupying QUIC: a
-foreign-connection refusal preserves the entire prior queue accounting, and the
-pressure fixture waits for real admission before testing backpressure. Neither
-change resets a deadline, changes production code or substitutes timeout for a
-specific rejection.
+There are at most 16 reliable routes: the two control streams and at most seven
+auxiliary pairs. At most one attachment is pending, and at most four video
+datagram routes are installed. Static routes count against the same ceilings.
+Retired binding/ticket identities remain reserved until connection closure;
+exhaustion refuses rather than recycling identities.
 
-## Published source and retained verification
+Receive credit for a client-initiated stream is armed only after BindingAccepted.
+Advertising it before the client opens the stream is invalid on the pinned
+transport. Before activation, only the attachment message family is routable;
+after activation, replayed attachment records no longer match. Retained native
+retransmission bytes keep their original accounting and deadlines. Recovery
+traffic is bulk and cannot consume the separate critical-record allowance.
 
-The bounded wire records were published in `24788e1eff192a75e5402d4f2ca742912b7256ec`.
-The runtime, session integration and native test migration were published in
-`1c733934bed6cabdb8f793e206f075af4b78ba4a`, preserving concurrent control-renewal
-work through `184e0092eaf713aab84d298dbcd5cfc760b098f5`.
+The joined sender retains the existing `Egress`: one exact prepared media record,
+not another queue. Closing it does not cancel a shared encoder. The enclosing
+session still owns timely input revocation, held-key/button cleanup, generation
+invalidation, cooperative drain and supervised worker termination. Connection
+identity and media closure do not themselves prove OS cleanup or optical scanout.
 
-[Run 34474629312](https://github.com/Dicklesworthstone/franken_remote/actions/runs/34474629312)
-verified the exact five wire source objects. The corrected runtime's exact ten
-source objects passed full pinned-toolchain formatting, workspace compilation,
-strict Clippy, tests and documentation checks in
-[run 34478447265](https://github.com/Dicklesworthstone/franken_remote/actions/runs/34478447265),
-including explicit runs of all nine live attachment tests, all 26 session-startup
-tests and all nine native decoder-startup tests. The workflow staged only the
-hash-checked reviewed patch, then exported the matching source objects after
-success. Its base was `8d0befc`, before concurrent client/control-renewal publication;
-that evidence does not automatically cover later combined checkouts. The retained
-first runtime candidate run `34477797403` failed on the queue-empty test assumption
-above; it is not counted as passing evidence.
+## Executed evidence
 
-Locally, the final nine native tests passed ten four-thread repetitions. The nine
-attachment, 26 session and nine native tests also passed three combined parallel
-runs. Sixteen existing live-QUIC regressions passed, as did the earlier 320-test
-core/wire/media/client Cargo selection, which predates the concurrent client
-changes. Selected first-party and test Clippy checks passed. These are separate
-selections and repetitions, not an invented full-suite count.
+The 12 native decoder-startup tests use actual localhost UDP/TLS, private Xvfb
+servers, real X11 capture, direct FFmpeg software HEVC, supervised child-process
+decoding/presentation and pixel readback. All three media roles attach on the
+network before decoder startup. Only the initial control pair is installed by
+the fixture; no configuration, recovery, feedback or video route is preinstalled.
 
-A negative control removed only ticket-identity comparison from a separate source
-copy. The unchanged forged-ticket test then failed; the production implementation
-passed. Deadline, tuple, transport and application-refusal assertions were retained.
+The successful path verifies an IDR and a subsequent dependent P picture without
+restarting the decoder or receiver. A second path drops every original datagram
+of the final dependent picture **after genuine QUIC reception**, then requires
+reliable progress and a repair request sent through the negotiated reverse stream
+to restore that picture. No additional capture is taken after the loss. This is
+application-boundary loss injection, not physical-link or WAN qualification.
 
-The finalized workflow checks committed source read-only, without candidate
-patches, source-object writes, elevated token permissions or branch mutations.
-UBS and Beads tooling were unavailable; no issue, task or phase was closed.
+The remaining tests preserve malformed HEVC/geometry rejection before worker
+launch, failed native startup without premature IDR release, early/foreign
+acknowledgement refusal, idle expiry, premature media refusal, genuine transport
+backpressure, cancellation and worker reaping. Added checks reject mixed-role or
+foreign completed owners, altered negotiated limits, foreign media/repair/receive
+connections, and another session's otherwise-live observation authority.
+
+The final local selection passed 362 core/wire/media/client Cargo tests, 14 live
+attachment tests, 12 native decoder-startup tests, six existing native media/QUIC
+tests, 16 existing live-QUIC tests, seven media-egress tests and 26 session-driver
+tests: **443 selected tests, zero failures or ignored cases**. The 12 native tests
+also passed eight four-thread repetitions and separate one-, two- and eight-thread
+runs. Selected source/test strict Clippy, formatting and documentation checks passed. Runtime
+and native local tests rebuilt first-party Rust and C sources against the exact
+retained Asupersync 0.4.10 libraries; they are not a cold dependency build.
+
+A separate negative-control source copy removed only the media sender's original
+connection comparison. The unchanged foreign-connection test then failed because
+a progress record was accepted by the other connection. The production source
+and test assertions were untouched and passed. This demonstrates that the test
+can detect the prohibited redirect, not merely successful ordinary delivery.
+
+## Publication and CI history
+
+Wire attachment first landed in `24788e1`, followed by the configuration runtime
+in `1c73393`. Those stages retained successful exact-source verification in runs
+34474629312 and 34478447265. The initial runtime candidate 34477797403 failed on
+an incorrect empty-queue test assumption and is not passing evidence: the final
+test correctly preserves complete queue accounting when an attachment ACK remains
+retained. No rejection or deadline requirement was relaxed.
+
+Recovery/video attachment landed in `fceb7a5`, after exact-source run 34490490417.
+That committed revision passed Rust verification 34493282074 and full media-worker
+verification 34493282089. The explicit shared media-binding layout landed in
+`ea87043`, with its 111 local media tests including cross-channel rejection and a
+41-picture reordering/duplicate/loss/repair sequence.
+
+The joined native source landed in `9bde835eb65ba6d16d40b50397e81da7cb12e212`.
+Its six exact source objects passed clean pinned-toolchain workspace formatting,
+compilation, strict Clippy, tests and documentation checks in
+[run 34498548083](https://github.com/Dicklesworthstone/franken_remote/actions/runs/34498548083),
+against `976594b0d05c05797c54f810bdaabb36a57243c5`. That run additionally executed
+all 14 live attachment and all 12 native decoder-startup tests, then exported the
+matching Git source objects only after success. The published implementation
+uses those exact objects. The workflow now verifies committed source read-only,
+without staged patches, source exports, elevated permissions or branch writes.
+
+Verification of a later combined checkout is distinct from that exact-source
+candidate result. Earlier configuration-only success or a queued workflow is
+not counted as qualification of this increment.
 
 Reproduce on the pinned compiler with native SDKs installed:
 
 ```sh
+cargo test -p fr-media --test negotiated_delivery --locked
 cargo test -p fr-transport --test media_attachment --locked
-cargo test -p frd session_startup --locked
-cargo test -p fr-native --features linux-media --test decoder_startup --locked
+cargo test -p fr-native --features linux-media --test decoder_startup --locked -- --nocapture
+cargo test -p fr-native --features linux-media --test media_quic --locked
 ./scripts/verify.sh fast
 ./scripts/verify.sh docs
 ```
 
-Local runtime tests rebuild first-party Rust and native bridge code against the
-exact retained Asupersync TLS libraries. A cold local dependency build exceeded
-this container's memory; full fresh Cargo verification is a separate CI gate.
-This evidence does not certify live tailnet sharing/ingress, independent QUIC
-interoperability, hardware acceleration, WAN performance, or optical latency.
-No Beads task or full application gate is closed by this configuration slice.
+This evidence does not certify live tailnet sharing or protected ingress,
+independent-peer QUIC interoperability, hardware acceleration, WAN performance,
+optical latency, browser/mobile clients, input-channel attachment, installers or
+the final application loop. Asupersync QUIC remains primary. No dependency,
+runtime, codec or identity-policy substitution was made. UBS and Beads tooling
+were unavailable; no issue, task or full application gate was closed.
 
 Related: [PROTOCOL_ATTACHMENT.md](PROTOCOL_ATTACHMENT.md),
 [SESSION_DRIVERS.md](SESSION_DRIVERS.md), [DECODER_STARTUP.md](DECODER_STARTUP.md),
-[QUIC_RECORDS.md](QUIC_RECORDS.md), [PROTOCOL.md](PROTOCOL.md).
+[MEDIA_QUIC.md](MEDIA_QUIC.md), [QUIC_RECORDS.md](QUIC_RECORDS.md),
+[PROTOCOL.md](PROTOCOL.md).

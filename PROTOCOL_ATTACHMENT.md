@@ -69,6 +69,13 @@ Related contracts: [PROTOCOL.md](PROTOCOL.md),
 [PROTOCOL_NEGOTIATION.md](PROTOCOL_NEGOTIATION.md),
 [PROTOCOL_DECODER.md](PROTOCOL_DECODER.md).
 
-The configuration-role runtime join is implemented and tested in
-[NATIVE_MEDIA_ATTACHMENT.md](NATIVE_MEDIA_ATTACHMENT.md); other roles still
-require separate runtime implementations.
+All three roles now have runtime attachment and native HEVC integration in
+[NATIVE_MEDIA_ATTACHMENT.md](NATIVE_MEDIA_ATTACHMENT.md). Configuration requires
+`native-media-attachment` version 1; Recovery and Video additionally require
+`native-media-delivery` version 1. Configuration-only peers do not gain the new
+roles implicitly. The Video role shares its admitted binding across datagrams,
+progress and repair while retaining exact kinds, directions and native streams;
+Recovery uses a separate bulk binding. Actual packet allowances also respect the
+selected transport's stream, datagram and queue caps. Compressed and decoded
+picture budgets remain separate. Input and other non-media channel attachment
+and the protected ingress/application lifecycle are not established by this join.
