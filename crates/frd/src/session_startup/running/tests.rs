@@ -17,7 +17,7 @@ use std::{
     },
     time::Instant,
 };
-pub(super) fn run<F, Fut>(f: F)
+pub(in crate::session_startup) fn run<F, Fut>(f: F)
 where
     F: FnOnce(Cx, Cx) -> Fut,
     Fut: Future<Output = ()>,
@@ -41,7 +41,7 @@ async fn pair_with_capabilities(
 ) -> (HostSession, ViewerSession) {
     pair_initialized(c, h, capabilities, |_| {}).await
 }
-pub(super) async fn pair_initialized(
+pub(in crate::session_startup) async fn pair_initialized(
     c: &Cx,
     h: &Cx,
     capabilities: Vec<fr_wire::negotiation::Capability>,

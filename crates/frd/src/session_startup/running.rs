@@ -9,7 +9,7 @@ use fr_transport::quic::{ControlRoutes, Disposition, QuicRecords, Route};
 use fr_wire::negotiation::{ControlBinding, Selection};
 use std::{future::Future, pin::pin, task::Poll, time::Duration};
 
-mod controlled;
+pub(super) mod controlled;
 pub use controlled::ControlledHost;
 
 const REFRESH_MARGIN_US: u64 = 500_000;
@@ -375,4 +375,4 @@ async fn pump_refresh(
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

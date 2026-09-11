@@ -29,6 +29,7 @@ mod running;
 pub use running::{ControlledHost, HostSession};
 
 mod viewer;
+pub use viewer::controlled::{ControlledViewer, Error as ControlledViewerError, ViewerControl};
 pub use viewer::{Viewer, ViewerSession};
 
 const WAITING: u8 = 1;

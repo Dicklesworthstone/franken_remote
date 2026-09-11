@@ -252,4 +252,4 @@ where
 }
 
 #[cfg(test)]
-mod tests;
+pub(in crate::session_startup) mod tests;

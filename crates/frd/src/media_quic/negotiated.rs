@@ -214,6 +214,20 @@ impl NegotiatedMedia {
             policy,
         })
     }
+    /// The exact reliable source-progress route for a viewer dispatcher.
+    pub fn progress_route(&self, q: &QuicRecords) -> Result<StreamRoute, Error> {
+        self.check(q)?;
+        if self.is_host() {
+            return Err(Error::InvalidRoutes);
+        }
+        Ok(self.video.inbound)
+    }
+    #[cfg(test)]
+    pub(crate) fn progress_for_test(&self, q: &QuicRecords) -> StreamRoute {
+        self.check(q).unwrap();
+        assert!(self.is_host());
+        self.video.outbound
+    }
     /// Called from this connection's bounded dispatcher. Kind and stream remain
     /// exact even though progress, repair and datagrams share the Video binding.
     pub fn viewer_channel(&self, q: &QuicRecords, route: Route) -> Result<Channel, Error> {

@@ -75,7 +75,7 @@ fn ticket(n: &mut u128) -> Option<InputTicketId> {
     Some(InputTicketId::from_raw(*n))
 }
 
-async fn attach(
+pub(in crate::session_startup) async fn attach(
     host: &mut HostSession,
     viewer: &mut ViewerSession,
     c: &Cx,

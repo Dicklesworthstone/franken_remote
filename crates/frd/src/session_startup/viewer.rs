@@ -2,6 +2,7 @@
 //! caller supplies a TLS-established QUIC connection and a session-local Cx.
 //! No windows, decoder, input grant, peer identity or alternative transport are
 //! invented here. Application dispatch is synchronous and bounded by `QuicRecords`.
+pub(super) mod controlled;
 use super::{Error, now};
 use asupersync::{cx::Cx, net::quic_native::NativeQuicUdpConnection, types::CancelKind};
 use fr_client::{
