@@ -24,7 +24,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           python3 - <<'PY'
-          import base64, hashlib, json, lzma, os, subprocess
+          import base64, hashlib, json, lzma, os, subprocess, tarfile
           from pathlib import Path
           def sha(data): return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
           chunks = [('08018493ed82c835f0f8fca0bc1c8d5084e28741', 6400), ('a4474b818cbb5fbe8302277b679193943003789e', 6400), ('08b1c8b2776bf836a8fbb4ac3dc1ab16513fdbb3', 6400), ('78387aea4175ef91dcb097e09df854def6f1a903', 5800)]
@@ -53,7 +53,24 @@ jobs:
           subprocess.run(['git', 'apply', str(patch)], check=True)
           for path, expected in candidate['after'].items(): assert sha(Path(path).read_bytes()) == expected, path
           Path(os.environ['RUNNER_TEMP'], 'streaming-paths.json').write_text(json.dumps(candidate['after']))
+          review = Path(os.environ['RUNNER_TEMP'], 'streaming-review')
+          review.mkdir()
+          (review / 'candidate.json').write_bytes(data)
+          (review / 'source-commit.txt').write_text(os.environ['GITHUB_SHA'] + '\n')
+          subprocess.run(['git', 'archive', '--format=tar.gz', '-o', str(review / 'original.tar.gz'), 'HEAD'], check=True)
+          tracked = set(subprocess.check_output(['git', 'ls-files', '-z']).decode().rstrip('\0').split('\0'))
+          with tarfile.open(review / 'candidate.tar.gz', 'w:gz') as archive:
+              for path in sorted(tracked | set(candidate['after'])):
+                  assert path and not Path(path).is_absolute() and '..' not in Path(path).parts
+                  archive.add(path, arcname=path, recursive=False)
+          (review / 'SHA256SUMS').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest() + '  ' + p.name + '\n' for p in sorted(review.iterdir()) if p.is_file()))
           PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: streaming-review-source
+          path: ${{ runner.temp }}/streaming-review/
+          retention-days: 1
+          if-no-files-found: error
       - name: Install pinned compiler and native SDKs
         run: |
           rustup show active-toolchain
