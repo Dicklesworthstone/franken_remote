@@ -33,6 +33,14 @@ impl DecoderBinding {
         }
         Ok(())
     }
+    /// Check an owned in-flight picture without borrowing its receiver. This
+    /// permits bounded reception while a foreign decoder is awaiting completion.
+    pub fn check_picture(&self, picture: &ReceivedPicture) -> Result<(), DeliveryError> {
+        if self.revoked || !Arc::ptr_eq(&self.scope, &picture.scope) || !picture.is_live() {
+            return Err(DeliveryError::DecodeMismatch);
+        }
+        Ok(())
+    }
     /// A failed chain may recover under its existing decoder owner. An external
     /// replacement has a different scope; a closed receiver remains terminal.
     pub fn check_recovery(&self, receiver: &ReceivePipeline) -> Result<(), DeliveryError> {
@@ -137,6 +145,7 @@ pub struct ReceivedPicture {
     bindings: MediaBindings,
     queue_fresh: bool,
     display_until_us: u64,
+    reference_until_us: u64,
     bytes: TrackedBytes,
 }
 impl fmt::Debug for ReceivedPicture {
@@ -158,6 +167,23 @@ impl ReceivedPicture {
     }
     pub fn bytes(&self) -> &[u8] {
         &self.bytes.bytes
+    }
+    /// Fixed receiver deadlines, including time queued before native submission.
+    pub const fn display_deadline_us(&self) -> u64 {
+        self.display_until_us
+    }
+    pub const fn reference_deadline_us(&self) -> u64 {
+        self.reference_until_us
+    }
+    /// The exact receiver lifetime must remain live throughout detached decode.
+    pub fn is_live(&self) -> bool {
+        self.scope.load(Ordering::Acquire)
+    }
+    /// Abandoning an accepted decode fences this picture's original receiver.
+    /// A replacement receiver is unaffected; borrowed bytes remain charged until
+    /// their owners release them. This is cancellation, not decoder completion.
+    pub fn cancel_decode(&self) {
+        self.scope.store(false, Ordering::Release);
     }
     /// Receiver queue age only. Presentation also needs source-freshness,
     /// clock-uncertainty, visibility and current authority checks.
@@ -678,6 +704,7 @@ impl ReceivePipeline {
             bindings: self.config.bindings,
             queue_fresh: now < a.display_until,
             display_until_us: a.display_until,
+            reference_until_us: a.reference_until,
             bytes: a.bytes,
         }))
     }

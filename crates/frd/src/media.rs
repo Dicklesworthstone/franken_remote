@@ -4,7 +4,6 @@
 use crate::worker::{self, Deadline, Launch, Worker};
 use asupersync::{
     cx::Cx,
-    time::sleep,
     types::{CancelKind, Time},
 };
 use fr_core::{
@@ -17,7 +16,7 @@ use fr_media::{
         BudgetUsage, DecodedFrame, DecoderBinding, DeliveryError, DeliveryMode, MediaBindings,
         MediaEpoch, PacketOffer, ReceivePipeline, SendCache, SendError, SendPolicy,
     },
-    worker::{Configuration, Kind, Role, unit_parts},
+    worker::{Configuration, Kind, Role},
 };
 use fr_wire::{FrameDescriptor, MediaLimits, PipelineState, Progress, SourceObservation};
 use std::{
@@ -31,6 +30,7 @@ pub mod decoder_startup;
 #[cfg(target_os = "linux")]
 pub mod discovery;
 mod grant;
+pub(crate) mod presentation;
 pub mod renewal;
 #[cfg(target_os = "linux")]
 pub mod streaming;
@@ -555,107 +555,13 @@ impl Presenter {
         cx: &Cx,
         receiver: &mut ReceivePipeline,
     ) -> Result<Option<PresentationReceipt>, Error> {
-        self.binding.check(receiver).map_err(Error::Receiver)?;
-        let now = host_now(cx)?.as_micros();
-        let Some(picture) = receiver.take_decodable(now).map_err(|_| Error::Delivery)? else {
+        let Some(job) = self.take_next(cx, receiver)? else {
             return Ok(None);
         };
-        let mut operation = MediaOperation::new(&mut self.worker);
-        // Declared after the worker guard so cancellation fences receiver/view
-        // receipts before aborting native work. No committed OS effect rolls back.
-        let mut receiving = ReceiveOperation::new(receiver);
-        let d = picture.descriptor();
-        if picture.epoch().configuration != self.configuration.generation {
-            return Err(Error::InvalidFrame);
-        }
-        let kind = d.reference.map_or(
-            FrameKind::Idr {
-                recovery: picture.epoch().recovery,
-            },
-            |id| FrameKind::Predicted {
-                references: FrameId::from_raw(id),
-            },
-        );
-        // One IPC staging buffer plus one retained receiver buffer, each capped
-        // by negotiated max-AU. The runtime integration admits both allocations.
-        let payload = unit_parts(
-            FrameId::from_raw(d.frame),
-            d.capture_micros,
-            self.configuration.generation,
-            kind,
-            picture.bytes(),
-        )?;
-        let display = picture.within_display_queue_budget();
-        let result = async {
-            let deadline = Deadline::after(cx, Duration::from_millis(200))?;
-            let mut reply = operation
-                .worker
-                .request(
-                    cx,
-                    if display { Kind::Present } else { Kind::Decode },
-                    payload,
-                    deadline,
-                )
-                .await?;
-            loop {
-                match reply.header.kind {
-                    kind if kind
-                        == if display {
-                            Kind::Presented
-                        } else {
-                            Kind::Decoded
-                        }
-                        && reply.body() == d.frame.to_be_bytes() =>
-                    {
-                        return Ok(FrameId::from_raw(d.frame));
-                    }
-                    Kind::NeedInput => {
-                        sleep(
-                            cx.timer_driver()
-                                .ok_or(worker::Error::MissingRuntime)?
-                                .now(),
-                            Duration::from_millis(1),
-                        )
-                        .await;
-                        reply = operation
-                            .worker
-                            .request(cx, Kind::Poll, vec![], deadline)
-                            .await?;
-                    }
-                    _ => return Err(Error::InvalidFrame),
-                }
-            }
-        }
-        .await;
-        let completed_at = host_now(cx)?.as_micros();
-        match result {
-            Ok(frame) => {
-                self.binding
-                    .check(receiving.receiver)
-                    .map_err(Error::Receiver)?;
-                let decoded = receiving
-                    .receiver
-                    .complete_decode(&picture, completed_at)
-                    .map_err(|_| Error::Delivery)?;
-                receiving.completed = true;
-                operation.completed = true;
-                Ok(Some(PresentationReceipt {
-                    frame,
-                    decoded,
-                    stage: if display {
-                        PresentationStage::SubmittedToCompositor
-                    } else {
-                        PresentationStage::DecodedOnly
-                    },
-                }))
-            }
-            Err(error) => {
-                let _ = receiving
-                    .receiver
-                    .acknowledge_decode(&picture, false, completed_at);
-                Err(error)
-            }
-        }
+        self.decode_job(cx, job)
+            .await?
+            .complete(cx, receiver)
+            .map(Some)
     }
     /// Fence view receipts before stopping native work. No raw worker access is
     /// exposed: decoder submissions always pass through the bound receiver.
