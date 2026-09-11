@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
-      - name: Stage exact listener identity source
+      - name: Stage exact protected endpoint source
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -27,20 +27,20 @@ jobs:
           import base64,hashlib,json,lzma,os,subprocess
           from pathlib import Path
           def sha(b): return hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest()
-          oid='c2a412568194969d6aec6ed6e65cf141bebac6bc'
+          oid='80a877fdeb43a61affe1c0f5f74060e1f34b8640'
           row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
           raw=base64.b64decode(row['content'])
-          assert len(raw)==6096 and sha(raw)==oid
+          assert len(raw)==13928 and sha(raw)==oid
           d=lzma.LZMADecompressor()
-          data=d.decompress(base64.b64decode(raw,validate=True),max_length=16280)
-          assert d.eof and not d.unused_data and len(data)==16279
-          assert hashlib.sha256(data).hexdigest()=='d16f0ee9fd074a55d473fc7151f8c6258437a4aafa9d591e222bca26b4edee42'
+          data=d.decompress(base64.b64decode(raw,validate=True),max_length=40294)
+          assert d.eof and not d.unused_data and len(data)==40293
+          assert hashlib.sha256(data).hexdigest()=='63e166970fc46cf325abc5bcc240f41b823613444a57531fa2b46c673bc6bb83'
           c=json.loads(data)
-          assert len(c['after'])==5 and set(c['before'])==set(c['after'])
+          assert len(c['after'])==4 and set(c['before'])==set(c['after'])
           for p,s in c['before'].items():
               assert p.startswith('crates/fr-tailnet/') and '..' not in Path(p).parts
               assert (sha(Path(p).read_bytes()) if Path(p).exists() else None)==s,p
-          patch=Path(os.environ['RUNNER_TEMP'],'listener-identity.patch');patch.write_text(c['patch'])
+          patch=Path(os.environ['RUNNER_TEMP'],'protected-endpoint.patch');patch.write_text(c['patch'])
           stats=subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
           assert {l.split('\t',2)[2] for l in stats.splitlines()}==set(c['after'])
           subprocess.run(['git','apply','--check',str(patch)],check=True)
@@ -48,14 +48,23 @@ jobs:
           for p,s in c['after'].items(): assert sha(Path(p).read_bytes())==s,p
           Path(os.environ['RUNNER_TEMP'],'listener-source.json').write_text(json.dumps(c['after']))
           PY
-      - name: Verify real pinned LocalAPI implementation
+      - name: Install qualification tools
         run: |
           rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y nftables iproute2 python3
+      - name: Verify pinned source and unit tests
+        run: |
           cargo fmt --all -- --check
           cargo check -p fr-tailnet --all-targets --locked
           cargo clippy -p fr-tailnet --all-targets --locked -- -D warnings
           cargo test -p fr-tailnet --locked -- --test-threads=4
+          cargo build -p fr-tailnet --example qualify_linux_ingress --locked
           git diff --check
+      - name: Verify real firewall and TUN outside the host network namespace
+        run: |
+          sudo test -c /dev/net/tun
+          timeout 30s sudo unshare --net ./target/debug/examples/qualify_linux_ingress
       - name: Export exact tested source objects
         env:
           GH_TOKEN: ${{ github.token }}
