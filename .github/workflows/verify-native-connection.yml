@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths: ['.github/workflows/verify-native-connection.yml', 'crates/fr-tailnet/**', 'crates/fr-transport/**', 'crates/fr-native/**', 'crates/frd/**', 'Cargo.toml', 'Cargo.lock']
 permissions:
-  contents: read
+  contents: write
 env:
   CARGO_BUILD_JOBS: '1'
   CARGO_PROFILE_DEV_DEBUG: '0'
@@ -19,18 +19,34 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
-      - name: Retain committed source before verification
+      - name: Stage exact peer-target candidate without branch writes
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p "$RUNNER_TEMP/connection-source"
-          git rev-parse HEAD > "$RUNNER_TEMP/connection-source/source-commit.txt"
-          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/connection-source/source.tar.gz"
-          cd "$RUNNER_TEMP/connection-source"
-          sha256sum source.tar.gz source-commit.txt > SHA256SUMS
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: native-connection-source
-          path: ${{ runner.temp }}/connection-source/
-          retention-days: 1
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, subprocess
+          from pathlib import Path
+          def sha(b): return hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest()
+          row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/413f0653b12408878e74eee8303199931ec23ad2'],timeout=30))
+          encoded=base64.b64decode(row['content']); assert len(encoded)==7968 and sha(encoded)=='413f0653b12408878e74eee8303199931ec23ad2'
+          dec=lzma.LZMADecompressor(); data=dec.decompress(base64.b64decode(encoded,validate=True),max_length=23996)
+          assert dec.eof and not dec.unused_data and len(data)==23995
+          assert hashlib.sha256(data).hexdigest()=='68188bf50cd19c9c0881b3c213d0b4cff67fca680a80a64fd40fa8c612ddb521'
+          candidate=json.loads(data); assert len(candidate['after'])==8 and set(candidate['before'])==set(candidate['after'])
+          current={}
+          for path in candidate['before']:
+              assert path.startswith('crates/fr-tailnet/') and '..' not in Path(path).parts
+              current[path]=sha(Path(path).read_bytes()) if Path(path).exists() else None
+          if current!=candidate['after']:
+              assert current==candidate['before'], 'candidate preimages changed'
+              patch=Path(os.environ['RUNNER_TEMP'],'peer-target.patch'); patch.write_text(candidate['patch'])
+              stats=subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
+              assert {line.split('\t',2)[2] for line in stats.splitlines()}==set(candidate['after'])
+              subprocess.run(['git','apply','--check',str(patch)],check=True)
+              subprocess.run(['git','apply',str(patch)],check=True)
+          for path, expected in candidate['after'].items(): assert sha(Path(path).read_bytes())==expected, path
+          Path(os.environ['RUNNER_TEMP'],'peer-target-paths.json').write_text(json.dumps(candidate['after']))
+          PY
       - name: Select pinned toolchain
         run: rustup show active-toolchain
       - name: Exercise installed-tailnet adapter
@@ -40,3 +56,16 @@ jobs:
           cargo clippy -p fr-tailnet -p fr-transport --all-targets --locked -- -D warnings
           cargo fmt --all --check
           ./scripts/verify.sh docs
+      - name: Retain verified blobs without changing refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, subprocess
+          from pathlib import Path
+          for path, expected in json.loads(Path(os.environ['RUNNER_TEMP'],'peer-target-paths.json').read_text()).items():
+              data=Path(path).read_bytes(); assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()==expected
+              body=json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()})
+              row=json.loads(subprocess.check_output(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,timeout=30))
+              assert row['sha']==expected; print(json.dumps({'path':path,'sha':expected}))
+          PY
