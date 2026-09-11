@@ -22,6 +22,8 @@ use fr_wire::{
     input_result::{InputResult, ResultBinding, SequenceSpace, decode_input_result},
 };
 
+use std::sync::Arc;
+
 pub const MAX_PENDING_ACTIONS: usize = 32;
 /// CLIENT monotonic microseconds, never compared to a host ticket timestamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -131,6 +133,7 @@ struct Pending {
 /// Stop fences new sends; notify the host's independent revoke/cleanup path too.
 /// A missing result is uncertainty, never a claim that the host did nothing.
 pub struct InputClient {
+    viewport_owner: Arc<()>,
     credentials: InputCredentials,
     binding: ResultBinding,
     bounds: InputBounds,
@@ -177,6 +180,7 @@ impl InputClient {
             return Err(Error::InvalidConfiguration);
         }
         Ok(Self {
+            viewport_owner: Arc::new(()),
             credentials,
             binding: ResultBinding {
                 channel,

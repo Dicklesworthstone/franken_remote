@@ -148,6 +148,7 @@ impl PositionedAction {
 /// Confirmation means the renderer applied this placement, NOT visible pixels,
 /// host mapping acknowledgement, fresh source evidence or input authorization.
 pub struct Viewport {
+    owner: Arc<()>,
     binding: ResultBinding,
     view: InputView,
     bounds: InputBounds,
@@ -262,7 +263,8 @@ impl Viewport {
         Ok(position)
     }
     fn check_input(&self, input: &InputClient) -> Result<(), Error> {
-        if self.binding != input.binding
+        if !Arc::ptr_eq(&self.owner, &input.viewport_owner)
+            || self.binding != input.binding
             || self.view != input.credentials.view
             || self.bounds != input.bounds
         {
@@ -284,6 +286,7 @@ impl InputClient {
     /// mapping nor changes this input owner's authority or freshness.
     pub fn viewport(&self) -> Viewport {
         Viewport {
+            owner: self.viewport_owner.clone(),
             binding: self.binding,
             view: self.credentials.view,
             bounds: self.bounds,

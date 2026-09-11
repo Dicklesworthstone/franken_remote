@@ -512,3 +512,33 @@ fn assert_scroll(
             .contains(&Operation::Absolute(DesktopPoint { x: -960, y: 640 }))
     );
 }
+
+#[test]
+fn equal_numeric_regrant_cannot_reuse_the_previous_input_owners_layout() {
+    let desktop = bounds(0, 0, 100, 100);
+    let old = client_with(credentials(), desktop);
+    let mut viewport = old.viewport();
+    let layout = viewport
+        .configure(desktop, SurfaceRect::new(0, 0, 100, 100).unwrap())
+        .unwrap();
+    viewport.confirm_layout(&layout).unwrap();
+    let mut replacement = client_with(credentials(), desktop);
+    ready(&mut replacement, credentials());
+    let mut out = [0; MAX_INPUT_RECORD_BYTES];
+    assert_eq!(
+        replacement.pointer_on(
+            &viewport,
+            &layout.at(LocalPoint::pixels(50, 50)),
+            &mut out,
+            ClientInstant(1)
+        ),
+        Err(Error::WrongInput)
+    );
+    assert_eq!(
+        replacement
+            .pointer(DesktopPoint { x: 50, y: 50 }, &mut out, ClientInstant(1))
+            .unwrap()
+            .sequence,
+        0
+    );
+}
