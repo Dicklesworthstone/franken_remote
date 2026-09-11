@@ -5,6 +5,7 @@
 mod control;
 pub mod held;
 pub mod ticket;
+pub mod viewport;
 use fr_core::{
     ids::{InputTicketId, RemoteSessionId},
     input::{
