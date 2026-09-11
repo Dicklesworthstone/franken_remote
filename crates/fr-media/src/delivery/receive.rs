@@ -427,6 +427,25 @@ impl ReceivePipeline {
     pub(crate) fn presentation_scope(&self) -> (Arc<AtomicBool>, ReceiveConfig) {
         (self.scope.clone(), self.config)
     }
+    /// Check the admitted delivery tuple without replacing the receiver or its
+    /// unique decoder ownership. Policy and resource ceilings are not widened.
+    pub fn check_delivery_configuration(
+        &self,
+        limits: MediaLimits,
+        bindings: MediaBindings,
+        epoch: MediaEpoch,
+    ) -> Result<(), DeliveryError> {
+        if !self.scope.load(Ordering::Acquire) || self.state == ReceiveState::Closed {
+            return Err(DeliveryError::WrongState);
+        }
+        if self.config.bindings != bindings || self.config.epoch != epoch {
+            return Err(DeliveryError::StaleGeneration);
+        }
+        if self.config.limits != limits {
+            return Err(DeliveryError::ResourceLimit);
+        }
+        Ok(())
+    }
     pub const fn state(&self) -> ReceiveState {
         self.state
     }

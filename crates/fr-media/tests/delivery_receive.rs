@@ -524,3 +524,116 @@ fn clock_faults_close_and_binding_or_epoch_reuse_cannot_reopen() {
     );
     assert_eq!(overflow.state(), ReceiveState::AwaitingConfiguration);
 }
+
+#[test]
+fn detached_decoder_work_keeps_exact_receiver_identity_and_budget() {
+    let c = config();
+    let budget = MediaBudget::new(c.limits.protocol()).unwrap();
+    let mut receiver = ReceivePipeline::new(c, budget.clone()).unwrap();
+    let mut decoder = receiver
+        .bind_decoder(c.epoch.configuration, c.limits.protocol(), 0)
+        .unwrap();
+    recovery(&mut receiver, c, 0);
+    let picture = receiver.take_decodable(1).unwrap().unwrap();
+    decoder.check_picture(&picture).unwrap();
+    let charged = budget.usage();
+    for packet in fragments(descriptor(1, Some(0)), &payload(), c) {
+        receiver.receive(Channel::Video, &packet, 2).unwrap();
+    }
+    assert!(receiver.take_decodable(3).unwrap().is_none());
+    assert!(budget.usage().bytes > charged.bytes);
+    let mut foreign =
+        ReceivePipeline::new(c, MediaBudget::new(c.limits.protocol()).unwrap()).unwrap();
+    let other = foreign
+        .bind_decoder(c.epoch.configuration, c.limits.protocol(), 0)
+        .unwrap();
+    assert_eq!(
+        other.check_picture(&picture),
+        Err(DeliveryError::DecodeMismatch)
+    );
+    let completion = receiver.complete_decode(&picture, 4).unwrap();
+    assert_eq!(completion.descriptor().frame, 0);
+    assert_eq!(
+        completion.display_deadline_us(),
+        picture.display_deadline_us()
+    );
+    assert!(budget.usage().bytes > charged.bytes);
+    decoder.revoke();
+    assert_eq!(
+        decoder.check_picture(&picture),
+        Err(DeliveryError::DecodeMismatch)
+    );
+    receiver.close();
+    assert_eq!(budget.usage().pictures, 1);
+    drop(picture);
+    assert_eq!(budget.usage().pictures, 0);
+}
+
+#[test]
+fn receiver_replacement_fences_detached_decode_even_with_equal_numeric_epoch() {
+    let c = config();
+    let mut receiver =
+        ReceivePipeline::new(c, MediaBudget::new(c.limits.protocol()).unwrap()).unwrap();
+    let decoder = receiver
+        .bind_decoder(c.epoch.configuration, c.limits.protocol(), 0)
+        .unwrap();
+    recovery(&mut receiver, c, 0);
+    let picture = receiver.take_decodable(1).unwrap().unwrap();
+    decoder.check_picture(&picture).unwrap();
+    receiver.close();
+    assert_eq!(
+        decoder.check_picture(&picture),
+        Err(DeliveryError::DecodeMismatch)
+    );
+    let mut replacement =
+        ReceivePipeline::new(c, MediaBudget::new(c.limits.protocol()).unwrap()).unwrap();
+    let new_decoder = replacement
+        .bind_decoder(c.epoch.configuration, c.limits.protocol(), 0)
+        .unwrap();
+    assert_eq!(
+        new_decoder.check_picture(&picture),
+        Err(DeliveryError::DecodeMismatch)
+    );
+    assert!(replacement.complete_decode(&picture, 2).is_err());
+}
+
+#[test]
+fn delivery_handoff_checks_all_bindings_generations_and_limits() {
+    let c = config();
+    let (mut receiver, _) = running(c);
+    assert!(
+        receiver
+            .check_delivery_configuration(c.limits, c.bindings, c.epoch)
+            .is_ok()
+    );
+    assert!(
+        receiver
+            .check_delivery_configuration(
+                c.limits,
+                MediaBindings::new(11, 12, 13, 14).unwrap(),
+                c.epoch
+            )
+            .is_err()
+    );
+    let epoch = MediaEpoch {
+        recovery: c.epoch.recovery.next().unwrap(),
+        ..c.epoch
+    };
+    assert!(
+        receiver
+            .check_delivery_configuration(c.limits, c.bindings, epoch)
+            .is_err()
+    );
+    let limits = MediaLimits::new(*c.limits.protocol(), 1100, 16384, 64).unwrap();
+    assert!(
+        receiver
+            .check_delivery_configuration(limits, c.bindings, c.epoch)
+            .is_err()
+    );
+    receiver.close();
+    assert!(
+        receiver
+            .check_delivery_configuration(c.limits, c.bindings, c.epoch)
+            .is_err()
+    );
+}
