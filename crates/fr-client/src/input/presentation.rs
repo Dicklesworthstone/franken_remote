@@ -77,6 +77,11 @@ impl PresentedInput {
     pub fn check_receiver(&self, receiver: &ReceivePipeline) -> Result<(), Error> {
         self.view.check_receiver(receiver).map_err(Error::Media)
     }
+    /// Local coordinate metadata bound to this exact underlying input lifetime.
+    /// It grants neither visibility nor permission to send input.
+    pub fn viewport(&self) -> super::viewport::Viewport {
+        self.input.viewport()
+    }
     /// Immutable input identity. Does not expose the bearer ticket.
     pub const fn binding(&self) -> fr_wire::input_result::ResultBinding {
         self.input.binding

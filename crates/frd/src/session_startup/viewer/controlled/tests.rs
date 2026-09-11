@@ -65,6 +65,7 @@ fn nonce(counter: &mut u128) -> Result<u128, ()> {
 #[derive(Default)]
 struct Effects {
     keys: Vec<bool>,
+    operations: Vec<Op>,
 }
 struct Sink(Arc<Mutex<Effects>>);
 impl InputSink for Sink {
@@ -72,13 +73,11 @@ impl InputSink for Sink {
         Ok(())
     }
     fn submit(&mut self, op: Op) -> Submission {
+        let mut effects = self.0.lock().unwrap();
         if let Op::Key { transition, .. } = op {
-            self.0
-                .lock()
-                .unwrap()
-                .keys
-                .push(transition != KeyTransition::Release);
+            effects.keys.push(transition != KeyTransition::Release);
         }
+        effects.operations.push(op);
         Submission::Submitted
     }
 }
@@ -99,9 +98,12 @@ struct Fixture {
     effects: Arc<Mutex<Effects>>,
     observation: ObservationControl,
 }
-#[allow(clippy::too_many_lines)]
 async fn fixture(client_cx: &Cx, host_cx: &Cx) -> Fixture {
-    let capabilities = [
+    Box::pin(fixture_with_caps(client_cx, host_cx, caps())).await
+}
+#[allow(clippy::too_many_lines)]
+async fn fixture_with_caps(client_cx: &Cx, host_cx: &Cx, capabilities: Capabilities) -> Fixture {
+    let wire_capabilities = [
         fr_wire::clock::CAPABILITY,
         decoder::CAPABILITY,
         attachment::INPUT_CAPABILITY,
@@ -115,7 +117,7 @@ async fn fixture(client_cx: &Cx, host_cx: &Cx) -> Fixture {
         required: true,
     })
     .collect();
-    let (mut host, mut viewer) = pair_initialized(client_cx, host_cx, capabilities, |host| {
+    let (mut host, mut viewer) = pair_initialized(client_cx, host_cx, wire_capabilities, |host| {
         let host_result = host.authority.as_mut().unwrap();
         let stamp = HostInstant::from_micros(now(host_cx).unwrap());
         host_result.mark_view_ready(stamp).unwrap();
@@ -201,7 +203,7 @@ async fn fixture(client_cx: &Cx, host_cx: &Cx) -> Fixture {
         }
     };
     let session = observation
-        .input_session(creds(), bounds(), caps())
+        .input_session(creds(), bounds(), capabilities)
         .unwrap();
     let effects = Arc::new(Mutex::new(Effects::default()));
     let sink = effects.clone();
@@ -222,7 +224,7 @@ async fn fixture(client_cx: &Cx, host_cx: &Cx) -> Fixture {
         creds(),
         10,
         bounds(),
-        caps(),
+        capabilities,
         ProtocolLimits::ABSOLUTE,
         Policy::default(),
         ClientInstant(now(client_cx).unwrap()),
@@ -892,3 +894,5 @@ fn progress_callback_receiver_failure_cannot_enable_followup_input() {
         assert_eq!(state.effects.lock().unwrap().keys, [] as [bool; 0]);
     });
 }
+
+mod viewport;

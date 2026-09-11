@@ -1,5 +1,6 @@
 //! The running native viewer owns input identities, freshness and network sends.
 //! Decode/present work stays off this task; qualified callbacks arrive between turns.
+mod viewport;
 use super::{ViewerSession, now};
 use crate::{
     input_quic::{self, NegotiatedInput},
@@ -30,6 +31,7 @@ pub enum Error {
     Session(super::Error),
     Input(input_quic::Error),
     View(presentation::Error),
+    Viewport(fr_client::input::viewport::Error),
     Clock(clock::Error),
     Media(crate::media_quic::Error),
     WrongBinding,
@@ -75,6 +77,7 @@ struct Pending {
 pub struct ControlledViewer {
     session: ViewerSession,
     input: PresentedInput,
+    viewport: fr_client::input::viewport::Viewport,
     channels: NegotiatedInput,
     media: NegotiatedMedia,
     clock: ClockSync,
@@ -144,9 +147,11 @@ impl ViewerSession {
             cx: self.cx.clone(),
             stopped: Arc::new(AtomicBool::new(false)),
         };
+        let viewport = input.viewport();
         Ok(ControlledViewer {
             session: self,
             input,
+            viewport,
             channels,
             media,
             clock,
@@ -174,6 +179,7 @@ impl ControlledViewer {
         self.last_result
     }
     pub fn close(&mut self) {
+        self.viewport.stop();
         self.input.stop(StopReason::Disconnected);
         self.pending = None;
         self.control.stop();
