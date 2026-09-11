@@ -186,6 +186,11 @@ impl NegotiatedInput {
         }
         Ok((a.outbound, a.inbound, pointer))
     }
+    /// Immutable checked session/configuration identity for the owning viewer.
+    pub fn viewer_scope(&self, q: &QuicRecords) -> Result<(ControlBinding, Binding), Error> {
+        self.viewer_routes(q)?;
+        Ok((self.parent, self.configuration.descriptor.binding))
+    }
     /// Preserve the caller's original absolute deadline and exact record under
     /// transport backpressure. An action never falls back to a pointer datagram.
     pub fn send(

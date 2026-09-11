@@ -36,14 +36,14 @@ pub enum Error {
 /// sent the request and before the viewer received the response. The transport
 /// must authenticate and correlate that exchange; arbitrary peer timestamps are
 /// not such evidence. Drift is a locally qualified *relative* clock-rate bound.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClockSample {
     pub host_boot: HostBootId,
     pub client_sent_us: u64,
     pub host_sample_us: u64,
     pub client_received_us: u64,
 }
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClockPolicy {
     pub max_exchange_us: u64,
     pub valid_for_us: u64,
@@ -58,7 +58,7 @@ impl Default for ClockPolicy {
         }
     }
 }
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClockCorrelation {
     sample: ClockSample,
     policy: ClockPolicy,
@@ -200,8 +200,15 @@ impl ViewTracker {
             closed: false,
         })
     }
+    /// Exact receiver channel bindings; this is identity metadata, not authority.
+    pub const fn bindings(&self) -> MediaBindings {
+        self.bindings
+    }
     pub const fn host_boot(&self) -> HostBootId {
         self.clock.host_boot()
+    }
+    pub const fn clock_correlation(&self) -> ClockCorrelation {
+        self.clock
     }
     pub const fn epoch(&self) -> MediaEpoch {
         self.epoch

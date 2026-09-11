@@ -72,6 +72,65 @@ impl PresentedInput {
             active: false,
         })
     }
+    /// Immutable input identity. Does not expose the bearer ticket.
+    pub const fn binding(&self) -> fr_wire::input_result::ResultBinding {
+        self.input.binding
+    }
+    pub const fn input_view(&self) -> InputView {
+        self.input.credentials.view
+    }
+    pub const fn protocol_limits(&self) -> fr_core::limits::ProtocolLimits {
+        self.input.limits
+    }
+    pub const fn host_boot(&self) -> fr_core::ids::HostBootId {
+        self.view.host_boot()
+    }
+    pub const fn media_bindings(&self) -> fr_media::delivery::MediaBindings {
+        self.view.bindings()
+    }
+    pub const fn clock_correlation(&self) -> ClockCorrelation {
+        self.view.clock_correlation()
+    }
+    pub fn ticket_deadline(&self) -> Option<ClientInstant> {
+        self.input.ticket_deadline()
+    }
+    /// The previous view's exclusive deadline remains in force while a newly
+    /// submitted picture awaits its independent visibility callback. This is a
+    /// maintenance bound, NOT permission to send input or renew control.
+    pub fn maintenance_deadline(&mut self, now: ClientInstant) -> Result<ClientInstant, Error> {
+        self.tick(now)?;
+        self.input
+            .view_until
+            .ok_or(Error::Input(super::Error::NoPresentedView))
+    }
+    /// Bound transport retention by the evidence used at encoding, not a newer
+    /// observation received while an older action is waiting to be transmitted.
+    pub fn view_deadline(&mut self, now: ClientInstant) -> Result<ClientInstant, Error> {
+        if !self.tick(now)? {
+            return Err(Error::Input(super::Error::NoPresentedView));
+        }
+        if !self.input.mapped {
+            return Err(Error::Input(super::Error::MappingUnconfirmed));
+        }
+        self.input
+            .view_until
+            .ok_or(Error::Input(super::Error::NoPresentedView))
+    }
+    /// A network send requires a measured initial ticket expiry. The legacy
+    /// opaque-ticket constructor is deliberately insufficient for this path.
+    pub fn send_deadline(&mut self, now: ClientInstant) -> Result<ClientInstant, Error> {
+        let view = self.view_deadline(now)?;
+        self.input.ready(now)?;
+        let ticket = self
+            .input
+            .ticket_deadline()
+            .ok_or(Error::Input(super::Error::InvalidConfiguration))?;
+        let receipt = now
+            .0
+            .checked_add(self.input.policy.receipt_timeout_us)
+            .ok_or(Error::Input(super::Error::InvalidConfiguration))?;
+        Ok(ClientInstant(view.0.min(ticket.0).min(receipt)))
+    }
     /// A network ticket still needs independent media-derived freshness. Late
     /// receipts can be collected after stop, but a ticket cannot clear that stop.
     pub fn accept_ticket(

@@ -247,6 +247,19 @@ impl ClockSync {
             side,
         })
     }
+    /// Match the actual measured exchange to its original session before moving
+    /// it into a persistent viewer. Equal clocks are not a substitute for this.
+    pub fn matches_viewer(
+        &self,
+        connection: &QuicRecords,
+        binding: ControlBinding,
+        limits: ProtocolLimits,
+    ) -> bool {
+        matches!(self.side, Side::Viewer { .. })
+            && connection.is_bound_to(&self.connection)
+            && binding == self.binding
+            && limits == self.limits
+    }
     pub fn stop(&mut self) {
         self.life.stop();
         match &mut self.side {
