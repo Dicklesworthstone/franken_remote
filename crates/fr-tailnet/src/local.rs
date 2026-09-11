@@ -305,5 +305,8 @@ async fn bounded<T>(
     .await
 }
 
+mod node;
+pub use node::NodeIdentity;
+
 #[cfg(test)]
 mod tests;

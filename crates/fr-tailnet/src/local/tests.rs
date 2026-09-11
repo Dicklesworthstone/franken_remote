@@ -109,6 +109,7 @@ impl Server {
                 );
                 assert!(
                     request.starts_with("GET /localapi/v0/status?peers=true ")
+                        || request.starts_with("GET /localapi/v0/status?peers=false ")
                         || request.starts_with("GET /localapi/v0/whois?addr=100.64.0.2%3A30001 ")
                 );
                 counted.fetch_add(1, Ordering::SeqCst);
@@ -1111,4 +1112,98 @@ fn operation_poll_cannot_cross_lookup_deadline_or_cancellation() {
                 });
         }
     }
+}
+
+#[test]
+fn installed_node_snapshot_is_bounded_local_only_and_redacted() {
+    let (mut status, _) = fixtures();
+    status["Self"]["DNSName"] = json!("host.fixture.ts.net.");
+    status["TailscaleIPs"] = json!(["100.64.0.1", "fd7a:115c:a1e0::1"]);
+    status["Self"]["TailscaleIPs"] = status["TailscaleIPs"].clone();
+    status.as_object_mut().unwrap().remove("Peer");
+    let server = Server::new(vec![response(&status, true)], Duration::ZERO);
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let node = server.client.node_identity(&cx).await.unwrap();
+        assert_eq!(server.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(node.addresses().len(), 2);
+        assert_eq!(node.certificate_name(), "host.fixture.ts.net");
+        assert_eq!(
+            node.check_at(node.expires_us(), node.wall_issued_us),
+            Err(Error::Expired)
+        );
+        let other = LocalApi::new(&*server.client.path).unwrap();
+        assert_eq!(other.check_node(&cx, &node), Err(Error::IdentityMismatch));
+        for sensitive in ["100.64", "host.fixture", "nodekey", "n-host"] {
+            assert!(!format!("{node:?}").contains(sensitive));
+        }
+        let renewed = server.client.revalidate_node(&cx, &node).await.unwrap();
+        assert!(node.same_node(&renewed));
+        assert!(renewed.expires_us() >= node.expires_us());
+    });
+}
+#[test]
+fn node_address_name_identity_and_backend_changes_refuse() {
+    let (mut original, _) = fixtures();
+    original["Self"]["DNSName"] = json!("host.fixture.ts.net.");
+    for (field, value) in [
+        ("DNSName", json!("attacker.example.org.")),
+        ("DNSName", json!("host.fixture.ts.net..")),
+        ("TailscaleIPs", json!(["::ffff:100.64.0.1"])),
+        ("TailscaleIPs", json!(["127.0.0.1"])),
+        ("Expired", json!(true)),
+    ] {
+        let mut invalid = original.clone();
+        invalid["Self"][field] = value;
+        assert!(
+            Status::parse(&serde_json::to_vec(&invalid).unwrap())
+                .unwrap()
+                .host_identity()
+                .is_err(),
+            "{field}"
+        );
+    }
+    let mut changed = original.clone();
+    changed["Self"]["DNSName"] = json!("other.fixture.ts.net.");
+    let server = Server::new(
+        vec![response(&original, false), response(&changed, false)],
+        Duration::ZERO,
+    );
+    runtime().block_on(async {
+        assert!(matches!(
+            server.client.node_identity(&Cx::current().unwrap()).await,
+            Err(Error::SnapshotChanged)
+        ));
+    });
+}
+#[test]
+fn node_refresh_cannot_replace_key_or_extend_a_dead_snapshot() {
+    let (mut original, _) = fixtures();
+    original["Self"]["DNSName"] = json!("host.fixture.ts.net.");
+    let mut changed = original.clone();
+    changed["Self"]["PublicKey"] = json!(format!("nodekey:{}", "3".repeat(64)));
+    let server = Server::new(
+        vec![
+            response(&original, false),
+            response(&original, false),
+            response(&changed, false),
+        ],
+        Duration::ZERO,
+    );
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let node = server.client.node_identity(&cx).await.unwrap();
+        assert!(matches!(
+            server.client.revalidate_node(&cx, &node).await,
+            Err(Error::IdentityChanged)
+        ));
+        let mut expired = node;
+        expired.expires_us = now(&cx).unwrap();
+        let calls = server.calls.load(Ordering::SeqCst);
+        assert!(matches!(
+            server.client.revalidate_node(&cx, &expired).await,
+            Err(Error::Expired)
+        ));
+        assert_eq!(server.calls.load(Ordering::SeqCst), calls);
+    });
 }

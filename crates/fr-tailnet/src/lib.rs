@@ -11,7 +11,7 @@ pub use lease::{Admission, Lease};
 mod local;
 mod metadata;
 #[cfg(target_os = "linux")]
-pub use local::LocalApi;
+pub use local::{LocalApi, NodeIdentity};
 
 use std::{fmt, net::SocketAddr, time::Duration};
 

@@ -68,6 +68,8 @@ impl<'de, const N: usize> Deserialize<'de> for Text<N> {
 pub(crate) struct Peer {
     #[serde(rename = "ID")]
     pub id: Text<128>,
+    #[serde(rename = "DNSName", default)]
+    pub dns_name: Option<Text<254>>,
     #[serde(rename = "NodeID")]
     pub node_id: u64,
     #[serde(rename = "PublicKey")]
@@ -108,7 +110,7 @@ pub(crate) struct Status {
     pub tailnet: Tailnet,
     #[serde(rename = "TailscaleIPs")]
     ips: List<IpAddr, 8>,
-    #[serde(rename = "Peer", deserialize_with = "peers")]
+    #[serde(rename = "Peer", deserialize_with = "peers", default)]
     pub peers: BTreeMap<String, Peer>,
 }
 fn peers<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, Peer>, D::Error> {
@@ -379,4 +381,81 @@ pub(crate) fn evaluate(
         permissions,
         expiries,
     ))
+}
+
+/// Local status projection deliberately excludes unrelated peer churn.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct HostIdentity {
+    pub host: Peer,
+    pub certificate_name: String,
+    version: Text<128>,
+    tailnet: Tailnet,
+}
+impl Status {
+    pub(crate) fn host_identity(&self) -> Result<HostIdentity, Error> {
+        if self.backend.0 != "Running" {
+            return Err(Error::BackendNotRunning);
+        }
+        self.this.validate()?;
+        if self.version.0.is_empty()
+            || self.tailnet.name.0.is_empty()
+            || self.ips.0.len() != self.this.ips.0.len()
+            || self.ips.0.iter().any(|ip| !self.this.ips.0.contains(ip))
+            || self
+                .ips
+                .0
+                .iter()
+                .enumerate()
+                .any(|(i, ip)| self.ips.0[..i].contains(ip))
+            || self
+                .this
+                .ips
+                .0
+                .iter()
+                .any(|ip| matches!(ip, IpAddr::V6(v) if v.to_ipv4_mapped().is_some()))
+        {
+            return Err(Error::MalformedMetadata);
+        }
+        let name = &self
+            .this
+            .dns_name
+            .as_ref()
+            .ok_or(Error::MalformedMetadata)?
+            .0;
+        let name = name.strip_suffix('.').unwrap_or(name);
+        let suffix = self
+            .tailnet
+            .suffix
+            .0
+            .strip_suffix('.')
+            .unwrap_or(&self.tailnet.suffix.0);
+        let valid_name = |text: &str| {
+            !text.is_empty()
+                && text.len() <= 253
+                && text.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && !label.starts_with('-')
+                        && !label.ends_with('-')
+                        && label
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                })
+        };
+        if !valid_name(name)
+            || !valid_name(suffix)
+            || name == suffix
+            || !name
+                .strip_suffix(suffix)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+        {
+            return Err(Error::MalformedMetadata);
+        }
+        Ok(HostIdentity {
+            host: self.this.clone(),
+            certificate_name: name.to_owned(),
+            version: self.version.clone(),
+            tailnet: self.tailnet.clone(),
+        })
+    }
 }
