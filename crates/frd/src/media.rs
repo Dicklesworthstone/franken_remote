@@ -28,6 +28,8 @@ use std::{
 mod capture_update;
 pub mod clock;
 pub mod decoder_startup;
+#[cfg(target_os = "linux")]
+pub mod discovery;
 mod grant;
 pub mod renewal;
 pub use capture_update::CaptureUpdate;
@@ -119,6 +121,10 @@ impl ObservationControl {
                 Err(Error::Admission(error))
             }
         }
+    }
+    #[cfg(target_os = "linux")]
+    pub(crate) fn same_owner(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.authority, &other.authority)
     }
     pub(crate) fn context(&self) -> Cx {
         self.cx.clone()
@@ -235,6 +241,7 @@ pub struct CaptureSource {
     next: Option<FrameId>,
     source: Arc<()>,
     last_capture: Option<FrameId>,
+    selected_control: Option<ObservationControl>,
 }
 impl CaptureSource {
     pub async fn start(
@@ -260,13 +267,20 @@ impl CaptureSource {
             next: Some(FrameId::FIRST),
             source: Arc::new(()),
             last_capture: None,
+            selected_control: None,
         })
+    }
+    pub fn worker_id(&self) -> Option<u32> {
+        self.worker.id()
     }
     /// Retire provenance for future results before unrestricted worker access.
     /// This borrow can replace the child or its codec history. Resuming source-
     /// bound delivery requires a fresh encoded IDR and a new/recovered
     /// subscription; an unchanged reply cannot bridge this ownership boundary.
     pub fn worker_mut(&mut self) -> &mut Worker {
+        if let Some(control) = &self.selected_control {
+            control.revoke();
+        }
         self.source = Arc::new(());
         self.last_capture = None;
         &mut self.worker

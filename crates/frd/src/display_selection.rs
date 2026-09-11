@@ -520,6 +520,26 @@ impl SelectedDisplay {
             .and_then(|s| s.require_display(self.display.pixel_width, self.display.pixel_height))
             .map_err(Error::Decoder)
     }
+    pub(crate) fn check_capture(
+        &self,
+        q: &QuicRecords,
+        control: &ObservationControl,
+        catalog: &Catalog,
+    ) -> Result<Display, Error> {
+        self.check(q)?;
+        if self
+            .life
+            .control
+            .as_ref()
+            .is_none_or(|owner| !owner.same_owner(control))
+        {
+            return Err(Error::Configuration);
+        }
+        if catalog.find(self.display.handle) != Some(self.display) {
+            return Err(Error::ChangedDisplay);
+        }
+        Ok(self.display)
+    }
     pub fn limits(&self) -> ProtocolLimits {
         self.life.selection.limits
     }

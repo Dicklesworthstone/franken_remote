@@ -85,6 +85,8 @@ impl CaptureSource {
         force_idr: bool,
         conditional: bool,
     ) -> Result<CaptureUpdate, Error> {
+        #[cfg(target_os = "linux")]
+        let mut selection = super::discovery::SelectionGuard::capture(self, control)?;
         let issued = control.check()?;
         let deadline = control.deadline(Duration::from_secs(2))?;
         let frame = self.next.ok_or(Error::InvalidFrame)?;
@@ -145,6 +147,8 @@ impl CaptureSource {
             }
         };
         operation.completed = true;
+        #[cfg(target_os = "linux")]
+        selection.finish();
         Ok(CaptureUpdate {
             source: self.source.clone(),
             configuration: self.configuration.generation,

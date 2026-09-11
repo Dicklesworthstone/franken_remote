@@ -190,15 +190,23 @@ impl Link {
             configuration().limits().unwrap(),
         )
         .unwrap();
+        let catalog = fixture_catalog(root.width(), root.height());
         Self::with_choice(
             cx,
-            Some((source.control.clone(), root.width(), root.height())),
+            Some((
+                source.control.clone(),
+                catalog,
+                catalog.displays()[0].handle,
+            )),
         )
         .await
     }
-    async fn with_choice(cx: &Cx, choice: Option<(ObservationControl, u32, u32)>) -> Self {
+    async fn with_choice(
+        cx: &Cx,
+        choice: Option<(ObservationControl, fr_wire::display::Catalog, u128)>,
+    ) -> Self {
         let (mut host, mut client, control) = control_link(cx).await;
-        let chosen = if let Some((observation, width, height)) = choice {
+        let chosen = if let Some((observation, catalog, handle)) = choice {
             Some(
                 select_output(
                     cx,
@@ -206,8 +214,8 @@ impl Link {
                     &mut client,
                     control,
                     observation,
-                    width,
-                    height,
+                    &catalog,
+                    handle,
                 )
                 .await,
             )
@@ -457,15 +465,28 @@ fn assert_pixel(readback: &mut X11Surface, color: [u8; 3]) {
 }
 #[test]
 fn actual_network_configuration_precedes_idr_and_survives_handoff_to_regular_media() {
-    run(|cx| media_path(cx, false));
+    run(|cx| media_path(cx, false, false));
 }
 #[test]
 fn all_negotiated_channels_repair_the_entire_final_picture_without_another_capture() {
-    run(|cx| media_path(cx, true));
+    run(|cx| media_path(cx, true, false));
 }
-async fn media_path(cx: Cx, lose_final_picture: bool) {
-    let mut source = Source::new(&cx).await;
-    let mut link = Link::selected(&cx, &source).await;
+async fn media_path(cx: Cx, lose_final_picture: bool, discovered: bool) {
+    #[cfg(feature = "linux-displays")]
+    let (mut source, mut link) = if discovered {
+        Box::pin(discovered_source(&cx)).await
+    } else {
+        let source = Source::new(&cx).await;
+        let link = Link::selected(&cx, &source).await;
+        (source, link)
+    };
+    #[cfg(not(feature = "linux-displays"))]
+    let (mut source, mut link) = {
+        assert!(!discovered);
+        let source = Source::new(&cx).await;
+        let link = Link::selected(&cx, &source).await;
+        (source, link)
+    };
     let color = source.paint(3);
     let target = Display::start();
     let mut readback =
@@ -1206,30 +1227,15 @@ async fn select_output(
     client: &mut QuicRecords,
     control: (StreamRoute, StreamRoute),
     observation: ObservationControl,
-    width: u32,
-    height: u32,
+    catalog: &fr_wire::display::Catalog,
+    handle: u128,
 ) -> (SelectedDisplay, SelectedDisplay) {
     use fr_transport::quic::{ChannelScope, ControlRoutes};
-    use fr_wire::display::{Catalog, Display as Output};
     let selection = selected_attachment();
     let parent = ControlBinding {
         id: control.0.binding,
         ..binding().parent
     };
-    let output = Output {
-        handle: binding().display,
-        geometry: binding().geometry,
-        x: 0,
-        y: 0,
-        pixel_width: width,
-        pixel_height: height,
-        logical_width: width,
-        logical_height: height,
-        scale_numerator: 1,
-        scale_denominator: 1,
-        rotation: 0,
-    };
-    let catalog = Catalog::new(1, &[output], &selection.limits).unwrap();
     let mut h = DisplaySelection::host(
         host,
         ChannelScope {
@@ -1241,7 +1247,7 @@ async fn select_output(
             selection: &selection,
         },
         observation,
-        catalog,
+        *catalog,
         Duration::from_secs(2),
     )
     .unwrap();
@@ -1277,8 +1283,8 @@ async fn select_output(
         "a one-entry catalog cannot implicitly select"
     );
     let received = *v.catalog(client).unwrap().unwrap();
-    assert_eq!(received, catalog);
-    v.choose(client, received.displays()[0].handle).unwrap();
+    assert_eq!(received, *catalog);
+    v.choose(client, handle).unwrap();
     while !h.is_complete() {
         assert!(Instant::now() < until);
         v.transmit(client).unwrap();
@@ -1292,7 +1298,15 @@ async fn select_output(
 fn selected_dimensions_reject_an_otherwise_valid_hevc_stream_before_worker_launch() {
     run(|cx| async move {
         let mut source = Source::new(&cx).await;
-        let mut link = Link::with_choice(&cx, Some((source.control.clone(), 322, 240))).await;
+        let mut link = Link::with_choice(
+            &cx,
+            Some((
+                source.control.clone(),
+                fixture_catalog(322, 240),
+                binding().display,
+            )),
+        )
+        .await;
         source.paint(3);
         let update = source
             .capture
@@ -1343,7 +1357,15 @@ fn selected_dimensions_reject_an_otherwise_valid_hevc_stream_before_worker_launc
 fn host_selected_geometry_refuses_wrong_capture_and_selected_view_drop_revokes_media() {
     run(|cx| async move {
         let mut source = Source::new(&cx).await;
-        let mut link = Link::with_choice(&cx, Some((source.control.clone(), 322, 240))).await;
+        let mut link = Link::with_choice(
+            &cx,
+            Some((
+                source.control.clone(),
+                fixture_catalog(322, 240),
+                binding().display,
+            )),
+        )
+        .await;
         let update = source
             .capture
             .capture_if_changed(&source.control, true)
@@ -1407,4 +1429,226 @@ async fn drive_attachment(cx: &Cx, host: &mut QuicRecords, client: &mut QuicReco
     .await;
     a.unwrap();
     b.unwrap();
+}
+
+fn fixture_catalog(width: u32, height: u32) -> fr_wire::display::Catalog {
+    use fr_wire::display::{Catalog, Display as Output};
+    let output = Output {
+        handle: binding().display,
+        geometry: binding().geometry,
+        x: 0,
+        y: 0,
+        pixel_width: width,
+        pixel_height: height,
+        logical_width: width,
+        logical_height: height,
+        scale_numerator: 1,
+        scale_denominator: 1,
+        rotation: 0,
+    };
+    Catalog::new(1, &[output], &selected_attachment().limits).unwrap()
+}
+
+#[cfg(feature = "linux-displays")]
+fn new_observation(cx: &Cx) -> ObservationControl {
+    let mut authority = SessionAuthority::new(
+        binding().parent.remote_session,
+        AuthorityPolicy::plan_defaults(),
+    );
+    authority.mark_capabilities_checked().unwrap();
+    authority
+        .authorize_observation(frd::media::host_now(cx).unwrap())
+        .unwrap();
+    ObservationControl::new(cx.clone(), authority).unwrap()
+}
+#[cfg(feature = "linux-displays")]
+async fn discovered_source(cx: &Cx) -> (Source, Link) {
+    use frd::media::discovery::DiscoveredSource;
+    let display = Display::start();
+    let surface = X11Surface::presenter(
+        Some(&display.name),
+        320,
+        240,
+        configuration().limits().unwrap(),
+    )
+    .unwrap();
+    let control = new_observation(cx);
+    let mut discovery = DiscoveredSource::start(&control, launch(&display, 191, Role::Capture))
+        .await
+        .unwrap();
+    let pid = discovery.worker_id();
+    let catalog = discovery.catalog().unwrap();
+    assert_eq!(catalog.displays().len(), 1);
+    assert_eq!(
+        (
+            catalog.displays()[0].pixel_width,
+            catalog.displays()[0].pixel_height
+        ),
+        (320, 240)
+    );
+    let link = Link::with_choice(
+        cx,
+        Some((control.clone(), catalog, catalog.displays()[0].handle)),
+    )
+    .await;
+    discovery.check_display().await.unwrap();
+    let capture = discovery
+        .configure(
+            &link.host,
+            &link.chosen.as_ref().unwrap().0,
+            configuration(),
+        )
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(capture.worker_id(), pid);
+    (
+        Source {
+            capture,
+            control,
+            surface,
+            display,
+        },
+        link,
+    )
+}
+#[cfg(feature = "linux-displays")]
+#[test]
+fn discovered_native_monitor_runs_selection_configuration_and_dependent_presentation() {
+    run(|cx| media_path(cx, false, true));
+}
+#[cfg(feature = "linux-displays")]
+#[test]
+fn discovered_native_monitor_preserves_negotiated_repair_of_the_whole_final_picture() {
+    run(|cx| media_path(cx, true, true));
+}
+#[cfg(feature = "linux-displays")]
+#[test]
+fn discovered_native_view_failure_revokes_original_observation_on_idle_check() {
+    run(|cx| async move {
+        let (source, _link) = Box::pin(discovered_source(&cx)).await;
+        let Source {
+            mut capture,
+            control,
+            surface,
+            mut display,
+        } = source;
+        // Close the test-only paint connection before killing Xvfb. The production
+        // parent holds only private IPC; only its isolated worker should lose Xlib.
+        drop(surface);
+        display.child.kill().unwrap();
+        display.child.wait().unwrap();
+        assert!(capture.check_selected_display(&control).await.is_err());
+        assert!(control.check().is_err());
+    });
+}
+#[cfg(feature = "linux-displays")]
+#[test]
+fn discovery_cannot_use_an_independent_same_id_approved_authority() {
+    run(|cx| async move {
+        let display = Display::start();
+        let control = new_observation(&cx);
+        let other = new_observation(&cx);
+        let discovery = frd::media::discovery::DiscoveredSource::start(
+            &control,
+            launch(&display, 192, Role::Capture),
+        )
+        .await
+        .unwrap();
+        let catalog = discovery.catalog().unwrap();
+        let link = Link::with_choice(
+            &cx,
+            Some((other.clone(), catalog, catalog.displays()[0].handle)),
+        )
+        .await;
+        assert!(
+            discovery
+                .configure(
+                    &link.host,
+                    &link.chosen.as_ref().unwrap().0,
+                    configuration()
+                )
+                .is_err()
+        );
+        assert!(control.check().is_ok());
+        assert!(other.check().is_ok());
+        assert!(!link.host.is_closed());
+    });
+}
+#[cfg(feature = "linux-displays")]
+#[test]
+fn new_discovery_cannot_rebind_the_old_network_selected_handle() {
+    run(|cx| async move {
+        let display = Display::start();
+        let control = new_observation(&cx);
+        let original = frd::media::discovery::DiscoveredSource::start(
+            &control,
+            launch(&display, 193, Role::Capture),
+        )
+        .await
+        .unwrap();
+        let catalog = original.catalog().unwrap();
+        let link = Link::with_choice(
+            &cx,
+            Some((control.clone(), catalog, catalog.displays()[0].handle)),
+        )
+        .await;
+        let fresh = frd::media::discovery::DiscoveredSource::start(
+            &control,
+            launch(&display, 193, Role::Capture),
+        )
+        .await
+        .unwrap();
+        assert_ne!(catalog.revision(), fresh.catalog().unwrap().revision());
+        assert!(
+            fresh
+                .configure(
+                    &link.host,
+                    &link.chosen.as_ref().unwrap().0,
+                    configuration()
+                )
+                .is_err()
+        );
+        assert!(control.check().is_ok());
+        assert!(!link.host.is_closed());
+        let capture = original
+            .configure(
+                &link.host,
+                &link.chosen.as_ref().unwrap().0,
+                configuration(),
+            )
+            .unwrap()
+            .await
+            .unwrap();
+        assert!(capture.worker_id().is_some());
+    });
+}
+#[cfg(feature = "linux-displays")]
+#[test]
+fn dropping_unpolled_discovered_configuration_revokes_before_encoder_setup() {
+    run(|cx| async move {
+        let display = Display::start();
+        let control = new_observation(&cx);
+        let discovery = frd::media::discovery::DiscoveredSource::start(
+            &control,
+            launch(&display, 194, Role::Capture),
+        )
+        .await
+        .unwrap();
+        let catalog = discovery.catalog().unwrap();
+        let link = Link::with_choice(
+            &cx,
+            Some((control.clone(), catalog, catalog.displays()[0].handle)),
+        )
+        .await;
+        let future = discovery
+            .configure(
+                &link.host,
+                &link.chosen.as_ref().unwrap().0,
+                configuration(),
+            )
+            .unwrap();
+        drop(future);
+        assert!(control.check().is_err());
+    });
 }
