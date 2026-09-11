@@ -1,0 +1,90 @@
+name: Verify reconciled capture
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/verify-reconciled-capture.yml']
+permissions:
+  contents: write
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Stage exact reconciliation without branch writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, subprocess
+          from pathlib import Path
+          def sha(data): return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
+          parts = [
+              ('26360cbb9fe29fa3b17cc1530d84572ed03ba187', 6000),
+              ('b1e8c6490d7918441d57a0eacc2c0a2faa78d098', 6000),
+              ('9edd16a48a70b36402fd1c171ccb2e3893736a82', 6000),
+              ('85e3491ad6159e33470c9b96ef16766ba0d397ee', 5212),
+          ]
+          chunks = []
+          for oid, length in parts:
+              row = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
+              chunk = base64.b64decode(row['content'])
+              assert len(chunk) == length and sha(chunk) == oid
+              chunks.append(chunk)
+          packed = b''.join(chunks)
+          assert len(packed) == 23212 and sha(packed) == '117d63a1f3f3eafbe46eb8daf62b36205acb8fab'
+          decoder = lzma.LZMADecompressor(memlimit=64 * 1024 * 1024)
+          data = decoder.decompress(packed, max_length=120023)
+          assert decoder.eof and not decoder.unused_data and len(data) == 120022
+          assert hashlib.sha256(data).hexdigest() == '2fc7426f4ce5b50daece5173c8c446f8643f374a1a4b051eead1a207fae41ffd'
+          candidate = json.loads(data)
+          assert len(candidate['after']) == 22 and set(candidate['before']) == set(candidate['after'])
+          for path, expected in candidate['before'].items():
+              assert path.startswith('crates/') and '..' not in Path(path).parts
+              assert (sha(Path(path).read_bytes()) if Path(path).exists() else None) == expected, path
+          patch = Path(os.environ['RUNNER_TEMP'], 'reconciled-capture.patch')
+          patch.write_text(candidate['patch'])
+          stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
+          assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(candidate['after'])
+          subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
+          subprocess.run(['git', 'apply', str(patch)], check=True)
+          for path, expected in candidate['after'].items():
+              assert sha(Path(path).read_bytes()) == expected, path
+          Path(os.environ['RUNNER_TEMP'], 'reconciled-capture-paths.json').write_text(json.dumps(candidate['after']))
+          PY
+      - name: Install pinned compiler and native SDKs
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 libxrandr2 pkg-config xvfb xauth openssl
+      - name: Verify complete workspace and both native capture profiles
+        run: |
+          ./scripts/verify.sh fast
+          ./scripts/verify.sh docs
+          cargo test -p fr-media --test capture_discovery --test worker_displays --locked
+          cargo test -p fr-native --all-features --test display_inventory --test worker_process --test decoder_startup --locked -- --test-threads=4
+          cargo test -p fr-native --features linux-media --test worker_process --locked -- --test-threads=4
+          git diff --check
+      - name: Retain exact verified source objects without branch writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, subprocess
+          from pathlib import Path
+          for path, expected in json.loads(Path(os.environ['RUNNER_TEMP'], 'reconciled-capture-paths.json').read_text()).items():
+              data = Path(path).read_bytes()
+              assert hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest() == expected, path
+              body = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()})
+              row = json.loads(subprocess.check_output(['gh', 'api', '--method', 'POST', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', '--input', '-'], input=body, text=True))
+              assert row['sha'] == expected, path
+              print(json.dumps({'path': path, 'sha': expected, 'verified_against': os.environ['GITHUB_SHA']}))
+          PY
