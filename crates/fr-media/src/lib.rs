@@ -26,6 +26,7 @@ pub mod config;
 pub mod delivery;
 pub mod freshness;
 pub mod hevc;
+pub mod pacing;
 pub mod surface;
 
 #[cfg(feature = "testing")]
