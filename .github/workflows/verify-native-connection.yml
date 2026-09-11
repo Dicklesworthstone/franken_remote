@@ -1,0 +1,42 @@
+name: Verify native connection
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/verify-native-connection.yml', 'crates/fr-tailnet/**', 'crates/fr-transport/**', 'crates/fr-native/**', 'crates/frd/**', 'Cargo.toml', 'Cargo.lock']
+permissions:
+  contents: read
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  connection:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Retain committed source before verification
+        run: |
+          mkdir -p "$RUNNER_TEMP/connection-source"
+          git rev-parse HEAD > "$RUNNER_TEMP/connection-source/source-commit.txt"
+          git archive --format=tar.gz HEAD > "$RUNNER_TEMP/connection-source/source.tar.gz"
+          cd "$RUNNER_TEMP/connection-source"
+          sha256sum source.tar.gz source-commit.txt > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: native-connection-source
+          path: ${{ runner.temp }}/connection-source/
+          retention-days: 1
+      - name: Select pinned toolchain
+        run: rustup show active-toolchain
+      - name: Exercise installed-tailnet adapter
+        run: cargo test -p fr-tailnet --locked -- --test-threads=4
+      - name: Check connection source
+        run: |
+          cargo clippy -p fr-tailnet -p fr-transport --all-targets --locked -- -D warnings
+          cargo fmt --all --check
+          ./scripts/verify.sh docs
