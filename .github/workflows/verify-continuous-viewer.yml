@@ -1,0 +1,83 @@
+name: Verify continuous native viewer
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/verify-continuous-viewer.yml']
+permissions:
+  contents: write
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Recover exact tested source objects without ref writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, subprocess
+          from pathlib import Path
+          def sha(data): return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
+          def api(path, body=None):
+              command = ['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/{path}']
+              if body is not None: command += ['--method', 'POST', '--input', '-']
+              return json.loads(subprocess.check_output(command, input=body, text=True, timeout=30))
+          chunks = [('6e069e524d5fcc74ea61fc4ca0c09bac410c9d99', 6400), ('09d07c5978667fc24a03e7c7c74ed6afbd052bb9', 6400), ('29f8d7c5cd85e9bfaa1af6430b62327ad0bb3edb', 6400), ('787e4f8fe5ee393e506ddccfc3c29bed126b04b3', 3804)]
+          parts = []
+          for oid, size in chunks:
+              raw = base64.b64decode(api(f'git/blobs/{oid}')['content'])
+              assert len(raw) == size and sha(raw) == oid
+              parts.append(raw)
+          encoded = b''.join(parts)
+          assert len(encoded) == 23004 and sha(encoded) == 'e8af4b21d92662683744a71efa8dac1af217a568'
+          decoder = lzma.LZMADecompressor()
+          data = decoder.decompress(base64.b64decode(encoded, validate=True), max_length=84607)
+          assert decoder.eof and not decoder.unused_data and len(data) == 84606
+          assert hashlib.sha256(data).hexdigest() == 'dcc56799fe9cbcc128d05eca04c16d444dde876b9d47f0f67bd6a11e95f5fa0c'
+          candidate = json.loads(data)
+          assert len(candidate['after']) == 19 and set(candidate['before']) == set(candidate['after'])
+          current = {}
+          for path in candidate['before']:
+              assert (path.startswith('crates/') or path == 'CONTINUOUS_VIEWER.md') and '..' not in Path(path).parts
+              current[path] = sha(Path(path).read_bytes()) if Path(path).exists() else None
+          if current != candidate['after']:
+              assert current == candidate['before'], 'candidate preimages changed'
+              patch = Path(os.environ['RUNNER_TEMP'], 'continuous-viewer.patch')
+              patch.write_text(candidate['patch'])
+              stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
+              assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(candidate['after'])
+              subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
+              subprocess.run(['git', 'apply', str(patch)], check=True)
+          for path, expected in candidate['after'].items():
+              content = Path(path).read_bytes()
+              assert sha(content) == expected, path
+              body = json.dumps({'encoding': 'base64', 'content': base64.b64encode(content).decode()})
+              assert api('git/blobs', body)['sha'] == expected, path
+              print(json.dumps({'path': path, 'sha': expected, 'checkout': os.environ['GITHUB_SHA']}))
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          PY
+      - name: Install pinned compiler and native SDKs
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
+      - name: Verify continuous viewer and actual native streaming
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          cargo test -p fr-core -p fr-wire -p fr-media -p fr-client --all-features --locked
+          cargo test -p frd --lib --locked -- --test-threads=4
+          cargo build -p fr-native --all-features --bin fr-media-worker --locked
+          FR_NATIVE_TEST_WORKER="$PWD/target/debug/fr-media-worker" cargo test -p frd --lib actual_hevc_streams --locked -- --ignored --test-threads=1
+          ./scripts/verify.sh docs
+      - name: Verify full workspace
+        run: ./scripts/verify.sh fast
