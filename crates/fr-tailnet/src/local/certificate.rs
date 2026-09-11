@@ -6,11 +6,19 @@ use crate::Error;
 use asupersync::{
     cx::Cx,
     net::quic_native::{handshake_driver::QuicHandshakeDriver, tls::QuicServerIdentityVerifier},
+    time::sleep,
     tls::{Certificate, CertificateChain, PrivateKey, RootCertStore, TlsAcceptor},
+    types::Time,
 };
 use std::{
     fmt,
-    sync::{Arc, Mutex, MutexGuard, atomic::Ordering},
+    future::{Future, poll_fn},
+    pin::pin,
+    sync::{
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
+    },
+    task::{Poll, Waker},
     time::Duration,
 };
 
@@ -18,6 +26,7 @@ const PAIR_LIMIT: usize = 64 * 1024;
 const MAX_CERTIFICATES: usize = 8;
 const PARAMETER_LIMIT: usize = 4096;
 const ALPN: &[u8] = b"fr-remote/0";
+const SERVICE_PULSE: Duration = Duration::from_millis(10);
 
 /// Explicit local provisioning policy. Calling the provisioning API can ask
 /// tailscaled to obtain/renew a public certificate; it is NOT an identity read.
@@ -124,6 +133,48 @@ impl State {
     }
 }
 
+/// One service and one wake slot per shared credential lifetime. Registering
+/// under the mutex and checking stop before releasing it prevents a lost wake.
+#[derive(Default)]
+struct ServiceWake {
+    claimed: AtomicBool,
+    stopped: AtomicBool,
+    waker: Mutex<Option<Waker>>,
+}
+impl ServiceWake {
+    fn claim(&self) -> Result<(), Error> {
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(Error::Revoked);
+        }
+        self.claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| Error::Busy)?;
+        if self.stopped.load(Ordering::Acquire) {
+            self.claimed.store(false, Ordering::Release);
+            return Err(Error::Revoked);
+        }
+        Ok(())
+    }
+    fn register(&self, waker: &Waker) -> Result<bool, Error> {
+        let mut slot = self.waker.lock().map_err(|_| Error::Revoked)?;
+        if self.stopped.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        if slot.as_ref().is_none_or(|old| !old.will_wake(waker)) {
+            *slot = Some(waker.clone());
+        }
+        Ok(true)
+    }
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::Release);
+        let wake = self.waker.lock().ok().and_then(|mut slot| slot.take());
+        // Never call arbitrary executor code while holding our mutex.
+        if let Some(waker) = wake {
+            waker.wake();
+        }
+    }
+}
+
 /// One shared credential lifetime with one complete active TLS configuration.
 /// Renewal never replaces half a pair or blocks new handshakes behind `LocalAPI`
 /// I/O. Clones share stop, backoff, generation and atomic publication.
@@ -133,6 +184,7 @@ pub struct NativeServerIdentity {
     verifier: Arc<QuicServerIdentityVerifier>,
     policy: CertificatePolicy,
     state: Arc<Mutex<State>>,
+    service: Arc<ServiceWake>,
 }
 impl fmt::Debug for NativeServerIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -174,6 +226,7 @@ impl LocalApi {
             verifier,
             policy,
             state: Arc::new(Mutex::new(state)),
+            service: Arc::new(ServiceWake::default()),
         })
     }
     async fn load_pair(
@@ -231,10 +284,12 @@ impl NativeServerIdentity {
     /// Stop is shared and terminal. A pending successful renewal cannot revive
     /// it. Already-created connections retain their independent admission and
     /// shutdown owners; dropping a certificate config does not revoke a peer.
+    /// A running renewal service is also woken to drop its pending API request.
     pub fn stop(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.active = None;
         }
+        self.service.stop();
     }
     /// Create the actual TLS 1.3 native QUIC handshake driver. Each new handshake
     /// requires fresh self metadata, the original daemon/node, valid `WebPKI` trust
@@ -263,6 +318,94 @@ impl NativeServerIdentity {
         self.api.check_node(cx, node)?;
         state.check(now(cx)?, wall_now()?)?;
         Ok(driver)
+    }
+    /// Own automatic renewal on the caller's existing structured task. Claiming
+    /// occurs before the returned future is polled; dropping even an unpolled
+    /// service stops this credential lifetime. A second service returns `Busy`.
+    ///
+    /// Explicit `stop` completes successfully. Cancellation, clock faults and
+    /// changed identity are terminal errors. Transient issuance failures retain
+    /// the previous complete pair, subject to its independently checked validity,
+    /// and retry only on the existing bounded schedule. Nothing is spawned here.
+    pub fn serve_renewal<'a>(
+        &'a self,
+        cx: &'a Cx,
+    ) -> Result<impl Future<Output = Result<(), Error>> + 'a, Error> {
+        self.status(cx)?;
+        self.service.claim()?;
+        let guard = ServiceGuard(self.clone());
+        Ok(async move {
+            let _guard = guard;
+            self.drive_renewal(cx).await
+        })
+    }
+    async fn drive_renewal(&self, cx: &Cx) -> Result<(), Error> {
+        let mut operation = pin!(self.renewal_loop(cx));
+        let mut pulse = Box::pin(sleep(cx.now(), SERVICE_PULSE));
+        poll_fn(|task| {
+            match self.service.register(task.waker()) {
+                Ok(false) => return Poll::Ready(Ok(())),
+                Err(error) => return Poll::Ready(Err(error)),
+                Ok(true) => {}
+            }
+            if let Err(error) = self.status(cx) {
+                return Poll::Ready(Err(error));
+            }
+            let result = operation.as_mut().poll(task);
+            if self.service.stopped.load(Ordering::Acquire) {
+                return Poll::Ready(Ok(()));
+            }
+            // Recheck cancellation and authority after a poll that may have
+            // completed native certificate verification or an HTTP response.
+            if let Err(error) = self.status(cx) {
+                return Poll::Ready(Err(error));
+            }
+            if let Poll::Ready(result) = result {
+                return Poll::Ready(result);
+            }
+            if pulse.as_mut().poll(task).is_ready() {
+                pulse = Box::pin(sleep(cx.now(), SERVICE_PULSE));
+                task.waker().wake_by_ref();
+            }
+            Poll::Pending
+        })
+        .await
+    }
+    async fn renewal_loop(&self, cx: &Cx) -> Result<(), Error> {
+        loop {
+            let status = self.status(cx)?;
+            let current = now(cx)?;
+            if current < status.next_refresh_us {
+                sleep(
+                    Time::from_nanos(current.checked_mul(1000).ok_or(Error::Clock)?),
+                    Duration::from_micros(status.next_refresh_us - current),
+                )
+                .await;
+                continue;
+            }
+            match self.refresh(cx).await {
+                Ok(()) | Err(Error::CertificateNotDue) => {}
+                Err(Error::Busy) => {
+                    // A manual renewal or another identity sharing this API
+                    // may own the bounded issuance slot. Never retry in a spin.
+                    sleep(cx.now(), self.policy.retry_initial).await;
+                }
+                Err(
+                    Error::LocalApiUnavailable
+                    | Error::Timeout
+                    | Error::LocalApiDenied
+                    | Error::Http
+                    | Error::MalformedMetadata
+                    | Error::SnapshotChanged
+                    | Error::BackendNotRunning
+                    | Error::CertificateRejected,
+                ) => {
+                    // refresh reserved its next deadline before awaiting. Do
+                    // not reset that deadline or extend the old certificate.
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
     /// Poll at `next_refresh_us`. Failed/cancelled renewal leaves the complete old
     /// pair available only while it remains valid, with capped exponential retry.
@@ -320,6 +463,13 @@ impl NativeServerIdentity {
         };
         state.retry_us = micros(self.policy.retry_initial)?;
         Ok(())
+    }
+}
+struct ServiceGuard(NativeServerIdentity);
+impl Drop for ServiceGuard {
+    fn drop(&mut self) {
+        self.0.stop();
+        self.0.service.claimed.store(false, Ordering::Release);
     }
 }
 struct Renewal(Arc<Mutex<State>>);
@@ -393,3 +543,64 @@ fn check_pem(bytes: &[u8]) -> Result<usize, Error> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod service_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::task::Wake;
+
+    #[derive(Default)]
+    struct Count(AtomicUsize);
+    impl Wake for Count {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    #[test]
+    fn one_service_claim_cannot_be_reused_after_stop() {
+        let service = ServiceWake::default();
+        assert_eq!(service.claim(), Ok(()));
+        assert_eq!(service.claim(), Err(Error::Busy));
+        service.stop();
+        service.claimed.store(false, Ordering::Release);
+        assert_eq!(service.claim(), Err(Error::Revoked));
+    }
+
+    #[test]
+    fn stop_wakes_the_registered_owner_once_and_retires_the_slot() {
+        let service = ServiceWake::default();
+        let count = Arc::new(Count::default());
+        let waker = Waker::from(count.clone());
+        assert_eq!(service.register(&waker), Ok(true));
+        assert_eq!(service.register(&waker), Ok(true));
+        service.stop();
+        service.stop();
+        assert_eq!(count.0.load(Ordering::Acquire), 1);
+        assert!(service.waker.lock().unwrap().is_none());
+        assert_eq!(service.register(&waker), Ok(false));
+    }
+
+    #[test]
+    fn stop_before_registration_cannot_leave_a_waiting_owner() {
+        let service = ServiceWake::default();
+        service.stop();
+        let count = Arc::new(Count::default());
+        assert_eq!(service.register(&Waker::from(count.clone())), Ok(false));
+        assert!(service.waker.lock().unwrap().is_none());
+        assert_eq!(count.0.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn changing_executor_waker_keeps_only_the_latest_waiter() {
+        let service = ServiceWake::default();
+        let old = Arc::new(Count::default());
+        let current = Arc::new(Count::default());
+        assert_eq!(service.register(&Waker::from(old.clone())), Ok(true));
+        assert_eq!(service.register(&Waker::from(current.clone())), Ok(true));
+        service.stop();
+        assert_eq!(old.0.load(Ordering::Acquire), 0);
+        assert_eq!(current.0.load(Ordering::Acquire), 1);
+    }
+}
