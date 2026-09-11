@@ -161,3 +161,12 @@ UBS and Beads tooling were unavailable; no issue or full phase gate was closed.
 Related: [NATIVE_MEDIA_ATTACHMENT.md](NATIVE_MEDIA_ATTACHMENT.md),
 [DECODER_STARTUP.md](DECODER_STARTUP.md), [SESSION_DRIVERS.md](SESSION_DRIVERS.md),
 [BROKER_CONTROL_GRANT.md](BROKER_CONTROL_GRANT.md), [PROTOCOL.md](PROTOCOL.md).
+
+## Native capture follow-through
+
+The reconciled monitor profile now connects this selection to native discovery
+and same-worker rectangle capture. The original full-X11-screen discovery profile
+is retained separately within the same worker protocol and supervisor; there is
+no fallback from an unavailable monitor profile to full-framebuffer capture.
+See [NATIVE_DISPLAY_DISCOVERY.md](NATIVE_DISPLAY_DISCOVERY.md) for the exact
+profile records, source identity, topology checks and later execution evidence.
