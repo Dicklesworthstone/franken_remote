@@ -11,7 +11,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-asupersync.workspace = true
+asupersync = { workspace = true, features = ["tls"] }
 
 [lints]
 workspace = true

@@ -1,5 +1,6 @@
-//! Read-only Linux `LocalAPI` over authenticated Unix sockets. No TCP fallback,
-//! subprocess, ambient HTTP proxy, redirect, public listener, or mutation API.
+//! Linux `LocalAPI` over authenticated Unix sockets. No TCP fallback, subprocess,
+//! ambient HTTP proxy, redirect, or public listener. Certificate provisioning is
+//! an explicit local opt-in; identity queries never issue certificates.
 use crate::{
     Authorization, ConnectionAddresses, Error, GrantPolicy, expiry,
     metadata::{self, Status, WhoIs},
@@ -29,6 +30,7 @@ pub struct LocalApi {
     path: Arc<PathBuf>,
     origin: Arc<()>,
     busy: Arc<AtomicBool>,
+    certificate_busy: Arc<AtomicBool>,
     daemon_uid: u32,
 }
 impl fmt::Debug for LocalApi {
@@ -66,6 +68,7 @@ impl LocalApi {
             path: Arc::new(path.to_path_buf()),
             origin: Arc::new(()),
             busy: Arc::new(AtomicBool::new(false)),
+            certificate_busy: Arc::new(AtomicBool::new(false)),
             daemon_uid: 0,
         })
     }
@@ -192,6 +195,14 @@ impl LocalApi {
         Ok((WhoIs::parse(&body)?, process))
     }
     async fn get(&self, uri: &str, maximum: usize) -> Result<(Vec<u8>, UCred), Error> {
+        self.get_typed(uri, maximum, "application/json").await
+    }
+    async fn get_typed(
+        &self,
+        uri: &str,
+        maximum: usize,
+        content_type: &str,
+    ) -> Result<(Vec<u8>, UCred), Error> {
         let socket = UnixStream::connect(&*self.path)
             .await
             .map_err(|_| Error::LocalApiUnavailable)?;
@@ -202,7 +213,7 @@ impl LocalApi {
         let request = Request::get(uri)
             .header("Host", "local-tailscaled.sock")
             .header("Connection", "close")
-            .header("Accept", "application/json")
+            .header("Accept", content_type)
             .build();
         let (response, _socket, withheld) =
             Http1Client::request_with_io_and_max_body_size(socket, request, maximum)
@@ -217,7 +228,7 @@ impl LocalApi {
             || !response.header_value("Content-Type").is_some_and(|v| {
                 v.split(';')
                     .next()
-                    .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/json"))
+                    .is_some_and(|m| m.trim().eq_ignore_ascii_case(content_type))
             })
         {
             return Err(Error::Http);
@@ -310,3 +321,6 @@ pub use node::NodeIdentity;
 
 #[cfg(test)]
 mod tests;
+
+mod certificate;
+pub use certificate::{CertificatePolicy, CredentialStatus, NativeServerIdentity};

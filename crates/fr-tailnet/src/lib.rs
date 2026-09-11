@@ -11,7 +11,9 @@ pub use lease::{Admission, Lease};
 mod local;
 mod metadata;
 #[cfg(target_os = "linux")]
-pub use local::{LocalApi, NodeIdentity};
+pub use local::{
+    CertificatePolicy, CredentialStatus, LocalApi, NativeServerIdentity, NodeIdentity,
+};
 
 use std::{fmt, net::SocketAddr, time::Duration};
 
@@ -43,6 +45,9 @@ pub enum Error {
     MachineNotAuthorized,
     CapabilityDenied,
     InvalidCapability,
+    CertificateRejected,
+    CertificateNotDue,
+    InvalidTrustStore,
     KeyExpired,
     Clock,
     Expired,

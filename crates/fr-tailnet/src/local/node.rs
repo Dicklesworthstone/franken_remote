@@ -53,6 +53,9 @@ impl NodeIdentity {
         }
         Ok(())
     }
+    pub(super) fn matches_process(&self, pid: Option<i32>) -> bool {
+        pid == Some(self.daemon_pid)
+    }
     pub(crate) fn same_node(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.origin, &other.origin)
             && self.daemon_pid == other.daemon_pid
