@@ -27,25 +27,34 @@ jobs:
           import base64, hashlib, json, lzma, os, subprocess
           from pathlib import Path
           def sha(data): return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
-          oid = 'fbbb2bc2edaf479883f4fbde78434fcee394006e'
-          row = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
-          raw = base64.b64decode(row['content'])
-          assert len(raw) == 15308 and sha(raw) == oid
-          decoder = lzma.LZMADecompressor()
-          data = decoder.decompress(base64.b64decode(raw, validate=True), max_length=51433)
-          assert decoder.eof and not decoder.unused_data and len(data) == 51432
-          assert hashlib.sha256(data).hexdigest() == 'df4e525e1c47367110a08aaf5110ab1800e00cbdd1efea26f4929d8bc6affec9'
-          candidate = json.loads(data)
+          def load(oid, encoded_size, raw_size, digest):
+              row = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
+              raw = base64.b64decode(row['content'])
+              assert len(raw) == encoded_size and sha(raw) == oid
+              decoder = lzma.LZMADecompressor()
+              data = decoder.decompress(base64.b64decode(raw, validate=True), max_length=raw_size + 1)
+              assert decoder.eof and not decoder.unused_data and len(data) == raw_size
+              assert hashlib.sha256(data).hexdigest() == digest
+              return json.loads(data)
+          candidate = load('fbbb2bc2edaf479883f4fbde78434fcee394006e', 15308, 51432, 'df4e525e1c47367110a08aaf5110ab1800e00cbdd1efea26f4929d8bc6affec9')
           assert len(candidate['after']) == 8 and set(candidate['before']) == set(candidate['after'])
           for path, expected in candidate['before'].items():
               assert path.startswith('crates/') and '..' not in Path(path).parts
               assert (sha(Path(path).read_bytes()) if Path(path).exists() else None) == expected, path
-          patch = Path(os.environ['RUNNER_TEMP'], 'capture-discovery.patch')
-          patch.write_text(candidate['patch'])
-          stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
-          assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(candidate['after'])
-          subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
-          subprocess.run(['git', 'apply', str(patch)], check=True)
+          def apply(text, paths, name):
+              patch = Path(os.environ['RUNNER_TEMP'], name)
+              patch.write_text(text)
+              stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
+              assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(paths)
+              subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
+              subprocess.run(['git', 'apply', str(patch)], check=True)
+          apply(candidate['patch'], candidate['after'], 'capture-discovery.patch')
+          for path, expected in candidate['after'].items(): assert sha(Path(path).read_bytes()) == expected, path
+          split = load('452bed858320076144810fd73ffe7bb555c24b01', 1840, 5587, '21ca6ea53983c78c975281df1ea99a53d87cba736f569c052d2bb996a4612042')
+          assert split['path'] == 'crates/fr-native/src/bin/media_worker.rs'
+          assert sha(Path(split['path']).read_bytes()) == split['before']
+          apply(split['patch'], [split['path']], 'capture-startup-split.patch')
+          candidate['after'][split['path']] = split['after']
           for path, expected in candidate['after'].items(): assert sha(Path(path).read_bytes()) == expected, path
           Path(os.environ['RUNNER_TEMP'], 'capture-discovery-paths.json').write_text(json.dumps(candidate['after']))
           PY
