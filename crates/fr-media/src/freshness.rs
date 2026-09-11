@@ -200,6 +200,20 @@ impl ViewTracker {
             closed: false,
         })
     }
+    /// Match the actual original receiver lifetime, not equal numeric bindings
+    /// or a shared memory budget. This is ownership metadata, not live authority: a
+    /// closed viewer can still close its own receiver without touching a foreign
+    /// one. Normal evidence and input checks independently reject closed scopes.
+    pub fn check_receiver(&self, receiver: &ReceivePipeline) -> Result<(), Error> {
+        let (scope, config) = receiver.presentation_scope();
+        if !Arc::ptr_eq(&scope, &self.scope)
+            || config.bindings != self.bindings
+            || config.epoch != self.epoch
+        {
+            return Err(Error::StaleBinding);
+        }
+        Ok(())
+    }
     /// Exact receiver channel bindings; this is identity metadata, not authority.
     pub const fn bindings(&self) -> MediaBindings {
         self.bindings

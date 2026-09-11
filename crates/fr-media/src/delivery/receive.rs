@@ -110,6 +110,15 @@ pub enum ReceiveState {
     NeedsRecovery,
     Closed,
 }
+/// A bounded request written to caller-owned bytes. The deadline belongs to the
+/// original missing picture, not the generation or successful send of a repair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepairOffer {
+    pub bytes: usize,
+    pub frame: u64,
+    pub reference_deadline_us: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReceiveUpdate {
     Accepted,
@@ -729,6 +738,16 @@ impl ReceivePipeline {
         now: u64,
         out: &mut [u8],
     ) -> Result<Option<usize>, DeliveryError> {
+        Ok(self.repair_offer(now, out)?.map(|offer| offer.bytes))
+    }
+    /// Generate once, retain the bytes through backpressure, and never reset the
+    /// returned reference deadline. Call `repair_needed` before sending a queued
+    /// offer: original data may have completed that picture in the meantime.
+    pub fn repair_offer(
+        &mut self,
+        now: u64,
+        out: &mut [u8],
+    ) -> Result<Option<RepairOffer>, DeliveryError> {
         self.tick(now)?;
         let selected = self
             .slots
@@ -762,7 +781,38 @@ impl ReceivePipeline {
         )?;
         a.next_repair = next;
         a.repair_attempts += 1;
-        Ok(Some(n))
+        Ok(Some(RepairOffer {
+            bytes: n,
+            frame: a.descriptor.frame,
+            reference_deadline_us: a.reference_until,
+        }))
+    }
+    /// Whether the original picture is still incomplete in this live receiver.
+    /// This does not check time; call `tick` first. Completed, decoded or replaced
+    /// pictures cannot keep an obsolete unsent request alive.
+    pub fn repair_needed(&self, frame: u64) -> bool {
+        self.scope.load(Ordering::Acquire)
+            && self.slots.iter().flatten().any(|a| {
+                a.descriptor.frame == frame && !a.complete() && a.reliable_offset.is_none()
+            })
+    }
+    /// Earliest hard media deadline, excluding retry scheduling. A sender that
+    /// already retains a repair uses this bound rather than busy-polling a past
+    /// retry instant while transport remains backpressured.
+    pub fn reference_deadline(&self) -> Option<u64> {
+        if matches!(
+            self.state,
+            ReceiveState::NeedsRecovery | ReceiveState::Closed
+        ) {
+            return None;
+        }
+        self.slots
+            .iter()
+            .flatten()
+            .map(|a| a.reference_until)
+            .chain(self.recovery_until)
+            .chain(self.in_flight.map(|p| p.deadline))
+            .min()
     }
     /// Call at `next_deadline` even when no more packets arrive (final-frame loss).
     pub fn tick(&mut self, now: u64) -> Result<(), DeliveryError> {

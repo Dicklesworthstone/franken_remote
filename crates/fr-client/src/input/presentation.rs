@@ -72,6 +72,11 @@ impl PresentedInput {
             active: false,
         })
     }
+    /// Validate the exact receiver underlying the input's presentation evidence.
+    /// Equal IDs on a different receiver do not authorize media or repairs.
+    pub fn check_receiver(&self, receiver: &ReceivePipeline) -> Result<(), Error> {
+        self.view.check_receiver(receiver).map_err(Error::Media)
+    }
     /// Immutable input identity. Does not expose the bearer ticket.
     pub const fn binding(&self) -> fr_wire::input_result::ResultBinding {
         self.input.binding
