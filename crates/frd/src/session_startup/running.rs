@@ -11,6 +11,8 @@ use std::{future::Future, pin::pin, task::Poll, time::Duration};
 
 pub(super) mod controlled;
 pub use controlled::ControlledHost;
+mod streaming;
+pub use streaming::StreamingHost;
 
 const REFRESH_MARGIN_US: u64 = 500_000;
 const MAX_TURN: Duration = Duration::from_millis(100);

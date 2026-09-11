@@ -26,7 +26,7 @@ use std::{
 };
 
 mod running;
-pub use running::{ControlledHost, HostSession};
+pub use running::{ControlledHost, HostSession, StreamingHost};
 
 mod viewer;
 pub use viewer::controlled::{ControlledViewer, Error as ControlledViewerError, ViewerControl};
@@ -41,6 +41,8 @@ const CONSUMED: u8 = 5;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     InvalidConfiguration,
+    Media(crate::media::Error),
+    MediaTransport(crate::media_quic::Error),
     ClientStartup(fr_client::startup::Error),
     Input(crate::input_quic::Error),
     ControlRenewal(crate::input_quic::control::Error),

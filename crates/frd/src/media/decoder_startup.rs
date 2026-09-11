@@ -379,6 +379,18 @@ impl Host {
             phase: HostPhase::Configuration,
         })
     }
+    /// End startup's deadline exactly once, after the actual matching report.
+    /// No visibility evidence or input grant is manufactured by this handoff.
+    pub(crate) fn finish_stream(
+        mut self,
+        transport: &QuicRecords,
+    ) -> Result<(ObservationControl, decoder::Binding), Error> {
+        self.check_transport(transport)?;
+        if !self.is_complete() {
+            return Err(Error::WrongState);
+        }
+        Ok((self.control, self.bound.setup.binding))
+    }
     pub fn close(&mut self) {
         self.bound.closed = true;
         self.update = None;

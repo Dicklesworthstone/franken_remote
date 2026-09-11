@@ -196,6 +196,7 @@ impl NegotiatedMedia {
             egress: Egress::new(subscription),
             routes,
             connection: Some(self.connection.clone()),
+            view: Some(self.binding()),
         })
     }
     pub fn receiver_config(

@@ -16,7 +16,7 @@ use std::{future::Future, time::Duration};
 /// application still supplies fresh presentation/target evidence and drives the
 /// native watchdog; media work stays outside this task.
 pub struct ControlledHost {
-    session: HostSession,
+    pub(super) session: HostSession,
     input: QuicInput,
     renewal: ControlRenewal,
     ticket_turn: bool,
@@ -110,6 +110,26 @@ impl ControlledHost {
             Err(error) => Err(error),
         }
     }
+    pub(super) async fn drive_services(
+        &mut self,
+        wait: Duration,
+        fresh_nonce: &mut impl FnMut() -> Result<u128, ()>,
+        fresh_ticket: &mut impl FnMut() -> Option<InputTicketId>,
+        other: &mut impl Services,
+    ) -> Result<(), Error> {
+        let mut services = InputServices {
+            input: &mut self.input,
+            renewal: &mut self.renewal,
+            observation: self.session.opened.control.clone(),
+            control: self.session.opened.routes,
+            ticket_turn: &mut self.ticket_turn,
+            ticket: fresh_ticket,
+            other,
+        };
+        self.session
+            .drive_inner(wait, fresh_nonce, &mut services)
+            .await
+    }
     /// Service all authorities, native receipts and input tickets during idle,
     /// traffic, and a pending installed-Tailscale refresh. The two supplied ID
     /// sources must be host-owned, unpredictable and non-reusing. They are not
@@ -132,18 +152,9 @@ impl ControlledHost {
         };
         async move {
             let mut operation = operation;
-            let host = &mut *operation.host;
-            let mut services = InputServices {
-                input: &mut host.input,
-                renewal: &mut host.renewal,
-                observation: host.session.opened.control.clone(),
-                control: host.session.opened.routes,
-                ticket_turn: &mut host.ticket_turn,
-                ticket: &mut fresh_ticket,
-                other: &mut other,
-            };
-            host.session
-                .drive_inner(wait, &mut fresh_nonce, &mut services)
+            operation
+                .host
+                .drive_services(wait, &mut fresh_nonce, &mut fresh_ticket, &mut other)
                 .await?;
             operation.complete = true;
             Ok(())
@@ -184,10 +195,10 @@ fn is_input(routes: Routes, route: Route) -> bool {
 impl<T, F> Services for InputServices<'_, T, F>
 where
     T: FnMut() -> Option<InputTicketId>,
-    F: FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+    F: Services,
 {
     fn permitted(&mut self) -> bool {
-        self.renewal.permitted()
+        self.renewal.permitted() && self.other.permitted()
     }
     fn maintain<N: FnMut() -> Result<u128, ()>>(
         &mut self,
@@ -198,7 +209,7 @@ where
             .receive(q, |_, _| Ok(Disposition::Blocked))
             .map_err(Error::ControlRenewal)?;
         self.renewal
-            .service(q, nonce)
+            .service(q, &mut *nonce)
             .map_err(Error::ControlRenewal)?;
         self.input
             .service(q, || self.observation.check().is_ok())
@@ -233,7 +244,10 @@ where
                 return Err(Error::Closed);
             }
         }
-        Ok(())
+        if !self.renewal.permitted() {
+            return Err(Error::Closed);
+        }
+        self.other.maintain(q, nonce)
     }
     fn receive(&mut self, route: Route, bytes: &[u8]) -> Result<Disposition, ()> {
         // These records belong to the owners serviced immediately before/after
@@ -246,7 +260,7 @@ where
         {
             Ok(Disposition::Blocked)
         } else {
-            (self.other)(route, bytes)
+            self.other.receive(route, bytes)
         }
     }
 }

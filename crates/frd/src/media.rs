@@ -32,6 +32,8 @@ pub mod decoder_startup;
 pub mod discovery;
 mod grant;
 pub mod renewal;
+#[cfg(target_os = "linux")]
+pub mod streaming;
 pub use capture_update::CaptureUpdate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,6 +317,39 @@ impl Subscription {
             first: true,
             capture_source: None,
         })
+    }
+    pub(crate) fn maximum_capacity(&self) -> usize {
+        self.cache.maximum_capacity()
+    }
+    pub(crate) fn stream_credit(&self, capacity: usize) -> bool {
+        self.cache.can_push_capacity(capacity)
+    }
+    pub(crate) fn originals_pending(&self) -> bool {
+        self.cache.originals_pending()
+    }
+    pub(crate) fn join_source(
+        &self,
+        source: &CaptureSource,
+        control: &ObservationControl,
+        epoch: MediaEpoch,
+    ) -> Result<(), Error> {
+        control.check()?;
+        if !self.control.same_owner(control)
+            || self.epoch != epoch
+            || self.first
+            || source.configuration.generation != epoch.configuration
+            || self
+                .capture_source
+                .as_ref()
+                .is_none_or(|id| !Arc::ptr_eq(id, &source.source))
+            || source
+                .selected_control
+                .as_ref()
+                .is_some_and(|c| !c.same_owner(control))
+        {
+            return Err(Error::InvalidFrame);
+        }
+        Ok(())
     }
     /// Exact record bound used by this subscription's packetizer.
     pub const fn record_bytes(&self) -> usize {

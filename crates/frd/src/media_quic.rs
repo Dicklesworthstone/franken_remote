@@ -124,6 +124,7 @@ pub struct QuicEgress {
     egress: Egress,
     routes: Routes,
     connection: Option<quic::ConnectionBinding>,
+    view: Option<fr_wire::decoder::Binding>,
 }
 impl std::fmt::Debug for QuicEgress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -131,7 +132,7 @@ impl std::fmt::Debug for QuicEgress {
             .field("egress", &self.egress)
             .field("routes", &self.routes)
             .field("connection_bound", &self.connection.is_some())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 impl QuicEgress {
@@ -140,6 +141,7 @@ impl QuicEgress {
             egress,
             routes,
             connection: None,
+            view: None,
         }
     }
     /// Negotiated senders cannot be redirected to a connection with matching
@@ -158,6 +160,52 @@ impl QuicEgress {
             return Err(Error::Closed);
         }
         Ok(())
+    }
+    pub(crate) fn join_stream(
+        &mut self,
+        q: &QuicRecords,
+        source: &media::CaptureSource,
+        control: &media::ObservationControl,
+        view: fr_wire::decoder::Binding,
+    ) -> Result<(), Error> {
+        self.check_connection(q)?;
+        // Steady state requires the completed attachments, not legacy routes.
+        if self.connection.is_none() || self.view != Some(view) {
+            return Err(Error::InvalidRoutes);
+        }
+        self.egress
+            .stream_subscription()
+            .map_err(Error::Media)?
+            .join_source(
+                source,
+                control,
+                fr_media::delivery::MediaEpoch {
+                    configuration: view.configuration,
+                    recovery: view.recovery,
+                },
+            )
+            .map_err(Error::Media)
+    }
+    pub(crate) fn maximum_capacity(&self) -> Result<usize, Error> {
+        Ok(self
+            .egress
+            .stream_subscription()
+            .map_err(Error::Media)?
+            .maximum_capacity())
+    }
+    pub(crate) fn stream_credit(&self, capacity: usize) -> bool {
+        self.egress.pending().is_none()
+            && self
+                .egress
+                .stream_subscription()
+                .is_ok_and(|s| !s.originals_pending() && s.stream_credit(capacity))
+    }
+    pub(crate) fn stream_check(&mut self, q: &QuicRecords) -> Result<(), Error> {
+        self.check_connection(q)?;
+        self.tick()
+    }
+    pub(crate) const fn stream_repair_route(&self) -> Route {
+        Route::Stream(self.routes.repair)
     }
     pub fn enqueue(&mut self, frame: EncodedAccessUnit) -> Result<(), Error> {
         self.tick()?;

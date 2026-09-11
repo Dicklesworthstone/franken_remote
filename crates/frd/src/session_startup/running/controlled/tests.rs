@@ -195,29 +195,32 @@ struct Fixture {
     effects: Arc<Mutex<Effects>>,
     initial_until: u64,
 }
+fn media_capabilities() -> Vec<WireCapability> {
+    [
+        fr_wire::decoder::CAPABILITY,
+        attachment::INPUT_CAPABILITY,
+        attachment::CAPABILITY,
+        attachment::DELIVERY_CAPABILITY,
+    ]
+    .into_iter()
+    .map(|name| WireCapability {
+        name: name.into(),
+        version: 1,
+        required: true,
+    })
+    .collect()
+}
 async fn fixture(c: &Cx, h: &Cx, gate: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>) -> Fixture {
     let mut initial_until = 0;
-    let (mut host, mut viewer) = pair_initialized(
-        c,
-        h,
-        [attachment::INPUT_CAPABILITY, attachment::CAPABILITY]
-            .into_iter()
-            .map(|name| WireCapability {
-                name: name.into(),
-                version: 1,
-                required: true,
-            })
-            .collect(),
-        |host| {
-            let a = host.authority.as_mut().unwrap();
-            let t = HostInstant::from_micros(now(h).unwrap());
-            a.mark_view_ready(t).unwrap();
-            a.grant_lease(credentials().lease, t).unwrap();
-            initial_until = a.control_deadline().unwrap().as_micros();
-            a.issue_input_ticket(credentials().lease, credentials().ticket, t)
-                .unwrap();
-        },
-    )
+    let (mut host, mut viewer) = pair_initialized(c, h, media_capabilities(), |host| {
+        let a = host.authority.as_mut().unwrap();
+        let t = HostInstant::from_micros(now(h).unwrap());
+        a.mark_view_ready(t).unwrap();
+        a.grant_lease(credentials().lease, t).unwrap();
+        initial_until = a.control_deadline().unwrap().as_micros();
+        a.issue_input_ticket(credentials().lease, credentials().ticket, t)
+            .unwrap();
+    })
     .await;
     let (hc, vc) = attach(&mut host, &mut viewer, c, h, MediaRole::Configuration, 8).await;
     let (hi, vi) = attach(&mut host, &mut viewer, c, h, MediaRole::Input, 10).await;
@@ -861,5 +864,68 @@ fn revoke_during_refresh_poll_blocks_shared_udp_before_the_next_service_turn() {
         assert!(observation.check().is_err());
         assert!(driver.await.handoff_safe());
         assert!(!seat.is_occupied());
+    });
+}
+
+#[test]
+fn streaming_codec_stall_does_not_hold_input_results_tickets_or_local_cleanup() {
+    crate::session_startup::running::streaming::tests::run(|c, h| async move {
+        let Fixture {
+            mut host,
+            mut viewer,
+            driver,
+            seat,
+            effects,
+            ..
+        } = Box::pin(fixture(&c, &h, None)).await;
+        let stream = Box::pin(
+            crate::session_startup::running::streaming::tests::source_for_controlled(
+                &mut host.session,
+                &mut viewer.session,
+                &c,
+                &h,
+            ),
+        )
+        .await;
+        let stop = host.control();
+        let mut host = host.into_streaming(stream).unwrap();
+        let (mut n, mut t) = (2000, 5000);
+        let ((), shutdown) = Box::pin(support::both(
+            async {
+                viewer.visible(&c);
+                viewer.queue_key(&c, true);
+                let until = now(&c).unwrap() + 700_000;
+                let (result, ()) = Box::pin(support::both(
+                    host.serve(|| nonce(&mut n), || ticket(&mut t), block),
+                    async {
+                        while now(&c).unwrap() < until {
+                            viewer.drive(&c).await;
+                        }
+                        assert_eq!(viewer.receipts, 1, "codec stalled native receipts");
+                        assert!(viewer.tickets >= 2, "codec stalled ticket renewal");
+                        assert!(effects.lock().unwrap().held);
+                        stop.stop(StopReason::LocalRevoke);
+                    },
+                ))
+                .await;
+                assert!(result.is_err());
+                assert_eq!(
+                    host.statistics().encoded_updates,
+                    0,
+                    "stalled capture produced fabricated output"
+                );
+                host.reap_media(
+                    &c,
+                    crate::worker::Deadline::after(&c, Duration::from_secs(1)).unwrap(),
+                )
+                .await
+                .unwrap();
+            },
+            driver,
+        ))
+        .await;
+        assert!(shutdown.handoff_safe());
+        assert!(!seat.is_occupied());
+        assert_eq!(effects.lock().unwrap().events, vec![true, false]);
     });
 }

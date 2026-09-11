@@ -70,6 +70,11 @@ impl Egress {
             maximum,
         }
     }
+    pub(crate) fn stream_subscription(&self) -> Result<&Subscription, Error> {
+        self.subscription
+            .as_ref()
+            .ok_or(Error::Send(fr_media::delivery::SendError::Closed))
+    }
     pub fn enqueue(&mut self, unit: EncodedAccessUnit) -> Result<(), Error> {
         self.subscription
             .as_mut()
