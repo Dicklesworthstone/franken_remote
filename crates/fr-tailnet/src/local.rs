@@ -324,3 +324,6 @@ mod tests;
 
 mod certificate;
 pub use certificate::{CertificatePolicy, CredentialStatus, NativeServerIdentity};
+
+mod target;
+pub use target::{PeerSelector, PeerTarget};

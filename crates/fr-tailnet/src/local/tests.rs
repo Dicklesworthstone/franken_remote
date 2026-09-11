@@ -1207,3 +1207,5 @@ fn node_refresh_cannot_replace_key_or_extend_a_dead_snapshot() {
         assert_eq!(server.calls.load(Ordering::SeqCst), calls);
     });
 }
+
+mod outbound;

@@ -13,6 +13,7 @@ mod metadata;
 #[cfg(target_os = "linux")]
 pub use local::{
     CertificatePolicy, CredentialStatus, LocalApi, NativeServerIdentity, NodeIdentity,
+    PeerSelector, PeerTarget,
 };
 
 use std::{fmt, net::SocketAddr, time::Duration};

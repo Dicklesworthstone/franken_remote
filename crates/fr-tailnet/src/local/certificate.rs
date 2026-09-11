@@ -384,14 +384,15 @@ impl NativeServerIdentity {
                 continue;
             }
             match self.refresh(cx).await {
-                Ok(()) | Err(Error::CertificateNotDue) => {}
                 Err(Error::Busy) => {
                     // A manual renewal or another identity sharing this API
                     // may own the bounded issuance slot. Never retry in a spin.
                     sleep(cx.now(), self.policy.retry_initial).await;
                 }
-                Err(
-                    Error::LocalApiUnavailable
+                Ok(())
+                | Err(
+                    Error::CertificateNotDue
+                    | Error::LocalApiUnavailable
                     | Error::Timeout
                     | Error::LocalApiDenied
                     | Error::Http
