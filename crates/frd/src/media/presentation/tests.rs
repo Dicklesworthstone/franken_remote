@@ -57,6 +57,7 @@ pub(crate) async fn presenter(cx: &Cx, receiver: &mut ReceivePipeline, mode: &st
         worker,
         configuration,
         binding,
+        stream_binding: None,
     }
 }
 fn runtime() -> asupersync::runtime::Runtime {

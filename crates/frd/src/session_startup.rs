@@ -30,6 +30,10 @@ pub use running::{ControlledHost, HostSession, StreamingHost};
 
 mod viewer;
 pub use viewer::controlled::{ControlledViewer, Error as ControlledViewerError, ViewerControl};
+pub use viewer::streaming::{
+    Error as StreamingViewerError, Presentation, Statistics as ViewerStatistics, StreamingViewer,
+    StreamingViewerControl,
+};
 pub use viewer::{Viewer, ViewerSession};
 
 const WAITING: u8 = 1;

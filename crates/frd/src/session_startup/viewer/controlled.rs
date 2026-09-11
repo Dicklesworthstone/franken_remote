@@ -163,6 +163,18 @@ impl ViewerSession {
     }
 }
 impl ControlledViewer {
+    pub(super) fn streaming_parts(
+        &mut self,
+    ) -> Result<(&mut ViewerSession, &NegotiatedMedia), Error> {
+        self.check()?;
+        Ok((&mut self.session, &self.media))
+    }
+    pub(super) fn check_stream_receiver(
+        &self,
+        receiver: &fr_media::delivery::ReceivePipeline,
+    ) -> Result<(), Error> {
+        self.input.check_receiver(receiver).map_err(Error::View)
+    }
     pub fn control(&self) -> ViewerControl {
         self.control.clone()
     }

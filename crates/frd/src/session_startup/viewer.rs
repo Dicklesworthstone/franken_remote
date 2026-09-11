@@ -3,6 +3,7 @@
 //! No windows, decoder, input grant, peer identity or alternative transport are
 //! invented here. Application dispatch is synchronous and bounded by `QuicRecords`.
 pub(super) mod controlled;
+pub(super) mod streaming;
 use super::{Error, now};
 use asupersync::{cx::Cx, net::quic_native::NativeQuicUdpConnection, types::CancelKind};
 use fr_client::{

@@ -86,6 +86,8 @@ fn block(_: Route, _: &[u8]) -> Result<Disposition, ()> {
     Ok(Disposition::Blocked)
 }
 struct Fixture {
+    presenter: Option<crate::media::Presenter>,
+    video: quic::DatagramRoute,
     host: ControlledHost,
     viewer: ControlledViewer,
     host_clock: ClockSync,
@@ -103,6 +105,21 @@ async fn fixture(client_cx: &Cx, host_cx: &Cx) -> Fixture {
 }
 #[allow(clippy::too_many_lines)]
 async fn fixture_with_caps(client_cx: &Cx, host_cx: &Cx, capabilities: Capabilities) -> Fixture {
+    Box::pin(fixture_with_decoder(
+        client_cx,
+        host_cx,
+        capabilities,
+        false,
+    ))
+    .await
+}
+#[allow(clippy::too_many_lines)]
+async fn fixture_with_decoder(
+    client_cx: &Cx,
+    host_cx: &Cx,
+    capabilities: Capabilities,
+    decode: bool,
+) -> Fixture {
     let wire_capabilities = [
         fr_wire::clock::CAPABILITY,
         decoder::CAPABILITY,
@@ -168,6 +185,11 @@ async fn fixture_with_caps(client_cx: &Cx, host_cx: &Cx, capabilities: Capabilit
     let observation = host.observation().unwrap();
     let host_media = NegotiatedMedia::new(host.io().unwrap().0, &selection, &hc, &hr, &hv).unwrap();
     let media = NegotiatedMedia::new(viewer.io().unwrap().0, &selection, &vc, &vr, &vv).unwrap();
+    let video = hv
+        .completed_on(host.io().unwrap().0)
+        .unwrap()
+        .datagram
+        .unwrap();
     let hn = NegotiatedInput::new(host.io().unwrap().0, &selection, &hc, hi).unwrap();
     let vn = NegotiatedInput::new(viewer.io().unwrap().0, &selection, &vc, vi).unwrap();
     let (hq, routes) = host.io().unwrap();
@@ -266,13 +288,34 @@ async fn fixture_with_caps(client_cx: &Cx, host_cx: &Cx, capabilities: Capabilit
     let limits = media.limits();
     let mut receiver = ReceivePipeline::new(
         media
-            .receiver_config(viewer.io().unwrap().0, ReceivePolicy::default())
+            .receiver_config(
+                viewer.io().unwrap().0,
+                ReceivePolicy {
+                    display_budget_micros: if decode { 200_000 } else { 50_000 },
+                    ..ReceivePolicy::default()
+                },
+            )
             .unwrap(),
         MediaBudget::new(limits.protocol()).unwrap(),
     )
     .unwrap();
+    let presenter = if decode {
+        Some(
+            crate::media::Presenter::stream_fixture(
+                client_cx,
+                viewer.io().unwrap().0,
+                &media,
+                &mut receiver,
+            )
+            .await,
+        )
+    } else {
+        receiver
+            .decoder_configured(now(client_cx).unwrap())
+            .unwrap();
+        None
+    };
     let stamp = now(client_cx).unwrap();
-    receiver.decoder_configured(stamp).unwrap();
     let mut input =
         PresentedInput::new(input, &receiver, correlation, ClientInstant(stamp)).unwrap();
     input
@@ -325,6 +368,8 @@ async fn fixture_with_caps(client_cx: &Cx, host_cx: &Cx, capabilities: Capabilit
     input.visible(0, ClientInstant(stamp)).unwrap();
     let viewer = viewer.into_controlled(vn, media, input, clock).unwrap();
     Fixture {
+        presenter,
+        video,
         last_announce: stamp,
         host: host.into_controlled(native).unwrap(),
         viewer,
@@ -896,3 +941,5 @@ fn progress_callback_receiver_failure_cannot_enable_followup_input() {
 }
 
 mod viewport;
+
+mod streaming;

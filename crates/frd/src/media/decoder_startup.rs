@@ -733,6 +733,35 @@ impl Viewer {
             .await
             .map_err(Error::Media)
     }
+    /// Join only the original authenticated connection and its completed media
+    /// attachments. Numeric decoder IDs alone do not authorize this transfer.
+    pub(crate) fn finish_stream(
+        mut self,
+        transport: &QuicRecords,
+        media: &crate::media_quic::NegotiatedMedia,
+    ) -> Result<(Presenter, ReceivePipeline), Error> {
+        let checked = (|| {
+            self.bound.check(transport)?;
+            media.check(transport).map_err(|_| Error::InvalidRoutes)?;
+            if self.bound.setup.binding != media.binding()
+                || self.bound.setup.limits != *media.limits().protocol()
+            {
+                return Err(Error::InvalidRoutes);
+            }
+            let config = media
+                .receiver_config(transport, fr_media::delivery::ReceivePolicy::default())
+                .map_err(|_| Error::InvalidRoutes)?;
+            self.receiver
+                .check_delivery_configuration(config.limits, config.bindings, config.epoch)
+                .map_err(|_| Error::InvalidRoutes)?;
+            Ok(())
+        })();
+        if let Err(error) = checked {
+            self.close();
+            return Err(error);
+        }
+        self.finish()
+    }
     /// Move the configured owner into the regular session, preserving receiver
     /// identity, reference state, decoder reservations and native process.
     pub fn finish(mut self) -> Result<(Presenter, ReceivePipeline), Error> {
@@ -740,6 +769,8 @@ impl Viewer {
         if self.phase != ViewerPhase::Complete {
             return Err(Error::WrongState);
         }
+        self.presenter.stream_binding =
+            Some((self.bound.connection.clone(), self.bound.setup.binding));
         Ok((self.presenter, self.receiver))
     }
 }

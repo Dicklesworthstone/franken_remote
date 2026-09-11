@@ -477,6 +477,10 @@ pub struct Presenter {
     worker: Worker,
     configuration: Configuration,
     binding: DecoderBinding,
+    stream_binding: Option<(
+        fr_transport::quic::ConnectionBinding,
+        fr_wire::decoder::Binding,
+    )>,
 }
 impl Presenter {
     pub async fn start(
@@ -511,6 +515,7 @@ impl Presenter {
             worker,
             configuration,
             binding,
+            stream_binding: None,
         })
     }
     /// Reuse this running decoder for a new IDR under the SAME receiver and
@@ -539,6 +544,7 @@ impl Presenter {
             .replace(epoch, bindings, now)
             .map_err(Error::Receiver)?;
         let mut receiving = ReceiveOperation::new(receiver);
+        self.stream_binding = None;
         self.binding = receiving
             .receiver
             .bind_decoder(

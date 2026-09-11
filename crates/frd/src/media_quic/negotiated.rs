@@ -254,6 +254,22 @@ impl NegotiatedMedia {
         }
         Err(Error::InvalidRoutes)
     }
+    /// Copy the authenticated dispatch map for a split-borrow session turn.
+    /// Callers must revalidate this owner on that connection before each turn.
+    pub(crate) fn viewer_routes(&self, q: &QuicRecords) -> Result<[(Route, Channel); 3], Error> {
+        self.check(q)?;
+        if self.is_host() {
+            return Err(Error::InvalidRoutes);
+        }
+        Ok([
+            (Route::Stream(self.recovery.inbound), Channel::Recovery),
+            (Route::Stream(self.video.inbound), Channel::MediaConfig),
+            (
+                Route::Datagram(self.video.datagram.ok_or(Error::InvalidRoutes)?),
+                Channel::Video,
+            ),
+        ])
+    }
     /// Dispatch only the negotiated viewer media lanes from their original live
     /// connection. No borrowed packet escapes this bounded transport callback;
     /// all unrelated records stay with their existing session owner.

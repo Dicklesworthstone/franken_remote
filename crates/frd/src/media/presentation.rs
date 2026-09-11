@@ -70,6 +70,29 @@ struct DecodeCall<'a> {
     operation: MediaOperation<'a>,
 }
 impl Presenter {
+    /// A successful network startup stamps the presenter before handing it to
+    /// input-grant/UI setup. A standalone or recovered decoder has no such stamp.
+    pub(crate) fn check_stream(
+        &self,
+        q: &fr_transport::quic::QuicRecords,
+        media: &crate::media_quic::NegotiatedMedia,
+        receiver: &fr_media::delivery::ReceivePipeline,
+    ) -> Result<(), Error> {
+        let Some((connection, view)) = &self.stream_binding else {
+            return Err(Error::InvalidFrame);
+        };
+        if !q.is_bound_to(connection) || *view != media.binding() {
+            return Err(Error::InvalidFrame);
+        }
+        let cfg = media
+            .receiver_config(q, fr_media::delivery::ReceivePolicy::default())
+            .map_err(|_| Error::InvalidFrame)?;
+        receiver
+            .check_delivery_configuration(cfg.limits, cfg.bindings, cfg.epoch)
+            .map_err(Error::Receiver)?;
+        self.binding.check(receiver).map_err(Error::Receiver)
+    }
+
     pub(crate) fn check_receiver(&self, receiver: &ReceivePipeline) -> Result<(), Error> {
         self.binding.check(receiver).map_err(Error::Receiver)?;
         if self.worker.state() != worker::State::Running {
@@ -219,3 +242,6 @@ async fn run_native(
 
 #[cfg(all(test, target_os = "linux"))]
 pub(crate) mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod stream_fixture;
