@@ -251,6 +251,37 @@ impl SendCache {
     pub const fn needs_recovery(&self) -> bool {
         self.needs_recovery
     }
+    /// Largest Vec allocation that can fit even when the cache is empty.
+    /// An upstream producer must refuse a maximum larger than this instead of
+    /// waiting forever for credit that can never exist.
+    pub fn maximum_capacity(&self) -> usize {
+        self.policy
+            .max_cached_bytes
+            .saturating_sub(core::mem::size_of::<CachedPicture>())
+    }
+    /// Admission credit for ONE not-yet-produced access unit. The owner must
+    /// retain this reservation until transferring the result to `push`, and must
+    /// not enqueue other pictures in between. Includes actual Vec capacity and
+    /// per-picture metadata, just like `push`; this does not allocate or evict.
+    pub fn can_push_capacity(&self, capacity: usize) -> bool {
+        !self.closed
+            && !self.needs_recovery
+            && self.used_pictures < self.policy.max_cached_pictures
+            && capacity
+                .checked_add(core::mem::size_of::<CachedPicture>())
+                .and_then(|charge| self.used_bytes.checked_add(charge))
+                .is_some_and(|total| total <= self.policy.max_cached_bytes)
+    }
+    /// Does not advance the packetizer or consume a source observation. A
+    /// prepared transport packet remains separately owned by its egress.
+    pub fn originals_pending(&self) -> bool {
+        self.observation.is_some()
+            || self
+                .pictures
+                .iter()
+                .flatten()
+                .any(|p| !p.announced || !p.original_complete())
+    }
     /// progress is supplied by the capture adapter; the sender does not invent
     /// capture-freshness evidence or certify declared IDRs from opaque bytes.
     pub fn push(
@@ -295,7 +326,15 @@ impl SendCache {
             DeliveryMode::Recovery => self.policy.recovery_horizon_micros,
             DeliveryMode::Datagrams => self.policy.reference_horizon_micros,
         };
-        let send_by = deadline(now, lifetime)?;
+        // Codec and application backpressure are part of the picture's age.
+        // Enqueueing late must not manufacture another full repair lifetime.
+        if d.capture_micros > now {
+            return Err(SendError::InvalidObservation);
+        }
+        let send_by = deadline(d.capture_micros, lifetime)?;
+        if now >= send_by {
+            return Err(SendError::OriginalExpired);
+        }
         let index = self
             .pictures
             .iter()
@@ -508,7 +547,7 @@ impl SendCache {
         }
         Ok(())
     }
-    /// Expire by the insertion deadline, even on an idle connection. Losing an
+    /// Expire by the capture-anchored deadline, even on an idle connection. Losing an
     /// unsent reference fences all its dependents instead of sending a broken chain.
     pub fn tick(&mut self, now: u64) -> Result<(), SendError> {
         self.check_clock(now)?;
