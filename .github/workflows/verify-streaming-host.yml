@@ -1,0 +1,84 @@
+name: Verify continuous native host
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/verify-streaming-host.yml']
+permissions:
+  contents: write
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Stage exact continuous-streaming implementation without ref writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, subprocess
+          from pathlib import Path
+          def sha(data): return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
+          chunks = [('08018493ed82c835f0f8fca0bc1c8d5084e28741', 6400), ('a4474b818cbb5fbe8302277b679193943003789e', 6400), ('08b1c8b2776bf836a8fbb4ac3dc1ab16513fdbb3', 6400), ('78387aea4175ef91dcb097e09df854def6f1a903', 5800)]
+          parts = []
+          for oid, size in chunks:
+              row = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}'], timeout=30))
+              raw = base64.b64decode(row['content'])
+              assert len(raw) == size and sha(raw) == oid
+              parts.append(raw)
+          encoded = b''.join(parts)
+          assert len(encoded) == 25000 and sha(encoded) == '5e1b8b9e16784605c091a6afbbf3db3b958a7ba9'
+          decoder = lzma.LZMADecompressor()
+          data = decoder.decompress(base64.b64decode(encoded, validate=True), max_length=89015)
+          assert decoder.eof and not decoder.unused_data and len(data) == 89014
+          assert hashlib.sha256(data).hexdigest() == 'c0c11b4ed76a457938b55e68c270b41396c5531c79c40009a7ef670796406227'
+          candidate = json.loads(data)
+          assert len(candidate['after']) == 17 and set(candidate['before']) == set(candidate['after'])
+          for path, expected in candidate['before'].items():
+              assert path.startswith('crates/') and '..' not in Path(path).parts
+              assert (sha(Path(path).read_bytes()) if Path(path).exists() else None) == expected, path
+          patch = Path(os.environ['RUNNER_TEMP'], 'continuous-streaming.patch')
+          patch.write_text(candidate['patch'])
+          stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
+          assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(candidate['after'])
+          subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
+          subprocess.run(['git', 'apply', str(patch)], check=True)
+          for path, expected in candidate['after'].items(): assert sha(Path(path).read_bytes()) == expected, path
+          Path(os.environ['RUNNER_TEMP'], 'streaming-paths.json').write_text(json.dumps(candidate['after']))
+          PY
+      - name: Install pinned compiler and native SDKs
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
+      - name: Verify workspace and continuous native streaming
+        run: |
+          ./scripts/verify.sh fast
+          ./scripts/verify.sh docs
+          cargo test -p frd --lib --locked -- --test-threads=4
+          cargo build -p fr-native --all-features --bin fr-media-worker --locked
+          FR_NATIVE_TEST_WORKER="$PWD/target/debug/fr-media-worker" cargo test -p frd --lib actual_hevc_streams --locked -- --ignored --test-threads=1 --nocapture
+          git diff --check
+      - name: Retain exact verified source objects without ref writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, subprocess
+          from pathlib import Path
+          for path, expected in json.loads(Path(os.environ['RUNNER_TEMP'], 'streaming-paths.json').read_text()).items():
+              data = Path(path).read_bytes()
+              assert hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest() == expected, path
+              body = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()})
+              row = json.loads(subprocess.check_output(['gh', 'api', '--method', 'POST', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', '--input', '-'], input=body, text=True, timeout=30))
+              assert row['sha'] == expected, path
+              print(json.dumps({'path': path, 'sha': expected, 'verified_against': os.environ['GITHUB_SHA']}))
+          PY
