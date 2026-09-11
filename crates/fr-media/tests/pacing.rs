@@ -250,3 +250,81 @@ fn trace_replay_is_exact_and_adjustment_retention_is_fixed() {
     );
     assert!(core::mem::size_of::<Controller>() < 8192);
 }
+
+#[test]
+fn brief_unknown_capture_credit_pauses_but_never_counts_as_headroom() {
+    let mut c = controller();
+    let initial = c.interval_us();
+    let mut first_probe = None;
+    for tick in 0..=300 {
+        let mut s = active(tick * 10_000);
+        // One outstanding native operation every 100 ms. Unknown credit is
+        // not spare credit, but the other 80 ms have measured ready endpoints.
+        if tick % 10 == 0 {
+            s.capture_credit = A::Unknown;
+        }
+        let r = c.update(s).unwrap();
+        if tick % 10 == 0 {
+            assert_eq!(r.headroom_us, 0);
+        }
+        if r.reason == Reason::HeadroomProbe && first_probe.is_none() {
+            first_probe = Some(tick * 10_000);
+        }
+        if tick <= 200 {
+            assert_eq!(r.interval_us, initial);
+        }
+    }
+    let probe = first_probe.expect("brief genuine work must not disable recovery forever");
+    assert_eq!(probe, 2_490_000);
+}
+
+#[test]
+fn extended_unknown_or_known_pressure_cannot_bank_headroom_for_a_later_probe() {
+    for blocked in [false, true] {
+        let mut c = controller();
+        for i in 0..=38 {
+            c.update(active(i * 50_000)).unwrap();
+        }
+        for i in 39..=44 {
+            let mut s = active(i * 50_000);
+            s.capture_credit = if blocked { A::Blocked } else { A::Unknown };
+            let r = c.update(s).unwrap();
+            assert_ne!(r.reason, Reason::HeadroomProbe);
+        }
+        for i in 45..=64 {
+            let r = c.update(active(i * 50_000)).unwrap();
+            assert_ne!(r.reason, Reason::HeadroomProbe);
+            assert!(r.headroom_us < 2_000_000);
+        }
+    }
+}
+
+#[test]
+fn explicitly_slow_fixed_policies_stay_fixed_without_widening_adaptation() {
+    for interval in [250_000, 500_000, 1_000_000] {
+        let mut c = Controller::new(Policy {
+            minimum_interval_us: interval,
+            maximum_interval_us: interval,
+        })
+        .unwrap();
+        for i in 0..=100 {
+            let mut s = active(i * 50_000);
+            s.capture_credit = A::Blocked;
+            assert_eq!(c.update(s).unwrap().interval_us, interval);
+        }
+    }
+    assert!(
+        Controller::new(Policy {
+            minimum_interval_us: 200_000,
+            maximum_interval_us: 250_000
+        })
+        .is_err()
+    );
+    assert!(
+        Controller::new(Policy {
+            minimum_interval_us: 1_000_001,
+            maximum_interval_us: 1_000_001
+        })
+        .is_err()
+    );
+}

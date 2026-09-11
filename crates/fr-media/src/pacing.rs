@@ -29,7 +29,9 @@ impl Policy {
     fn validate(self) -> Result<(), Error> {
         if self.minimum_interval_us < 1_000
             || self.minimum_interval_us > self.maximum_interval_us
-            || self.maximum_interval_us > 200_000
+            || self.maximum_interval_us > 1_000_000
+            || (self.maximum_interval_us > 200_000
+                && self.minimum_interval_us != self.maximum_interval_us)
         {
             return Err(Error::InvalidPolicy);
         }
@@ -102,6 +104,8 @@ pub struct Controller {
     adjusted: Option<u64>,
     busy_since: [Option<u64>; 3],
     headroom_since: Option<u64>,
+    headroom_evidence_us: u64,
+    headroom_previous_ready: bool,
     source: Option<Observation>,
     unchanged_since: Option<u64>,
     mode: Mode,
@@ -120,6 +124,8 @@ impl Controller {
             adjusted: None,
             busy_since: [None; 3],
             headroom_since: None,
+            headroom_evidence_us: 0,
+            headroom_previous_ready: false,
             source: None,
             unchanged_since: None,
             mode: Mode::Active,
@@ -185,7 +191,7 @@ impl Controller {
             .is_some_and(|o| s.now_us - o.at_us > SOURCE_EVIDENCE_US)
         {
             self.unchanged_since = None;
-            self.headroom_since = None;
+            self.reset_headroom();
             if self.mode == Mode::Idle {
                 self.mode = Mode::Active;
                 reason = Reason::EvidenceGap;
@@ -210,13 +216,13 @@ impl Controller {
                 self.interval = self.policy.conservative();
             }
             self.adjusted = Some(s.now_us);
-            self.headroom_since = None;
+            self.reset_headroom();
             reason = Reason::ChangedAfterIdle;
         } else if idle && self.mode != Mode::Idle {
             self.mode = Mode::Idle;
             self.interval = self.policy.maximum_interval_us;
             self.adjusted = Some(s.now_us);
-            self.headroom_since = None;
+            self.reset_headroom();
             reason = Reason::VerifiedIdle;
         }
         let headroom = fresh
@@ -226,12 +232,17 @@ impl Controller {
                 .is_some_and(|work| work <= self.interval * 3 / 4)
             && s.send == Availability::Ready
             && s.capture_credit == Availability::Ready;
-        let headroom_us = if headroom {
-            s.now_us - *self.headroom_since.get_or_insert(s.now_us)
-        } else {
-            self.headroom_since = None;
-            0
-        };
+        // A short outstanding source operation can make credit unknown. It
+        // contributes no headroom duration, but must not erase every preceding
+        // measured interval and make recovery impossible in a real pipeline.
+        let uncertain = fresh
+            && !idle
+            && self.mode == Mode::Active
+            && s.source_work_us
+                .is_none_or(|work| work <= self.interval * 3 / 4)
+            && s.send != Availability::Blocked
+            && s.capture_credit != Availability::Blocked;
+        let headroom_us = self.track_headroom(s.now_us, headroom, uncertain);
         if reason == Reason::Hold && self.mode == Mode::Active {
             reason = self.adjust_for_load(s.now_us, pressure_us, headroom_us);
         }
@@ -253,7 +264,7 @@ impl Controller {
         {
             self.interval = (self.interval * 2).min(self.policy.maximum_interval_us);
             self.adjusted = Some(now_us);
-            self.headroom_since = None;
+            self.reset_headroom();
             return [
                 Reason::SourceWork,
                 Reason::SendAdmission,
@@ -266,10 +277,40 @@ impl Controller {
             self.interval =
                 (self.interval - self.interval.div_ceil(8)).max(self.policy.minimum_interval_us);
             self.adjusted = Some(now_us);
+            self.reset_headroom();
             self.headroom_since = Some(now_us);
+            self.headroom_previous_ready = true;
             return Reason::HeadroomProbe;
         }
         Reason::Hold
+    }
+    fn reset_headroom(&mut self) {
+        self.headroom_since = None;
+        self.headroom_evidence_us = 0;
+        self.headroom_previous_ready = false;
+    }
+    fn track_headroom(&mut self, now: u64, ready: bool, uncertain: bool) -> u64 {
+        if self
+            .headroom_since
+            .is_some_and(|last| now - last > MAX_SAMPLE_GAP_US)
+        {
+            self.reset_headroom();
+        }
+        if ready {
+            if self.headroom_previous_ready
+                && let Some(last) = self.headroom_since
+            {
+                self.headroom_evidence_us = self.headroom_evidence_us.saturating_add(now - last);
+            }
+            self.headroom_since = Some(now);
+            self.headroom_previous_ready = true;
+        } else if uncertain {
+            // Neither edge adjacent to an unknown interval is counted.
+            self.headroom_previous_ready = false;
+        } else {
+            self.reset_headroom();
+        }
+        if ready { self.headroom_evidence_us } else { 0 }
     }
     fn track_pressure(&mut self, s: Sample) -> ([bool; 3], [u64; 3]) {
         let pressure = [
@@ -310,7 +351,7 @@ impl Controller {
     }
     fn reset_evidence(&mut self) {
         self.busy_since = [None; 3];
-        self.headroom_since = None;
+        self.reset_headroom();
         self.unchanged_since = None;
     }
 }
