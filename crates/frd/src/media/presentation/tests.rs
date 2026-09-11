@@ -274,3 +274,27 @@ fn completion_for_replaced_receiver_is_rejected_without_closing_new_scope() {
         assert_eq!(receiver.state(), ReceiveState::AwaitingRecovery);
     });
 }
+
+#[test]
+fn borrowed_present_next_abandonment_immediately_closes_and_drains_receiver() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let (mut presenter, mut receiver, limits) = fixture(&cx, "stall").await;
+        next_frame(&cx, &mut receiver, limits);
+        assert_eq!(receiver.budget_usage().pictures, 2);
+        {
+            let mut operation = pin!(presenter.present_next(&cx, &mut receiver));
+            assert!(poll_once(operation.as_mut()).await);
+        }
+        // No tick or subsequent packet is needed to complete borrowed cleanup.
+        assert_eq!(receiver.state(), ReceiveState::Closed);
+        assert_eq!(receiver.budget_usage(), BudgetUsage::default());
+        assert_eq!(presenter.worker.state(), worker::State::Poisoned);
+        assert!(
+            presenter
+                .reap(&cx, Deadline::after(&cx, Duration::from_secs(1)).unwrap())
+                .await
+                .is_ok()
+        );
+    });
+}

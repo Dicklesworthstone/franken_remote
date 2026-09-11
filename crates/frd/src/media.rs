@@ -564,10 +564,16 @@ impl Presenter {
         let Some(job) = self.take_next(cx, receiver)? else {
             return Ok(None);
         };
-        self.decode_job(cx, job)
+        // This compatibility call retains the receiver borrow across IPC, so
+        // preserve its eager cancellation cleanup. The detached streaming path
+        // uses DecodeJob's scope fence and services the receiver independently.
+        let mut receiving = ReceiveOperation::new(receiver);
+        let receipt = self
+            .decode_job(cx, job)
             .await?
-            .complete(cx, receiver)
-            .map(Some)
+            .complete(cx, receiving.receiver)?;
+        receiving.completed = true;
+        Ok(Some(receipt))
     }
     /// Fence view receipts before stopping native work. No raw worker access is
     /// exposed: decoder submissions always pass through the bound receiver.
