@@ -70,6 +70,7 @@ unsafe extern "C" {
         height: *mut c_int,
     ) -> c_int;
     fn fr_x11_free(p: *mut c_void);
+    fn fr_x11_validate(x: *mut c_void) -> c_int;
     fn fr_x11_capture(p: *mut c_void, bytes: *mut u8, len: usize) -> c_int;
     fn fr_x11_present(p: *mut c_void, bytes: *const u8, len: usize) -> c_int;
 }
@@ -96,7 +97,7 @@ impl fmt::Display for NativeError {
     }
 }
 impl std::error::Error for NativeError {}
-fn status(code: c_int) -> Result<(), NativeError> {
+pub(crate) fn status(code: c_int) -> Result<(), NativeError> {
     match code {
         0 => Ok(()),
         1 => Err(NativeError::NeedInput),
@@ -109,14 +110,14 @@ fn status(code: c_int) -> Result<(), NativeError> {
         _ => Err(NativeError::Codec),
     }
 }
-fn zeroed(len: usize) -> Result<Vec<u8>, NativeError> {
+pub(crate) fn zeroed(len: usize) -> Result<Vec<u8>, NativeError> {
     let mut v = Vec::new();
     v.try_reserve_exact(len)
         .map_err(|_| NativeError::Allocation)?;
     v.resize(len, 0);
     Ok(v)
 }
-fn frame_len(w: u32, h: u32, limits: &ProtocolLimits) -> Result<usize, NativeError> {
+pub(crate) fn frame_len(w: u32, h: u32, limits: &ProtocolLimits) -> Result<usize, NativeError> {
     limits
         .validate_coded_dimensions(w, h)
         .map_err(|_| NativeError::InvalidConfiguration)?;
@@ -647,6 +648,12 @@ pub struct X11Surface {
     _thread: PhantomData<Rc<()>>,
 }
 impl X11Surface {
+    pub(crate) fn revalidate(&mut self) -> Result<(), NativeError> {
+        // SAFETY: live thread-confined context; validation borrows it and retains
+        // any geometry failure so restoring dimensions cannot revive the owner.
+        status(unsafe { fr_x11_validate(self.raw.as_ptr()) })
+    }
+
     pub fn capture(display: Option<&str>, limits: ProtocolLimits) -> Result<Self, NativeError> {
         Self::open(display, None, limits)
     }

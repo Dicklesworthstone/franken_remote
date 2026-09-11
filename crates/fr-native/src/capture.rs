@@ -20,8 +20,31 @@ struct Snapshot {
     frame: FrameId,
     pixels: BgraFrame,
 }
+// Fixed bounded native inventory stays inline in the single worker owner.
+#[allow(clippy::large_enum_variant)]
+enum CaptureSurface {
+    Root(X11Surface),
+    #[cfg(feature = "linux-displays")]
+    Selected(crate::displays::X11SelectedCapture),
+}
+impl CaptureSurface {
+    fn verify(&mut self) -> Result<(), NativeError> {
+        match self {
+            Self::Root(surface) => surface.revalidate(),
+            #[cfg(feature = "linux-displays")]
+            Self::Selected(surface) => surface.revalidate(),
+        }
+    }
+    fn snapshot(&mut self) -> Result<BgraFrame, NativeError> {
+        match self {
+            Self::Root(s) => s.snapshot(),
+            #[cfg(feature = "linux-displays")]
+            Self::Selected(s) => s.snapshot(),
+        }
+    }
+}
 pub struct ChangeAwareCapture {
-    surface: X11Surface,
+    surface: CaptureSurface,
     codec: HevcEncoder,
     baseline: Option<Snapshot>,
     pending: Option<Snapshot>,
@@ -32,13 +55,41 @@ pub struct ChangeAwareCapture {
 impl ChangeAwareCapture {
     pub const fn new(surface: X11Surface, codec: HevcEncoder) -> Self {
         Self {
-            surface,
+            surface: CaptureSurface::Root(surface),
             codec,
             baseline: None,
             pending: None,
             last_request: None,
             last_observed: None,
             closed: false,
+        }
+    }
+    #[cfg(feature = "linux-displays")]
+    pub const fn selected(
+        surface: crate::displays::X11SelectedCapture,
+        codec: HevcEncoder,
+    ) -> Self {
+        Self {
+            surface: CaptureSurface::Selected(surface),
+            codec,
+            baseline: None,
+            pending: None,
+            last_request: None,
+            last_observed: None,
+            closed: false,
+        }
+    }
+    /// Topology only: this does not update the last pixel/source observation.
+    pub fn check_display(&mut self) -> Result<(), NativeError> {
+        if self.closed {
+            return Err(NativeError::Closed);
+        }
+        match &mut self.surface {
+            #[cfg(feature = "linux-displays")]
+            CaptureSurface::Selected(surface) => {
+                surface.revalidate().inspect_err(|_| self.closed = true)
+            }
+            CaptureSurface::Root(_) => Err(NativeError::Unavailable),
         }
     }
     /// The supplied timestamp is the parent's pre-request lower bound, NEVER
@@ -76,6 +127,7 @@ impl ChangeAwareCapture {
             && old.pixels.height() == pixels.height()
             && old.pixels.pixels() == pixels.pixels()
         {
+            self.surface.verify().inspect_err(|_| self.closed = true)?;
             return Ok(CaptureOutput::Unchanged(UnchangedCapture {
                 candidate: frame,
                 reference: old.frame,
@@ -108,6 +160,9 @@ impl ChangeAwareCapture {
             self.closed = true;
             return Err(NativeError::UnsupportedBitstream);
         }
+        // Encoding can block after capture validation. A changed selected output
+        // must not release either an access unit or unchanged-source evidence.
+        self.surface.verify().inspect_err(|_| self.closed = true)?;
         // Move the snapshot only AFTER the validated access unit exists. Pending
         // or refused native submissions cannot become an unchanged-source anchor.
         self.baseline = self.pending.take();

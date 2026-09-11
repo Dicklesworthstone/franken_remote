@@ -26,3 +26,6 @@ pub mod input_agent;
     any(feature = "linux-media", feature = "linux-input")
 ))]
 pub mod xlib;
+
+#[cfg(all(target_os = "linux", feature = "linux-displays"))]
+pub mod displays;

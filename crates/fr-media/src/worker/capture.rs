@@ -1,6 +1,9 @@
 //! Private discovery of full X11 screens, not a network display catalog.
 //! The same child/X connection retains these identities until selection.
 use super::{CONFIG_BYTES, Configuration, Error};
+
+/// Explicit monitor profile of the same private capture protocol.
+pub mod monitors;
 use core::fmt;
 use fr_core::limits::ProtocolLimits;
 

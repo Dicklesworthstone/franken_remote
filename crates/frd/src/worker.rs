@@ -12,6 +12,9 @@ use asupersync::{
 };
 use fr_core::limits::ProtocolLimits;
 use fr_media::worker::{self, Configuration, HEADER_BYTES, Header, Identity, Kind, Record, Role};
+mod selected;
+pub use selected::MonitorDiscovery;
+
 use std::{
     fmt,
     future::{Future, poll_fn},
@@ -233,6 +236,7 @@ pub struct Worker {
     role: Role,
     state: State,
     exit: Option<ExitStatus>,
+    selected: Option<fr_wire::display::Display>,
 }
 impl fmt::Debug for Worker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -353,6 +357,7 @@ impl Worker {
             role,
             state: State::Starting,
             exit: None,
+            selected: None,
         })
     }
     /// Enumerate on the capture child without opening a codec or reading pixels.
@@ -375,6 +380,9 @@ impl Worker {
             .await?;
         let screens = worker::capture::Screens::decode(reply.body())?;
         Ok(CaptureDiscovery { worker, screens })
+    }
+    pub const fn selected_display(&self) -> Option<fr_wire::display::Display> {
+        self.selected
     }
     pub const fn state(&self) -> State {
         self.state
@@ -406,11 +414,16 @@ impl Worker {
         }
         if !matches!(
             (self.role, kind),
-            (Role::Capture, Kind::Capture | Kind::CaptureIfChanged)
-                | (Role::Present, Kind::Present | Kind::Decode)
+            (
+                Role::Capture,
+                Kind::Capture | Kind::CaptureIfChanged | Kind::CheckMonitor
+            ) | (Role::Present, Kind::Present | Kind::Decode)
                 | (_, Kind::Poll | Kind::Stop)
         ) {
             return Err(Error::Protocol(worker::Error::WrongRole));
+        }
+        if kind == Kind::CheckMonitor && self.selected.is_none() {
+            return Err(Error::Protocol(worker::Error::WrongState));
         }
         self.exchange(cx, kind, body, deadline).await
     }
@@ -594,6 +607,9 @@ fn allowed_reply(request: Kind, reply: Kind) -> bool {
         || match request {
             Kind::Configure => reply == Kind::Ready,
             Kind::DiscoverCapture => reply == Kind::CaptureScreens,
+            Kind::DiscoverMonitors => reply == Kind::CaptureMonitors,
+            Kind::ConfigureMonitor => reply == Kind::MonitorReady,
+            Kind::CheckMonitor => reply == Kind::MonitorValid,
             Kind::ConfigureCapture => reply == Kind::CaptureReady,
             Kind::ConfigureDecoder => reply == Kind::DecoderReady,
             Kind::Capture => matches!(reply, Kind::Unit | Kind::NeedInput | Kind::NeedDrain),

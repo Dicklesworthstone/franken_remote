@@ -12,6 +12,8 @@ mod linux {
     };
     use std::io;
 
+    // Fixed bounded native inventory stays inline in the single worker owner.
+    #[allow(clippy::large_enum_variant)]
     enum Media {
         Capture(ChangeAwareCapture),
         Present {
@@ -113,6 +115,13 @@ mod linux {
             verify: bool,
         ) -> Result<(Kind, Vec<u8>), Error> {
             match request.header.kind {
+                Kind::CheckMonitor => {
+                    let Self::Capture(capture) = self else {
+                        return Err(Error::WrongRole);
+                    };
+                    capture.check_display().map_err(native)?;
+                    Ok((Kind::MonitorValid, Vec::new()))
+                }
                 Kind::Capture | Kind::CaptureIfChanged => {
                     let Self::Capture(capture) = self else {
                         return Err(Error::WrongRole);
@@ -161,92 +170,153 @@ mod linux {
             }
         }
     }
+    type Initialized = (Configuration, Media, Kind, Vec<u8>);
     fn initialize(
+        first: Record,
         role: Role,
+        sequence: &mut Sequence,
+        identity: &mut worker::Identity,
         input: &mut impl io::Read,
         output: &mut impl io::Write,
-    ) -> Result<Option<(Configuration, Media, Sequence)>, Error> {
-        let absolute = ProtocolLimits::ABSOLUTE;
-        let mut first = Record::read(input, &absolute)?.ok_or(Error::Io)?;
-        let mut sequence = Sequence::new(first.header.identity.epoch)?;
-        sequence.accept(first.header)?;
-        let discovered = if role == Role::Capture && first.header.kind == Kind::DiscoverCapture {
-            let screens = match X11Screens::open(None, absolute).map_err(native) {
-                Ok(screens) => screens,
-                Err(error) => {
-                    Record::new(
-                        Kind::Refused,
-                        first.header.identity,
-                        (error as u16).to_be_bytes().to_vec(),
-                        &absolute,
-                    )?
-                    .write(output, &absolute)?;
-                    return Err(error);
-                }
-            };
-            Record::new(
-                Kind::CaptureScreens,
-                first.header.identity,
-                screens.catalog().encode(),
-                &absolute,
-            )?
-            .write(output, &absolute)?;
-            first = Record::read(input, &absolute)?.ok_or(Error::Io)?;
-            sequence.accept(first.header)?;
-            if first.header.kind == Kind::Stop {
-                drop(screens);
-                Record::new(Kind::Stopped, first.header.identity, Vec::new(), &absolute)?
-                    .write(output, &absolute)?;
-                return Ok(None);
+    ) -> Result<Option<Initialized>, Error> {
+        if first.header.kind == Kind::DiscoverCapture {
+            if role != Role::Capture {
+                return Err(Error::WrongRole);
             }
-            Some(screens)
-        } else {
-            None
+            return discover_screens(sequence, identity, input, output);
+        }
+        if first.header.kind == Kind::DiscoverMonitors {
+            if role != Role::Capture {
+                return Err(Error::WrongRole);
+            }
+            return discover(sequence, identity, input, output);
+        }
+        let (configuration, media, ready) = match (role, first.header.kind) {
+            (Role::Capture, Kind::Configure) => {
+                let c = Configuration::decode(first.body())?;
+                (c, open(role, c, None)?, Kind::Ready)
+            }
+            (Role::Present, Kind::ConfigureDecoder) => {
+                let (c, record) = Configuration::decode_decoder(first.body())?;
+                (c, open(role, c, Some(record))?, Kind::DecoderReady)
+            }
+            _ => return Err(Error::WrongState),
         };
-        let first_identity = first.header.identity;
-        let initialized = match (discovered, role, first.header.kind) {
-            (Some(screens), Role::Capture, Kind::ConfigureCapture) => {
-                worker::capture::parse_configuration(first.body()).and_then(|(c, screen)| {
-                    screens
-                        .select(screen)
-                        .map_err(native)
-                        .and_then(|surface| capture_media(surface, c).map(|m| (c, m)))
-                })
-            }
-            (None, Role::Capture, Kind::Configure) => Configuration::decode(first.body())
-                .and_then(|c| open(role, c, None).map(|m| (c, m))),
-            (None, Role::Present, Kind::ConfigureDecoder) => {
-                Configuration::decode_decoder(first.body())
-                    .and_then(|(c, record)| open(role, c, Some(record)).map(|m| (c, m)))
-            }
-            _ => Err(Error::WrongState),
-        };
-        let (configuration, media) = match initialized {
-            Ok(value) => value,
-            Err(error) => {
-                Record::new(
-                    Kind::Refused,
-                    first_identity,
-                    (error as u16).to_be_bytes().to_vec(),
-                    &absolute,
-                )?
-                .write(output, &absolute)?;
-                return Err(error);
-            }
-        };
-        let limits = configuration.limits()?;
+        Ok(Some((configuration, media, ready, first.into_body())))
+    }
+    fn discover_screens(
+        sequence: &mut Sequence,
+        identity: &mut worker::Identity,
+        input: &mut impl io::Read,
+        output: &mut impl io::Write,
+    ) -> Result<Option<Initialized>, Error> {
+        let limits = ProtocolLimits::ABSOLUTE;
+        let screens = X11Screens::open(None, limits).map_err(native)?;
         Record::new(
-            match first.header.kind {
-                Kind::ConfigureDecoder => Kind::DecoderReady,
-                Kind::ConfigureCapture => Kind::CaptureReady,
-                _ => Kind::Ready,
-            },
-            first_identity,
-            first.into_body(),
+            Kind::CaptureScreens,
+            *identity,
+            screens.catalog().encode(),
             &limits,
         )?
         .write(output, &limits)?;
-        Ok(Some((configuration, media, sequence)))
+        let request = Record::read(input, &limits)?.ok_or(Error::Io)?;
+        sequence.accept(request.header)?;
+        *identity = request.header.identity;
+        match request.header.kind {
+            Kind::Stop => {
+                drop(screens);
+                Record::new(Kind::Stopped, *identity, Vec::new(), &limits)?
+                    .write(output, &limits)?;
+                Ok(None)
+            }
+            Kind::ConfigureCapture => {
+                let (configuration, screen) = worker::capture::parse_configuration(request.body())?;
+                let surface = screens.select(screen).map_err(native)?;
+                let media = capture_media(surface, configuration)?;
+                Ok(Some((
+                    configuration,
+                    media,
+                    Kind::CaptureReady,
+                    request.into_body(),
+                )))
+            }
+            _ => Err(Error::WrongState),
+        }
+    }
+    #[cfg(not(feature = "linux-displays"))]
+    fn discover(
+        _: &mut Sequence,
+        _: &mut worker::Identity,
+        _: &mut impl io::Read,
+        _: &mut impl io::Write,
+    ) -> Result<Option<Initialized>, Error> {
+        Err(Error::Unsupported)
+    }
+    #[cfg(feature = "linux-displays")]
+    fn discover(
+        sequence: &mut Sequence,
+        identity: &mut worker::Identity,
+        input: &mut impl io::Read,
+        output: &mut impl io::Write,
+    ) -> Result<Option<Initialized>, Error> {
+        let limits = ProtocolLimits::ABSOLUTE;
+        let selector = std::env::var("DISPLAY").map_err(|_| Error::Unsupported)?;
+        let mut inventory =
+            fr_native::displays::X11Inventory::open(&selector, limits).map_err(native)?;
+        let catalog = inventory.catalog().map_err(native)?;
+        Record::new(
+            Kind::CaptureMonitors,
+            *identity,
+            worker::capture::monitors::encode_catalog(catalog, &limits)?,
+            &limits,
+        )?
+        .write(output, &limits)?;
+        loop {
+            let request = Record::read(input, &limits)?.ok_or(Error::Io)?;
+            sequence.accept(request.header)?;
+            *identity = request.header.identity;
+            match request.header.kind {
+                Kind::CheckMonitor => {
+                    inventory.revalidate().map_err(native)?;
+                    Record::new(Kind::MonitorValid, *identity, Vec::new(), &limits)?
+                        .write(output, &limits)?;
+                }
+                Kind::Stop => {
+                    drop(inventory);
+                    Record::new(Kind::Stopped, *identity, Vec::new(), &limits)?
+                        .write(output, &limits)?;
+                    return Ok(None);
+                }
+                Kind::ConfigureMonitor => {
+                    let (c, selected) =
+                        worker::capture::monitors::decode_configuration(request.body(), catalog)?;
+                    let surface = inventory.select(selected.handle).map_err(native)?;
+                    let backend = match c.backend {
+                        Backend::Nvenc => EncodeBackend::Nvenc,
+                        Backend::Vaapi => EncodeBackend::Vaapi,
+                        Backend::SoftwareExplicit => EncodeBackend::SoftwareExplicit,
+                    };
+                    let codec = HevcEncoder::new(
+                        c.codec()?,
+                        c.limits()?,
+                        backend,
+                        u32::from(c.fps),
+                        c.bitrate,
+                    )
+                    .map_err(native)?;
+                    let mut capture = ChangeAwareCapture::selected(surface, codec);
+                    // Configuration work can block; check topology again before Ready.
+                    capture.check_display().map_err(native)?;
+                    return Ok(Some((
+                        c,
+                        Media::Capture(capture),
+                        Kind::MonitorReady,
+                        request.into_body(),
+                    )));
+                }
+                _ => return Err(Error::WrongState),
+            }
+        }
     }
     pub fn run() -> Result<(), Error> {
         let mut args = std::env::args().skip(1);
@@ -274,12 +344,36 @@ mod linux {
         }
         let (stdin, stdout) = (io::stdin(), io::stdout());
         let (mut input, mut output) = (stdin.lock(), stdout.lock());
-        let Some((configuration, mut media, mut sequence)) =
-            initialize(role, &mut input, &mut output)?
-        else {
+        let absolute = ProtocolLimits::ABSOLUTE;
+        let first = Record::read(&mut input, &absolute)?.ok_or(Error::Io)?;
+        let mut identity = first.header.identity;
+        let mut sequence = Sequence::new(identity.epoch)?;
+        sequence.accept(first.header)?;
+        let initialized = initialize(
+            first,
+            role,
+            &mut sequence,
+            &mut identity,
+            &mut input,
+            &mut output,
+        );
+        let Some((configuration, mut media, ready, body)) = (match initialized {
+            Ok(value) => value,
+            Err(error) => {
+                Record::new(
+                    Kind::Refused,
+                    identity,
+                    (error as u16).to_be_bytes().to_vec(),
+                    &absolute,
+                )?
+                .write(&mut output, &absolute)?;
+                return Err(error);
+            }
+        }) else {
             return Ok(());
         };
         let limits = configuration.limits()?;
+        Record::new(ready, identity, body, &limits)?.write(&mut output, &limits)?;
         while let Some(request) = Record::read(&mut input, &limits)? {
             let identity = request.header.identity;
             sequence.accept(request.header)?;

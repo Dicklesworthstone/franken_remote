@@ -9,6 +9,7 @@ build = "build.rs"
 [dependencies]
 fr-core.workspace = true
 fr-media.workspace = true
+fr-wire.workspace = true
 frd = { workspace = true, optional = true }
 asupersync = { workspace = true, optional = true }
 
@@ -22,6 +23,7 @@ asupersync.workspace = true
 [features]
 default = []
 linux-media = []
+linux-displays = ["linux-media"]
 linux-input = []
 linux-input-agent = ["linux-input", "dep:frd", "dep:asupersync"]
 

@@ -33,6 +33,9 @@ pub enum Kind {
     ConfigureDecoder = 8,
     DiscoverCapture = 9,
     ConfigureCapture = 10,
+    DiscoverMonitors = 11,
+    ConfigureMonitor = 12,
+    CheckMonitor = 13,
     Ready = 257,
     Unit = 258,
     NeedInput = 259,
@@ -45,6 +48,9 @@ pub enum Kind {
     DecoderReady = 266,
     CaptureScreens = 267,
     CaptureReady = 268,
+    CaptureMonitors = 269,
+    MonitorReady = 270,
+    MonitorValid = 271,
 }
 impl Kind {
     fn parse(n: u16) -> Result<Self, Error> {
@@ -59,6 +65,9 @@ impl Kind {
             8 => Self::ConfigureDecoder,
             9 => Self::DiscoverCapture,
             10 => Self::ConfigureCapture,
+            11 => Self::DiscoverMonitors,
+            12 => Self::ConfigureMonitor,
+            13 => Self::CheckMonitor,
             257 => Self::Ready,
             258 => Self::Unit,
             259 => Self::NeedInput,
@@ -71,6 +80,9 @@ impl Kind {
             266 => Self::DecoderReady,
             267 => Self::CaptureScreens,
             268 => Self::CaptureReady,
+            269 => Self::CaptureMonitors,
+            270 => Self::MonitorReady,
+            271 => Self::MonitorValid,
             _ => return Err(Error::Malformed),
         })
     }
@@ -85,7 +97,18 @@ impl Kind {
                 (1 + capture::SCREEN_BYTES..=capture::MAX_CATALOG_BYTES).contains(&length)
                     && (length - 1).is_multiple_of(capture::SCREEN_BYTES)
             }
-            Self::DiscoverCapture => length == 0,
+            Self::DiscoverCapture
+            | Self::DiscoverMonitors
+            | Self::CheckMonitor
+            | Self::MonitorValid => length == 0,
+            Self::CaptureMonitors => {
+                (9..=capture::monitors::CATALOG_MAX_BYTES).contains(&length)
+                    && length <= limits.max_control_message_bytes() as usize
+            }
+            Self::ConfigureMonitor | Self::MonitorReady => {
+                length == capture::monitors::SELECTED_CONFIG_BYTES
+                    && length <= limits.max_control_message_bytes() as usize
+            }
             Self::ConfigureDecoder | Self::DecoderReady => {
                 (CONFIG_BYTES + 23..=CONFIG_BYTES + crate::hevc::MAX_DECODER_RECORD_BYTES)
                     .contains(&length)

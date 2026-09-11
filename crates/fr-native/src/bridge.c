@@ -263,6 +263,11 @@ static int fr_x11_geometry(FrX11 *x) {
     }
     return FR_OK;
 }
+/* Used again after encoding before a pending access unit leaves the worker. */
+int fr_x11_validate(FrX11 *x) {
+    if (!x || !x->display) return FR_INVALID;
+    return fr_x11_geometry(x);
+}
 void fr_x11_free(FrX11 *x) {
     if (!x) return;
     if (x->display) { if (x->gc) XFreeGC(x->display,x->gc); if (x->presenter && x->window) XDestroyWindow(x->display,x->window); XCloseDisplay(x->display); }
@@ -311,4 +316,25 @@ int fr_x11_present(FrX11 *x,const uint8_t *bgra,size_t len) {
     im->data=calloc((size_t)im->bytes_per_line,(size_t)x->h); if (!im->data) { XDestroyImage(im); return FR_MEMORY; }
     for (int y=0;y<x->h;y++) memcpy(im->data+(size_t)y*im->bytes_per_line,bgra+(size_t)y*x->w*4,(size_t)x->w*4);
     XRaiseWindow(x->display,x->window); XPutImage(x->display,x->window,x->gc,im,0,0,0,0,x->w,x->h); XSync(x->display,False); XDestroyImage(im); return FR_OK;
+}
+
+/* Borrowed X connection, selected whole-monitor rectangle. This never captures
+   an all-monitor bounding framebuffer. Rust revalidates topology on both sides. */
+int fr_x11_capture_rectangle(Display *display, Window root, int x, int y,
+                             int w, int h, uint8_t *out, size_t len) {
+    if (!display || !out || !bgra_buffer(w,h,len) || x<0 || y<0) return FR_INVALID;
+    XWindowAttributes a;
+    if (!XGetWindowAttributes(display,root,&a)) return FR_DISPLAY;
+    if ((int64_t)x+w>a.width || (int64_t)y+h>a.height) return FR_GEOMETRY;
+    if (a.depth!=24 || a.visual->class!=TrueColor ||
+        a.visual->red_mask!=0xff0000 || a.visual->green_mask!=0xff00 ||
+        a.visual->blue_mask!=0xff) return FR_UNAVAILABLE;
+    XImage *image=XGetImage(display,root,x,y,w,h,AllPlanes,ZPixmap);
+    if (!image) return FR_DISPLAY;
+    if (image->bits_per_pixel!=32 || image->byte_order!=LSBFirst ||
+        image->bytes_per_line<w*4) { XDestroyImage(image); return FR_UNAVAILABLE; }
+    for (int row=0;row<h;row++)
+        memcpy(out+(size_t)row*w*4,image->data+(size_t)row*image->bytes_per_line,(size_t)w*4);
+    for (size_t i=3;i<len;i+=4) out[i]=255;
+    XDestroyImage(image); return FR_OK;
 }

@@ -694,3 +694,54 @@ fn blocked_native_selection_obeys_parent_deadline_and_abandoned_selection_kills_
         }
     });
 }
+
+#[cfg(feature = "linux-displays")]
+#[test]
+fn screen_discovery_never_accepts_monitor_configuration_on_the_same_child() {
+    let display = Display::start();
+    let mut child = Worker::start(&display, Role::Capture);
+    let reply = child.transact(Kind::DiscoverCapture, vec![]);
+    assert_eq!(reply.header.kind, Kind::CaptureScreens);
+    let screens = capture::Screens::decode(reply.body()).unwrap();
+    let mut inventory =
+        fr_native::displays::X11Inventory::open(&display.name, ProtocolLimits::ABSOLUTE).unwrap();
+    let monitors = inventory.catalog().unwrap();
+    let selection = monitors.selection(monitors.displays()[0].handle).unwrap();
+    let body =
+        capture::monitors::encode_configuration(configuration(), selection, monitors).unwrap();
+    let refusal = child.transact(Kind::ConfigureMonitor, body);
+    assert_eq!(refusal.header.kind, Kind::Refused);
+    assert_eq!(refusal.body(), &(Error::WrongState as u16).to_be_bytes());
+    assert!(!child.child.wait().unwrap().success());
+    assert_eq!(screens.entries()[0].width, 320);
+}
+
+#[cfg(feature = "linux-displays")]
+#[test]
+fn monitor_discovery_never_accepts_screen_configuration_on_the_same_child() {
+    let display = Display::start();
+    let mut child = Worker::start(&display, Role::Capture);
+    let reply = child.transact(Kind::DiscoverMonitors, vec![]);
+    assert_eq!(reply.header.kind, Kind::CaptureMonitors);
+    let monitors =
+        capture::monitors::decode_catalog(reply.body(), &ProtocolLimits::ABSOLUTE).unwrap();
+    let screens =
+        fr_native::X11Screens::open(Some(&display.name), ProtocolLimits::ABSOLUTE).unwrap();
+    let body = capture::configure(configuration(), screens.catalog().entries()[0]).unwrap();
+    let refusal = child.transact(Kind::ConfigureCapture, body);
+    assert_eq!(refusal.header.kind, Kind::Refused);
+    assert_eq!(refusal.body(), &(Error::WrongState as u16).to_be_bytes());
+    assert!(!child.child.wait().unwrap().success());
+    assert_eq!(monitors.displays()[0].pixel_width, 320);
+}
+
+#[cfg(not(feature = "linux-displays"))]
+#[test]
+fn unavailable_monitor_profile_refuses_without_falling_back_to_screen_capture() {
+    let display = Display::start();
+    let mut child = Worker::start(&display, Role::Capture);
+    let refusal = child.transact(Kind::DiscoverMonitors, vec![]);
+    assert_eq!(refusal.header.kind, Kind::Refused);
+    assert_eq!(refusal.body(), &(Error::Unsupported as u16).to_be_bytes());
+    assert!(!child.child.wait().unwrap().success());
+}

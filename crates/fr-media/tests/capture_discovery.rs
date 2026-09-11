@@ -188,3 +188,53 @@ fn discovery_sequences_never_reset_and_debug_excludes_native_roots() {
     assert_eq!(format!("{:?}", screen(0)), format!("{:?}", screen(1)));
     assert!(worker::capture::Screens::new(&[]).is_err());
 }
+
+#[test]
+fn screen_and_monitor_profiles_keep_distinct_stable_record_numbers() {
+    for (kind, code, length) in [
+        (Kind::DiscoverCapture, 9_u16, 0),
+        (Kind::ConfigureCapture, 10, 48),
+        (Kind::DiscoverMonitors, 11, 0),
+        (Kind::ConfigureMonitor, 12, 52),
+        (Kind::CheckMonitor, 13, 0),
+        (Kind::CaptureScreens, 267, 21),
+        (Kind::CaptureReady, 268, 48),
+        (Kind::CaptureMonitors, 269, 66),
+        (Kind::MonitorReady, 270, 52),
+        (Kind::MonitorValid, 271, 0),
+    ] {
+        let header = Header {
+            kind,
+            identity: Identity {
+                epoch: 7,
+                sequence: 3,
+            },
+            length,
+        };
+        let bytes = header.encode(&ProtocolLimits::ABSOLUTE).unwrap();
+        assert_eq!(&bytes[6..8], &code.to_be_bytes());
+        assert_eq!(
+            Header::decode(&bytes, &ProtocolLimits::ABSOLUTE),
+            Ok(header)
+        );
+    }
+    for (kind, wrong_length) in [
+        (Kind::ConfigureCapture, 52),
+        (Kind::CaptureReady, 52),
+        (Kind::ConfigureMonitor, 48),
+        (Kind::MonitorReady, 48),
+    ] {
+        assert!(
+            Header {
+                kind,
+                identity: Identity {
+                    epoch: 7,
+                    sequence: 3
+                },
+                length: wrong_length,
+            }
+            .encode(&ProtocolLimits::ABSOLUTE)
+            .is_err()
+        );
+    }
+}
