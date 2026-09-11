@@ -6,7 +6,8 @@ mod linux {
     use fr_core::limits::ProtocolLimits;
     use fr_media::worker::{self, Backend, Configuration, Error, Kind, Record, Role, Sequence};
     use fr_native::{
-        EncodeBackend, HevcDecoder, HevcEncoder, NativeError, X11Surface, bind_worker_parent,
+        EncodeBackend, HevcDecoder, HevcEncoder, NativeError, X11Screens, X11Surface,
+        bind_worker_parent,
         capture::{CaptureOutput, ChangeAwareCapture},
     };
     use std::io;
@@ -27,6 +28,25 @@ mod linux {
             _ => Error::NativeFailure,
         }
     }
+    fn capture_media(surface: X11Surface, configuration: Configuration) -> Result<Media, Error> {
+        if surface.width() != configuration.width || surface.height() != configuration.height {
+            return Err(Error::GeometryChanged);
+        }
+        let backend = match configuration.backend {
+            Backend::Nvenc => EncodeBackend::Nvenc,
+            Backend::Vaapi => EncodeBackend::Vaapi,
+            Backend::SoftwareExplicit => EncodeBackend::SoftwareExplicit,
+        };
+        let codec = HevcEncoder::new(
+            configuration.codec()?,
+            configuration.limits()?,
+            backend,
+            u32::from(configuration.fps),
+            configuration.bitrate,
+        )
+        .map_err(native)?;
+        Ok(Media::Capture(ChangeAwareCapture::new(surface, codec)))
+    }
     fn open(
         role: Role,
         configuration: Configuration,
@@ -37,25 +57,7 @@ mod linux {
         Ok(match role {
             Role::Capture => {
                 let surface = X11Surface::capture(None, limits).map_err(native)?;
-                if surface.width() != configuration.width
-                    || surface.height() != configuration.height
-                {
-                    return Err(Error::GeometryChanged);
-                }
-                let backend = match configuration.backend {
-                    Backend::Nvenc => EncodeBackend::Nvenc,
-                    Backend::Vaapi => EncodeBackend::Vaapi,
-                    Backend::SoftwareExplicit => EncodeBackend::SoftwareExplicit,
-                };
-                let codec = HevcEncoder::new(
-                    config,
-                    limits,
-                    backend,
-                    u32::from(configuration.fps),
-                    configuration.bitrate,
-                )
-                .map_err(native)?;
-                Media::Capture(ChangeAwareCapture::new(surface, codec))
+                capture_media(surface, configuration)?
             }
             Role::Present => Media::Present {
                 surface: X11Surface::presenter(
@@ -159,6 +161,93 @@ mod linux {
             }
         }
     }
+    fn initialize(
+        role: Role,
+        input: &mut impl io::Read,
+        output: &mut impl io::Write,
+    ) -> Result<Option<(Configuration, Media, Sequence)>, Error> {
+        let absolute = ProtocolLimits::ABSOLUTE;
+        let mut first = Record::read(input, &absolute)?.ok_or(Error::Io)?;
+        let mut sequence = Sequence::new(first.header.identity.epoch)?;
+        sequence.accept(first.header)?;
+        let discovered = if role == Role::Capture && first.header.kind == Kind::DiscoverCapture {
+            let screens = match X11Screens::open(None, absolute).map_err(native) {
+                Ok(screens) => screens,
+                Err(error) => {
+                    Record::new(
+                        Kind::Refused,
+                        first.header.identity,
+                        (error as u16).to_be_bytes().to_vec(),
+                        &absolute,
+                    )?
+                    .write(output, &absolute)?;
+                    return Err(error);
+                }
+            };
+            Record::new(
+                Kind::CaptureScreens,
+                first.header.identity,
+                screens.catalog().encode(),
+                &absolute,
+            )?
+            .write(output, &absolute)?;
+            first = Record::read(input, &absolute)?.ok_or(Error::Io)?;
+            sequence.accept(first.header)?;
+            if first.header.kind == Kind::Stop {
+                drop(screens);
+                Record::new(Kind::Stopped, first.header.identity, Vec::new(), &absolute)?
+                    .write(output, &absolute)?;
+                return Ok(None);
+            }
+            Some(screens)
+        } else {
+            None
+        };
+        let first_identity = first.header.identity;
+        let initialized = match (discovered, role, first.header.kind) {
+            (Some(screens), Role::Capture, Kind::ConfigureCapture) => {
+                worker::capture::parse_configuration(first.body()).and_then(|(c, screen)| {
+                    screens
+                        .select(screen)
+                        .map_err(native)
+                        .and_then(|surface| capture_media(surface, c).map(|m| (c, m)))
+                })
+            }
+            (None, Role::Capture, Kind::Configure) => Configuration::decode(first.body())
+                .and_then(|c| open(role, c, None).map(|m| (c, m))),
+            (None, Role::Present, Kind::ConfigureDecoder) => {
+                Configuration::decode_decoder(first.body())
+                    .and_then(|(c, record)| open(role, c, Some(record)).map(|m| (c, m)))
+            }
+            _ => Err(Error::WrongState),
+        };
+        let (configuration, media) = match initialized {
+            Ok(value) => value,
+            Err(error) => {
+                Record::new(
+                    Kind::Refused,
+                    first_identity,
+                    (error as u16).to_be_bytes().to_vec(),
+                    &absolute,
+                )?
+                .write(output, &absolute)?;
+                return Err(error);
+            }
+        };
+        let limits = configuration.limits()?;
+        Record::new(
+            match first.header.kind {
+                Kind::ConfigureDecoder => Kind::DecoderReady,
+                Kind::ConfigureCapture => Kind::CaptureReady,
+                _ => Kind::Ready,
+            },
+            first_identity,
+            first.into_body(),
+            &limits,
+        )?
+        .write(output, &limits)?;
+        Ok(Some((configuration, media, sequence)))
+    }
     pub fn run() -> Result<(), Error> {
         let mut args = std::env::args().skip(1);
         let role = match args.next().as_deref() {
@@ -185,43 +274,12 @@ mod linux {
         }
         let (stdin, stdout) = (io::stdin(), io::stdout());
         let (mut input, mut output) = (stdin.lock(), stdout.lock());
-        let absolute = ProtocolLimits::ABSOLUTE;
-        let first = Record::read(&mut input, &absolute)?.ok_or(Error::Io)?;
-        let first_identity = first.header.identity;
-        let mut sequence = Sequence::new(first_identity.epoch)?;
-        sequence.accept(first.header)?;
-        let initialized = match (role, first.header.kind) {
-            (Role::Capture, Kind::Configure) => Configuration::decode(first.body())
-                .and_then(|c| open(role, c, None).map(|m| (c, m))),
-            (Role::Present, Kind::ConfigureDecoder) => Configuration::decode_decoder(first.body())
-                .and_then(|(c, record)| open(role, c, Some(record)).map(|m| (c, m))),
-            _ => Err(Error::WrongState),
-        };
-        let (configuration, mut media) = match initialized {
-            Ok(value) => value,
-            Err(error) => {
-                Record::new(
-                    Kind::Refused,
-                    first_identity,
-                    (error as u16).to_be_bytes().to_vec(),
-                    &absolute,
-                )?
-                .write(&mut output, &absolute)?;
-                return Err(error);
-            }
+        let Some((configuration, mut media, mut sequence)) =
+            initialize(role, &mut input, &mut output)?
+        else {
+            return Ok(());
         };
         let limits = configuration.limits()?;
-        Record::new(
-            if role == Role::Present {
-                Kind::DecoderReady
-            } else {
-                Kind::Ready
-            },
-            first_identity,
-            first.into_body(),
-            &limits,
-        )?
-        .write(&mut output, &limits)?;
         while let Some(request) = Record::read(&mut input, &limits)? {
             let identity = request.header.identity;
             sequence.accept(request.header)?;

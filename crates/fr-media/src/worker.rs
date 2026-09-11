@@ -18,6 +18,7 @@ use std::io::{self, Read, Write};
 pub const HEADER_BYTES: usize = 36;
 pub const UNIT_PREFIX_BYTES: usize = 40;
 const CONFIG_BYTES: usize = 28;
+pub mod capture;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
@@ -30,6 +31,8 @@ pub enum Kind {
     Decode = 6,
     CaptureIfChanged = 7,
     ConfigureDecoder = 8,
+    DiscoverCapture = 9,
+    ConfigureCapture = 10,
     Ready = 257,
     Unit = 258,
     NeedInput = 259,
@@ -40,6 +43,8 @@ pub enum Kind {
     Decoded = 264,
     Unchanged = 265,
     DecoderReady = 266,
+    CaptureScreens = 267,
+    CaptureReady = 268,
 }
 impl Kind {
     fn parse(n: u16) -> Result<Self, Error> {
@@ -52,6 +57,8 @@ impl Kind {
             6 => Self::Decode,
             7 => Self::CaptureIfChanged,
             8 => Self::ConfigureDecoder,
+            9 => Self::DiscoverCapture,
+            10 => Self::ConfigureCapture,
             257 => Self::Ready,
             258 => Self::Unit,
             259 => Self::NeedInput,
@@ -62,6 +69,8 @@ impl Kind {
             264 => Self::Decoded,
             265 => Self::Unchanged,
             266 => Self::DecoderReady,
+            267 => Self::CaptureScreens,
+            268 => Self::CaptureReady,
             _ => return Err(Error::Malformed),
         })
     }
@@ -71,6 +80,12 @@ impl Kind {
     fn accepts_length(self, length: usize, limits: &ProtocolLimits) -> bool {
         match self {
             Self::Configure | Self::Ready => length == CONFIG_BYTES,
+            Self::ConfigureCapture | Self::CaptureReady => length == capture::CONFIGURE_BYTES,
+            Self::CaptureScreens => {
+                (1 + capture::SCREEN_BYTES..=capture::MAX_CATALOG_BYTES).contains(&length)
+                    && (length - 1).is_multiple_of(capture::SCREEN_BYTES)
+            }
+            Self::DiscoverCapture => length == 0,
             Self::ConfigureDecoder | Self::DecoderReady => {
                 (CONFIG_BYTES + 23..=CONFIG_BYTES + crate::hevc::MAX_DECODER_RECORD_BYTES)
                     .contains(&length)

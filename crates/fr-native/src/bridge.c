@@ -193,7 +193,76 @@ int fr_decoder_receive(FrDecoder *d,uint8_t *out,size_t len,int64_t *pts) {
     *pts=f->pts; av_frame_unref(f); d->have_frame=0; return FR_OK;
 }
 
-typedef struct { Display *display; Window window; GC gc; int screen,w,h,presenter; } FrX11;
+typedef struct { Display *display; Window window; GC gc; int screen,w,h,presenter,invalid; } FrX11;
+/* A catalog owns ONE X connection. Selection transfers that same connection,
+   never reopening DISPLAY after the user chose a source. X11 screens are root
+   coordinate spaces, not necessarily physical monitors. */
+typedef struct { Window root; int w,h,invalid; } FrScreen;
+typedef struct { Display *display; int count; FrScreen screens[8]; } FrScreens;
+void fr_x11_screens_free(FrScreens *s) {
+    if (!s) return;
+    if (s->display) XCloseDisplay(s->display);
+    free(s);
+}
+static int screen_visual(Display *d,int screen) {
+    Visual *v=DefaultVisual(d,screen);
+    return v->class==TrueColor && v->red_mask==0xff0000 &&
+        v->green_mask==0xff00 && v->blue_mask==0xff && DefaultDepth(d,screen)==24;
+}
+int fr_x11_screens_new(const char *display,FrScreens **out,uint32_t *count) {
+    if (!out || !count) return FR_INVALID;
+    *out=NULL; *count=0;
+    FrScreens *s=calloc(1,sizeof(*s)); if (!s) return FR_MEMORY;
+    s->display=XOpenDisplay(display);
+    if (!s->display) { free(s); return FR_DISPLAY; }
+    s->count=ScreenCount(s->display);
+    if (s->count<1 || s->count>8) { fr_x11_screens_free(s); return FR_UNAVAILABLE; }
+    for (int i=0;i<s->count;i++) {
+        if (!screen_visual(s->display,i)) { fr_x11_screens_free(s); return FR_UNAVAILABLE; }
+        FrScreen *e=&s->screens[i]; e->root=RootWindow(s->display,i);
+        XSelectInput(s->display,e->root,StructureNotifyMask);
+        XWindowAttributes a;
+        if (!XGetWindowAttributes(s->display,e->root,&a)) { fr_x11_screens_free(s); return FR_DISPLAY; }
+        e->w=a.width; e->h=a.height;
+        if (!geometry(e->w,e->h)) { fr_x11_screens_free(s); return FR_GEOMETRY; }
+    }
+    *count=(uint32_t)s->count; *out=s; return FR_OK;
+}
+int fr_x11_screen(FrScreens *s,uint32_t index,uint64_t *root,uint32_t *width,uint32_t *height) {
+    if (!s || !s->display || !root || !width || !height || index>=(uint32_t)s->count) return FR_INVALID;
+    FrScreen *e=&s->screens[index]; XWindowAttributes a; XEvent event;
+    if (e->invalid) return FR_GEOMETRY;
+    if (!XGetWindowAttributes(s->display,e->root,&a)) return FR_DISPLAY;
+    /* A resize-away-and-back is still a changed source generation. */
+    if (a.width!=e->w || a.height!=e->h ||
+        XCheckTypedWindowEvent(s->display,e->root,ConfigureNotify,&event)) {
+        e->invalid=1; return FR_GEOMETRY;
+    }
+    *root=(uint64_t)e->root; *width=(uint32_t)e->w; *height=(uint32_t)e->h;
+    return FR_OK;
+}
+int fr_x11_screen_select(FrScreens *s,uint32_t index,uint64_t root,uint32_t w,uint32_t h,FrX11 **out) {
+    if (!out) return FR_INVALID;
+    *out=NULL;
+    uint64_t actual_root=0; uint32_t actual_w=0,actual_h=0;
+    int code=fr_x11_screen(s,index,&actual_root,&actual_w,&actual_h);
+    if (code!=FR_OK) return code;
+    if (actual_root!=root || actual_w!=w || actual_h!=h) return FR_GEOMETRY;
+    FrX11 *x=calloc(1,sizeof(*x)); if (!x) return FR_MEMORY;
+    x->display=s->display; s->display=NULL;
+    x->window=(Window)root; x->screen=(int)index; x->w=(int)w; x->h=(int)h;
+    *out=x; return FR_OK;
+}
+static int fr_x11_geometry(FrX11 *x) {
+    if (x->invalid) return FR_GEOMETRY;
+    XWindowAttributes a; XEvent event;
+    if (!XGetWindowAttributes(x->display,x->window,&a)) return FR_DISPLAY;
+    if (a.width!=x->w || a.height!=x->h || (!x->presenter &&
+        XCheckTypedWindowEvent(x->display,x->window,ConfigureNotify,&event))) {
+        x->invalid=1; return FR_GEOMETRY;
+    }
+    return FR_OK;
+}
 void fr_x11_free(FrX11 *x) {
     if (!x) return;
     if (x->display) { if (x->gc) XFreeGC(x->display,x->gc); if (x->presenter && x->window) XDestroyWindow(x->display,x->window); XCloseDisplay(x->display); }
@@ -214,17 +283,21 @@ int fr_x11_new(const char *display,int presenter,int w,int h,FrX11 **out,int *wi
         XStoreName(x->display,x->window,"FrankenRemote native media verification");
         XMapWindow(x->display,x->window); x->gc=XCreateGC(x->display,x->window,0,NULL); XSync(x->display,False);
     } else {
-        x->window=RootWindow(x->display,x->screen); x->w=DisplayWidth(x->display,x->screen); x->h=DisplayHeight(x->display,x->screen);
+        x->window=RootWindow(x->display,x->screen);
+        XSelectInput(x->display,x->window,StructureNotifyMask);
+        XWindowAttributes a;
+        if (!XGetWindowAttributes(x->display,x->window,&a)) { fr_x11_free(x); return FR_DISPLAY; }
+        x->w=a.width; x->h=a.height;
         if (!geometry(x->w,x->h)) { fr_x11_free(x); return FR_GEOMETRY; }
     }
     *width=x->w; *height=x->h; *out=x; return FR_OK;
 }
 int fr_x11_capture(FrX11 *x,uint8_t *out,size_t len) {
     if (!x || !out || !bgra_buffer(x->w,x->h,len)) return FR_INVALID;
-    XWindowAttributes a;
-    if (!XGetWindowAttributes(x->display,x->window,&a)) return FR_DISPLAY;
-    if (a.width!=x->w || a.height!=x->h) return FR_GEOMETRY;
+    int code=fr_x11_geometry(x); if (code!=FR_OK) return code;
     XImage *image=XGetImage(x->display,x->window,0,0,x->w,x->h,AllPlanes,ZPixmap); if (!image) return FR_DISPLAY;
+    code=fr_x11_geometry(x);
+    if (code!=FR_OK) { XDestroyImage(image); return code; }
     if (image->bits_per_pixel!=32 || image->byte_order!=LSBFirst || image->bytes_per_line<x->w*4) { XDestroyImage(image); return FR_UNAVAILABLE; }
     for (int y=0;y<x->h;y++) memcpy(out+(size_t)y*x->w*4,image->data+(size_t)y*image->bytes_per_line,(size_t)x->w*4);
     for (size_t i=3;i<len;i+=4) out[i]=255;

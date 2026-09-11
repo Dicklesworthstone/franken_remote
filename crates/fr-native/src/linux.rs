@@ -14,6 +14,23 @@ use std::{collections::VecDeque, ffi::CString, rc::Rc};
 
 unsafe extern "C" {
     fn fr_native_quiet();
+    fn fr_x11_screens_new(display: *const c_char, out: *mut *mut c_void, count: *mut u32) -> c_int;
+    fn fr_x11_screens_free(screens: *mut c_void);
+    fn fr_x11_screen(
+        screens: *mut c_void,
+        index: u32,
+        root: *mut u64,
+        width: *mut u32,
+        height: *mut u32,
+    ) -> c_int;
+    fn fr_x11_screen_select(
+        screens: *mut c_void,
+        index: u32,
+        root: u64,
+        width: u32,
+        height: u32,
+        out: *mut *mut c_void,
+    ) -> c_int;
     fn fr_native_avcodec_version() -> u32;
     fn fr_native_compiled_avcodec_version() -> u32;
     fn fr_encoder_new(
@@ -510,6 +527,113 @@ impl Drop for HevcDecoder {
     fn drop(&mut self) {
         // SAFETY: uniquely owned context; outstanding codec refs are released internally.
         unsafe { fr_decoder_free(self.raw.as_ptr()) };
+    }
+}
+
+/// Full X11 root-screen discovery on one retained, thread-confined connection.
+/// This does not enumerate `RandR` physical monitors or certify Wayland capture.
+/// Run it in the supervised capture child: Xlib may block or exit on server loss.
+pub struct X11Screens {
+    raw: NonNull<c_void>,
+    screens: fr_media::worker::capture::Screens,
+    limits: ProtocolLimits,
+    _thread: PhantomData<Rc<()>>,
+}
+impl X11Screens {
+    pub fn open(display: Option<&str>, limits: ProtocolLimits) -> Result<Self, NativeError> {
+        crate::xlib::initialize_threads().map_err(|_| NativeError::DisplayUnavailable)?;
+        let name = display
+            .map(CString::new)
+            .transpose()
+            .map_err(|_| NativeError::DisplayUnavailable)?;
+        let mut ptr = core::ptr::null_mut();
+        let mut count = 0;
+        // SAFETY: CString and out parameters live through this call. The bridge
+        // owns the X connection; it never returns borrowed Xlib memory.
+        status(unsafe {
+            fr_x11_screens_new(
+                name.as_ref().map_or(core::ptr::null(), |n| n.as_ptr()),
+                &raw mut ptr,
+                &raw mut count,
+            )
+        })?;
+        let raw = NonNull::new(ptr).ok_or(NativeError::Allocation)?;
+        let read = || {
+            let count = usize::try_from(count).map_err(|_| NativeError::InvalidConfiguration)?;
+            if count == 0 || count > fr_media::worker::capture::MAX_SCREENS {
+                return Err(NativeError::InvalidConfiguration);
+            }
+            let mut entries = [fr_media::worker::capture::Screen::default();
+                fr_media::worker::capture::MAX_SCREENS];
+            for (i, entry) in entries[..count].iter_mut().enumerate() {
+                entry.index = u32::try_from(i).map_err(|_| NativeError::InvalidConfiguration)?;
+                // SAFETY: the live context is uniquely borrowed; all outputs are writable scalars.
+                status(unsafe {
+                    fr_x11_screen(
+                        raw.as_ptr(),
+                        entry.index,
+                        &raw mut entry.root,
+                        &raw mut entry.width,
+                        &raw mut entry.height,
+                    )
+                })?;
+                entry
+                    .validate(&limits)
+                    .map_err(|_| NativeError::InvalidConfiguration)?;
+            }
+            fr_media::worker::capture::Screens::new(&entries[..count])
+                .map_err(|_| NativeError::InvalidConfiguration)
+        };
+        match read() {
+            Ok(screens) => Ok(Self {
+                raw,
+                screens,
+                limits,
+                _thread: PhantomData,
+            }),
+            Err(error) => {
+                // SAFETY: construction failed before ownership escaped.
+                unsafe { fr_x11_screens_free(raw.as_ptr()) };
+                Err(error)
+            }
+        }
+    }
+    pub fn catalog(&self) -> fr_media::worker::capture::Screens {
+        self.screens
+    }
+    pub fn select(
+        self,
+        screen: fr_media::worker::capture::Screen,
+    ) -> Result<X11Surface, NativeError> {
+        if !self.screens.contains(screen) {
+            return Err(NativeError::GeometryChanged);
+        }
+        let mut ptr = core::ptr::null_mut();
+        // SAFETY: the bridge revalidates the exact root and dimensions, then
+        // transfers its connection once. Dropping the now-empty catalog is safe.
+        status(unsafe {
+            fr_x11_screen_select(
+                self.raw.as_ptr(),
+                screen.index,
+                screen.root,
+                screen.width,
+                screen.height,
+                &raw mut ptr,
+            )
+        })?;
+        Ok(X11Surface {
+            raw: NonNull::new(ptr).ok_or(NativeError::Allocation)?,
+            width: screen.width,
+            height: screen.height,
+            limits: self.limits,
+            _thread: PhantomData,
+        })
+    }
+}
+impl Drop for X11Screens {
+    fn drop(&mut self) {
+        // SAFETY: unique context. Selected connections have already been detached.
+        unsafe { fr_x11_screens_free(self.raw.as_ptr()) };
     }
 }
 

@@ -288,45 +288,7 @@ impl Worker {
         if now(cx)? >= deadline.0 {
             return Err(Error::Deadline);
         }
-        let mut command = Command::new(&launch.image);
-        command
-            .env_clear()
-            .env("DISPLAY", &launch.display)
-            .arg(match launch.role {
-                Role::Capture => "--capture",
-                Role::Present => "--present",
-            })
-            .arg("--parent-pid")
-            .arg(std::process::id().to_string())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .process_group_mode(ProcessGroupMode::NewProcessGroup)
-            .signal_target(ProcessSignalTarget::ProcessGroup)
-            .kill_on_drop(true);
-        if let Some(path) = &launch.xauthority {
-            command.env("XAUTHORITY", path);
-        }
-        // Spawn is a bounded-count local syscall, not codec setup. The child
-        // performs all native initialization behind its private Configure RPC.
-        let mut child = command
-            .spawn()
-            .map_err(|error| Error::SpawnFailed(error.into()))?;
-        let input = child.stdin().ok_or(Error::PipeFailed)?;
-        let output = child.stdout().ok_or(Error::PipeFailed)?;
-        let mut worker = Self {
-            child,
-            input: Some(input),
-            output: Some(output),
-            limits,
-            identity: Identity {
-                epoch: launch.epoch,
-                sequence: 0,
-            },
-            role: launch.role,
-            state: State::Starting,
-            exit: None,
-        };
+        let mut worker = Self::spawn(launch, limits)?;
         let result = worker.exchange(cx, kind, body.clone(), deadline).await;
         let expected = if kind == Kind::ConfigureDecoder {
             Kind::DecoderReady
@@ -347,6 +309,72 @@ impl Worker {
                 Err(error)
             }
         }
+    }
+    fn spawn(launch: Launch, limits: ProtocolLimits) -> Result<Self, Error> {
+        let Launch {
+            image,
+            display,
+            xauthority,
+            role,
+            epoch,
+        } = launch;
+        let mut command = Command::new(image);
+        command
+            .env_clear()
+            .env("DISPLAY", display)
+            .arg(match role {
+                Role::Capture => "--capture",
+                Role::Present => "--present",
+            })
+            .arg("--parent-pid")
+            .arg(std::process::id().to_string())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group_mode(ProcessGroupMode::NewProcessGroup)
+            .signal_target(ProcessSignalTarget::ProcessGroup)
+            .kill_on_drop(true);
+        if let Some(path) = xauthority {
+            command.env("XAUTHORITY", path);
+        }
+        // Spawn is a bounded-count local syscall, not codec setup. The child
+        // performs all native initialization behind its private Configure RPC.
+        let mut child = command
+            .spawn()
+            .map_err(|error| Error::SpawnFailed(error.into()))?;
+        let input = child.stdin().ok_or(Error::PipeFailed)?;
+        let output = child.stdout().ok_or(Error::PipeFailed)?;
+        Ok(Self {
+            child,
+            input: Some(input),
+            output: Some(output),
+            limits,
+            identity: Identity { epoch, sequence: 0 },
+            role,
+            state: State::Starting,
+            exit: None,
+        })
+    }
+    /// Enumerate on the capture child without opening a codec or reading pixels.
+    /// The returned owner retains that exact child and X connection until selection.
+    pub async fn discover_capture(
+        cx: &Cx,
+        launch: Launch,
+        deadline: Deadline,
+    ) -> Result<CaptureDiscovery, Error> {
+        runtime_ready(cx)?;
+        if launch.role != Role::Capture {
+            return Err(Error::Protocol(worker::Error::WrongRole));
+        }
+        if now(cx)? >= deadline.0 {
+            return Err(Error::Deadline);
+        }
+        let mut worker = Self::spawn(launch, ProtocolLimits::ABSOLUTE)?;
+        let reply = worker
+            .exchange(cx, Kind::DiscoverCapture, Vec::new(), deadline)
+            .await?;
+        let screens = worker::capture::Screens::decode(reply.body())?;
+        Ok(CaptureDiscovery { worker, screens })
     }
     pub const fn state(&self) -> State {
         self.state
@@ -492,6 +520,64 @@ impl Drop for Worker {
         }
     }
 }
+/// Single-use discovered capture process. Native root IDs stay on these private
+/// pipes; the broker assigns separate network display handles after local policy.
+pub struct CaptureDiscovery {
+    worker: Worker,
+    screens: worker::capture::Screens,
+}
+impl fmt::Debug for CaptureDiscovery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CaptureDiscovery")
+            .field("screens", &self.screens.entries().len())
+            .finish_non_exhaustive()
+    }
+}
+impl CaptureDiscovery {
+    pub fn screens(&self) -> &worker::capture::Screens {
+        &self.screens
+    }
+    pub fn id(&self) -> Option<u32> {
+        self.worker.id()
+    }
+    pub fn abort(&mut self) {
+        self.worker.abort();
+    }
+    pub async fn reap(&mut self, cx: &Cx, deadline: Deadline) -> Result<ExitStatus, Error> {
+        self.worker.reap(cx, deadline).await
+    }
+    pub async fn stop(&mut self, cx: &Cx, deadline: Deadline) -> Result<(), Error> {
+        if self.worker.state != State::Starting {
+            return Err(Error::Unavailable);
+        }
+        self.worker
+            .exchange(cx, Kind::Stop, Vec::new(), deadline)
+            .await?;
+        Ok(())
+    }
+    pub async fn configure(
+        mut self,
+        cx: &Cx,
+        screen: worker::capture::Screen,
+        configuration: Configuration,
+        deadline: Deadline,
+    ) -> Result<Worker, Error> {
+        if self.worker.state != State::Starting || !self.screens.contains(screen) {
+            return Err(Error::Protocol(worker::Error::WrongState));
+        }
+        let body = worker::capture::configure(configuration, screen)?;
+        self.worker.limits = configuration.limits()?;
+        let reply = self
+            .worker
+            .exchange(cx, Kind::ConfigureCapture, body.clone(), deadline)
+            .await?;
+        if reply.body() != body {
+            return Err(Error::Protocol(worker::Error::WrongState));
+        }
+        self.worker.state = State::Running;
+        Ok(self.worker)
+    }
+}
 struct Exchange<'a> {
     owner: &'a mut Worker,
     finished: bool,
@@ -507,6 +593,8 @@ fn allowed_reply(request: Kind, reply: Kind) -> bool {
     reply == Kind::Refused
         || match request {
             Kind::Configure => reply == Kind::Ready,
+            Kind::DiscoverCapture => reply == Kind::CaptureScreens,
+            Kind::ConfigureCapture => reply == Kind::CaptureReady,
             Kind::ConfigureDecoder => reply == Kind::DecoderReady,
             Kind::Capture => matches!(reply, Kind::Unit | Kind::NeedInput | Kind::NeedDrain),
             Kind::CaptureIfChanged => matches!(
