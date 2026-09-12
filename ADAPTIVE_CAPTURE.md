@@ -128,3 +128,12 @@ against retained matching dependencies. The native worker is rebuilt from the
 current Rust and C sources against the installed FFmpeg/X11 libraries. These
 results are not a fresh full-workspace Cargo dependency build or remote CI pass.
 Repository formatting and documentation-link checks are separate validations.
+
+## Negotiated decoder-load integration
+
+[Continuous receiver feedback](RECEIVER_FEEDBACK.md) joins the published
+`decoder-metrics` query/reply protocol to actual continuous host/viewer service.
+The original query deadline bounds sample age, and measured receiver backlog and
+decode-service time inform the canonical controller without overriding its local
+rate, deadline or ownership constraints. Platform presentation measurements,
+runtime codec reconfiguration and aggregate bandwidth control remain separate.

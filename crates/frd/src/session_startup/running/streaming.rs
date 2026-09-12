@@ -5,6 +5,7 @@
 use super::{ControlledHost, Error, HostSession, Services, now};
 use crate::{
     input_watchdog::{Control, StopReason},
+    media::receiver_feedback::{self as feedback, HostFeedback, Setup},
     media::{
         CaptureSource, CaptureUpdate, ObservationControl,
         streaming::{Statistics, Stream},
@@ -67,6 +68,7 @@ impl Host {
 pub struct StreamingHost {
     host: Host,
     stream: Stream,
+    feedback: Option<HostFeedback>,
 }
 impl HostSession {
     pub fn into_streaming(self, stream: Stream) -> Result<StreamingHost, Error> {
@@ -92,14 +94,40 @@ impl StreamingHost {
             stream
                 .sender
                 .stream_check(&session.opened.transport)
-                .map_err(Error::MediaTransport)
+                .map_err(Error::MediaTransport)?;
+            let setup = Setup::selected(
+                &session.opened.selected,
+                session.opened.binding,
+                stream
+                    .sender
+                    .feedback_view()
+                    .map_err(Error::MediaTransport)?,
+            )
+            .map_err(Error::ReceiverFeedback)?;
+            setup
+                .map(|s| {
+                    HostFeedback::new(
+                        s,
+                        Route::Stream(session.opened.routes.inbound),
+                        Route::Stream(session.opened.routes.outbound),
+                    )
+                })
+                .transpose()
+                .map_err(Error::ReceiverFeedback)
         })();
-        if let Err(error) = admitted {
-            host.close();
-            stream.close();
-            return Err(error);
-        }
-        Ok(Self { host, stream })
+        let feedback = match admitted {
+            Ok(feedback) => feedback,
+            Err(error) => {
+                host.close();
+                stream.close();
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            host,
+            stream,
+            feedback,
+        })
     }
     pub fn statistics(&self) -> Statistics {
         self.stream.statistics()
@@ -111,6 +139,10 @@ impl StreamingHost {
     }
     pub fn pacing(&self) -> Option<&pacing::Controller> {
         self.stream.pacing()
+    }
+    /// Accepted advisory reports, not rendered or visible frames.
+    pub fn receiver_feedback_reports(&self) -> u64 {
+        self.feedback.as_ref().map_or(0, |f| f.accepted)
     }
     pub fn worker_id(&self) -> Option<u32> {
         self.stream.worker_id()
@@ -202,6 +234,7 @@ impl StreamingHost {
             last_capture: None,
             next_capture: 0,
             repair_turn: false,
+            feedback: self.feedback.as_mut(),
             other,
         };
         let mut network = pin!(async {
@@ -307,6 +340,7 @@ struct VideoServices<'a, S> {
     last_capture: Option<u64>,
     next_capture: u64,
     repair_turn: bool,
+    feedback: Option<&'a mut HostFeedback>,
     other: &'a mut S,
 }
 impl<S> VideoServices<'_, S> {
@@ -357,19 +391,26 @@ impl<S> VideoServices<'_, S> {
                 .filter(|&(at, _)| current - at <= pacing::SOURCE_EVIDENCE_US)
                 .map(|(_, elapsed)| elapsed);
             let source_work_us = elapsed.into_iter().chain(completed).max();
-            let report = controller
-                .update(Sample {
-                    now_us: current,
-                    source_work_us,
-                    send,
-                    capture_credit: if credit {
-                        Availability::Ready
-                    } else {
-                        Availability::Blocked
-                    },
-                    observation,
-                })
-                .map_err(|error| Error::Media(crate::media::Error::Pacing(error)))?;
+            let sample = Sample {
+                now_us: current,
+                source_work_us,
+                send,
+                capture_credit: if credit {
+                    Availability::Ready
+                } else {
+                    Availability::Blocked
+                },
+                observation,
+            };
+            let report = if let Some(feedback) = &mut self.feedback {
+                let load = feedback
+                    .evidence(current)
+                    .map_err(Error::ReceiverFeedback)?;
+                controller.update_with_receiver(sample, load)
+            } else {
+                controller.update(sample)
+            }
+            .map_err(|error| Error::Media(crate::media::Error::Pacing(error)))?;
             if report.interval_us != report.previous_interval_us
                 && let Some(last) = self.last_capture
             {
@@ -454,6 +495,11 @@ impl<S: Services> Services for VideoServices<'_, S> {
             }
         }
         let current = now(&cx)?;
+        if let Some(feedback) = &mut self.feedback {
+            feedback
+                .service(q, &cx, current)
+                .map_err(Error::ReceiverFeedback)?;
+        }
         let credit = self.sender.stream_credit(self.capacity);
         let interval = self.capture_interval(current, send, credit, observation)?;
         if self.in_flight.is_none() && current >= self.next_capture && credit {
@@ -465,7 +511,12 @@ impl<S: Services> Services for VideoServices<'_, S> {
         Ok(())
     }
     fn receive(&mut self, route: Route, bytes: &[u8]) -> Result<Disposition, ()> {
-        if route == self.sender.stream_repair_route() {
+        if feedback::is_feedback(bytes) {
+            let feedback = self.feedback.as_mut().ok_or(())?;
+            let now = self.control.check().map_err(|_| ())?.as_micros();
+            feedback.receive(route, bytes, now).map_err(|_| ())?;
+            Ok(Disposition::Consumed)
+        } else if route == self.sender.stream_repair_route() {
             Ok(Disposition::Blocked)
         } else {
             self.other.receive(route, bytes)
@@ -474,7 +525,7 @@ impl<S: Services> Services for VideoServices<'_, S> {
 }
 
 #[cfg(test)]
-pub(super) mod tests;
+pub(in crate::session_startup) mod tests;
 
 #[cfg(test)]
 mod native;

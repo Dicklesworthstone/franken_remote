@@ -45,6 +45,7 @@ const CONSUMED: u8 = 5;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     InvalidConfiguration,
+    ReceiverFeedback(crate::media::ReceiverFeedbackError),
     Media(crate::media::Error),
     MediaTransport(crate::media_quic::Error),
     ClientStartup(fr_client::startup::Error),

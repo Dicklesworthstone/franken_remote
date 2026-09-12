@@ -595,3 +595,11 @@ deadlines, expired queued input, partial OS effects, and receiver-credit replay.
 Fixtures/simulations do not stand in for live TLS, browser, codec, or hardware
 evidence. These gates remain owned by the implementation/qualification beads;
 this draft neither closes them nor preselects a passing outcome.
+
+### Implemented solicited decoder metrics
+
+The `decoder-metrics` v1 capability selects the bounded `StageMetrics`
+query/reply form in `fr-wire/src/receiver_metrics.rs`. Its continuous runtime
+ownership, clocks, queue bounds and limits are described in
+[RECEIVER_FEEDBACK.md](RECEIVER_FEEDBACK.md). This is advisory decode load, not
+`ReceiverPressure` credit or `PresentedState` visibility/authority.

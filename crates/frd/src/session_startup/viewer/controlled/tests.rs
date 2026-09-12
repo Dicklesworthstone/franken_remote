@@ -120,7 +120,24 @@ async fn fixture_with_decoder(
     capabilities: Capabilities,
     decode: bool,
 ) -> Fixture {
-    let wire_capabilities = [
+    Box::pin(fixture_with_wire_feedback(
+        client_cx,
+        host_cx,
+        capabilities,
+        decode,
+        false,
+    ))
+    .await
+}
+#[allow(clippy::too_many_lines)]
+async fn fixture_with_wire_feedback(
+    client_cx: &Cx,
+    host_cx: &Cx,
+    capabilities: Capabilities,
+    decode: bool,
+    feedback: bool,
+) -> Fixture {
+    let mut wire_capabilities: Vec<WireCapability> = [
         fr_wire::clock::CAPABILITY,
         decoder::CAPABILITY,
         attachment::INPUT_CAPABILITY,
@@ -134,6 +151,14 @@ async fn fixture_with_decoder(
         required: true,
     })
     .collect();
+    if feedback {
+        wire_capabilities.push(WireCapability {
+            name: fr_wire::receiver_metrics::CAPABILITY.into(),
+            version: 1,
+            required: false,
+        });
+    }
+    wire_capabilities.sort_by(|a, b| a.name.cmp(&b.name));
     let (mut host, mut viewer) = pair_initialized(client_cx, host_cx, wire_capabilities, |host| {
         let host_result = host.authority.as_mut().unwrap();
         let stamp = HostInstant::from_micros(now(host_cx).unwrap());

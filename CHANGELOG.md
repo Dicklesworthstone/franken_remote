@@ -1,5 +1,13 @@
 # Changelog
 
+## Continuous decoder-load feedback integration
+
+- Connect the canonical negotiated decoder-metrics protocol to continuous
+  host/viewer service and actual capture pacing, including input and receipts
+  during supervised decoder waits. Preserve original query/reply deadlines and
+  exact connection/view ownership. See [RECEIVER_FEEDBACK.md](RECEIVER_FEEDBACK.md).
+
+
 ## 2026-09-10 — Native control-lease renewal
 
 Join observation delivery and native input to the same approved authority and

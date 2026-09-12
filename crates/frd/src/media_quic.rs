@@ -186,6 +186,9 @@ impl QuicEgress {
             )
             .map_err(Error::Media)
     }
+    pub(crate) fn feedback_view(&self) -> Result<fr_wire::decoder::Binding, Error> {
+        self.view.ok_or(Error::InvalidRoutes)
+    }
     pub(crate) fn maximum_capacity(&self) -> Result<usize, Error> {
         Ok(self
             .egress

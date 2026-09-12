@@ -96,7 +96,10 @@ impl Messages {
             Self::DecoderReplies => matches!(kind, 0x0031 | 0x0033),
             Self::Negotiation => matches!(kind, 0x0001..=0x0003 | 0x0010 | 0x0011),
             Self::SessionControl => {
-                matches!(kind, 0x0012..=0x001e | 0x0020 | 0x0022 | 0x0084 | 0x0085)
+                matches!(
+                    kind,
+                    0x0012..=0x001e | 0x0020 | 0x0022 | 0x0082 | 0x0084 | 0x0085
+                )
             }
             // Release-only HeldState and InputMode share the ordered action
             // stream. Neither pointer datagrams nor results enter this lane.

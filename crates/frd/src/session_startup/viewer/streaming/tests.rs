@@ -258,6 +258,7 @@ fn actual_quic_viewer_service_repairs_an_entirely_lost_final_picture() {
                     &mut receiver,
                     &mut repair,
                     &mut stats,
+                    None,
                     &c,
                     &mut |_| {},
                     &mut block,
@@ -286,5 +287,198 @@ fn actual_quic_viewer_service_repairs_an_entirely_lost_final_picture() {
         host.close();
         peer.close();
         receiver.close();
+    });
+}
+
+#[test]
+fn slow_real_decoder_process_reduces_remote_capture_without_stopping_session_service() {
+    run(|c, h| async move {
+        let (mut host, viewer, media, receiver, presenter, observation) =
+            Box::pin(crate::session_startup::running::feedback_pair(&c, &h, true)).await;
+        host.enable_adaptive_capture(Duration::from_millis(200))
+            .unwrap();
+        let mut viewer = StreamingViewer::new(
+            Peer::Observe {
+                session: viewer,
+                media,
+            },
+            presenter,
+            receiver,
+        )
+        .unwrap();
+        let stop = viewer.control();
+
+        let started = now(&c).unwrap();
+        let until = started + 3_300_000;
+        let mut n = 9000_u128;
+        let mut callbacks = 0;
+        let (a, b) = Box::pin(support::both(
+            host.serve(
+                || {
+                    n += 1;
+                    Ok(n)
+                },
+                || None,
+                block,
+            ),
+            viewer.serve(
+                |_, event| {
+                    if event.is_some() {
+                        callbacks += 1;
+                    }
+                    if now(&c).unwrap() >= until {
+                        stop.stop();
+                        observation.revoke();
+                    }
+                    Ok(())
+                },
+                |_| {},
+                block,
+            ),
+        ))
+        .await;
+        assert!(a.is_err());
+        assert!(b.is_err());
+        assert!(
+            support::clock(&c) >= until,
+            "service failed prematurely: {a:?} {b:?}"
+        );
+        assert!(callbacks >= 10, "decoder stalled instead of backing off");
+        assert!(
+            viewer.statistics().network_turns > callbacks * 3,
+            "decode blocked network maintenance"
+        );
+        assert!(host.receiver_feedback_reports() >= 20);
+        assert!(viewer.receiver_feedback_reports() >= host.receiver_feedback_reports());
+        assert!(
+            viewer.receiver_feedback_reports() <= 70,
+            "telemetry cadence not bounded"
+        );
+        assert!(
+            host.pacing()
+                .unwrap()
+                .decisions()
+                .any(|r| r.reason == fr_media::pacing::Reason::DecoderWork),
+            "local pipeline never acted on remote decoder load"
+        );
+        assert!(
+            host.statistics().encoded_updates < 40,
+            "remote feedback was computed but not used for capture admission"
+        );
+        host.reap_media(
+            &Cx::current().unwrap(),
+            Deadline::after(&Cx::current().unwrap(), Duration::from_secs(1)).unwrap(),
+        )
+        .await
+        .unwrap();
+        viewer
+            .reap_media(
+                &Cx::current().unwrap(),
+                Deadline::after(&Cx::current().unwrap(), Duration::from_secs(1)).unwrap(),
+            )
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
+fn unnegotiated_continuous_viewer_sends_no_metrics_or_implicit_extension() {
+    run(|c, h| async move {
+        let (mut host, viewer, media, receiver, presenter, observation) = Box::pin(
+            crate::session_startup::running::feedback_pair(&c, &h, false),
+        )
+        .await;
+        let mut viewer = StreamingViewer::new(
+            Peer::Observe {
+                session: viewer,
+                media,
+            },
+            presenter,
+            receiver,
+        )
+        .unwrap();
+        let stop = viewer.control();
+        let mut n = 9000_u128;
+        let end = now(&c).unwrap() + 500_000;
+        let (a, b) = Box::pin(support::both(
+            host.serve(
+                || {
+                    n += 1;
+                    Ok(n)
+                },
+                || None,
+                block,
+            ),
+            viewer.serve(
+                |_, _| {
+                    if now(&c).unwrap() >= end {
+                        stop.stop();
+                        observation.revoke();
+                    }
+                    Ok(())
+                },
+                |_| {},
+                block,
+            ),
+        ))
+        .await;
+        assert!(a.is_err());
+        assert!(b.is_err());
+        assert!(support::clock(&c) >= end, "premature {a:?} {b:?}");
+        assert!(viewer.statistics().decoded >= 2);
+        assert_eq!(viewer.receiver_feedback_reports(), 0);
+        assert_eq!(host.receiver_feedback_reports(), 0);
+        host.reap_media(
+            &Cx::current().unwrap(),
+            Deadline::after(&Cx::current().unwrap(), Duration::from_secs(1)).unwrap(),
+        )
+        .await
+        .unwrap();
+        viewer
+            .reap_media(
+                &Cx::current().unwrap(),
+                Deadline::after(&Cx::current().unwrap(), Duration::from_secs(1)).unwrap(),
+            )
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
+fn actual_quic_backpressure_preserves_pending_metrics_without_reencoding() {
+    run(|c, h| async move {
+        let caps = vec![negotiation::Capability {
+            name: receiver_metrics::CAPABILITY.into(),
+            version: 1,
+            required: false,
+        }];
+        let (mut host, mut viewer) = pair_initialized(&c, &h, caps, |_| {}).await;
+        let mut nonce = 1000;
+        for _ in 0..4 {
+            let (a, b) = Box::pin(support::both(
+                host.drive(
+                    Duration::from_millis(1),
+                    || {
+                        nonce += 1;
+                        Ok(nonce)
+                    },
+                    block,
+                ),
+                viewer.drive(Duration::from_millis(1), block),
+            ))
+            .await;
+            a.unwrap();
+            b.unwrap();
+        }
+        let parent = host.binding();
+        let (q, routes) = viewer.io().unwrap();
+        crate::media::receiver_feedback::tests::actual_backpressure(
+            q,
+            Route::Stream(routes.outbound),
+            &c,
+            parent,
+        );
+        host.close();
+        viewer.close();
     });
 }

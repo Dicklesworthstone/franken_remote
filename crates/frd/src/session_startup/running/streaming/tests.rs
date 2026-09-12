@@ -81,6 +81,7 @@ pub(super) fn capabilities() -> Vec<Capability> {
     .collect()
 }
 struct Media {
+    presenter: Option<crate::media::Presenter>,
     stream: Stream,
     channels: NegotiatedMedia,
     receiver: ReceivePipeline,
@@ -103,6 +104,18 @@ async fn media(
     h: &Cx,
     mode: &str,
     policy: SendPolicy,
+) -> Media {
+    Box::pin(media_with_decoder(host, viewer, c, h, mode, policy, false)).await
+}
+#[allow(clippy::too_many_arguments)]
+async fn media_with_decoder(
+    host: &mut HostSession,
+    viewer: &mut ViewerSession,
+    c: &Cx,
+    h: &Cx,
+    mode: &str,
+    policy: SendPolicy,
+    native_decoder: bool,
 ) -> Media {
     use crate::session_startup::running::controlled::tests::attach;
     let (hc, vc) = attach(host, viewer, c, h, MediaRole::Configuration, 18).await;
@@ -130,7 +143,20 @@ async fn media(
         .unwrap();
     let mut receiver =
         ReceivePipeline::new(cfg, MediaBudget::new(cfg.limits.protocol()).unwrap()).unwrap();
-    receiver.decoder_configured(now(c).unwrap()).unwrap();
+    let mut presenter = if native_decoder {
+        Some(
+            crate::media::Presenter::stream_fixture(
+                c,
+                viewer.io().unwrap().0,
+                &channels,
+                &mut receiver,
+            )
+            .await,
+        )
+    } else {
+        receiver.decoder_configured(now(c).unwrap()).unwrap();
+        None
+    };
     let mut n = 1000;
     loop {
         sender
@@ -154,7 +180,16 @@ async fn media(
                 },
             )
             .unwrap();
-        if let Some(frame) = receiver.take_decodable(now(c).unwrap()).unwrap() {
+        if let Some(presenter) = &mut presenter {
+            if presenter
+                .present_next(c, &mut receiver)
+                .await
+                .unwrap()
+                .is_some()
+            {
+                break;
+            }
+        } else if let Some(frame) = receiver.take_decodable(now(c).unwrap()).unwrap() {
             assert_eq!(frame.descriptor().frame, 0);
             receiver
                 .acknowledge_decode(&frame, true, now(c).unwrap())
@@ -175,6 +210,7 @@ async fn media(
         pacing: None,
     };
     Media {
+        presenter,
         stream,
         channels,
         receiver,
@@ -196,6 +232,7 @@ async fn fixture(
         stream,
         channels,
         receiver,
+        presenter: _,
     } = Box::pin(media(&mut host, &mut viewer, c, h, mode, policy)).await;
     (
         host.into_streaming(stream).unwrap(),
@@ -376,6 +413,7 @@ fn pending_admission_refresh_services_native_results_before_the_lookup_finishes(
             mut stream,
             channels,
             mut receiver,
+            presenter: _,
         } = Box::pin(media(
             &mut host,
             &mut viewer,
@@ -406,6 +444,7 @@ fn pending_admission_refresh_services_native_results_before_the_lookup_finishes(
             last_capture: None,
             next_capture: 0,
             repair_turn: false,
+            feedback: None,
             other: &mut other,
         };
         let mut producer = pin!(produce(&mut stream.source, &control, requests, completed));
@@ -560,3 +599,50 @@ fn unpolled_native_future_is_dropped_only_after_observation_is_fenced() {
 }
 
 mod adaptive;
+
+// Reuse the original capture, real attachments and supervised decoder fixture.
+pub(in crate::session_startup) async fn feedback_pair(
+    c: &Cx,
+    h: &Cx,
+    negotiated: bool,
+) -> (
+    StreamingHost,
+    ViewerSession,
+    NegotiatedMedia,
+    ReceivePipeline,
+    crate::media::Presenter,
+    ObservationControl,
+) {
+    let mut caps = capabilities();
+    if negotiated {
+        caps.push(Capability {
+            name: fr_wire::receiver_metrics::CAPABILITY.into(),
+            version: 1,
+            required: false,
+        });
+    }
+    caps.sort_by(|a, b| a.name.cmp(&b.name));
+    let (mut host, mut viewer) = pair_initialized(c, h, caps, |_| {}).await;
+    let mut m = Box::pin(media_with_decoder(
+        &mut host,
+        &mut viewer,
+        c,
+        h,
+        "changed",
+        SendPolicy::default(),
+        true,
+    ))
+    .await;
+    if !negotiated {
+        m.stream.policy.capture_interval = Duration::from_millis(120);
+    }
+    let observation = host.observation().unwrap();
+    (
+        host.into_streaming(m.stream).unwrap(),
+        viewer,
+        m.channels,
+        m.receiver,
+        m.presenter.take().unwrap(),
+        observation,
+    )
+}

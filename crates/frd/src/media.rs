@@ -31,6 +31,8 @@ pub mod decoder_startup;
 pub mod discovery;
 mod grant;
 pub(crate) mod presentation;
+pub(crate) mod receiver_feedback;
+pub use receiver_feedback::Error as ReceiverFeedbackError;
 pub mod renewal;
 #[cfg(target_os = "linux")]
 pub mod streaming;
