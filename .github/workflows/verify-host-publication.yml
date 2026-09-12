@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['.github/workflows/verify-host-publication.yml']
+    paths: ['.github/workflows/verify-host-publication.yml', 'crates/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'scripts/verify.sh', 'HOST_PUBLICATION.md']
 permissions:
-  contents: write
+  contents: read
 env:
   CARGO_BUILD_JOBS: '1'
   CARGO_PROFILE_DEV_DEBUG: '0'
@@ -19,47 +19,12 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
-      - name: Stage reviewed source without reference writes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import base64, hashlib, json, lzma, os, subprocess
-          from pathlib import Path
-          def blob(b): return hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest()
-          oid='9a17a1b636bae7d3907235d274e36bf976baab53'
-          row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}'],timeout=30))
-          compressed=base64.b64decode(row['content'])
-          assert len(compressed)==13548 and blob(compressed)==oid
-          dec=lzma.LZMADecompressor()
-          data=dec.decompress(compressed,max_length=58113)
-          assert dec.eof and not dec.unused_data and len(data)==58112
-          assert hashlib.sha256(data).hexdigest()=='6a61a58b2fc110aabb75a9e90a9892ac7a9b90aec4f2e449af3c9efb45c66c05'
-          c=json.loads(data)
-          assert c['base']=='b9fffc5794acf55f91cb20d433279e77b6ff6969'
-          allowed={'CHANGELOG.md','HOST_PUBLICATION.md','README.md','crates/frd/src/lib.rs','crates/frd/src/session_startup.rs','crates/frd/src/session_startup/running.rs','crates/frd/src/session_startup/running/publisher.rs','crates/frd/src/session_startup/running/publisher/tests.rs','crates/frd/src/session_startup/running/streaming/native/observer.rs','crates/frd/src/session_startup/running/streaming/native/observer/publisher.rs'}
-          assert len(c['files'])==10 and {f['path'] for f in c['files']}==allowed
-          before={f['path']:f['before'] for f in c['files']}
-          after={f['path']:f['after'] for f in c['files']}
-          current={p:blob(Path(p).read_bytes()) if Path(p).exists() else None for p in allowed}
-          if current!=after:
-              assert current==before, 'concurrent source changes require reconciliation'
-              patch=Path(os.environ['RUNNER_TEMP'],'host-publication.patch')
-              patch.write_text(c['patch'])
-              stats=subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
-              assert {line.split('\t',2)[2] for line in stats.splitlines()}==allowed
-              subprocess.run(['git','apply','--check',str(patch)],check=True)
-              subprocess.run(['git','apply',str(patch)],check=True)
-          for path, expected in after.items(): assert blob(Path(path).read_bytes())==expected, path
-          Path(os.environ['RUNNER_TEMP'],'host-publication-paths.json').write_text(json.dumps(after))
-          subprocess.run(['git','diff','--check'],check=True)
-          PY
       - name: Install pinned compiler and native SDKs
         run: |
           rustup show active-toolchain
           sudo apt-get update
           sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxrandr-dev libxtst6 pkg-config xvfb xauth openssl
-      - name: Verify complete candidate workspace
+      - name: Verify exact committed workspace
         run: |
           ./scripts/verify.sh fast
           ./scripts/verify.sh docs
@@ -71,18 +36,5 @@ jobs:
         run: |
           cargo build -p fr-native --all-features --bin fr-media-worker --locked
           FR_NATIVE_TEST_WORKER="$PWD/target/debug/fr-media-worker" cargo test -p frd --lib session_startup::running::streaming::native:: --locked -- --ignored --test-threads=1
-      - name: Retain verified source objects without reference writes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import base64, hashlib, json, os, subprocess
-          from pathlib import Path
-          for path, expected in json.loads(Path(os.environ['RUNNER_TEMP'],'host-publication-paths.json').read_text()).items():
-              data=Path(path).read_bytes()
-              assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()==expected
-              body=json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()})
-              row=json.loads(subprocess.check_output(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,timeout=30))
-              assert row['sha']==expected
-              print(json.dumps({'path':path,'sha':expected,'verified_checkout':os.environ['GITHUB_SHA']}))
-          PY
+      - name: Confirm verification did not change tracked sources
+        run: git diff --exit-code

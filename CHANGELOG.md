@@ -1,5 +1,13 @@
 # Changelog
 
+## Native host publication bootstrap
+
+- Join approved observation, native display discovery, explicit selection,
+  channel attachment, decoder startup, and continuous capture through
+  `HostSession::publish_display`. Preserve the original connection and worker,
+  call-time deadlines, renewal during native waits, and fence-before-cleanup.
+  [HOST_PUBLICATION.md](HOST_PUBLICATION.md) records the native evidence and limits.
+
 ## Continuous decoder-load feedback integration
 
 - Connect the canonical negotiated decoder-metrics protocol to continuous
