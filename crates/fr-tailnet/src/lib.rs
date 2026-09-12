@@ -16,8 +16,8 @@ mod local;
 mod metadata;
 #[cfg(target_os = "linux")]
 pub use local::{
-    CertificatePolicy, CredentialStatus, LocalApi, NativeServerIdentity, NodeIdentity,
-    PeerSelector, PeerTarget,
+    CertificatePolicy, ConnectedPeer, CredentialStatus, DialRoute, LocalApi, NativeClient,
+    NativeServerIdentity, NodeIdentity, PeerSelector, PeerTarget,
 };
 
 use std::{fmt, net::SocketAddr, time::Duration};
@@ -53,6 +53,9 @@ pub enum Error {
     CertificateRejected,
     CertificateNotDue,
     InvalidTrustStore,
+    NativeBind,
+    NativeHandshake,
+    EntropyUnavailable,
     KeyExpired,
     Clock,
     Expired,

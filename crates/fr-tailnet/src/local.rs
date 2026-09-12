@@ -327,3 +327,6 @@ pub use certificate::{CertificatePolicy, CredentialStatus, NativeServerIdentity}
 
 mod target;
 pub use target::{PeerSelector, PeerTarget};
+
+mod dial;
+pub use dial::{ConnectedPeer, DialRoute, NativeClient};
