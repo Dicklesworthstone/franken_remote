@@ -15,6 +15,7 @@ pub mod input;
 pub mod input_result;
 mod media;
 pub mod negotiation;
+pub mod receiver_metrics;
 mod record;
 pub mod stream;
 

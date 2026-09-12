@@ -142,7 +142,7 @@ fn role(kind: Kind, direction: InputDirection, delivery: InputDelivery) -> Resul
     }
     Ok(())
 }
-fn write_binding(w: &mut Writer<'_>, b: Binding) -> Result<(), WireError> {
+pub(crate) fn write_binding(w: &mut Writer<'_>, b: Binding) -> Result<(), WireError> {
     for n in [
         b.parent.host_boot.as_raw(),
         b.parent.os_session.as_raw(),
@@ -161,7 +161,7 @@ fn write_binding(w: &mut Writer<'_>, b: Binding) -> Result<(), WireError> {
     }
     Ok(())
 }
-fn check_binding(r: &mut Reader<'_>, b: Binding) -> Result<(), WireError> {
+pub(crate) fn check_binding(r: &mut Reader<'_>, b: Binding) -> Result<(), WireError> {
     for n in [
         b.parent.host_boot.as_raw(),
         b.parent.os_session.as_raw(),
