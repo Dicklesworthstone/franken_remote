@@ -225,3 +225,161 @@ fn inconsistent_snapshot_and_slow_lookup_cannot_mint_fresh_target() {
         assert!(!server.client.busy.load(Ordering::Acquire));
     });
 }
+
+#[test]
+fn destination_owner_refreshes_one_shared_lifetime_and_drop_is_terminal() {
+    let server = Server::new(vec![response(&status(), false)], Duration::ZERO);
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let target = server
+            .client
+            .peer_target(&cx, PeerSelector::StableId("n-peer"))
+            .await
+            .unwrap();
+        let mut owner = crate::TargetOwner::new(server.client.clone(), cx.clone(), target).unwrap();
+        let lease = owner.lease();
+        let old = lease.check().unwrap();
+        sleep(cx.now(), Duration::from_millis(5)).await;
+        owner.refresh().await.unwrap();
+        assert!(lease.check().unwrap() > old);
+        assert_eq!(lease.check(), owner.lease().check());
+        drop(owner);
+        assert_eq!(lease.check(), Err(Error::Revoked));
+    });
+}
+#[test]
+fn unpolled_destination_refresh_or_service_cannot_leave_a_live_gate() {
+    for service in [false, true] {
+        let server = Server::new(vec![response(&status(), false)], Duration::ZERO);
+        runtime().block_on(async {
+            let cx = Cx::current().unwrap();
+            let target = server
+                .client
+                .peer_target(&cx, PeerSelector::StableId("n-peer"))
+                .await
+                .unwrap();
+            let mut owner = crate::TargetOwner::new(server.client.clone(), cx, target).unwrap();
+            let lease = owner.lease();
+            if service {
+                drop(owner.serve());
+            } else {
+                drop(owner.refresh());
+            }
+            assert_eq!(lease.check(), Err(Error::Revoked));
+            assert_eq!(server.calls.load(Ordering::SeqCst), 2);
+        });
+    }
+}
+#[test]
+fn changed_peer_identity_revokes_every_destination_handle() {
+    let first = status();
+    let mut changed = first.clone();
+    peer_mut(&mut changed)["DNSName"] = json!("replacement.fixture.ts.net.");
+    let server = Server::new(
+        vec![
+            response(&first, false),
+            response(&first, false),
+            response(&changed, false),
+        ],
+        Duration::ZERO,
+    );
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let target = server
+            .client
+            .peer_target(&cx, PeerSelector::StableId("n-peer"))
+            .await
+            .unwrap();
+        let mut owner = crate::TargetOwner::new(server.client.clone(), cx, target).unwrap();
+        let lease = owner.lease();
+        assert_eq!(owner.refresh().await, Err(Error::IdentityChanged));
+        assert_eq!(lease.check(), Err(Error::IdentityChanged));
+        assert_eq!(owner.refresh().await, Err(Error::IdentityChanged));
+    });
+}
+#[test]
+fn late_destination_refresh_cannot_resurrect_the_old_proof() {
+    let server = Server::new(vec![response(&status(), false)], Duration::from_millis(20));
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let mut target = server
+            .client
+            .peer_target(&cx, PeerSelector::StableId("n-peer"))
+            .await
+            .unwrap();
+        // Shorten this fixture only; production's original three seconds remain unchanged.
+        target.expires_us = now(&cx).unwrap() + 10_000;
+        let mut owner = crate::TargetOwner::new(server.client.clone(), cx, target).unwrap();
+        let lease = owner.lease();
+        assert_eq!(owner.refresh().await, Err(Error::Expired));
+        assert_eq!(lease.check(), Err(Error::Expired));
+    });
+}
+#[test]
+fn destination_service_stop_wakes_registered_waiter_without_timer_pulses() {
+    use std::task::{Context, Wake, Waker};
+    struct Count(AtomicUsize);
+    impl Wake for Count {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let server = Server::new(vec![response(&status(), false)], Duration::ZERO);
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let target = server
+            .client
+            .peer_target(&cx, PeerSelector::StableId("n-peer"))
+            .await
+            .unwrap();
+        let mut owner = crate::TargetOwner::new(server.client.clone(), cx, target).unwrap();
+        let lease = owner.lease();
+        let count = Arc::new(Count(AtomicUsize::new(0)));
+        let waker = Waker::from(count.clone());
+        let mut task = Context::from_waker(&waker);
+        let mut service = pin!(owner.serve());
+        assert!(service.as_mut().poll(&mut task).is_pending());
+        count.0.store(0, Ordering::SeqCst);
+        lease.revoke();
+        assert_eq!(count.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            service.as_mut().poll(&mut task),
+            Poll::Ready(Err(Error::Revoked))
+        );
+        assert_eq!(server.calls.load(Ordering::SeqCst), 2);
+    });
+}
+#[test]
+fn destination_service_renews_past_initial_expiry_without_granting_permissions() {
+    let server = Server::new(vec![response(&status(), false)], Duration::ZERO);
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let target = server
+            .client
+            .peer_target(&cx, PeerSelector::StableId("n-peer"))
+            .await
+            .unwrap();
+        let old = target.expires_us();
+        let mut owner = crate::TargetOwner::new(server.client.clone(), cx.clone(), target).unwrap();
+        let lease = owner.lease();
+        let mut service = pin!(owner.serve());
+        let mut done = pin!(sleep(cx.now(), Duration::from_millis(3100)));
+        poll_fn(|task| {
+            assert!(service.as_mut().poll(task).is_pending());
+            done.as_mut().poll(task)
+        })
+        .await;
+        assert!(now(&cx).unwrap() > old);
+        assert!(lease.check().unwrap() > old);
+        let calls = server.calls.load(Ordering::SeqCst);
+        assert!(
+            (6..=10).contains(&calls),
+            "bounded one-second refresh cadence: {calls}"
+        );
+        lease.revoke();
+        assert_eq!(service.await, Err(Error::Revoked));
+    });
+}

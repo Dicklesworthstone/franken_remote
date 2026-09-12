@@ -4,6 +4,10 @@
 //! It does NOT guess zero-setup same-tailnet membership from names or addresses.
 mod expiry;
 #[cfg(target_os = "linux")]
+mod outbound;
+#[cfg(target_os = "linux")]
+pub use outbound::{TargetLease, TargetOwner};
+#[cfg(target_os = "linux")]
 mod lease;
 #[cfg(target_os = "linux")]
 pub use lease::{Admission, Lease};
