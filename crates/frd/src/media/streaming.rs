@@ -6,8 +6,9 @@ use asupersync::process::ExitStatus;
 use fr_transport::quic::QuicRecords;
 use std::time::Duration;
 
-/// Fixed local pacing. It never overrides encoder frame rate or congestion
-/// admission. Missed capture opportunities are not accumulated for catch-up.
+/// Baseline local pacing, optionally reduced by the capture admission controller.
+/// It never overrides encoder frame rate or congestion admission. Missed capture
+/// opportunities are not accumulated for catch-up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Policy {
     pub capture_interval: Duration,
@@ -59,6 +60,7 @@ pub struct Stream {
     pub(crate) capacity: usize,
     pub(crate) statistics: Statistics,
     pub(crate) served: bool,
+    pub(crate) pacing: Option<fr_media::pacing::Controller>,
 }
 impl std::fmt::Debug for Stream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -103,7 +105,34 @@ impl Stream {
             capacity,
             statistics: Statistics::default(),
             served: false,
+            pacing: None,
         })
+    }
+    /// Enable adaptive RAW capture admission before service starts. The floor is
+    /// this stream's already validated baseline; native codec parameters, source
+    /// verification, reference retention and authority deadlines are untouched.
+    /// This does not estimate link bandwidth or provide aggregate bitrate control.
+    pub fn enable_adaptive_capture(&mut self, maximum: Duration) -> Result<(), super::Error> {
+        self.control.check()?;
+        if self.served || self.pacing.is_some() {
+            return Err(super::Error::InvalidFrame);
+        }
+        let minimum_interval_us =
+            u64::try_from(self.policy.capture_interval.as_nanos().div_ceil(1000))
+                .map_err(|_| super::Error::InvalidFrame)?;
+        let maximum_interval_us =
+            u64::try_from(maximum.as_micros()).map_err(|_| super::Error::InvalidFrame)?;
+        self.pacing = Some(
+            fr_media::pacing::Controller::new(fr_media::pacing::Policy {
+                minimum_interval_us,
+                maximum_interval_us,
+            })
+            .map_err(super::Error::Pacing)?,
+        );
+        Ok(())
+    }
+    pub fn pacing(&self) -> Option<&fr_media::pacing::Controller> {
+        self.pacing.as_ref()
     }
     pub const fn statistics(&self) -> Statistics {
         self.statistics

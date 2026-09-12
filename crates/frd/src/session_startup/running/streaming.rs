@@ -14,6 +14,7 @@ use crate::{
 };
 use asupersync::{channel::mpsc, cx::Cx};
 use fr_core::ids::InputTicketId;
+use fr_media::pacing::{self, Availability, Observation, Sample};
 use fr_transport::quic::{Disposition, QuicRecords, Route};
 use std::{
     future::{Future, poll_fn},
@@ -103,6 +104,14 @@ impl StreamingHost {
     pub fn statistics(&self) -> Statistics {
         self.stream.statistics()
     }
+    pub fn enable_adaptive_capture(&mut self, maximum: Duration) -> Result<(), Error> {
+        self.stream
+            .enable_adaptive_capture(maximum)
+            .map_err(Error::Media)
+    }
+    pub fn pacing(&self) -> Option<&pacing::Controller> {
+        self.stream.pacing()
+    }
     pub fn worker_id(&self) -> Option<u32> {
         self.stream.worker_id()
     }
@@ -187,7 +196,10 @@ impl StreamingHost {
             capacity: stream.capacity,
             credit,
             results,
-            in_flight: false,
+            in_flight: None,
+            pacing: stream.pacing.as_mut(),
+            last_work: None,
+            last_capture: None,
             next_capture: 0,
             repair_turn: false,
             other,
@@ -289,10 +301,88 @@ struct VideoServices<'a, S> {
     capacity: usize,
     credit: mpsc::Sender<()>,
     results: mpsc::Receiver<CaptureUpdate>,
-    in_flight: bool,
+    in_flight: Option<u64>,
+    pacing: Option<&'a mut pacing::Controller>,
+    last_work: Option<(u64, u64)>,
+    last_capture: Option<u64>,
     next_capture: u64,
     repair_turn: bool,
     other: &'a mut S,
+}
+impl<S> VideoServices<'_, S> {
+    fn collect_capture(&mut self, cx: &Cx) -> Result<Option<Observation>, Error> {
+        let mut observation = None;
+        if let Some(started) = self.in_flight {
+            match self.results.try_recv() {
+                Ok(update) => {
+                    let unchanged = update.is_unchanged();
+                    let observed = update.observed_micros();
+                    self.sender
+                        .enqueue_capture(update)
+                        .map_err(Error::MediaTransport)?;
+                    self.in_flight = None;
+                    let collected = now(cx)?;
+                    self.last_work = Some((
+                        collected,
+                        collected.checked_sub(started).ok_or(Error::Clock)?,
+                    ));
+                    observation = Some(Observation {
+                        at_us: observed,
+                        changed: !unchanged,
+                    });
+                    let count = if unchanged {
+                        &mut self.statistics.unchanged_observations
+                    } else {
+                        &mut self.statistics.encoded_updates
+                    };
+                    *count = count.saturating_add(1);
+                }
+                Err(mpsc::RecvError::Empty) => {}
+                Err(_) => return Err(Error::Closed),
+            }
+        }
+        Ok(observation)
+    }
+    fn capture_interval(
+        &mut self,
+        current: u64,
+        send: Availability,
+        credit: bool,
+        observation: Option<Observation>,
+    ) -> Result<u64, Error> {
+        let interval = if let Some(controller) = &mut self.pacing {
+            let elapsed = self.in_flight.map(|start| current - start);
+            let completed = self
+                .last_work
+                .filter(|&(at, _)| current - at <= pacing::SOURCE_EVIDENCE_US)
+                .map(|(_, elapsed)| elapsed);
+            let source_work_us = elapsed.into_iter().chain(completed).max();
+            let report = controller
+                .update(Sample {
+                    now_us: current,
+                    source_work_us,
+                    send,
+                    capture_credit: if credit {
+                        Availability::Ready
+                    } else {
+                        Availability::Blocked
+                    },
+                    observation,
+                })
+                .map_err(|error| Error::Media(crate::media::Error::Pacing(error)))?;
+            if report.interval_us != report.previous_interval_us
+                && let Some(last) = self.last_capture
+            {
+                // Reschedule only the NEXT raw admission. Already queued or
+                // executing work and every encoded deadline remain unchanged.
+                self.next_capture = last.checked_add(report.interval_us).ok_or(Error::Clock)?;
+            }
+            report.interval_us
+        } else {
+            u64::try_from(self.policy.capture_interval.as_micros()).map_err(|_| Error::Clock)?
+        };
+        Ok(interval)
+    }
 }
 impl<S: Services> Services for VideoServices<'_, S> {
     fn permitted(&mut self) -> bool {
@@ -328,26 +418,9 @@ impl<S: Services> Services for VideoServices<'_, S> {
             },
         )
         .map_err(|error| failure.map_or(Error::Transport(error), Error::MediaTransport))?;
-        if self.in_flight {
-            match self.results.try_recv() {
-                Ok(update) => {
-                    let unchanged = update.is_unchanged();
-                    self.sender
-                        .enqueue_capture(update)
-                        .map_err(Error::MediaTransport)?;
-                    self.in_flight = false;
-                    let count = if unchanged {
-                        &mut self.statistics.unchanged_observations
-                    } else {
-                        &mut self.statistics.encoded_updates
-                    };
-                    *count = count.saturating_add(1);
-                }
-                Err(mpsc::RecvError::Empty) => {}
-                Err(_) => return Err(Error::Closed),
-            }
-        }
+        let observation = self.collect_capture(&cx)?;
         let mut idle = 0;
+        let mut send = Availability::Ready;
         for _ in 0..self.policy.records_per_turn {
             if !self.permitted() {
                 return Err(Error::Authority);
@@ -363,7 +436,10 @@ impl<S: Services> Services for VideoServices<'_, S> {
                 .transmit(&cx, q, lane)
                 .map_err(Error::MediaTransport)?
             {
-                Progress::Pending(_) => break,
+                Progress::Pending(_) => {
+                    send = Availability::Blocked;
+                    break;
+                }
                 Progress::Accepted(_) => {
                     idle = 0;
                     self.statistics.admitted_records =
@@ -378,18 +454,13 @@ impl<S: Services> Services for VideoServices<'_, S> {
             }
         }
         let current = now(&cx)?;
-        if !self.in_flight
-            && current >= self.next_capture
-            && self.sender.stream_credit(self.capacity)
-        {
+        let credit = self.sender.stream_credit(self.capacity);
+        let interval = self.capture_interval(current, send, credit, observation)?;
+        if self.in_flight.is_none() && current >= self.next_capture && credit {
             self.credit.try_send(()).map_err(|_| Error::Order)?;
-            self.in_flight = true;
-            self.next_capture = current
-                .checked_add(
-                    u64::try_from(self.policy.capture_interval.as_micros())
-                        .map_err(|_| Error::Clock)?,
-                )
-                .ok_or(Error::Clock)?;
+            self.in_flight = Some(current);
+            self.last_capture = Some(current);
+            self.next_capture = current.checked_add(interval).ok_or(Error::Clock)?;
         }
         Ok(())
     }

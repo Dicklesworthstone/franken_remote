@@ -20,6 +20,7 @@ try:
     assert kind == 1
     reply(header,257,configuration)
     last = None
+    start = time.monotonic()
     while True:
         h,k,b = receive()
         if k == 5: reply(h,262); break
@@ -27,7 +28,8 @@ try:
         frame,observed,forced = struct.unpack('>QQB',b)
         if last is not None and MODE == 'stall': time.sleep(60)
         if last is not None and MODE == 'slow': time.sleep(.06)
-        if last is not None and MODE == 'unchanged' and not forced:
+        if last is not None and MODE == 'overloaded': time.sleep(.18)
+        if last is not None and (MODE == 'unchanged' or (MODE == 'wake' and time.monotonic() - start < 1.65)) and not forced:
             reply(h,265,struct.pack('>QQQ',frame,last,observed)); continue
         reference = 0 if last is None or forced else last
         predicted = int(last is not None and not forced)

@@ -172,6 +172,7 @@ async fn media(
             + fr_media::worker::UNIT_PREFIX_BYTES,
         statistics: Statistics::default(),
         served: false,
+        pacing: None,
     };
     Media {
         stream,
@@ -399,7 +400,10 @@ fn pending_admission_refresh_services_native_results_before_the_lookup_finishes(
             capacity: stream.capacity,
             credit,
             results,
-            in_flight: false,
+            in_flight: None,
+            pacing: None,
+            last_work: None,
+            last_capture: None,
             next_capture: 0,
             repair_turn: false,
             other: &mut other,
@@ -554,3 +558,5 @@ fn unpolled_native_future_is_dropped_only_after_observation_is_fenced() {
         );
     });
 }
+
+mod adaptive;

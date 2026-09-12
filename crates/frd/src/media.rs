@@ -43,6 +43,7 @@ pub enum Error {
     Worker(worker::Error),
     Send(SendError),
     InvalidFrame,
+    Pacing(fr_media::pacing::Error),
     Backpressure,
     Delivery,
     Receiver(DeliveryError),
