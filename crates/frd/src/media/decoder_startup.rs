@@ -552,6 +552,65 @@ pub struct Viewer {
     bytes: [u8; decoder::FIRST_DECODED_BYTES],
     len: usize,
 }
+/// Owned preparation keeps the original deadline, validated parameter sets and
+/// receiver reservation while the session independently drives network work.
+pub(crate) struct PreparedViewer {
+    bound: Bound,
+    receiver: ReceivePipeline,
+    configuration: Configuration,
+    record: DecoderRecord,
+}
+impl PreparedViewer {
+    pub(crate) async fn configure(mut self, launch: Launch) -> Result<Viewer, Error> {
+        let n = self.bound.tick()?;
+        let result = timeout(
+            self.bound.cx.now(),
+            Duration::from_micros(self.bound.until - n),
+            Presenter::start(
+                &self.bound.cx,
+                launch,
+                self.configuration,
+                &self.record,
+                &mut self.receiver,
+            ),
+        )
+        .await;
+        let mut presenter = match result {
+            Ok(Ok(presenter)) => presenter,
+            Ok(Err(error)) => return Err(Error::Media(error)),
+            Err(_) => {
+                self.receiver.close();
+                return Err(Error::Expired);
+            }
+        };
+        // Original expiry still governs queueing/configuration; transfer does
+        // not re-create Bound or begin a new startup lifetime.
+        if let Err(error) = self.bound.tick() {
+            self.receiver.close();
+            presenter.abort();
+            return Err(error);
+        }
+        let binding = self.bound.setup.binding;
+        let limits = self.bound.setup.limits;
+        let mut viewer = Viewer {
+            bound: self.bound,
+            receiver: self.receiver,
+            presenter,
+            phase: ViewerPhase::Configured,
+            bytes: [0; decoder::FIRST_DECODED_BYTES],
+            len: 0,
+        };
+        viewer.len = decoder::encode(
+            Message::Configured,
+            binding,
+            &limits,
+            &mut viewer.bytes,
+            Direction::ViewerToHost,
+            Delivery::Reliable,
+        )?;
+        Ok(viewer)
+    }
+}
 impl Viewer {
     pub async fn start(
         cx: Cx,
@@ -561,52 +620,50 @@ impl Viewer {
         launch: Launch,
         receive: ReceiveConfig,
     ) -> Result<Self, Error> {
-        let mut bound = Bound::new(cx, transport, setup, StreamRole::Client)?;
+        let prepared = Self::prepare(cx, transport, setup, bytes, receive)?;
+        let mut viewer = prepared.configure(launch).await?;
+        viewer.check_transport(transport)?;
+        Ok(viewer)
+    }
+    /// Validate and own the bounded configuration before launching native work.
+    /// No transport borrow survives preparation. The enclosing session MUST
+    /// continue its original connection and authority service during configure.
+    pub(crate) fn prepare(
+        cx: Cx,
+        transport: &QuicRecords,
+        setup: Setup,
+        bytes: &[u8],
+        receive: ReceiveConfig,
+    ) -> Result<PreparedViewer, Error> {
+        let bound = Bound::new(cx, transport, setup, StreamRole::Client)?;
         if receive.epoch.configuration != setup.binding.configuration
             || receive.epoch.recovery != setup.binding.recovery
             || receive.limits.protocol() != &setup.limits
         {
             return Err(Error::InvalidRoutes);
         }
-        let (cfg, record) = admit(bytes, setup)?;
+        let (configuration, record) = admit(bytes, setup)?;
         let budget =
             MediaBudget::new(&setup.limits).map_err(|_| Error::UnsupportedConfiguration)?;
-        let mut receiver =
+        let receiver =
             ReceivePipeline::new(receive, budget).map_err(|_| Error::UnsupportedConfiguration)?;
-        let n = bound.tick()?;
-        let result = timeout(
-            bound.cx.now(),
-            Duration::from_micros(bound.until - n),
-            Presenter::start(&bound.cx, launch, cfg, &record, &mut receiver),
-        )
-        .await;
-        let presenter = match result {
-            Ok(Ok(presenter)) => presenter,
-            Ok(Err(e)) => return Err(Error::Media(e)),
-            Err(_) => {
-                receiver.close();
-                return Err(Error::Expired);
-            }
-        };
-        // A ready native reply that crossed expiry cannot mint an acknowledgement.
-        bound.check(transport)?;
-        let mut this = Self {
+        Ok(PreparedViewer {
             bound,
             receiver,
-            presenter,
-            phase: ViewerPhase::Configured,
-            bytes: [0; decoder::FIRST_DECODED_BYTES],
-            len: 0,
-        };
-        this.len = decoder::encode(
-            Message::Configured,
-            setup.binding,
-            &setup.limits,
-            &mut this.bytes,
-            Direction::ViewerToHost,
-            Delivery::Reliable,
-        )?;
-        Ok(this)
+            configuration,
+            record,
+        })
+    }
+    /// Finish a native wait only on the original still-live transport. No
+    /// successful native reply alone establishes permission to acknowledge it.
+    pub(crate) fn check_transport(&mut self, transport: &QuicRecords) -> Result<(), Error> {
+        let result = self
+            .tick()
+            .and_then(|()| self.bound.check(transport).map(|_| ()));
+        if result.is_err() {
+            self.close();
+        }
+        result
     }
     pub fn close(&mut self) {
         self.bound.closed = true;
