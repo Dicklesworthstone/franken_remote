@@ -454,3 +454,7 @@ fn tiny_reply_budget_and_unqualified_configuration_fail_without_capture_or_input
         assert!(host.finish().is_err());
     });
 }
+
+mod refresh;
+
+mod opening;

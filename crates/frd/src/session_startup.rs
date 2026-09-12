@@ -18,6 +18,7 @@ use fr_wire::negotiation::{self, ControlBinding, Message, Offer, Role, Selection
 use std::{
     cell::Cell,
     fmt,
+    future::Future,
     sync::{
         Arc, Weak,
         atomic::{AtomicU8, Ordering},
@@ -25,6 +26,8 @@ use std::{
     time::Duration,
 };
 
+mod admission_refresh;
+mod opening;
 mod running;
 pub use running::publisher::{Error as PublisherError, NativePublisher, Policy as PublisherPolicy};
 pub use running::{ControlledHost, HostSession, StreamingHost};
@@ -583,14 +586,17 @@ impl Host {
     }
     /// Run one bounded reactor turn. Peer revalidation never refreshes the
     /// startup deadline, pending record deadline, or provisional observation.
-    pub async fn drive(&mut self, wait: Duration) -> Result<(), Error> {
-        let mut guard = Drive {
+    pub fn drive(&mut self, wait: Duration) -> impl Future<Output = Result<(), Error>> + '_ {
+        let guard = Drive {
             host: self,
             completed: false,
         };
-        let result = guard.host.drive_inner(wait).await;
-        guard.completed = result.is_ok();
-        result
+        async move {
+            let mut guard = guard;
+            let result = guard.host.drive_inner(wait).await;
+            guard.completed = result.is_ok();
+            result
+        }
     }
     async fn drive_inner(&mut self, wait: Duration) -> Result<(), Error> {
         if wait > Duration::from_millis(100) {
@@ -601,16 +607,22 @@ impl Host {
             return Ok(());
         }
         let current = self.check()?;
-        if self
+        let peer_until = self
             .peer
             .as_ref()
             .ok_or(Error::Closed)?
-            .check(&self.cx, self.role)?
-            .saturating_sub(current)
-            < 250_000
-        {
-            self.peer.as_mut().ok_or(Error::Closed)?.refresh().await?;
-            self.check()?;
+            .check(&self.cx, self.role)?;
+        if peer_until.saturating_sub(current) < 250_000 {
+            let bound = admission_refresh::Bound::new(self, peer_until)?;
+            bound
+                .run(
+                    self.transport.as_mut().ok_or(Error::Closed)?,
+                    self.peer.as_mut().ok_or(Error::Closed)?.refresh(),
+                    wait,
+                )
+                .await?;
+            self.step()?;
+            return Ok(());
         }
         let peer = self.peer.as_ref().ok_or(Error::Closed)?;
         let until = self
