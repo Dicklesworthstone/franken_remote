@@ -20,6 +20,7 @@ pub struct ControlledHost {
     input: QuicInput,
     renewal: ControlRenewal,
     ticket_turn: bool,
+    submitted: super::input_wake::Submitted,
 }
 impl std::fmt::Debug for ControlledHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -56,6 +57,7 @@ impl HostSession {
             input,
             renewal,
             ticket_turn: false,
+            submitted: super::input_wake::Submitted::default(),
         })
     }
 }
@@ -123,6 +125,7 @@ impl ControlledHost {
             observation: self.session.opened.control.clone(),
             control: self.session.opened.routes,
             ticket_turn: &mut self.ticket_turn,
+            submitted: &mut self.submitted,
             ticket: fresh_ticket,
             other,
         };
@@ -183,6 +186,7 @@ struct InputServices<'a, T, F> {
     observation: ObservationControl,
     control: ControlRoutes,
     ticket_turn: &'a mut bool,
+    submitted: &'a mut super::input_wake::Submitted,
     ticket: &'a mut T,
     other: &'a mut F,
 }
@@ -214,6 +218,13 @@ where
         self.input
             .service(q, || self.observation.check().is_ok())
             .map_err(Error::Input)?;
+        // Collection, not reverse-stream delivery, supplies the hint. Separate
+        // sequence high-water marks reject both immediate and older replays;
+        // ticket/authority traffic and zero-effect refusals never wake capture.
+        if self.submitted.take(self.input.last_reply()) && self.renewal.permitted() {
+            let at = self.observation.check().map_err(Error::Media)?.as_micros();
+            self.other.input_submitted(at);
+        }
         // A sustained ordered stream must not occupy every newly freed mailbox
         // slot forever. After a serviced input turn, give a due ticket ONE turn
         // before more input. An outstanding receipt still owns the slot first;

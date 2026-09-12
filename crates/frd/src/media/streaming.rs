@@ -48,6 +48,8 @@ pub struct Statistics {
     pub unchanged_observations: u64,
     pub admitted_records: u64,
     pub repair_requests: u64,
+    /// Raw checks admitted before the ordinary idle deadline after native input.
+    pub input_wake_captures: u64,
 }
 /// Consumes a UNIQUE capture source and the matching subscriber. Only an actual
 /// completed decoder startup can construct it. A share-session encoder feeding

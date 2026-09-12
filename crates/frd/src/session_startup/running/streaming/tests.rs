@@ -97,6 +97,29 @@ pub(in crate::session_startup::running) async fn source_for_controlled(
         .await
         .stream
 }
+pub(in crate::session_startup::running) async fn idle_source_for_controlled(
+    host: &mut HostSession,
+    viewer: &mut ViewerSession,
+    c: &Cx,
+    h: &Cx,
+) -> (Stream, NegotiatedMedia, ReceivePipeline) {
+    let Media {
+        stream,
+        channels,
+        receiver,
+        presenter: _,
+    } = Box::pin(media(
+        host,
+        viewer,
+        c,
+        h,
+        "unchanged",
+        SendPolicy::default(),
+    ))
+    .await;
+    (stream, channels, receiver)
+}
+
 async fn media(
     host: &mut HostSession,
     viewer: &mut ViewerSession,
@@ -445,6 +468,7 @@ fn pending_admission_refresh_services_native_results_before_the_lookup_finishes(
             next_capture: 0,
             repair_turn: false,
             feedback: None,
+            input_wake: super::super::input_wake::Wake::default(),
             other: &mut other,
         };
         let mut producer = pin!(produce(&mut stream.source, &control, requests, completed));

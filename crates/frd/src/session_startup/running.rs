@@ -22,7 +22,12 @@ const MAX_TURN: Duration = Duration::from_millis(100);
 
 /// Synchronous, bounded application work, serviced during admission refresh as
 /// well as ordinary I/O. No native calls or blocking callbacks belong here.
+mod input_wake;
+
 trait Services {
+    /// A new locally collected native submission, never packet receipt or renewal.
+    fn input_submitted(&mut self, _at_us: u64) {}
+
     fn permitted(&mut self) -> bool {
         true
     }

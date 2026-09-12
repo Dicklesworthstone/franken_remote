@@ -233,6 +233,7 @@ impl StreamingHost {
             last_work: None,
             last_capture: None,
             next_capture: 0,
+            input_wake: super::input_wake::Wake::default(),
             repair_turn: false,
             feedback: self.feedback.as_mut(),
             other,
@@ -339,6 +340,7 @@ struct VideoServices<'a, S> {
     last_work: Option<(u64, u64)>,
     last_capture: Option<u64>,
     next_capture: u64,
+    input_wake: super::input_wake::Wake,
     repair_turn: bool,
     feedback: Option<&'a mut HostFeedback>,
     other: &'a mut S,
@@ -426,6 +428,10 @@ impl<S> VideoServices<'_, S> {
     }
 }
 impl<S: Services> Services for VideoServices<'_, S> {
+    fn input_submitted(&mut self, at_us: u64) {
+        self.input_wake.note(at_us);
+        self.other.input_submitted(at_us);
+    }
     fn permitted(&mut self) -> bool {
         self.control.check().is_ok() && self.other.permitted()
     }
@@ -502,8 +508,19 @@ impl<S: Services> Services for VideoServices<'_, S> {
         }
         let credit = self.sender.stream_credit(self.capacity);
         let interval = self.capture_interval(current, send, credit, observation)?;
-        if self.in_flight.is_none() && current >= self.next_capture && credit {
+        let wake = self.input_wake.due(
+            current,
+            self.last_capture,
+            self.in_flight.is_some(),
+            self.pacing.as_deref(),
+        )?;
+        if self.in_flight.is_none() && (current >= self.next_capture || wake) && credit {
             self.credit.try_send(()).map_err(|_| Error::Order)?;
+            if current < self.next_capture {
+                self.statistics.input_wake_captures =
+                    self.statistics.input_wake_captures.saturating_add(1);
+            }
+            self.input_wake.admitted();
             self.in_flight = Some(current);
             self.last_capture = Some(current);
             self.next_capture = current.checked_add(interval).ok_or(Error::Clock)?;
