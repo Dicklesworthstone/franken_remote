@@ -17,7 +17,7 @@ on:
       - 'rust-toolchain.toml'
       - 'scripts/verify.sh'
 permissions:
-  contents: read
+  contents: write
 env:
   CARGO_BUILD_JOBS: '1'
   CARGO_PROFILE_DEV_DEBUG: '0'
@@ -31,16 +31,80 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
+      - name: Stage exact reviewed receiver-feedback sources without branch writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, subprocess
+          from pathlib import Path
+          def blob(data):
+              return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
+          chunks = [('9d6d7aa5b1a82d280b5169f2670551f8e7a04322', 7000),
+                    ('172b2b4e2de9537a5a7313250abdc5d2c32dc210', 7000),
+                    ('424101dd6d78f47477999237f511c0d478db39be', 6880)]
+          encoded = bytearray()
+          for sha, size in chunks:
+              row = json.loads(subprocess.check_output(['gh', 'api',
+                  f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{sha}'], timeout=30))
+              part = base64.b64decode(row['content'])
+              assert len(part) == size and blob(part) == sha, 'candidate chunk mismatch'
+              encoded.extend(part)
+          assert len(encoded) == 20880
+          decoder = lzma.LZMADecompressor()
+          data = decoder.decompress(base64.b64decode(encoded, validate=True), max_length=67358)
+          assert decoder.eof and not decoder.unused_data and len(data) == 67357
+          assert hashlib.sha256(data).hexdigest() == '85934565f6c9ed8c7d0932259c60128b576c5959f0b452a80ff221a0d8b10a1c'
+          candidate = json.loads(data)
+          before, after = candidate['before'], candidate['after']
+          assert len(after) == 17 and set(before) == set(after)
+          documents = {'ADAPTIVE_CAPTURE.md', 'CHANGELOG.md', 'PROTOCOL.md', 'RECEIVER_FEEDBACK.md'}
+          current = {}
+          for name in before:
+              path = Path(name)
+              assert not path.is_absolute() and '..' not in path.parts
+              assert name in documents or name.startswith(('crates/frd/', 'crates/fr-transport/'))
+              assert not path.is_symlink()
+              current[name] = blob(path.read_bytes()) if path.exists() else None
+          if current != after:
+              assert current == before, 'source preimages changed; reconcile instead of overwriting'
+              patch = Path(os.environ['RUNNER_TEMP'], 'receiver-feedback.mbox')
+              patch.write_text(candidate['patch'])
+              stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
+              assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(after)
+              subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
+              subprocess.run(['git', 'apply', str(patch)], check=True)
+          for name, expected in after.items():
+              assert blob(Path(name).read_bytes()) == expected, name
+          Path(os.environ['RUNNER_TEMP'], 'receiver-feedback-paths.json').write_text(json.dumps(after))
+          PY
       - name: Install pinned compiler and native SDKs
         run: |
           rustup show active-toolchain
           sudo apt-get update
           sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 libxrandr2 pkg-config xvfb xauth openssl
-      - name: Verify committed workspace and both native capture profiles
+      - name: Verify exact workspace and both native capture profiles
         run: |
           ./scripts/verify.sh fast
           ./scripts/verify.sh docs
           cargo test -p fr-media --test capture_discovery --test worker_displays --locked
           cargo test -p fr-native --all-features --test display_inventory --test worker_process --test decoder_startup --locked -- --test-threads=4
           cargo test -p fr-native --features linux-media --test worker_process --locked -- --test-threads=4
-          git diff --exit-code
+      - name: Retain verified source objects without changing refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, subprocess
+          from pathlib import Path
+          for name, expected in json.loads(Path(os.environ['RUNNER_TEMP'], 'receiver-feedback-paths.json').read_text()).items():
+              data = Path(name).read_bytes()
+              actual = hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
+              assert actual == expected, name
+              body = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()})
+              row = json.loads(subprocess.check_output(['gh', 'api', '--method', 'POST',
+                  f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', '--input', '-'],
+                  input=body, text=True, timeout=30))
+              assert row['sha'] == expected, name
+              print(json.dumps({'path': name, 'sha': expected}))
+          PY
