@@ -122,3 +122,10 @@ The native Driver, real platform consent/visibility/lifecycle adapters, viewer
 input/event-loop integration, qualified clock exchange and live Tailscale ingress
 remain application responsibilities. No dependency, release pin, codec, runtime,
 listener, permission policy or capability advertisement changes are included.
+
+## Adaptive continuous capture
+
+The existing `StreamingHost` can opt into [adaptive raw-capture admission](ADAPTIVE_CAPTURE.md)
+before `serve`. Its controller uses genuine conditional captures and existing
+sender admission/credit, changes only the next capture opportunity, and leaves
+input/ticket/observation maintenance and every original deadline unchanged.

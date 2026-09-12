@@ -463,6 +463,16 @@ fn worker_image() -> std::path::PathBuf {
 #[test]
 #[ignore = "explicit native lane requires FR_NATIVE_TEST_WORKER and Xvfb"]
 fn actual_hevc_streams_continuous_viewer_keeps_decoder_and_renews_during_idle() {
+    continuous_viewer(false);
+}
+
+#[test]
+#[ignore = "explicit native lane requires FR_NATIVE_TEST_WORKER and Xvfb"]
+fn actual_hevc_streams_adaptive_idle_wakes_without_replacing_capture_or_decoder() {
+    continuous_viewer(true);
+}
+
+fn continuous_viewer(adaptive: bool) {
     let image = worker_image();
     run(|c, h| async move {
         let NativePair {
@@ -477,6 +487,11 @@ fn actual_hevc_streams_continuous_viewer_keeps_decoder_and_renews_during_idle() 
             source_pid,
             mut n,
         } = Box::pin(native_pair(&c, &h, &image, &image)).await;
+        if adaptive {
+            streaming
+                .enable_adaptive_capture(Duration::from_millis(200))
+                .unwrap();
+        }
         let decoder_pid = decoder.worker_id();
         let mut receiving = viewer.into_streaming(v_media, decoder).unwrap();
         let stop = receiving.control();
@@ -508,7 +523,7 @@ fn actual_hevc_streams_continuous_viewer_keeps_decoder_and_renews_during_idle() 
                         }
                         source_display.paint(colors[index]);
                         index += 1;
-                        until = stamp + 850_000;
+                        until = stamp + if adaptive { 1_450_000 } else { 850_000 };
                     }
                     Ok(())
                 },
@@ -525,6 +540,20 @@ fn actual_hevc_streams_continuous_viewer_keeps_decoder_and_renews_during_idle() 
         assert_eq!(streaming.worker_id(), Some(source_pid));
         assert_eq!(streaming.statistics().encoded_updates, 4);
         assert!(streaming.statistics().unchanged_observations > 10);
+        if adaptive {
+            let pacing = streaming.pacing().unwrap();
+            assert!(
+                pacing
+                    .decisions()
+                    .any(|r| r.reason == fr_media::pacing::Reason::VerifiedIdle)
+            );
+            assert!(
+                pacing
+                    .decisions()
+                    .any(|r| r.reason == fr_media::pacing::Reason::ChangedAfterIdle)
+            );
+            assert!(streaming.statistics().unchanged_observations < 120);
+        }
         receiving
             .reap_media(&c, Deadline::after(&c, Duration::from_secs(1)).unwrap())
             .await
