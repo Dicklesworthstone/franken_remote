@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['.github/workflows/verify-native-connection.yml', 'crates/fr-tailnet/**', 'crates/fr-transport/**', 'crates/fr-native/**', 'crates/frd/**', 'Cargo.toml', 'Cargo.lock']
+    paths: ['.github/workflows/verify-native-connection.yml', 'crates/fr-tailnet/**', 'crates/fr-transport/**', 'crates/frd/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'scripts/verify-native-dial.sh', 'scripts/verify-native-session.sh']
 permissions:
-  contents: write
+  contents: read
 env:
   CARGO_BUILD_JOBS: '1'
   CARGO_PROFILE_DEV_DEBUG: '0'
@@ -19,53 +19,39 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
-      - name: Stage exact peer-target candidate without branch writes
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Select pinned compiler and test prerequisites
         run: |
-          python3 - <<'PY'
-          import base64, hashlib, json, lzma, os, subprocess
-          from pathlib import Path
-          def sha(b): return hashlib.sha1(f'blob {len(b)}\0'.encode()+b).hexdigest()
-          row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/413f0653b12408878e74eee8303199931ec23ad2'],timeout=30))
-          encoded=base64.b64decode(row['content']); assert len(encoded)==7968 and sha(encoded)=='413f0653b12408878e74eee8303199931ec23ad2'
-          dec=lzma.LZMADecompressor(); data=dec.decompress(base64.b64decode(encoded,validate=True),max_length=23996)
-          assert dec.eof and not dec.unused_data and len(data)==23995
-          assert hashlib.sha256(data).hexdigest()=='68188bf50cd19c9c0881b3c213d0b4cff67fca680a80a64fd40fa8c612ddb521'
-          candidate=json.loads(data); assert len(candidate['after'])==8 and set(candidate['before'])==set(candidate['after'])
-          current={}
-          for path in candidate['before']:
-              assert path.startswith('crates/fr-tailnet/') and '..' not in Path(path).parts
-              current[path]=sha(Path(path).read_bytes()) if Path(path).exists() else None
-          if current!=candidate['after']:
-              assert current==candidate['before'], 'candidate preimages changed'
-              patch=Path(os.environ['RUNNER_TEMP'],'peer-target.patch'); patch.write_text(candidate['patch'])
-              stats=subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
-              assert {line.split('\t',2)[2] for line in stats.splitlines()}==set(candidate['after'])
-              subprocess.run(['git','apply','--check',str(patch)],check=True)
-              subprocess.run(['git','apply',str(patch)],check=True)
-          for path, expected in candidate['after'].items(): assert sha(Path(path).read_bytes())==expected, path
-          Path(os.environ['RUNNER_TEMP'],'peer-target-paths.json').write_text(json.dumps(candidate['after']))
-          PY
-      - name: Select pinned toolchain
-        run: rustup show active-toolchain
-      - name: Exercise installed-tailnet adapter
-        run: cargo test -p fr-tailnet --locked -- --test-threads=4
-      - name: Check connection source
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y openssl iproute2
+      - name: Check committed connection sources
         run: |
-          cargo clippy -p fr-tailnet -p fr-transport --all-targets --locked -- -D warnings
           cargo fmt --all --check
+          cargo clippy -p fr-tailnet -p fr-transport -p frd --all-targets --locked -- -D warnings
           ./scripts/verify.sh docs
-      - name: Retain verified blobs without changing refs
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Exercise actual native records and session lifetimes
         run: |
+          cargo test -p fr-tailnet -p fr-transport -p frd --locked -- --test-threads=1
+      - name: Exercise public dial and viewer in isolated network namespaces
+        run: |
+          cargo test -p fr-tailnet -p frd --locked --lib --no-run --message-format=json > "$RUNNER_TEMP/connection-executables.json"
           python3 - <<'PY'
-          import base64, hashlib, json, os, subprocess
+          import json, os, subprocess
           from pathlib import Path
-          for path, expected in json.loads(Path(os.environ['RUNNER_TEMP'],'peer-target-paths.json').read_text()).items():
-              data=Path(path).read_bytes(); assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()==expected
-              body=json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()})
-              row=json.loads(subprocess.check_output(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,timeout=30))
-              assert row['sha']==expected; print(json.dumps({'path':path,'sha':expected}))
+          binaries = {}
+          for line in Path(os.environ['RUNNER_TEMP'], 'connection-executables.json').read_text().splitlines():
+              row = json.loads(line)
+              if row.get('reason') == 'compiler-artifact' and row.get('profile', {}).get('test') and row.get('executable'):
+                  name = row.get('target', {}).get('name')
+                  if name in ('fr_tailnet', 'frd'):
+                      assert name not in binaries, 'duplicate test executable'
+                      binaries[name] = os.path.abspath(row['executable'])
+          assert set(binaries) == {'fr_tailnet', 'frd'}, 'both committed test binaries required'
+          original = os.readlink('/proc/self/ns/net')
+          for name, script in [('fr_tailnet', 'scripts/verify-native-dial.sh'), ('frd', 'scripts/verify-native-session.sh')]:
+              # Privilege is confined to creating a separate test namespace.
+              # No network address is added before unshare; no repository writes.
+              subprocess.run(['sudo', '-n', 'unshare', '--user', '--map-root-user', '--net',
+                  'env', 'FR_DIAL_TEST_NAMESPACE=isolated', 'FR_SESSION_TEST_NAMESPACE=isolated',
+                  f'FR_SESSION_ORIGINAL_NETNS={original}', 'bash', script, '--inside', binaries[name]], check=True)
           PY
