@@ -26,6 +26,7 @@ use std::{
 };
 
 mod running;
+pub use running::publisher::{Error as PublisherError, NativePublisher, Policy as PublisherPolicy};
 pub use running::{ControlledHost, HostSession, StreamingHost};
 
 mod viewer;

@@ -11,6 +11,7 @@ use std::{future::Future, pin::pin, task::Poll, time::Duration};
 
 pub(super) mod controlled;
 pub use controlled::ControlledHost;
+pub(super) mod publisher;
 mod streaming;
 pub use streaming::StreamingHost;
 #[cfg(test)]
