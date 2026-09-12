@@ -68,7 +68,7 @@ fn openssl(dir: &Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
-fn pki() -> &'static Path {
+pub fn pki() -> &'static Path {
     static PATH: OnceLock<PathBuf> = OnceLock::new();
     PATH.get_or_init(|| {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();

@@ -783,3 +783,39 @@ impl Drop for SessionRefresh<'_> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) fn connection_test_host(
+    cx: Cx,
+    native: NativeQuicUdpConnection,
+    offer: Offer,
+    policy: Policy,
+) -> Host {
+    let until = now(&cx).unwrap() + 30_000_000;
+    Host::start(
+        cx,
+        native,
+        Peer::Fixture {
+            alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            until,
+            control: true,
+        },
+        Configuration {
+            offer,
+            binding: ControlBinding {
+                id: 7,
+                host_boot: fr_core::ids::HostBootId::from_raw(11),
+                os_session: fr_core::ids::OsSessionId::from_raw(12),
+                remote_session: fr_core::ids::RemoteSessionId::from_raw(13),
+            },
+            require_approval: true,
+            startup_timeout: Duration::from_secs(2),
+            authority: AuthorityPolicy::plan_defaults(),
+            transport: policy,
+        },
+    )
+    .unwrap()
+}
+
+#[cfg(test)]
+pub(crate) use tests::support as test_network;

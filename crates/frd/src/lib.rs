@@ -25,3 +25,6 @@ pub mod session_startup;
 
 #[cfg(target_os = "linux")]
 pub mod display_selection;
+
+#[cfg(target_os = "linux")]
+pub mod native_connection;

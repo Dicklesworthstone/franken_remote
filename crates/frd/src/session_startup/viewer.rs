@@ -44,6 +44,19 @@ impl fmt::Debug for Viewer {
     }
 }
 impl Viewer {
+    /// Preserve the connector's independent destination lifetime across startup
+    /// and every subsequent handoff of the original transport owner.
+    pub(crate) fn retain_connection_check(
+        &mut self,
+        check: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<(), Error> {
+        self.transport
+            .as_mut()
+            .ok_or(Error::Closed)?
+            .retain_lifetime_check(&self.cx, check)
+            .map_err(Error::from)
+    }
+
     /// TLS/hostname/ALPN verification has already completed in Asupersync. The
     /// chosen endpoint must come from the caller's qualified tailnet connection
     /// path. This does not accept a plaintext socket or enable skip-verification.
