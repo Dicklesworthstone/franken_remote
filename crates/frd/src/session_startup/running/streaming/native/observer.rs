@@ -299,7 +299,9 @@ fn exercise(delayed: bool) {
         );
         let (observed, hosted) = Box::pin(support::both(
             attempt,
-            host_bootstrap(host, &h, &image, &source_display, &notice),
+            // Keep the manual host fixture's large decoder continuation off
+            // the ordinary test stack, as the public host bootstrap already does.
+            Box::pin(host_bootstrap(host, &h, &image, &source_display, &notice)),
         ))
         .await;
         let mut observed = observed.unwrap();
@@ -380,3 +382,5 @@ fn public_observer_runs_approval_selection_configuration_and_real_hevc_without_m
 fn public_observer_services_renewal_during_delayed_real_decoder_configuration() {
     exercise(true);
 }
+
+mod publisher;
