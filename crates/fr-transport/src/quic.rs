@@ -19,6 +19,8 @@ use std::{
     time::Duration,
 };
 
+mod lifetime;
+
 mod attachment;
 pub use attachment::{AttachedChannel, ChannelRequest, ChannelScope, MediaChannel};
 
@@ -140,6 +142,12 @@ pub struct Policy {
     pub datagram_record_bytes: usize,
     pub record_lifetime_micros: u64,
 }
+impl Policy {
+    /// Validate resource bounds before allocating a socket or TLS handshake.
+    pub fn validate(self) -> Result<(), Error> {
+        validate_policy(&[], &[], self, StreamRole::Client)
+    }
+}
 impl Default for Policy {
     fn default() -> Self {
         Self {
@@ -236,6 +244,7 @@ pub struct ConnectionBinding(Weak<()>);
 /// Asupersync still owns congestion/loss recovery and its qualification gates.
 pub struct QuicRecords {
     identity: Arc<()>,
+    lifetime_check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     clock_attached: bool,
     display_selection_claimed: bool,
     attachments: Vec<attachment::Reservation>,
@@ -348,6 +357,7 @@ impl QuicRecords {
         }
         Ok(Self {
             identity: Arc::new(()),
+            lifetime_check: None,
             clock_attached: false,
             display_selection_claimed: false,
             attachments: Vec::new(),
@@ -468,7 +478,7 @@ impl QuicRecords {
             self.close();
             return Err(Error::Cancelled);
         }
-        if !authorize() {
+        if self.lifetime_check.as_ref().is_some_and(|check| !check()) || !authorize() {
             self.close();
             return Err(Error::Unauthorized);
         }
@@ -637,19 +647,27 @@ impl QuicRecords {
             return Err(error);
         }
         let mut native = self.native.take().ok_or(Error::Closed)?;
-        let overall = Duration::from_millis(250);
-        let result = timeout(cx.now(), overall, async {
-            native.flush(cx).await.map_err(|_| Error::Native)?;
-            if cx.checkpoint().is_err() {
-                return Err(Error::Cancelled);
-            }
-            if !authorize() {
-                return Err(Error::Unauthorized);
-            }
-            native
-                .drive_io_once(cx, wait)
-                .await
-                .map_err(|_| Error::Native)?;
+        let until = self.senders.iter().filter_map(|s| s.until).min();
+        let gate = self.lifetime_check.clone();
+        let result = timeout(cx.now(), Duration::from_millis(250), async {
+            lifetime::poll_io(
+                cx,
+                gate.as_deref(),
+                &mut authorize,
+                current,
+                until,
+                native.flush(cx),
+            )
+            .await?;
+            lifetime::poll_io(
+                cx,
+                gate.as_deref(),
+                &mut authorize,
+                current,
+                until,
+                native.drive_io_once(cx, wait),
+            )
+            .await?;
             Ok(())
         })
         .await
