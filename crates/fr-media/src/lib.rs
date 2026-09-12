@@ -34,3 +34,5 @@ pub mod fake;
 
 /// Private media-process protocol; never accepted on network channels.
 pub mod worker;
+
+pub mod receiver_feedback;

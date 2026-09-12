@@ -77,10 +77,20 @@ pub enum Reason {
     SourceWork,
     SendAdmission,
     CaptureCredit,
+    ReceiverBacklog,
+    DecoderWork,
     HeadroomProbe,
     VerifiedIdle,
     ChangedAfterIdle,
     EvidenceGap,
+}
+/// Optional remote evidence. Unnegotiated peers retain local-only behavior;
+/// negotiated peers without a timely solicited sample cannot justify a probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiverEvidence {
+    Unobserved,
+    Unknown,
+    Measured(fr_wire::receiver_metrics::Load),
 }
 /// Bounded content-free decision evidence. Elapsed durations expose the dwell
 /// evidence; replaying the same ordered samples produces exactly the same reports.
@@ -93,6 +103,8 @@ pub struct Report {
     pub reason: Reason,
     pub pressure_us: [u64; 3],
     pub headroom_us: u64,
+    pub receiver: ReceiverEvidence,
+    pub receiver_pressure_us: [u64; 2],
 }
 /// Fixed-size state and bounded adjustment history. Callers may export reports through
 /// their own bounded diagnostic sink; this controller never retains media.
@@ -103,6 +115,7 @@ pub struct Controller {
     last_now: Option<u64>,
     adjusted: Option<u64>,
     busy_since: [Option<u64>; 3],
+    receiver_busy_since: [Option<u64>; 2],
     headroom_since: Option<u64>,
     headroom_evidence_us: u64,
     headroom_previous_ready: bool,
@@ -123,6 +136,7 @@ impl Controller {
             last_now: None,
             adjusted: None,
             busy_since: [None; 3],
+            receiver_busy_since: [None; 2],
             headroom_since: None,
             headroom_evidence_us: 0,
             headroom_previous_ready: false,
@@ -151,10 +165,17 @@ impl Controller {
         })
     }
     pub fn update(&mut self, sample: Sample) -> Result<Report, Error> {
+        self.update_with_receiver(sample, ReceiverEvidence::Unobserved)
+    }
+    pub fn update_with_receiver(
+        &mut self,
+        sample: Sample,
+        receiver: ReceiverEvidence,
+    ) -> Result<Report, Error> {
         if self.closed {
             return Err(Error::Closed);
         }
-        match self.update_inner(sample) {
+        match self.update_inner(sample, receiver) {
             Ok(report) => {
                 self.report = Some(report);
                 if report.reason != Reason::Hold {
@@ -169,7 +190,7 @@ impl Controller {
             }
         }
     }
-    fn update_inner(&mut self, s: Sample) -> Result<Report, Error> {
+    fn update_inner(&mut self, s: Sample, receiver: ReceiverEvidence) -> Result<Report, Error> {
         let previous = self.interval;
         if self.last_now.is_some_and(|t| s.now_us < t) {
             return Err(Error::ClockRegression);
@@ -199,6 +220,8 @@ impl Controller {
         }
         let changed = self.observe(s.observation, s.now_us)?;
         let (pressure, pressure_us) = self.track_pressure(s);
+        let (remote, receiver_ready, receiver_pressure_us) =
+            self.track_receiver(receiver, s.now_us);
         let fresh = self
             .source
             .is_some_and(|o| s.now_us - o.at_us <= SOURCE_EVIDENCE_US);
@@ -212,7 +235,7 @@ impl Controller {
         if changed && self.mode == Mode::Idle {
             self.mode = Mode::Active;
             // Wake is conservative, never an optimistic probe through pressure.
-            if !pressure.contains(&true) {
+            if !pressure.contains(&true) && !remote.contains(&true) {
                 self.interval = self.policy.conservative();
             }
             self.adjusted = Some(s.now_us);
@@ -225,7 +248,8 @@ impl Controller {
             self.reset_headroom();
             reason = Reason::VerifiedIdle;
         }
-        let headroom = fresh
+        let headroom = receiver_ready
+            && fresh
             && !idle
             && self.mode == Mode::Active
             && s.source_work_us
@@ -235,7 +259,8 @@ impl Controller {
         // A short outstanding source operation can make credit unknown. It
         // contributes no headroom duration, but must not erase every preceding
         // measured interval and make recovery impossible in a real pipeline.
-        let uncertain = fresh
+        let uncertain = !remote.contains(&true)
+            && fresh
             && !idle
             && self.mode == Mode::Active
             && s.source_work_us
@@ -244,7 +269,7 @@ impl Controller {
             && s.capture_credit != Availability::Blocked;
         let headroom_us = self.track_headroom(s.now_us, headroom, uncertain);
         if reason == Reason::Hold && self.mode == Mode::Active {
-            reason = self.adjust_for_load(s.now_us, pressure_us, headroom_us);
+            reason = self.adjust_for_load(s.now_us, pressure_us, receiver_pressure_us, headroom_us);
         }
         Ok(Report {
             sample: s,
@@ -254,11 +279,51 @@ impl Controller {
             reason,
             pressure_us,
             headroom_us,
+            receiver,
+            receiver_pressure_us,
         })
     }
-    fn adjust_for_load(&mut self, now_us: u64, pressure_us: [u64; 3], headroom_us: u64) -> Reason {
+    fn track_receiver(
+        &mut self,
+        receiver: ReceiverEvidence,
+        now_us: u64,
+    ) -> ([bool; 2], bool, [u64; 2]) {
+        let (remote, receiver_ready) = match receiver {
+            ReceiverEvidence::Unobserved => ([false; 2], true),
+            ReceiverEvidence::Unknown => ([false; 2], false),
+            ReceiverEvidence::Measured(load) => (
+                [
+                    load.retained_pictures > 1,
+                    load.work_us.is_some_and(|n| n >= self.interval),
+                ],
+                !load.decoding
+                    && load.retained_pictures <= 1
+                    && load.work_us.is_some_and(|n| n <= self.interval * 3 / 4),
+            ),
+        };
+        let mut receiver_pressure_us = [0; 2];
+        for (i, busy) in remote.into_iter().enumerate() {
+            if busy {
+                receiver_pressure_us[i] =
+                    now_us - *self.receiver_busy_since[i].get_or_insert(now_us);
+            } else {
+                self.receiver_busy_since[i] = None;
+            }
+        }
+        (remote, receiver_ready, receiver_pressure_us)
+    }
+    fn adjust_for_load(
+        &mut self,
+        now_us: u64,
+        pressure_us: [u64; 3],
+        receiver_pressure_us: [u64; 2],
+        headroom_us: u64,
+    ) -> Reason {
         let since_adjust = self.adjusted.map_or(u64::MAX, |t| now_us - t);
-        if let Some(index) = pressure_us.iter().position(|&t| t >= PRESSURE_DWELL_US)
+        if let Some(index) = pressure_us
+            .iter()
+            .chain(receiver_pressure_us.iter())
+            .position(|&t| t >= PRESSURE_DWELL_US)
             && since_adjust >= REDUCE_DWELL_US
             && self.interval < self.policy.maximum_interval_us
         {
@@ -269,6 +334,8 @@ impl Controller {
                 Reason::SourceWork,
                 Reason::SendAdmission,
                 Reason::CaptureCredit,
+                Reason::ReceiverBacklog,
+                Reason::DecoderWork,
             ][index];
         } else if headroom_us >= PROBE_DWELL_US
             && since_adjust >= PROBE_DWELL_US
@@ -351,6 +418,7 @@ impl Controller {
     }
     fn reset_evidence(&mut self) {
         self.busy_since = [None; 3];
+        self.receiver_busy_since = [None; 2];
         self.reset_headroom();
         self.unchanged_since = None;
     }
