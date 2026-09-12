@@ -245,6 +245,21 @@ impl fmt::Debug for ConnectedPeer {
     }
 }
 impl ConnectedPeer {
+    /// Transfer the exact connection AND its authenticated destination into a
+    /// renewable owner. This preserves provenance through long-lived viewer
+    /// startup/service; dropping the returned owner invalidates every lease.
+    /// Application I/O must retain its lease check and poll the owner's service.
+    pub fn into_owned_connection(
+        self,
+        cx: Cx,
+    ) -> Result<(NativeQuicUdpConnection, crate::TargetOwner), Error> {
+        self.api.check_peer_target(&cx, &self.target)?;
+        if self.native.local_addr() != self.local || self.native.peer_addr() != self.remote {
+            return Err(Error::AddressMismatch);
+        }
+        let owner = crate::TargetOwner::new(self.api, cx, self.target)?;
+        Ok((self.native, owner))
+    }
     pub fn target(&self) -> &PeerTarget {
         &self.target
     }
@@ -296,6 +311,11 @@ pub(super) fn transport_parameters() -> Result<Vec<u8>, Error> {
     let mut bytes = Vec::new();
     TransportParameters {
         initial_max_data: Some(cfg.connection_recv_limit),
+        // The pinned native connection retains one conservative stream window,
+        // taking the minimum of all three negotiated classes. Advertise equal
+        // byte bounds; max_streams_bidi remains zero, so no bidi stream is admitted.
+        initial_max_stream_data_bidi_local: Some(cfg.recv_window),
+        initial_max_stream_data_bidi_remote: Some(cfg.recv_window),
         initial_max_stream_data_uni: Some(cfg.recv_window),
         initial_max_streams_bidi: Some(0),
         initial_max_streams_uni: Some(8),
@@ -309,3 +329,19 @@ pub(super) fn transport_parameters() -> Result<Vec<u8>, Error> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn native_application_credit_is_nonzero_without_admitting_bidirectional_streams() {
+    let parameters = TransportParameters::decode(&transport_parameters().unwrap()).unwrap();
+    let bounds = [
+        parameters.initial_max_stream_data_bidi_local.unwrap_or(0),
+        parameters.initial_max_stream_data_bidi_remote.unwrap_or(0),
+        parameters.initial_max_stream_data_uni.unwrap_or(0),
+    ];
+    assert_eq!(bounds, [connection_config().recv_window; 3]);
+    assert_eq!(bounds.into_iter().min(), Some(65_536));
+    assert_eq!(parameters.initial_max_streams_bidi, Some(0));
+    assert_eq!(connection_config().max_local_bidi, 0);
+    assert_eq!(parameters.initial_max_data, Some(524_288));
+}
