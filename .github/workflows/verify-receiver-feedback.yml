@@ -54,6 +54,37 @@ jobs:
           Path(os.environ['RUNNER_TEMP'],'receiver-feedback-paths.json').write_text(json.dumps(candidate['after']))
           subprocess.run(['git','diff','--check'],check=True)
           PY
+      - name: Stage exact native feedback test
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, subprocess
+          from pathlib import Path
+          def blob(data): return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
+          oid='85d877d65bfb0db1a6afd4986c80d71284eac418'
+          row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}'],timeout=30))
+          encoded=base64.b64decode(row['content'])
+          assert len(encoded)==2496 and blob(encoded)==oid
+          dec=lzma.LZMADecompressor()
+          data=dec.decompress(base64.b64decode(encoded,validate=True),max_length=5536)
+          assert dec.eof and not dec.unused_data and len(data)==5535
+          assert hashlib.sha256(data).hexdigest()=='2752a624bee80015be38636ebcbb3c7d65899a921dd3d9cfdc90e2dc834e42a1'
+          c=json.loads(data)
+          assert c['path']=='crates/frd/src/session_startup/running/streaming/native.rs'
+          actual=blob(Path(c['path']).read_bytes())
+          if actual!=c['after']:
+              assert actual==c['before'], 'concurrent native test changes require reconciliation'
+              patch=Path(os.environ['RUNNER_TEMP'],'native-feedback.patch')
+              patch.write_text(c['patch'])
+              subprocess.run(['git','apply','--check',str(patch)],check=True)
+              subprocess.run(['git','apply',str(patch)],check=True)
+          assert blob(Path(c['path']).read_bytes())==c['after']
+          manifest=Path(os.environ['RUNNER_TEMP'],'receiver-feedback-paths.json')
+          paths=json.loads(manifest.read_text()); paths[c['path']]=c['after']
+          assert len(paths)==18
+          manifest.write_text(json.dumps(paths))
+          PY
       - name: Install pinned compiler and native SDKs
         run: |
           rustup show active-toolchain
@@ -68,6 +99,10 @@ jobs:
           cargo test -p frd --lib receiver_feedback --locked -- --test-threads=1
           cargo test -p frd --lib receiver_feedback --locked -- --test-threads=8
           cargo test -p frd --lib keeps_input_and_receipts --locked -- --test-threads=4
+      - name: Exercise actual HEVC feedback and existing native streaming
+        run: |
+          cargo build -p fr-native --all-features --bin fr-media-worker --locked
+          FR_NATIVE_TEST_WORKER="$PWD/target/debug/fr-media-worker" cargo test -p frd --lib actual_hevc_streams --locked -- --ignored --test-threads=1
       - name: Retain verified source objects without reference writes
         env:
           GH_TOKEN: ${{ github.token }}
