@@ -1,0 +1,60 @@
+name: Verify input capture wake
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/verify-input-capture-wake.yml']
+permissions:
+  contents: write
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Recover exact locally tested source objects without branch writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, subprocess
+          from pathlib import Path
+          def sha(data):
+              return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
+          repo = os.environ['GITHUB_REPOSITORY']
+          blob = 'fe9f049b65d917eeeef79c0577b2b4fabaf39483'
+          row = json.loads(subprocess.check_output(['gh', 'api', f'repos/{repo}/git/blobs/{blob}'], timeout=30))
+          encoded = base64.b64decode(row['content'])
+          assert len(encoded) == 2472 and sha(encoded) == blob
+          decoder = lzma.LZMADecompressor()
+          data = decoder.decompress(base64.b64decode(encoded, validate=True), max_length=6355)
+          assert decoder.eof and not decoder.unused_data and len(data) == 6354
+          assert hashlib.sha256(data).hexdigest() == '91d9ad7f8028e592668592870fb023f15b67f9666e1684cc7668856329bd8892'
+          candidate = json.loads(data)
+          allowed = {
+              'crates/frd/src/session_startup/running/streaming.rs',
+              'crates/frd/src/session_startup/running/controlled/tests.rs',
+              'crates/frd/src/session_startup/running/streaming/tests.rs',
+          }
+          assert set(candidate['before']) == set(candidate['after']) == allowed
+          current = {path: sha(Path(path).read_bytes()) for path in allowed}
+          if current != candidate['after']:
+              assert current == candidate['before'], 'concurrent source edit: refuse publication'
+              patch = Path(os.environ['RUNNER_TEMP'], 'input-wake.patch')
+              patch.write_text(candidate['patch'])
+              stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
+              assert {line.split('\t', 2)[2] for line in stats.splitlines()} == allowed
+              subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
+              subprocess.run(['git', 'apply', str(patch)], check=True)
+          subprocess.run(['git', 'diff', '--check'], check=True)
+          for path in sorted(allowed):
+              data = Path(path).read_bytes()
+              assert sha(data) == candidate['after'][path], path
+              body = json.dumps({'encoding': 'base64', 'content': base64.b64encode(data).decode()})
+              row = json.loads(subprocess.check_output(['gh', 'api', '--method', 'POST',
+                  f'repos/{repo}/git/blobs', '--input', '-'], input=body, text=True, timeout=30))
+              assert row['sha'] == candidate['after'][path]
+              print(json.dumps({'path': path, 'sha': row['sha']}), flush=True)
+          PY
