@@ -1,0 +1,85 @@
+name: Verify receiver feedback
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/verify-receiver-feedback.yml']
+permissions:
+  contents: write
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  feedback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Stage exact candidate without reference writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, subprocess
+          from pathlib import Path
+          def blob(data): return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
+          oid='3f2c05546f42ee0dd475cbf7c781a84a01b16b9a'
+          row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}'],timeout=30))
+          encoded=base64.b64decode(row['content'])
+          assert len(encoded)==20072 and blob(encoded)==oid
+          dec=lzma.LZMADecompressor()
+          data=dec.decompress(base64.b64decode(encoded,validate=True),max_length=66288)
+          assert dec.eof and not dec.unused_data and len(data)==66287
+          assert hashlib.sha256(data).hexdigest()=='25d5ac23125c4586c82f7316d4ecdbf6eac1f45e2a4a1133b725991656ed0d98'
+          candidate=json.loads(data)
+          assert candidate['base']=='4dccf93a88e07f4f395083ae0e5c87d4d1b5c7e2'
+          assert len(candidate['after'])==17 and set(candidate['before'])==set(candidate['after'])
+          current={}
+          for path in candidate['before']:
+              assert (path.startswith('crates/') or path in {'ADAPTIVE_CAPTURE.md','CHANGELOG.md','PROTOCOL.md','RECEIVER_FEEDBACK.md'}) and '..' not in Path(path).parts
+              current[path]=blob(Path(path).read_bytes()) if Path(path).exists() else None
+          if current!=candidate['after']:
+              assert current==candidate['before'], 'concurrent source changes require reconciliation'
+              patch=Path(os.environ['RUNNER_TEMP'],'receiver-feedback.patch')
+              patch.write_text(candidate['patch'])
+              stats=subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
+              assert {line.split('\t',2)[2] for line in stats.splitlines()}==set(candidate['after'])
+              subprocess.run(['git','apply','--check',str(patch)],check=True)
+              subprocess.run(['git','apply',str(patch)],check=True)
+          for path, expected in candidate['after'].items(): assert blob(Path(path).read_bytes())==expected, path
+          Path(os.environ['RUNNER_TEMP'],'receiver-feedback-paths.json').write_text(json.dumps(candidate['after']))
+          subprocess.run(['git','diff','--check'],check=True)
+          PY
+      - name: Install pinned compiler and native SDKs
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxrandr-dev libxtst6 pkg-config xvfb xauth openssl
+      - name: Verify complete candidate workspace
+        run: |
+          ./scripts/verify.sh fast
+          ./scripts/verify.sh docs
+      - name: Exercise feedback and concurrent input repeatedly
+        run: |
+          cargo test -p frd --lib receiver_feedback --locked -- --test-threads=1
+          cargo test -p frd --lib receiver_feedback --locked -- --test-threads=8
+          cargo test -p frd --lib keeps_input_and_receipts --locked -- --test-threads=4
+      - name: Retain verified source objects without reference writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, subprocess
+          from pathlib import Path
+          for path, expected in json.loads(Path(os.environ['RUNNER_TEMP'],'receiver-feedback-paths.json').read_text()).items():
+              data=Path(path).read_bytes()
+              assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()==expected
+              body=json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()})
+              row=json.loads(subprocess.check_output(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,timeout=30))
+              assert row['sha']==expected
+              print(json.dumps({'path':path,'sha':expected,'verified_checkout':os.environ['GITHUB_SHA']}))
+          PY
