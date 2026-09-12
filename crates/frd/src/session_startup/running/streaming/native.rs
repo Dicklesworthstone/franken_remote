@@ -820,3 +820,5 @@ fn actual_hevc_streams_receiver_feedback_slows_capture_with_real_decoder_and_pix
             .unwrap();
     });
 }
+
+mod observer;

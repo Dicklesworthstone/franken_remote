@@ -321,3 +321,124 @@ fn bounded_slot_cannot_replace_or_grow_for_second_control_record() {
     assert_eq!(&slot.bytes[..slot.len], &a);
     assert_eq!(slot.bytes.len(), 16);
 }
+
+#[test]
+fn successful_native_completion_cannot_cancel_the_inflight_network_turn() {
+    run(|c, h| async move {
+        let (mut host, mut viewer) =
+            crate::session_startup::running::tests::pair_initialized(&c, &h, vec![], |_| {}).await;
+        let original = viewer.io().unwrap().0.binding();
+        let budget = Budget::new(
+            c.clone(),
+            Policy {
+                timeout: Duration::from_millis(200),
+                network_turn: Duration::from_millis(20),
+            },
+        )
+        .unwrap();
+        let mut n = 9000;
+        let native = async {
+            asupersync::time::sleep(c.now(), Duration::from_millis(1)).await;
+            Ok(7_u8)
+        };
+        let (result, network) = Box::pin(support::both(
+            during(&mut viewer, &budget, native),
+            host.drive(
+                Duration::from_millis(30),
+                || {
+                    n += 1;
+                    Ok(n)
+                },
+                retain,
+            ),
+        ))
+        .await;
+        assert_eq!(result, Ok(7));
+        network.unwrap();
+        assert!(
+            !viewer.is_closed(),
+            "healthy decoder completion dropped session drive"
+        );
+        assert!(viewer.io().unwrap().0.is_bound_to(&original));
+        viewer.check().unwrap();
+    });
+}
+#[test]
+fn total_bootstrap_expiry_fences_before_dropping_pending_foreign_work() {
+    struct ForeignWait {
+        cx: Cx,
+        fenced: Arc<AtomicBool>,
+    }
+    impl Future for ForeignWait {
+        type Output = Result<u8, decoder_startup::Error>;
+        fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+            Poll::Pending
+        }
+    }
+    impl Drop for ForeignWait {
+        fn drop(&mut self) {
+            self.fenced
+                .store(self.cx.checkpoint().is_err(), Ordering::Release);
+        }
+    }
+    run(|c, h| async move {
+        let (mut host, mut viewer) =
+            crate::session_startup::running::tests::pair_initialized(&c, &h, vec![], |_| {}).await;
+        let fenced = Arc::new(AtomicBool::new(false));
+        let budget = Budget::new(
+            c.clone(),
+            Policy {
+                timeout: Duration::from_millis(25),
+                ..Policy::default()
+            },
+        )
+        .unwrap();
+        let mut n = 10_000;
+        let serve = async {
+            while c.checkpoint().is_ok() {
+                if host_turn(&mut host, &mut n).await.is_err() {
+                    break;
+                }
+            }
+        };
+        let (result, ()) = Box::pin(support::both(
+            during(
+                &mut viewer,
+                &budget,
+                ForeignWait {
+                    cx: c.clone(),
+                    fenced: fenced.clone(),
+                },
+            ),
+            serve,
+        ))
+        .await;
+        assert!(matches!(result, Err(Error::Expired)));
+        assert!(
+            fenced.load(Ordering::Acquire),
+            "foreign work dropped before scope was fenced"
+        );
+        // The fence is immediate even between healthy network turns. The
+        // borrowed session must reject access and materialize terminal state;
+        // public observe owns and drops this session on the same error.
+        assert!(viewer.io().is_err());
+        assert!(viewer.is_closed());
+    });
+}
+#[test]
+fn abandoning_an_already_open_sessions_observer_cannot_leave_its_connection_live() {
+    run(|c, h| async move {
+        let (_host, viewer) = crate::session_startup::running::tests::pair_initialized(
+            &c,
+            &h,
+            capabilities(),
+            |_| {},
+        )
+        .await;
+        drop(viewer.observe(no_launch(), Policy::default(), |_| {
+            panic!("unpolled selection")
+        }));
+        assert!(c.checkpoint().is_err());
+        assert!(h.checkpoint().is_ok());
+    });
+}
