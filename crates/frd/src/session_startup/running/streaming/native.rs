@@ -116,12 +116,31 @@ struct NativePair {
     source_pid: u32,
     n: u128,
 }
-#[allow(clippy::too_many_lines)]
 async fn native_pair(c: &Cx, h: &Cx, image: &Path, target_image: &Path) -> NativePair {
+    Box::pin(native_pair_with_feedback(c, h, image, target_image, false)).await
+}
+
+#[allow(clippy::too_many_lines)]
+async fn native_pair_with_feedback(
+    c: &Cx,
+    h: &Cx,
+    image: &Path,
+    target_image: &Path,
+    feedback: bool,
+) -> NativePair {
     use crate::session_startup::running::controlled::tests::attach;
     let mut source_display = Display::start();
     let mut target_display = Display::start();
-    let (mut host, mut viewer) = pair_initialized(c, h, capabilities(), |_| {}).await;
+    let mut caps = capabilities();
+    if feedback {
+        caps.push(Capability {
+            name: fr_wire::receiver_metrics::CAPABILITY.into(),
+            version: fr_wire::receiver_metrics::VERSION,
+            required: false,
+        });
+        caps.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    let (mut host, mut viewer) = pair_initialized(c, h, caps, |_| {}).await;
     let (hc, vc) = attach(&mut host, &mut viewer, c, h, MediaRole::Configuration, 18).await;
     let (hr, vr) = attach(&mut host, &mut viewer, c, h, MediaRole::Recovery, 19).await;
     let (hv, vv) = attach(&mut host, &mut viewer, c, h, MediaRole::Video, 20).await;
@@ -708,6 +727,93 @@ fn actual_hevc_streams_unpolled_viewer_serve_is_terminal() {
             .await
             .unwrap();
         control.revoke();
+        streaming
+            .reap_media(&c, Deadline::after(&c, Duration::from_secs(1)).unwrap())
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
+#[ignore = "explicit native lane requires FR_NATIVE_TEST_WORKER and Xvfb"]
+fn actual_hevc_streams_receiver_feedback_slows_capture_with_real_decoder_and_pixels() {
+    let image = worker_image();
+    let proxy = decoder_proxy(&image, 90);
+    run(|c, h| async move {
+        let NativePair {
+            mut streaming,
+            viewer,
+            v_media,
+            decoder,
+            control,
+            mut source_display,
+            mut target_display,
+            source_pid,
+            mut n,
+            ..
+        } = Box::pin(native_pair_with_feedback(&c, &h, &image, &proxy, true)).await;
+        streaming
+            .enable_adaptive_capture(Duration::from_millis(200))
+            .unwrap();
+        let initial_interval = streaming.pacing().unwrap().interval_us();
+        let decoder_pid = decoder.worker_id();
+        let mut receiving = viewer.into_streaming(v_media, decoder).unwrap();
+        let stop = receiving.control();
+        let colors = [0x0020_4060, 0x0060_4020, 0x0020_5050, 0x0050_3070];
+        let mut color_index = 0;
+        let mut pictures = 0;
+        let mut callbacks = 0;
+        let until = now(&c).unwrap() + 3_300_000;
+        source_display.paint(colors[color_index]);
+        let (a, b) = Box::pin(support::both(
+            streaming.serve(|| nonce(&mut n), || None, block),
+            receiving.serve(
+                |_, event| {
+                    callbacks += 1;
+                    if event.is_some() {
+                        target_display.assert_pixel(colors[color_index]);
+                        pictures += 1;
+                        color_index = (color_index + 1) % colors.len();
+                        source_display.paint(colors[color_index]);
+                    }
+                    if now(&c).unwrap() >= until {
+                        assert!(control.check().is_ok(), "feedback blocked renewal");
+                        stop.stop();
+                        control.revoke();
+                    }
+                    Ok(())
+                },
+                |_| {},
+                block,
+            ),
+        ))
+        .await;
+        assert!(a.is_err() && b.is_err());
+        assert!(support::clock(&c) >= until, "premature close: {a:?} {b:?}");
+        assert!(pictures >= 8, "backoff stalled real HEVC presentation");
+        assert_eq!(receiving.statistics().decoded, pictures);
+        assert!(
+            callbacks > pictures * 3,
+            "native decoding blocked UI service"
+        );
+        assert!(receiving.statistics().network_turns > pictures * 3);
+        assert!(streaming.receiver_feedback_reports() >= 20);
+        assert!(receiving.receiver_feedback_reports() >= streaming.receiver_feedback_reports());
+        assert!(receiving.receiver_feedback_reports() <= 80);
+        let pacing = streaming.pacing().unwrap();
+        assert!(pacing.interval_us() > initial_interval);
+        assert!(
+            pacing
+                .decisions()
+                .any(|r| r.reason == fr_media::pacing::Reason::DecoderWork),
+            "real decoder load did not reach capture admission"
+        );
+        assert_eq!(streaming.worker_id(), Some(source_pid));
+        assert_eq!(receiving.worker_id(), decoder_pid);
+        receiving
+            .reap_media(&c, Deadline::after(&c, Duration::from_secs(1)).unwrap())
+            .await
+            .unwrap();
         streaming
             .reap_media(&c, Deadline::after(&c, Duration::from_secs(1)).unwrap())
             .await
