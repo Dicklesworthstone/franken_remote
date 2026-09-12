@@ -4,24 +4,35 @@ use super::*;
 use crate::session_startup::{NativePublisher, PublisherError, PublisherPolicy};
 
 async fn publish(
-    mut host: StartupHost,
+    host: StartupHost,
     source: &Display,
     image: &Path,
     notices: &AtomicUsize,
     policy: PublisherPolicy,
     selected: &AtomicUsize,
 ) -> Result<NativePublisher, PublisherError> {
-    while !host.is_complete() {
-        host.drive(Duration::from_millis(1))
-            .await
-            .map_err(PublisherError::Session)?;
-        if notices.load(Ordering::Acquire) != 0
-            && let Some(approval) = host.approval()
-        {
-            approval.decide(true).unwrap();
+    let approval = std::sync::Mutex::new(None::<crate::session_startup::Approval>);
+    let cx = host.cx.clone();
+    let opening = host.open(Duration::from_millis(1), |request, role| {
+        assert_eq!(role, Intent::Observe);
+        let mut slot = approval.lock().unwrap();
+        assert!(slot.is_none(), "local consent was notified twice");
+        *slot = Some(request);
+        Ok(())
+    });
+    let local_consent = async {
+        loop {
+            if notices.load(Ordering::Acquire) != 0
+                && let Some(request) = approval.lock().unwrap().take()
+            {
+                request.decide(true).unwrap();
+                return;
+            }
+            asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
         }
-    }
-    let host = host.finish().unwrap().into_running().unwrap();
+    };
+    let (host, ()) = Box::pin(support::both(opening, local_consent)).await;
+    let host = host.map_err(PublisherError::Session)?;
     let mut nonce_value = 9000;
     host.publish_display(
         source.launch(image, Role::Capture, 161),
