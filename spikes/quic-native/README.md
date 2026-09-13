@@ -12,6 +12,11 @@ plus a cross-machine pair over a real tailnet direct path.
 **The verdict and full evidence table live in [`RESULTS.md`](RESULTS.md).**
 Raw scenario output is retained under `results/`.
 
+The current manifest selects released Asupersync 0.5.0 at
+`78b64636e99fea4ea2d868096576021dd3b8e519`. This candidate has not yet been
+executed by this harness. The historical results retain their original source
+identities and NO-GO verdict; they do not qualify the new pin.
+
 ## Layout
 
 - `src/main.rs` — scenario dispatch; one scenario per process invocation.
