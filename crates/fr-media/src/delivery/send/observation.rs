@@ -7,6 +7,12 @@ pub(super) struct PendingObservation {
     pub(super) send_by: u64,
 }
 impl SendCache {
+    /// Last admitted source observation, retaining its ORIGINAL host timestamp.
+    /// This is neither proof of peer receipt nor permission to extend its age.
+    pub const fn latest_progress(&self) -> Option<Progress> {
+        self.last_progress
+    }
+
     /// Queue an actual full-source comparison of the LAST inserted picture.
     /// The capture adapter supplies evidence; a heartbeat must never call this.
     /// Retain one coalesced metadata value, not the encoded picture. A duplicate

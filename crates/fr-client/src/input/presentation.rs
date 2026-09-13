@@ -353,6 +353,15 @@ impl PresentedInput {
             }
         }
     }
+    /// Authenticated runtime reporting uses the existing visible-view evidence;
+    /// this neither admits input nor extends any ticket, source age or deadline.
+    pub fn presented_sample(
+        &mut self,
+        now: ClientInstant,
+    ) -> Result<fr_wire::presented::Sample, Error> {
+        self.input.tick(now)?;
+        self.view.presented_sample(now.0).map_err(Error::Media)
+    }
     pub fn pointer(
         &mut self,
         position: DesktopPoint,

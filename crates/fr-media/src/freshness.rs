@@ -432,6 +432,23 @@ impl ViewTracker {
             source,
         })
     }
+    /// A positive protocol report can only come from the exact live receiver's
+    /// already qualified visible frame. Keep the ORIGINAL host source identity;
+    /// a caller must not infer it from arrival time or the next unseen picture.
+    pub fn presented_sample(&mut self, now_us: u64) -> Result<fr_wire::presented::Sample, Error> {
+        let evidence = self.evidence(now_us)?;
+        let descriptor = self.visible.ok_or(Error::NotSubmitted)?;
+        let (observed_us, source) = self.visible_source.ok_or(Error::SourceUnknown)?;
+        Ok(fr_wire::presented::Sample {
+            stamp: fr_wire::presented::Stamp {
+                frame: descriptor.frame,
+                captured_us: descriptor.capture_micros,
+                observed_us,
+                source,
+            },
+            age_upper_us: evidence.source_age_upper_us,
+        })
+    }
     pub fn hide(&mut self) {
         self.pending = None;
         self.visible = None;
