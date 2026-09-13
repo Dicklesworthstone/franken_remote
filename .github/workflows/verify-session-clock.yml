@@ -33,32 +33,11 @@ jobs:
               data=base64.b64decode(row['content'])
               assert blob(data)==oid
               return data
-          before={
-              'crates/frd/src/media/clock.rs':'a7b5c8497d662c3b5ae636bb49fdb33c38ee04f0',
-              'crates/frd/src/session_startup.rs':'0f0ff29824793b2e92b3cee875577378759b43ff',
-              'crates/frd/src/session_startup/running.rs':'e173f6c5fca1c1196d0ef828468ca3631d08a571',
-              'crates/frd/src/session_startup/running/controlled/tests.rs':'3d9ff57f828e72fd0fba867b62c9f605f7c7e7b9',
-              'crates/frd/src/session_startup/running/controlled/tests/input_wake.rs':'345b1bafad86457ca89f06d5c95d56ddb555e531',
-              'crates/frd/src/session_startup/running/tests.rs':'b5a304297c8ef7fd4a20f6c21a199f784d9635d5',
-              'crates/frd/src/session_startup/running/tests/session_clock.rs':None,
-              'crates/frd/src/session_startup/viewer.rs':'30cf4285db4347335d273a95c81ea37e410962e9',
-              'crates/frd/src/session_startup/viewer/controlled.rs':'6353a10b9e149df6c20c0e2151e75968dbef32ea',
-              'crates/frd/src/session_startup/viewer/controlled/tests.rs':'5295f221318f445475c54308a7e04cbd4319ba1a',
-              'crates/frd/src/session_startup/viewer/controlled/tests/streaming.rs':'ee8f82915ce12bd169cff18f4fe110c323f5b093',
-          }
-          after={
-              'crates/frd/src/media/clock.rs':'e80c6831bc7e0b99eee9ece98a10b5529cb157ce',
-              'crates/frd/src/session_startup.rs':'a1743bbdfde97da97ae3eebe0ed2a13862842163',
-              'crates/frd/src/session_startup/running.rs':'e6d5a55d963ffc56b38683e6c4065bf1b780223e',
-              'crates/frd/src/session_startup/running/controlled/tests.rs':'09c766e18a032a1e5c2225b9b89b677059ec1b53',
-              'crates/frd/src/session_startup/running/controlled/tests/input_wake.rs':'821ba0f34f98e11a8a9dfc080b083947ec334d82',
-              'crates/frd/src/session_startup/running/tests.rs':'2938bf44fb161e4f26e943f60178d73f48fcf0ff',
-              'crates/frd/src/session_startup/running/tests/session_clock.rs':'d2af9db229042d394192c610dc6cfb691ca5f4f1',
-              'crates/frd/src/session_startup/viewer.rs':'4d1c406127b972a1526483733a755ad2241863a8',
-              'crates/frd/src/session_startup/viewer/controlled.rs':'c9dd192067764a3ec04b437844ec9d931bf13325',
-              'crates/frd/src/session_startup/viewer/controlled/tests.rs':'919a3a73bf960c5a53612e5b040b085627e60168',
-              'crates/frd/src/session_startup/viewer/controlled/tests/streaming.rs':'7c1d0717f320ea5a88ce7127f0a8d5c6c29fd07e',
-          }
+          manifest=json.loads(fetch('5a6b3f706cc210a41c42933d52f06e1952e3fded'))
+          before,after=manifest['before'],manifest['after']
+          assert len(after)==11 and set(before)==set(after)
+          for path in after:
+              assert path.startswith('crates/frd/src/') and path.endswith('.rs') and '..' not in Path(path).parts
           current={p:blob(Path(p).read_bytes()) if Path(p).is_file() else None for p in before}
           if current!=after:
               assert current==before, 'concurrent source changes require reconciliation'
@@ -71,7 +50,7 @@ jobs:
               c=json.loads(data)
               assert c['base']=='fc6c5cf524b7138e47bc4c054176eabbef7bd8eb'
               assert set(c['after']).issubset(after)
-              patches=[c['patch'].encode(),fetch('1ae8c6f67065b46ab2a8724adb810100292c2ee4')]
+              patches=[c['patch'].encode(),fetch('1ae8c6f67065b46ab2a8724adb810100292c2ee4'),fetch('b8c37028cb91e9bbcb77d27af2e39db59336cee4')]
               for i,data in enumerate(patches):
                   patch=Path(os.environ['RUNNER_TEMP'],f'session-clock-{i}.patch')
                   patch.write_bytes(data)
@@ -99,7 +78,7 @@ jobs:
           cargo test -p frd --lib input_wake --locked -- --test-threads=4
           cargo test -p frd --test clock_sync --locked -- --test-threads=4
           for attempt in 1 2 3; do
-            cargo test -p frd --lib slow_real_decoder_process_reduces_remote_capture_without_stopping_session_service --locked -- --exact session_startup::viewer::streaming::tests::slow_real_decoder_process_reduces_remote_capture_without_stopping_session_service --test-threads=1
+            cargo test -p frd --lib session_startup::viewer::streaming::tests::slow_real_decoder_process_reduces_remote_capture_without_stopping_session_service --locked -- --exact --test-threads=1
           done
       - name: Retain verified source objects without reference writes
         env:
