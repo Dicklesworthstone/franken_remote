@@ -40,39 +40,86 @@ impl ViewerSession {
         request: Request,
         policy: Policy,
     ) -> impl Future<Output = Result<(Granted, InputClient), Error>> + 'a {
-        // Construct outside the async body: scheduling cannot restart the TTL.
-        let pending = now(&self.cx).map_err(Error::Session).and_then(|t| {
-            RequestControl::new(
-                request,
-                channels.channel_binding(),
-                self.opened.selection.limits,
-                ClientInstant(t),
-            )
-            .map_err(Error::ControlRequest)
-        });
-        let guard = Attempt {
+        let pending = self.prepare_control_request(channels, request);
+        Attempt {
+            session: self,
+            clock: Clock::Borrowed(clock),
+            complete: false,
+        }
+        .run(channels, request, pending, policy)
+    }
+    /// Use the already enabled session-owned exchange without claiming another
+    /// endpoint or requiring the application to detach/rebuild it. Success puts
+    /// that same endpoint back, including its outstanding probe and correlation,
+    /// for ordinary viewer service and `into_controlled_synchronized` handoff.
+    /// No clock, input attachment or presentation evidence is enabled implicitly.
+    pub fn request_control_synchronized<'a>(
+        &'a mut self,
+        channels: &'a NegotiatedInput,
+        request: Request,
+        policy: Policy,
+    ) -> impl Future<Output = Result<(Granted, InputClient), Error>> + 'a {
+        let pending = self.prepare_control_request(channels, request);
+        let clock = Clock::Session(self.clock.take().map(Box::new));
+        Attempt {
             session: self,
             clock,
             complete: false,
-        };
-        async move {
-            let mut guard = guard;
-            let mut pending = pending?;
-            guard.check(channels, request, pending.deadline().0)?;
-            let result = guard
-                .exchange(channels, request, &mut pending, policy)
-                .await?;
-            guard.complete = true;
-            Ok(result)
+        }
+        .run(channels, request, pending, policy)
+    }
+    fn prepare_control_request(
+        &self,
+        channels: &NegotiatedInput,
+        request: Request,
+    ) -> Result<RequestControl, Error> {
+        // Construct outside the async body: scheduling cannot restart the TTL.
+        let t = now(&self.cx).map_err(Error::Session)?;
+        RequestControl::new(
+            request,
+            channels.channel_binding(),
+            self.opened.selection.limits,
+            ClientInstant(t),
+        )
+        .map_err(Error::ControlRequest)
+    }
+}
+enum Clock<'a> {
+    Borrowed(&'a mut ClockSync),
+    Session(Option<Box<ClockSync>>),
+}
+impl Clock<'_> {
+    fn get(&mut self) -> Result<&mut ClockSync, Error> {
+        match self {
+            Self::Borrowed(clock) => Ok(clock),
+            Self::Session(clock) => clock.as_deref_mut().ok_or(Error::ClockNotReady),
         }
     }
 }
 struct Attempt<'a> {
     session: &'a mut ViewerSession,
-    clock: &'a mut ClockSync,
+    clock: Clock<'a>,
     complete: bool,
 }
-impl Attempt<'_> {
+impl<'a> Attempt<'a> {
+    async fn run(
+        mut self,
+        channels: &'a NegotiatedInput,
+        request: Request,
+        pending: Result<RequestControl, Error>,
+        policy: Policy,
+    ) -> Result<(Granted, InputClient), Error> {
+        let mut pending = pending?;
+        self.check(channels, request, pending.deadline().0)?;
+        let result = self
+            .exchange(channels, request, &mut pending, policy)
+            .await?;
+        if let Clock::Session(clock) = &mut self.clock {
+            self.session.clock = clock.take().map(|clock| *clock);
+        }
+        self.complete = true;
+        Ok(result)
+    }
     fn check(
         &mut self,
         channels: &NegotiatedInput,
@@ -89,9 +136,10 @@ impl Attempt<'_> {
         {
             return Err(Error::ControlNotNegotiated);
         }
-        if request.parent != self.session.opened.binding
+        if self.session.clock.is_some()
+            || request.parent != self.session.opened.binding
             || channels.limits() != selected.limits
-            || !self.clock.matches_viewer(
+            || !self.clock.get()?.matches_viewer(
                 &self.session.transport,
                 self.session.opened.binding,
                 selected.limits,
@@ -122,13 +170,16 @@ impl Attempt<'_> {
         loop {
             self.check(channels, request, until)?;
             self.clock
+                .get()?
                 .receive(&mut self.session.transport, |_, _| Ok(Disposition::Blocked))
                 .map_err(Error::Clock)?;
             self.clock
+                .get()?
                 .service(&mut self.session.transport)
                 .map_err(Error::Clock)?;
             let sample = self
                 .clock
+                .get()?
                 .correlation(&mut self.session.transport)
                 .map_err(Error::Clock)?;
             let t = self.check(channels, request, until)?;
@@ -206,7 +257,9 @@ impl Drop for Attempt<'_> {
     fn drop(&mut self) {
         if !self.complete {
             self.session.close();
-            self.clock.stop();
+            if let Ok(clock) = self.clock.get() {
+                clock.stop();
+            }
         }
     }
 }

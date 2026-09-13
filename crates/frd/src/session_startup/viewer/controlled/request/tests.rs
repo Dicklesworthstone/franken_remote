@@ -55,7 +55,7 @@ struct Fixture {
     host: HostSession,
     viewer: ViewerSession,
     host_clock: ClockSync,
-    clock: ClockSync,
+    clock: Option<ClockSync>,
     channels: NegotiatedInput,
     broker: GrantBroker,
     observation: ObservationControl,
@@ -76,6 +76,9 @@ fn target() -> Target {
     }
 }
 async fn fixture(c: &Cx, h: &Cx) -> Fixture {
+    Box::pin(fixture_with_clock(c, h, false)).await
+}
+async fn fixture_with_clock(c: &Cx, h: &Cx, synchronized: bool) -> Fixture {
     let mut capabilities: Vec<_> = [
         fr_wire::clock::CAPABILITY,
         fr_wire::decoder::CAPABILITY,
@@ -109,16 +112,23 @@ async fn fixture(c: &Cx, h: &Cx) -> Fixture {
     let observation = host.observation().unwrap();
     let (q, routes) = host.io().unwrap();
     let host_clock = ClockSync::host(observation.clone(), q, routes, parent, &selection).unwrap();
-    let (q, routes) = viewer.io().unwrap();
-    let clock = ClockSync::viewer(
-        c.clone(),
-        q,
-        routes,
-        parent,
-        &selection,
-        ClockPolicy::default(),
-    )
-    .unwrap();
+    let clock = if synchronized {
+        viewer.enable_clock_sync(ClockPolicy::default()).unwrap();
+        None
+    } else {
+        let (q, routes) = viewer.io().unwrap();
+        Some(
+            ClockSync::viewer(
+                c.clone(),
+                q,
+                routes,
+                parent,
+                &selection,
+                ClockPolicy::default(),
+            )
+            .unwrap(),
+        )
+    };
     let seat = Seat::default();
     let broker = host.negotiated_control_broker(seat.clone(), hn).unwrap();
     Fixture {
@@ -219,7 +229,7 @@ async fn host_until_granted(
     (driver, input)
 }
 
-async fn accepted(c: Cx, h: Cx, delay: u64) {
+async fn accepted(c: Cx, h: Cx, delay: u64, synchronized: bool) {
     let Fixture {
         mut host,
         mut viewer,
@@ -230,15 +240,24 @@ async fn accepted(c: Cx, h: Cx, delay: u64) {
         observation,
         seat,
         request,
-    } = Box::pin(fixture(&c, &h)).await;
+    } = Box::pin(fixture_with_clock(&c, &h, synchronized)).await;
     let effects = Arc::new(AtomicUsize::new(0));
     let done = AtomicBool::new(false);
     let initial = observation.deadline(Duration::from_secs(3)).unwrap().time();
     let (answer, (driver, native)) = Box::pin(support::both(
         async {
-            let answer = viewer
-                .request_control(&channels, &mut clock, request, Policy::default())
-                .await;
+            let answer = match &mut clock {
+                Some(clock) => {
+                    viewer
+                        .request_control(&channels, clock, request, Policy::default())
+                        .await
+                }
+                None => {
+                    viewer
+                        .request_control_synchronized(&channels, request, Policy::default())
+                        .await
+                }
+            };
             done.store(true, Ordering::SeqCst);
             answer
         },
@@ -261,7 +280,15 @@ async fn accepted(c: Cx, h: Cx, delay: u64) {
     assert!(input.ticket_deadline().is_some());
     assert!(seat.is_occupied());
     assert!(!viewer.is_closed());
-    assert!(clock.correlation(viewer.io().unwrap().0).unwrap().is_some());
+    if let Some(clock) = &mut clock {
+        assert!(clock.correlation(viewer.io().unwrap().0).unwrap().is_some());
+    } else {
+        assert!(viewer.clock_correlation().unwrap().is_some());
+        assert_eq!(
+            viewer.enable_clock_sync(ClockPolicy::default()),
+            Err(crate::media::clock::Error::Configuration)
+        );
+    }
     if delay > 1_000_000 {
         assert!(observation.deadline(Duration::from_secs(3)).unwrap().time() > initial);
     }
@@ -282,24 +309,33 @@ async fn accepted(c: Cx, h: Cx, delay: u64) {
 }
 #[test]
 fn real_broker_grant_is_bound_to_input_without_inventing_presentation() {
-    run(|c, h| accepted(c, h, 0));
+    run(|c, h| accepted(c, h, 0, false));
 }
 #[test]
 fn delayed_local_approval_keeps_observation_and_clock_alive() {
-    run(|c, h| accepted(c, h, 1_100_000));
+    run(|c, h| accepted(c, h, 1_100_000, false));
 }
 #[test]
 fn unpolled_request_drop_closes_original_session_without_reserving_seat() {
     run(|c, h| async move {
         let mut f = Box::pin(fixture(&c, &h)).await;
-        let request =
-            f.viewer
-                .request_control(&f.channels, &mut f.clock, f.request, Policy::default());
+        let request = f.viewer.request_control(
+            &f.channels,
+            f.clock.as_mut().unwrap(),
+            f.request,
+            Policy::default(),
+        );
         drop(request);
         assert!(f.viewer.is_closed());
         assert!(!f.seat.is_occupied());
         assert!(f.broker.request().is_none());
-        assert!(f.clock.correlation(&mut f.viewer.transport).is_err());
+        assert!(
+            f.clock
+                .as_mut()
+                .unwrap()
+                .correlation(&mut f.viewer.transport)
+                .is_err()
+        );
     });
 }
 #[test]
@@ -309,7 +345,12 @@ fn wrong_session_request_refuses_before_native_authority() {
         f.request.parent.remote_session = RemoteSessionId::from_raw(99);
         let result = f
             .viewer
-            .request_control(&f.channels, &mut f.clock, f.request, Policy::default())
+            .request_control(
+                &f.channels,
+                f.clock.as_mut().unwrap(),
+                f.request,
+                Policy::default(),
+            )
             .await;
         assert!(matches!(result, Err(Error::WrongBinding)));
         assert!(f.viewer.is_closed());
@@ -321,9 +362,64 @@ fn wrong_session_request_refuses_before_native_authority() {
 fn request_deadline_includes_time_before_its_first_poll() {
     run(|c, h| async move {
         let mut f = Box::pin(fixture(&c, &h)).await;
+        let request = f.viewer.request_control(
+            &f.channels,
+            f.clock.as_mut().unwrap(),
+            f.request,
+            Policy::default(),
+        );
+        asupersync::time::sleep(c.now(), Duration::from_millis(2050)).await;
+        assert!(matches!(request.await, Err(Error::Expired)));
+        assert!(f.viewer.is_closed());
+        assert!(!f.seat.is_occupied());
+        assert!(f.broker.request().is_none());
+    });
+}
+
+#[test]
+fn session_owned_clock_survives_grant_and_rejects_duplicate_ownership() {
+    run(|c, h| accepted(c, h, 0, true));
+}
+#[test]
+fn session_owned_clock_and_observation_renew_during_local_approval() {
+    run(|c, h| accepted(c, h, 1_100_000, true));
+}
+#[test]
+fn synchronized_request_does_not_create_an_unconfigured_clock() {
+    run(|c, h| async move {
+        let mut f = Box::pin(fixture(&c, &h)).await;
+        let result = f
+            .viewer
+            .request_control_synchronized(&f.channels, f.request, Policy::default())
+            .await;
+        assert!(matches!(result, Err(Error::ClockNotReady)));
+        assert!(f.viewer.is_closed());
+        assert!(!f.seat.is_occupied());
+        assert!(f.broker.request().is_none());
+    });
+}
+#[test]
+fn dropping_unpolled_synchronized_request_fences_its_owned_clock() {
+    run(|c, h| async move {
+        let mut f = Box::pin(fixture_with_clock(&c, &h, true)).await;
+        assert!(f.viewer.clock.is_some());
+        drop(
+            f.viewer
+                .request_control_synchronized(&f.channels, f.request, Policy::default()),
+        );
+        assert!(f.viewer.is_closed());
+        assert!(f.viewer.clock.is_none());
+        assert!(!f.seat.is_occupied());
+        assert!(f.broker.request().is_none());
+    });
+}
+#[test]
+fn synchronized_request_deadline_also_starts_before_polling() {
+    run(|c, h| async move {
+        let mut f = Box::pin(fixture_with_clock(&c, &h, true)).await;
         let request =
             f.viewer
-                .request_control(&f.channels, &mut f.clock, f.request, Policy::default());
+                .request_control_synchronized(&f.channels, f.request, Policy::default());
         asupersync::time::sleep(c.now(), Duration::from_millis(2050)).await;
         assert!(matches!(request.await, Err(Error::Expired)));
         assert!(f.viewer.is_closed());
