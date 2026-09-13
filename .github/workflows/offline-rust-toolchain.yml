@@ -3,7 +3,11 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['.github/workflows/offline-rust-toolchain.yml']
+    paths:
+      - '.github/workflows/offline-rust-toolchain.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
 permissions:
   contents: read
 jobs:
