@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
-      - name: Stage exact checked source without reference writes
+      - name: Stage reconciled source without reference writes
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -28,31 +28,59 @@ jobs:
           import base64, hashlib, json, lzma, os, subprocess
           from pathlib import Path
           def blob(data): return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
-          oid='7739b3fc0ea03ca39246d432e6104b9b715af25e'
-          row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}'],timeout=30))
-          encoded=base64.b64decode(row['content'])
-          assert len(encoded)==10316 and blob(encoded)==oid
-          dec=lzma.LZMADecompressor()
-          data=dec.decompress(base64.b64decode(encoded,validate=True),max_length=33307)
-          assert dec.eof and not dec.unused_data and len(data)==33306
-          assert hashlib.sha256(data).hexdigest()=='c1b2771f068a6ad674adaa39345dddf18c16103e1ff167dfdb27a4dde995938a'
-          c=json.loads(data)
-          assert c['base']=='fc6c5cf524b7138e47bc4c054176eabbef7bd8eb'
-          assert len(c['after'])==9 and set(c['before'])==set(c['after'])
-          current={}
-          for path in c['before']:
-              assert path.startswith('crates/frd/src/') and path.endswith('.rs') and '..' not in Path(path).parts
-              current[path]=blob(Path(path).read_bytes()) if Path(path).is_file() else None
-          if current!=c['after']:
-              assert current==c['before'], 'concurrent source changes require reconciliation'
-              patch=Path(os.environ['RUNNER_TEMP'],'session-clock.patch')
-              patch.write_text(c['patch'])
-              stats=subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
-              assert {line.split('\t',2)[2] for line in stats.splitlines()}==set(c['after'])
-              subprocess.run(['git','apply','--check',str(patch)],check=True)
-              subprocess.run(['git','apply',str(patch)],check=True)
-          for path, expected in c['after'].items(): assert blob(Path(path).read_bytes())==expected, path
-          Path(os.environ['RUNNER_TEMP'],'session-clock-paths.json').write_text(json.dumps(c['after']))
+          def fetch(oid):
+              row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}'],timeout=30))
+              data=base64.b64decode(row['content'])
+              assert blob(data)==oid
+              return data
+          before={
+              'crates/frd/src/media/clock.rs':'a7b5c8497d662c3b5ae636bb49fdb33c38ee04f0',
+              'crates/frd/src/session_startup.rs':'0f0ff29824793b2e92b3cee875577378759b43ff',
+              'crates/frd/src/session_startup/running.rs':'e173f6c5fca1c1196d0ef828468ca3631d08a571',
+              'crates/frd/src/session_startup/running/controlled/tests.rs':'3d9ff57f828e72fd0fba867b62c9f605f7c7e7b9',
+              'crates/frd/src/session_startup/running/controlled/tests/input_wake.rs':'345b1bafad86457ca89f06d5c95d56ddb555e531',
+              'crates/frd/src/session_startup/running/tests.rs':'b5a304297c8ef7fd4a20f6c21a199f784d9635d5',
+              'crates/frd/src/session_startup/running/tests/session_clock.rs':None,
+              'crates/frd/src/session_startup/viewer.rs':'30cf4285db4347335d273a95c81ea37e410962e9',
+              'crates/frd/src/session_startup/viewer/controlled.rs':'6353a10b9e149df6c20c0e2151e75968dbef32ea',
+              'crates/frd/src/session_startup/viewer/controlled/tests.rs':'5295f221318f445475c54308a7e04cbd4319ba1a',
+              'crates/frd/src/session_startup/viewer/controlled/tests/streaming.rs':'ee8f82915ce12bd169cff18f4fe110c323f5b093',
+          }
+          after={
+              'crates/frd/src/media/clock.rs':'e80c6831bc7e0b99eee9ece98a10b5529cb157ce',
+              'crates/frd/src/session_startup.rs':'a1743bbdfde97da97ae3eebe0ed2a13862842163',
+              'crates/frd/src/session_startup/running.rs':'e6d5a55d963ffc56b38683e6c4065bf1b780223e',
+              'crates/frd/src/session_startup/running/controlled/tests.rs':'09c766e18a032a1e5c2225b9b89b677059ec1b53',
+              'crates/frd/src/session_startup/running/controlled/tests/input_wake.rs':'821ba0f34f98e11a8a9dfc080b083947ec334d82',
+              'crates/frd/src/session_startup/running/tests.rs':'2938bf44fb161e4f26e943f60178d73f48fcf0ff',
+              'crates/frd/src/session_startup/running/tests/session_clock.rs':'d2af9db229042d394192c610dc6cfb691ca5f4f1',
+              'crates/frd/src/session_startup/viewer.rs':'4d1c406127b972a1526483733a755ad2241863a8',
+              'crates/frd/src/session_startup/viewer/controlled.rs':'c9dd192067764a3ec04b437844ec9d931bf13325',
+              'crates/frd/src/session_startup/viewer/controlled/tests.rs':'919a3a73bf960c5a53612e5b040b085627e60168',
+              'crates/frd/src/session_startup/viewer/controlled/tests/streaming.rs':'7c1d0717f320ea5a88ce7127f0a8d5c6c29fd07e',
+          }
+          current={p:blob(Path(p).read_bytes()) if Path(p).is_file() else None for p in before}
+          if current!=after:
+              assert current==before, 'concurrent source changes require reconciliation'
+              encoded=fetch('7739b3fc0ea03ca39246d432e6104b9b715af25e')
+              assert len(encoded)==10316
+              dec=lzma.LZMADecompressor()
+              data=dec.decompress(base64.b64decode(encoded,validate=True),max_length=33307)
+              assert dec.eof and not dec.unused_data and len(data)==33306
+              assert hashlib.sha256(data).hexdigest()=='c1b2771f068a6ad674adaa39345dddf18c16103e1ff167dfdb27a4dde995938a'
+              c=json.loads(data)
+              assert c['base']=='fc6c5cf524b7138e47bc4c054176eabbef7bd8eb'
+              assert set(c['after']).issubset(after)
+              patches=[c['patch'].encode(),fetch('1ae8c6f67065b46ab2a8724adb810100292c2ee4')]
+              for i,data in enumerate(patches):
+                  patch=Path(os.environ['RUNNER_TEMP'],f'session-clock-{i}.patch')
+                  patch.write_bytes(data)
+                  stats=subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
+                  assert {line.split('\t',2)[2] for line in stats.splitlines()}.issubset(after)
+                  subprocess.run(['git','apply','--check',str(patch)],check=True)
+                  subprocess.run(['git','apply',str(patch)],check=True)
+          for path,expected in after.items(): assert blob(Path(path).read_bytes())==expected,path
+          Path(os.environ['RUNNER_TEMP'],'session-clock-paths.json').write_text(json.dumps(after))
           subprocess.run(['git','diff','--check'],check=True)
           PY
       - name: Select pinned compiler and native SDKs
@@ -64,11 +92,15 @@ jobs:
         run: |
           ./scripts/verify.sh fast
           ./scripts/verify.sh docs
-      - name: Repeat session and control-handoff clock regressions
+      - name: Repeat session clock, handoff, input wake and decoder pressure regressions
         run: |
           cargo test -p frd --lib session_clock --locked -- --test-threads=1
           cargo test -p frd --lib session_clock --locked -- --test-threads=8
+          cargo test -p frd --lib input_wake --locked -- --test-threads=4
           cargo test -p frd --test clock_sync --locked -- --test-threads=4
+          for attempt in 1 2 3; do
+            cargo test -p frd --lib slow_real_decoder_process_reduces_remote_capture_without_stopping_session_service --locked -- --exact session_startup::viewer::streaming::tests::slow_real_decoder_process_reduces_remote_capture_without_stopping_session_service --test-threads=1
+          done
       - name: Retain verified source objects without reference writes
         env:
           GH_TOKEN: ${{ github.token }}
@@ -77,7 +109,7 @@ jobs:
           import base64, hashlib, json, os, subprocess
           from pathlib import Path
           manifest=Path(os.environ['RUNNER_TEMP'],'session-clock-paths.json')
-          for path, expected in json.loads(manifest.read_text()).items():
+          for path,expected in json.loads(manifest.read_text()).items():
               data=Path(path).read_bytes()
               assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()==expected
               body=json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()})
