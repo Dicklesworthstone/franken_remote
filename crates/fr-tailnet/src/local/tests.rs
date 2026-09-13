@@ -6,7 +6,12 @@ use crate::{
     DESKTOP_CAPABILITY, Permissions, Scope,
     metadata::{Status, WhoIs, evaluate},
 };
-use asupersync::{runtime::RuntimeBuilder, types::CancelKind};
+use asupersync::{
+    Budget,
+    cx::cap,
+    runtime::{RuntimeBuilder, SpawnError},
+    types::CancelKind,
+};
 use serde_json::{Value, json};
 use std::{
     io::{Read, Write},
@@ -176,6 +181,94 @@ fn runtime() -> asupersync::runtime::Runtime {
         .enable_platform_reactor(true)
         .build()
         .unwrap()
+}
+
+#[test]
+fn runtime_context_localapi_keeps_narrowed_authority_during_real_lookup() {
+    type LookupCaps = cap::CapSet<false, true, false, true, false>;
+    let (status, who) = fixtures();
+    let server = Server::fixture(&status, &who, false);
+    let runtime = runtime();
+    let caller = runtime.request_cx_with_budget(Budget::INFINITE.with_cost_quota(17));
+    runtime.block_on(async {
+        let root = Cx::current().unwrap();
+        {
+            let _caller = Cx::set_current(Some(caller.clone()));
+            {
+                let _restriction = caller.restrict::<LookupCaps>().set_current_restricted();
+                let cx = Cx::current().unwrap();
+                assert_eq!(cx.task_id(), caller.task_id());
+                assert_eq!(cx.budget(), caller.budget());
+                assert!(!cx.capabilities().spawn);
+                assert!(cx.timer_driver().is_some());
+                assert!(cx.capabilities().io);
+                assert!(matches!(
+                    cx.spawn_blocking(|_| 42),
+                    Err(SpawnError::RuntimeUnavailable)
+                ));
+                let proof = server
+                    .client
+                    .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
+                    .await
+                    .unwrap();
+                assert!(proof.permissions().observe());
+                assert!(proof.permissions().control());
+                assert_eq!(server.calls.load(Ordering::SeqCst), 3);
+                assert!(!Cx::current().unwrap().capabilities().spawn);
+                assert_eq!(Cx::current().unwrap().budget(), caller.budget());
+
+                caller.cancel_fast(CancelKind::User);
+                assert_eq!(
+                    server
+                        .client
+                        .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
+                        .await
+                        .unwrap_err(),
+                    Error::Cancelled
+                );
+                assert!(cx.cancelled_by(CancelKind::User));
+                assert_eq!(server.calls.load(Ordering::SeqCst), 3);
+                assert!(!server.client.busy.load(Ordering::Acquire));
+            }
+            assert_eq!(Cx::current().unwrap().task_id(), caller.task_id());
+            assert_eq!(Cx::current().unwrap().capabilities(), caller.capabilities());
+        }
+        assert_eq!(Cx::current().unwrap().task_id(), root.task_id());
+        assert_eq!(Cx::current().unwrap().capabilities(), root.capabilities());
+    });
+}
+
+#[test]
+fn runtime_context_localapi_rejects_retained_timer_denial_before_socket_io() {
+    let (status, who) = fixtures();
+    let server = Server::fixture(&status, &who, false);
+    runtime().block_on(async {
+        let parent = Cx::current().unwrap();
+        let denied = {
+            let _restriction = parent.restrict::<cap::None>().set_current_restricted();
+            Cx::current().unwrap()
+        };
+        assert_eq!(Cx::current().unwrap().capabilities(), parent.capabilities());
+        assert!(Cx::current().unwrap().timer_driver().is_some());
+        assert!(denied.timer_driver().is_none());
+        assert!(!denied.capabilities().io);
+        assert!(matches!(
+            denied.spawn_blocking(|_| 42),
+            Err(SpawnError::RuntimeUnavailable)
+        ));
+        assert_eq!(
+            server
+                .client
+                .authorize_app_capability(&denied, endpoints(), GrantPolicy::default())
+                .await
+                .unwrap_err(),
+            Error::MissingRuntime
+        );
+        assert_eq!(server.calls.load(Ordering::SeqCst), 0);
+        assert!(!server.client.busy.load(Ordering::Acquire));
+        assert_eq!(Cx::current().unwrap().task_id(), parent.task_id());
+        assert_eq!(Cx::current().unwrap().capabilities(), parent.capabilities());
+    });
 }
 
 #[test]
