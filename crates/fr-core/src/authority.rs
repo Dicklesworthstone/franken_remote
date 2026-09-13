@@ -149,6 +149,8 @@ pub struct SessionAuthority {
     phase: Phase,
     observation_until: Option<HostInstant>,
     readiness: ViewReadiness,
+    view_until: Option<HostInstant>,
+    bounded_view: bool,
     lease: Option<Lease>,
     native_owner: Option<std::sync::Arc<()>>,
     observation_challenge: Option<Challenge>,
@@ -165,6 +167,7 @@ impl fmt::Debug for SessionAuthority {
             .field("phase", &self.phase)
             .field("observation_until", &self.observation_until)
             .field("readiness", &self.readiness)
+            .field("view_until", &self.view_until)
             .field("has_lease", &self.lease.is_some())
             .field(
                 "has_ticket",
@@ -196,6 +199,8 @@ impl SessionAuthority {
             phase: Phase::Identified,
             observation_until: None,
             readiness: ViewReadiness::Unready,
+            view_until: None,
+            bounded_view: false,
             lease: None,
             native_owner: None,
             observation_challenge: None,
@@ -284,6 +289,50 @@ impl SessionAuthority {
     pub fn mark_view_ready(&mut self, now: HostInstant) -> Result<(), AuthorityError> {
         self.check_time(now)?;
         self.check_observation_live(now)?;
+        if self.bounded_view {
+            return Err(AuthorityError::ViewUnready);
+        }
+        self.phase = Phase::Viewing;
+        self.readiness = ViewReadiness::Ready;
+        Ok(())
+    }
+
+    /// Select finite, evidence-backed readiness before exposing a remote view.
+    /// This cannot replace an already held lease, nor can the legacy readiness
+    /// setter disable it later. Observation remains independent and live.
+    pub fn require_view_evidence(&mut self, now: HostInstant) -> Result<(), AuthorityError> {
+        self.check_time(now)?;
+        self.check_observation_live(now)?;
+        if self.lease.is_some() {
+            return Err(AuthorityError::ControllerBusy);
+        }
+        self.bounded_view = true;
+        self.mark_view_stale();
+        Ok(())
+    }
+
+    /// Install a verifier's ORIGINAL host-clock source deadline, not receipt
+    /// time plus a fresh TTL. The containing authenticated media owner validates
+    /// the source identity and presentation stage. This never grants a lease.
+    /// A readiness lapse cannot revive an existing native owner, even if no
+    /// watchdog tick ran during the lapse: revoke/cleanup must precede a grant.
+    pub fn mark_view_ready_until(
+        &mut self,
+        until: HostInstant,
+        now: HostInstant,
+    ) -> Result<(), AuthorityError> {
+        self.check_time(now)?;
+        self.check_observation_live(now)?;
+        if until <= now
+            || (self.bounded_view && self.readiness != ViewReadiness::Ready && self.lease.is_some())
+        {
+            return Err(AuthorityError::ViewUnready);
+        }
+        if self.view_until.is_some_and(|previous| until < previous) {
+            return Err(AuthorityError::ViewUnready);
+        }
+        self.bounded_view = true;
+        self.view_until = Some(until);
         self.phase = Phase::Viewing;
         self.readiness = ViewReadiness::Ready;
         Ok(())
@@ -292,6 +341,7 @@ impl SessionAuthority {
     /// Suspends input and invalidates old tickets. Recovery requires a new
     /// ticket even if the lease identity and observation remain live.
     pub fn mark_view_stale(&mut self) {
+        self.view_until = None;
         if self.readiness == ViewReadiness::Ready {
             self.readiness = ViewReadiness::Stale;
         }
@@ -523,11 +573,19 @@ impl SessionAuthority {
             && self.lease.is_some_and(|lease| now < lease.authorized_until)
     }
 
-    /// Read-only deadline snapshot for the independent input watchdog. Time
-    /// checks stay in the serialized caller: a concurrent observer's earlier
-    /// clock sample must not regress the submission owner's clock high-water.
-    /// This never renews authority and deliberately does not inspect tickets.
+    /// Read-only deadline snapshot for the independent input watchdog, including
+    /// source freshness. A caller compares a freshly sampled clock under the same
+    /// policy lock. Lease renewal and new tickets cannot extend this view bound.
     pub fn control_deadline(&self) -> Result<HostInstant, AuthorityError> {
+        let until = self.lease_deadline()?;
+        Ok(self.view_until.map_or(until, |view| until.min(view)))
+    }
+
+    /// Advertised lease lifetime, separately constrained at every submission by
+    /// current view readiness. Keep the wire lease/ticket lifetime distinct from
+    /// the watchdog's readiness bound: source evidence never renews a lease and
+    /// a control heartbeat never freshens the view.
+    pub fn lease_deadline(&self) -> Result<HostInstant, AuthorityError> {
         if self.phase != Phase::Viewing || self.readiness != ViewReadiness::Ready {
             return Err(AuthorityError::ViewUnready);
         }
@@ -599,6 +657,7 @@ impl SessionAuthority {
     fn clear_authority(&mut self) {
         self.observation_until = None;
         self.readiness = ViewReadiness::Unready;
+        self.view_until = None;
         self.lease = None;
         self.native_owner = None;
         self.observation_challenge = None;
@@ -651,6 +710,9 @@ impl SessionAuthority {
             return Err(AuthorityError::ClockRegression);
         }
         self.last_checked = Some(now);
+        if self.view_until.is_some_and(|until| now >= until) {
+            self.mark_view_stale();
+        }
         Ok(())
     }
 

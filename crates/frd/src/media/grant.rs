@@ -53,7 +53,7 @@ impl ObservationControl {
             let ticket_until = authority
                 .issue_input_ticket(lease, ticket, now)
                 .map_err(Error::Authority)?;
-            let until = authority.control_deadline().map_err(Error::Authority)?;
+            let until = authority.lease_deadline().map_err(Error::Authority)?;
             Ok(Granted {
                 request,
                 input_channel,
