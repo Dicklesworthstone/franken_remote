@@ -72,6 +72,43 @@ impl PresentedInput {
             active: false,
         })
     }
+    /// Attach an unused grant to an already observed view without decoding again
+    /// or recreating its freshness history. The tracker moves, never clones; its
+    /// real receiver identity, source timestamps and pending candidate stay intact.
+    /// Only a currently qualified visible view is accepted. Local mapping remains
+    /// a separate requirement and the original ticket is neither replaced nor
+    /// extended. The grant still enforces its own source-age ceiling even when
+    /// the preceding observer used a more permissive freshness policy.
+    pub fn from_view(
+        mut input: InputClient,
+        receiver: &ReceivePipeline,
+        mut view: ViewTracker,
+        now: ClientInstant,
+    ) -> Result<Self, Error> {
+        input.tick(now)?;
+        if input.observation.is_some()
+            || input.pending_actions() != 0
+            || input.next_action != Some(0)
+            || input.next_pointer != Some(0)
+        {
+            return Err(Error::AlreadyUsed);
+        }
+        view.check_receiver(receiver)?;
+        if view.epoch().configuration != input.credentials.view.configuration
+            || view.epoch().recovery != input.credentials.view.recovery
+        {
+            return Err(Error::ViewMismatch);
+        }
+        let evidence = view.evidence(now.0)?;
+        let mut this = Self {
+            input,
+            view,
+            delivered_serial: None,
+            active: false,
+        };
+        this.deliver(evidence, now)?;
+        Ok(this)
+    }
     /// Validate the exact receiver underlying the input's presentation evidence.
     /// Equal IDs on a different receiver do not authorize media or repairs.
     pub fn check_receiver(&self, receiver: &ReceivePipeline) -> Result<(), Error> {
