@@ -28,18 +28,18 @@ jobs:
           import base64, hashlib, json, lzma, os, subprocess
           from pathlib import Path
           def blob(data): return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
-          oid='731edf32c890f77b2574fe83ccad6b2ad310dc3c'
+          oid='e05424feb6b24fe6046898f0f26a858621db566d'
           row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}'],timeout=30))
           encoded=base64.b64decode(row['content'])
-          assert blob(encoded)==oid and len(encoded)==11632
+          assert blob(encoded)==oid and len(encoded)==6748
           dec=lzma.LZMADecompressor()
-          data=dec.decompress(base64.b64decode(encoded,validate=True),max_length=37685)
-          assert dec.eof and not dec.unused_data and len(data)==37684
-          assert hashlib.sha256(data).hexdigest()=='cd5a620662fccbe1929d96be66c1eae934b5fd4741af9f49090843232b88d6c4'
+          data=dec.decompress(base64.b64decode(encoded,validate=True),max_length=18714)
+          assert dec.eof and not dec.unused_data and len(data)==18713
+          assert hashlib.sha256(data).hexdigest()=='54721f2282a168f25e6d853409b0b963f9d98352d9c6e1bace7e0cedb78b88ce'
           candidate=json.loads(data)
           before,after=candidate['before'],candidate['after']
-          assert candidate['base']=='61282a67fc7000f08a267cc1644b61560da6595e'
-          assert len(after)==11 and set(before)==set(after)
+          assert candidate['base']=='6bf14657d3b387b0ecc39d38d7c0a4b5f0aa6cc7'
+          assert len(after)==7 and set(before)==set(after)
           for path in after:
               assert path.startswith('crates/frd/src/') and path.endswith('.rs') and '..' not in Path(path).parts
           current={p:blob(Path(p).read_bytes()) if Path(p).is_file() else None for p in before}
@@ -70,9 +70,17 @@ jobs:
           cargo test -p frd --lib session_clock --locked -- --test-threads=8
           cargo test -p frd --lib input_wake --locked -- --test-threads=4
           cargo test -p frd --test clock_sync --locked -- --test-threads=4
+          cargo test -p frd --lib public_observe --locked -- --test-threads=1
+          cargo test -p frd --lib publication_clock --locked -- --test-threads=4
           for attempt in 1 2 3; do
             cargo test -p frd --lib session_startup::viewer::streaming::tests::slow_real_decoder_process_reduces_remote_capture_without_stopping_session_service --locked -- --exact --test-threads=1
           done
+      - name: Exercise actual native publication with automatic clock exchange
+        run: |
+          cargo build --workspace --all-features --locked
+          export FR_NATIVE_TEST_WORKER="$PWD/target/debug/fr-media-worker"
+          cargo test -p frd --lib public_publisher_and_observer --locked -- --ignored --test-threads=1
+          cargo test -p frd --lib delayed_display_choice_keeps_discovered_source --locked -- --ignored --test-threads=1
       - name: Retain verified source objects without reference writes
         env:
           GH_TOKEN: ${{ github.token }}
