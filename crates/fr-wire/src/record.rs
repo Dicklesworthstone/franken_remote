@@ -126,6 +126,7 @@ pub enum Kind {
     HeldState = 0x0046,
     InputMode = 0x0047,
     InputResult = 0x0048,
+    PresentedState = 0x0080,
     StageMetrics = 0x0082,
     ClockProbe = 0x0084,
     ClockReply = 0x0085,
@@ -176,6 +177,7 @@ impl Kind {
             0x0046 => Ok(Self::HeldState),
             0x0047 => Ok(Self::InputMode),
             0x0048 => Ok(Self::InputResult),
+            0x0080 => Ok(Self::PresentedState),
             0x0082 => Ok(Self::StageMetrics),
             0x0084 => Ok(Self::ClockProbe),
             0x0085 => Ok(Self::ClockReply),
@@ -217,6 +219,7 @@ impl Kind {
             | Self::Text
             | Self::InputMode
             | Self::InputResult
+            | Self::PresentedState
             | Self::StageMetrics
             | Self::ClockProbe
             | Self::ClockReply => None,
