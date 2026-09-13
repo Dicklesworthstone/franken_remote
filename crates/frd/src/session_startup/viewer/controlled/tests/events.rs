@@ -246,3 +246,5 @@ fn future_sample_cannot_mint_a_longer_native_event_lifetime() {
         state.host.close();
     });
 }
+
+mod text;
