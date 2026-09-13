@@ -19,11 +19,10 @@ repository = "https://github.com/Dicklesworthstone/franken_remote"
 # The sole async runtime (AGENTS.md section 3.1). Pinned here so every
 # consumer inherits one version; default-features off because FrankenRemote
 # enables only the Asupersync features it qualifies (plan section 4.1).
-# 0.4.10 is the newest published release (verified against crates.io
-# 2026-09-08); the plan inspected the 0.4.11 snapshot, which is unpublished —
-# revisit this pin when it ships. The local /data/projects/asupersync
-# checkout is 0.4.11 and is read by spikes, never path-depended-on here.
-asupersync = { version = "=0.4.10", default-features = false }
+# Use the published 0.5.0 release, never the mutable sibling checkout.
+# The standalone QUIC spike retains its separate immutable Git pin and
+# qualification evidence; selecting this version does not qualify transport.
+asupersync = { version = "=0.5.0", default-features = false }
 # First-party crates, wired by path in exactly one place; consumers write
 # `fr-core.workspace = true`.
 fr-core = { path = "crates/fr-core" }

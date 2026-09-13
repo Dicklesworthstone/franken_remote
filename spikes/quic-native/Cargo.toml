@@ -21,7 +21,7 @@ publish = false
 # an explicit capability context (`Cx::for_testing`) outside the runtime — the
 # same way upstream's own live-UDP integration proof drives this composition.
 # Candidate for fr-5nb requalification; this does not change the shipping pin.
-asupersync = { git = "https://github.com/Dicklesworthstone/asupersync.git", rev = "352b3695d3cb84a6296bb307a7880a6c9fafc2f8", features = ["tls", "test-internals"] }
+asupersync = { version = "=0.5.0", git = "https://github.com/Dicklesworthstone/asupersync.git", rev = "78b64636e99fea4ea2d868096576021dd3b8e519", features = ["tls", "test-internals"] }
 futures-lite = "2"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
 rcgen = "0.13"

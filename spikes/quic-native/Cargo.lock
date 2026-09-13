@@ -99,8 +99,8 @@ dependencies = [
 
 [[package]]
 name = "asupersync"
-version = "0.4.11"
-source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=352b3695d3cb84a6296bb307a7880a6c9fafc2f8#352b3695d3cb84a6296bb307a7880a6c9fafc2f8"
+version = "0.5.0"
+source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=78b64636e99fea4ea2d868096576021dd3b8e519#78b64636e99fea4ea2d868096576021dd3b8e519"
 dependencies = [
  "aes-gcm",
  "asupersync-macros",
@@ -128,7 +128,6 @@ dependencies = [
  "prost",
  "rmp-serde",
  "rustls",
- "rustls-pemfile",
  "rustls-pki-types",
  "semver",
  "serde",
@@ -159,8 +158,8 @@ dependencies = [
 
 [[package]]
 name = "asupersync-macros"
-version = "0.4.11"
-source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=352b3695d3cb84a6296bb307a7880a6c9fafc2f8#352b3695d3cb84a6296bb307a7880a6c9fafc2f8"
+version = "0.5.0"
+source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=78b64636e99fea4ea2d868096576021dd3b8e519#78b64636e99fea4ea2d868096576021dd3b8e519"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -636,8 +635,8 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "franken-decision"
-version = "0.4.11"
-source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=352b3695d3cb84a6296bb307a7880a6c9fafc2f8#352b3695d3cb84a6296bb307a7880a6c9fafc2f8"
+version = "0.5.0"
+source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=78b64636e99fea4ea2d868096576021dd3b8e519#78b64636e99fea4ea2d868096576021dd3b8e519"
 dependencies = [
  "franken-evidence",
  "franken-kernel",
@@ -646,8 +645,8 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.4.11"
-source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=352b3695d3cb84a6296bb307a7880a6c9fafc2f8#352b3695d3cb84a6296bb307a7880a6c9fafc2f8"
+version = "0.5.0"
+source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=78b64636e99fea4ea2d868096576021dd3b8e519#78b64636e99fea4ea2d868096576021dd3b8e519"
 dependencies = [
  "serde",
  "serde_json",
@@ -655,8 +654,8 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.4.11"
-source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=352b3695d3cb84a6296bb307a7880a6c9fafc2f8#352b3695d3cb84a6296bb307a7880a6c9fafc2f8"
+version = "0.5.0"
+source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=78b64636e99fea4ea2d868096576021dd3b8e519#78b64636e99fea4ea2d868096576021dd3b8e519"
 dependencies = [
  "serde",
 ]
@@ -1591,15 +1590,6 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework",
-]
-
-[[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
 ]
 
 [[package]]
