@@ -496,6 +496,7 @@ fn pending_admission_refresh_keeps_control_tickets_and_input_results_progressing
                     observation: observation.clone(),
                     control: host.session.opened.routes,
                     ticket_turn: &mut host.ticket_turn,
+                    submitted: &mut host.submitted,
                     ticket: &mut fresh,
                     other: &mut other,
                 };
@@ -786,6 +787,7 @@ fn buffered_ordered_input_cannot_take_a_due_tickets_fair_turn() {
                     observation: host.session.opened.control.clone(),
                     control: host.session.opened.routes,
                     ticket_turn: &mut host.ticket_turn,
+                    submitted: &mut host.submitted,
                     ticket: &mut fresh,
                     other: &mut other,
                 };
@@ -836,6 +838,7 @@ fn revoke_during_refresh_poll_blocks_shared_udp_before_the_next_service_turn() {
             observation: observation.clone(),
             control: host.session.opened.routes,
             ticket_turn: &mut host.ticket_turn,
+            submitted: &mut host.submitted,
             ticket: &mut fresh,
             other: &mut other,
         };
@@ -929,3 +932,5 @@ fn streaming_codec_stall_does_not_hold_input_results_tickets_or_local_cleanup() 
         assert_eq!(effects.lock().unwrap().events, vec![true, false]);
     });
 }
+
+mod input_wake;

@@ -1,0 +1,37 @@
+name: Verify input capture wake
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/verify-input-capture-wake.yml', 'crates/fr-core/**', 'crates/fr-wire/**', 'crates/fr-media/**', 'crates/fr-client/**', 'crates/frd/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml']
+permissions:
+  contents: read
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  committed-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Select pinned compiler and test prerequisites
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y openssl python3
+      - name: Check committed source without staging or Git writes
+        run: |
+          cargo fmt --all --check
+          cargo clippy -p frd --all-targets --locked -- -D warnings
+          ./scripts/verify.sh docs
+      - name: Exercise all ordinary daemon tests
+        run: cargo test -p frd --lib --locked -- --test-threads=4
+      - name: Repeat native-input capture-wake regressions
+        run: |
+          cargo test -p frd --lib --locked input_wake -- --test-threads=1
+          cargo test -p frd --lib --locked input_wake -- --test-threads=8

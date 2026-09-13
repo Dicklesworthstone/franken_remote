@@ -67,7 +67,9 @@ source checks and observation renewal running without dummy encoded frames.
 The first actual changed observation exits idle at the conservative starting
 interval, unless current measured pressure forbids speeding up. Until the next
 source check, change detection remains polling-limited by the selected interval;
-this adds no platform damage-event notification or input-triggered wakeup.
+platform damage-event notification remains outside this controller. The separate
+[collected native-input wake path](INPUT_CAPTURE_WAKE.md) can advance one bounded
+source check during verified idle without altering these pacing decisions.
 
 A sampling gap longer than 100 ms resets accumulated dwell and idle evidence.
 Missing source evidence removes the idle classification without manufacturing a
@@ -111,8 +113,10 @@ queued-dependent regression. The detached continuous path remains independent.
 
 Remaining work includes qualified runtime bitrate/quantizer/resolution changes,
 remote decoder and presentation feedback, aggregate host/path budgets, qualified
-damage/input wakeup, and platform/GUI policy selection. The broad adaptive-control
-bead remains incomplete.
+damage-event and local-input wakeup, and platform/GUI policy selection. Collected
+remote-input wakeup is implemented separately in
+[INPUT_CAPTURE_WAKE.md](INPUT_CAPTURE_WAKE.md). The broad adaptive-control bead
+remains incomplete.
 
 ## Direct publication verification
 
