@@ -6,14 +6,21 @@ pub use fr_client::input::{
     ClientInstant,
     viewport::{Layout, LocalPoint, Located, PositionedAction},
 };
-use fr_core::input::{KeyTransition, PhysicalKey};
+pub use fr_core::input::{CommittedText, TextError};
+use fr_core::{
+    input::{KeyTransition, MAX_COMMITTED_TEXT_BYTES, PhysicalKey},
+    input_submission::Capability,
+};
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex, TryLockError},
+    sync::{Arc, Mutex, TryLockError, Weak},
 };
 
 pub const MAX_EVENTS: usize = 64;
 pub const MAX_EVENT_AGE_US: u64 = 100_000;
+/// Heap payload bound across the queue and its one deferred dispatch event.
+/// Fixed event metadata and the existing encoded send slot are bounded separately.
+pub const MAX_RETAINED_TEXT_BYTES: usize = (MAX_EVENTS + 1) * MAX_COMMITTED_TEXT_BYTES;
 
 /// No Debug: physical keys, pointer coordinates and text are not diagnostics.
 pub enum Event {
@@ -21,6 +28,8 @@ pub enum Event {
         key: PhysicalKey,
         transition: KeyTransition,
     },
+    /// A whole committed Unicode value, never an IME preedit update.
+    Text(CommittedText),
     Pointer(Located),
     Positioned {
         location: Located,
@@ -35,6 +44,8 @@ pub enum Error {
     Expired,
     Overflow,
     Unavailable,
+    UnsupportedText,
+    Text(TextError),
 }
 struct Captured {
     event: Event,
@@ -45,12 +56,15 @@ struct Queue {
     last_sample: ClientInstant,
 }
 /// A single native event producer. Drop, focus loss, hiding, resize, suspend and
-/// native failure must stop it. Stopping is lock-free and wakes cancellation of
-/// an in-flight network operation; no subsequent focus gain can resume control.
+/// native failure must stop it. The authority fence is lock-free and wakes
+/// cancellation of an in-flight network operation. Best-effort queue cleanup
+/// never waits for a lock; no subsequent focus gain can resume control.
 /// Capture timestamps must use `clock`, not wall time or the host's clock.
+/// A retained stopped producer cannot keep the closed viewer's payloads alive.
 pub struct Source {
-    queue: Arc<Mutex<Queue>>,
+    queue: Weak<Mutex<Queue>>,
     control: ViewerControl,
+    text_supported: bool,
 }
 pub(super) struct Receiver {
     queue: Arc<Mutex<Queue>>,
@@ -67,21 +81,55 @@ impl Source {
     }
     pub fn stop(&self) {
         self.control.stop();
+        if let Some(queue) = self.queue.upgrade() {
+            match queue.try_lock() {
+                Ok(mut queue) => queue.events.clear(),
+                Err(TryLockError::Poisoned(error)) => error.into_inner().events.clear(),
+                Err(TryLockError::WouldBlock) => {}
+            }
+        }
     }
-    /// Submit an event stamped when sampled, never when dequeued after a stall.
-    /// Adjacent motion replaces motion, but never crosses an action barrier.
-    /// Failure is terminal: a dropped release cannot leave a live remote drag.
-    pub fn push(&mut self, event: Event, sampled: ClientInstant) -> Result<(), Error> {
-        let result = self.push_inner(event, sampled);
-        if result.is_err() {
+    /// The host-granted capability, not permission to bypass freshness or expiry.
+    pub const fn supports_text(&self) -> bool {
+        self.text_supported
+    }
+    /// Capture one completed IME/software-keyboard commit. Do not also send the
+    /// physical keys that produced the same text. No clipboard or layout fallback.
+    /// Oversized commits are refused whole, never split into separately retried actions.
+    pub fn commit_text(&mut self, text: &str, sampled: ClientInstant) -> Result<(), Error> {
+        let result = (|| {
+            check_age(sampled, self.clock()?)?;
+            if !self.text_supported {
+                return Err(Error::UnsupportedText);
+            }
+            let text = CommittedText::new(text).map_err(Error::Text)?;
+            self.push_inner(Event::Text(text), sampled)
+        })();
+        self.finish_capture(result)
+    }
+    fn finish_capture(&self, result: Result<(), Error>) -> Result<(), Error> {
+        // Capability refusal admitted nothing. Keep physical-key operation usable.
+        if result.is_err() && result != Err(Error::UnsupportedText) {
             self.stop();
         }
         result
     }
+    /// Submit an event stamped when sampled, never when dequeued after a stall.
+    /// Adjacent motion replaces motion, but never crosses an action barrier.
+    /// Except for unsupported text refused before admission, failure is terminal:
+    /// a dropped release cannot leave a live remote drag.
+    pub fn push(&mut self, event: Event, sampled: ClientInstant) -> Result<(), Error> {
+        let result = self.push_inner(event, sampled);
+        self.finish_capture(result)
+    }
     fn push_inner(&mut self, event: Event, sampled: ClientInstant) -> Result<(), Error> {
         let current = self.clock()?;
         check_age(sampled, current)?;
-        let mut queue = self.queue.lock().map_err(|_| Error::Unavailable)?;
+        if matches!(event, Event::Text(_)) && !self.text_supported {
+            return Err(Error::UnsupportedText);
+        }
+        let shared = self.queue.upgrade().ok_or(Error::Closed)?;
+        let mut queue = shared.lock().map_err(|_| Error::Unavailable)?;
         if self.control.is_stopped() {
             return Err(Error::Closed);
         }
@@ -170,8 +218,9 @@ impl ControlledViewer {
             pending: None,
         });
         Ok(Source {
-            queue,
+            queue: Arc::downgrade(&queue),
             control: self.control(),
+            text_supported: self.input.capabilities().contains(Capability::Text),
         })
     }
     pub(super) fn dispatch_captured(&mut self) -> Result<(), super::Error> {
@@ -179,7 +228,9 @@ impl ControlledViewer {
             return Ok(());
         };
         let result = self.dispatch_one(&mut receiver);
-        self.events = Some(receiver);
+        if !self.is_closed() {
+            self.events = Some(receiver);
+        }
         result
     }
     fn dispatch_one(&mut self, receiver: &mut Receiver) -> Result<(), super::Error> {
@@ -195,6 +246,7 @@ impl ControlledViewer {
                 key: *key,
                 transition: *transition,
             }),
+            Event::Text(text) => self.action(Action::Text(text.as_str())),
             Event::Pointer(location) => self.pointer_in_view(location),
             Event::Positioned { location, action } => self.action_in_view(location, *action),
         };

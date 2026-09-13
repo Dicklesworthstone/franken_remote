@@ -82,6 +82,11 @@ impl PresentedInput {
     pub fn viewport(&self) -> super::viewport::Viewport {
         self.input.viewport()
     }
+    /// Immutable host-granted operation capabilities. This does not grant
+    /// authority or replace the submission-time checks in the input owner.
+    pub const fn capabilities(&self) -> fr_core::input_submission::Capabilities {
+        self.input.capabilities
+    }
     /// Immutable input identity. Does not expose the bearer ticket.
     pub const fn binding(&self) -> fr_wire::input_result::ResultBinding {
         self.input.binding
