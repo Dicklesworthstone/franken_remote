@@ -6,6 +6,7 @@ pub use fr_client::input::{
     ClientInstant,
     viewport::{Layout, LocalPoint, Located, PositionedAction},
 };
+pub use fr_core::held_state::HeldState;
 pub use fr_core::input::{CommittedText, TextError};
 use fr_core::{
     input::{KeyTransition, MAX_COMMITTED_TEXT_BYTES, PhysicalKey},
@@ -30,6 +31,8 @@ pub enum Event {
     },
     /// A whole committed Unicode value, never an IME preedit update.
     Text(CommittedText),
+    /// Actual local platform state, used only to reconcile already-sent presses.
+    HeldState(HeldState),
     Pointer(Located),
     Positioned {
         location: Located,
@@ -106,6 +109,19 @@ impl Source {
             self.push_inner(Event::Text(text), sampled)
         })();
         self.finish_capture(result)
+    }
+    /// Capture the platform's actual key/button snapshot in the same ordered
+    /// queue as input. Missing state releases remotely held input; extra held
+    /// bits never synthesize presses. Snapshots are not coalesced across actions.
+    /// Sample periodically: the existing sender permits at most four snapshots
+    /// per second and discards early samples without postponing or retiming them.
+    /// Focus loss, hiding and suspension still require immediate `stop` instead.
+    pub fn reconcile_held(
+        &mut self,
+        observed: HeldState,
+        sampled: ClientInstant,
+    ) -> Result<(), Error> {
+        self.push(Event::HeldState(observed), sampled)
     }
     fn finish_capture(&self, result: Result<(), Error>) -> Result<(), Error> {
         // Capability refusal admitted nothing. Keep physical-key operation usable.
@@ -242,16 +258,21 @@ impl ControlledViewer {
             return Ok(());
         }
         let result = match &captured.event {
-            Event::Key { key, transition } => self.action(Action::Key {
-                key: *key,
-                transition: *transition,
-            }),
-            Event::Text(text) => self.action(Action::Text(text.as_str())),
-            Event::Pointer(location) => self.pointer_in_view(location),
-            Event::Positioned { location, action } => self.action_in_view(location, *action),
+            Event::Key { key, transition } => self
+                .action(Action::Key {
+                    key: *key,
+                    transition: *transition,
+                })
+                .map(|_| ()),
+            Event::Text(text) => self.action(Action::Text(text.as_str())).map(|_| ()),
+            Event::HeldState(observed) => self.reconcile_held(*observed).map(|_| ()),
+            Event::Pointer(location) => self.pointer_in_view(location).map(|_| ()),
+            Event::Positioned { location, action } => {
+                self.action_in_view(location, *action).map(|_| ())
+            }
         };
         match result {
-            Ok(_) => {
+            Ok(()) => {
                 // Native event age survives encoding AND transport backpressure.
                 let deadline = captured
                     .sampled
