@@ -968,3 +968,5 @@ fn progress_callback_receiver_failure_cannot_enable_followup_input() {
 mod viewport;
 
 mod streaming;
+
+mod events;

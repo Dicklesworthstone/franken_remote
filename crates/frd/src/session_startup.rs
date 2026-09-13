@@ -33,6 +33,7 @@ pub use running::publisher::{Error as PublisherError, NativePublisher, Policy as
 pub use running::{ControlledHost, HostSession, StreamingHost};
 
 mod viewer;
+pub use viewer::controlled::events as viewer_events;
 pub use viewer::controlled::{ControlledViewer, Error as ControlledViewerError, ViewerControl};
 pub use viewer::observer::{Error as ObserverError, NativeObserver, Policy as ObserverPolicy};
 pub use viewer::streaming::{

@@ -1,5 +1,6 @@
 //! The running native viewer owns input identities, freshness and network sends.
 //! Decode/present work stays off this task; qualified callbacks arrive between turns.
+pub mod events;
 mod viewport;
 use super::{ViewerSession, now};
 use crate::{
@@ -39,6 +40,7 @@ pub enum Error {
     Backpressure,
     Expired,
     Closed,
+    Capture(events::Error),
 }
 impl From<super::Error> for Error {
     fn from(e: super::Error) -> Self {
@@ -85,6 +87,7 @@ pub struct ControlledViewer {
     pending: Option<Pending>,
     control: ViewerControl,
     last_result: Option<ResultEvent>,
+    events: Option<events::Receiver>,
 }
 impl std::fmt::Debug for ControlledViewer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -159,6 +162,7 @@ impl ViewerSession {
             pending: None,
             control,
             last_result: None,
+            events: None,
         })
     }
 }
@@ -195,6 +199,7 @@ impl ControlledViewer {
         self.input.stop(StopReason::Disconnected);
         self.pending = None;
         self.control.stop();
+        self.events = None;
         self.clock.stop();
         self.session.close();
     }
@@ -211,6 +216,9 @@ impl ControlledViewer {
             .map_err(Error::Media)?;
         let t = ClientInstant(now(&self.session.cx)?);
         self.input.maintenance_deadline(t)?;
+        if let Some(events) = &self.events {
+            events.check(t).map_err(Error::Capture)?;
+        }
         if self.pending.as_ref().is_some_and(|p| t.0 >= p.until) {
             return Err(Error::Expired);
         }
@@ -368,6 +376,7 @@ impl ControlledViewer {
                 .synchronize(sample, ClientInstant(now(&self.session.cx)?))?;
             self.clock_at = sample.received_at_us();
         }
+        self.dispatch_captured()?;
         self.send()?;
         let (_, feedback, _) = self
             .channels
