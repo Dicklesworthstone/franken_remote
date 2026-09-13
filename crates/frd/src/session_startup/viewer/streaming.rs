@@ -226,6 +226,19 @@ impl ControlledViewer {
     }
 }
 impl StreamingViewer {
+    #[cfg(test)]
+    pub(in crate::session_startup) fn from_test_parts(
+        session: ViewerSession,
+        media: NegotiatedMedia,
+        presenter: Presenter,
+        receiver: ReceivePipeline,
+        initial: media::PresentationReceipt,
+    ) -> Self {
+        let mut viewer = Self::new(Peer::Observe { session, media }, presenter, receiver).unwrap();
+        viewer.initial = Some(initial);
+        viewer
+    }
+
     fn new(
         mut peer: Peer,
         mut presenter: Presenter,

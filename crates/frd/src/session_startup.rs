@@ -30,7 +30,10 @@ mod admission_refresh;
 mod opening;
 mod running;
 pub use running::publisher::{Error as PublisherError, NativePublisher, Policy as PublisherPolicy};
-pub use running::{ControlledHost, HostSession, StreamingHost};
+pub use running::{
+    ControlledHost, HostSession, LocalControl as HostControlState,
+    PendingControl as PendingHostControl, StreamingHost,
+};
 
 mod viewer;
 pub use viewer::controlled::events as viewer_events;
@@ -58,6 +61,7 @@ pub enum Error {
     ClientStartup(fr_client::startup::Error),
     Input(crate::input_quic::Error),
     ControlRenewal(crate::input_quic::control::Error),
+    ControlGrant(crate::input_quic::grant::Error),
     ClientRenewal(fr_client::authority::Error),
     Renewal(crate::media::renewal::Error),
     Admission(fr_tailnet::Error),

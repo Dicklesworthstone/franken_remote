@@ -2,6 +2,7 @@
 //! covers the only pending native result; packetization retains its existing
 //! exact pending record. Neither codec waits nor admission refresh block the
 //! other owner's maintenance. The native input Driver remains independent.
+pub(super) mod acquisition;
 use super::{ControlledHost, Error, HostSession, Services, now};
 use crate::{
     input_watchdog::{Control, StopReason},
@@ -29,17 +30,19 @@ use std::{
 enum Host {
     Observe(HostSession),
     Control(ControlledHost),
+    Closed,
 }
 impl Host {
-    fn session(&mut self) -> &mut HostSession {
+    fn session(&mut self) -> Result<&mut HostSession, Error> {
         match self {
-            Self::Observe(h) => h,
-            Self::Control(h) => &mut h.session,
+            Self::Observe(h) => Ok(h),
+            Self::Control(h) => Ok(&mut h.session),
+            Self::Closed => Err(Error::Closed),
         }
     }
     fn native(&self) -> Option<Control> {
         match self {
-            Self::Observe(_) => None,
+            Self::Observe(_) | Self::Closed => None,
             Self::Control(h) => Some(h.control()),
         }
     }
@@ -47,6 +50,7 @@ impl Host {
         match self {
             Self::Observe(h) => h.close(),
             Self::Control(h) => h.close(),
+            Self::Closed => {}
         }
     }
     async fn drive(
@@ -59,6 +63,7 @@ impl Host {
         match self {
             Self::Observe(h) => h.drive_inner(wait, nonce, services).await,
             Self::Control(h) => h.drive_services(wait, nonce, ticket, services).await,
+            Self::Closed => Err(Error::Closed),
         }
     }
 }
@@ -86,7 +91,7 @@ impl StreamingHost {
             if host.native().is_some_and(|c| c.is_stopped()) {
                 return Err(Error::Closed);
             }
-            let session = host.session();
+            let session = host.session()?;
             session.check()?;
             if !session.opened.control.same_owner(&stream.control) || stream.served {
                 return Err(Error::Order);
@@ -166,7 +171,7 @@ impl StreamingHost {
     ) -> Result<Option<crate::input_agent::InputReply>, crate::input_quic::Error> {
         match &mut self.host {
             Host::Control(h) => h.collect_after_close(),
-            Host::Observe(_) => Ok(None),
+            Host::Observe(_) | Host::Closed => Ok(None),
         }
     }
     /// Runs until local revoke, cancellation, native failure or protocol error.
@@ -192,7 +197,7 @@ impl StreamingHost {
                 let operation = operation;
                 operation
                     .host
-                    .serve_inner(&mut nonce, &mut ticket, &mut other)
+                    .serve_inner(&mut nonce, &mut ticket, &mut other, None, &mut |_| Ok(None))
                     .await
             }),
         }
@@ -202,6 +207,13 @@ impl StreamingHost {
         nonce: &mut impl FnMut() -> Result<u128, ()>,
         ticket: &mut impl FnMut() -> Option<InputTicketId>,
         other: &mut impl Services,
+        mut acquisition: Option<Box<acquisition::Acquisition>>,
+        local: &mut impl FnMut(
+            acquisition::LocalControl<'_>,
+        ) -> Result<
+            Option<fr_wire::control::Target>,
+            crate::input_quic::grant::Error,
+        >,
     ) -> Result<(), Error> {
         if self.stream.served {
             return Err(Error::Closed);
@@ -240,9 +252,22 @@ impl StreamingHost {
         };
         let mut network = pin!(async {
             loop {
-                self.host
-                    .drive(stream.policy.network_turn, nonce, ticket, &mut services)
-                    .await?;
+                if let Some(acquisition) = &mut acquisition {
+                    acquisition
+                        .drive(
+                            &mut self.host,
+                            stream.policy.network_turn,
+                            nonce,
+                            ticket,
+                            &mut services,
+                            local,
+                        )
+                        .await?;
+                } else {
+                    self.host
+                        .drive(stream.policy.network_turn, nonce, ticket, &mut services)
+                        .await?;
+                }
                 asupersync::runtime::yield_now().await;
             }
         });

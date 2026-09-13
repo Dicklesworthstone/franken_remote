@@ -209,6 +209,13 @@ where
         q: &mut QuicRecords,
         nonce: &mut N,
     ) -> Result<(), Error> {
+        // Local lifecycle permission must be refreshed before draining queued
+        // input, including inside a long admission refresh. Native submission
+        // still checks its own independent authority and platform state.
+        if !self.other.permitted() {
+            self.input.control().stop(StopReason::ViewInvalidated);
+            return Err(Error::Closed);
+        }
         self.renewal
             .receive(q, |_, _| Ok(Disposition::Blocked))
             .map_err(Error::ControlRenewal)?;

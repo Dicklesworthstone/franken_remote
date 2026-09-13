@@ -43,7 +43,7 @@ pub(super) fn configuration() -> Configuration {
         generation: CodecConfigurationGeneration::INITIAL,
     }
 }
-fn fixture_path(mode: &str) -> PathBuf {
+pub(super) fn fixture_path(mode: &str) -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
         "fr-stream-fixture-{}-{}-{mode}.py",
@@ -315,7 +315,7 @@ fn continuous_frames_keep_the_original_session_alive_past_initial_authority() {
         assert!(result.is_err());
         assert!(frames >= 20, "slow native work blocked the network");
         assert!(host.stream.statistics.encoded_updates >= u64::try_from(frames).unwrap());
-        assert!(host.host.session().opened.transport.is_closed());
+        assert!(host.host.session().unwrap().opened.transport.is_closed());
         host.reap_media(&c, Deadline::after(&c, Duration::from_secs(1)).unwrap())
             .await
             .unwrap();
@@ -406,7 +406,7 @@ fn stalled_capture_does_not_block_local_revoke_and_unpolled_serve_is_terminal() 
         ))
         .await;
         assert!(result.is_err());
-        assert!(host.host.session().opened.transport.is_closed());
+        assert!(host.host.session().unwrap().opened.transport.is_closed());
         assert!(
             !host
                 .reap_media(&c, Deadline::after(&c, Duration::from_secs(1)).unwrap())
@@ -422,7 +422,7 @@ fn stalled_capture_does_not_block_local_revoke_and_unpolled_serve_is_terminal() 
         let control = host.stream.control.clone();
         drop(host.serve(|| Ok(99), || None, block));
         assert!(control.check().is_err());
-        assert!(host.host.session().opened.transport.is_closed());
+        assert!(host.host.session().unwrap().opened.transport.is_closed());
         host.reap_media(&c, Deadline::after(&c, Duration::from_secs(1)).unwrap())
             .await
             .unwrap();

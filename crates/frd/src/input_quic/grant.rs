@@ -320,31 +320,13 @@ impl GrantBroker {
         let n = operation.connection.receive(
             &cx,
             || observation.check().is_ok(),
-            |route, bytes| {
-                let kind = bytes.get(6..8);
-                if route == Route::Stream(operation.broker.input_routes.actions)
-                    || operation
-                        .broker
-                        .input_routes
-                        .pointer
-                        .is_some_and(|p| route == Route::Datagram(p))
-                {
-                    failure = Some(Error::NativeNotReady);
-                    return Err(());
+            |route, bytes| match operation.broker.dispatch_record(route, bytes) {
+                Ok(Some(disposition)) => Ok(disposition),
+                Ok(None) => other(route, bytes),
+                Err(error) => {
+                    failure = Some(error);
+                    Err(())
                 }
-                if route == Route::Stream(operation.broker.control_routes.inbound)
-                    && kind == Some(&(Kind::ControlRequest as u16).to_be_bytes())
-                {
-                    let result = operation.broker.accept(bytes);
-                    return match result {
-                        Ok(()) => Ok(Disposition::Consumed),
-                        Err(error) => {
-                            failure = Some(error);
-                            Err(())
-                        }
-                    };
-                }
-                other(route, bytes)
             },
         );
         if let Some(error) = failure {
@@ -354,6 +336,31 @@ impl GrantBroker {
         operation.broker.live(operation.connection)?;
         operation.complete = true;
         Ok(n)
+    }
+    /// Only the original session's checked dispatcher may call this. Its
+    /// maintenance must call `service` before/after dispatch on that connection.
+    /// Sharing the ordered control lane avoids head-of-line blocking between
+    /// requests, observation renewal and clock messages; it installs no routes.
+    pub(crate) fn dispatch_record(
+        &mut self,
+        route: Route,
+        bytes: &[u8],
+    ) -> Result<Option<Disposition>, Error> {
+        if route == Route::Stream(self.input_routes.actions)
+            || self
+                .input_routes
+                .pointer
+                .is_some_and(|p| route == Route::Datagram(p))
+        {
+            return Err(Error::NativeNotReady);
+        }
+        if route == Route::Stream(self.control_routes.inbound)
+            && bytes.get(6..8) == Some(&(Kind::ControlRequest as u16).to_be_bytes())
+        {
+            self.accept(bytes)?;
+            return Ok(Some(Disposition::Consumed));
+        }
+        Ok(None)
     }
     fn accept(&mut self, bytes: &[u8]) -> Result<(), Error> {
         if self.native.is_some() {

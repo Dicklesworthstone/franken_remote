@@ -13,9 +13,12 @@ pub(super) mod controlled;
 pub use controlled::ControlledHost;
 pub(super) mod publisher;
 mod streaming;
-pub use streaming::StreamingHost;
 #[cfg(test)]
 pub(in crate::session_startup) use streaming::tests::feedback_pair;
+pub use streaming::{
+    StreamingHost,
+    acquisition::{LocalControl, PendingControl},
+};
 
 const REFRESH_MARGIN_US: u64 = 500_000;
 const MAX_TURN: Duration = Duration::from_millis(100);

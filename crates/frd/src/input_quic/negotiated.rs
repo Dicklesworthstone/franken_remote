@@ -141,6 +141,13 @@ impl NegotiatedInput {
         let attached = self.checked(q)?;
         Routes::new(attached.inbound, attached.outbound, attached.datagram)
     }
+    /// Exact host-side configuration identity for joining a capture pipeline.
+    /// This validates the original attachment and host route direction, not
+    /// consent, a usable view, or permission to initialize a native input owner.
+    pub(crate) fn host_scope(&self, q: &QuicRecords) -> Result<(ControlBinding, Binding), Error> {
+        self.broker_routes(q, self.parent, self.limits)?;
+        Ok((self.parent, self.configuration.descriptor.binding))
+    }
     /// Attach an already granted native agent, not a factory supplied by a peer.
     /// It must own the exact same observation authority and mapped view. This
     /// operation consumes the attachment proof but does not consume the native
