@@ -28,36 +28,29 @@ jobs:
           import base64, hashlib, json, lzma, os, subprocess
           from pathlib import Path
           def blob(data): return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
-          def fetch(oid):
-              row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}'],timeout=30))
-              data=base64.b64decode(row['content'])
-              assert blob(data)==oid
-              return data
-          manifest=json.loads(fetch('5a6b3f706cc210a41c42933d52f06e1952e3fded'))
-          before,after=manifest['before'],manifest['after']
+          oid='731edf32c890f77b2574fe83ccad6b2ad310dc3c'
+          row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}'],timeout=30))
+          encoded=base64.b64decode(row['content'])
+          assert blob(encoded)==oid and len(encoded)==11632
+          dec=lzma.LZMADecompressor()
+          data=dec.decompress(base64.b64decode(encoded,validate=True),max_length=37685)
+          assert dec.eof and not dec.unused_data and len(data)==37684
+          assert hashlib.sha256(data).hexdigest()=='cd5a620662fccbe1929d96be66c1eae934b5fd4741af9f49090843232b88d6c4'
+          candidate=json.loads(data)
+          before,after=candidate['before'],candidate['after']
+          assert candidate['base']=='61282a67fc7000f08a267cc1644b61560da6595e'
           assert len(after)==11 and set(before)==set(after)
           for path in after:
               assert path.startswith('crates/frd/src/') and path.endswith('.rs') and '..' not in Path(path).parts
           current={p:blob(Path(p).read_bytes()) if Path(p).is_file() else None for p in before}
           if current!=after:
               assert current==before, 'concurrent source changes require reconciliation'
-              encoded=fetch('7739b3fc0ea03ca39246d432e6104b9b715af25e')
-              assert len(encoded)==10316
-              dec=lzma.LZMADecompressor()
-              data=dec.decompress(base64.b64decode(encoded,validate=True),max_length=33307)
-              assert dec.eof and not dec.unused_data and len(data)==33306
-              assert hashlib.sha256(data).hexdigest()=='c1b2771f068a6ad674adaa39345dddf18c16103e1ff167dfdb27a4dde995938a'
-              c=json.loads(data)
-              assert c['base']=='fc6c5cf524b7138e47bc4c054176eabbef7bd8eb'
-              assert set(c['after']).issubset(after)
-              patches=[c['patch'].encode(),fetch('1ae8c6f67065b46ab2a8724adb810100292c2ee4'),fetch('b8c37028cb91e9bbcb77d27af2e39db59336cee4')]
-              for i,data in enumerate(patches):
-                  patch=Path(os.environ['RUNNER_TEMP'],f'session-clock-{i}.patch')
-                  patch.write_bytes(data)
-                  stats=subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
-                  assert {line.split('\t',2)[2] for line in stats.splitlines()}.issubset(after)
-                  subprocess.run(['git','apply','--check',str(patch)],check=True)
-                  subprocess.run(['git','apply',str(patch)],check=True)
+              patch=Path(os.environ['RUNNER_TEMP'],'session-clock.patch')
+              patch.write_text(candidate['patch'])
+              stats=subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
+              assert {line.split('\t',2)[2] for line in stats.splitlines()}==set(after)
+              subprocess.run(['git','apply','--check',str(patch)],check=True)
+              subprocess.run(['git','apply',str(patch)],check=True)
           for path,expected in after.items(): assert blob(Path(path).read_bytes())==expected,path
           Path(os.environ['RUNNER_TEMP'],'session-clock-paths.json').write_text(json.dumps(after))
           subprocess.run(['git','diff','--check'],check=True)
@@ -96,3 +89,26 @@ jobs:
               assert row['sha']==expected
               print(json.dumps({'path':path,'sha':expected,'verified_checkout':os.environ['GITHUB_SHA']}))
           PY
+      - name: Retain compiler-matched build inputs
+        if: always()
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/clock-build-inputs"
+          mkdir -p "$root/libraries"
+          if [ -d target/debug ]; then
+            find target/debug -type f \( -name '*.rlib' -o -name '*.rmeta' -o -name '*.so' -o -name '*.a' \) -exec cp -n '{}' "$root/libraries/" \;
+          fi
+          rustc -Vv > "$root/compiler.txt"
+          cp Cargo.lock "$root/Cargo.lock"
+          cp "$RUNNER_TEMP/session-clock-paths.json" "$root/source-hashes.json"
+          printf '%s\n' "$GITHUB_SHA" > "$root/checkout.txt"
+          (cd "$root" && find libraries -type f -print0 | sort -z | xargs -0 -r sha256sum > SHA256SUMS)
+          tar -czf "$RUNNER_TEMP/clock-build-inputs.tar.gz" -C "$root" .
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: clock-build-inputs
+          path: ${{ runner.temp }}/clock-build-inputs.tar.gz
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
