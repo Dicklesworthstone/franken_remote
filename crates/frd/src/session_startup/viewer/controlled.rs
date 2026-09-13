@@ -1,6 +1,7 @@
 //! The running native viewer owns input identities, freshness and network sends.
 //! Decode/present work stays off this task; qualified callbacks arrive between turns.
 pub mod events;
+pub mod request;
 mod viewport;
 use super::{ViewerSession, now};
 use crate::{
@@ -41,6 +42,8 @@ pub enum Error {
     Expired,
     Closed,
     Capture(events::Error),
+    ControlRequest(fr_client::control_grant::Error),
+    ControlNotNegotiated,
 }
 impl From<super::Error> for Error {
     fn from(e: super::Error) -> Self {
