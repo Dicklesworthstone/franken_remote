@@ -18,6 +18,42 @@ fn layout(state: &mut Fixture) -> fr_client::input::viewport::Layout {
     state.viewer.confirm_viewport(&layout).unwrap();
     layout
 }
+fn assert_captured_operations(operations: &[Op]) {
+    assert_eq!(
+        operations,
+        [
+            Op::Key {
+                key: PhysicalKey::new(4).unwrap(),
+                transition: KeyTransition::Press
+            },
+            Op::Key {
+                key: PhysicalKey::new(4).unwrap(),
+                transition: KeyTransition::Repeat
+            },
+            Op::Key {
+                key: PhysicalKey::new(4).unwrap(),
+                transition: KeyTransition::Release
+            },
+            Op::Absolute(DesktopPoint { x: 100, y: 50 }),
+            Op::Absolute(DesktopPoint { x: 110, y: 60 }),
+            Op::Button {
+                button: PointerButton::Primary,
+                pressed: true
+            },
+            Op::Absolute(DesktopPoint { x: 110, y: 60 }),
+            Op::Button {
+                button: PointerButton::Primary,
+                pressed: false
+            },
+            Op::Absolute(DesktopPoint { x: 110, y: 60 }),
+            Op::Scroll {
+                x: 0,
+                y: -1,
+                unit: ScrollUnit::Lines
+            },
+        ]
+    );
+}
 #[test]
 fn captured_events_reach_native_session_in_order_with_motion_coalescing() {
     run(|client, host| async move {
@@ -87,40 +123,7 @@ fn captured_events_reach_native_session_in_order_with_motion_coalescing() {
                     }
                 }
                 let operations = state.effects.lock().unwrap().operations.clone();
-                assert_eq!(
-                    operations,
-                    [
-                        Op::Key {
-                            key: PhysicalKey::new(4).unwrap(),
-                            transition: KeyTransition::Press
-                        },
-                        Op::Key {
-                            key: PhysicalKey::new(4).unwrap(),
-                            transition: KeyTransition::Repeat
-                        },
-                        Op::Key {
-                            key: PhysicalKey::new(4).unwrap(),
-                            transition: KeyTransition::Release
-                        },
-                        Op::Absolute(DesktopPoint { x: 100, y: 50 }),
-                        Op::Absolute(DesktopPoint { x: 110, y: 60 }),
-                        Op::Button {
-                            button: PointerButton::Primary,
-                            pressed: true
-                        },
-                        Op::Absolute(DesktopPoint { x: 110, y: 60 }),
-                        Op::Button {
-                            button: PointerButton::Primary,
-                            pressed: false
-                        },
-                        Op::Absolute(DesktopPoint { x: 110, y: 60 }),
-                        Op::Scroll {
-                            x: 0,
-                            y: -1,
-                            unit: ScrollUnit::Lines
-                        },
-                    ]
-                );
+                assert_captured_operations(&operations);
                 source.stop();
                 state.viewer.close();
                 state.host.close();
@@ -146,7 +149,7 @@ fn focus_loss_cancels_an_unpolled_drive_and_never_replays_queued_keys() {
             source.push(physical(KeyTransition::Release), at),
             Err(events::Error::Closed)
         );
-        assert!(state.effects.lock().unwrap().operations.is_empty());
+        assert_eq!(state.effects.lock().unwrap().operations, [] as [Op; 0]);
         state.host.close();
     });
 }
@@ -204,7 +207,7 @@ fn captured_event_age_survives_encoding_before_transport_backpressure() {
                 .await
                 .is_err()
         );
-        assert!(state.effects.lock().unwrap().operations.is_empty());
+        assert_eq!(state.effects.lock().unwrap().operations, [] as [Op; 0]);
         state.host.close();
     });
 }
