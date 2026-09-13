@@ -6,12 +6,14 @@ pub(super) mod controlled;
 pub(super) mod observer;
 pub(super) mod streaming;
 use super::{Error, now};
+use crate::media::clock::{self, ClockSync};
 use asupersync::{cx::Cx, net::quic_native::NativeQuicUdpConnection, types::CancelKind};
 use fr_client::{
     authority::ObservationResponder,
     input::ClientInstant,
     startup::{ApprovalNotice, Opened, Startup},
 };
+use fr_media::freshness::{ClockCorrelation, ClockPolicy};
 use fr_transport::quic::{
     self, ConnectionBinding, ControlRoutes, Disposition, Policy, QuicRecords, Route,
 };
@@ -270,11 +272,49 @@ pub struct ViewerSession {
     routes: ControlRoutes,
     opened: Opened,
     responder: ObservationResponder,
+    clock: Option<ClockSync>,
     last: u64,
     heard_until: u64,
     closed: bool,
 }
 impl ViewerSession {
+    /// Begin the one negotiated exchange on this original connection. Subsequent
+    /// tick/drive and streaming turns service it, including idle periods. The
+    /// policy is local and validated by the existing estimator; it is never
+    /// inferred from a heartbeat or a peer-supplied offset.
+    pub fn enable_clock_sync(&mut self, policy: ClockPolicy) -> Result<(), clock::Error> {
+        self.check().map_err(clock::Error::Startup)?;
+        if self.clock.is_some() {
+            return Err(clock::Error::Configuration);
+        }
+        self.clock = Some(ClockSync::viewer(
+            self.cx.clone(),
+            &mut self.transport,
+            self.routes,
+            self.opened.binding,
+            &self.opened.selection,
+            policy,
+        )?);
+        Ok(())
+    }
+    /// The actual bounded measurement, or None before a reply/after expiry.
+    /// Reading it does not issue a probe, renew permission or reset its lifetime.
+    pub fn clock_correlation(&mut self) -> Result<Option<ClockCorrelation>, clock::Error> {
+        self.check().map_err(clock::Error::Startup)?;
+        match &mut self.clock {
+            Some(clock) => clock.correlation(&mut self.transport),
+            None => Ok(None),
+        }
+    }
+    fn service_clock(&mut self) -> Result<(), Error> {
+        if let Some(clock) = &mut self.clock {
+            clock
+                .service(&mut self.transport)
+                .map_err(|_| Error::ClockSynchronization)?;
+        }
+        Ok(())
+    }
+
     /// Receive this approved session's display catalog without choosing a
     /// default. The UI explicitly chooses a handle from the received catalog.
     pub fn select_display(
@@ -346,6 +386,7 @@ impl ViewerSession {
             routes,
             opened,
             responder,
+            clock: None,
             last: current,
             heard_until,
             closed: false,
@@ -424,6 +465,7 @@ impl ViewerSession {
         other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
     ) -> Result<(), Error> {
         self.send_response()?;
+        self.service_clock()?;
         let binding = authority::Binding {
             channel: self.opened.binding.id,
             session: self.opened.binding.remote_session,
@@ -432,6 +474,7 @@ impl ViewerSession {
         let cx = &self.cx;
         let inbound = self.routes.inbound;
         let responder = &mut self.responder;
+        let clock = &mut self.clock;
         let heard_until = &mut self.heard_until;
         let old_until = *heard_until;
         let mut failure = None;
@@ -440,6 +483,16 @@ impl ViewerSession {
                 cx,
                 || now(cx).is_ok_and(|n| n < old_until),
                 |route, bytes| {
+                    if let Some(clock) = clock {
+                        match clock.dispatch_record(route, bytes) {
+                            Ok(Some(disposition)) => return Ok(disposition),
+                            Ok(None) => {}
+                            Err(_) => {
+                                failure = Some(Error::ClockSynchronization);
+                                return Err(());
+                            }
+                        }
+                    }
                     if route == Route::Stream(inbound)
                         && bytes.get(6..8) == Some(&(Kind::Challenge as u16).to_be_bytes())
                     {
@@ -489,6 +542,7 @@ impl ViewerSession {
             )
             .map_err(|e| failure.unwrap_or(Error::Transport(e)))?;
         self.send_response()?;
+        self.service_clock()?;
         self.check()
     }
     pub fn tick(
@@ -540,6 +594,9 @@ impl ViewerSession {
     pub fn close(&mut self) {
         self.closed = true;
         self.responder.stop();
+        if let Some(clock) = &mut self.clock {
+            clock.stop();
+        }
         self.transport.close();
         self.cx.cancel_fast(CancelKind::User);
     }

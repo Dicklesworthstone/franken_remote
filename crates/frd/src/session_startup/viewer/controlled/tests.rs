@@ -90,7 +90,7 @@ struct Fixture {
     video: quic::DatagramRoute,
     host: ControlledHost,
     viewer: ControlledViewer,
-    host_clock: ClockSync,
+    host_clock: Option<ClockSync>,
     host_media: NegotiatedMedia,
     receiver: ReceivePipeline,
     descriptor: FrameDescriptor,
@@ -136,6 +136,25 @@ async fn fixture_with_wire_feedback(
     capabilities: Capabilities,
     decode: bool,
     feedback: bool,
+) -> Fixture {
+    Box::pin(fixture_with_clock_mode(
+        client_cx,
+        host_cx,
+        capabilities,
+        decode,
+        feedback,
+        false,
+    ))
+    .await
+}
+#[allow(clippy::too_many_lines)]
+async fn fixture_with_clock_mode(
+    client_cx: &Cx,
+    host_cx: &Cx,
+    capabilities: Capabilities,
+    decode: bool,
+    feedback: bool,
+    managed: bool,
 ) -> Fixture {
     let mut wire_capabilities: Vec<WireCapability> = [
         fr_wire::clock::CAPABILITY,
@@ -217,27 +236,38 @@ async fn fixture_with_wire_feedback(
         .unwrap();
     let hn = NegotiatedInput::new(host.io().unwrap().0, &selection, &hc, hi).unwrap();
     let vn = NegotiatedInput::new(viewer.io().unwrap().0, &selection, &vc, vi).unwrap();
-    let (hq, routes) = host.io().unwrap();
-    let mut host_clock =
-        ClockSync::host(observation.clone(), hq, routes, parent, &selection).unwrap();
-    let (vq, routes) = viewer.io().unwrap();
-    let mut clock = ClockSync::viewer(
-        client_cx.clone(),
-        vq,
-        routes,
-        parent,
-        &selection,
-        ClockPolicy::default(),
-    )
-    .unwrap();
+    let (mut host_clock, mut clock) = if managed {
+        host.enable_clock_sync().unwrap();
+        viewer.enable_clock_sync(ClockPolicy::default()).unwrap();
+        (None, None)
+    } else {
+        let (hq, routes) = host.io().unwrap();
+        let host_clock =
+            ClockSync::host(observation.clone(), hq, routes, parent, &selection).unwrap();
+        let (vq, routes) = viewer.io().unwrap();
+        let clock = ClockSync::viewer(
+            client_cx.clone(),
+            vq,
+            routes,
+            parent,
+            &selection,
+            ClockPolicy::default(),
+        )
+        .unwrap();
+        (Some(host_clock), Some(clock))
+    };
     let mut counter = 5000;
     let until = now(host_cx).unwrap() + 1_000_000;
     let correlation = loop {
         assert!(now(host_cx).unwrap() < until);
-        clock.receive(viewer.io().unwrap().0, block).unwrap();
-        clock.service(viewer.io().unwrap().0).unwrap();
-        host_clock.receive(host.io().unwrap().0, block).unwrap();
-        host_clock.service(host.io().unwrap().0).unwrap();
+        if let Some(clock) = &mut clock {
+            clock.receive(viewer.io().unwrap().0, block).unwrap();
+            clock.service(viewer.io().unwrap().0).unwrap();
+        }
+        if let Some(host_clock) = &mut host_clock {
+            host_clock.receive(host.io().unwrap().0, block).unwrap();
+            host_clock.service(host.io().unwrap().0).unwrap();
+        }
         let (host_result, viewer_result) = Box::pin(support::both(
             host.drive(Duration::from_millis(1), || nonce(&mut counter), block),
             viewer.drive(Duration::from_millis(1), block),
@@ -245,7 +275,11 @@ async fn fixture_with_wire_feedback(
         .await;
         host_result.unwrap();
         viewer_result.unwrap();
-        if let Some(sample) = clock.correlation(viewer.io().unwrap().0).unwrap() {
+        let sample = match &mut clock {
+            Some(clock) => clock.correlation(viewer.io().unwrap().0).unwrap(),
+            None => viewer.clock_correlation().unwrap(),
+        };
+        if let Some(sample) = sample {
             break sample;
         }
     };
@@ -391,7 +425,13 @@ async fn fixture_with_wire_feedback(
         )
         .unwrap();
     input.visible(0, ClientInstant(stamp)).unwrap();
-    let viewer = viewer.into_controlled(vn, media, input, clock).unwrap();
+    let viewer = if let Some(clock) = clock {
+        viewer.into_controlled(vn, media, input, clock).unwrap()
+    } else {
+        viewer
+            .into_controlled_synchronized(vn, media, input)
+            .unwrap()
+    };
     Fixture {
         presenter,
         video,
@@ -466,14 +506,10 @@ async fn turn(
         );
         state.last_announce = now(host_cx).unwrap();
     }
-    state
-        .host_clock
-        .receive(state.host.io().unwrap().0, block)
-        .unwrap();
-    state
-        .host_clock
-        .service(state.host.io().unwrap().0)
-        .unwrap();
+    if let Some(clock) = &mut state.host_clock {
+        clock.receive(state.host.io().unwrap().0, block).unwrap();
+        clock.service(state.host.io().unwrap().0).unwrap();
+    }
     Box::pin(support::both(state.host.drive(Duration::from_millis(1),||nonce(counter),||{*stamp+=1;Some(InputTicketId::from_raw(*stamp))},block),state.viewer.drive(Duration::from_millis(1),|_|{},|route,bytes| {
         if matches!(route,Route::Stream(s) if s.messages==quic::Messages::Exact(Kind::Progress as u16)) {
             state.receiver.receive(Channel::MediaConfig,bytes,now(client_cx).unwrap()).map_err(|_|())?;Ok(Disposition::Consumed)
@@ -970,3 +1006,54 @@ mod viewport;
 mod streaming;
 
 mod events;
+
+#[test]
+fn session_clock_handoff_preserves_measurement_and_control_renewal() {
+    run(|client_cx, host_cx| async move {
+        let mut state = Box::pin(fixture_with_clock_mode(
+            &client_cx,
+            &host_cx,
+            caps(),
+            false,
+            false,
+            true,
+        ))
+        .await;
+        assert!(state.host_clock.is_none());
+        assert!(state.viewer.session.clock.is_none());
+        let before = state.viewer.clock_at;
+        assert_eq!(
+            state.viewer.input.clock_correlation().received_at_us(),
+            before
+        );
+        let mut counter = 10000;
+        let mut stamp = 20000;
+        let driver = state.driver.take().unwrap();
+        let ((), shutdown) = Box::pin(support::both(
+            async {
+                let until = now(&client_cx).unwrap() + 3_200_000;
+                assert_eq!(state.viewer.action(key(true)).unwrap().sequence, 0);
+                let mut released = false;
+                while now(&client_cx).unwrap() < until {
+                    let (a, b) =
+                        turn(&mut state, &client_cx, &host_cx, &mut counter, &mut stamp).await;
+                    a.unwrap();
+                    b.unwrap();
+                    if !released && state.viewer.pending_actions() == 0 {
+                        assert_eq!(state.viewer.action(key(false)).unwrap().sequence, 1);
+                        released = true;
+                    }
+                }
+                assert!(released && state.viewer.pending_actions() == 0);
+                assert_eq!(state.effects.lock().unwrap().keys, [true, false]);
+                assert!(state.viewer.clock_at > before);
+                state.viewer.close();
+                state.host.close();
+            },
+            driver,
+        ))
+        .await;
+        assert!(shutdown.handoff_safe());
+        assert!(!state.seat.is_occupied());
+    });
+}

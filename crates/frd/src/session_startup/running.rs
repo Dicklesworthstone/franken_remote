@@ -2,7 +2,7 @@
 //! installed-Tailscale admission without stopping the UDP/TLS reactor during a
 //! `LocalAPI` lookup. No listener, control grant or new media queue is created.
 use super::{Error, OpenedSession, now};
-use crate::media::{ObservationControl, renewal::ObservationRenewal};
+use crate::media::{ObservationControl, clock::ClockSync, renewal::ObservationRenewal};
 use asupersync::cx::Cx;
 use fr_core::time::HostInstant;
 use fr_transport::quic::{ControlRoutes, Disposition, QuicRecords, Route};
@@ -53,6 +53,7 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> Services for F {
 pub struct HostSession {
     opened: OpenedSession,
     renewal: ObservationRenewal,
+    clock: Option<ClockSync>,
 }
 impl OpenedSession {
     /// Attach exactly one observation renewer after the binding acknowledgement.
@@ -69,10 +70,23 @@ impl OpenedSession {
         Ok(HostSession {
             opened: self,
             renewal,
+            clock: None,
         })
     }
 }
 impl HostSession {
+    /// Opt into session-owned clock service after positive capability selection.
+    /// Existing explicitly owned `ClockSync` callers remain supported; the same
+    /// connection can never claim both. No timestamp or authority is fabricated.
+    pub fn enable_clock_sync(&mut self) -> Result<(), crate::media::clock::Error> {
+        self.check().map_err(crate::media::clock::Error::Startup)?;
+        if self.clock.is_some() {
+            return Err(crate::media::clock::Error::Configuration);
+        }
+        self.clock = Some(ClockSync::from_opened(&mut self.opened)?);
+        Ok(())
+    }
+
     /// Publish a locally enumerated, approved disclosure scope and retain the
     /// resulting choice while media runs. Enumeration must not block this owner.
     /// Continue driving this session and dispatch display records between turns.
@@ -204,6 +218,9 @@ impl HostSession {
     pub fn close(&mut self) {
         self.opened.close();
         self.renewal.stop();
+        if let Some(clock) = &mut self.clock {
+            clock.stop();
+        }
     }
     /// Run one bounded I/O turn, refreshing admission when its remaining lifetime
     /// falls below 500 ms. A required refresh may span several turns, bounded by
@@ -243,7 +260,12 @@ impl HostSession {
         if wait > MAX_TURN {
             return Err(Error::InvalidConfiguration);
         }
-        self.check()?;
+        self.opened.check()?;
+        let mut timed = TimedServices {
+            clock: self.clock.as_mut(),
+            other,
+        };
+        let other = &mut timed;
         service(
             &mut self.renewal,
             &mut self.opened.transport,
@@ -275,14 +297,14 @@ impl HostSession {
                 .await
                 .map_err(Error::Renewal)?;
         }
-        self.check()?;
+        self.opened.check()?;
         service(
             &mut self.renewal,
             &mut self.opened.transport,
             fresh_nonce,
             other,
         )?;
-        self.check()
+        self.opened.check()
     }
 }
 impl Drop for HostSession {
@@ -299,6 +321,42 @@ impl Drop for Operation<'_> {
         if !self.complete {
             self.session.close();
         }
+    }
+}
+/// Keep the optional clock in the same service chain during ordinary turns,
+/// control service and pending admission refresh. It owns no additional task.
+struct TimedServices<'a, S> {
+    clock: Option<&'a mut ClockSync>,
+    other: &'a mut S,
+}
+impl<S: Services> Services for TimedServices<'_, S> {
+    fn input_submitted(&mut self, at_us: u64) {
+        self.other.input_submitted(at_us);
+    }
+
+    fn permitted(&mut self) -> bool {
+        self.other.permitted()
+    }
+    fn maintain<N: FnMut() -> Result<u128, ()>>(
+        &mut self,
+        transport: &mut QuicRecords,
+        nonce: &mut N,
+    ) -> Result<(), Error> {
+        self.other.maintain(transport, nonce)?;
+        if let Some(clock) = &mut self.clock {
+            clock
+                .service(transport)
+                .map_err(|_| Error::ClockSynchronization)?;
+        }
+        Ok(())
+    }
+    fn receive(&mut self, route: Route, bytes: &[u8]) -> Result<Disposition, ()> {
+        if let Some(clock) = &mut self.clock
+            && let Some(disposition) = clock.dispatch_record(route, bytes).map_err(|_| ())?
+        {
+            return Ok(disposition);
+        }
+        self.other.receive(route, bytes)
     }
 }
 fn service(

@@ -459,6 +459,26 @@ impl ClockSync {
         }
         Ok(Disposition::Consumed)
     }
+    /// Used only by the original session's checked receive dispatcher. Service
+    /// this endpoint against that connection before and after dispatch. Keeping
+    /// record handling here avoids a second codec or a second receive loop that
+    /// could block renewal behind a clock message on the same ordered stream.
+    pub(crate) fn dispatch_record(
+        &mut self,
+        route: Route,
+        bytes: &[u8],
+    ) -> Result<Option<Disposition>, Error> {
+        let kind = bytes.get(6..8);
+        if kind != Some(&(fr_wire::Kind::ClockProbe as u16).to_be_bytes())
+            && kind != Some(&(fr_wire::Kind::ClockReply as u16).to_be_bytes())
+        {
+            return Ok(None);
+        }
+        if route != Route::Stream(self.routes.inbound) {
+            return Err(Error::Configuration);
+        }
+        self.message(bytes).map(Some)
+    }
     /// Unrelated control/media/input belongs to the enclosing session. Returning
     /// Blocked preserves its bytes for that dispatcher; it is never discarded.
     pub fn receive(
@@ -474,20 +494,13 @@ impl ClockSync {
         let count = guard.connection.receive(
             &life.cx,
             || life.now().is_ok(),
-            |route, bytes| {
-                let kind = bytes.get(6..8);
-                if kind == Some(&(fr_wire::Kind::ClockProbe as u16).to_be_bytes())
-                    || kind == Some(&(fr_wire::Kind::ClockReply as u16).to_be_bytes())
-                {
-                    if route != Route::Stream(self.routes.inbound) {
-                        failure = Some(Error::Configuration);
-                        return Err(());
-                    }
-                    return self.message(bytes).map_err(|e| {
-                        failure = Some(e);
-                    });
+            |route, bytes| match self.dispatch_record(route, bytes) {
+                Ok(Some(disposition)) => Ok(disposition),
+                Ok(None) => other(route, bytes),
+                Err(error) => {
+                    failure = Some(error);
+                    Err(())
                 }
-                other(route, bytes)
             },
         );
         if let Some(e) = failure {

@@ -96,8 +96,16 @@ fn continuous_control(feedback: bool) {
                 async {
                     loop {
                         let q = host.io().map_err(Error::Session)?.0;
-                        host_clock.receive(q, block).map_err(Error::Clock)?;
-                        host_clock.service(q).map_err(Error::Clock)?;
+                        host_clock
+                            .as_mut()
+                            .unwrap()
+                            .receive(q, block)
+                            .map_err(Error::Clock)?;
+                        host_clock
+                            .as_mut()
+                            .unwrap()
+                            .service(q)
+                            .map_err(Error::Clock)?;
                         if feedback {
                             let current = now(&h).unwrap();
                             requester.prepare(current).unwrap();

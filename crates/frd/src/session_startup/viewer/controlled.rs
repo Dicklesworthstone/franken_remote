@@ -98,6 +98,20 @@ impl std::fmt::Debug for ControlledViewer {
     }
 }
 impl ViewerSession {
+    /// Transfer the SAME session-owned exchange, including pending probe bytes
+    /// and its original correlation, rather than constructing another estimator.
+    /// Presentation, negotiated input and the initial control ticket remain
+    /// independent prerequisites. A missing/unmeasured clock refuses control.
+    pub fn into_controlled_synchronized(
+        mut self,
+        channels: NegotiatedInput,
+        media: NegotiatedMedia,
+        input: PresentedInput,
+    ) -> Result<ControlledViewer, Error> {
+        let clock = self.clock.take().ok_or(Error::ClockNotReady)?;
+        self.into_controlled(channels, media, input, clock)
+    }
+
     /// `ClockSync` must already have measured THIS session. `PresentedInput` must
     /// come from the actual decoder receiver, with a mapped, qualified visible
     /// frame and network-bounded initial ticket. No prerequisite is fabricated.
@@ -116,7 +130,8 @@ impl ViewerSession {
             .map_err(Error::Input)?;
         let b = media.binding();
         let v = input.input_view();
-        if self.opened.selection.role != Role::RequestControl
+        if self.clock.is_some()
+            || self.opened.selection.role != Role::RequestControl
             || parent != binding
             || configuration != b
             || input.binding().channel != channels.channel_binding()

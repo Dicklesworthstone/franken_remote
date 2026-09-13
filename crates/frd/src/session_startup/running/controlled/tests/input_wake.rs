@@ -1,5 +1,6 @@
 //! Actual native-owner result collection and UDP/TLS media service. OS effects,
-//! consent, clock correlation, visibility and codec bytes are explicit fixtures.
+//! consent, input clock correlation, visibility and codec bytes are fixtures.
+//! The idle-capture cases also service the negotiated session-owned clock.
 use super::*;
 use fr_media::pacing::Mode;
 
@@ -13,7 +14,7 @@ fn exercise(adaptive: bool) {
             seat,
             effects,
             ..
-        } = Box::pin(fixture(&c, &h, None)).await;
+        } = Box::pin(fixture_with_clock(&c, &h, None, true)).await;
         let (mut stream, channels, mut receiver) = Box::pin(
             crate::session_startup::running::streaming::tests::idle_source_for_controlled(
                 &mut host.session,
@@ -77,6 +78,7 @@ fn exercise(adaptive: bool) {
                                 previous = observed;
                             }
                         }
+                        assert!(viewer.session.clock_correlation().unwrap().is_some());
                         assert_eq!(viewer.receipts, 1);
                         assert!(viewer.tickets >= 3);
                         stop.stop(StopReason::LocalRevoke);

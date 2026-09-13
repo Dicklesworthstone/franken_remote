@@ -67,6 +67,7 @@ pub enum Error {
     Denied,
     Expired,
     Clock,
+    ClockSynchronization,
     Cancelled,
     Closed,
 }

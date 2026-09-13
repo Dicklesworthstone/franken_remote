@@ -651,3 +651,5 @@ fn display_choice_uses_running_sessions_while_observation_renews_past_initial_gr
         assert!(host.check().is_err());
     });
 }
+
+mod session_clock;

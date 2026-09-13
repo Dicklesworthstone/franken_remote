@@ -211,8 +211,25 @@ fn media_capabilities() -> Vec<WireCapability> {
     .collect()
 }
 async fn fixture(c: &Cx, h: &Cx, gate: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>) -> Fixture {
+    Box::pin(fixture_with_clock(c, h, gate, false)).await
+}
+async fn fixture_with_clock(
+    c: &Cx,
+    h: &Cx,
+    gate: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
+    synchronized: bool,
+) -> Fixture {
+    let mut capabilities = media_capabilities();
+    if synchronized {
+        capabilities.push(WireCapability {
+            name: fr_wire::clock::CAPABILITY.into(),
+            version: fr_wire::clock::VERSION,
+            required: true,
+        });
+        capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    }
     let mut initial_until = 0;
-    let (mut host, mut viewer) = pair_initialized(c, h, media_capabilities(), |host| {
+    let (mut host, mut viewer) = pair_initialized(c, h, capabilities, |host| {
         let a = host.authority.as_mut().unwrap();
         let t = HostInstant::from_micros(now(h).unwrap());
         a.mark_view_ready(t).unwrap();
@@ -222,6 +239,10 @@ async fn fixture(c: &Cx, h: &Cx, gate: Option<(mpsc::Sender<()>, mpsc::Receiver<
             .unwrap();
     })
     .await;
+    if synchronized {
+        host.enable_clock_sync().unwrap();
+        viewer.enable_clock_sync(ClockPolicy::default()).unwrap();
+    }
     let (hc, vc) = attach(&mut host, &mut viewer, c, h, MediaRole::Configuration, 8).await;
     let (hi, vi) = attach(&mut host, &mut viewer, c, h, MediaRole::Input, 10).await;
     let selection = host.selection().clone();
