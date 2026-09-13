@@ -37,8 +37,9 @@ pub use viewer::controlled::events as viewer_events;
 pub use viewer::controlled::{ControlledViewer, Error as ControlledViewerError, ViewerControl};
 pub use viewer::observer::{Error as ObserverError, NativeObserver, Policy as ObserverPolicy};
 pub use viewer::streaming::{
-    Error as StreamingViewerError, Presentation, Statistics as ViewerStatistics, StreamingViewer,
-    StreamingViewerControl,
+    ControlState as ViewerControlState, Error as StreamingViewerError,
+    PendingControl as PendingViewerControl, Presentation, Statistics as ViewerStatistics,
+    StreamingViewer, StreamingViewerControl,
 };
 pub use viewer::{Viewer, ViewerSession};
 

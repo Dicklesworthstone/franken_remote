@@ -47,10 +47,13 @@ controlled viewing continues to check ticket expiry, view freshness and exact
 receiver identity before emitting input. The native owner still checks authority
 immediately before OS submission.
 
-This implements the initial network grant exchange, not an installable desktop
-application or automatic promotion of every StreamingViewer. The remaining
-application handoff must keep the actual decoder/receiver and qualified platform
-visibility intact; it must not fabricate a startup frame to enter control.
+For continuous video during acquisition, use
+[`StreamingViewer::serve_requesting_control`](VIEWER_CONTROL_PROMOTION.md)
+instead. It retains the original decoder, receiver, repair state and qualified
+presentation while the real grant is pending, then promotes that same viewer.
+These lower-level request methods remain available for explicitly coordinated
+applications. Neither path is an installable desktop shell or a grant of control
+to an observation-only session.
 
 ## Verification scope
 

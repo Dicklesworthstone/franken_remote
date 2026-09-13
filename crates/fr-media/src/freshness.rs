@@ -259,6 +259,29 @@ impl ViewTracker {
             _ => Error::InvalidProgress,
         })?;
         let p = decode_progress(record, limits).map_err(|_| Error::InvalidProgress)?;
+        self.observe(p, now_us)
+    }
+    /// Seed or update from the original receiver's already validated progress.
+    /// This copies no pixels and never changes host timestamps. Polling the same
+    /// observation is a no-op, not evidence of a fresh source. Equal numeric
+    /// bindings on another receiver cannot supply this tracker's history.
+    pub fn observe_receiver(
+        &mut self,
+        receiver: &ReceivePipeline,
+        now_us: u64,
+    ) -> Result<(), Error> {
+        self.check_receiver(receiver)?;
+        self.tick(now_us)?;
+        if let Some(progress) = receiver.latest_progress() {
+            match self.observe(progress, now_us) {
+                Err(Error::Obsolete) => Ok(()),
+                result => result,
+            }
+        } else {
+            Ok(())
+        }
+    }
+    fn observe(&mut self, p: Progress, now_us: u64) -> Result<(), Error> {
         self.tick(now_us)?;
         if p.pipeline == PipelineState::Failed {
             return self.fail(Error::SourceUnknown);

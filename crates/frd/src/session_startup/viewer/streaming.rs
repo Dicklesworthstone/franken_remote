@@ -1,5 +1,6 @@
 //! Continuous native receiving without lending the connection to a codec.
 //! One owned picture stays charged while QUIC, repairs and control keep moving.
+mod acquisition;
 use super::{
     ViewerSession,
     controlled::{ControlledViewer, ViewerControl},
@@ -11,6 +12,7 @@ use crate::{
     media_quic::NegotiatedMedia,
     worker::Deadline,
 };
+pub use acquisition::{PendingControl, State as ControlState};
 use asupersync::{cx::Cx, types::CancelKind};
 use fr_client::input::ResultEvent;
 use fr_media::{
@@ -35,6 +37,7 @@ pub enum Error {
     Delivery(DeliveryError),
     Transport(quic::Error),
     Feedback(feedback::Error),
+    Freshness(fr_media::freshness::Error),
     Application,
     Closed,
 }
@@ -59,6 +62,14 @@ pub struct Statistics {
     pub repair_requests: u64,
     pub network_turns: u64,
 }
+impl Statistics {
+    fn presented(&mut self, stage: PresentationStage) {
+        self.decoded = self.decoded.saturating_add(1);
+        if stage == PresentationStage::SubmittedToCompositor {
+            self.compositor_submissions = self.compositor_submissions.saturating_add(1);
+        }
+    }
+}
 /// Independently usable terminal stop; it cannot replace observation or acquire
 /// input. A native decoder never owns or blocks this handle.
 #[derive(Clone)]
@@ -82,28 +93,58 @@ enum Peer {
         media: NegotiatedMedia,
     },
     Control(ControlledViewer),
+    Acquiring {
+        session: ViewerSession,
+        media: NegotiatedMedia,
+        request: Box<PendingControl>,
+    },
+    Closed,
 }
 impl Peer {
+    fn prepare_decode(&mut self, receiver: &ReceivePipeline) -> Result<bool, Error> {
+        match self {
+            Self::Acquiring {
+                session, request, ..
+            } => request.prepare(session, receiver),
+            Self::Closed => Err(Error::Closed),
+            _ => Ok(true),
+        }
+    }
+    fn decoded(&mut self, receipt: media::PresentationReceipt) -> Result<(), Error> {
+        match self {
+            Self::Control(viewer) => viewer
+                .decoded(
+                    receipt.decoded,
+                    receipt.stage == PresentationStage::SubmittedToCompositor,
+                )
+                .map_err(Error::Control),
+            Self::Acquiring { request, .. } => request.decoded(receipt),
+            Self::Observe { .. } => Ok(()),
+            Self::Closed => Err(Error::Closed),
+        }
+    }
     fn parts(&mut self) -> Result<(&mut ViewerSession, &NegotiatedMedia), Error> {
         match self {
-            Self::Observe { session, media } => {
+            Self::Observe { session, media } | Self::Acquiring { session, media, .. } => {
                 session.check().map_err(Error::Session)?;
                 media.check(&session.transport).map_err(Error::Routes)?;
                 Ok((session, media))
             }
             Self::Control(v) => v.streaming_parts().map_err(Error::Control),
+            Self::Closed => Err(Error::Closed),
         }
     }
     fn controlled(&mut self) -> Option<&mut ControlledViewer> {
         match self {
             Self::Control(v) => Some(v),
-            Self::Observe { .. } => None,
+            Self::Observe { .. } | Self::Acquiring { .. } | Self::Closed => None,
         }
     }
     fn close(&mut self) {
         match self {
             Self::Control(v) => v.close(),
-            Self::Observe { session, .. } => session.close(),
+            Self::Observe { session, .. } | Self::Acquiring { session, .. } => session.close(),
+            Self::Closed => {}
         }
     }
     async fn drive(
@@ -117,6 +158,12 @@ impl Peer {
                 session.drive(wait, other).await.map_err(Error::Session)
             }
             Self::Control(v) => v.drive(wait, result, other).await.map_err(Error::Control),
+            Self::Acquiring {
+                session,
+                media,
+                request,
+            } => request.drive(session, media, wait, other).await,
+            Self::Closed => Err(Error::Closed),
         }
     }
 }
@@ -133,8 +180,22 @@ pub struct StreamingViewer {
     control: StreamingViewerControl,
     statistics: Statistics,
     served: bool,
+    initial: Option<media::PresentationReceipt>,
 }
 impl ViewerSession {
+    /// Retain the actual first native completion for a subsequent control request.
+    /// No decode, visibility, mapping or grant is synthesized by this handoff.
+    /// The token keeps its receiver identity and original presentation deadline.
+    pub fn into_streaming_presented(
+        self,
+        media: NegotiatedMedia,
+        startup: decoder_startup::Viewer,
+        initial: media::PresentationReceipt,
+    ) -> Result<StreamingViewer, Error> {
+        let mut viewer = self.into_streaming(media, startup)?;
+        viewer.initial = Some(initial);
+        Ok(viewer)
+    }
     pub fn into_streaming(
         self,
         media: NegotiatedMedia,
@@ -232,6 +293,7 @@ impl StreamingViewer {
             control: StreamingViewerControl { cx, input },
             statistics: Statistics::default(),
             served: false,
+            initial: None,
         })
     }
     pub fn control(&self) -> StreamingViewerControl {
@@ -257,6 +319,7 @@ impl StreamingViewer {
         self.receiver.close();
         self.presenter.abort();
         self.repair.clear();
+        self.initial = None;
     }
     /// Reaping is a separate observed OS result, not implied by cancellation.
     pub async fn reap_media(
@@ -291,14 +354,18 @@ impl StreamingViewer {
                 let operation = operation;
                 operation
                     .viewer
-                    .serve_inner(&mut ui, &mut result, &mut other)
+                    .serve_inner(
+                        &mut |state, event| ui(state.controlled(), event),
+                        &mut result,
+                        &mut other,
+                    )
                     .await
             }),
         }
     }
     async fn serve_inner(
         &mut self,
-        ui: &mut impl FnMut(Option<&mut ControlledViewer>, Option<Presentation>) -> Result<(), ()>,
+        ui: &mut impl FnMut(ControlState<'_>, Option<Presentation>) -> Result<(), ()>,
         result: &mut impl FnMut(ResultEvent),
         other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
     ) -> Result<(), Error> {
@@ -306,13 +373,17 @@ impl StreamingViewer {
             return Err(Error::Closed);
         }
         self.served = true;
-        let cx = &self.control.cx;
-        ui(self.peer.controlled(), None).map_err(|()| Error::Application)?;
+        let cx = &self.control.cx.clone();
+        acquisition::notify(&mut self.peer, &self.receiver, &mut self.control, None, ui)?;
         loop {
-            let job = self
-                .presenter
-                .take_next(cx, &mut self.receiver)
-                .map_err(Error::Media)?;
+            let ready = self.peer.prepare_decode(&self.receiver)?;
+            let job = if ready {
+                self.presenter
+                    .take_next(cx, &mut self.receiver)
+                    .map_err(Error::Media)?
+            } else {
+                None
+            };
             let Some(job) = job else {
                 network(
                     &mut self.peer,
@@ -325,7 +396,7 @@ impl StreamingViewer {
                     other,
                 )
                 .await?;
-                ui(self.peer.controlled(), None).map_err(|()| Error::Application)?;
+                acquisition::notify(&mut self.peer, &self.receiver, &mut self.control, None, ui)?;
                 continue;
             };
             if let Some(f) = &mut self.feedback {
@@ -368,7 +439,13 @@ impl StreamingViewer {
                     if let Some(stage) = decoded {
                         break stage.map_err(Error::Media)?;
                     }
-                    ui(self.peer.controlled(), None).map_err(|()| Error::Application)?;
+                    acquisition::notify(
+                        &mut self.peer,
+                        &self.receiver,
+                        &mut self.control,
+                        None,
+                        ui,
+                    )?;
                 }
             };
             let receipt = job.complete(cx, &mut self.receiver).map_err(Error::Media)?;
@@ -381,21 +458,16 @@ impl StreamingViewer {
                 frame: receipt.frame,
                 stage,
             };
-            if let Some(viewer) = self.peer.controlled() {
-                viewer
-                    .decoded(
-                        receipt.decoded,
-                        stage == PresentationStage::SubmittedToCompositor,
-                    )
-                    .map_err(Error::Control)?;
-            }
-            self.statistics.decoded = self.statistics.decoded.saturating_add(1);
-            if stage == PresentationStage::SubmittedToCompositor {
-                self.statistics.compositor_submissions =
-                    self.statistics.compositor_submissions.saturating_add(1);
-            }
+            self.peer.decoded(receipt)?;
+            self.statistics.presented(stage);
             // Completion releases the original decode reservation only after native borrowing.
-            ui(self.peer.controlled(), Some(event)).map_err(|()| Error::Application)?;
+            acquisition::notify(
+                &mut self.peer,
+                &self.receiver,
+                &mut self.control,
+                Some(event),
+                ui,
+            )?;
         }
     }
 }
