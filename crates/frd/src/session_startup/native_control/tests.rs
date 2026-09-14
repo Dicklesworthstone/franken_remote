@@ -424,3 +424,5 @@ fn public_control_bootstrap_never_substitutes_first_decode_for_visibility() {
 fn public_control_bootstrap_never_substitutes_presentation_for_consent() {
     run3(|c, h, cleanup| exercise(c, h, cleanup, false, true));
 }
+
+mod handoff;

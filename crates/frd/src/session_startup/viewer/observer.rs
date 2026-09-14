@@ -129,7 +129,9 @@ pub struct NativeObserver {
     selected: SelectedDisplay,
     display: Display,
     initial: streaming::Presentation,
-    viewer: streaming::StreamingViewer,
+    // Keep the large receiver/transport owner out of nested bootstrap Poll results.
+    // One stable allocation moves the same session; it does not clone its state.
+    viewer: Box<streaming::StreamingViewer>,
     cx: Cx,
     input: Option<NegotiatedInput>,
     parent: fr_wire::negotiation::ControlBinding,
@@ -694,7 +696,7 @@ async fn bootstrap(
         selected,
         display,
         initial: presentation,
-        viewer,
+        viewer: Box::new(viewer),
         cx: budget.cx.clone(),
         input,
         parent,
