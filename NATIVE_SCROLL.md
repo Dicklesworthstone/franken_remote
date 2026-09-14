@@ -119,7 +119,8 @@ files. Unrelated test/dependency sources are the recovered `3a99e73` snapshot,
 with the current finite-readiness authority source restored. This is a scoped
 rebuild, **not a complete current-main dependency build or CI pass**. The seven
 relative-input integration tests added after that snapshot were not rerun in this
-slice. No production dependency, feature or repository Cargo manifest is altered
+local slice; the clean publication CI below subsequently ran those cases too.
+No production dependency, feature or repository Cargo manifest is altered
 by the external build arrangement.
 
 In a normal complete checkout with the pinned toolchain and native SDKs:
@@ -131,5 +132,32 @@ cargo test -p fr-native --features linux-input --test scroll_x11 --locked -- --t
 cargo clippy -p fr-core -p fr-client -p fr-native --all-targets --features fr-native/linux-input --locked -- -D warnings
 ```
 
-Full current-workspace CI, physical devices/displays, live Tailscale ingress,
-Wayland, macOS and Windows qualification remain separate acceptance work.
+## Publication verification — 14 September 2026
+
+The recovered implementation is published on `main` in `21e6e7e`, followed by
+the native regression tests and integration contract in `d79c3c5`. All ten
+published source objects are the exact objects exported after successful
+verification; no reconstructed or unverified replacement source was published.
+
+Fresh local verification repeated all 464 scoped tests at one, four and eight
+test threads and separately passed strict Clippy, formatting and generated API
+documentation checks. Both deliberately broken copies failed their unchanged
+regressions. The local snapshot limitations above remain explicit.
+
+Separately, clean GitHub Actions run `34844573653` completed successfully on
+`767c141b`. That run checked every published preimage before applying the reviewed
+candidate, built the complete pinned dependency graph, and passed the full
+workspace `fast` and documentation lanes. It also repeated the core scrolling,
+client receipt and native input suites at one and eight test threads, including
+the previously published relative-input tests, keyboard tests and concurrent
+XTest-cache test. The verifier checked all resulting source hashes again and
+exported them only after every test step succeeded.
+
+The finalized workflow verifies committed sources read-only. It no longer stages
+a candidate patch, receives a write token or creates Git objects. A fresh run
+against the final documentation/workflow commit is separate evidence; the
+completed candidate run does not imply that later checks have already passed.
+
+Physical devices/displays, live Tailscale ingress, Wayland, macOS and Windows
+qualification remain separate acceptance work. The former saved scrolling patch
+is superseded by these published commits and should not be reapplied.

@@ -3,9 +3,18 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['.github/workflows/verify-native-scroll.yml']
+    paths:
+      - '.github/workflows/verify-native-scroll.yml'
+      - 'crates/fr-core/**'
+      - 'crates/fr-client/**'
+      - 'crates/fr-native/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'scripts/verify.sh'
+      - 'NATIVE_SCROLL.md'
 permissions:
-  contents: write
+  contents: read
 env:
   CARGO_BUILD_JOBS: '1'
   CARGO_PROFILE_DEV_DEBUG: '0'
@@ -20,48 +29,12 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
-      - name: Stage exact reviewed scrolling source
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import base64, hashlib, json, lzma, os, subprocess
-          from pathlib import Path
-          def blob(data): return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
-          chunks = []
-          for oid, size in [('12b02a5e1b932c6b9fb1fae272c41a8881e55465',8000),('02b0badf778954e6488b9ee64636eb5a33a43ef6',8000),('ce3e5d41829ad35954ac04e5a6b8e3deedffcfa4',5696)]:
-              row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}'],timeout=30))
-              data=base64.b64decode(row['content'])
-              assert len(data)==size and blob(data)==oid
-              chunks.append(data)
-          dec=lzma.LZMADecompressor(memlimit=64*1024*1024)
-          raw=dec.decompress(base64.b64decode(b''.join(chunks),validate=True),max_length=71947)
-          assert dec.eof and not dec.unused_data and len(raw)==71946
-          assert hashlib.sha256(raw).hexdigest()=='3a4f7929e91fb77cd9aa6bee1b4b983da47bf89deec4729dce8fca44eb4f7fbd'
-          c=json.loads(raw)
-          assert c['base']=='c1914fcf60be7d00db06a0cf8871bef38ccebe2b'
-          assert len(c['after'])==10 and set(c['before'])==set(c['after'])
-          for path in c['after']:
-              assert (path.startswith('crates/') or path in {'NATIVE_INPUT.md','NATIVE_SCROLL.md'}) and '..' not in Path(path).parts
-          current={p:blob(Path(p).read_bytes()) if Path(p).is_file() else None for p in c['before']}
-          if current!=c['after']:
-              assert current==c['before'], 'concurrent source changes require reconciliation'
-              patch=Path(os.environ['RUNNER_TEMP'],'native-scroll.patch')
-              patch.write_text(c['patch'])
-              stats=subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
-              assert {line.split('\t',2)[2] for line in stats.splitlines()}==set(c['after'])
-              subprocess.run(['git','apply','--check',str(patch)],check=True)
-              subprocess.run(['git','apply',str(patch)],check=True)
-          for path,expected in c['after'].items(): assert blob(Path(path).read_bytes())==expected,path
-          Path(os.environ['RUNNER_TEMP'],'native-scroll-paths.json').write_text(json.dumps(c['after']))
-          subprocess.run(['git','diff','--check'],check=True)
-          PY
       - name: Select pinned compiler and native SDKs
         run: |
           rustup show active-toolchain
           sudo apt-get update
           sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxrandr-dev libxtst6 pkg-config xvfb xauth openssl
-      - name: Verify complete candidate workspace
+      - name: Verify complete committed workspace
         run: |
           ./scripts/verify.sh fast
           ./scripts/verify.sh docs
@@ -72,18 +45,5 @@ jobs:
             cargo test -p fr-client --test scroll_receipts --locked -- --test-threads="$threads"
             cargo test -p fr-native --features linux-input --lib --test scroll_x11 --test input_x11 --test keyboard_x11 --test input_concurrency --locked -- --test-threads="$threads"
           done
-      - name: Retain verified source objects without reference writes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import base64, hashlib, json, os, subprocess
-          from pathlib import Path
-          for path,expected in json.loads(Path(os.environ['RUNNER_TEMP'],'native-scroll-paths.json').read_text()).items():
-              data=Path(path).read_bytes()
-              assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()==expected
-              body=json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()})
-              row=json.loads(subprocess.check_output(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,timeout=30))
-              assert row['sha']==expected
-              print(json.dumps({'path':path,'sha':expected,'verified_checkout':os.environ['GITHUB_SHA']}))
-          PY
+      - name: Confirm verification did not change tracked sources
+        run: git diff --exit-code
