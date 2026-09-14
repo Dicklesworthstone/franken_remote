@@ -3,6 +3,7 @@
 //! display loss; the independent watchdog/revoke path must remain outside it.
 //! This is not a Wayland permission fallback or an X11 security sandbox.
 use crate::keyboard::Keyboard;
+mod scroll;
 use core::{
     ffi::{c_char, c_int, c_uint, c_ulong, c_void},
     marker::PhantomData,
@@ -12,6 +13,7 @@ use fr_core::{
     input::{DesktopPoint, InputBounds, KeyTransition, PointerButton},
     input_submission::{Capabilities, Capability, InputSink, Operation, PlatformError, Submission},
 };
+use scroll::WheelState;
 use std::{
     ffi::CString,
     rc::Rc,
@@ -102,6 +104,8 @@ pub struct X11Pointer {
     root: c_ulong,
     dimensions: (u32, u32),
     relative: bool,
+    line_scroll: bool,
+    wheel: WheelState,
     prepared: Option<Operation>,
     xtest: Option<MutexGuard<'static, ()>>,
     keyboard: Keyboard,
@@ -131,6 +135,8 @@ impl X11Pointer {
             root,
             dimensions: (0, 0),
             relative: false,
+            line_scroll: false,
+            wheel: WheelState::default(),
             prepared: None,
             xtest: None,
             keyboard: Keyboard::new(display),
@@ -163,6 +169,7 @@ impl X11Pointer {
         owner.relative = relative_supported(major, minor, unsafe {
             XScreenCount(owner.display.as_ptr())
         });
+        owner.line_scroll = owner.relative && owner.wheel_mapping_available();
         owner.dimensions = owner.geometry()?;
         if owner.dimensions.0 > 8192 || owner.dimensions.1 > 8192 {
             return Err(PlatformError::Unsupported);
@@ -175,6 +182,9 @@ impl X11Pointer {
             .with(Capability::Buttons);
         if self.relative {
             caps = caps.with(Capability::Relative);
+        }
+        if self.line_scroll {
+            caps = caps.with(Capability::LineScroll);
         }
         if self.keyboard.enabled() {
             caps.with(Capability::Keys).with(Capability::Repeat)
@@ -197,6 +207,7 @@ impl X11Pointer {
         self.cancel_prepared();
         let _access = xtest_access();
         let keyboard_done = self.keyboard.cleanup();
+        let wheel_done = self.cleanup_wheel();
         for index in 0..self.buttons.len() {
             let Some(code) = self.buttons[index] else {
                 continue;
@@ -223,7 +234,7 @@ impl X11Pointer {
             }
             self.buttons[index] = None;
         }
-        keyboard_done && self.buttons.iter().all(Option::is_none)
+        keyboard_done && wheel_done && self.buttons.iter().all(Option::is_none)
     }
     fn prepare_button(
         &mut self,
@@ -365,6 +376,7 @@ impl InputSink for X11Pointer {
                     return Err(PlatformError::GeometryChanged);
                 }
             }
+            Operation::Wheel { direction, pressed } => self.prepare_wheel(direction, pressed)?,
             // Release-only cleanup still works after geometry replacement.
             Operation::Button { button, pressed } => self.prepare_button(button, pressed)?,
             _ => return Err(PlatformError::Unsupported),
@@ -393,6 +405,7 @@ impl InputSink for X11Pointer {
                 Operation::Absolute(p) => {
                     XTestFakeMotionEvent(self.display.as_ptr(), self.screen, p.x, p.y, 0)
                 }
+                Operation::Wheel { direction, pressed } => self.submit_wheel(direction, pressed),
                 Operation::Relative { x, y } => {
                     // One checked signed-16-bit displacement, no splitting,
                     // acceleration emulation, delayed replay or absolute warp.
@@ -435,10 +448,14 @@ impl InputSink for X11Pointer {
     fn cancel_prepared(&mut self) {
         self.prepared = None;
         self.prepared_button = None;
+        self.wheel.prepared = None;
         self.keyboard.cancel_prepared();
         self.xtest = None;
     }
     fn repeat_requires_pair(&self) -> bool {
+        true
+    }
+    fn line_scroll_requires_pairs(&self) -> bool {
         true
     }
 }

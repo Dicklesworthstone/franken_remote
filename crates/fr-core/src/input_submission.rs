@@ -17,9 +17,11 @@ use crate::{
 };
 mod control;
 mod held;
+pub mod scroll;
 pub use control::ControlLease;
 use core::fmt;
 pub use held::{Reconciliation, ReconciliationOutcome};
+use scroll::{LineScroll, WheelDirection};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -76,6 +78,12 @@ pub enum Operation {
         y: i32,
         unit: ScrollUnit,
     },
+    /// One native wheel-button transition. Only discrete backends request this
+    /// expansion; each press AND release gets its own final authority check.
+    Wheel {
+        direction: WheelDirection,
+        pressed: bool,
+    },
     Text(char),
 }
 impl fmt::Debug for Operation {
@@ -87,6 +95,7 @@ impl fmt::Debug for Operation {
             Self::Relative { .. } => "Relative",
             Self::Scroll { .. } => "Scroll",
             Self::Text(_) => "Text",
+            Self::Wheel { .. } => "Wheel",
         })
     }
 }
@@ -119,6 +128,11 @@ pub trait InputSink {
     /// X11 has no standalone repeat event. Request two separately authorized
     /// operations instead of hiding release/press inside one native submission.
     fn repeat_requires_pair(&self) -> bool {
+        false
+    }
+    /// Discrete wheel backends need separately authorized press/release calls.
+    /// The default retains one atomic Scroll API call for other platforms.
+    fn line_scroll_requires_pairs(&self) -> bool {
         false
     }
 }
@@ -284,6 +298,7 @@ pub struct InputSession {
     revoke: RevokeHandle,
     keys: [bool; 256],
     buttons: [bool; 5],
+    wheel: Option<WheelDirection>,
     pointer_floor: Option<u64>,
     mode: PointerMode,
     mode_epoch: u64,
@@ -355,6 +370,7 @@ impl InputSession {
             revoke,
             keys: [false; 256],
             buttons: [false; 5],
+            wheel: None,
             pointer_floor: None,
             mode: PointerMode::Absolute,
             mode_epoch: 0,
@@ -488,6 +504,17 @@ impl InputSession {
     pub fn cleanup(&mut self, sink: &mut impl InputSink) -> Cleanup {
         self.revoke();
         let mut submitted = 0;
+        if let Some(direction) = self.wheel {
+            let prepared = PreparedSink(sink);
+            let op = Operation::Wheel {
+                direction,
+                pressed: false,
+            };
+            if prepared.0.prepare(op).is_ok() && prepared.0.submit(op) == Submission::Submitted {
+                self.wheel = None;
+                submitted += 1;
+            }
+        }
         for index in 0..self.keys.len() {
             if self.keys[index] {
                 let key = PhysicalKey::new(u16::try_from(index).expect("fixed key array"));
@@ -545,7 +572,8 @@ impl InputSession {
                 .iter()
                 .chain(&self.buttons)
                 .filter(|held| **held)
-                .count(),
+                .count()
+                + usize::from(self.wheel.is_some()),
         )
         .expect("fixed held arrays")
     }
@@ -703,6 +731,7 @@ impl Attempt<'_, '_> {
             } => Some(self.owner.buttons[button as usize - 1]),
             _ => None,
         };
+        let previous_wheel = self.owner.wheel;
         self.track(op, true);
         self.uncertain = true;
         match prepared.0.submit(op) {
@@ -715,6 +744,9 @@ impl Attempt<'_, '_> {
             Submission::Unknown => Err(Refusal::UnknownEffect),
             Submission::NotSubmitted(error) => {
                 self.uncertain = false;
+                if matches!(op, Operation::Wheel { pressed: true, .. }) {
+                    self.owner.wheel = previous_wheel;
+                }
                 if let Some(old) = previous {
                     match op {
                         Operation::Key { key, .. } => {
@@ -732,6 +764,11 @@ impl Attempt<'_, '_> {
     }
     fn track(&mut self, op: Operation, before: bool) {
         match op {
+            Operation::Wheel {
+                direction,
+                pressed: true,
+            } => self.owner.wheel = Some(direction),
+            Operation::Wheel { pressed: false, .. } if !before => self.owner.wheel = None,
             Operation::Key {
                 key,
                 transition: KeyTransition::Press,
@@ -792,6 +829,19 @@ impl Attempt<'_, '_> {
             self.one(Operation::Key { key, transition }, sink, clock)
         }
     }
+    fn wheel_steps(
+        &mut self,
+        discrete: LineScroll,
+        sink: &mut impl InputSink,
+        clock: &mut impl FnMut() -> HostInstant,
+    ) -> Result<(), Refusal> {
+        for direction in discrete.steps() {
+            for pressed in [true, false] {
+                self.one(Operation::Wheel { direction, pressed }, sink, clock)?;
+            }
+        }
+        Ok(())
+    }
     fn execute(
         &mut self,
         sink: &mut impl InputSink,
@@ -833,9 +883,20 @@ impl Attempt<'_, '_> {
                     ScrollUnit::Lines => Capability::LineScroll,
                 })?;
                 self.owner.position(position)?;
+                // Validate the entire native work bound before even positioning.
+                // A fractional/oversized request cannot leave a partial move.
+                let discrete = if unit == ScrollUnit::Lines && sink.line_scroll_requires_pairs() {
+                    Some(LineScroll::new(x, y).ok_or(Refusal::Unsupported)?)
+                } else {
+                    None
+                };
                 self.owner.barrier(barrier);
                 self.one(Operation::Absolute(position), sink, clock)?;
-                self.one(Operation::Scroll { x, y, unit }, sink, clock)
+                if let Some(discrete) = discrete {
+                    self.wheel_steps(discrete, sink, clock)
+                } else {
+                    self.one(Operation::Scroll { x, y, unit }, sink, clock)
+                }
             }
             InputEvent::Text(text) => {
                 self.owner.require(Capability::Text)?;

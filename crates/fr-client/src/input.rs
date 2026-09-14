@@ -510,6 +510,13 @@ impl InputClient {
                     ScrollUnit::Pixels => Capability::PixelScroll,
                     ScrollUnit::Lines => Capability::LineScroll,
                 })?;
+                let compound = (unit == ScrollUnit::Lines)
+                    .then(|| fr_core::input_submission::scroll::LineScroll::new(x, y))
+                    .flatten()
+                    .map_or(
+                        2,
+                        fr_core::input_submission::scroll::LineScroll::native_operations,
+                    );
                 (
                     InputEvent::Scroll {
                         position,
@@ -518,8 +525,8 @@ impl InputClient {
                         unit,
                         barrier,
                     },
-                    2,
-                    2,
+                    2.min(compound),
+                    2.max(compound),
                 )
             }
             Action::Text(text) => {
@@ -584,7 +591,7 @@ impl InputClient {
         let p = self.pending[slot].expect("matched pending");
         let count = result.submitted_operations;
         let valid = match result.outcome {
-            InputOutcome::SubmittedToOs => (p.minimum..=p.maximum).contains(&count),
+            InputOutcome::SubmittedToOs => count == p.minimum || count == p.maximum,
             InputOutcome::PartiallySubmittedToOs | InputOutcome::EffectUnknown => count < p.maximum,
             InputOutcome::AppliedLocally => false,
             _ => count == 0,
