@@ -178,6 +178,12 @@ fn credentials() -> InputCredentials {
     }
 }
 fn grant(sink: &X11Pointer) -> (InputSession, InputClient) {
+    grant_with_view_bound(sink, None)
+}
+fn grant_with_view_bound(
+    sink: &X11Pointer,
+    view_until: Option<u64>,
+) -> (InputSession, InputClient) {
     let c = credentials();
     let mut a = SessionAuthority::new(
         c.session,
@@ -188,7 +194,12 @@ fn grant(sink: &X11Pointer) -> (InputSession, InputClient) {
     );
     a.mark_capabilities_checked().unwrap();
     a.authorize_observation(at(0)).unwrap();
-    a.mark_view_ready(at(0)).unwrap();
+    if let Some(until) = view_until {
+        a.require_view_evidence(at(0)).unwrap();
+        a.mark_view_ready_until(at(until), at(0)).unwrap();
+    } else {
+        a.mark_view_ready(at(0)).unwrap();
+    }
     a.grant_lease(c.lease, at(0)).unwrap();
     a.issue_input_ticket(c.lease, c.ticket, at(0)).unwrap();
     let host = InputSession::new(a, c, sink.bounds(), sink.capabilities(), at(0)).unwrap();
@@ -584,4 +595,131 @@ fn existing_vertical_wheel_press_is_not_claimed_or_released_by_remote_cleanup() 
     assert!(local.cleanup_native());
     assert_eq!(local.query_pointer().unwrap().1 & (1 << 11), 0);
     assert_eq!(observer.events(), [(4, false)]);
+}
+
+#[test]
+fn original_source_expiry_stops_native_scroll_even_when_ticket_and_lease_are_live() {
+    for stop_after_press in [false, true] {
+        let server = Server::new();
+        let observer = Observer::open(&server.name);
+        let mut sink = X11Pointer::open(&server.name).unwrap();
+        let (mut host, mut client) = grant_with_view_bound(&sink, Some(100));
+        let clock = Cell::new(1);
+        let bytes = encode(&mut client, LINE, LINE, 1);
+        let monitor = host.monitor();
+        assert_eq!(monitor.deadline(at(1)).unwrap(), at(100));
+        let result = {
+            let mut hook = Hook {
+                native: &mut sink,
+                after: |op| {
+                    if matches!(op, Operation::Wheel { pressed, .. } if pressed == stop_after_press)
+                    {
+                        clock.set(100);
+                    }
+                },
+            };
+            dispatch(&mut host, &mut hook, &bytes, || at(clock.get()))
+        };
+        assert_eq!(result.outcome, InputOutcome::PartiallySubmittedToOs);
+        assert_eq!(
+            result.submitted_operations,
+            if stop_after_press { 2 } else { 3 }
+        );
+        assert_eq!(
+            result.refusal,
+            Some(Refusal::Authority(
+                fr_core::authority::AuthorityError::ViewUnready
+            ))
+        );
+        assert_eq!(host.held_count(), u16::from(stop_after_press));
+        assert!(matches!(
+            acknowledge(&mut client, result, 2),
+            ResultEvent::Completed(_)
+        ));
+        assert!(client.stopped().is_some());
+        barrier(&mut sink);
+        let expected = if stop_after_press {
+            vec![(7, true)]
+        } else {
+            vec![(7, true), (7, false)]
+        };
+        assert_eq!(observer.events(), expected);
+        let cleanup = host.maintain(at(100), &mut sink);
+        assert_eq!(cleanup.remaining, 0);
+        assert_eq!(cleanup.submitted_releases, u16::from(stop_after_press));
+        barrier(&mut sink);
+        assert_eq!(
+            observer.events(),
+            if stop_after_press {
+                vec![(7, false)]
+            } else {
+                vec![]
+            }
+        );
+        assert!(sink.cleanup_native());
+        assert_eq!(dispatch(&mut host, &mut sink, &bytes, || at(101)), result);
+        barrier(&mut sink);
+        assert_eq!(observer.events(), []);
+    }
+}
+
+#[test]
+fn readiness_watchdog_revokes_a_prepared_native_wheel_before_submission() {
+    struct Preparing<'a> {
+        native: &'a mut X11Pointer,
+        monitor: InputMonitor,
+        clock: &'a Cell<u64>,
+    }
+    impl InputSink for Preparing<'_> {
+        fn prepare(&mut self, op: Operation) -> Result<(), PlatformError> {
+            self.native.prepare(op)?;
+            if matches!(op, Operation::Wheel { pressed: true, .. }) {
+                self.clock.set(100);
+                assert!(self.monitor.deadline(at(100)).is_err());
+                assert!(self.monitor.is_revoked());
+            }
+            Ok(())
+        }
+        fn submit(&mut self, op: Operation) -> Submission {
+            self.native.submit(op)
+        }
+        fn cancel_prepared(&mut self) {
+            self.native.cancel_prepared();
+        }
+        fn line_scroll_requires_pairs(&self) -> bool {
+            true
+        }
+    }
+    let server = Server::new();
+    let observer = Observer::open(&server.name);
+    let mut sink = X11Pointer::open(&server.name).unwrap();
+    let (mut host, mut client) = grant_with_view_bound(&sink, Some(100));
+    let clock = Cell::new(1);
+    let bytes = encode(&mut client, 0, 3 * LINE, 1);
+    let result = {
+        let mut preparing = Preparing {
+            native: &mut sink,
+            monitor: host.monitor(),
+            clock: &clock,
+        };
+        dispatch(&mut host, &mut preparing, &bytes, || at(clock.get()))
+    };
+    assert_eq!(result.outcome, InputOutcome::PartiallySubmittedToOs);
+    assert_eq!(result.submitted_operations, 1);
+    assert_eq!(result.refusal, Some(Refusal::Revoked));
+    assert_eq!(host.held_count(), 0);
+    assert!(matches!(
+        acknowledge(&mut client, result, 2),
+        ResultEvent::Completed(_)
+    ));
+    assert_eq!(
+        sink.submit(Operation::Wheel {
+            direction: WheelDirection::Down,
+            pressed: true
+        }),
+        Submission::NotSubmitted(PlatformError::Unsupported)
+    );
+    assert_eq!(host.cleanup(&mut sink).remaining, 0);
+    barrier(&mut sink);
+    assert_eq!(observer.events(), []);
 }
