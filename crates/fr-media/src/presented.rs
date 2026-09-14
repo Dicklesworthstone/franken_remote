@@ -135,7 +135,7 @@ impl Verifier {
     }
 }
 struct Pending {
-    stamp: Stamp,
+    stamp: Option<Stamp>,
     bytes: [u8; wire::BYTES],
     until: u64,
 }
@@ -148,6 +148,7 @@ pub struct Reporter {
     last_now: u64,
     after: u64,
     sent: Option<Stamp>,
+    unavailable_sent: bool,
     pending: Option<Pending>,
 }
 impl Reporter {
@@ -160,6 +161,7 @@ impl Reporter {
             last_now: now,
             after: now,
             sent: None,
+            unavailable_sent: false,
             pending: None,
         })
     }
@@ -168,15 +170,42 @@ impl Reporter {
     }
     pub fn prepare(&mut self, sample: Option<Sample>, now: u64) -> Result<(), Error> {
         tick(&mut self.last_now, now)?;
+        // Once loss of visibility is observed, its negative report cannot be
+        // replaced by a later positive sample before the host receives it.
+        if self.pending.as_ref().is_some_and(|p| p.stamp.is_none()) {
+            self.pending(now)?;
+            return Ok(());
+        }
         let Some(sample) = sample else {
             self.pending = None;
+            if self.sent.is_some() && !self.unavailable_sent {
+                let until = now.checked_add(REPORT_INTERVAL_US).ok_or(Error::Overflow)?;
+                let mut bytes = [0; wire::BYTES];
+                wire::encode(
+                    Report {
+                        sequence: self.sequence,
+                        visible: None,
+                    },
+                    self.binding,
+                    &self.limits,
+                    &mut bytes,
+                    InputDirection::ViewerToHost,
+                    InputDelivery::Reliable,
+                )
+                .map_err(Error::Wire)?;
+                self.pending = Some(Pending {
+                    stamp: None,
+                    bytes,
+                    until,
+                });
+            }
             return Ok(());
         };
         sample.validate().map_err(Error::Wire)?;
         if self
             .pending
             .as_ref()
-            .is_some_and(|p| p.stamp != sample.stamp)
+            .is_some_and(|p| p.stamp != Some(sample.stamp))
         {
             self.pending = None;
         }
@@ -206,7 +235,7 @@ impl Reporter {
         )
         .map_err(Error::Wire)?;
         self.pending = Some(Pending {
-            stamp: sample.stamp,
+            stamp: Some(sample.stamp),
             bytes,
             until,
         });
@@ -222,7 +251,12 @@ impl Reporter {
     pub fn queued(&mut self, now: u64) -> Result<(), Error> {
         self.pending(now)?.ok_or(Error::Expired)?;
         let pending = self.pending.take().ok_or(Error::Expired)?;
-        self.sent = Some(pending.stamp);
+        if let Some(stamp) = pending.stamp {
+            self.sent = Some(stamp);
+            self.unavailable_sent = false;
+        } else {
+            self.unavailable_sent = true;
+        }
         self.sequence = self.sequence.checked_add(1).ok_or(Error::Overflow)?;
         self.after = now.checked_add(REPORT_INTERVAL_US).ok_or(Error::Overflow)?;
         Ok(())

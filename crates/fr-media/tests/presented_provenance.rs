@@ -186,7 +186,14 @@ fn same_source_does_not_emit_heartbeats_and_visibility_loss_discards_unsent() {
     r.prepare(Some(sample(200_000)), 220_000).unwrap();
     assert!(r.pending(220_000).unwrap().is_some());
     r.prepare(None, 220_001).unwrap();
-    assert!(r.pending(220_001).unwrap().is_none());
+    let (negative, until) = r.pending(220_001).unwrap().unwrap();
+    assert_eq!(negative, record(2, None));
+    assert_eq!(until, 220_001 + REPORT_INTERVAL_US);
+    r.queued(220_002).unwrap();
+    r.prepare(None, 220_003).unwrap();
+    assert!(r.pending(220_003).unwrap().is_none());
+    r.prepare(Some(s), 300_000).unwrap();
+    assert!(r.pending(300_000).unwrap().is_none());
 }
 #[test]
 fn new_source_replaces_only_unsent_metadata_and_roundtrips_through_verifier() {
@@ -203,4 +210,46 @@ fn new_source_replaces_only_unsent_metadata_and_roundtrips_through_verifier() {
         Decision::Ready { until_us: 390_000 }
     );
     r.queued(150_001).unwrap();
+}
+
+#[test]
+fn negative_report_preempts_positive_throttle_and_survives_later_visibility() {
+    let mut r = Reporter::new(binding(), ProtocolLimits::ABSOLUTE, 0).unwrap();
+    let old = sample(120_000);
+    r.prepare(Some(old), 130_000).unwrap();
+    r.queued(130_000).unwrap();
+    r.prepare(None, 130_001).unwrap();
+    let (b, until) = r.pending(130_001).unwrap().unwrap();
+    let original = b.to_vec();
+    assert_eq!(original, record(2, None));
+    assert_eq!(until, 180_001);
+    r.prepare(Some(sample(140_000)), 150_000).unwrap();
+    assert_eq!(
+        r.pending(150_000).unwrap(),
+        Some((original.as_slice(), until))
+    );
+    r.queued(150_001).unwrap();
+    r.prepare(Some(sample(200_000)), 220_000).unwrap();
+    assert_eq!(
+        r.pending(220_000).unwrap().unwrap().0,
+        record(3, Some(sample(200_000)))
+    );
+}
+#[test]
+fn never_visible_emits_nothing_and_negative_expiry_cannot_be_retimed() {
+    let mut r = Reporter::new(binding(), ProtocolLimits::ABSOLUTE, 0).unwrap();
+    r.prepare(None, 100_000).unwrap();
+    assert!(r.pending(100_000).unwrap().is_none());
+    r.prepare(Some(sample(120_000)), 130_000).unwrap();
+    r.prepare(None, 130_001).unwrap();
+    assert!(r.pending(130_001).unwrap().is_none());
+    r.prepare(Some(sample(140_000)), 150_000).unwrap();
+    r.queued(150_000).unwrap();
+    r.prepare(None, 150_001).unwrap();
+    assert_eq!(r.prepare(None, 200_001), Err(Error::Expired));
+    assert_eq!(
+        r.prepare(Some(sample(180_000)), 200_002),
+        Err(Error::Expired)
+    );
+    assert_eq!(r.pending(200_003), Err(Error::Expired));
 }
