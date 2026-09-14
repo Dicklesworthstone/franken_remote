@@ -1,0 +1,87 @@
+name: Verify client relative input
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/verify-relative-input.yml']
+permissions:
+  contents: write
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+  RUST_TEST_THREADS: '4'
+jobs:
+  relative:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Stage exact reviewed source without reference writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, subprocess
+          from pathlib import Path
+          def blob(data): return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
+          oid='1b8a68c70bfb9e49c27419a759253a70bd95c33d'
+          row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}'],timeout=30))
+          encoded=base64.b64decode(row['content'])
+          assert len(encoded)==16480 and blob(encoded)==oid
+          dec=lzma.LZMADecompressor(memlimit=64*1024*1024)
+          data=dec.decompress(base64.b64decode(encoded,validate=True),max_length=57089)
+          assert dec.eof and not dec.unused_data and len(data)==57088
+          assert hashlib.sha256(data).hexdigest()=='916b3db504e184f45fc16f620c36f454340c68bb715a28a2732145504a0abc3e'
+          c=json.loads(data)
+          assert c['base']=='01bedf8a68968a0fd85f9a798f1fd8ec2e8cdc37'
+          assert len(c['after'])==11 and set(c['before'])==set(c['after'])
+          for p in c['after']:
+              assert (p.startswith('crates/') or p in {'PROTOCOL_INPUT.md','CLIENT_RELATIVE_INPUT.md'}) and '..' not in Path(p).parts
+          current={p:blob(Path(p).read_bytes()) if Path(p).is_file() else None for p in c['before']}
+          if current!=c['after']:
+              assert current==c['before'], 'concurrent changes require reconciliation'
+              patch=Path(os.environ['RUNNER_TEMP'],'relative-input.patch')
+              patch.write_text(c['patch'])
+              stats=subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
+              assert {line.split('\t',2)[2] for line in stats.splitlines()}==set(c['after'])
+              subprocess.run(['git','apply','--check',str(patch)],check=True)
+              subprocess.run(['git','apply',str(patch)],check=True)
+          for p,expected in c['after'].items(): assert blob(Path(p).read_bytes())==expected,p
+          Path(os.environ['RUNNER_TEMP'],'relative-input-paths.json').write_text(json.dumps(c['after']))
+          subprocess.run(['git','diff','--check'],check=True)
+          PY
+      - name: Select pinned compiler and native SDKs
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxrandr-dev libxtst6 pkg-config xvfb xauth openssl
+      - name: Verify complete candidate workspace
+        run: |
+          ./scripts/verify.sh fast
+          ./scripts/verify.sh docs
+      - name: Repeat client and native relative-mode regressions
+        run: |
+          cargo test -p fr-client --test relative_input --locked -- --test-threads=1
+          cargo test -p fr-client --test relative_input --locked -- --test-threads=8
+          cargo test -p fr-wire --test input_submission --locked
+          cargo test -p fr-native --features linux-input --lib --test input_x11 --test keyboard_x11 --test input_concurrency --locked -- --test-threads=1
+          cargo test -p fr-native --features linux-input --lib --test input_x11 --test keyboard_x11 --test input_concurrency --locked -- --test-threads=8
+      - name: Retain verified source objects without reference writes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, subprocess
+          from pathlib import Path
+          for path,expected in json.loads(Path(os.environ['RUNNER_TEMP'],'relative-input-paths.json').read_text()).items():
+              data=Path(path).read_bytes()
+              assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()==expected
+              body=json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()})
+              row=json.loads(subprocess.check_output(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,timeout=30))
+              assert row['sha']==expected
+              print(json.dumps({'path':path,'sha':expected,'verified_checkout':os.environ['GITHUB_SHA']}))
+          PY
