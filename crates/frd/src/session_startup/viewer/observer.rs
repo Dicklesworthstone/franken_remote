@@ -1,6 +1,8 @@
 //! One native observer bootstrap, from approved startup to continuous receiving.
 //! The selected display, connection and decoder are transferred, never recreated.
 use super::{Viewer, ViewerSession, now, streaming};
+use crate::input_quic::NegotiatedInput;
+use crate::session_startup::native_control;
 use crate::{
     display_selection::{DisplaySelection, SelectedDisplay},
     media::{PresentationReceipt, decoder_startup},
@@ -10,6 +12,7 @@ use crate::{
 use asupersync::{cx::Cx, types::CancelKind};
 use fr_client::startup::ApprovalNotice;
 use fr_media::delivery::{BudgetUsage, ReceivePolicy};
+use fr_media::freshness::ClockPolicy;
 use fr_transport::quic::{self, Disposition, MediaChannel, Route};
 use fr_wire::{
     Kind,
@@ -38,6 +41,8 @@ pub enum Error {
     Media(crate::media_quic::Error),
     Decoder(decoder_startup::Error),
     Streaming(streaming::Error),
+    Input(crate::input_quic::Error),
+    Clock(crate::media::clock::Error),
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -125,6 +130,10 @@ pub struct NativeObserver {
     display: Display,
     initial: streaming::Presentation,
     viewer: streaming::StreamingViewer,
+    cx: Cx,
+    input: Option<NegotiatedInput>,
+    parent: fr_wire::negotiation::ControlBinding,
+    view: fr_wire::decoder::Binding,
 }
 impl std::fmt::Debug for NativeObserver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -137,6 +146,63 @@ impl NativeObserver {
     }
     pub const fn initial_presentation(&self) -> streaming::Presentation {
         self.initial
+    }
+    /// Request metadata uses this actual selected display, not caller-guessed
+    /// channel IDs or generations. Capabilities remain a request, not permission.
+    pub fn control_request(
+        &self,
+        sequence: u64,
+        capabilities: fr_core::input_submission::Capabilities,
+    ) -> Result<fr_wire::control::Request, Error> {
+        now(&self.cx).map_err(Error::Session)?;
+        Ok(fr_wire::control::Request {
+            parent: self.parent,
+            sequence,
+            target: native_control::target(self.display, self.view, capabilities)
+                .map_err(Error::Wire)?,
+        })
+    }
+    pub fn presentation_reports(&self) -> u64 {
+        self.viewer.presentation_reports()
+    }
+    pub fn last_result(&mut self) -> Option<fr_client::input::ResultEvent> {
+        self.viewer.last_result()
+    }
+    /// Continue the explicit control-capable bootstrap without exposing or
+    /// replacing the connection, input attachment, selected display or decoder.
+    /// Visibility and mapping still require independent local UI confirmation.
+    /// The grant request is constructed NOW, including its fixed timeout.
+    pub fn serve_requesting_control<'a>(
+        &'a mut self,
+        sequence: u64,
+        capabilities: fr_core::input_submission::Capabilities,
+        policy: fr_client::input::Policy,
+        ui: impl FnMut(streaming::ControlState<'_>, Option<streaming::Presentation>) -> Result<(), ()>
+        + 'a,
+        result: impl FnMut(fr_client::input::ResultEvent) + 'a,
+    ) -> impl Future<Output = Result<(), Error>> + 'a {
+        let cx = self.cx.clone();
+        let request = self.control_request(sequence, capabilities);
+        let future = request.and_then(|request| {
+            self.input
+                .take()
+                .ok_or(Error::InvalidConfiguration)
+                .map(|input| {
+                    self.viewer.serve_requesting_control(
+                        input,
+                        request,
+                        policy,
+                        ui,
+                        result,
+                        |_, _| Err(()),
+                    )
+                })
+        });
+        Attempt {
+            cx,
+            complete: false,
+            inner: Box::pin(async move { future?.await.map_err(Error::Streaming) }),
+        }
     }
     pub fn control(&self) -> streaming::StreamingViewerControl {
         self.viewer.control()
@@ -151,8 +217,8 @@ impl NativeObserver {
         self.viewer.budget_usage()
     }
     pub fn close(&mut self) {
-        self.selected.invalidate();
         self.viewer.close();
+        self.selected.invalidate();
     }
     /// The callback is bounded/nonblocking; a native compositor submission must
     /// not be relabelled visible. This API cannot acquire or synthesize control.
@@ -194,9 +260,32 @@ impl Viewer {
     /// bounded network turns. `approval` is a notification, NEVER an approval RPC.
     /// Both callbacks must be nonblocking. Dropping an unpolled attempt is terminal.
     pub fn observe<'a>(
+        self,
+        launch: Launch,
+        policy: Policy,
+        choose: impl FnMut(&Catalog) -> Result<Option<u128>, ()> + 'a,
+        approval: impl FnMut(ApprovalNotice) -> Result<(), ()> + 'a,
+    ) -> impl Future<Output = Result<NativeObserver, Error>> + 'a {
+        self.observe_native(launch, policy, None, choose, approval)
+    }
+    /// Prepare control after the SAME approved startup, display selection and
+    /// first native decode. Positive capability selection is required; this
+    /// does not upgrade observation intent or send a control request yet.
+    pub fn observe_for_control<'a>(
+        self,
+        launch: Launch,
+        policy: Policy,
+        clock: ClockPolicy,
+        choose: impl FnMut(&Catalog) -> Result<Option<u128>, ()> + 'a,
+        approval: impl FnMut(ApprovalNotice) -> Result<(), ()> + 'a,
+    ) -> impl Future<Output = Result<NativeObserver, Error>> + 'a {
+        self.observe_native(launch, policy, Some(clock), choose, approval)
+    }
+    fn observe_native<'a>(
         mut self,
         launch: Launch,
         policy: Policy,
+        clock: Option<ClockPolicy>,
         mut choose: impl FnMut(&Catalog) -> Result<Option<u128>, ()> + 'a,
         mut approval: impl FnMut(ApprovalNotice) -> Result<(), ()> + 'a,
     ) -> impl Future<Output = Result<NativeObserver, Error>> + 'a {
@@ -223,6 +312,7 @@ impl Viewer {
                     launch,
                     &budget,
                     &mut choose,
+                    clock,
                 ))
                 .await
             }),
@@ -236,6 +326,26 @@ impl ViewerSession {
         self,
         launch: Launch,
         policy: Policy,
+        choose: impl FnMut(&Catalog) -> Result<Option<u128>, ()> + 'a,
+    ) -> impl Future<Output = Result<NativeObserver, Error>> + 'a {
+        self.observe_native(launch, policy, None, choose)
+    }
+    /// The same explicit path for an already approved session. The existing
+    /// session must not already own a clock: there is exactly one estimator.
+    pub fn observe_for_control<'a>(
+        self,
+        launch: Launch,
+        policy: Policy,
+        clock: ClockPolicy,
+        choose: impl FnMut(&Catalog) -> Result<Option<u128>, ()> + 'a,
+    ) -> impl Future<Output = Result<NativeObserver, Error>> + 'a {
+        self.observe_native(launch, policy, Some(clock), choose)
+    }
+    fn observe_native<'a>(
+        self,
+        launch: Launch,
+        policy: Policy,
+        clock: Option<ClockPolicy>,
         mut choose: impl FnMut(&Catalog) -> Result<Option<u128>, ()> + 'a,
     ) -> impl Future<Output = Result<NativeObserver, Error>> + 'a {
         let cx = self.cx.clone();
@@ -244,7 +354,7 @@ impl ViewerSession {
             cx,
             complete: false,
             inner: Box::pin(async move {
-                Box::pin(bootstrap(self, launch, &budget?, &mut choose)).await
+                Box::pin(bootstrap(self, launch, &budget?, &mut choose, clock)).await
             }),
         }
     }
@@ -256,7 +366,7 @@ struct Attempt<F> {
     complete: bool,
     inner: Pin<Box<F>>,
 }
-impl<F: Future<Output = Result<NativeObserver, Error>>> Future for Attempt<F> {
+impl<T, F: Future<Output = Result<T, Error>>> Future for Attempt<F> {
     type Output = F::Output;
     fn poll(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
@@ -365,11 +475,12 @@ async fn receive_record(
     budget.remaining()?;
     Ok(())
 }
-fn role_index(role: MediaRole) -> Result<usize, Error> {
+fn role_index(role: MediaRole, controlled: bool) -> Result<usize, Error> {
     match role {
         MediaRole::Configuration => Ok(0),
         MediaRole::Recovery => Ok(1),
         MediaRole::Video => Ok(2),
+        MediaRole::Input if controlled => Ok(3),
         MediaRole::Input => Err(Error::Order),
     }
 }
@@ -377,14 +488,15 @@ async fn attach_media(
     session: &mut ViewerSession,
     budget: &Budget,
     selected: &SelectedDisplay,
-) -> Result<(NegotiatedMedia, Route), Error> {
-    let mut channels: [Option<MediaChannel>; 3] = std::array::from_fn(|_| None);
+    controlled: bool,
+) -> Result<(NegotiatedMedia, Route, Option<NegotiatedInput>), Error> {
+    let mut channels: [Option<MediaChannel>; 4] = std::array::from_fn(|_| None);
     let mut slot = RecordSlot::new(
         attachment::BINDING_RECORD_BYTES,
         Route::Stream(session.routes.inbound),
         Kind::StreamBinding,
     )?;
-    for _ in 0..3 {
+    for _ in 0..if controlled { 4 } else { 3 } {
         receive_record(session, budget, &mut slot).await?;
         let Message::Binding(descriptor) = attachment::decode(
             &slot.bytes[..slot.len],
@@ -398,7 +510,7 @@ async fn attach_media(
         else {
             return Err(Error::Order);
         };
-        let index = role_index(descriptor.role)?;
+        let index = role_index(descriptor.role, controlled)?;
         if channels[index].is_some() {
             return Err(Error::Order);
         }
@@ -432,7 +544,7 @@ async fn attach_media(
         }
         channels[index] = Some(channel);
     }
-    let [Some(configuration), Some(recovery), Some(video)] = channels else {
+    let [Some(configuration), Some(recovery), Some(video), input] = channels else {
         return Err(Error::Order);
     };
     let selection = session.opened.selection.clone();
@@ -445,7 +557,15 @@ async fn attach_media(
     );
     let media = NegotiatedMedia::new(q, &selection, &configuration, &recovery, &video)
         .map_err(Error::Media)?;
-    Ok((media, route))
+    let input = input
+        .map(|input| {
+            NegotiatedInput::new(q, &selection, &configuration, input).map_err(Error::Input)
+        })
+        .transpose()?;
+    if controlled != input.is_some() {
+        return Err(Error::Order);
+    }
+    Ok((media, route, input))
 }
 
 /// A successful native result is held until the already-polled network turn
@@ -491,12 +611,21 @@ async fn bootstrap(
     launch: Launch,
     budget: &Budget,
     choose: &mut impl FnMut(&Catalog) -> Result<Option<u128>, ()>,
+    clock: Option<ClockPolicy>,
 ) -> Result<NativeObserver, Error> {
+    budget.remaining()?;
+    if !native_control::profile(&session.opened.selection, clock.is_some()) {
+        return Err(Error::InvalidConfiguration);
+    }
+    if let Some(clock) = clock {
+        session.enable_clock_sync(clock).map_err(Error::Clock)?;
+    }
     let selected = choose_display(&mut session, budget, choose).await?;
     let display = selected
         .display(session.io().map_err(Error::Session)?.0)
         .map_err(Error::Display)?;
-    let (media, route) = attach_media(&mut session, budget, &selected).await?;
+    let (media, route, input) =
+        attach_media(&mut session, budget, &selected, clock.is_some()).await?;
     let mut config = RecordSlot::new(
         session.opened.selection.limits.max_control_message_bytes() as usize,
         route,
@@ -552,17 +681,24 @@ async fn bootstrap(
         .check(session.io().map_err(Error::Session)?.0)
         .map_err(Error::Display)?;
     budget.remaining()?;
+    let parent = session.opened.binding;
+    let view = media.binding();
+    let presentation = streaming::Presentation {
+        frame: initial.frame,
+        stage: initial.stage,
+    };
     let viewer = session
-        .into_streaming(media, decoder)
+        .into_streaming_presented(media, decoder, initial)
         .map_err(Error::Streaming)?;
     Ok(NativeObserver {
         selected,
         display,
-        initial: streaming::Presentation {
-            frame: initial.frame,
-            stage: initial.stage,
-        },
+        initial: presentation,
         viewer,
+        cx: budget.cx.clone(),
+        input,
+        parent,
+        view,
     })
 }
 async fn send_decoder(

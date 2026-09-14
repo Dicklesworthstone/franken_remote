@@ -1,6 +1,8 @@
 //! Approved native host bootstrap. Discovery, selected capture and decoder
 //! negotiation use their existing owners while the original session stays driven.
 use super::{HostSession, Services, StreamingHost};
+use crate::input_quic::NegotiatedInput;
+use crate::session_startup::native_control;
 use crate::{
     display_selection::{DisplaySelection, SelectedDisplay},
     media::{self, ObservationControl, decoder_startup, discovery::DiscoveredSource, streaming},
@@ -14,7 +16,6 @@ use fr_transport::quic::{self, ChannelRequest, Disposition, MediaChannel, QuicRe
 use fr_wire::{
     attachment::{MediaRole, Ticket},
     display::Display,
-    negotiation::Role,
 };
 use std::{
     future::{Future, poll_fn},
@@ -34,6 +35,9 @@ pub enum Error {
     Startup(decoder_startup::Error),
     Transport(quic::Error),
     Routes(crate::media_quic::Error),
+    Input(crate::input_quic::Error),
+    Clock(crate::media::clock::Error),
+    Wire(fr_wire::WireError),
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -155,6 +159,8 @@ pub struct NativePublisher {
     // Moving the publication handle never duplicates host or media ownership.
     host: Box<StreamingHost>,
     control: ObservationControl,
+    input: Option<NegotiatedInput>,
+    view: fr_wire::decoder::Binding,
 }
 impl std::fmt::Debug for NativePublisher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -164,6 +170,52 @@ impl std::fmt::Debug for NativePublisher {
 impl NativePublisher {
     pub const fn display(&self) -> Display {
         self.display
+    }
+    /// Exact selected display metadata for the LOCAL capability/consent check.
+    /// The caller must probe these capabilities; this method does not grant them.
+    pub fn control_target(
+        &self,
+        capabilities: fr_core::input_submission::Capabilities,
+    ) -> Result<fr_wire::control::Target, Error> {
+        self.control.check().map_err(Error::Media)?;
+        native_control::target(self.display, self.view, capabilities).map_err(Error::Wire)
+    }
+    pub fn presentation_reports(&self) -> u64 {
+        self.host.presentation_reports()
+    }
+    pub fn collect_after_close(
+        &mut self,
+    ) -> Result<Option<crate::input_agent::InputReply>, crate::input_quic::Error> {
+        self.host.collect_after_close()
+    }
+    /// Service the original controlled-capable bootstrap. Local approval, live
+    /// target checks and independently polling the returned native Driver remain
+    /// mandatory. Taking the one attachment happens now, not on first polling.
+    pub fn serve_accepting_control<'a>(
+        &'a mut self,
+        seat: crate::input_agent::Seat,
+        local: impl FnMut(
+            crate::session_startup::HostControlState<'_>,
+        )
+            -> Result<Option<fr_wire::control::Target>, crate::input_quic::grant::Error>
+        + 'a,
+        nonce: impl FnMut() -> Result<u128, ()> + 'a,
+        ticket: impl FnMut() -> Option<fr_core::ids::InputTicketId> + 'a,
+    ) -> impl Future<Output = Result<(), Error>> + 'a {
+        let control = self.control.clone();
+        let future = self
+            .input
+            .take()
+            .ok_or(Error::InvalidConfiguration)
+            .map(|input| {
+                self.host
+                    .serve_accepting_control(seat, input, local, nonce, ticket, |_, _| Err(()))
+            });
+        Attempt {
+            control,
+            complete: false,
+            inner: Box::pin(async move { future?.await.map_err(Error::Session) }),
+        }
     }
     pub fn control(&self) -> ObservationControl {
         self.control.clone()
@@ -220,7 +272,30 @@ impl HostSession {
         launch: Launch,
         policy: Policy,
         configure: impl FnOnce(Display) -> Result<Configuration, ()> + 'a,
+        entropy: impl FnMut() -> Result<u128, ()> + 'a,
+    ) -> impl Future<Output = Result<NativePublisher, Error>> + 'a {
+        self.publish_native(launch, policy, configure, entropy, false)
+    }
+    /// Explicit control-capable startup. The offer must already select control,
+    /// input attachment, native grants, clock correlation and presentation proof.
+    /// It uses the same discovered source, selected display and HEVC handshake;
+    /// opening an input channel is not an input grant or an approval decision.
+    pub fn publish_controlled_display<'a>(
+        self,
+        launch: Launch,
+        policy: Policy,
+        configure: impl FnOnce(Display) -> Result<Configuration, ()> + 'a,
+        entropy: impl FnMut() -> Result<u128, ()> + 'a,
+    ) -> impl Future<Output = Result<NativePublisher, Error>> + 'a {
+        self.publish_native(launch, policy, configure, entropy, true)
+    }
+    fn publish_native<'a>(
+        self,
+        launch: Launch,
+        policy: Policy,
+        configure: impl FnOnce(Display) -> Result<Configuration, ()> + 'a,
         mut entropy: impl FnMut() -> Result<u128, ()> + 'a,
+        controlled: bool,
     ) -> impl Future<Output = Result<NativePublisher, Error>> + 'a {
         let control = self.opened.control.clone();
         let budget = Budget::new(control.clone(), policy);
@@ -236,6 +311,7 @@ impl HostSession {
                     configure,
                     &mut entropy,
                     &budget,
+                    controlled,
                 ))
                 .await
             }),
@@ -247,8 +323,8 @@ struct Attempt<F> {
     complete: bool,
     inner: Pin<Box<F>>,
 }
-impl<F: Future<Output = Result<NativePublisher, Error>>> Future for Attempt<F> {
-    type Output = Result<NativePublisher, Error>;
+impl<T, F: Future<Output = Result<T, Error>>> Future for Attempt<F> {
+    type Output = Result<T, Error>;
     fn poll(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         if let Err(e) = this.control.check() {
@@ -492,25 +568,14 @@ async fn bootstrap(
     configure: impl FnOnce(Display) -> Result<Configuration, ()>,
     entropy: &mut impl FnMut() -> Result<u128, ()>,
     budget: &Budget,
+    controlled: bool,
 ) -> Result<NativePublisher, Error> {
     budget.remaining()?;
-    if host.selection().role != Role::Observe {
+    if !native_control::profile(host.selection(), controlled) {
         return Err(Error::InvalidConfiguration);
     }
-    for name in [
-        fr_wire::display::CAPABILITY,
-        fr_wire::attachment::CAPABILITY,
-        fr_wire::attachment::DELIVERY_CAPABILITY,
-        fr_wire::decoder::CAPABILITY,
-    ] {
-        if !host
-            .selection()
-            .capabilities
-            .iter()
-            .any(|c| c.name == name && c.version == 1)
-        {
-            return Err(Error::InvalidConfiguration);
-        }
+    if controlled {
+        host.enable_clock_sync().map_err(Error::Clock)?;
     }
     let control = budget.control.clone();
     let source = during(
@@ -574,6 +639,11 @@ async fn bootstrap(
     )
     .await?;
     let v = attach(&mut host, &mut selected, MediaRole::Video, budget, entropy).await?;
+    let input_channel = if controlled {
+        Some(attach(&mut host, &mut selected, MediaRole::Input, budget, entropy).await?)
+    } else {
+        None
+    };
     let negotiation = host.selection().clone();
     let media = NegotiatedMedia::new(
         host.io().map_err(|e| budget.fail(Error::Session(e)))?.0,
@@ -583,6 +653,18 @@ async fn bootstrap(
         &v,
     )
     .map_err(|e| budget.fail(Error::Routes(e)))?;
+    let input = input_channel
+        .map(|input| {
+            NegotiatedInput::new(
+                host.io().map_err(Error::Session)?.0,
+                &negotiation,
+                &c,
+                input,
+            )
+            .map_err(Error::Input)
+        })
+        .transpose()?;
+    let view = media.binding();
     let initial = during(
         &mut host,
         budget,
@@ -650,6 +732,8 @@ async fn bootstrap(
         display,
         host: Box::new(host),
         control,
+        input,
+        view,
     })
 }
 

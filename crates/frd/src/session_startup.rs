@@ -27,6 +27,7 @@ use std::{
 };
 
 mod admission_refresh;
+mod native_control;
 mod opening;
 mod running;
 pub use running::publisher::{Error as PublisherError, NativePublisher, Policy as PublisherPolicy};
