@@ -80,5 +80,19 @@ pub(super) fn target(
     })
 }
 
+/// The native bootstrap's selected display remains the outer control boundary.
+/// Capabilities still come from independent local probes/consent; only this
+/// exact display's coordinates and generations can be approved or kept active.
+pub(super) fn check_target(
+    display: Display,
+    binding: decoder::Binding,
+    candidate: Target,
+) -> Result<(), WireError> {
+    if target(display, binding, candidate.capabilities)? != candidate {
+        return Err(WireError::InvalidBinding);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;

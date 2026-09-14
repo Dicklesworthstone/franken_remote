@@ -194,22 +194,49 @@ impl NativePublisher {
     pub fn serve_accepting_control<'a>(
         &'a mut self,
         seat: crate::input_agent::Seat,
-        local: impl FnMut(
+        mut local: impl FnMut(
             crate::session_startup::HostControlState<'_>,
-        )
-            -> Result<Option<fr_wire::control::Target>, crate::input_quic::grant::Error>
-        + 'a,
+        ) -> Result<
+            Option<fr_wire::control::Target>,
+            crate::input_quic::grant::Error,
+        > + 'a,
         nonce: impl FnMut() -> Result<u128, ()> + 'a,
         ticket: impl FnMut() -> Option<fr_core::ids::InputTicketId> + 'a,
     ) -> impl Future<Output = Result<(), Error>> + 'a {
         let control = self.control.clone();
+        let display = self.display;
+        let binding = self.view;
         let future = self
             .input
             .take()
             .ok_or(Error::InvalidConfiguration)
             .map(|input| {
-                self.host
-                    .serve_accepting_control(seat, input, local, nonce, ticket, |_, _| Err(()))
+                self.host.serve_accepting_control(
+                    seat,
+                    input,
+                    move |state| {
+                        use crate::session_startup::HostControlState;
+                        let request = match &state {
+                            HostControlState::Pending(pending) => pending.request(),
+                            HostControlState::Active { request, .. } => Some(*request),
+                        };
+                        // Refuse foreign coordinates before exposing the approval
+                        // capability. Equal channel/view IDs alone are insufficient.
+                        if let Some(request) = request {
+                            native_control::check_target(display, binding, request.target)
+                                .map_err(|_| crate::input_quic::grant::Error::TargetChanged)?;
+                        }
+                        let current = local(state)?;
+                        if let Some(target) = current {
+                            native_control::check_target(display, binding, target)
+                                .map_err(|_| crate::input_quic::grant::Error::TargetChanged)?;
+                        }
+                        Ok(current)
+                    },
+                    nonce,
+                    ticket,
+                    |_, _| Err(()),
+                )
             });
         Attempt {
             control,
