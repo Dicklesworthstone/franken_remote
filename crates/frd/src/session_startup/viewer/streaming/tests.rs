@@ -259,6 +259,7 @@ fn actual_quic_viewer_service_repairs_an_entirely_lost_final_picture() {
                     &mut repair,
                     &mut stats,
                     None,
+                    None,
                     &c,
                     &mut |_| {},
                     &mut block,

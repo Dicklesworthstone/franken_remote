@@ -241,6 +241,16 @@ impl Reporter {
         });
         Ok(())
     }
+    /// Stop advertising an unconfirmed compositor candidate without erasing a
+    /// pending explicit loss report or renewing the preceding visible source.
+    pub fn pause(&mut self, now: u64) -> Result<(), Error> {
+        tick(&mut self.last_now, now)?;
+        if self.pending.as_ref().is_some_and(|p| p.stamp.is_some()) {
+            self.pending = None;
+        }
+        self.pending(now)?;
+        Ok(())
+    }
     pub fn pending(&mut self, now: u64) -> Result<Option<(&[u8], u64)>, Error> {
         tick(&mut self.last_now, now)?;
         if self.pending.as_ref().is_some_and(|p| now >= p.until) {

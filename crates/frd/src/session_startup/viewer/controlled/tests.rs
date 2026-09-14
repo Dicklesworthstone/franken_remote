@@ -716,11 +716,16 @@ fn lost_visibility_callback_keeps_the_preceding_view_expiry() {
             .0;
         submit_successor(&mut state, &client_cx);
         while now(&client_cx).unwrap() < until {
-            state
-                .viewer
-                .drive(Duration::ZERO, |_| {}, block)
-                .await
-                .unwrap();
+            match state.viewer.drive(Duration::ZERO, |_| {}, block).await {
+                Ok(()) => {}
+                Err(Error::Expired) => {
+                    // The executor can cross the exclusive deadline AFTER the
+                    // loop's clock sample, even for a zero-duration drive.
+                    assert!(now(&client_cx).unwrap() >= until);
+                    break;
+                }
+                Err(error) => panic!("unexpected pre-expiry failure: {error:?}"),
+            }
             asupersync::time::sleep(client_cx.now(), Duration::from_millis(1)).await;
         }
         assert!(

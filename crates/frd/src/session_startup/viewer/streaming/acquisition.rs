@@ -168,6 +168,16 @@ impl PendingControl {
     pub fn stop(&self) {
         self.cx.cancel_fast(asupersync::types::CancelKind::User);
     }
+    pub(super) fn presented_sample(
+        &mut self,
+    ) -> Result<crate::media::presented::ViewSample, Error> {
+        let at = self.current()?;
+        let Some(view) = &mut self.view else {
+            return Ok(crate::media::presented::ViewSample::Pending);
+        };
+        crate::media::presented::ViewSample::from_view(view.presented_sample(at), at)
+            .map_err(Error::Freshness)
+    }
     pub(super) fn decoded(&mut self, receipt: PresentationReceipt) -> Result<(), Error> {
         let at = self.current()?;
         if receipt.frame.as_raw() != receipt.decoded.descriptor().frame {

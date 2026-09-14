@@ -31,6 +31,8 @@ pub mod decoder_startup;
 pub mod discovery;
 mod grant;
 pub(crate) mod presentation;
+pub(crate) mod presented;
+pub use presented::Error as PresentedStateError;
 pub(crate) mod receiver_feedback;
 pub use receiver_feedback::Error as ReceiverFeedbackError;
 pub mod renewal;
@@ -143,6 +145,16 @@ impl ObservationControl {
             .authorize_observation_delivery(now)
             .map_err(Error::Authority)?;
         Ok(now)
+    }
+    /// Current evidence-backed readiness, not a control grant. The clock is
+    /// checked under the authority lock so even idle callers observe expiry.
+    pub fn view_ready(&self) -> Result<bool, Error> {
+        self.check()?;
+        let mut authority = self.authority.lock().map_err(|_| Error::Poisoned)?;
+        authority
+            .authorize_observation_delivery(host_now(&self.cx)?)
+            .map_err(Error::Authority)?;
+        Ok(authority.readiness() == fr_core::authority::ViewReadiness::Ready)
     }
     /// Routing metadata must never borrow another approved session's authority.
     pub(crate) fn belongs_to_session(&self, session: fr_core::ids::RemoteSessionId) -> bool {
@@ -320,6 +332,9 @@ impl Subscription {
             first: true,
             capture_source: None,
         })
+    }
+    pub(crate) fn source_progress(&self) -> Option<Progress> {
+        self.cache.latest_progress()
     }
     pub(crate) fn maximum_capacity(&self) -> usize {
         self.cache.maximum_capacity()

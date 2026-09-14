@@ -6,6 +6,7 @@ pub(super) mod acquisition;
 use super::{ControlledHost, Error, HostSession, Services, now};
 use crate::{
     input_watchdog::{Control, StopReason},
+    media::presented::{self, HostPresentation},
     media::receiver_feedback::{self as feedback, HostFeedback, Setup},
     media::{
         CaptureSource, CaptureUpdate, ObservationControl,
@@ -74,6 +75,7 @@ pub struct StreamingHost {
     host: Host,
     stream: Stream,
     feedback: Option<HostFeedback>,
+    presentation: Option<HostPresentation>,
 }
 impl HostSession {
     pub fn into_streaming(self, stream: Stream) -> Result<StreamingHost, Error> {
@@ -109,7 +111,7 @@ impl StreamingHost {
                     .map_err(Error::MediaTransport)?,
             )
             .map_err(Error::ReceiverFeedback)?;
-            setup
+            let feedback = setup
                 .map(|s| {
                     HostFeedback::new(
                         s,
@@ -118,10 +120,33 @@ impl StreamingHost {
                     )
                 })
                 .transpose()
-                .map_err(Error::ReceiverFeedback)
+                .map_err(Error::ReceiverFeedback)?;
+            let mut presentation = HostPresentation::attach(
+                &session.opened.selected,
+                session.opened.binding,
+                stream
+                    .sender
+                    .feedback_view()
+                    .map_err(Error::MediaTransport)?,
+                &session.opened.transport,
+                session.opened.routes.inbound,
+                stream.control.clone(),
+            )
+            .map_err(Error::PresentedState)?;
+            if let Some(presentation) = &mut presentation {
+                presentation
+                    .observe(
+                        stream
+                            .sender
+                            .source_progress()
+                            .map_err(Error::MediaTransport)?,
+                    )
+                    .map_err(Error::PresentedState)?;
+            }
+            Ok((feedback, presentation))
         })();
-        let feedback = match admitted {
-            Ok(feedback) => feedback,
+        let (feedback, presentation) = match admitted {
+            Ok(owners) => owners,
             Err(error) => {
                 host.close();
                 stream.close();
@@ -132,6 +157,7 @@ impl StreamingHost {
             host,
             stream,
             feedback,
+            presentation,
         })
     }
     pub fn statistics(&self) -> Statistics {
@@ -148,6 +174,11 @@ impl StreamingHost {
     /// Accepted advisory reports, not rendered or visible frames.
     pub fn receiver_feedback_reports(&self) -> u64 {
         self.feedback.as_ref().map_or(0, |f| f.accepted)
+    }
+    /// Positive peer reports matched against this capture owner's source history.
+    /// Not an attestation of physical scanout or a grant of input authority.
+    pub fn presentation_reports(&self) -> u64 {
+        self.presentation.as_ref().map_or(0, |p| p.accepted)
     }
     pub fn worker_id(&self) -> Option<u32> {
         self.stream.worker_id()
@@ -248,6 +279,7 @@ impl StreamingHost {
             input_wake: super::input_wake::Wake::default(),
             repair_turn: false,
             feedback: self.feedback.as_mut(),
+            presentation: self.presentation.as_mut(),
             other,
         };
         let mut network = pin!(async {
@@ -368,6 +400,7 @@ struct VideoServices<'a, S> {
     input_wake: super::input_wake::Wake,
     repair_turn: bool,
     feedback: Option<&'a mut HostFeedback>,
+    presentation: Option<&'a mut HostPresentation>,
     other: &'a mut S,
 }
 impl<S> VideoServices<'_, S> {
@@ -491,6 +524,18 @@ impl<S: Services> Services for VideoServices<'_, S> {
         )
         .map_err(|error| failure.map_or(Error::Transport(error), Error::MediaTransport))?;
         let observation = self.collect_capture(&cx)?;
+        if let Some(presentation) = &mut self.presentation {
+            presentation
+                .check_connection(q)
+                .map_err(Error::PresentedState)?;
+            presentation
+                .observe(
+                    self.sender
+                        .source_progress()
+                        .map_err(Error::MediaTransport)?,
+                )
+                .map_err(Error::PresentedState)?;
+        }
         let mut idle = 0;
         let mut send = Availability::Ready;
         for _ in 0..self.policy.records_per_turn {
@@ -553,7 +598,14 @@ impl<S: Services> Services for VideoServices<'_, S> {
         Ok(())
     }
     fn receive(&mut self, route: Route, bytes: &[u8]) -> Result<Disposition, ()> {
-        if feedback::is_feedback(bytes) {
+        if presented::is_report(bytes) {
+            let presentation = self.presentation.as_mut().ok_or(())?;
+            presentation
+                .observe(self.sender.source_progress().map_err(|_| ())?)
+                .map_err(|_| ())?;
+            presentation.receive(route, bytes).map_err(|_| ())?;
+            Ok(Disposition::Consumed)
+        } else if feedback::is_feedback(bytes) {
             let feedback = self.feedback.as_mut().ok_or(())?;
             let now = self.control.check().map_err(|_| ())?.as_micros();
             feedback.receive(route, bytes, now).map_err(|_| ())?;
@@ -571,3 +623,6 @@ pub(in crate::session_startup) mod tests;
 
 #[cfg(test)]
 mod native;
+
+#[cfg(test)]
+mod presented_tests;

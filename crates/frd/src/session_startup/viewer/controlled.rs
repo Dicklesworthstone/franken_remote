@@ -185,6 +185,18 @@ impl ViewerSession {
     }
 }
 impl ControlledViewer {
+    pub(super) fn presented_sample(
+        &mut self,
+    ) -> Result<crate::media::presented::ViewSample, Error> {
+        let at = self.check()?;
+        let sample = match self.input.presented_sample(at) {
+            Ok(sample) => Ok(sample),
+            Err(presentation::Error::Media(error)) => Err(error),
+            Err(error) => return Err(Error::View(error)),
+        };
+        crate::media::presented::ViewSample::from_view(sample, at.0)
+            .map_err(|e| Error::View(presentation::Error::Media(e)))
+    }
     pub(super) fn streaming_parts(
         &mut self,
     ) -> Result<(&mut ViewerSession, &NegotiatedMedia), Error> {

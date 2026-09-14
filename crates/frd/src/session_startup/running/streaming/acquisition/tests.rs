@@ -79,6 +79,16 @@ struct Fixture {
 }
 #[allow(clippy::too_many_lines)]
 async fn fixture(c: &Cx, h: &Cx, ready: bool, mode: &str) -> Fixture {
+    Box::pin(fixture_with_presentation(c, h, ready, mode, false)).await
+}
+#[allow(clippy::too_many_lines)]
+async fn fixture_with_presentation(
+    c: &Cx,
+    h: &Cx,
+    ready: bool,
+    mode: &str,
+    proof: bool,
+) -> Fixture {
     let mut capabilities: Vec<_> = [
         fr_wire::clock::CAPABILITY,
         fr_wire::decoder::CAPABILITY,
@@ -94,6 +104,17 @@ async fn fixture(c: &Cx, h: &Cx, ready: bool, mode: &str) -> Fixture {
         required: true,
     })
     .collect();
+    if proof {
+        capabilities.push(WireCapability {
+            name: fr_wire::presented::CAPABILITY.into(),
+            version: fr_wire::presented::VERSION,
+            required: true,
+        });
+        assert!(
+            !ready,
+            "presentation tests must not supply manual host readiness"
+        );
+    }
     capabilities.sort_by(|a, b| a.name.cmp(&b.name));
     let (mut host, mut viewer) = pair_initialized(c, h, capabilities, |host| {
         if ready {
@@ -231,6 +252,20 @@ enum Case {
     NotReady,
     ChangeAfterGrant,
     NativeFailure,
+    Presented,
+    PresentedNoConsent,
+    PresentedNoVisibility,
+}
+impl Case {
+    fn proof(self) -> bool {
+        matches!(
+            self,
+            Self::Presented | Self::PresentedNoConsent | Self::PresentedNoVisibility
+        )
+    }
+    fn no_consent(self) -> bool {
+        matches!(self, Self::NoConsent | Self::PresentedNoConsent)
+    }
 }
 #[allow(clippy::too_many_lines)]
 async fn exercise(c: Cx, h: Cx, cleanup: Cx, case: Case, delay: u64, hold: u64) {
@@ -241,11 +276,12 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, case: Case, delay: u64, hold: u64) 
         vi,
         request,
         seat,
-    } = Box::pin(fixture(
+    } = Box::pin(fixture_with_presentation(
         &c,
         &h,
-        !matches!(case, Case::NotReady),
+        !matches!(case, Case::NotReady) && !case.proof(),
         "unchanged",
+        case.proof(),
     ))
     .await;
     let host_pid = host.worker_id();
@@ -281,7 +317,8 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, case: Case, delay: u64, hold: u64) 
                                     if pending.request().is_some()
                                         && pending.native_status().is_none()
                                         && now(&h).unwrap() >= start + delay
-                                        && !matches!(case, Case::NoConsent)
+                                        && !case.no_consent()
+                                        && (!case.proof() || pending.view_ready()?)
                                     {
                                         let effects = effects.clone();
                                         let calls = factory_calls.clone();
@@ -348,6 +385,7 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, case: Case, delay: u64, hold: u64) 
                                         .unwrap();
                                     if let Some(frame) = pending.presentation()
                                         && visible != Some(frame.frame)
+                                        && !matches!(case, Case::PresentedNoVisibility)
                                     {
                                         assert_eq!(
                                             frame.stage,
@@ -422,7 +460,7 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, case: Case, delay: u64, hold: u64) 
     ))
     .await;
     assert!(host_result.is_err() && view_result.is_err());
-    if matches!(case, Case::Accept) {
+    if matches!(case, Case::Accept | Case::Presented) {
         assert!(
             granted && active.get(),
             "host={host_result:?} viewer={view_result:?}"
@@ -446,9 +484,21 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, case: Case, delay: u64, hold: u64) 
     } else {
         assert!(!active.get());
         assert!(effects.lock().unwrap().is_empty());
-        if matches!(case, Case::NoConsent) {
+        if case.no_consent() || matches!(case, Case::PresentedNoVisibility) {
             assert_eq!(factory_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         }
+    }
+    if matches!(case, Case::Presented | Case::PresentedNoConsent) {
+        assert!(
+            host.presentation_reports() > 1,
+            "host={host_result:?} viewer={view_result:?}"
+        );
+        assert!(viewer.presentation_reports() > 1);
+        assert_eq!(host.statistics().encoded_updates, 0);
+        assert_eq!(viewer.statistics().decoded, 0);
+    } else if matches!(case, Case::PresentedNoVisibility) {
+        assert_eq!(host.presentation_reports(), 0);
+        assert_eq!(viewer.presentation_reports(), 0);
     }
     assert!(sampled > 0);
     assert!(!seat.is_occupied());
@@ -528,4 +578,17 @@ where
             .await
             .unwrap();
     });
+}
+
+#[test]
+fn actual_presentation_reports_replace_manual_readiness_through_grant_and_idle_renewal() {
+    run3(|c, h, cleanup| exercise(c, h, cleanup, Case::Presented, 0, 3_100_000));
+}
+#[test]
+fn presented_source_does_not_supply_local_consent() {
+    run3(|c, h, cleanup| exercise(c, h, cleanup, Case::PresentedNoConsent, 0, 0));
+}
+#[test]
+fn decoder_submission_without_visibility_never_reports_readiness_or_starts_native_input() {
+    run3(|c, h, cleanup| exercise(c, h, cleanup, Case::PresentedNoVisibility, 0, 0));
 }

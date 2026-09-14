@@ -7,6 +7,7 @@ use super::{
     now,
 };
 use crate::{
+    media::presented::{self as presented, ViewSample, ViewerPresentation},
     media::receiver_feedback::{self as feedback, Setup, ViewerFeedback},
     media::{self, PresentationStage, Presenter, decoder_startup},
     media_quic::NegotiatedMedia,
@@ -37,6 +38,7 @@ pub enum Error {
     Delivery(DeliveryError),
     Transport(quic::Error),
     Feedback(feedback::Error),
+    PresentedState(presented::Error),
     Freshness(fr_media::freshness::Error),
     Application,
     Closed,
@@ -110,6 +112,19 @@ impl Peer {
             _ => Ok(true),
         }
     }
+    fn presented_sample(&mut self, receiver: &ReceivePipeline) -> Result<ViewSample, Error> {
+        match self {
+            Self::Acquiring {
+                session, request, ..
+            } => {
+                request.prepare(session, receiver)?;
+                request.presented_sample()
+            }
+            Self::Control(viewer) => viewer.presented_sample().map_err(Error::Control),
+            Self::Observe { .. } => Ok(ViewSample::Pending),
+            Self::Closed => Err(Error::Closed),
+        }
+    }
     fn decoded(&mut self, receipt: media::PresentationReceipt) -> Result<(), Error> {
         match self {
             Self::Control(viewer) => viewer
@@ -177,6 +192,7 @@ pub struct StreamingViewer {
     receiver: ReceivePipeline,
     repair: Repair,
     feedback: Option<ViewerFeedback>,
+    presentation: Option<ViewerPresentation>,
     control: StreamingViewerControl,
     statistics: Statistics,
     served: bool,
@@ -276,7 +292,7 @@ impl StreamingViewer {
                 media.binding(),
             )
             .map_err(Error::Feedback)?;
-            setup
+            let feedback = setup
                 .map(|s| {
                     ViewerFeedback::new(
                         s,
@@ -285,10 +301,20 @@ impl StreamingViewer {
                     )
                 })
                 .transpose()
-                .map_err(Error::Feedback)
+                .map_err(Error::Feedback)?;
+            let presentation = ViewerPresentation::attach(
+                &session.opened.selection,
+                session.opened.binding,
+                media.binding(),
+                &session.transport,
+                session.routes.outbound,
+                now(&cx).map_err(Error::Session)?,
+            )
+            .map_err(Error::PresentedState)?;
+            Ok((feedback, presentation))
         })();
-        let feedback = match setup {
-            Ok(feedback) => feedback,
+        let (feedback, presentation) = match setup {
+            Ok(owners) => owners,
             Err(error) => {
                 peer.close();
                 receiver.close();
@@ -303,6 +329,7 @@ impl StreamingViewer {
             receiver,
             repair: Repair::default(),
             feedback,
+            presentation,
             control: StreamingViewerControl { cx, input },
             statistics: Statistics::default(),
             served: false,
@@ -321,6 +348,10 @@ impl StreamingViewer {
     /// Actually admitted advisory reports; these are not display acknowledgements.
     pub fn receiver_feedback_reports(&self) -> u64 {
         self.feedback.as_ref().map_or(0, |f| f.sent)
+    }
+    /// Reports admitted to the original transport; not proof of host receipt or scanout.
+    pub fn presentation_reports(&self) -> u64 {
+        self.presentation.as_ref().map_or(0, |p| p.sent)
     }
     pub fn budget_usage(&self) -> BudgetUsage {
         self.receiver.budget_usage()
@@ -376,6 +407,7 @@ impl StreamingViewer {
             }),
         }
     }
+    #[allow(clippy::too_many_lines)]
     async fn serve_inner(
         &mut self,
         ui: &mut impl FnMut(ControlState<'_>, Option<Presentation>) -> Result<(), ()>,
@@ -404,6 +436,7 @@ impl StreamingViewer {
                     &mut self.repair,
                     &mut self.statistics,
                     self.feedback.as_mut(),
+                    self.presentation.as_mut(),
                     cx,
                     result,
                     other,
@@ -426,6 +459,7 @@ impl StreamingViewer {
                             &mut self.repair,
                             &mut self.statistics,
                             self.feedback.as_mut(),
+                            self.presentation.as_mut(),
                             cx,
                             result,
                             other,
@@ -574,6 +608,7 @@ async fn network(
     repair: &mut Repair,
     statistics: &mut Statistics,
     mut feedback: Option<&mut ViewerFeedback>,
+    presentation: Option<&mut ViewerPresentation>,
     cx: &Cx,
     result: &mut impl FnMut(ResultEvent),
     other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
@@ -636,6 +671,20 @@ async fn network(
     receiver
         .tick(now(cx).map_err(Error::Session)?)
         .map_err(Error::Delivery)?;
+    // Source evidence is serviced independently of codec progress and before
+    // advisory telemetry. No report can be derived from decode completion alone.
+    if let Some(presentation) = presentation {
+        let sample = peer.presented_sample(receiver)?;
+        let (session, _) = peer.parts()?;
+        presentation
+            .service(
+                &mut session.transport,
+                cx,
+                sample,
+                now(cx).map_err(Error::Session)?,
+            )
+            .map_err(Error::PresentedState)?;
+    }
     // The session's renewal, repair and input services get their turn first.
     if let Some(feedback) = feedback {
         let (session, _) = peer.parts()?;

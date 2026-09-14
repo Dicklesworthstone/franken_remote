@@ -253,3 +253,25 @@ fn never_visible_emits_nothing_and_negative_expiry_cannot_be_retimed() {
     );
     assert_eq!(r.pending(200_003), Err(Error::Expired));
 }
+
+#[test]
+fn unconfirmed_candidate_pauses_positive_reports_without_erasing_explicit_loss() {
+    let mut r = Reporter::new(binding(), ProtocolLimits::ABSOLUTE, 0).unwrap();
+    let s = sample(120_000);
+    r.prepare(Some(s), 130_000).unwrap();
+    r.pause(130_001).unwrap();
+    assert!(r.pending(130_001).unwrap().is_none());
+    assert!(!r.has_reported());
+    r.prepare(Some(s), 130_002).unwrap();
+    r.queued(130_002).unwrap();
+    r.pause(130_003).unwrap();
+    assert!(r.pending(130_003).unwrap().is_none());
+    r.prepare(None, 130_004).unwrap();
+    let until = r.pending(130_004).unwrap().unwrap().1;
+    r.pause(140_000).unwrap();
+    assert_eq!(
+        r.pending(140_000).unwrap(),
+        Some((record(2, None).as_slice(), until))
+    );
+    assert_eq!(r.pause(until), Err(Error::Expired));
+}

@@ -186,6 +186,13 @@ impl QuicEgress {
             )
             .map_err(Error::Media)
     }
+    pub(crate) fn source_progress(&self) -> Result<Option<fr_wire::Progress>, Error> {
+        Ok(self
+            .egress
+            .stream_subscription()
+            .map_err(Error::Media)?
+            .source_progress())
+    }
     pub(crate) fn feedback_view(&self) -> Result<fr_wire::decoder::Binding, Error> {
         self.view.ok_or(Error::InvalidRoutes)
     }

@@ -35,6 +35,11 @@ impl PendingControl<'_> {
     pub fn request(&self) -> Option<Request> {
         self.broker.request()
     }
+    /// True only while the host's current view evidence remains valid.
+    /// Approval is still explicit and rechecks readiness at publication.
+    pub fn view_ready(&mut self) -> Result<bool, GrantError> {
+        self.broker.view_ready(self.connection)
+    }
     pub fn native_status(&self) -> Option<Status> {
         self.broker.native_status()
     }

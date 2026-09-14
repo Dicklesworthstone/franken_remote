@@ -214,6 +214,13 @@ impl GrantBroker {
             terminal: false,
         })
     }
+    /// Inspect the original host's view gate without reserving the Seat,
+    /// minting credentials or treating the remote request as consent.
+    pub fn view_ready(&mut self, connection: &QuicRecords) -> Result<bool, Error> {
+        self.bound(connection)?;
+        self.live(connection)?;
+        self.observation.view_ready().map_err(Error::Media)
+    }
     fn bound(&mut self, connection: &QuicRecords) -> Result<(), Error> {
         if !connection.is_bound_to(&self.connection) {
             self.stop();

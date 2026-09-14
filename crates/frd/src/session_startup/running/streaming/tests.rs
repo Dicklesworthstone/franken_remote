@@ -468,6 +468,7 @@ fn pending_admission_refresh_services_native_results_before_the_lookup_finishes(
             next_capture: 0,
             repair_turn: false,
             feedback: None,
+            presentation: None,
             input_wake: super::super::input_wake::Wake::default(),
             other: &mut other,
         };

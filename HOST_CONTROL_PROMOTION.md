@@ -18,13 +18,22 @@ observation-only selection is not silently upgraded, and no attachment or clock
 is installed by this operation.
 
 The local-control callback receives `HostControlState::Pending` before the grant.
-Its PendingHostControl exposes the validated request and native status, explicit
-approve/deny/stop, and no raw connection or mutable broker. Returning a target is
+Its PendingHostControl exposes the validated request, native status and read-only
+`view_ready()` query, explicit approve/deny/stop, and no raw connection or mutable
+broker. Returning a target is
 NOT approval. On approval the canonical broker reserves the shared Seat before
 minting credentials, checks already-established host readiness, and runs the
 native factory on its existing native thread. Poll the returned Driver in an
 independent authority task immediately; it must remain driven during initialization,
 codec stalls, network failures and cleanup. Do not poll it from a media callback.
+
+When `presented-state` version 1 is selected, the original streaming service
+establishes finite host readiness from source-matched viewer reports. It no longer
+requires manual readiness mutation. Wait for `PendingHostControl::view_ready()`
+before offering approval; the approval/publication paths recheck the gate.
+Presentation evidence is still not consent. See
+[Presentation-backed readiness](PRESENTATION_READINESS.md) for the complete
+source, visibility, deadline and verification contract.
 
 Return the CURRENT qualified Target on every local callback. Once promoted,
 `HostControlState::Active` supplies the original request and revoke-only native
@@ -61,7 +70,7 @@ receipts; worker reaping remains explicit with a separate live cleanup context.
 
 ## Verification scope
 
-The seven new integration cases exercise production UDP/TLS, negotiated channels,
+The original seven integration cases exercise production UDP/TLS, negotiated channels,
 clock/observation/control renewal, the real grant broker and input owner, and two
 supervised media processes. They cover immediate/delayed consent, continuous idle
 source verification, refusal without host readiness, no-consent expiry, native
@@ -69,12 +78,20 @@ initialization failure, target loss after grant and unpolled cancellation.
 Decoder/encoder replies, source checks, readiness, consent, visibility and the
 counted OS input sink are explicit fixtures, not physical or hardware evidence.
 
+Three additional cases now exercise negotiated presentation-backed readiness
+without setting host readiness manually: successful grant and idle renewal,
+refusal without consent despite valid presentation, and refusal without visibility
+despite decoder submission. The successful case keeps the original workers and
+input owner beyond the initial lease and produces no additional video frames.
+
 Local verification on nightly-2026-08-31 rebuilt current first-party sources with
-compiler-matched pinned Asupersync 0.5.0 artifacts. All 177 daemon unit tests
+compiler-matched pinned Asupersync 0.5.0 artifacts. All 187 daemon unit tests
 passed with four threads; 16 existing native/namespace cases remained ignored.
-The new seven cases also passed serially. Strict daemon library/test Clippy and
-changed-source formatting passed. This artifact-assisted rebuild is not a cold
-full-dependency/native-workspace build; committed-source CI is a separate result.
+Another 189 selected media, transport, core and wire tests passed without skips.
+Strict changed-library/test Clippy and changed-source formatting passed. This
+artifact-assisted rebuild is not a cold full-dependency/native-workspace build;
+committed-source CI is a separate result. See the linked readiness document for
+the exact artifact and test scope.
 
 ```sh
 cargo test -p frd --lib session_startup::running::streaming::acquisition --locked -- --test-threads=1
