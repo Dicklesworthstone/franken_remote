@@ -35,6 +35,7 @@ unsafe extern "C" {
     fn XOpenDisplay(name: *const c_char) -> *mut c_void;
     fn XCloseDisplay(display: *mut c_void) -> c_int;
     fn XDefaultScreen(display: *mut c_void) -> c_int;
+    fn XScreenCount(display: *mut c_void) -> c_int;
     fn XRootWindow(display: *mut c_void, screen: c_int) -> c_ulong;
     fn XGetGeometry(
         display: *mut c_void,
@@ -79,6 +80,12 @@ unsafe extern "C" {
         y: c_int,
         delay: c_ulong,
     ) -> c_int;
+    fn XTestFakeRelativeMotionEvent(
+        display: *mut c_void,
+        x: c_int,
+        y: c_int,
+        delay: c_ulong,
+    ) -> c_int;
     fn XTestFakeButtonEvent(
         display: *mut c_void,
         button: c_uint,
@@ -94,6 +101,7 @@ pub struct X11Pointer {
     screen: c_int,
     root: c_ulong,
     dimensions: (u32, u32),
+    relative: bool,
     prepared: Option<Operation>,
     xtest: Option<MutexGuard<'static, ()>>,
     keyboard: Keyboard,
@@ -122,6 +130,7 @@ impl X11Pointer {
             screen,
             root,
             dimensions: (0, 0),
+            relative: false,
             prepared: None,
             xtest: None,
             keyboard: Keyboard::new(display),
@@ -147,6 +156,13 @@ impl X11Pointer {
         if available == 0 || major < 2 {
             return Err(PlatformError::Unsupported);
         }
+        // The relative XTest entry uses the CURRENT root, not a screen argument.
+        // Multiple X screens could retarget input after preparation, so do not
+        // advertise this path there. Screen count is fixed for the connection.
+        // SAFETY: live owned display; this reads its connection setup metadata.
+        owner.relative = relative_supported(major, minor, unsafe {
+            XScreenCount(owner.display.as_ptr())
+        });
         owner.dimensions = owner.geometry()?;
         if owner.dimensions.0 > 8192 || owner.dimensions.1 > 8192 {
             return Err(PlatformError::Unsupported);
@@ -154,9 +170,12 @@ impl X11Pointer {
         Ok(owner)
     }
     pub fn capabilities(&self) -> Capabilities {
-        let caps = Capabilities::default()
+        let mut caps = Capabilities::default()
             .with(Capability::Absolute)
             .with(Capability::Buttons);
+        if self.relative {
+            caps = caps.with(Capability::Relative);
+        }
         if self.keyboard.enabled() {
             caps.with(Capability::Keys).with(Capability::Repeat)
         } else {
@@ -329,6 +348,23 @@ impl InputSink for X11Pointer {
                     return Err(PlatformError::GeometryChanged);
                 }
             }
+            Operation::Relative { x, y } => {
+                if !self.relative || i16::try_from(x).is_err() || i16::try_from(y).is_err() {
+                    return Err(PlatformError::Unsupported);
+                }
+                if self.geometry()? != self.dimensions {
+                    return Err(PlatformError::GeometryChanged);
+                }
+                // Refuse a known off-display target instead of relying on XTest
+                // to clamp it. Keep the operation relative: a local movement
+                // after this query must not be overwritten by a stale absolute
+                // position. The native receipt remains API-submitted evidence.
+                let current = self.query_pointer()?.0;
+                let target = current.x.checked_add(x).zip(current.y.checked_add(y));
+                if !target.is_some_and(|(x, y)| self.bounds().contains(DesktopPoint { x, y })) {
+                    return Err(PlatformError::GeometryChanged);
+                }
+            }
             // Release-only cleanup still works after geometry replacement.
             Operation::Button { button, pressed } => self.prepare_button(button, pressed)?,
             _ => return Err(PlatformError::Unsupported),
@@ -356,6 +392,11 @@ impl InputSink for X11Pointer {
             match op {
                 Operation::Absolute(p) => {
                     XTestFakeMotionEvent(self.display.as_ptr(), self.screen, p.x, p.y, 0)
+                }
+                Operation::Relative { x, y } => {
+                    // One checked signed-16-bit displacement, no splitting,
+                    // acceleration emulation, delayed replay or absolute warp.
+                    XTestFakeRelativeMotionEvent(self.display.as_ptr(), x, y, 0)
                 }
                 Operation::Button { button, pressed } => {
                     let Some(code) = self.prepared_button.take() else {
@@ -412,6 +453,9 @@ impl Drop for X11Pointer {
         }
     }
 }
+fn relative_supported(major: c_int, minor: c_int, screens: c_int) -> bool {
+    major == 2 && minor >= 1 && screens == 1
+}
 pub(crate) fn local_display(name: &str) -> bool {
     if name.len() > 32 {
         return false;
@@ -428,6 +472,14 @@ pub(crate) fn local_display(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn relative_requires_qualified_xtest_version_and_one_root() {
+        assert!(relative_supported(2, 1, 1));
+        assert!(relative_supported(2, 2, 1));
+        for (major, minor, screens) in [(1, 9, 1), (2, 0, 1), (3, 0, 1), (2, 2, 0), (2, 2, 2)] {
+            assert!(!relative_supported(major, minor, screens));
+        }
+    }
     #[test]
     fn only_explicit_local_display_selectors_are_accepted() {
         for s in [":0", ":19.1"] {
