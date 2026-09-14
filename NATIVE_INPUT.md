@@ -11,12 +11,15 @@ selection or replaces the upstream QUIC work.
 
 The implemented subset is absolute pointer motion, bounded relative motion on
 a qualified single-X-screen connection, mapped primary/secondary/middle/back/
-forward buttons, physical keyboard press/release and client-owned repeat.
+forward buttons, bounded whole-line wheel scrolling, physical keyboard
+press/release and client-owned repeat.
 Physical keys are resolved through XKB key names rather than character layout
 guesses. See [XKB_INPUT.md](XKB_INPUT.md) for the keyboard preparation,
-repeat and cleanup contract. Committed Unicode and scrolling remain explicitly
-unsupported by this native adapter; their wire/core paths do not manufacture
-native support. There is no clipboard-paste fallback and no
+repeat and cleanup contract. [NATIVE_SCROLL.md](NATIVE_SCROLL.md) specifies the
+whole-line scroll bound and separately authorized wheel transitions. Committed
+Unicode, fractional-line and pixel scrolling remain unsupported by this native
+adapter; their wire/core paths do not manufacture native support. There is no
+clipboard-paste fallback and no
 fallback after Wayland/portal permission refusal.
 
 ## Relative motion
@@ -73,7 +76,8 @@ rather than claimed as this owner's held input. Extended back/forward buttons
 have no held-state bit in core XQueryPointer, so equivalent pre-existing-state
 attribution is not claimed for them.
 
-Normal native-owner Drop attempts release/restoration of both keys and drags,
+Normal native-owner Drop attempts release/restoration of keys, drags and any
+possibly held wheel transition,
 including the path where an enclosing owner forgot an explicit cleanup call.
 For acknowledged handoff, first retire input authority, then require both the
 core cleanup result to have zero remaining held items and
