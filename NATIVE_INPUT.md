@@ -9,14 +9,48 @@ metadata is accessed by the small XKB ABI helper built against system headers.
 **Asupersync QUIC remains the primary transport.** Nothing here changes that
 selection or replaces the upstream QUIC work.
 
-The implemented subset is absolute pointer motion, mapped primary/secondary/
-middle/back/forward buttons, physical keyboard press/release and client-owned
-repeat. Physical keys are resolved through XKB key names rather than character
-layout guesses. See [XKB_INPUT.md](XKB_INPUT.md) for the keyboard preparation,
-repeat and cleanup contract. Committed Unicode, relative motion and scrolling
-remain explicitly unsupported by this native adapter; their wire/core paths do
-not manufacture native support. There is no clipboard-paste fallback and no
+The implemented subset is absolute pointer motion, bounded relative motion on
+a qualified single-X-screen connection, mapped primary/secondary/middle/back/
+forward buttons, physical keyboard press/release and client-owned repeat.
+Physical keys are resolved through XKB key names rather than character layout
+guesses. See [XKB_INPUT.md](XKB_INPUT.md) for the keyboard preparation,
+repeat and cleanup contract. Committed Unicode and scrolling remain explicitly
+unsupported by this native adapter; their wire/core paths do not manufacture
+native support. There is no clipboard-paste fallback and no
 fallback after Wayland/portal permission refusal.
+
+## Relative motion
+
+A successful XTest version query enables `Capability::Relative` only for version
+2.1 or later within major version 2 and exactly one X screen in the connection
+setup. The native relative entry has no screen selector and addresses the
+current pointer root. Multi-X-screen connections therefore retain their absolute
+input support but refuse relative operations, rather than borrowing an unrelated
+root. This restriction is about X screens, not the number of RandR monitors.
+
+The existing `RelativeCheckpoint` record stays reliable and ordered. The core
+owner converts cumulative i64 positions to checked deltas in the current mode
+epoch; the adapter additionally checks XTest's signed-16-bit wire range before
+passing C integers to the library. There is no truncation, delta splitting,
+synthetic acceleration, delayed replay or conversion to an absolute warp. A
+zero checkpoint delta needs no OS call. Replays return the retained result and
+cannot move the pointer twice; ticket rollover does not reset the cumulative
+position. An input-mode change still requires a fresh ticket.
+
+Preflight checks current geometry and rejects a known off-display destination
+instead of deliberately asking XTest to clamp it. The actual command remains
+relative to the pointer at submission, so intervening local movement is not
+overwritten by a stale absolute target. The existing final authority check runs
+after this preflight and foreign-cache lock acquisition. Expiry or local revoke
+at that boundary cancels preparation before any relative OS submission. One
+accepted nonzero delta is one native request with zero server-side delay.
+
+Local movement, pointer grabs, confinement and display reconfiguration can still
+race a submitted X request. This is neither raw-device relative input nor an
+atomic physical-position guarantee. Client GUI mode switching/pointer locking,
+Wayland relative input and multi-X-screen relative routing are not implemented
+by this adapter change. The normal high-level viewer still needs its own
+relative-mode integration; exposing a native capability does not supply it.
 
 ## Ownership and failure behavior
 
@@ -71,8 +105,9 @@ cargo test -p fr-native --features linux-input --test input_x11 --locked
 cargo test -p fr-native --features linux-input --test keyboard_x11 --locked -- --test-threads=1
 ```
 
-All **13 native integration tests passed locally**: four existing pointer tests
-unchanged and nine keyboard/ownership tests. Each passes actual FRD0 bytes through
+The original keyboard-boundary validation recorded **13 native integration
+tests passed locally**: four existing pointer tests unchanged and nine
+keyboard/ownership tests. Each passes actual FRD0 bytes through
 real authority/replay/final-submission logic into XTest, then queries X11 or uses
 an independent Xlib client to observe events/state. Covered behavior includes
 keys, repeat, dragging, old-pointer barriers, duplicate suppression, native
@@ -97,3 +132,37 @@ qualification. Run the full native workspace lane separately:
 ./scripts/verify.sh fast
 ./scripts/verify.sh docs
 ```
+
+### Relative-input validation
+
+The relative-input increment adds seven native integration cases and one local
+capability-rule test. The scoped native run executes **23 tests, zero failures
+and zero ignored tests**: two library tests, eleven pointer/input cases, nine
+keyboard cases and the existing concurrent-extension-cache test. It passes with
+one, four and eight test threads. Strict Clippy and formatting pass without
+relaxing warnings or expiry/replay assertions.
+
+The new cases exercise actual FRD0 encode/decode, production cumulative input
+and final-submission ownership, real XTest requests and independent X11 pointer
+queries. They cover reverse/zero/repeated checkpoints, ticket rollover, fresh
+mode tickets, stale view/mode identities, reliable sequence gaps, native integer
+bounds, known off-display destinations, expiry and revoke after preparation,
+local pointer movement between preparation and submission, canceled preparation
+and explicit multi-X-screen refusal. Grants, view readiness and host time in
+these tests remain labeled fixtures; the X server and input effects are real.
+
+This local run uses the repository-pinned nightly-2026-08-31 compiler and an
+external scoped Cargo manifest pointing at the unchanged native build script,
+updated native sources/tests and hash-matched core/wire sources from `13a40a1`.
+It rebuilds those first-party libraries and the XKB helper, not the full
+Asupersync/media workspace. No full-workspace CI, physical display/input-latency,
+GUI-relative-mode or Tailscale admission result is claimed for this increment.
+The normal repository commands for the same test targets are:
+
+```sh
+cargo test -p fr-native --features linux-input --lib --test input_x11 --test keyboard_x11 --test input_concurrency --locked -- --test-threads=4
+cargo clippy -p fr-native --features linux-input --lib --test input_x11 --test keyboard_x11 --test input_concurrency --locked -- -D warnings
+```
+
+This advances `fr-p1-input-pipeline-ay1` without closing its broader acceptance
+criteria. No dependency, codec, runtime, wire format or release pin is changed.

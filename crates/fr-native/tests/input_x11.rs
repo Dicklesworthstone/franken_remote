@@ -276,3 +276,6 @@ fn revoke_after_actual_motion_prevents_the_following_button_press() {
     assert_eq!(mask & 256, 0);
     assert_eq!(o.cleanup(&mut sink).remaining, 0);
 }
+
+#[path = "input_x11/relative.rs"]
+mod relative;
