@@ -10,12 +10,12 @@ use std::{
     task::Waker,
 };
 mod namespace;
-fn roots() -> Vec<Certificate> {
+pub(super) fn roots() -> Vec<Certificate> {
     vec![Certificate::from_der(
         std::fs::read(network::pki().join("ca.der")).unwrap(),
     )]
 }
-fn offer() -> Offer {
+pub(super) fn offer() -> Offer {
     Offer {
         versions: vec![0],
         profile: 1,

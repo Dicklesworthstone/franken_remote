@@ -443,19 +443,20 @@ impl ViewerSession {
             .pending(ClientInstant(now(&self.cx)?))
             .map_err(Error::ClientRenewal)?
         {
+            let expired = Cell::new(None);
             match self.transport.send(
                 &self.cx,
                 Route::Stream(self.routes.outbound),
                 bytes,
                 until,
-                || now(&self.cx).is_ok_and(|n| n < until),
+                || live_until(&self.cx, until, &expired),
             ) {
                 Ok(()) => self
                     .responder
                     .sent(ClientInstant(now(&self.cx)?))
                     .map_err(Error::ClientRenewal)?,
                 Err(quic::Error::Backpressure) => {}
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(expired.get().unwrap_or(Error::Transport(e))),
             }
         }
         Ok(())
@@ -477,11 +478,12 @@ impl ViewerSession {
         let clock = &mut self.clock;
         let heard_until = &mut self.heard_until;
         let old_until = *heard_until;
+        let expired = Cell::new(None);
         let mut failure = None;
         self.transport
             .receive(
                 cx,
-                || now(cx).is_ok_and(|n| n < old_until),
+                || live_until(cx, old_until, &expired),
                 |route, bytes| {
                     if let Some(clock) = clock {
                         match clock.dispatch_record(route, bytes) {
@@ -540,7 +542,7 @@ impl ViewerSession {
                     other(route, bytes)
                 },
             )
-            .map_err(|e| failure.unwrap_or(Error::Transport(e)))?;
+            .map_err(|e| failure.or(expired.get()).unwrap_or(Error::Transport(e)))?;
         self.send_response()?;
         self.service_clock()?;
         self.check()
@@ -579,13 +581,15 @@ impl ViewerSession {
                 });
             let cx = &guard.viewer.cx;
             let remaining = until.checked_sub(now(cx)?).ok_or(Error::Expired)?;
+            let expired = Cell::new(None);
             guard
                 .viewer
                 .transport
                 .drive(cx, wait.min(Duration::from_micros(remaining)), || {
-                    now(cx).is_ok_and(|n| n < until)
+                    live_until(cx, until, &expired)
                 })
-                .await?;
+                .await
+                .map_err(|e| expired.get().unwrap_or(Error::Transport(e)))?;
             guard.viewer.step(&mut other)?;
             guard.complete = true;
             Ok(())
@@ -614,6 +618,23 @@ impl Drop for SessionDrive<'_> {
     fn drop(&mut self) {
         if !self.complete {
             self.viewer.close();
+        }
+    }
+}
+
+// Preserve an actual local silence/response deadline failure through the
+// transport's boolean permission callback. The transport evaluates its original
+// identity gate first; an identity refusal is never relabelled as a timeout.
+fn live_until(cx: &Cx, until: u64, failure: &Cell<Option<Error>>) -> bool {
+    match now(cx) {
+        Ok(at) if at < until => true,
+        Ok(_) => {
+            failure.set(Some(Error::Expired));
+            false
+        }
+        Err(error) => {
+            failure.set(Some(error));
+            false
         }
     }
 }

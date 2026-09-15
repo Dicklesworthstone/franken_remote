@@ -1,5 +1,7 @@
 //! Installed-tailnet connection kept under renewal through native viewer service.
 //! Reuses fr-tailnet's canonical TLS dialer, not another connection implementation.
+pub mod reconnect;
+
 use crate::session_startup::Viewer;
 use asupersync::{
     cx::Cx, net::quic_native::NativeQuicUdpConnection, tls::Certificate, types::CancelKind,
@@ -138,6 +140,24 @@ impl Client {
         F: Future<Output = T> + 'a,
         A: FnOnce(Viewer) -> F + 'a,
     {
+        self.run_checked(cx, selector, cfg, offer, None, application)
+    }
+    // A reconnect pin is comparison-only metadata. Every attempt still performs
+    // fresh LocalAPI, TLS and post-handshake checks before exposing a Viewer.
+    #[allow(clippy::too_many_arguments)]
+    fn run_checked<'a, T: 'a, F, A>(
+        &'a mut self,
+        cx: Cx,
+        selector: PeerSelector<'a>,
+        cfg: Configuration,
+        offer: Offer,
+        expected: Option<&'a fr_tailnet::PeerTarget>,
+        application: A,
+    ) -> impl Future<Output = Result<T, Error>> + 'a
+    where
+        F: Future<Output = T> + 'a,
+        A: FnOnce(Viewer) -> F + 'a,
+    {
         Scoped {
             cx: cx.clone(),
             inner: Box::pin(async move {
@@ -148,6 +168,9 @@ impl Client {
                     .peer_target(&cx, selector)
                     .await
                     .map_err(Error::Tailnet)?;
+                if expected.is_some_and(|old| !old.same_identity(&target)) {
+                    return Err(Error::Tailnet(fr_tailnet::Error::IdentityChanged));
+                }
                 let route = select_route(target.local_addresses(), target.addresses(), cfg)?;
                 let connected = self
                     .native
