@@ -126,6 +126,10 @@ pub enum Kind {
     HeldState = 0x0046,
     InputMode = 0x0047,
     InputResult = 0x0048,
+    ClipboardBegin = 0x0050,
+    ClipboardChunk = 0x0051,
+    ClipboardCommit = 0x0052,
+    ClipboardCancel = 0x0053,
     PresentedState = 0x0080,
     StageMetrics = 0x0082,
     ClockProbe = 0x0084,
@@ -177,6 +181,10 @@ impl Kind {
             0x0046 => Ok(Self::HeldState),
             0x0047 => Ok(Self::InputMode),
             0x0048 => Ok(Self::InputResult),
+            0x0050 => Ok(Self::ClipboardBegin),
+            0x0051 => Ok(Self::ClipboardChunk),
+            0x0052 => Ok(Self::ClipboardCommit),
+            0x0053 => Ok(Self::ClipboardCancel),
             0x0080 => Ok(Self::PresentedState),
             0x0082 => Ok(Self::StageMetrics),
             0x0084 => Ok(Self::ClockProbe),
@@ -219,6 +227,10 @@ impl Kind {
             | Self::Text
             | Self::InputMode
             | Self::InputResult
+            | Self::ClipboardBegin
+            | Self::ClipboardChunk
+            | Self::ClipboardCommit
+            | Self::ClipboardCancel
             | Self::PresentedState
             | Self::StageMetrics
             | Self::ClockProbe
@@ -470,7 +482,7 @@ impl<'a> Writer<'a> {
         Ok(())
     }
     pub(crate) fn data(&mut self, data: &[u8]) -> Result<(), WireError> {
-        self.u32(u32::try_from(data.len()).map_err(|_| WireError::ArithmeticOverflow)?)?;
+        self.u32(u32::try_from(data.len()).map_err(|_| WireError::ResourceLimit)?)?;
         self.put(data)
     }
     pub(crate) fn finish(self) -> Result<usize, WireError> {

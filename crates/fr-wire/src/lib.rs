@@ -7,6 +7,7 @@
 
 pub mod attachment;
 pub mod authority;
+pub mod clipboard;
 pub mod clock;
 pub mod decoder;
 pub mod display;
