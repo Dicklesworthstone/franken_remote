@@ -274,3 +274,6 @@ fn duplicate_remote_commit_never_discards_a_newer_genuine_local_copy() {
     deliver(&mut target, &mut source, &mut source_platform);
     assert_eq!(source_platform.text, ["new local"]);
 }
+
+#[path = "clipboard_session/faults.rs"]
+mod faults;
