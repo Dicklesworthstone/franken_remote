@@ -29,3 +29,6 @@ pub mod xlib;
 
 #[cfg(all(target_os = "linux", feature = "linux-displays"))]
 pub mod displays;
+
+#[cfg(all(target_os = "linux", feature = "linux-clipboard"))]
+pub mod clipboard;
