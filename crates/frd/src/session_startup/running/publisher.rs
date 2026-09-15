@@ -1,5 +1,6 @@
 //! Approved native host bootstrap. Discovery, selected capture and decoder
 //! negotiation use their existing owners while the original session stays driven.
+mod managed;
 use super::{HostSession, Services, StreamingHost};
 use crate::input_quic::NegotiatedInput;
 use crate::session_startup::native_control;
@@ -17,6 +18,7 @@ use fr_wire::{
     attachment::{MediaRole, Ticket},
     display::Display,
 };
+pub use managed::{ManagedControlReport, ManagedHostControlState, ManagedPendingControl};
 use std::{
     future::{Future, poll_fn},
     pin::{Pin, pin},

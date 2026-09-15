@@ -30,7 +30,10 @@ mod admission_refresh;
 mod native_control;
 mod opening;
 mod running;
-pub use running::publisher::{Error as PublisherError, NativePublisher, Policy as PublisherPolicy};
+pub use running::publisher::{
+    Error as PublisherError, ManagedControlReport, ManagedHostControlState, ManagedPendingControl,
+    NativePublisher, Policy as PublisherPolicy,
+};
 pub use running::{
     ControlledHost, HostSession, LocalControl as HostControlState,
     PendingControl as PendingHostControl, StreamingHost,
