@@ -1,6 +1,7 @@
 //! Continuous native receiving without lending the connection to a codec.
 //! One owned picture stays charged while QUIC, repairs and control keep moving.
 mod acquisition;
+mod interactive;
 use super::{
     ViewerSession,
     controlled::{ControlledViewer, ViewerControl},
@@ -21,6 +22,7 @@ use fr_media::{
     delivery::{BudgetUsage, DeliveryError, ReceivePipeline},
 };
 use fr_transport::quic::{self, Disposition, Route};
+pub use interactive::{InteractiveState, ViewingControl};
 use std::{
     future::{Future, poll_fn},
     pin::{Pin, pin},
@@ -41,6 +43,7 @@ pub enum Error {
     PresentedState(presented::Error),
     Freshness(fr_media::freshness::Error),
     Application,
+    RequestAlreadyStarted,
     Closed,
 }
 impl std::fmt::Display for Error {
@@ -95,6 +98,11 @@ enum Peer {
         media: NegotiatedMedia,
     },
     Control(ControlledViewer),
+    Viewing {
+        session: ViewerSession,
+        media: NegotiatedMedia,
+        viewing: Box<ViewingControl>,
+    },
     Acquiring {
         session: ViewerSession,
         media: NegotiatedMedia,
@@ -108,6 +116,9 @@ impl Peer {
             Self::Acquiring {
                 session, request, ..
             } => request.prepare(session, receiver),
+            Self::Viewing {
+                session, viewing, ..
+            } => viewing.prepare(session, receiver),
             Self::Closed => Err(Error::Closed),
             _ => Ok(true),
         }
@@ -119,6 +130,12 @@ impl Peer {
             } => {
                 request.prepare(session, receiver)?;
                 request.presented_sample()
+            }
+            Self::Viewing {
+                session, viewing, ..
+            } => {
+                viewing.prepare(session, receiver)?;
+                viewing.sample()
             }
             Self::Control(viewer) => viewer.presented_sample().map_err(Error::Control),
             Self::Observe { .. } => Ok(ViewSample::Pending),
@@ -134,13 +151,16 @@ impl Peer {
                 )
                 .map_err(Error::Control),
             Self::Acquiring { request, .. } => request.decoded(receipt),
+            Self::Viewing { viewing, .. } => viewing.decoded(receipt),
             Self::Observe { .. } => Ok(()),
             Self::Closed => Err(Error::Closed),
         }
     }
     fn parts(&mut self) -> Result<(&mut ViewerSession, &NegotiatedMedia), Error> {
         match self {
-            Self::Observe { session, media } | Self::Acquiring { session, media, .. } => {
+            Self::Observe { session, media }
+            | Self::Acquiring { session, media, .. }
+            | Self::Viewing { session, media, .. } => {
                 session.check().map_err(Error::Session)?;
                 media.check(&session.transport).map_err(Error::Routes)?;
                 Ok((session, media))
@@ -152,13 +172,17 @@ impl Peer {
     fn controlled(&mut self) -> Option<&mut ControlledViewer> {
         match self {
             Self::Control(v) => Some(v),
-            Self::Observe { .. } | Self::Acquiring { .. } | Self::Closed => None,
+            Self::Observe { .. } | Self::Acquiring { .. } | Self::Viewing { .. } | Self::Closed => {
+                None
+            }
         }
     }
     fn close(&mut self) {
         match self {
             Self::Control(v) => v.close(),
-            Self::Observe { session, .. } | Self::Acquiring { session, .. } => session.close(),
+            Self::Observe { session, .. }
+            | Self::Acquiring { session, .. }
+            | Self::Viewing { session, .. } => session.close(),
             Self::Closed => {}
         }
     }
@@ -173,6 +197,9 @@ impl Peer {
                 session.drive(wait, other).await.map_err(Error::Session)
             }
             Self::Control(v) => v.drive(wait, result, other).await.map_err(Error::Control),
+            Self::Viewing {
+                session, viewing, ..
+            } => viewing.drive(session, wait, other).await,
             Self::Acquiring {
                 session,
                 media,
@@ -410,7 +437,7 @@ impl StreamingViewer {
     #[allow(clippy::too_many_lines)]
     async fn serve_inner(
         &mut self,
-        ui: &mut impl FnMut(ControlState<'_>, Option<Presentation>) -> Result<(), ()>,
+        ui: &mut impl FnMut(acquisition::Dispatch<'_>, Option<Presentation>) -> Result<(), ()>,
         result: &mut impl FnMut(ResultEvent),
         other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
     ) -> Result<(), Error> {

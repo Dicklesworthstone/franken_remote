@@ -1,5 +1,6 @@
 //! Live observation-to-control handoff. Decoder work never owns the request,
 //! original connection, or cancellation gate. All wire state uses `RequestControl`.
+use super::interactive::{LocalView, ViewingControl};
 use super::{
     Error, Guarded, Operation, Peer, Presentation, StreamingViewer, StreamingViewerControl,
 };
@@ -19,7 +20,7 @@ use fr_client::{
 };
 use fr_media::{
     delivery::ReceivePipeline,
-    freshness::{ClockCorrelation, ViewEvidence, ViewTracker},
+    freshness::{ClockCorrelation, ViewEvidence},
 };
 use fr_transport::quic::{self, Disposition, Route};
 use fr_wire::{
@@ -45,6 +46,26 @@ impl<'a> State<'a> {
         }
     }
 }
+// Internal dispatcher extends the service without adding variants to the
+// existing public control callback enum.
+pub(super) enum Dispatch<'a> {
+    Existing(State<'a>),
+    Viewing(&'a mut ViewingControl),
+}
+impl<'a> Dispatch<'a> {
+    pub(super) fn controlled(self) -> Option<&'a mut ControlledViewer> {
+        match self {
+            Self::Existing(state) => state.controlled(),
+            Self::Viewing(_) => None,
+        }
+    }
+    pub(super) fn existing(self) -> Result<State<'a>, ()> {
+        match self {
+            Self::Existing(state) => Ok(state),
+            Self::Viewing(_) => Err(()),
+        }
+    }
+}
 /// One explicit, non-replayable request and the original media-derived evidence.
 /// No field exposes a mutable connection, a fabricated clock or input credentials.
 pub struct PendingControl {
@@ -53,16 +74,44 @@ pub struct PendingControl {
     pending: RequestControl,
     channels: NegotiatedInput,
     policy: Policy,
-    view: Option<ViewTracker>,
-    initial: Option<PresentationReceipt>,
-    latest: Option<Presentation>,
-    mapped: bool,
+    local: LocalView,
     grant: Option<(Granted, InputClient)>,
 }
 fn input_error(error: fr_client::input::Error) -> Error {
     Error::Control(ControlError::View(
         fr_client::input::presentation::Error::Input(error),
     ))
+}
+pub(super) fn validate(
+    session: &ViewerSession,
+    channels: &NegotiatedInput,
+    request: Request,
+) -> Result<(), Error> {
+    if session.opened.selection.role != Role::RequestControl
+        || !session
+            .opened
+            .selection
+            .capabilities
+            .iter()
+            .any(|c| c.name == crate::input_quic::grant::CAPABILITY && c.version == 1)
+    {
+        return Err(Error::Control(ControlError::ControlNotNegotiated));
+    }
+    if session.clock.is_none() {
+        return Err(Error::Control(ControlError::ClockNotReady));
+    }
+    if request.parent != session.opened.binding
+        || channels.limits() != session.opened.selection.limits
+    {
+        return Err(Error::Control(ControlError::WrongBinding));
+    }
+    channels
+        .check_request(&session.transport, request)
+        .map_err(|e| Error::Control(ControlError::Input(e)))?;
+    channels
+        .viewer_routes(&session.transport)
+        .map_err(|e| Error::Control(ControlError::Input(e)))?;
+    Ok(())
 }
 impl PendingControl {
     fn new(
@@ -79,42 +128,33 @@ impl PendingControl {
             ClientInstant(now(&session.cx).map_err(Error::Session)?),
         )
         .map_err(|e| Error::Control(ControlError::ControlRequest(e)))?;
-        if session.opened.selection.role != Role::RequestControl
-            || !session
-                .opened
-                .selection
-                .capabilities
-                .iter()
-                .any(|c| c.name == crate::input_quic::grant::CAPABILITY && c.version == 1)
-        {
-            return Err(Error::Control(ControlError::ControlNotNegotiated));
-        }
-        if session.clock.is_none() {
-            return Err(Error::Control(ControlError::ClockNotReady));
-        }
-        if request.parent != session.opened.binding
-            || channels.limits() != session.opened.selection.limits
-        {
-            return Err(Error::Control(ControlError::WrongBinding));
-        }
-        channels
-            .check_request(&session.transport, request)
-            .map_err(|e| Error::Control(ControlError::Input(e)))?;
-        channels
-            .viewer_routes(&session.transport)
-            .map_err(|e| Error::Control(ControlError::Input(e)))?;
+        validate(session, &channels, request)?;
         Ok(Self {
             cx: session.cx.clone(),
             request,
             pending,
             channels,
             policy,
-            view: None,
-            initial: None,
-            latest: None,
-            mapped: false,
+            local: LocalView::default(),
             grant: None,
         })
+    }
+    pub(super) fn from_viewing(
+        session: &ViewerSession,
+        viewing: ViewingControl,
+    ) -> Result<Self, Error> {
+        validate(session, &viewing.channels, viewing.request)?;
+        let pending = Self {
+            cx: viewing.cx,
+            request: viewing.request,
+            pending: viewing.requested.ok_or(Error::Closed)?,
+            channels: viewing.channels,
+            policy: viewing.policy,
+            local: viewing.local,
+            grant: None,
+        };
+        pending.current()?;
+        Ok(pending)
     }
     fn current(&self) -> Result<u64, Error> {
         let at = now(&self.cx).map_err(Error::Session)?;
@@ -135,7 +175,7 @@ impl PendingControl {
     /// A real native completion, including the startup token when provided.
     /// Its stage does not certify visibility; delayed visibility still expires.
     pub const fn presentation(&self) -> Option<Presentation> {
-        self.latest
+        self.local.latest
     }
     pub fn deadline(&self) -> ClientInstant {
         self.pending.deadline()
@@ -150,7 +190,7 @@ impl PendingControl {
         if parent != self.request.parent || view != self.request.target.view {
             return Err(Error::Control(ControlError::WrongBinding));
         }
-        self.mapped = true;
+        self.local.mapped = true;
         Ok(())
     }
     /// Platform-qualified visibility of the exact native completion, not decode
@@ -158,7 +198,8 @@ impl PendingControl {
     /// revive a previous receiver or extend a picture's original queue deadline.
     pub fn visible(&mut self, frame: u64) -> Result<ViewEvidence, Error> {
         let at = self.current()?;
-        self.view
+        self.local
+            .view
             .as_mut()
             .ok_or(Error::Control(ControlError::ClockNotReady))?
             .visible(frame, at)
@@ -172,33 +213,11 @@ impl PendingControl {
         &mut self,
     ) -> Result<crate::media::presented::ViewSample, Error> {
         let at = self.current()?;
-        let Some(view) = &mut self.view else {
-            return Ok(crate::media::presented::ViewSample::Pending);
-        };
-        crate::media::presented::ViewSample::from_view(view.presented_sample(at), at)
-            .map_err(Error::Freshness)
+        self.local.sample(at)
     }
     pub(super) fn decoded(&mut self, receipt: PresentationReceipt) -> Result<(), Error> {
         let at = self.current()?;
-        if receipt.frame.as_raw() != receipt.decoded.descriptor().frame {
-            return Err(Error::Control(ControlError::WrongBinding));
-        }
-        let event = Presentation {
-            frame: receipt.frame,
-            stage: receipt.stage,
-        };
-        if let Some(view) = &mut self.view {
-            view.decoded(
-                receipt.decoded,
-                receipt.stage == crate::media::PresentationStage::SubmittedToCompositor,
-                at,
-            )
-            .map_err(Error::Freshness)?;
-        } else {
-            self.initial = Some(receipt);
-        }
-        self.latest = Some(event);
-        Ok(())
+        self.local.decoded(receipt, at)
     }
     pub(super) fn prepare(
         &mut self,
@@ -206,32 +225,7 @@ impl PendingControl {
         receiver: &ReceivePipeline,
     ) -> Result<bool, Error> {
         self.current()?;
-        let sample = session
-            .clock_correlation()
-            .map_err(|e| Error::Control(ControlError::Clock(e)))?;
-        let Some(sample) = sample else {
-            return Ok(false);
-        };
-        let at = self.current()?;
-        if let Some(view) = &mut self.view {
-            if view.clock_correlation() != sample {
-                view.synchronize(sample, at).map_err(Error::Freshness)?;
-            }
-        } else {
-            self.view = Some(
-                ViewTracker::new(receiver, sample, self.policy.view_age_us, at)
-                    .map_err(Error::Freshness)?,
-            );
-        }
-        self.view
-            .as_mut()
-            .unwrap()
-            .observe_receiver(receiver, at)
-            .map_err(Error::Freshness)?;
-        if let Some(initial) = self.initial.take() {
-            self.decoded(initial)?;
-        }
-        Ok(true)
+        self.local.prepare(session, receiver, self.policy)
     }
     fn service(&mut self, session: &mut ViewerSession) -> Result<Option<ClockCorrelation>, Error> {
         session.check().map_err(Error::Session)?;
@@ -308,7 +302,7 @@ impl PendingControl {
                                 .iter()
                                 .any(|(r, channel)| *r == route && *channel == Channel::MediaConfig)
                             && bytes.get(6..8) == Some(&(Kind::Progress as u16).to_be_bytes())
-                            && let Some(view) = &mut self.view
+                            && let Some(view) = &mut self.local.view
                         {
                             match view.progress(
                                 bytes,
@@ -386,7 +380,11 @@ impl StreamingViewer {
                 };
                 operation
                     .viewer
-                    .serve_inner(&mut ui, &mut result, &mut other)
+                    .serve_inner(
+                        &mut |state, event| ui(state.existing()?, event),
+                        &mut result,
+                        &mut other,
+                    )
                     .await
             }),
         }
@@ -397,7 +395,7 @@ pub(super) fn notify(
     receiver: &ReceivePipeline,
     control: &mut StreamingViewerControl,
     event: Option<Presentation>,
-    ui: &mut impl FnMut(State<'_>, Option<Presentation>) -> Result<(), ()>,
+    ui: &mut impl FnMut(Dispatch<'_>, Option<Presentation>) -> Result<(), ()>,
 ) -> Result<(), Error> {
     if let Peer::Acquiring {
         session, request, ..
@@ -405,13 +403,36 @@ pub(super) fn notify(
     {
         request.prepare(session, receiver)?;
     }
+    if let Peer::Viewing {
+        session, viewing, ..
+    } = peer
+    {
+        viewing.prepare(session, receiver)?;
+    }
     let state = match peer {
-        Peer::Acquiring { request, .. } => State::Requesting(request),
-        Peer::Control(viewer) => State::Controlled(viewer),
-        Peer::Observe { .. } => State::Observing,
+        Peer::Acquiring { request, .. } => Dispatch::Existing(State::Requesting(request)),
+        Peer::Viewing { viewing, .. } => Dispatch::Viewing(viewing),
+        Peer::Control(viewer) => Dispatch::Existing(State::Controlled(viewer)),
+        Peer::Observe { .. } => Dispatch::Existing(State::Observing),
         Peer::Closed => return Err(Error::Closed),
     };
     ui(state, event).map_err(|()| Error::Application)?;
+    if matches!(peer, Peer::Viewing { viewing, .. } if viewing.requested.is_some()) {
+        let Peer::Viewing {
+            session,
+            media,
+            viewing,
+        } = std::mem::replace(peer, Peer::Closed)
+        else {
+            return Err(Error::Closed);
+        };
+        let pending = PendingControl::from_viewing(&session, *viewing)?;
+        *peer = Peer::Acquiring {
+            session,
+            media,
+            request: Box::new(pending),
+        };
+    }
     let ready = if let Peer::Acquiring {
         session, request, ..
     } = peer
@@ -419,8 +440,8 @@ pub(super) fn notify(
         request.prepare(session, receiver)?;
         request.current()?;
         if request.grant.is_some()
-            && request.mapped
-            && let Some(view) = &mut request.view
+            && request.local.mapped
+            && let Some(view) = &mut request.local.view
         {
             match view.evidence(now(&request.cx).map_err(Error::Session)?) {
                 Ok(_) => true,
@@ -448,7 +469,7 @@ pub(super) fn notify(
         };
         let at = ClientInstant(request.current()?);
         let (_, input) = request.grant.take().ok_or(Error::Closed)?;
-        let view = request.view.take().ok_or(Error::Closed)?;
+        let view = request.local.view.take().ok_or(Error::Closed)?;
         let mut input = PresentedInput::from_view(input, receiver, view, at)
             .map_err(|e| Error::Control(ControlError::View(e)))?;
         input
