@@ -422,7 +422,7 @@ fn unapproved_observer_foreign_binding_and_wrong_lane_are_refused() {
     ];
     for (context, granted, expected) in cases {
         assert_eq!(
-            ChannelSession::new(&input, context, ProtocolLimits::ABSOLUTE, granted, at(0))
+            ClipboardChannel::new(&input, context, ProtocolLimits::ABSOLUTE, granted, at(0))
                 .unwrap_err(),
             expected
         );

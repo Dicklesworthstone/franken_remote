@@ -5,19 +5,22 @@ use fr_core::{
     clipboard::{Binding, ClipboardSink, Error, PlatformError, Publication, Stamp},
     ids::*,
     input::*,
-    input_submission::{Capabilities, InputSession},
+    input_submission::{Capabilities, InputSession as InputOwner},
     limits::ProtocolLimits,
     time::{HostDuration, HostInstant},
 };
 use fr_wire::clipboard::{
     Body, CancelReason, Context, Lane, Role, decode,
-    session::{Admission, ChannelSession, Offer, Pump, RecordSink, SessionError, TransportFailure},
+    session::{
+        Admission, ChannelSession as ClipboardChannel, Offer, Pump, RecordSink, SessionError,
+        TransportFailure,
+    },
 };
 
 fn at(us: u64) -> HostInstant {
     HostInstant::from_micros(us)
 }
-fn owner(lifetime: u64) -> InputSession {
+fn owner(lifetime: u64) -> InputOwner {
     let credentials = InputCredentials {
         session: RemoteSessionId::from_raw(1),
         lease: InputLeaseId::from_raw(2),
@@ -43,7 +46,7 @@ fn owner(lifetime: u64) -> InputSession {
     authority
         .issue_input_ticket(credentials.lease, credentials.ticket, at(0))
         .unwrap();
-    InputSession::new(
+    InputOwner::new(
         authority,
         credentials,
         InputBounds::new(DesktopPoint { x: 0, y: 0 }, 320, 240).unwrap(),
@@ -63,8 +66,8 @@ fn context(sender: Role) -> Context {
         lane: Lane::Clipboard,
     }
 }
-fn session(input: &InputSession, role: Role) -> ChannelSession {
-    ChannelSession::new(input, context(role), ProtocolLimits::ABSOLUTE, true, at(0)).unwrap()
+fn session(input: &InputOwner, role: Role) -> ClipboardChannel {
+    ClipboardChannel::new(input, context(role), ProtocolLimits::ABSOLUTE, true, at(0)).unwrap()
 }
 fn stamp(offer: Offer) -> Stamp {
     let Offer::Queued(stamp) = offer else {
@@ -104,13 +107,17 @@ impl RecordSink for Gate {
         })
     }
 }
-fn pump(session: &mut ChannelSession, gate: &mut Gate, now: u64) -> Pump {
+fn pump(session: &mut ClipboardChannel, gate: &mut Gate, now: u64) -> Pump {
     let mut scratch = vec![0xa5; 16_384 + 93];
     let result = session.pump(&mut scratch, gate, || at(now)).unwrap();
     assert!(scratch.iter().all(|b| *b == 0));
     result
 }
-fn deliver(from: &mut ChannelSession, to: &mut ChannelSession, platform: &mut Platform) -> Vec<u8> {
+fn deliver(
+    from: &mut ClipboardChannel,
+    to: &mut ClipboardChannel,
+    platform: &mut Platform,
+) -> Vec<u8> {
     let mut gate = Gate::default();
     for _ in 0..1030 {
         let state = pump(from, &mut gate, 0);
