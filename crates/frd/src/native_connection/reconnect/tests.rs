@@ -68,6 +68,11 @@ fn client() -> Client {
     )
     .unwrap()
 }
+fn control_offer() -> Offer {
+    let mut offer = offer();
+    offer.role = Role::RequestControl;
+    offer
+}
 #[test]
 fn backoff_is_bounded_and_attempt_counter_does_not_reset_or_wrap() {
     let p = Policy {
@@ -208,43 +213,128 @@ fn public_connector_retries_unavailable_daemon_only_after_cleanup_and_fixed_wait
     });
 }
 #[test]
-fn control_role_and_invalid_policy_refuse_before_discovery_or_callbacks() {
+fn role_specific_supervisors_refuse_before_discovery_or_callbacks() {
     let rt = network::runtime();
     rt.block_on(async {
-        for control in [false, true] {
-            let cx = rt.request_cx_with_budget(Budget::INFINITE);
-            let mut app = App::new();
-            let mut selected = offer();
-            let mut policy = quick();
-            if control {
-                selected.role = Role::RequestControl;
-            } else {
-                policy.max_attempts = 0;
-            }
-            assert_eq!(
-                client()
-                    .run_observing(
-                        cx.clone(),
-                        rt.handle(),
-                        PeerSelector::StableId("absent"),
-                        Configuration::default(),
-                        selected,
-                        policy,
-                        &mut app
-                    )
-                    .await,
-                Err(if control {
-                    Failure::ObservationOnly
-                } else {
-                    Failure::InvalidPolicy
-                })
-            );
-            assert_eq!(app.events.len(), 0);
-            assert_eq!(app.cleaned, 0);
-            assert!(cx.checkpoint().is_err());
-        }
+        let cx = rt.request_cx_with_budget(Budget::INFINITE);
+        let mut app = App::new();
+        assert_eq!(
+            client()
+                .run_observing(
+                    cx.clone(),
+                    rt.handle(),
+                    PeerSelector::StableId("absent"),
+                    Configuration::default(),
+                    control_offer(),
+                    quick(),
+                    &mut app,
+                )
+                .await,
+            Err(Failure::ObservationOnly)
+        );
+        assert!(app.events.is_empty() && app.cleaned == 0);
+        assert!(cx.checkpoint().is_err());
+
+        let cx = rt.request_cx_with_budget(Budget::INFINITE);
+        let mut app = App::new();
+        assert_eq!(
+            client()
+                .run_control_capable(
+                    cx.clone(),
+                    rt.handle(),
+                    PeerSelector::StableId("absent"),
+                    Configuration::default(),
+                    offer(),
+                    quick(),
+                    &mut app,
+                )
+                .await,
+            Err(Failure::ControlCapableOnly)
+        );
+        assert!(app.events.is_empty() && app.cleaned == 0);
+        assert!(cx.checkpoint().is_err());
+
+        let cx = rt.request_cx_with_budget(Budget::INFINITE);
+        let mut app = App::new();
+        let mut invalid = quick();
+        invalid.max_attempts = 0;
+        assert_eq!(
+            client()
+                .run_observing(
+                    cx.clone(),
+                    rt.handle(),
+                    PeerSelector::StableId("absent"),
+                    Configuration::default(),
+                    offer(),
+                    invalid,
+                    &mut app,
+                )
+                .await,
+            Err(Failure::InvalidPolicy)
+        );
+        assert!(app.events.is_empty() && app.cleaned == 0);
+        assert!(cx.checkpoint().is_err());
     });
 }
+#[test]
+fn control_capable_reconnect_uses_fresh_attempts_and_cleanup_without_replaying_control() {
+    let rt = network::runtime();
+    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    rt.block_on(async {
+        let mut app = App::new();
+        let result = client()
+            .run_control_capable(
+                cx.clone(),
+                rt.handle(),
+                PeerSelector::StableId("absent"),
+                Configuration::default(),
+                control_offer(),
+                quick(),
+                &mut app,
+            )
+            .await;
+        assert_eq!(
+            result,
+            Err(Failure::Connection(ConnectionError::Tailnet(
+                fr_tailnet::Error::LocalApiUnavailable
+            )))
+        );
+        assert_eq!(app.cleaned, 3);
+        assert_eq!(
+            app.events
+                .iter()
+                .filter(|event| matches!(event, Status::Connecting { .. }))
+                .count(),
+            3
+        );
+        assert_eq!(
+            app.events
+                .iter()
+                .filter(|event| matches!(event, Status::Authenticated { .. }))
+                .count(),
+            0,
+            "unavailable identity never exposed a Viewer or control-capable session"
+        );
+        assert!(cx.checkpoint().is_err());
+    });
+}
+#[test]
+fn native_control_adapter_constructs_without_starting_a_session_or_request() {
+    let _app = native_control_view(
+        ObserverPolicy::default(),
+        fr_media::freshness::ClockPolicy::default(),
+        fr_client::input::Policy::default(),
+        1,
+        fr_core::input_submission::Capabilities::default(),
+        |_| -> Result<crate::worker::Launch, CallbackError> { panic!("unpolled launch") },
+        |_, _| Ok(None),
+        |_, _| Ok(()),
+        |_, _, _| Ok(()),
+        |_, _| {},
+        |_| Ok(()),
+    );
+}
+
 #[test]
 fn cleanup_failure_and_explicit_stop_are_terminal_even_for_transient_errors() {
     let rt = network::runtime();
