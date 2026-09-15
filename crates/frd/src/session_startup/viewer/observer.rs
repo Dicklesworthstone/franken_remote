@@ -206,6 +206,47 @@ impl NativeObserver {
             inner: Box::pin(async move { future?.await.map_err(Error::Streaming) }),
         }
     }
+    /// Keep the actual native viewer read-only until the local UI explicitly asks
+    /// for control. Decoding, repair, observation renewal, clock correlation and
+    /// source-bound presentation reports continue on the same connection before
+    /// that decision. `ViewingControl::request_control` starts the one existing
+    /// request deadline at the decision point; this wrapper does not pre-reserve
+    /// the host Seat, synthesize visibility, or silently upgrade Observe intent.
+    pub fn serve_interactive_control<'a>(
+        &'a mut self,
+        sequence: u64,
+        capabilities: fr_core::input_submission::Capabilities,
+        policy: fr_client::input::Policy,
+        ui: impl FnMut(
+            streaming::InteractiveState<'_>,
+            Option<streaming::Presentation>,
+        ) -> Result<(), ()>
+        + 'a,
+        result: impl FnMut(fr_client::input::ResultEvent) + 'a,
+    ) -> impl Future<Output = Result<(), Error>> + 'a {
+        let cx = self.cx.clone();
+        let request = self.control_request(sequence, capabilities);
+        let future = request.and_then(|request| {
+            self.input
+                .take()
+                .ok_or(Error::InvalidConfiguration)
+                .map(|input| {
+                    self.viewer.serve_interactive_control(
+                        input,
+                        request,
+                        policy,
+                        ui,
+                        result,
+                        |_, _| Err(()),
+                    )
+                })
+        });
+        Attempt {
+            cx,
+            complete: false,
+            inner: Box::pin(async move { future?.await.map_err(Error::Streaming) }),
+        }
+    }
     pub fn control(&self) -> streaming::StreamingViewerControl {
         self.viewer.control()
     }
