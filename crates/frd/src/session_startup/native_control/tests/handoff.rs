@@ -742,3 +742,5 @@ fn native_scope_rejects_foreign_coordinates_and_every_changed_view_generation() 
     )
     .unwrap();
 }
+
+mod managed;

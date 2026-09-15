@@ -49,8 +49,10 @@ futures closes the original session, and those handles cannot be reused for
 an implicit reacquisition. An existing session clock is refused rather than
 replaced with a competing estimator.
 
-The returned native Driver must be polled independently of capture and decoder
-work. Source staleness fences input even while a capture process is stuck.
+The lower-level service returns a native Driver that must be polled independently
+of capture and decoder work. The [managed native service](MANAGED_NATIVE_CONTROL.md)
+owns and services it instead, including bounded shutdown draining. Source
+staleness fences input even while a capture process is stuck.
 Releasing a held key is cleanup, not rollback of its earlier press and not a
 second action receipt. Authentic results remain available through the existing
 `collect_after_close` and `last_result` accessors. Worker reaping uses a separate,
