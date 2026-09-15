@@ -211,7 +211,11 @@ fn public_native_viewer_watches_past_request_budget_then_takes_control_in_place(
         assert_eq!(host.worker_id(), host_pid);
         assert_eq!(viewer.worker_id(), viewer_pid);
         assert_eq!(host.statistics().encoded_updates, 0);
-        assert_eq!(viewer.statistics().decoded, 0, "initial frame decoded again");
+        assert_eq!(
+            viewer.statistics().decoded,
+            0,
+            "initial frame decoded again"
+        );
         assert!(host.presentation_reports() > 3);
         assert!(viewer.presentation_reports() > 3);
         assert!(!seat.is_occupied());
