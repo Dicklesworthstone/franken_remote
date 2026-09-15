@@ -1,0 +1,126 @@
+# Controller text clipboard: binary transfer and publication
+
+This is the implemented byte profile for `controller-text-clipboard` version 1,
+using the existing application-version-0 FRD0 envelope and the kinds allocated
+in [PROTOCOL.md](PROTOCOL.md). It implements plan section 15.3 and advances
+`fr-p2-shared-clipboard-wgd`; it does not close that feature's application,
+platform, approval, or interoperability gates.
+
+## Scope and authorization
+
+Only an explicitly attached, reliable clipboard channel is eligible. Its
+nonzero binding, remote session, current controller lease, and authenticated
+sender role come from the admission/attachment owner, not the record. No
+read-only observer, datagram, input lane, media lane, or ordinary control lane
+can acquire clipboard authority. A context describing another lane is refused.
+The existing media `Channel` enum is not extended with a non-media channel.
+
+Negotiate the capability before attaching the lane. The host must have the
+separately approved native clipboard grant. Both endpoint switches start on
+only after this grant and the current controller exist. `Context` and the
+constructor's grant argument are trusted local integration inputs, not fields
+to populate from unverified peer JSON. No listener or default-enabled network
+route is installed by linking the codec.
+
+`fr_core::clipboard::ClipboardSession` retains the original input monitor;
+copying numeric IDs cannot rebind it to a replacement controller. The owner
+must be retained uniquely for that lease and serviced while idle. It cannot
+be recreated to reset a consumed sequence floor. The host library constructor
+uses an actual native input owner; viewer lifecycle integration must use its
+qualified host-clock/lease projection, not manufacture a host authority.
+
+## Exact encoding
+
+Every integer is unsigned, big-endian. Every record has the 24-byte FRD0 header:
+magic `FRD0`, application version u16 = 0, kind u16, flags u16 = 0, reserved u16
+= 0, payload byte count u32, attached-channel binding u32, extension bytes u32.
+The usual bounded TLV extension rules apply; the encoder emits no extensions.
+There are no strings, MIME names, paths, executable commands, or implicit paste
+operations in the envelope.
+
+The common payload prefix, in order, is remote-session ID u128, controller-lease
+ID u128, transfer ID u128, source u8 (1 host, 2 controller), source sequence u64.
+IDs and sequence must be nonzero. The source must match the authenticated
+sender. The common prefix including the record header occupies 81 bytes.
+
+| Kind | Suffix after the common prefix | Whole record without extensions |
+|---|---|---|
+| `0x0050 ClipboardBegin` | Total UTF-8 bytes u32; chunk count u32 | 89 bytes |
+| `0x0051 ClipboardChunk` | Chunk index u32; byte offset u32; chunk byte count u32; exactly that many raw bytes | 93 + chunk bytes |
+| `0x0052 ClipboardCommit` | Original declared total UTF-8 bytes u32 | 85 bytes |
+| `0x0053 ClipboardCancel` | Reason u16 | 83 bytes |
+
+Cancel reasons are 1 user, 2 disabled, 3 expired, 4 superseded, 5 failed; all
+others refuse. Cancel references an existing transfer and is release-only,
+including while disabled. It never restores or overwrites an OS clipboard.
+Each direction has its own source sequence, strictly increasing within the
+original controller lease. An opaque transfer ID is not an authority token.
+
+## Allocation and ordering
+
+The selected `ProtocolLimits` applies to every complete record and item.
+The absolute ordinary-record limit remains 65,536 bytes and the item limit
+remains 1,048,576 bytes. Clipboard never raises the control-message ceiling.
+Each chunk has 1..16,384 bytes, each transfer has at most 1,024 chunks, and there
+is one incoming item buffer per clipboard owner. Admission checks total and
+count before reserving the complete item. Empty text has total/count zero and
+uses Begin then Commit, with no zero-byte chunk. A nonempty item has at least
+one byte per declared chunk and must fit its declared number of chunks.
+
+Chunks start at index/offset zero and must follow exactly, without overlap,
+duplicates, gaps, empty chunks, excess bytes, or excess chunk count. UTF-8 may
+cross chunk boundaries; only the complete item is validated as UTF-8. Partial,
+invalid, expired, or cancelled items never reach native publication. After an
+accepted Begin, its source sequence remains consumed even after cancellation,
+malformed chunks, allocation failure, native refusal, or receipt eviction.
+No transfer-ID or chunk-index collection grows with peer input.
+
+`Sender` owns at most one selected-limit item and emits one bounded record at
+a time. It chooses a chunk size no greater than 16,384 and no greater than the
+selected record budget minus 93. A smaller record budget that needs over 1,024
+chunks refuses before allocation. `encode_next` does not consume a record;
+`accepted` advances only after actual bounded transport admission. Failed
+queueing leaves the exact bytes reproducible. Completion/drop clears the
+sender's private buffer. Creating/sending a `Sender` does not authorize reading
+the native clipboard or disclosing bytes: the runtime rechecks current authority
+and both switches immediately before each enqueue and discards it on fencing.
+
+## Final publication and cancellation
+
+The transfer deadline is fixed at Begin admission, no later than three seconds
+or the then-current original-owner authorization deadline. Renewal/traffic does
+not extend it. The receiver tracks its own clock monotonically; regression
+fences the owner rather than manufacturing a new lifetime. A local clipboard
+revision change during transfer refuses the stale commit. Native preparation
+may block, but occurs outside the shared authority mutex. The clock, original
+owner, both switches, and fixed deadline are checked again after preparation,
+immediately before the single native publication call. A switch's off/on
+cycle advances a generation and cancels a blocked preparation even if it is on
+again when preparation returns. Already-entered OS operations cannot be undone.
+
+`SubmittedToOs`, `NotSubmitted`, and `UnknownEffect` remain distinct. A retained
+commit receipt is returned without a second native call; uncertain effects are
+never retried. This receipt is local API evidence, not a newly allocated wire
+acknowledgment message. A successful clipboard set is not application paste.
+The native adapter retains the exact source stamp for its selection so that its
+own change notifications are suppressed, including an uncertain publication
+that demonstrably became the current local selection. A real local change with
+no matching provenance remains a real new item, even if its text happens to be
+identical. Payloads and opaque IDs are excluded from Debug/errors.
+
+The wire-to-publication bridge closes and clears a clipboard owner on malformed
+ordered framing. Closing/disabling clears private transfer buffers where
+practical; it does not erase OS/clipboard-manager history, cancel unrelated
+input, or overwrite a newer local clipboard. Native preparation cleanup runs
+on every exit, including unwinding, without turning cleanup into publication.
+
+## Verification scope
+
+`cargo test -p fr-core -p fr-wire --locked` exercises independent exact fixtures
+for all four kinds, all fixture truncations, bounded single-byte mutations,
+small selected record budgets, full one-MiB transfers, split UTF-8, lazy sender
+backpressure, and the complete bytes-to-authority-to-publication contract.
+Recording sinks are explicitly test fixtures, not OS adapters. This is not
+native clipboard, live-tailnet, independent-peer, or GUI qualification. The
+full feature remains open until its platform/lifecycle attachment, switches,
+approval paths, automatic OS change detection, and desktop integration pass.
