@@ -1,7 +1,7 @@
 //! Bounded observation reconnection on the canonical installed-tailnet client.
 //! No input owner, old action, decoder reference, approval or lease crosses attempts.
 mod native;
-pub use native::native_view;
+pub use native::{native_control_view, native_view};
 
 use super::{Client, Configuration, Error as ConnectionError};
 use crate::session_startup::{ObserverError, StreamingViewerError, Viewer};
@@ -66,6 +66,7 @@ impl Policy {
 pub enum Failure {
     InvalidPolicy,
     ObservationOnly,
+    ControlCapableOnly,
     MissingRuntime,
     Clock,
     Cancelled,
@@ -154,7 +155,7 @@ impl Client {
     /// Cleanup runs before backoff or another discovery, under its own bounded
     /// context even when the session or supervisor has been cancelled.
     // Keep one linear attempt/cleanup/wait ownership sequence visible.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     pub fn run_observing<'a, A: Application + 'a>(
         &'a mut self,
         cx: Cx,
@@ -165,6 +166,63 @@ impl Client {
         policy: Policy,
         application: &'a mut A,
     ) -> impl Future<Output = Result<A::Output, Failure>> + 'a {
+        self.run_reconnecting(
+            cx,
+            runtime,
+            selector,
+            cfg,
+            offer,
+            policy,
+            Role::Observe,
+            Failure::ObservationOnly,
+            application,
+        )
+    }
+
+    /// Reconnect a control-capable *viewing* session without carrying control
+    /// authority across attempts. Every retry performs fresh destination
+    /// validation, TLS/startup, display selection, decoder setup and cleanup.
+    /// The application receives a new `Viewer` and may expose an explicit local
+    /// Take Control action only after the new session has fresh mapping and
+    /// presentation evidence. This supervisor never replays a request, lease,
+    /// ticket, action, held state, approval, or old media/reference identity.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_control_capable<'a, A: Application + 'a>(
+        &'a mut self,
+        cx: Cx,
+        runtime: RuntimeHandle,
+        selector: PeerSelector<'a>,
+        cfg: Configuration,
+        offer: Offer,
+        policy: Policy,
+        application: &'a mut A,
+    ) -> impl Future<Output = Result<A::Output, Failure>> + 'a {
+        self.run_reconnecting(
+            cx,
+            runtime,
+            selector,
+            cfg,
+            offer,
+            policy,
+            Role::RequestControl,
+            Failure::ControlCapableOnly,
+            application,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn run_reconnecting<'a, A: Application + 'a>(
+        &'a mut self,
+        cx: Cx,
+        runtime: RuntimeHandle,
+        selector: PeerSelector<'a>,
+        cfg: Configuration,
+        offer: Offer,
+        policy: Policy,
+        expected_role: Role,
+        role_failure: Failure,
+        application: &'a mut A,
+    ) -> impl Future<Output = Result<A::Output, Failure>> + 'a {
         Owned {
             cx: cx.clone(),
             inner: Box::pin(async move {
@@ -173,8 +231,8 @@ impl Client {
                 offer
                     .validate()
                     .map_err(|_| Failure::Connection(ConnectionError::InvalidConfiguration))?;
-                if offer.role != Role::Observe {
-                    return Err(Failure::ObservationOnly);
+                if offer.role != expected_role {
+                    return Err(role_failure);
                 }
                 let mut identity = None;
                 let mut clock = Clock::new(&cx)?;
