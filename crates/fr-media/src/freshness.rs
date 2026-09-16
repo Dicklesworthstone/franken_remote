@@ -149,6 +149,17 @@ struct Candidate {
     display_until_us: u64,
 }
 
+/// Read-only lifetime of the EXACT media receiver. Cloning retains identity,
+/// not liveness: closing/dropping that receiver invalidates every copy. This is
+/// not visibility, freshness, decoding success, or permission to grant control.
+#[derive(Clone, Debug)]
+pub struct ReceiverLifetime(Arc<AtomicBool>);
+impl ReceiverLifetime {
+    pub fn is_live(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 /// One configured stream's decode -> submit -> visible path. On replacement,
 /// create a new tracker with new bindings and invalidate the previous input
 /// owner. Late callbacks cannot rebind this owner. At most one pending renderer
@@ -213,6 +224,11 @@ impl ViewTracker {
             return Err(Error::StaleBinding);
         }
         Ok(())
+    }
+    /// Retain the original receiver's cancellation fence for detached auxiliary
+    /// workers. Numeric bindings on a replacement receiver never revive it.
+    pub fn receiver_lifetime(&self) -> ReceiverLifetime {
+        ReceiverLifetime(self.scope.clone())
     }
     /// Exact receiver channel bindings; this is identity metadata, not authority.
     pub const fn bindings(&self) -> MediaBindings {

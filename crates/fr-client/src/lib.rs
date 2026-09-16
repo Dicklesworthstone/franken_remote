@@ -11,3 +11,6 @@ pub mod startup;
 
 /// One-use initial input-grant negotiation.
 pub mod control_grant;
+
+/// Controller-only clipboard tied to the original accepted grant.
+pub mod clipboard;

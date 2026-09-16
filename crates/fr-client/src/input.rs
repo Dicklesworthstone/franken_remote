@@ -121,9 +121,9 @@ pub enum ResultEvent {
     Pointer(InputResult),
 }
 #[derive(Clone, Copy)]
-struct Pending {
+pub(crate) struct Pending {
     sequence: u64,
-    deadline: ClientInstant,
+    pub(crate) deadline: ClientInstant,
     minimum: u32,
     maximum: u32,
 }
@@ -133,24 +133,25 @@ struct Pending {
 /// Stop fences new sends; notify the host's independent revoke/cleanup path too.
 /// A missing result is uncertainty, never a claim that the host did nothing.
 pub struct InputClient {
+    pub(crate) clipboard_projection: Option<crate::clipboard::Owner>,
     viewport_owner: Arc<()>,
     credentials: InputCredentials,
     binding: ResultBinding,
     bounds: InputBounds,
     capabilities: Capabilities,
-    limits: ProtocolLimits,
+    pub(crate) limits: ProtocolLimits,
     policy: Policy,
     clock: ClientInstant,
     started: ClientInstant,
     stopped: Option<StopReason>,
-    mapped: bool,
+    pub(crate) mapped: bool,
     observation: Option<u64>,
-    view_until: Option<ClientInstant>,
+    pub(crate) view_until: Option<ClientInstant>,
     next_action: Option<u64>,
     next_pointer: Option<u64>,
     next_held: Option<u64>,
     held_after: Option<ClientInstant>,
-    pending: [Option<Pending>; MAX_PENDING_ACTIONS],
+    pub(crate) pending: [Option<Pending>; MAX_PENDING_ACTIONS],
     receipts: [Option<InputResult>; MAX_PENDING_ACTIONS],
     receipt_cursor: usize,
     ticket_state: Option<ticket::State>,
@@ -180,6 +181,7 @@ impl InputClient {
             return Err(Error::InvalidConfiguration);
         }
         Ok(Self {
+            clipboard_projection: None,
             viewport_owner: Arc::new(()),
             credentials,
             binding: ResultBinding {
@@ -212,6 +214,9 @@ impl InputClient {
     }
     pub fn stop(&mut self, reason: StopReason) {
         self.stopped.get_or_insert(reason);
+        if let Some(owner) = &self.clipboard_projection {
+            owner.stop();
+        }
         if let Some(response) = &mut self.control_response {
             response.stop();
         }
@@ -248,6 +253,11 @@ impl InputClient {
         if self.view_until.is_some_and(|until| now >= until) {
             return self.fail(StopReason::ViewStale);
         }
+        if let Some(owner) = &self.clipboard_projection
+            && owner.check(now).is_err()
+        {
+            return self.fail(StopReason::InvalidControl);
+        }
         Ok(())
     }
     /// Call only on the host's authenticated acknowledgement of this exact map.
@@ -265,6 +275,7 @@ impl InputClient {
             return self.fail(StopReason::ViewChanged);
         }
         self.mapped = true;
+        self.clipboard_readiness();
         Ok(())
     }
     pub fn presented(
@@ -311,6 +322,7 @@ impl InputClient {
         }
         self.observation = Some(evidence.serial);
         self.view_until = Some(until);
+        self.clipboard_readiness();
         Ok(())
     }
     /// A new opaque host ticket affects ONLY future actions. It neither changes
@@ -448,6 +460,7 @@ impl InputClient {
             minimum,
             maximum,
         });
+        self.clipboard_readiness();
         self.next_action = sequence.checked_add(1);
         if coordinate {
             self.next_pointer = barrier.checked_add(1);
@@ -600,6 +613,7 @@ impl InputClient {
             return self.fail(StopReason::InvalidReceipt);
         }
         self.pending[slot] = None;
+        self.clipboard_readiness();
         self.receipts[self.receipt_cursor] = Some(result);
         self.receipt_cursor = (self.receipt_cursor + 1) % MAX_PENDING_ACTIONS;
         if result.outcome != InputOutcome::SubmittedToOs {

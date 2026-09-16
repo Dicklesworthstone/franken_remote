@@ -18,6 +18,7 @@ use fr_wire::MediaLimits;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
+    Clipboard(crate::clipboard::Error),
     Input(super::Error),
     Media(freshness::Error),
     ViewMismatch,
@@ -65,6 +66,9 @@ impl PresentedInput {
         {
             return Err(Error::ViewMismatch);
         }
+        if let Some(owner) = &input.clipboard_projection {
+            owner.bind_receiver(view.receiver_lifetime());
+        }
         Ok(Self {
             input,
             view,
@@ -100,6 +104,9 @@ impl PresentedInput {
             return Err(Error::ViewMismatch);
         }
         let evidence = view.evidence(now.0)?;
+        if let Some(owner) = &input.clipboard_projection {
+            owner.bind_receiver(view.receiver_lifetime());
+        }
         let mut this = Self {
             input,
             view,
@@ -108,6 +115,47 @@ impl PresentedInput {
         };
         this.deliver(evidence, now)?;
         Ok(this)
+    }
+    /// Join a separately admitted clipboard lane to this original grant and
+    /// decoder-backed visible view. No input owner, media receiver or freshness
+    /// history is recreated. The returned native worker is fenced immediately
+    /// if the original receiver closes, even before this owner's next tick.
+    pub fn attach_clipboard(
+        &mut self,
+        channel: u32,
+        granted: bool,
+        now: ClientInstant,
+    ) -> Result<crate::clipboard::ControllerClipboard, Error> {
+        if !granted {
+            return Err(Error::Clipboard(crate::clipboard::Error::Permission));
+        }
+        if !self.tick(now)? {
+            return Err(Error::Input(super::Error::NoPresentedView));
+        }
+        self.input
+            .attach_clipboard(channel, true, now)
+            .map_err(Error::Clipboard)
+    }
+    /// Use the completed dedicated route's exact scope and record allowance.
+    /// Like `attach_clipboard`, this requires real current presentation; numeric
+    /// route metadata never upgrades observation into control or OS permission.
+    pub fn attach_clipboard_lane(
+        &mut self,
+        parent: fr_wire::negotiation::ControlBinding,
+        outgoing: fr_wire::clipboard::Context,
+        limits: fr_core::limits::ProtocolLimits,
+        granted: bool,
+        now: ClientInstant,
+    ) -> Result<crate::clipboard::ControllerClipboard, Error> {
+        if !granted {
+            return Err(Error::Clipboard(crate::clipboard::Error::Permission));
+        }
+        if !self.tick(now)? {
+            return Err(Error::Input(super::Error::NoPresentedView));
+        }
+        self.input
+            .attach_clipboard_lane(parent, outgoing, limits, true, now)
+            .map_err(Error::Clipboard)
     }
     /// Validate the exact receiver underlying the input's presentation evidence.
     /// Equal IDs on a different receiver do not authorize media or repairs.

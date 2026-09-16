@@ -165,6 +165,15 @@ impl RequestControl {
         input
             .accept_ticket(&ticket[..n], clock, now)
             .map_err(Error::Input)?;
+        input.clipboard_projection = Some(
+            crate::clipboard::Owner::new(grant, clock, now).map_err(|error| {
+                if error == crate::clipboard::Error::Expired {
+                    Error::Expired
+                } else {
+                    Error::Clock
+                }
+            })?,
+        );
         self.state = State::Done;
         Ok((grant, input))
     }

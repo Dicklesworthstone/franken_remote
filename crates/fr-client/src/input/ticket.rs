@@ -67,6 +67,11 @@ impl InputClient {
         if until <= now.0 {
             return Err(Error::TicketExpired);
         }
+        if let Some(owner) = &self.clipboard_projection
+            && owner.ticket(ticket.expires_at_us, clock, now).is_err()
+        {
+            return self.fail(StopReason::InvalidControl);
+        }
         self.credentials.ticket = c.ticket;
         Ok(())
     }

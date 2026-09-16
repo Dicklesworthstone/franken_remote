@@ -59,6 +59,7 @@ impl InputClient {
             }
             return Err(Error::Control(error));
         }
+        self.clipboard_readiness();
         Ok(())
     }
     pub fn control_response_deadline(&self) -> Option<ClientInstant> {
@@ -87,6 +88,7 @@ impl InputClient {
             self.stop(StopReason::InvalidControl);
             return Err(Error::Control(error));
         }
+        self.clipboard_readiness();
         Ok(())
     }
 }
