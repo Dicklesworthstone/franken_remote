@@ -16,8 +16,10 @@ use std::{
     rc::Rc,
     time::{Duration, Instant},
 };
+mod changes;
 mod ffi;
 mod read;
+pub use changes::{ClipboardChange, WatchError};
 use ffi::{Atoms, Event};
 pub use read::{ReadError, ReadText};
 
@@ -59,6 +61,7 @@ pub struct X11Clipboard {
     current: Option<Rc<Selection>>,
     readers: [Option<Reader>; READERS],
     capture: Option<read::Capture>,
+    changes: changes::Changes,
 }
 impl fmt::Debug for X11Clipboard {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -110,6 +113,7 @@ impl X11Clipboard {
             current: None,
             readers: std::array::from_fn(|_| None),
             capture: None,
+            changes: changes::Changes::default(),
         })
     }
     fn handle(&self) -> Result<*mut core::ffi::c_void, PlatformError> {
@@ -277,6 +281,9 @@ impl X11Clipboard {
         if let Some(capture) = &mut self.capture {
             capture.observe(event, self.atoms);
         }
+        if event.kind == 8 {
+            self.changes.record(event.window, event.time);
+        }
         match event.kind {
             1 => self.request(event, now),
             2 => {
@@ -356,6 +363,7 @@ impl X11Clipboard {
             }
         }
         self.capture = None;
+        self.changes.stop();
         self.prepared = None;
         self.current = None;
         self.readers = std::array::from_fn(|_| None);

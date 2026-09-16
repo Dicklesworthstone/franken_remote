@@ -194,3 +194,6 @@ fn permission_is_required_before_open_and_nonlocal_displays_refuse() {
 
 #[path = "clipboard_x11/authorized.rs"]
 mod authorized;
+
+#[path = "clipboard_x11/changes.rs"]
+mod changes;

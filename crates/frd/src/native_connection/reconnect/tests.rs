@@ -1,6 +1,7 @@
 //! Retry policy and public connector failure paths. No fabricated successful dial.
 use super::*;
 use crate::native_connection::tests::{offer, roots};
+use crate::session_startup::ObserverPolicy;
 use crate::session_startup::test_network as network;
 use std::{
     cell::Cell,

@@ -31,6 +31,8 @@ pub(super) struct Property {
     pub remaining: u32,
 }
 unsafe extern "C" {
+    pub(super) fn fr_clip_subscribe(handle: *mut c_void) -> c_int;
+    pub(super) fn fr_clip_unsubscribe(handle: *mut c_void) -> c_int;
     pub(super) fn fr_clip_requestor(handle: *mut c_void, window: *mut u32) -> c_int;
     pub(super) fn fr_clip_destroy(handle: *mut c_void, window: u32) -> c_int;
     pub(super) fn fr_clip_convert(

@@ -2,6 +2,8 @@
  * expiry and selection state. No callbacks, retained caller pointers or Xlib
  * global error handlers. Every checked request has a consumed result. */
 #include <xcb/xcb.h>
+#include <xcb/xcbext.h>
+#include <X11/extensions/xfixesproto.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,7 +12,28 @@ struct fr_clip_atoms { uint32_t clipboard, utf8, targets, timestamp, incr, clock
 struct fr_clip_property_reply { uint32_t kind, format, len, remaining; };
 struct fr_clip_event { uint32_t kind, window, property, target, time, selection, sequence; };
 _Static_assert(sizeof(xcb_selection_notify_event_t) <= 32, "XCB event ABI");
-struct fr_clip { xcb_connection_t *c; xcb_window_t window; struct fr_clip_atoms atoms; };
+struct fr_clip {
+    xcb_connection_t *c;
+    xcb_window_t window, observer;
+    struct fr_clip_atoms atoms;
+    uint8_t fixes_event;
+};
+_Static_assert(sizeof(xXFixesQueryVersionReq) == 12, "XFixes request ABI");
+_Static_assert(sizeof(xXFixesQueryVersionReply) == 32, "XFixes reply ABI");
+_Static_assert(sizeof(xXFixesSelectSelectionInputReq) == 16, "XFixes select ABI");
+_Static_assert(sizeof(xXFixesSelectionNotifyEvent) == 32, "XFixes event ABI");
+static xcb_extension_t fixes = { XFIXES_NAME, 0 };
+/* Two fixed-size version-1 requests use the installed protocol headers. No
+ * Xlib connection, extra runtime library, callbacks or retained pointers. XCB
+ * fills the wire header and copies the request before this function returns. */
+static unsigned int fixes_request(struct fr_clip *h, void *bytes, size_t size,
+                                   uint8_t opcode, uint8_t isvoid) {
+    struct iovec parts[3] = {{0}};
+    parts[2].iov_base = bytes;
+    parts[2].iov_len = size;
+    xcb_protocol_request_t request = {1, &fixes, opcode, isvoid};
+    return xcb_send_request(h->c, XCB_REQUEST_CHECKED, parts + 2, &request);
+}
 
 static int checked(struct fr_clip *h, xcb_void_cookie_t cookie) {
     xcb_generic_error_t *e = xcb_request_check(h->c, cookie);
@@ -57,6 +80,50 @@ struct fr_clip *fr_clip_open(const char *display, struct fr_clip_atoms *atoms,
     *atoms = h->atoms; *window = h->window; return h;
 fail:
     fr_clip_close(h); return NULL;
+}
+/* Fresh observer windows fence queued notifications across disable/re-enable.
+ * No selection is changed; a failed subscription destroys only its own child.
+ * -3 is a typed missing/old extension, distinct from connection failure. */
+int fr_clip_subscribe(struct fr_clip *h) {
+    if (h->observer) return -2;
+    if (!h->fixes_event) {
+        const xcb_query_extension_reply_t *ext = xcb_get_extension_data(h->c, &fixes);
+        if (!ext || !ext->present) return -3;
+        xXFixesQueryVersionReq request = {0};
+        request.majorVersion = 1;
+        unsigned int sequence = fixes_request(h, &request, sizeof(request),
+                                               X_XFixesQueryVersion, 0);
+        if (!sequence) return -1;
+        xcb_generic_error_t *error = NULL;
+        xXFixesQueryVersionReply *reply = xcb_wait_for_reply(h->c, sequence, &error);
+        int valid = reply && !error && reply->type == 1 && reply->length == 0
+                    && reply->majorVersion >= 1;
+        free(error); free(reply);
+        if (!valid) return -3;
+        h->fixes_event = ext->first_event + XFixesSelectionNotify;
+    }
+    uint32_t observer = xcb_generate_id(h->c);
+    if (checked(h, xcb_create_window_checked(h->c, 0, observer, h->window,
+        0, 0, 1, 1, 0, XCB_WINDOW_CLASS_INPUT_ONLY, XCB_COPY_FROM_PARENT, 0, NULL)))
+        return -1;
+    xXFixesSelectSelectionInputReq request = {0};
+    request.window = observer;
+    request.selection = h->atoms.clipboard;
+    request.eventMask = XFixesSetSelectionOwnerNotifyMask |
+        XFixesSelectionWindowDestroyNotifyMask | XFixesSelectionClientCloseNotifyMask;
+    xcb_void_cookie_t cookie = {fixes_request(h, &request, sizeof(request),
+                                             X_XFixesSelectSelectionInput, 1)};
+    if (!cookie.sequence || checked(h, cookie)) {
+        checked(h, xcb_destroy_window_checked(h->c, observer));
+        return -1;
+    }
+    h->observer = observer;
+    return 0;
+}
+int fr_clip_unsubscribe(struct fr_clip *h) {
+    uint32_t observer = h->observer;
+    h->observer = 0;
+    return observer ? checked(h, xcb_destroy_window_checked(h->c, observer)) : 0;
 }
 int fr_clip_tick(struct fr_clip *h, uint32_t *sequence) {
     const uint8_t value = 0;
@@ -109,6 +176,17 @@ int fr_clip_next(struct fr_clip *h, struct fr_clip_event *out) {
     xcb_generic_event_t *event = xcb_poll_for_event(h->c);
     if (!event) return xcb_connection_has_error(h->c) ? -1 : 0;
     out->sequence = event->full_sequence;
+    if (h->observer && event->response_type == h->fixes_event) {
+        const xXFixesSelectionNotifyEvent *e = (const void *)event;
+        if (e->window == h->observer && e->selection == h->atoms.clipboard &&
+            e->subtype <= XFixesSelectionClientCloseNotify) {
+            out->kind = 8;
+            out->window = e->owner;
+            out->time = e->selectionTimestamp;
+        }
+        free(event);
+        return 1;
+    }
     /* SelectionNotify is sent by the owner with SendEvent. It is only a hint:
      * Rust validates the requestor, target, property, time, current owner and
      * bounded property reply. Synthetic ownership/property events stay ignored. */
