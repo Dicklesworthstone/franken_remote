@@ -48,6 +48,8 @@ pub enum Error {
     Controller(fr_client::clipboard::Error),
     Presentation(fr_client::input::presentation::Error),
     AlreadyAttached,
+    NotNegotiated,
+    SetupExpired,
     ConsentRequired,
     Transport(quic::Error),
 }
@@ -57,8 +59,14 @@ pub enum State {
     Retired,
 }
 
-/// At most one outbound queued-or-in-flight record and one incoming
-/// queued/executing/deferred/uncollected record. Other lanes retain their budgets.
+// A fixed batch avoids one RTT of head-of-line delay per 16-KiB chunk. Every
+// retained native record keeps its OWN immutable permit/deadline until the
+// whole native lane drains. The worker still has only one handoff slot.
+const MAX_INFLIGHT_RECORDS: usize = 4;
+
+/// At most four native in-flight permits, one outbound handoff record, and one
+/// incoming queued/executing/deferred/uncollected record. Other lanes retain
+/// their original transport budgets. No payload history or unbounded queue.
 pub struct Bridge {
     lane: ClipboardChannel,
     connection: ConnectionBinding,
@@ -67,7 +75,8 @@ pub struct Bridge {
     cx: Cx,
     switches: (u64, u64),
     pending: Option<Outgoing>,
-    inflight: Option<(Egress, u64)>,
+    inflight: [Option<(Egress, u64)>; MAX_INFLIGHT_RECORDS],
+    release_outbox: bool,
     retired: bool,
     reason: Option<Error>,
 }
@@ -243,7 +252,8 @@ impl Bridge {
                 cx,
                 switches,
                 pending: None,
-                inflight: None,
+                inflight: std::array::from_fn(|_| None),
+                release_outbox: false,
                 retired: false,
                 reason: None,
             },
@@ -286,7 +296,8 @@ impl Bridge {
         self.bound(q)?;
         self.shared.stop();
         self.pending = None;
-        self.inflight = None;
+        self.inflight.fill(None);
+        self.release_outbox = false;
         if !self.retired {
             self.retired = true;
             self.lane.retire(q, &self.cx).map_err(Error::Transport)?;
@@ -302,7 +313,7 @@ impl Bridge {
         if (a.state(), b.state()) != self.switches || !a.is_enabled() || !b.is_enabled() {
             return Err(Error::SwitchChanged);
         }
-        if let Some((permit, until)) = &self.inflight {
+        for (permit, until) in self.inflight.iter().flatten() {
             permit.check_operation(host).map_err(Error::Session)?;
             if local >= *until {
                 return Err(Error::HandoffExpired);
@@ -322,6 +333,20 @@ impl Bridge {
             return Err(Error::HandoffExpired);
         }
         Ok((local, host))
+    }
+    fn release_handoff(&mut self) -> Result<(), Error> {
+        if self.release_outbox {
+            match self.shared.outbox.try_lock() {
+                Ok(mut outbox) => {
+                    outbox.busy = false;
+                    self.release_outbox = false;
+                    self.shared.wake();
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {}
+                Err(std::sync::TryLockError::Poisoned(_)) => return Err(Error::Poisoned),
+            }
+        }
+        Ok(())
     }
     /// Bounded network turn. Native work happens only in `Worker::step`/`WorkerSeed::spawn`;
     /// dispatch callbacks copy one bounded record with a fixed ingress deadline.
@@ -350,18 +375,16 @@ impl Bridge {
             turn.complete();
             return Ok(State::Retired);
         }
-        if self.inflight.is_some() && self.lane.send_drained(q).map_err(Error::Transport)? {
-            match self.shared.outbox.try_lock() {
-                Ok(mut outbox) => {
-                    self.inflight = None;
-                    outbox.busy = false;
-                    self.shared.wake();
-                }
-                Err(std::sync::TryLockError::WouldBlock) => {}
-                Err(std::sync::TryLockError::Poisoned(_)) => return Err(Error::Poisoned),
-            }
+        if self.inflight.iter().any(Option::is_some)
+            && self.lane.send_drained(q).map_err(Error::Transport)?
+        {
+            self.inflight.fill(None);
         }
-        if self.pending.is_none() && self.inflight.is_none() {
+        self.release_handoff()?;
+        if self.pending.is_none()
+            && !self.release_outbox
+            && self.inflight.iter().any(Option::is_none)
+        {
             match self.shared.outbox.try_lock() {
                 Ok(mut outbox) => self.pending = outbox.item.take(),
                 Err(std::sync::TryLockError::WouldBlock) => {}
@@ -383,7 +406,17 @@ impl Bridge {
             }) {
                 Ok(()) => {
                     let p = self.pending.take().expect("accepted exact record");
-                    self.inflight = Some((p.permit, p.until));
+                    let slot = self
+                        .inflight
+                        .iter_mut()
+                        .find(|slot| slot.is_none())
+                        .ok_or(Error::Limit)?;
+                    *slot = Some((p.permit, p.until));
+                    // Admission releases the one worker slot, not the original
+                    // Egress permit. If its lock is contended, remember this
+                    // exact accepted handoff; never send the record again.
+                    self.release_outbox = true;
+                    self.release_handoff()?;
                 }
                 Err(quic::Error::Backpressure) => {}
                 Err(e) => return Err(Error::Transport(e)),

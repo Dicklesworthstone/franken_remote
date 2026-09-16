@@ -8,11 +8,11 @@ use asupersync::bytes::Bytes;
 const CLIPBOARD_RETIRED: u64 = 0x4652_4350;
 
 impl MediaChannel {
-    pub(in crate::quic) fn retire_clipboard(
-        &mut self,
-        q: &mut QuicRecords,
-        cx: &Cx,
-    ) -> Result<(), Error> {
+    /// Retire only a COMPLETED optional clipboard pair on the original connection.
+    /// Also accepts a peer-retired tombstone, including during the selected
+    /// running-session readiness exchange. Never releases IDs for reuse or
+    /// grants clipboard access. Incomplete exchanges cannot use this escape.
+    pub fn retire_clipboard(&mut self, q: &mut QuicRecords, cx: &Cx) -> Result<(), Error> {
         // Reject a foreign object BEFORE any operation or error can mutate it.
         if !q.is_bound_to(&self.connection) || self.descriptor.role != MediaRole::Clipboard {
             return Err(Error::WrongRoute);

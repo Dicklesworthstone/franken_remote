@@ -33,6 +33,9 @@ pub const ALPN: &[u8] = b"fr-remote/0";
 const MAX_STREAMS: usize = 16;
 const MAX_DATAGRAMS: usize = 4;
 const TURN_RECORDS: usize = 16;
+/// Keep a turn bounded while allowing queued bulk records to use available
+/// congestion credit without one idle receive timeout per 900-byte prefix.
+const TURN_SEND_PREFIXES: usize = 8;
 /// Upper bound from the pinned native 1200-byte protected packet profile:
 /// short-header byte + maximal CID (20) + PN (4) + AEAD (16) + DATAGRAM (9).
 /// The actual peer-negotiated DATAGRAM limit can be lower and remains enforced
@@ -103,7 +106,7 @@ impl Messages {
             Self::SessionControl => {
                 matches!(
                     kind,
-                    0x0012..=0x001e | 0x0020 | 0x0022 | 0x0080 | 0x0082 | 0x0084 | 0x0085
+                    0x0012..=0x001e | 0x0020 | 0x0022 | 0x0054 | 0x0080 | 0x0082 | 0x0084 | 0x0085
                 )
             }
             // Release-only HeldState and InputMode share the ordered action
@@ -647,10 +650,12 @@ impl QuicRecords {
         }
         Ok(())
     }
-    /// Flush bounded native packets, then wait at most `wait` for incoming I/O.
-    /// The Asupersync reactor/loss timers do the waiting. Dropping this operation
-    /// is terminal. The external session watchdog must independently cancel Cx
-    /// on authority expiry/revoke, including while this future is suspended.
+    /// Flush at most eight small bulk prefixes or one critical prefix, then wait
+    /// at most `wait` for incoming I/O. Each prefix rechecks authority, deadlines, native congestion
+    /// and flow credit, and critical-stream priority. The whole turn retains one
+    /// 250 ms bound; backpressure never becomes an unbounded write loop.
+    /// Dropping an active native I/O operation is terminal. The session watchdog
+    /// must independently cancel Cx on expiry/revoke, including during silence.
     pub async fn drive(
         &mut self,
         cx: &Cx,
@@ -661,44 +666,63 @@ impl QuicRecords {
         if wait > Duration::from_millis(100) {
             return Err(Error::InvalidPolicy);
         }
-        let current = self.check(cx, &mut authorize)?;
-        if let Err(error) = self.queue_stream_prefix(cx, current) {
+        let result = timeout(
+            cx.now(),
+            Duration::from_millis(250),
+            self.drive_turn(cx, wait, &mut authorize),
+        )
+        .await
+        .map_err(|_| Error::Expired)
+        .and_then(core::convert::identity);
+        if result.is_err() {
             self.close();
-            return Err(error);
         }
-        let mut native = self.native.take().ok_or(Error::Closed)?;
-        let until = self.senders.iter().filter_map(|s| s.until).min();
+        result
+    }
+    async fn drive_turn(
+        &mut self,
+        cx: &Cx,
+        wait: Duration,
+        authorize: &mut impl FnMut() -> bool,
+    ) -> Result<(), Error> {
         let gate = self.lifetime_check.clone();
-        let result = timeout(cx.now(), Duration::from_millis(250), async {
+        for _ in 0..TURN_SEND_PREFIXES {
+            let current = self.check(cx, authorize)?;
+            let queued = self.queue_stream_prefix(cx, current)?;
+            let until = self.senders.iter().filter_map(|s| s.until).min();
+            // Native ownership stays outside self across every await: dropping
+            // or unwinding an in-flight operation cannot resume its queued data.
+            let mut native = self.native.take().ok_or(Error::Closed)?;
             lifetime::poll_io(
                 cx,
                 gate.as_deref(),
-                &mut authorize,
+                authorize,
                 current,
                 until,
                 native.flush(cx),
             )
             .await?;
-            lifetime::poll_io(
-                cx,
-                gate.as_deref(),
-                &mut authorize,
-                current,
-                until,
-                native.drive_io_once(cx, wait),
-            )
-            .await?;
-            Ok(())
-        })
-        .await
-        .map_err(|_| Error::Expired)
-        .and_then(core::convert::identity);
-        if let Err(e) = result {
-            self.close();
-            return Err(e);
+            self.native = Some(native);
+            if queued != Some(Priority::Bulk) {
+                // A critical prefix gets the first native slot, then yields to
+                // receive/service control before spending a bulk turn budget.
+                break;
+            }
         }
+        let current = self.check(cx, authorize)?;
+        let until = self.senders.iter().filter_map(|s| s.until).min();
+        let mut native = self.native.take().ok_or(Error::Closed)?;
+        lifetime::poll_io(
+            cx,
+            gate.as_deref(),
+            authorize,
+            current,
+            until,
+            native.drive_io_once(cx, wait),
+        )
+        .await?;
         self.native = Some(native);
-        self.check(cx, &mut authorize)?;
+        self.check(cx, authorize)?;
         let native = self.native.as_mut().ok_or(Error::Closed)?;
         if native.connection().state() != QuicConnectionState::Established
             || native.connection().inner().streams().len() > self.streams.len()
@@ -729,7 +753,7 @@ impl QuicRecords {
     /// Stage one small prefix, leaving congestion/loss control with Asupersync.
     /// Large application records are NOT single QUIC frames. No prefix is staged
     /// when native queued work plus flight could fill the protected-packet window.
-    fn queue_stream_prefix(&mut self, cx: &Cx, now: u64) -> Result<(), Error> {
+    fn queue_stream_prefix(&mut self, cx: &Cx, now: u64) -> Result<Option<Priority>, Error> {
         if self.pending_writes.iter().any(|p| now >= p.send_by) {
             return Err(Error::Expired);
         }
@@ -743,7 +767,7 @@ impl QuicRecords {
                 .saturating_sub(path.bytes_in_flight)
                 < needed
         {
-            return Ok(());
+            return Ok(None);
         }
         let reserve = if self
             .senders
@@ -780,7 +804,7 @@ impl QuicRecords {
                     .min(900)
                     .min(usize::try_from(credit).unwrap_or(usize::MAX));
                 if length != 0 {
-                    selected = Some((index, length));
+                    selected = Some((index, length, priority));
                     break;
                 }
             }
@@ -788,8 +812,8 @@ impl QuicRecords {
                 break;
             }
         }
-        let Some((index, length)) = selected else {
-            return Ok(());
+        let Some((index, length, priority)) = selected else {
+            return Ok(None);
         };
         let pending = &mut self.pending_writes[index];
         native
@@ -805,7 +829,7 @@ impl QuicRecords {
         if pending.offset == pending.bytes.len() {
             self.pending_writes.remove(index);
         }
-        Ok(())
+        Ok(Some(priority))
     }
     /// Drain at most 16 borrowed records per turn, alternating streams with
     /// datagrams. A blocked handler keeps its complete record (one per route).
