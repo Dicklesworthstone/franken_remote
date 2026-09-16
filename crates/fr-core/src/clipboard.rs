@@ -7,8 +7,8 @@
 //! records when this owner closes. Clipboard permission/approval is separate
 //! from permission to inject keys; only the local integration supplies it.
 use crate::{
-    ids::{InputLeaseId, InputTicketId, RemoteSessionId},
-    input_submission::{InputMonitor, InputSession, Refusal},
+    ids::{InputLeaseId, RemoteSessionId},
+    input_submission::{InputSession, Refusal},
     limits::ProtocolLimits,
     time::{HostDuration, HostInstant},
 };
@@ -17,6 +17,9 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+
+pub mod authority;
+use authority::Monitor;
 
 mod receive;
 
@@ -216,7 +219,7 @@ impl ClipboardSwitch {
 /// One bounded incoming transfer per original native input owner. No mutable
 /// monitor escape and no reconstruction of an old lease after reconnect.
 pub struct ClipboardSession {
-    monitor: InputMonitor,
+    monitor: Monitor,
     binding: Binding,
     local: Endpoint,
     limits: ProtocolLimits,
@@ -248,18 +251,34 @@ impl ClipboardSession {
         clipboard_granted: bool,
         now: HostInstant,
     ) -> Result<Self, Error> {
+        Self::with_monitor(
+            Monitor::from_input(input),
+            local,
+            limits,
+            clipboard_granted,
+            now,
+        )
+    }
+    /// Bind to an existing host owner or a qualified viewer projection. This is
+    /// local integration, not authorization from IDs in a clipboard record.
+    /// Retain one session per lane/lease; do not reconstruct consumed ledgers.
+    pub fn with_monitor(
+        monitor: Monitor,
+        local: Endpoint,
+        limits: ProtocolLimits,
+        clipboard_granted: bool,
+        now: HostInstant,
+    ) -> Result<Self, Error> {
         if !clipboard_granted {
             return Err(Error::Permission);
         }
-        // This accessor only describes the owner's immutable scope. A zero
-        // ticket is deliberately never issued or used to authorize clipboard.
-        let scope = input.ticket_credentials(InputTicketId::from_raw(0));
+        let binding = monitor.binding();
+        if !binding.valid() {
+            return Err(Error::Binding);
+        }
         let mut session = Self {
-            monitor: input.monitor(),
-            binding: Binding {
-                session: scope.session,
-                lease: scope.lease,
-            },
+            monitor,
+            binding,
             local,
             limits,
             switches: (

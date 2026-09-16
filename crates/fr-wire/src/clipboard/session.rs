@@ -12,6 +12,7 @@ use super::{
 };
 use crate::WireError;
 use core::fmt;
+use fr_core::clipboard::authority::Monitor;
 
 pub mod observation;
 pub mod synchronize;
@@ -19,7 +20,7 @@ use fr_core::{
     clipboard::{
         ClipboardSession, ClipboardSink, ClipboardSwitch, Error, Publication, Receipt, Stamp,
     },
-    input_submission::{InputMonitor, InputSession},
+    input_submission::InputSession,
     limits::ProtocolLimits,
     time::{HostDuration, HostInstant},
 };
@@ -100,7 +101,7 @@ struct Pending {
 /// Numeric scope and channel fields are descriptions, never bearer authority.
 pub struct ChannelSession {
     receiver: ClipboardSession,
-    monitor: InputMonitor,
+    monitor: Monitor,
     outgoing: Context,
     incoming: Context,
     limits: ProtocolLimits,
@@ -155,8 +156,26 @@ impl ChannelSession {
         clipboard_granted: bool,
         now: HostInstant,
     ) -> Result<Self, SessionError> {
+        Self::with_monitor(
+            Monitor::from_input(input),
+            outgoing,
+            limits,
+            clipboard_granted,
+            now,
+        )
+    }
+    /// Use the original owner's read-only authority, including a qualified
+    /// controller projection. Neither this context nor this method grants input.
+    pub fn with_monitor(
+        monitor: Monitor,
+        outgoing: Context,
+        limits: ProtocolLimits,
+        clipboard_granted: bool,
+        now: HostInstant,
+    ) -> Result<Self, SessionError> {
         let local = outgoing.validate()?;
-        let receiver = ClipboardSession::new(input, local, limits, clipboard_granted, now)?;
+        let receiver =
+            ClipboardSession::with_monitor(monitor.clone(), local, limits, clipboard_granted, now)?;
         if receiver.binding() != outgoing.scope {
             return Err(WireError::InvalidBinding.into());
         }
@@ -170,7 +189,7 @@ impl ChannelSession {
         };
         Ok(Self {
             receiver,
-            monitor: input.monitor(),
+            monitor,
             outgoing,
             incoming,
             limits,
