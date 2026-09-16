@@ -130,6 +130,7 @@ pub enum Kind {
     ClipboardChunk = 0x0051,
     ClipboardCommit = 0x0052,
     ClipboardCancel = 0x0053,
+    ClipboardReady = 0x0054,
     PresentedState = 0x0080,
     StageMetrics = 0x0082,
     ClockProbe = 0x0084,
@@ -185,6 +186,7 @@ impl Kind {
             0x0051 => Ok(Self::ClipboardChunk),
             0x0052 => Ok(Self::ClipboardCommit),
             0x0053 => Ok(Self::ClipboardCancel),
+            0x0054 => Ok(Self::ClipboardReady),
             0x0080 => Ok(Self::PresentedState),
             0x0082 => Ok(Self::StageMetrics),
             0x0084 => Ok(Self::ClockProbe),
@@ -231,6 +233,7 @@ impl Kind {
             | Self::ClipboardChunk
             | Self::ClipboardCommit
             | Self::ClipboardCancel
+            | Self::ClipboardReady
             | Self::PresentedState
             | Self::StageMetrics
             | Self::ClockProbe

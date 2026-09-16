@@ -15,6 +15,7 @@ use fr_core::{
 pub mod receive;
 pub mod send;
 pub mod session;
+pub mod startup;
 
 pub const CAPABILITY: &str = "controller-text-clipboard";
 pub const VERSION: u16 = 1;
