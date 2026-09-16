@@ -19,9 +19,11 @@ use std::{
 mod changes;
 mod ffi;
 mod read;
+mod synchronize;
 pub use changes::{ClipboardChange, WatchError};
 use ffi::{Atoms, Event};
 pub use read::{ReadError, ReadText};
+pub use synchronize::{ClipboardSynchronizer, SynchronizationError};
 
 const READERS: usize = 4;
 const CHUNK: usize = 16_384;

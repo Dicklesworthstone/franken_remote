@@ -14,6 +14,7 @@ use crate::WireError;
 use core::fmt;
 
 pub mod observation;
+pub mod synchronize;
 use fr_core::{
     clipboard::{
         ClipboardSession, ClipboardSink, ClipboardSwitch, Error, Publication, Receipt, Stamp,
@@ -104,6 +105,7 @@ pub struct ChannelSession {
     incoming: Context,
     limits: ProtocolLimits,
     sequence: u64,
+    observation_generation: u64,
     last_publication: Option<Stamp>,
     pending: Option<Pending>,
     cancel: Option<(Stamp, CancelReason)>,
@@ -173,6 +175,7 @@ impl ChannelSession {
             incoming,
             limits,
             sequence: 0,
+            observation_generation: 0,
             last_publication: None,
             pending: None,
             cancel: None,
@@ -201,6 +204,7 @@ impl ChannelSession {
     pub fn set_enabled(&mut self, local: bool, peer: bool) {
         self.receiver.set_enabled(local, peer);
         if !local || !peer {
+            self.invalidate_observations();
             self.discard_pending(CancelReason::Disabled);
         }
     }
@@ -216,9 +220,19 @@ impl ChannelSession {
         if self.receiver.is_closed() {
             self.close();
         } else if error == Error::Disabled {
+            self.invalidate_observations();
             self.discard_pending(CancelReason::Disabled);
         }
         error.into()
+    }
+    // Also fences a read when a different channel operation consumes a switch
+    // transition. The owning synchronizer never exposes a mutable channel.
+    fn invalidate_observations(&mut self) {
+        if let Some(next) = self.observation_generation.checked_add(1) {
+            self.observation_generation = next;
+        } else {
+            self.close();
+        }
     }
     fn discard_pending(&mut self, reason: CancelReason) {
         if let Some(pending) = self.pending.take()
@@ -241,6 +255,7 @@ impl ChannelSession {
         match self.receiver.maintain(now) {
             Ok(()) => {}
             Err(Error::Disabled) => {
+                self.invalidate_observations();
                 state.enabled = false;
                 self.discard_pending(CancelReason::Disabled);
             }
@@ -275,6 +290,21 @@ impl ChannelSession {
             Ok(true) => {}
             Err(error) => return Err(self.clipboard_error(error)),
         }
+        self.enqueue_observed(id, text, now, None)
+    }
+    // The owning synchronizer reports the native revision BEFORE reading it.
+    // Enqueuing its completion must not invent a second local revision and
+    // invalidate a newer incoming Begin admitted while that read was pending.
+    fn enqueue_observed(
+        &mut self,
+        id: u128,
+        text: &str,
+        now: HostInstant,
+        observation_deadline: Option<HostInstant>,
+    ) -> Result<Offer, SessionError> {
+        if !self.maintain(now)?.enabled {
+            return Err(Error::Disabled.into());
+        }
         self.discard_pending(CancelReason::Superseded);
         if id == 0 {
             return Err(WireError::InvalidValue.into());
@@ -301,6 +331,10 @@ impl ChannelSession {
                 SessionError::Clipboard(Error::Clock)
             })?
             .min(authority_deadline);
+        let deadline = observation_deadline.map_or(deadline, |bound| deadline.min(bound));
+        if now >= deadline {
+            return Err(Error::Expired.into());
+        }
         let sender = Sender::new(text, stamp, self.outgoing, self.limits)?;
         self.pending = Some(Pending {
             sender,

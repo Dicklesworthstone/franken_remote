@@ -123,7 +123,7 @@ backpressure, and the complete bytes-to-authority-to-publication contract.
 Recording sinks are explicitly test fixtures, not OS adapters. This is not
 native clipboard, live-tailnet, independent-peer, or GUI qualification. The
 full feature remains open until its platform/lifecycle attachment, switches,
-approval paths, automatic OS change detection, and desktop integration pass.
+approval paths, supported-platform OS change detection, and desktop integration pass.
 
 ## Opt-in Linux/X11 native observation
 
@@ -160,6 +160,53 @@ FR_NATIVE_CLIPBOARD_REQUIRED=1 xvfb-run -a \
 
 These tests exercise actual X11 selections and the real codec/authority owners;
 the record handoff between endpoints is an explicit in-memory transport fixture.
-This is not live-tailnet or cross-platform clipboard qualification. Automatic
-native change watching, GUI/session attachment, Wayland portal support, and a
-qualified viewer-side host-clock authority projection remain integration work.
+This is not live-tailnet or cross-platform clipboard qualification. GUI/session
+attachment, Wayland portal support, and a qualified viewer-side host-clock
+authority projection remain integration work.
+
+
+## Automatic native synchronization
+
+`fr_native::clipboard::ClipboardSynchronizer::new(channel, native)` owns an
+already admitted `ChannelSession` and its `X11Clipboard`. It watches server-authored
+XFixes version-1 selection changes, starts bounded reads automatically, and
+queues complete text without manual `begin_read` calls. The initial attachment
+observes the current selection once. Idle turns do not request clipboard text;
+even same-app copies of identical bytes are new native revisions. Exact own
+publication stamps suppress echoes without hashing or retaining text history.
+
+The interactive worker calls `poll(scratch, sink, host_clock, new_id)` during
+traffic and silence. `host_clock` is the original admitted owner's monotonic
+clock, and `new_id` supplies a nonzero qualified transfer ID. A poll services at
+most 32 change events, one native read step, and one outbound record. A backlog
+coalesces to the latest copy and suspends payload admission until caught up.
+The original read deadline also bounds outgoing transmission; a slow read or
+backpressured transport does not receive a fresh three-second lifetime.
+
+Call `receive(record, host_clock)` for one fully framed record on that dedicated
+lane. `Received::Deferred` means no consumption: retain at most one bounded
+record and retry a later turn. `Consumed` and `Refused` are terminal for that
+record; a refusal is not permission to replay. The synchronizer reports native
+revisions before incoming publication, interleaves both directions without
+holding authority locks across native work, and preserves committed or uncertain
+publication receipts. Completing an earlier local read is not another local
+copy and therefore cannot spuriously invalidate a later incoming Begin.
+
+Both switch handles remain available on the synchronizer. Disable and off/on
+cycles cancel private native reads and transfers. Re-enable waits for a genuine
+new copy instead of replaying an interrupted selection. A failed/expired native
+read is reported once, not retried while idle. Revocation, malformed input,
+identifier failure, and unwinding close the native and wire owners together;
+they do not overwrite another application's clipboard or revoke unrelated input.
+The transport integration must separately fence records it already accepted.
+No new network listener, synthetic viewer authority, native worker thread, or
+async runtime is installed by constructing this owner.
+
+The native integration target additionally starts two separate Xvfb desktops and
+exercises automatic transfers in both directions for empty, Unicode and full
+one-MiB text, idle/echo behavior, INCR replacement, both off switches, concurrent
+incoming transfers, original-deadline backpressure, ownership loss, malformed
+records, identifier faults and caught clock panics. X11 selection operations are
+real; the bounded single-record handoff is an explicit transport fixture, not
+live-tailnet qualification. Production channel attachment and interactive-worker
+scheduling remain separate integration gates.

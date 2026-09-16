@@ -104,6 +104,10 @@ impl Observation<'_> {
     ) -> Result<Offer, SessionError> {
         self.check(now)?;
         self.finished = true;
-        self.channel.offer(id, text, origin, now)
+        let offer = self.channel.offer(id, text, origin, now)?;
+        if let Some(pending) = &mut self.channel.pending {
+            pending.deadline = pending.deadline.min(self.deadline);
+        }
+        Ok(offer)
     }
 }

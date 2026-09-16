@@ -130,6 +130,12 @@ impl X11Clipboard {
     /// pending revision; continuous floods cannot force unbounded draining.
     /// This never requests text. Use the revision to fence an in-flight read.
     pub fn poll_change(&mut self) -> Result<Option<ClipboardChange>, WatchError> {
+        let (change, settled) = self.poll_change_turn()?;
+        Ok(if settled { change } else { None })
+    }
+    pub(super) fn poll_change_turn(
+        &mut self,
+    ) -> Result<(Option<ClipboardChange>, bool), WatchError> {
         if !self.changes.active {
             return Err(WatchError::NotWatching);
         }
@@ -137,11 +143,14 @@ impl X11Clipboard {
         if self.changes.exhausted {
             return Err(WatchError::GenerationExhausted);
         }
-        if count == 32 {
-            return Ok(None);
-        }
-        let Some(mut change) = self.changes.pending.take() else {
-            return Ok(None);
+        let settled = count < 32;
+        let pending = if settled {
+            self.changes.pending.take()
+        } else {
+            self.changes.pending
+        };
+        let Some(mut change) = pending else {
+            return Ok((None, settled));
         };
         // Exact publication provenance, not equality of text bytes. An old
         // notification from an earlier own publication is never mislabeled.
@@ -149,7 +158,7 @@ impl X11Clipboard {
             (change.owner == self.window && change.time == selection.time)
                 .then_some(selection.stamp)
         });
-        Ok(Some(change))
+        Ok((Some(change), settled))
     }
     /// Latest serviced revision, including a change still being coalesced.
     /// Valid only for this connection; it does not itself authorize anything.

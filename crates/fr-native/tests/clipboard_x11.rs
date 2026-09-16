@@ -197,3 +197,6 @@ mod authorized;
 
 #[path = "clipboard_x11/changes.rs"]
 mod changes;
+
+#[path = "clipboard_x11/synchronize.rs"]
+mod synchronize;
