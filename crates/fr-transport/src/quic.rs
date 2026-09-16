@@ -21,6 +21,8 @@ use std::{
 
 mod lifetime;
 
+pub mod clipboard;
+
 mod attachment;
 pub use attachment::{AttachedChannel, ChannelRequest, ChannelScope, MediaChannel};
 
@@ -80,6 +82,8 @@ pub enum Messages {
     InputActions,
     /// Host tickets and terminal input results on the same reliable feedback lane.
     InputFeedback,
+    /// Only bounded Begin/Chunk/Commit/Cancel records, on a dedicated pair.
+    Clipboard,
     /// Decoder configuration and first-frame acknowledgements, one ordered lane.
     DecoderReplies,
     /// Initial native control only, before the host installs a binding.
@@ -93,6 +97,7 @@ impl Messages {
             Self::NoApplication => false,
             Self::Exact(expected) => kind == expected,
             Self::InputFeedback => matches!(kind, 0x0017 | 0x0048),
+            Self::Clipboard => matches!(kind, 0x0050..=0x0053),
             Self::DecoderReplies => matches!(kind, 0x0031 | 0x0033),
             Self::Negotiation => matches!(kind, 0x0001..=0x0003 | 0x0010 | 0x0011),
             Self::SessionControl => {

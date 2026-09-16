@@ -28,6 +28,11 @@ pub const DELIVERY_VERSION: u16 = 1;
 /// required before any received action can be submitted to the OS.
 pub const INPUT_CAPABILITY: &str = "native-input-attachment";
 pub const INPUT_VERSION: u16 = 1;
+/// Adds the dedicated, bidirectional reliable clipboard pair. Requires control
+/// intent, the clipboard byte profile, and an already attached input channel.
+/// This capability does not grant native clipboard or input authority.
+pub const CLIPBOARD_CAPABILITY: &str = "native-clipboard-attachment";
+pub const CLIPBOARD_VERSION: u16 = 1;
 pub const BINDING_RECORD_BYTES: usize = HEADER_BYTES + 118;
 pub const GRANT_RECORD_BYTES: usize = BINDING_RECORD_BYTES + 44;
 
@@ -40,6 +45,7 @@ pub enum MediaRole {
     Recovery = 2,
     Video = 3,
     Input = 4,
+    Clipboard = 5,
 }
 impl MediaRole {
     /// Wire direction: 1 = host-to-viewer, 2 = viewer-to-host. This describes
@@ -53,6 +59,7 @@ impl MediaRole {
             2 => Ok(Self::Recovery),
             3 => Ok(Self::Video),
             4 => Ok(Self::Input),
+            5 => Ok(Self::Clipboard),
             _ => Err(WireError::InvalidValue),
         }
     }

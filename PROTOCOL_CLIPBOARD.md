@@ -229,3 +229,38 @@ Such an attempted external operation retains its conservative `UnknownEffect`
 receipt rather than being replayed. Deterministic real-X11 tests inject copies
 both before preparation and immediately after it, preserve the newer selection,
 and verify that its change notification still starts automatic propagation.
+
+## Native QUIC attachment
+
+`native-clipboard-attachment` version 1 adds native auxiliary role 5 (Clipboard)
+to the existing one-use binding/ticket exchange. It requires `RequestControl`,
+`native-input-attachment` version 1, `controller-text-clipboard` version 1, and
+an already completed input attachment on this exact connection. Only one
+clipboard reservation is allowed per connection, including after abandonment;
+a new stream must not reset a controller's consumed clipboard sequence floor.
+
+Both directions are allocated reliable unidirectional streams, with the fixed
+host-to-viewer primary direction marker 1. Each admits only kinds 0x0050..0x0053,
+uses the bulk budget, and has no datagram route. The existing media-channel enum
+and input ordering domain are unchanged. The byte reservation is bounded by the
+selected record cap, native stream window, and retained-send budgets. Input and
+control retain their protected record storage and connection credit.
+
+`fr_transport::quic::clipboard::ClipboardChannel` consumes the completed proof,
+retains the original connection identity, derives authenticated sender direction,
+and checks the actual session/lease and codec before dispatch/enqueue. Its
+`limits()` lowers only the selected record cap to the attached byte allowance;
+items remain separately chunked under the selected clipboard-item ceiling.
+`dispatch` services at most one record and does no OS work: a native worker must
+consume it through the existing authorized synchronizer. A blocked record stays
+in transport ownership. `send` takes the original absolute transport-clock
+operation deadline. The session's I/O driver must keep checking the original
+controller's authorization while accepted bytes remain retained.
+
+This route proof grants neither input nor native clipboard access. A host joins
+its actual original input owner and native clipboard grant; a viewer must use
+qualified client-side authority, never manufacture a host owner from wire IDs.
+Dropping/closing the typed route retires its attachment and fences the original
+connection at the next checked operation. It never acts on a foreign connection
+whose numeric routes happen to match. Per-lane teardown, native worker handoff,
+and application session construction remain separate integration work.

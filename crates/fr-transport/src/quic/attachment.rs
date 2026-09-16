@@ -96,10 +96,10 @@ enum Phase {
 pub struct MediaChannel {
     connection: ConnectionBinding,
     state: Arc<AtomicU8>,
-    host: bool,
+    pub(super) host: bool,
     parent: ControlBinding,
     limits: ProtocolLimits,
-    control: ControlRoutes,
+    pub(super) control: ControlRoutes,
     pair: ControlRoutes,
     descriptor: Descriptor,
     grant: Option<Grant>,
@@ -174,6 +174,23 @@ fn validate_role(scope: &ChannelScope<'_>, role: MediaRole) -> Result<(), Error>
             attachment::DELIVERY_CAPABILITY,
             attachment::DELIVERY_VERSION,
         ),
+        MediaRole::Clipboard => {
+            if scope.selection.role != fr_wire::negotiation::Role::RequestControl
+                || !scope.selection.capabilities.iter().any(|c| {
+                    c.name == fr_wire::clipboard::CAPABILITY
+                        && c.version == fr_wire::clipboard::VERSION
+                })
+                || !scope.selection.capabilities.iter().any(|c| {
+                    c.name == attachment::INPUT_CAPABILITY && c.version == attachment::INPUT_VERSION
+                })
+            {
+                return Err(Error::WrongRoute);
+            }
+            (
+                attachment::CLIPBOARD_CAPABILITY,
+                attachment::CLIPBOARD_VERSION,
+            )
+        }
         MediaRole::Input => {
             if scope.selection.role != fr_wire::negotiation::Role::RequestControl {
                 return Err(Error::WrongRoute);
@@ -196,7 +213,7 @@ fn has_datagram(role: MediaRole) -> bool {
 }
 
 fn priority(role: MediaRole, host_direction: bool) -> Priority {
-    if role == MediaRole::Recovery && host_direction {
+    if role == MediaRole::Clipboard || (role == MediaRole::Recovery && host_direction) {
         Priority::Bulk
     } else {
         Priority::Critical
@@ -212,6 +229,7 @@ fn messages(role: MediaRole, host_direction: bool) -> Messages {
         (MediaRole::Video, false) => Messages::Exact(0x35),
         (MediaRole::Input, true) => Messages::InputFeedback,
         (MediaRole::Input, false) => Messages::InputActions,
+        (MediaRole::Clipboard, _) => Messages::Clipboard,
     }
 }
 impl QuicRecords {
@@ -221,7 +239,9 @@ impl QuicRecords {
             .min(self.policy.critical_send_bytes as u64);
         match role {
             MediaRole::Configuration => base,
-            MediaRole::Recovery => base.min(self.policy.retained_send_bytes as u64),
+            MediaRole::Recovery | MediaRole::Clipboard => {
+                base.min(self.policy.retained_send_bytes as u64)
+            }
             // The same advertised cap bounds progress, repairs AND video.
             // A smaller peer/record ceiling cannot be bypassed via DATAGRAM.
             MediaRole::Video => base.min(self.policy.datagram_record_bytes as u64),
@@ -280,6 +300,24 @@ impl QuicRecords {
                     .streams
                     .iter()
                     .any(|r| r.messages == Messages::InputActions))
+        {
+            return Err(Error::WrongRoute);
+        }
+        // Clipboard is a single ordering domain for the original controller,
+        // never a read-only observation route or a replacement sequence floor.
+        // Retired reservations are deliberately not reusable on this connection.
+        if d.role == MediaRole::Clipboard
+            && (self
+                .attachments
+                .iter()
+                .any(|r| r.role == MediaRole::Clipboard)
+                || self
+                    .streams
+                    .iter()
+                    .any(|r| r.messages == Messages::Clipboard)
+                || !self.attachments.iter().any(|r| {
+                    r.role == MediaRole::Input && r.state.load(Ordering::Acquire) == ACTIVE
+                }))
         {
             return Err(Error::WrongRoute);
         }

@@ -654,3 +654,6 @@ mod delivery;
 
 #[path = "media_attachment/input.rs"]
 mod input;
+
+#[path = "media_attachment/clipboard.rs"]
+mod clipboard;

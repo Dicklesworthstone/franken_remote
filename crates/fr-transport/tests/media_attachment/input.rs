@@ -46,7 +46,14 @@ fn record(kind: u16, len: usize) -> Vec<u8> {
     b[16..20].copy_from_slice(&8u32.to_be_bytes());
     b
 }
-async fn transfer(l: &mut Link, cx: &Cx, host: bool, send: Route, recv: Route, bytes: &[u8]) {
+pub(super) async fn transfer(
+    l: &mut Link,
+    cx: &Cx,
+    host: bool,
+    send: Route,
+    recv: Route,
+    bytes: &[u8],
+) {
     let until = clock(cx) + 1_000_000;
     loop {
         let q = if host { &mut l.h } else { &mut l.c };
