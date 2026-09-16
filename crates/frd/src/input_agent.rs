@@ -177,6 +177,8 @@ impl SeatReservation {
         };
         #[cfg(target_os = "linux")]
         let authority_cx = cx.clone();
+        #[cfg(target_os = "linux")]
+        let clipboard_monitor = fr_core::clipboard::authority::Monitor::from_input(&session);
         let shared = Arc::new(Shared {
             mailbox: Mutex::new(Mailbox::default()),
             control: control.clone(),
@@ -241,6 +243,8 @@ impl SeatReservation {
             control_lease,
             #[cfg(target_os = "linux")]
             authority_cx,
+            #[cfg(target_os = "linux")]
+            clipboard_monitor,
         };
         let driver = Driver {
             watchdog,
@@ -442,8 +446,18 @@ pub struct Agent {
     control_lease: Option<fr_core::input_submission::ControlLease>,
     #[cfg(target_os = "linux")]
     authority_cx: Cx,
+    #[cfg(target_os = "linux")]
+    clipboard_monitor: fr_core::clipboard::authority::Monitor,
 }
 impl Agent {
+    /// Read-only access to the SAME native authority after its session has moved
+    /// to the worker. This cannot issue tickets or recreate an input owner.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn clipboard_monitor(&self) -> Option<fr_core::clipboard::authority::Monitor> {
+        self.shared.check_admission();
+        (!self.shared.control.is_stopped()).then(|| self.clipboard_monitor.clone())
+    }
+
     #[cfg(target_os = "linux")]
     pub(crate) fn matches_observation_view(
         &self,

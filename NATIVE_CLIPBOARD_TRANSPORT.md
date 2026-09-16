@@ -133,3 +133,35 @@ FR_NATIVE_CLIPBOARD_REQUIRED=1 xvfb-run -a \
   cargo test -p fr-native --features linux-clipboard \
   --test clipboard_x11 --test clipboard_network --locked
 ```
+
+## Running controlling sessions
+
+`ControlledHost::attach_clipboard` and `ControlledViewer::attach_clipboard`
+consume a completed `MediaChannel::Clipboard` pair on their existing connection
+and return the one-use `WorkerSeed`. The host takes a monitor of the original
+input agent's worker-owned session; the viewer uses its actual decoder-backed
+`PresentedInput`. Neither reconstructs authority from matching wire IDs.
+The pair must be separately negotiated with the clipboard capabilities before
+joining; `granted` still requires independent local clipboard/OS consent.
+Declining consent retires the completed optional lane without opening the OS or
+closing input/viewing. A channel cannot be replaced to reset sequence history.
+
+After moving/spawning the seed on the native worker, the existing controlled
+session `drive` methods service clipboard alongside input and media, including
+idle turns and host admission refreshes. Application record callbacks never
+consume the reserved clipboard route and never perform native clipboard work.
+The containing QUIC driver's authorization also checks pending clipboard work;
+retirement between turns preserves input, while cancellation or authority loss
+inside an active I/O operation retains the conservative connection fence.
+Dropping an unpolled controlled drive or closing its owner stops the clipboard
+worker's authority before it can open or publish to the native clipboard.
+
+Use `clipboard_switches`, `take_clipboard_received`, `clipboard_reason` and
+`retire_clipboard` on the controlling owner. Results remain backpressured until
+collected; retirement does not replace an uncertain OS receipt. `WorkerTask`
+completion remains a separate native-cleanup witness, not an effect of calling
+`close`. The running-session regression tests use real startup, native input
+agent, clock exchange, decoder-backed grant and encrypted UDP/TLS, with explicit
+fixture grant metadata and clipboard OS implementations. Production native UI
+consent, optional channel negotiation and GUI callback plumbing remain required;
+this API does not implicitly grant them or claim live-tailnet qualification.

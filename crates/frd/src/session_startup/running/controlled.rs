@@ -1,6 +1,7 @@
 //! Persistent control, input and observation service on one admitted connection.
 //! The native Driver remains independently polled; no native operation runs here.
 use super::{Error, HostSession, ObservationControl, Services};
+mod clipboard;
 use crate::{
     input_agent::{InputReply, Reply, Status},
     input_quic::{self, Progress, QuicInput, Routes, control::ControlRenewal},
@@ -21,6 +22,7 @@ pub struct ControlledHost {
     renewal: ControlRenewal,
     ticket_turn: bool,
     submitted: super::input_wake::Submitted,
+    clipboard: Option<crate::clipboard_quic::Bridge>,
 }
 impl std::fmt::Debug for ControlledHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -58,6 +60,7 @@ impl HostSession {
             renewal,
             ticket_turn: false,
             submitted: super::input_wake::Submitted::default(),
+            clipboard: None,
         })
     }
 }
@@ -93,6 +96,9 @@ impl ControlledHost {
     /// Native cleanup and destruction progress through the original Driver, not
     /// through this call. Other viewers' share-session capture is not cancelled.
     pub fn close(&mut self) {
+        if let Some(clipboard) = &self.clipboard {
+            clipboard.stop();
+        }
         self.input.control().stop(StopReason::LocalRevoke);
         self.renewal.stop();
         self.session.close();
@@ -121,6 +127,7 @@ impl ControlledHost {
     ) -> Result<(), Error> {
         let mut services = InputServices {
             input: &mut self.input,
+            clipboard: &mut self.clipboard,
             renewal: &mut self.renewal,
             observation: self.session.opened.control.clone(),
             control: self.session.opened.routes,
@@ -182,6 +189,7 @@ impl Drop for Operation<'_> {
 }
 struct InputServices<'a, T, F> {
     input: &'a mut QuicInput,
+    clipboard: &'a mut Option<crate::clipboard_quic::Bridge>,
     renewal: &'a mut ControlRenewal,
     observation: ObservationControl,
     control: ControlRoutes,
@@ -202,7 +210,12 @@ where
     F: Services,
 {
     fn permitted(&mut self) -> bool {
-        self.renewal.permitted() && self.other.permitted()
+        self.renewal.permitted()
+            && self.other.permitted()
+            && self
+                .clipboard
+                .as_ref()
+                .is_none_or(crate::clipboard_quic::Bridge::permits_io)
     }
     fn maintain<N: FnMut() -> Result<u128, ()>>(
         &mut self,
@@ -215,6 +228,11 @@ where
         if !self.other.permitted() {
             self.input.control().stop(StopReason::ViewInvalidated);
             return Err(Error::Closed);
+        }
+        if let Some(clipboard) = self.clipboard {
+            clipboard
+                .service(q, || self.observation.check().is_ok())
+                .map_err(Error::Clipboard)?;
         }
         self.renewal
             .receive(q, |_, _| Ok(Disposition::Blocked))
@@ -271,7 +289,11 @@ where
         // These records belong to the owners serviced immediately before/after
         // observation dispatch, never to an application callback or a new queue.
         let kind = bytes.get(6..8);
-        if is_input(self.input.routes(), route)
+        if self
+            .clipboard
+            .as_ref()
+            .is_some_and(|c| c.owns_inbound(route))
+            || is_input(self.input.routes(), route)
             || (route == Route::Stream(self.control.inbound)
                 && (kind == Some(&(Kind::ChallengeResponse as u16).to_be_bytes())
                     || kind == Some(&(Kind::Challenge as u16).to_be_bytes())))

@@ -46,6 +46,9 @@ pub enum Error {
     NativeSetup(PlatformError),
     Session(SessionError),
     Controller(fr_client::clipboard::Error),
+    Presentation(fr_client::input::presentation::Error),
+    AlreadyAttached,
+    ConsentRequired,
     Transport(quic::Error),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,12 +88,27 @@ impl Bridge {
         input: &InputSession,
         granted: bool,
     ) -> Result<(Self, WorkerSeed), Error> {
+        Self::host_monitor(
+            cx,
+            q,
+            lane,
+            fr_core::clipboard::authority::Monitor::from_input(input),
+            granted,
+        )
+    }
+    pub(crate) fn host_monitor(
+        cx: Cx,
+        q: &QuicRecords,
+        lane: ClipboardChannel,
+        monitor: fr_core::clipboard::authority::Monitor,
+        granted: bool,
+    ) -> Result<(Self, WorkerSeed), Error> {
         lane.check(q).map_err(Error::Transport)?;
         if lane.outgoing().sender != Role::Host {
             return Err(Error::WrongRole);
         }
-        let session = ChannelSession::new(
-            input,
+        let session = ChannelSession::with_monitor(
+            monitor,
             lane.outgoing(),
             lane.limits(),
             granted,
@@ -141,6 +159,54 @@ impl Bridge {
             Clock::Controller(network),
             Clock::Controller(worker),
         )
+    }
+    /// Attach the running viewer's real decoder-backed input owner. This keeps
+    /// the original visibility/receiver witness; no synthetic input is created.
+    pub fn presented(
+        cx: Cx,
+        q: &QuicRecords,
+        lane: ClipboardChannel,
+        input: &mut fr_client::input::presentation::PresentedInput,
+        granted: bool,
+    ) -> Result<(Self, WorkerSeed), Error> {
+        lane.check(q).map_err(Error::Transport)?;
+        if lane.outgoing().sender != Role::Controller {
+            return Err(Error::WrongRole);
+        }
+        let session = input
+            .attach_clipboard_lane(
+                lane.parent(),
+                lane.outgoing(),
+                lane.limits(),
+                granted,
+                ClientInstant(shared::now(&cx)?),
+            )
+            .map_err(Error::Presentation)?;
+        let network = session.transport();
+        let worker = session.transport();
+        Self::join(
+            cx,
+            q,
+            lane,
+            worker::Session::Controller(session),
+            network.transport(),
+            Clock::Controller(network),
+            Clock::Controller(worker),
+        )
+    }
+    /// Called by a containing session's existing QUIC driver on every I/O poll.
+    /// Between turns call `service` first so an optional stop can retire just
+    /// this lane. A loss DURING I/O retains connection-wide fail-closed behavior.
+    pub(crate) fn permits_io(&self) -> bool {
+        self.retired || self.admission().is_ok()
+    }
+    pub(crate) fn owns_inbound(&self, route: quic::Route) -> bool {
+        self.lane.owns_inbound(route)
+    }
+    /// Immediately fence queued work and the native final publication check.
+    /// This neither waits for the worker nor claims its cleanup has completed.
+    pub fn stop(&self) {
+        self.shared.stop();
     }
     fn join(
         cx: Cx,

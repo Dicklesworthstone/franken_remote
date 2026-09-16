@@ -513,6 +513,7 @@ fn pending_admission_refresh_keeps_control_tickets_and_input_results_progressing
                 let mut other = block;
                 let mut services = InputServices {
                     input: &mut host.input,
+                    clipboard: &mut host.clipboard,
                     renewal: &mut host.renewal,
                     observation: observation.clone(),
                     control: host.session.opened.routes,
@@ -804,6 +805,7 @@ fn buffered_ordered_input_cannot_take_a_due_tickets_fair_turn() {
                 let mut other = block;
                 let mut services = InputServices {
                     input: &mut host.input,
+                    clipboard: &mut host.clipboard,
                     renewal: &mut host.renewal,
                     observation: host.session.opened.control.clone(),
                     control: host.session.opened.routes,
@@ -855,6 +857,7 @@ fn revoke_during_refresh_poll_blocks_shared_udp_before_the_next_service_turn() {
         let mut other = block;
         let mut services = InputServices {
             input: &mut host.input,
+            clipboard: &mut host.clipboard,
             renewal: &mut host.renewal,
             observation: observation.clone(),
             control: host.session.opened.routes,

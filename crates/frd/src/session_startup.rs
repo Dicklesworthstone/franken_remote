@@ -59,6 +59,7 @@ const CONSUMED: u8 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
+    Clipboard(crate::clipboard_quic::Error),
     InvalidConfiguration,
     ReceiverFeedback(crate::media::ReceiverFeedbackError),
     PresentedState(crate::media::PresentedStateError),

@@ -86,6 +86,7 @@ fn block(_: Route, _: &[u8]) -> Result<Disposition, ()> {
     Ok(Disposition::Blocked)
 }
 struct Fixture {
+    clipboard_channels: Option<(quic::MediaChannel, quic::MediaChannel)>,
     presenter: Option<crate::media::Presenter>,
     video: quic::DatagramRoute,
     host: ControlledHost,
@@ -156,6 +157,27 @@ async fn fixture_with_clock_mode(
     feedback: bool,
     managed: bool,
 ) -> Fixture {
+    Box::pin(fixture_with_clipboard(
+        client_cx,
+        host_cx,
+        capabilities,
+        decode,
+        feedback,
+        managed,
+        false,
+    ))
+    .await
+}
+#[allow(clippy::too_many_lines, clippy::fn_params_excessive_bools)]
+async fn fixture_with_clipboard(
+    client_cx: &Cx,
+    host_cx: &Cx,
+    capabilities: Capabilities,
+    decode: bool,
+    feedback: bool,
+    managed: bool,
+    clipboard: bool,
+) -> Fixture {
     let mut wire_capabilities: Vec<WireCapability> = [
         fr_wire::clock::CAPABILITY,
         decoder::CAPABILITY,
@@ -170,6 +192,18 @@ async fn fixture_with_clock_mode(
         required: true,
     })
     .collect();
+    if clipboard {
+        for name in [
+            attachment::CLIPBOARD_CAPABILITY,
+            fr_wire::clipboard::CAPABILITY,
+        ] {
+            wire_capabilities.push(WireCapability {
+                name: name.into(),
+                version: 1,
+                required: false,
+            });
+        }
+    }
     if feedback {
         wire_capabilities.push(WireCapability {
             name: fr_wire::receiver_metrics::CAPABILITY.into(),
@@ -224,6 +258,21 @@ async fn fixture_with_clock_mode(
         11,
     )
     .await;
+    let clipboard_channels = if clipboard {
+        Some(
+            attach(
+                &mut host,
+                &mut viewer,
+                client_cx,
+                host_cx,
+                MediaRole::Clipboard,
+                12,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
     let parent = host.binding();
     let selection = host.selection().clone();
     let observation = host.observation().unwrap();
@@ -301,16 +350,22 @@ async fn fixture_with_clock_mode(
     let mut native = hn
         .into_host(host_cx.clone(), agent, host.io().unwrap().0, &observation)
         .unwrap();
-    let mut input = InputClient::new(
-        creds(),
-        10,
-        bounds(),
-        capabilities,
-        ProtocolLimits::ABSOLUTE,
-        Policy::default(),
-        ClientInstant(now(client_cx).unwrap()),
-    )
-    .unwrap();
+    let mut input = if clipboard {
+        None
+    } else {
+        Some(
+            InputClient::new(
+                creds(),
+                10,
+                bounds(),
+                capabilities,
+                ProtocolLimits::ABSOLUTE,
+                Policy::default(),
+                ClientInstant(now(client_cx).unwrap()),
+            )
+            .unwrap(),
+        )
+    };
     // Bind the initial expiry to an actual native ticket received on QUIC.
     let mut ticket_arrived = false;
     let until = now(host_cx).unwrap() + 500_000;
@@ -330,9 +385,33 @@ async fn fixture_with_clock_mode(
             host.drive(Duration::from_millis(1), || nonce(&mut counter), block),
             viewer.drive(Duration::from_millis(1), |_, bytes| {
                 if bytes[6..8] == (Kind::InputTicket as u16).to_be_bytes() {
-                    input
-                        .accept_ticket(bytes, correlation, ClientInstant(now(client_cx).unwrap()))
+                    if let Some(input) = &mut input {
+                        input
+                            .accept_ticket(
+                                bytes,
+                                correlation,
+                                ClientInstant(now(client_cx).unwrap()),
+                            )
+                            .unwrap();
+                    } else {
+                        // The fixture grant carries the actual initial ticket zero.
+                        // Accepting it a second time would correctly be a replay.
+                        let ticket = input_ticket::decode(
+                            bytes,
+                            &ProtocolLimits::ABSOLUTE,
+                            10,
+                            fr_wire::input::InputDirection::HostToViewer,
+                            fr_wire::input::InputDelivery::Reliable,
+                        )
                         .unwrap();
+                        input = Some(clipboard::accepted_grant(
+                            parent,
+                            capabilities,
+                            correlation,
+                            client_cx,
+                            ticket,
+                        ));
+                    }
                     ticket_arrived = true;
                     Ok(Disposition::Consumed)
                 } else {
@@ -344,6 +423,7 @@ async fn fixture_with_clock_mode(
         host_result.unwrap();
         viewer_result.unwrap();
     }
+    let input = input.unwrap();
     let limits = media.limits();
     let mut receiver = ReceivePipeline::new(
         media
@@ -433,6 +513,7 @@ async fn fixture_with_clock_mode(
             .unwrap()
     };
     Fixture {
+        clipboard_channels,
         presenter,
         video,
         last_announce: stamp,
@@ -1062,3 +1143,5 @@ fn session_clock_handoff_preserves_measurement_and_control_renewal() {
         assert!(!state.seat.is_occupied());
     });
 }
+
+mod clipboard;

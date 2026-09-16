@@ -176,6 +176,16 @@ pub struct QuicInput {
     last_ticket: Option<fr_core::ids::InputTicketId>,
 }
 impl QuicInput {
+    pub(crate) fn clipboard_monitor(
+        &self,
+        q: &QuicRecords,
+    ) -> Result<fr_core::clipboard::authority::Monitor, Error> {
+        if !q.is_bound_to(&self.connection) {
+            return Err(Error::WrongConnection);
+        }
+        self.agent.clipboard_monitor().ok_or(Error::Closed)
+    }
+
     /// `cx` must be the same clock/authority region used to create the agent and
     /// the connection. The independently polled native Driver is NOT consumed.
     pub fn new(

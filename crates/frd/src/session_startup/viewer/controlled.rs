@@ -1,5 +1,6 @@
 //! The running native viewer owns input identities, freshness and network sends.
 //! Decode/present work stays off this task; qualified callbacks arrive between turns.
+mod clipboard;
 pub mod events;
 pub mod request;
 mod viewport;
@@ -30,6 +31,7 @@ use std::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
+    Clipboard(crate::clipboard_quic::Error),
     Session(super::Error),
     Input(input_quic::Error),
     View(presentation::Error),
@@ -91,6 +93,7 @@ pub struct ControlledViewer {
     control: ViewerControl,
     last_result: Option<ResultEvent>,
     events: Option<events::Receiver>,
+    clipboard: Option<crate::clipboard_quic::Bridge>,
 }
 impl std::fmt::Debug for ControlledViewer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -181,6 +184,7 @@ impl ViewerSession {
             control,
             last_result: None,
             events: None,
+            clipboard: None,
         })
     }
 }
@@ -225,6 +229,9 @@ impl ControlledViewer {
         self.last_result
     }
     pub fn close(&mut self) {
+        if let Some(clipboard) = &self.clipboard {
+            clipboard.stop();
+        }
         self.viewport.stop();
         self.input.stop(StopReason::Disconnected);
         self.pending = None;
@@ -389,6 +396,7 @@ impl ControlledViewer {
         result: &mut impl FnMut(ResultEvent),
         other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
     ) -> Result<(), Error> {
+        self.service_clipboard()?;
         self.check_inner()?;
         self.clock
             .receive(&mut self.session.transport, |_, _| Ok(Disposition::Blocked))
@@ -419,10 +427,14 @@ impl ControlledViewer {
         let limits = self.media.limits();
         let inbound = self.session.routes.inbound;
         let cx = self.session.cx.clone();
+        let clipboard = &self.clipboard;
         let input = &mut self.input;
         let last_result = &mut self.last_result;
         let mut failure = None;
         let receive = self.session.step(&mut |route, bytes| {
+            if clipboard.as_ref().is_some_and(|c| c.owns_inbound(route)) {
+                return Ok(Disposition::Blocked);
+            }
             let kind = bytes.get(6..8);
             let t = ClientInstant(now(&cx).map_err(|e| {
                 failure = Some(Error::Session(e));
@@ -480,6 +492,7 @@ impl ControlledViewer {
             return Err(e);
         }
         receive?;
+        self.service_clipboard()?;
         self.send()?;
         self.check_inner().map(|_| ())
     }
@@ -503,6 +516,7 @@ impl ControlledViewer {
             if wait > Duration::from_millis(100) {
                 return Err(Error::Session(super::Error::InvalidConfiguration));
             }
+            operation.viewer.service_clipboard()?;
             let t = operation.viewer.check_inner()?;
             // A submitted frame is not yet a visible frame. Pause all network
             // submission during this short callback gap, but do not make it
@@ -545,7 +559,11 @@ impl ControlledViewer {
                 .session
                 .transport
                 .drive(cx, wait.min(Duration::from_micros(remaining)), || {
-                    permitted(&mut viewer.input, &viewer.control, cx)
+                    viewer
+                        .clipboard
+                        .as_ref()
+                        .is_none_or(crate::clipboard_quic::Bridge::permits_io)
+                        && permitted(&mut viewer.input, &viewer.control, cx)
                 })
                 .await
                 .map_err(|e| Error::Session(e.into()))?;

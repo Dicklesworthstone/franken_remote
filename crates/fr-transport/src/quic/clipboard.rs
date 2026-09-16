@@ -109,6 +109,10 @@ impl ClipboardChannel {
             }
         }
     }
+    /// Route classification only, not authority or proof of connection identity.
+    pub fn owns_inbound(&self, route: Route) -> bool {
+        route == Route::Stream(self.routes.inbound)
+    }
     pub const fn parent(&self) -> ControlBinding {
         self.parent
     }

@@ -222,6 +222,7 @@ fn unfinished_native_input_cannot_wake_but_collected_effect_bypasses_blocked_rec
                 let mut tickets = || ticket(&mut t);
                 let mut services = InputServices {
                     input: &mut host.input,
+                    clipboard: &mut host.clipboard,
                     renewal: &mut host.renewal,
                     observation: host.session.opened.control.clone(),
                     control: host.session.opened.routes,
