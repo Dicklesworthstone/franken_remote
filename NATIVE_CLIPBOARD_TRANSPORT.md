@@ -59,3 +59,77 @@ its handoff still has a fixed one-second deadline and original-owner check.
 The default sink method preserves immediate synchronous adapters, not permission
 to ignore metadata in a queued adapter. A successful check is not delivery or OS
 publication, and cannot recall an operation already performed by a peer.
+
+## Native worker and network owner
+
+`frd::clipboard_quic::Bridge` joins the completed `ClipboardChannel` to the
+original host input owner (`Bridge::host`) or actual accepted controller
+(`Bridge::controller`). Both factories consume the route and return a bridge
+and a one-use `WorkerSeed`. The separate `granted` argument requires negotiated
+clipboard support, local consent, and the approved native OS session. An input
+grant alone is not clipboard permission.
+
+Move the seed onto the interactive worker and call `open(native_factory)`, then
+service `Worker::step(new_id)` during traffic and silence. Alternatively,
+`WorkerSeed::spawn(native_factory, new_id)` runs this same owner on a named
+foreign-call thread. The factory executes on that thread, only after checking
+the original authority, and may return a thread-confined native clipboard.
+The item-ID callback must supply qualified randomness. Neither factory installs
+an async runtime, network listener, new input owner, or replacement grant.
+
+The session services `Bridge::service` and `Bridge::drive` on its existing
+connection with its existing admission callback; other routes remain the
+containing session's responsibility. All transport dispatch callbacks copy
+records only: no native preparation, read, or publication runs in a network
+callback or under a mailbox or authority lock. Native and network policy checks
+use independent monotonic viewer-clock cursors, so a concurrent network check
+cannot replace the exact native sample awaiting its final publication check.
+Every cursor remains bound to the same original controller and presentation.
+
+There is one outbound queued-or-in-flight record and one incoming
+queued/executing/deferred/uncollected record. Taking a buffer out of its mailbox
+does not free capacity. Outbound admission remains occupied until the actual
+native empty-send witness accounts for queued, unsent, and retransmittable
+bytes; a local copy into QUIC is not enough. Egress permits remain checked until
+that point. An incoming Begin carries its original ingress deadline through
+worker queueing. Deferral cannot restart its three-second transfer lifetime.
+These handoff slots supplement, not replace, the already bounded native item
+buffers and native QUIC stream windows.
+
+Collect `Bridge::take_received` regularly. A submitted, uncertain, or refused
+publication result is terminal for that record and retained until collected;
+subsequent incoming work is backpressured rather than overwriting the result.
+A publication receipt is not evidence of an application paste. No clipboard
+payload is included in cross-thread diagnostics.
+
+Call `Bridge::retire` before dropping the bridge. It fences native publication
+first, then retires the original optional stream pair without waiting for OS
+cleanup. `WorkerTask::stop` requests a stop; `is_finished`/`finish` distinguish
+actual thread completion from that request. `finish` never blocks on an ongoing
+foreign call. A stuck OS call cannot be safely killed as a Rust thread; dropping
+the handle does not claim successful native cleanup or rollback.
+
+The current network join is conservative: a switch transition (including
+an off/on cycle), expired queued work, or superseded in-flight payload retires
+the optional clipboard pair. It does not silently reopen the consumed channel
+or replay buffered text when a switch is re-enabled. Input and viewing continue
+when retirement is performed between I/O turns. Cancellation or authority loss
+inside an active QUIC future retains the existing whole-connection fail-closed
+behavior; even dropping an unpolled bridge-drive future fences its original
+connection and worker. No operation touches an equal-ID foreign connection.
+
+`clipboard_network` runs two actual Xvfb desktops, separate native worker
+threads, the production clipboard protocol, and encrypted UDP/TLS connections.
+It covers both directions, empty/Unicode/one-MiB items with a 2-KiB record cap,
+repeated copies, blocked real native preparation with live control traffic,
+queued cancellation, foreign connections, and stop-before-open. Grants,
+consent, presentation evidence, and IDs in these tests are explicit fixtures.
+This is a real network/native handoff, not production GUI/session-startup or
+live-tailnet qualification. Run alongside the native clipboard target:
+
+```sh
+FR_NATIVE_CLIPBOARD_REQUIRED=1 xvfb-run -a \
+  -s '-screen 0 1280x1024x24 -noreset -nolisten tcp' \
+  cargo test -p fr-native --features linux-clipboard \
+  --test clipboard_x11 --test clipboard_network --locked
+```
