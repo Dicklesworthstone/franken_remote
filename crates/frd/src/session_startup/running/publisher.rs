@@ -293,8 +293,9 @@ impl HostSession {
     ///
     /// `configure` is called once after explicit choice. It must be bounded and
     /// nonblocking; geometry and native codec validity are checked independently.
-    /// `entropy` supplies independent unpredictable values for renewal, channel
-    /// IDs and tickets. A collision/zero refuses, never retries indefinitely.
+    /// `entropy` supplies independent unpredictable renewal nonces and tickets.
+    /// Public channel IDs are allocated monotonically, not sampled from entropy.
+    /// A collision/zero refuses, never retries indefinitely.
     /// This consumes the session; every failed/abandoned attempt is terminal.
     pub fn publish_display<'a>(
         self,
@@ -550,11 +551,15 @@ async fn attach(
     entropy: &mut impl FnMut() -> Result<u128, ()>,
 ) -> Result<MediaChannel, Error> {
     budget.remaining()?;
-    // The binding identifier is public; its independent draw reveals no ticket
-    // bits. Native reservations reject used IDs; there is no retry/reset path.
-    let id =
-        u32::try_from(entropy().map_err(|()| budget.fail(Error::Identity))? & u128::from(u32::MAX))
-            .map_err(|_| budget.fail(Error::Identity))?;
+    // Bindings are public, monotonically allocated connection IDs. Random
+    // draws are not ordered and cannot satisfy the transport's consumed floor.
+    // Only the independent one-use ticket is drawn from qualified entropy.
+    let id = host
+        .io()
+        .map_err(|e| budget.fail(Error::Session(e)))?
+        .0
+        .next_channel_binding()
+        .map_err(|e| budget.fail(Error::Transport(e)))?;
     let ticket = Ticket(entropy().map_err(|()| budget.fail(Error::Identity))?);
     if ticket.0 == 0 {
         return Err(budget.fail(Error::Identity));

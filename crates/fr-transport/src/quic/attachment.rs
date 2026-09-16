@@ -256,6 +256,21 @@ impl QuicRecords {
             MediaRole::Input => base.min(fr_wire::input::MAX_INPUT_RECORD_BYTES as u64),
         }
     }
+    /// Next public channel ID in this connection's consumed namespace. This is
+    /// a candidate, not a reservation or permission: offer/accept still validate
+    /// the original connection, scope and authority atomically. Retired IDs are
+    /// included and exhaustion never wraps. Tickets remain independent secrets.
+    pub fn next_channel_binding(&self) -> Result<u32, Error> {
+        self.streams
+            .iter()
+            .map(|r| r.binding)
+            .chain(self.datagrams.iter().map(|r| r.binding))
+            .chain(self.attachments.iter().map(|r| r.binding))
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(Error::WrongRoute)
+    }
     fn next_uni(&self, role: StreamRole) -> Result<StreamId, Error> {
         let n = self
             .streams

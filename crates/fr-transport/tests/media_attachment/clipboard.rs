@@ -306,3 +306,6 @@ fn typed_clipboard_routes_check_scope_codec_and_original_connection() {
 
 #[path = "clipboard/retire.rs"]
 mod retire;
+
+#[path = "clipboard/allocation.rs"]
+mod allocation;
