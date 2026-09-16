@@ -164,9 +164,15 @@ async fn fixture_with_clock_mode(
         decode,
         feedback,
         managed,
-        false,
+        ClipboardMode::Disabled,
     ))
     .await
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClipboardMode {
+    Disabled,
+    Attached,
+    Negotiate,
 }
 #[allow(clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 async fn fixture_with_clipboard(
@@ -176,7 +182,7 @@ async fn fixture_with_clipboard(
     decode: bool,
     feedback: bool,
     managed: bool,
-    clipboard: bool,
+    clipboard: ClipboardMode,
 ) -> Fixture {
     let mut wire_capabilities: Vec<WireCapability> = [
         fr_wire::clock::CAPABILITY,
@@ -192,7 +198,7 @@ async fn fixture_with_clipboard(
         required: true,
     })
     .collect();
-    if clipboard {
+    if clipboard != ClipboardMode::Disabled {
         for name in [
             attachment::CLIPBOARD_CAPABILITY,
             fr_wire::clipboard::CAPABILITY,
@@ -203,6 +209,13 @@ async fn fixture_with_clipboard(
                 required: false,
             });
         }
+    }
+    if clipboard == ClipboardMode::Negotiate {
+        wire_capabilities.push(WireCapability {
+            name: fr_wire::clipboard::startup::CAPABILITY.into(),
+            version: 1,
+            required: false,
+        });
     }
     if feedback {
         wire_capabilities.push(WireCapability {
@@ -258,7 +271,7 @@ async fn fixture_with_clipboard(
         11,
     )
     .await;
-    let clipboard_channels = if clipboard {
+    let clipboard_channels = if clipboard == ClipboardMode::Attached {
         Some(
             attach(
                 &mut host,
@@ -335,6 +348,12 @@ async fn fixture_with_clipboard(
     let session = observation
         .input_session(creds(), bounds(), capabilities)
         .unwrap();
+    // Grant metadata must report the ORIGINAL host owner, not an invented
+    // two-second horizon counted from a subsequently issued input ticket.
+    let lease_until = session
+        .monitor()
+        .deadline(HostInstant::from_micros(now(host_cx).unwrap()))
+        .unwrap();
     let effects = Arc::new(Mutex::new(Effects::default()));
     let sink = effects.clone();
     let seat = Seat::default();
@@ -350,9 +369,7 @@ async fn fixture_with_clipboard(
     let mut native = hn
         .into_host(host_cx.clone(), agent, host.io().unwrap().0, &observation)
         .unwrap();
-    let mut input = if clipboard {
-        None
-    } else {
+    let mut input = if clipboard == ClipboardMode::Disabled {
         Some(
             InputClient::new(
                 creds(),
@@ -365,6 +382,8 @@ async fn fixture_with_clipboard(
             )
             .unwrap(),
         )
+    } else {
+        None
     };
     // Bind the initial expiry to an actual native ticket received on QUIC.
     let mut ticket_arrived = false;
@@ -410,6 +429,7 @@ async fn fixture_with_clipboard(
                             correlation,
                             client_cx,
                             ticket,
+                            lease_until,
                         ));
                     }
                     ticket_arrived = true;

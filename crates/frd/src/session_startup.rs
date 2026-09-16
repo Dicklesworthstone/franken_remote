@@ -27,6 +27,7 @@ use std::{
 };
 
 mod admission_refresh;
+mod clipboard;
 mod native_control;
 mod opening;
 mod running;

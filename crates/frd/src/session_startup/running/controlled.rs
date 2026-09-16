@@ -23,6 +23,7 @@ pub struct ControlledHost {
     ticket_turn: bool,
     submitted: super::input_wake::Submitted,
     clipboard: Option<crate::clipboard_quic::Bridge>,
+    clipboard_setup: crate::session_startup::clipboard::Setup,
 }
 impl std::fmt::Debug for ControlledHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -61,6 +62,7 @@ impl HostSession {
             ticket_turn: false,
             submitted: super::input_wake::Submitted::default(),
             clipboard: None,
+            clipboard_setup: crate::session_startup::clipboard::Setup::default(),
         })
     }
 }
@@ -99,6 +101,7 @@ impl ControlledHost {
         if let Some(clipboard) = &self.clipboard {
             clipboard.stop();
         }
+        self.clipboard_setup.stop();
         self.input.control().stop(StopReason::LocalRevoke);
         self.renewal.stop();
         self.session.close();
@@ -128,6 +131,9 @@ impl ControlledHost {
         let mut services = InputServices {
             input: &mut self.input,
             clipboard: &mut self.clipboard,
+            clipboard_setup: &mut self.clipboard_setup,
+            cx: self.session.opened.cx.clone(),
+            parent: self.session.opened.binding,
             renewal: &mut self.renewal,
             observation: self.session.opened.control.clone(),
             control: self.session.opened.routes,
@@ -190,6 +196,9 @@ impl Drop for Operation<'_> {
 struct InputServices<'a, T, F> {
     input: &'a mut QuicInput,
     clipboard: &'a mut Option<crate::clipboard_quic::Bridge>,
+    clipboard_setup: &'a mut crate::session_startup::clipboard::Setup,
+    cx: asupersync::cx::Cx,
+    parent: fr_wire::negotiation::ControlBinding,
     renewal: &'a mut ControlRenewal,
     observation: ObservationControl,
     control: ControlRoutes,
@@ -210,7 +219,8 @@ where
     F: Services,
 {
     fn permitted(&mut self) -> bool {
-        self.renewal.permitted()
+        self.clipboard_setup.permits_io()
+            && self.renewal.permitted()
             && self.other.permitted()
             && self
                 .clipboard
@@ -228,6 +238,22 @@ where
         if !self.other.permitted() {
             self.input.control().stop(StopReason::ViewInvalidated);
             return Err(Error::Closed);
+        }
+        if let Some((channel, granted)) = self
+            .clipboard_setup
+            .service(q, || {
+                self.renewal.permitted() && self.observation.check().is_ok()
+            })
+            .map_err(Error::Clipboard)?
+        {
+            let result = clipboard::join(q, &self.cx, self.parent, self.input, channel, granted)
+                .map(|(bridge, seed)| {
+                    *self.clipboard = Some(bridge);
+                    seed
+                });
+            self.clipboard_setup
+                .joined(result)
+                .map_err(Error::Clipboard)?;
         }
         if let Some(clipboard) = self.clipboard {
             clipboard
@@ -293,6 +319,7 @@ where
             .clipboard
             .as_ref()
             .is_some_and(|c| c.owns_inbound(route))
+            || self.clipboard_setup.owns(route, bytes)
             || is_input(self.input.routes(), route)
             || (route == Route::Stream(self.control.inbound)
                 && (kind == Some(&(Kind::ChallengeResponse as u16).to_be_bytes())

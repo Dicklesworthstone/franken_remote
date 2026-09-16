@@ -7,11 +7,12 @@ use fr_wire::clipboard::session::synchronize::{
 };
 
 pub(super) fn accepted_grant(
-    parent: negotiation::ControlBinding,
+    parent: fr_wire::negotiation::ControlBinding,
     capabilities: Capabilities,
     correlation: fr_media::freshness::ClockCorrelation,
     c: &Cx,
     ticket: input_ticket::Ticket,
+    lease_until: HostInstant,
 ) -> InputClient {
     let t = ClientInstant(now(c).unwrap());
     let at = ticket.issued_at_us;
@@ -31,7 +32,7 @@ pub(super) fn accepted_grant(
         lease: creds().lease,
         ticket: ticket.credentials.ticket,
         issued_at_us: at,
-        lease_until_us: at + 2_000_000,
+        lease_until_us: lease_until.as_micros(),
         ticket_until_us: ticket.expires_at_us,
         first_action: 0,
         first_pointer: 0,
@@ -166,7 +167,7 @@ async fn setup(c: &Cx, h: &Cx) -> Fixture {
         false,
         false,
         false,
-        true,
+        ClipboardMode::Attached,
     ))
     .await
 }
@@ -307,3 +308,5 @@ fn clipboard_consent_is_independent_of_the_accepted_control_grant() {
         assert!(state.driver.take().unwrap().await.handoff_safe());
     });
 }
+
+mod negotiation;

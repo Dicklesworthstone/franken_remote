@@ -94,6 +94,7 @@ pub struct ControlledViewer {
     last_result: Option<ResultEvent>,
     events: Option<events::Receiver>,
     clipboard: Option<crate::clipboard_quic::Bridge>,
+    clipboard_setup: crate::session_startup::clipboard::Setup,
 }
 impl std::fmt::Debug for ControlledViewer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -185,6 +186,7 @@ impl ViewerSession {
             last_result: None,
             events: None,
             clipboard: None,
+            clipboard_setup: crate::session_startup::clipboard::Setup::default(),
         })
     }
 }
@@ -232,6 +234,7 @@ impl ControlledViewer {
         if let Some(clipboard) = &self.clipboard {
             clipboard.stop();
         }
+        self.clipboard_setup.stop();
         self.viewport.stop();
         self.input.stop(StopReason::Disconnected);
         self.pending = None;
@@ -391,6 +394,7 @@ impl ControlledViewer {
         }
         Ok(())
     }
+    #[allow(clippy::too_many_lines)]
     fn step(
         &mut self,
         result: &mut impl FnMut(ResultEvent),
@@ -428,11 +432,14 @@ impl ControlledViewer {
         let inbound = self.session.routes.inbound;
         let cx = self.session.cx.clone();
         let clipboard = &self.clipboard;
+        let clipboard_setup = &self.clipboard_setup;
         let input = &mut self.input;
         let last_result = &mut self.last_result;
         let mut failure = None;
         let receive = self.session.step(&mut |route, bytes| {
-            if clipboard.as_ref().is_some_and(|c| c.owns_inbound(route)) {
+            if clipboard.as_ref().is_some_and(|c| c.owns_inbound(route))
+                || clipboard_setup.owns(route, bytes)
+            {
                 return Ok(Disposition::Blocked);
             }
             let kind = bytes.get(6..8);
@@ -554,6 +561,9 @@ impl ControlledViewer {
             if let Some(d) = viewer.session.responder.response_deadline() {
                 until = until.min(d.0);
             }
+            if let Some(deadline) = viewer.clipboard_setup.deadline_us() {
+                until = until.min(deadline);
+            }
             let remaining = until.checked_sub(now(cx)?).ok_or(Error::Expired)?;
             viewer
                 .session
@@ -563,6 +573,7 @@ impl ControlledViewer {
                         .clipboard
                         .as_ref()
                         .is_none_or(crate::clipboard_quic::Bridge::permits_io)
+                        && viewer.clipboard_setup.permits_io()
                         && permitted(&mut viewer.input, &viewer.control, cx)
                 })
                 .await
