@@ -280,3 +280,6 @@ fn late_promotion_cannot_restart_expired_source_freshness() {
         .is_err()
     );
 }
+
+#[path = "view_promotion/clipboard.rs"]
+mod clipboard;
