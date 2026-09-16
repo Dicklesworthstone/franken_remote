@@ -15,16 +15,15 @@ use std::{
 
 static SERIAL: Mutex<()> = Mutex::new(());
 fn display() -> Option<String> {
-    match std::env::var("DISPLAY") {
-        Ok(display) => Some(display),
-        Err(_) => {
-            assert!(
-                std::env::var_os("FR_NATIVE_CLIPBOARD_REQUIRED").is_none(),
-                "required native clipboard tests need an X11 display"
-            );
-            eprintln!("BLOCKED: no X11 display; not native clipboard qualification");
-            None
-        }
+    if let Ok(display) = std::env::var("DISPLAY") {
+        Some(display)
+    } else {
+        assert!(
+            std::env::var_os("FR_NATIVE_CLIPBOARD_REQUIRED").is_none(),
+            "required native clipboard tests need an X11 display"
+        );
+        eprintln!("BLOCKED: no X11 display; not native clipboard qualification");
+        None
     }
 }
 fn open(display: &str) -> X11Clipboard {
@@ -192,3 +191,6 @@ fn permission_is_required_before_open_and_nonlocal_displays_refuse() {
         Err(PlatformError::Unsupported)
     ));
 }
+
+#[path = "clipboard_x11/authorized.rs"]
+mod authorized;

@@ -32,3 +32,6 @@ pub mod displays;
 
 #[cfg(all(target_os = "linux", feature = "linux-clipboard"))]
 pub mod clipboard;
+
+#[cfg(all(target_os = "linux", feature = "linux-clipboard"))]
+pub mod clipboard_observation;
