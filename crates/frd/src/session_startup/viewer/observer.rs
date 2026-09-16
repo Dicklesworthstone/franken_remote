@@ -524,7 +524,7 @@ fn role_index(role: MediaRole, controlled: bool) -> Result<usize, Error> {
         MediaRole::Recovery => Ok(1),
         MediaRole::Video => Ok(2),
         MediaRole::Input if controlled => Ok(3),
-        MediaRole::Input => Err(Error::Order),
+        MediaRole::Input | MediaRole::Clipboard => Err(Error::Order),
     }
 }
 async fn attach_media(

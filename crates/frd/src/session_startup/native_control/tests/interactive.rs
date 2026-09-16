@@ -59,8 +59,15 @@ fn public_native_viewer_watches_past_request_budget_then_takes_control_in_place(
                             |state| {
                                 if let HostControlState::Pending(mut pending) = state {
                                     if pending.request().is_none() {
-                                        assert!(!request_started.get());
-                                        assert!(effects.lock().unwrap().is_empty());
+                                        // Before admission, a local viewer request can still
+                                        // be in flight. After approval, the broker consumes
+                                        // that request while its native driver initializes.
+                                        if pending.native_status().is_none() {
+                                            assert!(!host_saw_request.get());
+                                            assert!(effects.lock().unwrap().is_empty());
+                                        } else {
+                                            assert!(host_saw_request.get());
+                                        }
                                     } else {
                                         assert!(request_started.get());
                                         host_saw_request.set(true);
