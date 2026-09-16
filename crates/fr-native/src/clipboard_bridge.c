@@ -7,6 +7,7 @@
 #include <string.h>
 
 struct fr_clip_atoms { uint32_t clipboard, utf8, targets, timestamp, incr, clock; };
+struct fr_clip_property_reply { uint32_t kind, format, len, remaining; };
 struct fr_clip_event { uint32_t kind, window, property, target, time, selection, sequence; };
 _Static_assert(sizeof(xcb_selection_notify_event_t) <= 32, "XCB event ABI");
 struct fr_clip { xcb_connection_t *c; xcb_window_t window; struct fr_clip_atoms atoms; };
@@ -108,6 +109,14 @@ int fr_clip_next(struct fr_clip *h, struct fr_clip_event *out) {
     xcb_generic_event_t *event = xcb_poll_for_event(h->c);
     if (!event) return xcb_connection_has_error(h->c) ? -1 : 0;
     out->sequence = event->full_sequence;
+    /* SelectionNotify is sent by the owner with SendEvent. It is only a hint:
+     * Rust validates the requestor, target, property, time, current owner and
+     * bounded property reply. Synthetic ownership/property events stay ignored. */
+    if ((event->response_type & 127) == XCB_SELECTION_NOTIFY) {
+        const xcb_selection_notify_event_t *e = (const void *)event;
+        out->kind = 6; out->window = e->requestor; out->property = e->property;
+        out->target = e->target; out->time = e->time; out->selection = e->selection;
+    }
     /* Only server-generated notifications drive ownership or INCR progress. */
     if (!(event->response_type & 128)) switch (event->response_type) {
     case XCB_SELECTION_REQUEST: {
@@ -129,6 +138,7 @@ int fr_clip_next(struct fr_clip *h, struct fr_clip_event *out) {
         out->window = e->window; out->property = e->atom; out->time = e->time;
         if (e->state == XCB_PROPERTY_DELETE) out->kind = 3;
         else if (e->window == h->window && e->atom == h->atoms.clock) out->kind = 4;
+        else out->kind = 7;
         break;
     }
     case XCB_DESTROY_NOTIFY: {
@@ -138,4 +148,60 @@ int fr_clip_next(struct fr_clip *h, struct fr_clip_event *out) {
     default: break;
     }
     free(event); return 1;
+}
+
+/* One fresh requestor per read prevents delayed replies/INCR writes from
+ * entering a later read. Destroying it never changes another selection. */
+int fr_clip_requestor(struct fr_clip *h, uint32_t *window) {
+    uint32_t id = xcb_generate_id(h->c);
+    uint32_t events = XCB_EVENT_MASK_PROPERTY_CHANGE;
+    int rc = checked(h, xcb_create_window_checked(h->c, 0, id, h->window,
+        0, 0, 1, 1, 0, XCB_WINDOW_CLASS_INPUT_ONLY, XCB_COPY_FROM_PARENT,
+        XCB_CW_EVENT_MASK, &events));
+    if (!rc) *window = id;
+    return rc;
+}
+int fr_clip_destroy(struct fr_clip *h, uint32_t window) {
+    if (!window || window == h->window) return -2;
+    return checked(h, xcb_destroy_window_checked(h->c, window));
+}
+int fr_clip_convert(struct fr_clip *h, uint32_t window, uint32_t target,
+                    uint32_t property, uint32_t time) {
+    if (!window || !target || !property || !time) return -2;
+    if (checked(h, xcb_delete_property_checked(h->c, window, property))) return -1;
+    return checked(h, xcb_convert_selection_checked(h->c, window,
+        h->atoms.clipboard, target, property, time));
+}
+int fr_clip_delete(struct fr_clip *h, uint32_t window, uint32_t property,
+                   uint32_t *sequence) {
+    xcb_void_cookie_t cookie = xcb_delete_property_checked(h->c, window, property);
+    *sequence = cookie.sequence;
+    return checked(h, cookie);
+}
+int fr_clip_read(struct fr_clip *h, uint32_t window, uint32_t property,
+                 uint32_t offset, struct fr_clip_property_reply *out, uint8_t *bytes) {
+    /* Server reply allocation is limited to 16 KiB by the request. Rust checks
+     * bytes_after, aggregate size, format and type before retaining any bytes. */
+    if (!window || !property || offset > 1048576u / 4 || !out || !bytes) return -2;
+    memset(out, 0, sizeof(*out));
+    xcb_generic_error_t *e = NULL;
+    xcb_get_property_reply_t *r = xcb_get_property_reply(h->c,
+        xcb_get_property(h->c, 0, window, property, XCB_GET_PROPERTY_TYPE_ANY,
+                         offset, 16384u / 4), &e);
+    int rc = -1;
+    if (r && !e) {
+        int len = xcb_get_property_value_length(r);
+        if (len >= 0 && len <= 16384) {
+            out->kind = r->type; out->format = r->format;
+            out->len = (uint32_t)len; out->remaining = r->bytes_after;
+            if (len) memcpy(bytes, xcb_get_property_value(r), (size_t)len);
+            rc = 0;
+        }
+        /* Best-effort clearing of the library's temporary payload copy. */
+        if (len > 0 && len <= 16384) {
+            volatile uint8_t *p = xcb_get_property_value(r);
+            for (int i = 0; i < len; ++i) p[i] = 0;
+        }
+    }
+    free(e); free(r); return rc;
 }

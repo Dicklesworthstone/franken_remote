@@ -22,7 +22,38 @@ pub(super) struct Event {
     pub selection: u32,
     pub sequence: u32,
 }
+#[repr(C)]
+#[derive(Default)]
+pub(super) struct Property {
+    pub kind: u32,
+    pub format: u32,
+    pub len: u32,
+    pub remaining: u32,
+}
 unsafe extern "C" {
+    pub(super) fn fr_clip_requestor(handle: *mut c_void, window: *mut u32) -> c_int;
+    pub(super) fn fr_clip_destroy(handle: *mut c_void, window: u32) -> c_int;
+    pub(super) fn fr_clip_convert(
+        handle: *mut c_void,
+        window: u32,
+        target: u32,
+        property: u32,
+        time: u32,
+    ) -> c_int;
+    pub(super) fn fr_clip_delete(
+        handle: *mut c_void,
+        window: u32,
+        property: u32,
+        sequence: *mut u32,
+    ) -> c_int;
+    pub(super) fn fr_clip_read(
+        handle: *mut c_void,
+        window: u32,
+        property: u32,
+        offset: u32,
+        out: *mut Property,
+        bytes: *mut u8,
+    ) -> c_int;
     pub(super) fn fr_clip_open(
         display: *const c_char,
         atoms: *mut Atoms,

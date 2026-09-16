@@ -1,9 +1,10 @@
-//! Opt-in Linux X11 text publication through a narrow XCB boundary.
+//! Opt-in Linux X11 text observation and publication through a narrow XCB boundary.
 //!
 //! This owner belongs on the interactive-session native worker, not a transport
 //! task or an authority mutex. Its caller pumps bounded native events and drops
-//! it on session teardown. It does not read arbitrary local clipboard contents,
-//! inject paste keys, grant control, start a thread, or install a runtime.
+//! it on session teardown. Local reads are explicit, bounded observations.
+//! Neither direction injects paste keys, grants control, starts a thread, or
+//! installs a runtime. Reading does not authorize disclosure to a peer.
 use fr_core::{
     clipboard::{ClipboardSink, PlatformError, Publication, Stamp},
     limits::ProtocolLimits,
@@ -16,7 +17,9 @@ use std::{
     time::{Duration, Instant},
 };
 mod ffi;
+mod read;
 use ffi::{Atoms, Event};
+pub use read::{ReadError, ReadText};
 
 const READERS: usize = 4;
 const CHUNK: usize = 16_384;
@@ -45,7 +48,8 @@ struct Reader {
 /// Thread-confined connection. The `Rc` fields deliberately prevent Send/Sync.
 /// Up to four immutable old selections may complete INCR reads while a new
 /// current selection is published; at most six admitted-size native text
-/// buffers exist, including preparation. Native calls never retain Rust slices.
+/// buffers exist, including preparation, plus one bounded local-read buffer.
+/// Native calls never retain Rust slices.
 pub struct X11Clipboard {
     handle: Option<NonNull<core::ffi::c_void>>,
     atoms: Atoms,
@@ -54,6 +58,7 @@ pub struct X11Clipboard {
     prepared: Option<Rc<Selection>>,
     current: Option<Rc<Selection>>,
     readers: [Option<Reader>; READERS],
+    capture: Option<read::Capture>,
 }
 impl fmt::Debug for X11Clipboard {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -104,6 +109,7 @@ impl X11Clipboard {
             prepared: None,
             current: None,
             readers: std::array::from_fn(|_| None),
+            capture: None,
         })
     }
     fn handle(&self) -> Result<*mut core::ffi::c_void, PlatformError> {
@@ -268,6 +274,9 @@ impl X11Clipboard {
         }
     }
     fn event(&mut self, event: Event, now: Instant) {
+        if let Some(capture) = &mut self.capture {
+            capture.observe(event, self.atoms);
+        }
         match event.kind {
             1 => self.request(event, now),
             2 => {
@@ -346,6 +355,7 @@ impl X11Clipboard {
                 ffi::fr_clip_close(handle.as_ptr());
             }
         }
+        self.capture = None;
         self.prepared = None;
         self.current = None;
         self.readers = std::array::from_fn(|_| None);
@@ -389,6 +399,7 @@ impl ClipboardSink for X11Clipboard {
         Err(PlatformError::Unavailable)
     }
     fn publish(&mut self, _text: &str, stamp: Stamp) -> Publication {
+        self.cancel_read();
         let Some(prepared) = self.prepared.take() else {
             return Publication::NotSubmitted(PlatformError::Unavailable);
         };
