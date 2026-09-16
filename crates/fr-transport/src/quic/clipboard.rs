@@ -148,6 +148,17 @@ impl ClipboardChannel {
     pub fn retire(&mut self, q: &mut QuicRecords, cx: &Cx) -> Result<(), Error> {
         self.attachment.retire_clipboard(q, cx)
     }
+    /// True only after the existing native empty-send witness has retired all
+    /// queued, unsent and retransmittable bytes on this original route. This is
+    /// not an application receipt. Keep the Egress permit until this is true.
+    pub fn send_drained(&self, q: &QuicRecords) -> Result<bool, Error> {
+        self.check(q)?;
+        q.senders
+            .iter()
+            .find(|s| s.route == self.routes.outbound)
+            .map(|s| s.records == 0 && s.bytes == 0)
+            .ok_or(Error::WrongRoute)
+    }
     /// Whole-record admission, not a partial socket write or publication receipt.
     /// The absolute transport-clock deadline comes from the ORIGINAL operation,
     /// not the time it finally obtained queue capacity. Recheck authorization in

@@ -7,7 +7,7 @@
 //! silence. Transport admission is not remote publication or application paste.
 use super::{
     Body, CancelReason, Context, Message, Role, encode,
-    receive::{ReceiveError, receive},
+    receive::{ReceiveError, receive_before},
     send::Sender,
 };
 use crate::WireError;
@@ -508,6 +508,16 @@ impl ChannelSession {
         sink: &mut impl ClipboardSink,
         clock: impl FnMut() -> HostInstant,
     ) -> Result<Option<Receipt>, SessionError> {
+        self.receive_before(bytes, sink, clock, HostInstant::from_micros(u64::MAX))
+    }
+    /// Shorten Begin to the deadline captured at ingress before a worker queue.
+    pub fn receive_before(
+        &mut self,
+        bytes: &[u8],
+        sink: &mut impl ClipboardSink,
+        clock: impl FnMut() -> HostInstant,
+        bound: HostInstant,
+    ) -> Result<Option<Receipt>, SessionError> {
         if self.is_closed() {
             return Err(Error::Closed.into());
         }
@@ -515,13 +525,14 @@ impl ChannelSession {
             owner: self,
             completed: false,
         };
-        let result = receive(
+        let result = receive_before(
             &mut call.owner.receiver,
             bytes,
             call.owner.incoming,
             &call.owner.limits,
             sink,
             clock,
+            bound,
         );
         call.completed = true;
         if call.owner.receiver.is_closed() {

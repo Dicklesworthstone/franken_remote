@@ -132,3 +132,30 @@ fn cancellation_can_release_peer_while_switches_are_disabled() {
     ));
     cancel.permit.unwrap().check(at(2)).unwrap();
 }
+
+#[test]
+fn ingress_queue_time_is_not_added_to_the_native_receive_lifetime() {
+    let input = owner(10_000_000);
+    let peer = owner(10_000_000);
+    let mut source = session(&peer, Role::Controller);
+    let mut target = session(&input, Role::Host);
+    let mut sink = Platform::default();
+    source.offer(1, "", None, at(0)).unwrap();
+    let begin = handoff(&mut source, 0);
+    let commit = handoff(&mut source, 0);
+    target
+        .receive_before(&begin.bytes, &mut sink, || at(2_999_999), at(3_000_000))
+        .unwrap();
+    assert_eq!(
+        target.receive_before(&commit.bytes, &mut sink, || at(3_000_000), at(6_000_000)),
+        Err(Error::Expired.into())
+    );
+    assert_eq!(sink.text, [] as [String; 0]);
+    assert_eq!(target.retained_bytes(), 0);
+    assert!(!target.is_closed());
+    // Expiry never permits replay with a fresh first-record handoff deadline.
+    assert_eq!(
+        target.receive_before(&begin.bytes, &mut sink, || at(3_000_001), at(6_000_000)),
+        Err(Error::Replay.into())
+    );
+}

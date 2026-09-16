@@ -19,7 +19,27 @@ pub fn receive(
     context: Context,
     limits: &ProtocolLimits,
     sink: &mut impl ClipboardSink,
+    clock: impl FnMut() -> HostInstant,
+) -> Result<Option<Receipt>, ReceiveError> {
+    receive_before(
+        session,
+        bytes,
+        context,
+        limits,
+        sink,
+        clock,
+        HostInstant::from_micros(u64::MAX),
+    )
+}
+/// The first complete ingress record carries this fixed bound across queueing.
+pub fn receive_before(
+    session: &mut ClipboardSession,
+    bytes: &[u8],
+    context: Context,
+    limits: &ProtocolLimits,
+    sink: &mut impl ClipboardSink,
     mut clock: impl FnMut() -> HostInstant,
+    bound: HostInstant,
 ) -> Result<Option<Receipt>, ReceiveError> {
     if context.scope != session.binding() {
         return Err(ReceiveError::Wire(WireError::InvalidBinding));
@@ -33,7 +53,7 @@ pub fn receive(
             total_bytes,
             chunks,
         } => session
-            .begin(
+            .begin_before(
                 Begin {
                     binding: context.scope,
                     stamp: message.stamp,
@@ -41,6 +61,7 @@ pub fn receive(
                     chunks,
                 },
                 clock(),
+                bound,
             )
             .map(|()| None),
         Body::Chunk {

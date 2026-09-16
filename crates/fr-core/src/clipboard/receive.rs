@@ -11,6 +11,15 @@ impl<S: ClipboardSink> Drop for Prepared<'_, S> {
 }
 impl ClipboardSession {
     pub fn begin(&mut self, begin: Begin, now: HostInstant) -> Result<(), Error> {
+        self.begin_before(begin, now, HostInstant::from_micros(u64::MAX))
+    }
+    /// An ingress handoff may only shorten the operation, never reset its clock.
+    pub fn begin_before(
+        &mut self,
+        begin: Begin,
+        now: HostInstant,
+        bound: HostInstant,
+    ) -> Result<(), Error> {
         let authority_deadline = self.check(now)?;
         begin.validate(&self.limits)?;
         if begin.binding != self.binding {
@@ -28,10 +37,14 @@ impl ClipboardSession {
         let deadline = now
             .checked_add(HostDuration::from_micros(3_000_000))
             .ok_or(Error::Clock)?
-            .min(authority_deadline);
+            .min(authority_deadline)
+            .min(bound);
         // Consume once, including allocation/cancellation failures. A retry is
         // a genuinely new item, never resurrection of this transfer identity.
         self.received_floor = begin.stamp.sequence;
+        if now >= deadline {
+            return Err(Error::Expired);
+        }
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(begin.total_bytes as usize)

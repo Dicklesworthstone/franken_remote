@@ -58,6 +58,9 @@ impl Transport {
     }
     /// Authority only: release-only cancellations can travel while disabled.
     /// `now` MUST be sampled in the original owner's qualified clock domain.
+    pub fn is_open(&self) -> bool {
+        self.live.load(Ordering::Acquire)
+    }
     pub fn check(&self, now: HostInstant) -> Result<(), SessionError> {
         if !self.live.load(Ordering::Acquire) {
             return Err(Error::Closed.into());
@@ -112,6 +115,15 @@ impl Egress {
     }
     pub fn check(&self, now: HostInstant) -> Result<(), SessionError> {
         self.transport.check(now)?;
+        self.check_operation(now)
+    }
+    /// Deadline, lifetime and cancellation ONLY, not an authority check. A
+    /// qualified controller handoff checks its own original grant/projection
+    /// before this, without racing the native worker's independent clock cursor.
+    pub fn check_operation(&self, now: HostInstant) -> Result<(), SessionError> {
+        if !self.transport.is_open() {
+            return Err(Error::Closed.into());
+        }
         if now >= self.deadline {
             return Err(Error::Expired.into());
         }

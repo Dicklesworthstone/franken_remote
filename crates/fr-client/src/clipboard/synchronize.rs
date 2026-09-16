@@ -75,12 +75,25 @@ impl<N: NativeClipboard> ControllerSynchronizer<N> {
     pub fn receive(
         &mut self,
         record: &[u8],
+        clock: impl FnMut() -> ClientInstant,
+    ) -> Result<Received, NativeError<N::Error>> {
+        self.receive_before(
+            record,
+            clock,
+            fr_core::time::HostInstant::from_micros(u64::MAX),
+        )
+    }
+    /// `bound` was captured with this original controller's qualified projection.
+    pub fn receive_before(
+        &mut self,
+        record: &[u8],
         mut clock: impl FnMut() -> ClientInstant,
+        bound: fr_core::time::HostInstant,
     ) -> Result<Received, NativeError<N::Error>> {
         let failure = Cell::new(None);
-        let result = self
-            .native
-            .receive(record, || self.clock.checked(clock(), &failure));
+        let result =
+            self.native
+                .receive_before(record, || self.clock.checked(clock(), &failure), bound);
         result.map_err(|error| {
             failure
                 .get()

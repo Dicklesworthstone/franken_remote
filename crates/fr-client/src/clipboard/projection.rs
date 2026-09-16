@@ -16,6 +16,14 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+/// One monotonically advancing cursor per policy consumer. Network checks
+/// cannot replace the sample the native owner is about to validate.
+#[derive(Clone, Copy)]
+pub(super) struct Cursor {
+    pub(super) client: u64,
+    pub(super) host: u64,
+}
+
 pub(crate) struct Owner {
     state: Arc<State>,
     attached: bool,
@@ -187,7 +195,11 @@ impl Owner {
         {
             return Err(Error::WrongChannel);
         }
-        self.state.sample(now, true)?;
+        let at = self.state.sample(now, true)?;
+        let cursor = Arc::new(Mutex::new(Cursor {
+            client: now.0,
+            host: at.as_micros(),
+        }));
         // Consume before exposing any owner. Failed setup cannot reset the
         // per-lease replay ledger by constructing another clipboard channel.
         self.attached = true;
@@ -196,9 +208,11 @@ impl Owner {
             Monitor::new(Projection {
                 state: weak.clone(),
                 binding: self.state.binding,
+                cursor: cursor.clone(),
             }),
             ProjectedClock {
                 state: weak,
+                cursor,
                 fallback: HostInstant::from_micros(
                     self.state
                         .inner
@@ -268,6 +282,68 @@ impl State {
         }
         Ok(HostInstant::from_micros(host))
     }
+    // The original input client advances Metadata; clipboard consumers each
+    // advance their own cursor. Overtaking across consumers is conservative,
+    // while regression within any one consumer remains a terminal clock fault.
+    pub(super) fn sample_cursor(
+        &self,
+        now: ClientInstant,
+        cursor: &Mutex<Cursor>,
+    ) -> Result<HostInstant, Error> {
+        let result = self.sample_cursor_inner(now, cursor);
+        if result.as_ref().is_err_and(|e| *e != Error::NotReady) {
+            self.stopped.store(true, Ordering::Release);
+        }
+        result
+    }
+    fn sample_cursor_inner(
+        &self,
+        now: ClientInstant,
+        cursor: &Mutex<Cursor>,
+    ) -> Result<HostInstant, Error> {
+        let mut c = cursor.lock().map_err(|_| Error::Stopped)?;
+        let m = self.inner.lock().map_err(|_| Error::Stopped)?;
+        if now.0 < c.client {
+            return self.failure(Error::Clock);
+        }
+        let local = now.0.max(m.last_client);
+        self.ready_at(&m, local)?;
+        let rolling = c.host.checked_add(now.0 - c.client).ok_or(Error::Clock)?;
+        let base = m
+            .last_host
+            .checked_add(local - m.last_client)
+            .ok_or(Error::Clock)?;
+        let host = m
+            .clock
+            .age_upper_us(0, local)
+            .map_err(|_| Error::Clock)?
+            .max(rolling)
+            .max(base);
+        if host >= m.host_until {
+            return self.failure(Error::Expired);
+        }
+        *c = Cursor {
+            client: now.0,
+            host,
+        };
+        Ok(HostInstant::from_micros(host))
+    }
+    fn ready_at(&self, m: &Metadata, local: u64) -> Result<(), Error> {
+        if self.stopped.load(Ordering::Acquire) || m.receiver.as_ref().is_some_and(|r| !r.is_live())
+        {
+            return self.failure(Error::Stopped);
+        }
+        if local >= m.local_until
+            || local >= m.obligations_until
+            || m.view_until.is_some_and(|at| local >= at)
+        {
+            return self.failure(Error::Expired);
+        }
+        if !m.mapped || m.view_until.is_none() {
+            return Err(Error::NotReady);
+        }
+        Ok(())
+    }
     pub(super) fn last_host(&self) -> Option<HostInstant> {
         self.inner
             .lock()
@@ -277,6 +353,7 @@ impl State {
 }
 struct Projection {
     state: Weak<State>,
+    cursor: Arc<Mutex<Cursor>>,
     binding: Binding,
 }
 impl Authority for Projection {
@@ -293,24 +370,24 @@ impl Authority for Projection {
         if state.stopped.load(Ordering::Acquire) {
             return Err(Refusal::Revoked);
         }
+        let c = self
+            .cursor
+            .lock()
+            .map_err(|_| Refusal::AuthorityUnavailable)?;
         let m = state
             .inner
             .lock()
             .map_err(|_| Refusal::AuthorityUnavailable)?;
-        // The facade samples the client clock immediately before EVERY policy
-        // check, including after native preparation. Arbitrary host timestamps
-        // are not interchangeable with that qualified projection.
-        if m.receiver
-            .as_ref()
-            .is_some_and(|receiver| !receiver.is_live())
-            || now.as_micros() != m.last_host
-            || !m.mapped
-            || m.view_until.is_none()
-            || m.view_until.is_some_and(|at| m.last_client >= at)
-            || m.last_client >= m.local_until
-            || m.last_client >= m.obligations_until
-            || m.last_host >= m.host_until
-            || state.stopped.load(Ordering::Acquire)
+        // The exact sample belongs to this native consumer, not another
+        // concurrent network/input check. Original-owner updates may only tighten
+        // its decision. No lock is held across native preparation/publication.
+        let local = c.client.max(m.last_client);
+        if now.as_micros() != c.host
+            || state.ready_at(&m, local).is_err()
+            || m.clock
+                .age_upper_us(0, local)
+                .map_or(true, |at| at >= m.host_until)
+            || c.host >= m.host_until
         {
             state.stopped.store(true, Ordering::Release);
             return Err(Refusal::Revoked);

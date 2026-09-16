@@ -31,3 +31,6 @@ pub mod display_selection;
 
 #[cfg(target_os = "linux")]
 pub mod native_connection;
+
+#[cfg(target_os = "linux")]
+pub mod clipboard_quic;

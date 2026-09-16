@@ -431,7 +431,16 @@ impl<N: NativeClipboard> Synchronizer<N> {
     pub fn receive(
         &mut self,
         bytes: &[u8],
+        clock: impl FnMut() -> HostInstant,
+    ) -> Result<Received, SyncError<N::Error>> {
+        self.receive_before(bytes, clock, HostInstant::from_micros(u64::MAX))
+    }
+    /// The immutable ingress deadline includes time waiting for this worker.
+    pub fn receive_before(
+        &mut self,
+        bytes: &[u8],
         mut clock: impl FnMut() -> HostInstant,
+        bound: HostInstant,
     ) -> Result<Received, SyncError<N::Error>> {
         let mut turn = Turn {
             owner: self,
@@ -459,7 +468,7 @@ impl<N: NativeClipboard> Synchronizer<N> {
         let result = turn
             .owner
             .channel
-            .receive(bytes, &mut publication, &mut clock);
+            .receive_before(bytes, &mut publication, &mut clock, bound);
         let result = match result {
             Ok(receipt) => {
                 if turn.owner.channel.last_publication != previous {

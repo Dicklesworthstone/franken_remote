@@ -559,3 +559,6 @@ fn queued_or_sent_control_response_never_proves_host_lease_extension() {
 
 #[path = "clipboard_controller/lane.rs"]
 mod lane;
+
+#[path = "clipboard_controller/handoff.rs"]
+mod handoff;

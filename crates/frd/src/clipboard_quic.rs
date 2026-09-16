@@ -1,0 +1,382 @@
+//! Original-controller clipboard attachment joined to an off-network OS worker.
+//! The running session retains its admission and drives the existing connection.
+//! This module creates no listener, replacement lease, or synthetic viewer clock.
+use asupersync::cx::Cx;
+use fr_client::{
+    clipboard::{ControllerClipboard, ControllerSynchronizer, ControllerTransport},
+    input::{ClientInstant, InputClient},
+};
+use fr_core::{
+    clipboard::{ClipboardSwitch, PlatformError},
+    input_submission::InputSession,
+    time::HostInstant,
+};
+use fr_transport::quic::{
+    self, ConnectionBinding, Disposition, QuicRecords, clipboard::ClipboardChannel,
+};
+use fr_wire::clipboard::{
+    Role,
+    session::{
+        Admission, ChannelSession, RecordSink, SessionError, TransportFailure,
+        egress::{Egress, Transport},
+        synchronize::{IdentifierFailure, NativeClipboard, Received, Synchronizer},
+    },
+};
+use std::{sync::Arc, time::Duration};
+mod shared;
+mod worker;
+use shared::{Clock, Outgoing, Shared, Turn};
+pub use worker::{Worker, WorkerSeed, WorkerTask};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Error {
+    WrongConnection,
+    WrongRole,
+    Closed,
+    Clock,
+    Cancelled,
+    SwitchChanged,
+    Limit,
+    Allocation,
+    Poisoned,
+    Thread,
+    Native,
+    Panicked,
+    HandoffExpired,
+    NativeSetup(PlatformError),
+    Session(SessionError),
+    Controller(fr_client::clipboard::Error),
+    Transport(quic::Error),
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum State {
+    Active,
+    Retired,
+}
+
+/// At most one outbound queued-or-in-flight record and one incoming
+/// queued/executing/deferred/uncollected record. Other lanes retain their budgets.
+pub struct Bridge {
+    lane: ClipboardChannel,
+    connection: ConnectionBinding,
+    shared: Arc<Shared>,
+    clock: Clock,
+    cx: Cx,
+    switches: (u64, u64),
+    pending: Option<Outgoing>,
+    inflight: Option<(Egress, u64)>,
+    retired: bool,
+    reason: Option<Error>,
+}
+impl std::fmt::Debug for Bridge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClipboardBridge")
+            .field("retired", &self.retired)
+            .finish_non_exhaustive()
+    }
+}
+impl Bridge {
+    /// Use the original input owner and its actual host timer domain. `granted`
+    /// means separately negotiated/local clipboard approval, not control alone.
+    pub fn host(
+        cx: Cx,
+        q: &QuicRecords,
+        lane: ClipboardChannel,
+        input: &InputSession,
+        granted: bool,
+    ) -> Result<(Self, WorkerSeed), Error> {
+        lane.check(q).map_err(Error::Transport)?;
+        if lane.outgoing().sender != Role::Host {
+            return Err(Error::WrongRole);
+        }
+        let session = ChannelSession::new(
+            input,
+            lane.outgoing(),
+            lane.limits(),
+            granted,
+            HostInstant::from_micros(shared::now(&cx)?),
+        )
+        .map_err(Error::Session)?;
+        let transport = session.transport();
+        Self::join(
+            cx,
+            q,
+            lane,
+            worker::Session::Host(session),
+            transport.clone(),
+            Clock::Host(transport.clone()),
+            Clock::Host(transport),
+        )
+    }
+    /// Join the actual accepted viewer grant and completed route. Authority and
+    /// presentation remain tied to the ORIGINAL `InputClient`; no host owner exists.
+    pub fn controller(
+        cx: Cx,
+        q: &QuicRecords,
+        lane: ClipboardChannel,
+        input: &mut InputClient,
+        granted: bool,
+    ) -> Result<(Self, WorkerSeed), Error> {
+        lane.check(q).map_err(Error::Transport)?;
+        if lane.outgoing().sender != Role::Controller {
+            return Err(Error::WrongRole);
+        }
+        let session = input
+            .attach_clipboard_lane(
+                lane.parent(),
+                lane.outgoing(),
+                lane.limits(),
+                granted,
+                ClientInstant(shared::now(&cx)?),
+            )
+            .map_err(Error::Controller)?;
+        let network = session.transport();
+        let worker = session.transport();
+        Self::join(
+            cx,
+            q,
+            lane,
+            worker::Session::Controller(session),
+            network.transport(),
+            Clock::Controller(network),
+            Clock::Controller(worker),
+        )
+    }
+    fn join(
+        cx: Cx,
+        q: &QuicRecords,
+        lane: ClipboardChannel,
+        session: worker::Session,
+        gate: Transport,
+        clock: Clock,
+        worker_clock: Clock,
+    ) -> Result<(Self, WorkerSeed), Error> {
+        clock.sample(&cx)?;
+        let (a, b) = gate.switches();
+        let switches = (a.state(), b.state());
+        let shared = Arc::new(Shared {
+            maximum: gate.limits().max_control_message_bytes() as usize,
+            gate,
+            inbox: std::sync::Mutex::default(),
+            outbox: std::sync::Mutex::default(),
+            inbound_until: std::sync::atomic::AtomicU64::default(),
+            wake: std::sync::OnceLock::default(),
+        });
+        let seed = WorkerSeed {
+            session: Some(session),
+            shared: shared.clone(),
+            clock: worker_clock,
+            cx: cx.clone(),
+        };
+        Ok((
+            Self {
+                lane,
+                connection: q.binding(),
+                shared,
+                clock,
+                cx,
+                switches,
+                pending: None,
+                inflight: None,
+                retired: false,
+                reason: None,
+            },
+            seed,
+        ))
+    }
+    pub fn switches(&self) -> (ClipboardSwitch, ClipboardSwitch) {
+        self.shared.gate.switches()
+    }
+    pub const fn reason(&self) -> Option<Error> {
+        self.reason
+    }
+    pub const fn is_retired(&self) -> bool {
+        self.retired
+    }
+    /// A terminal publication/refusal is never overwritten by another incoming
+    /// item. Collect it even after shutdown; it is not permission to retry.
+    pub fn take_received(&mut self) -> Result<Option<Received>, Error> {
+        let mut inbox = match self.shared.inbox.try_lock() {
+            Ok(v) => v,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::sync::TryLockError::Poisoned(_)) => return Err(Error::Poisoned),
+        };
+        let result = inbox.result.take();
+        if result.is_some() {
+            inbox.busy = false;
+            self.shared.wake();
+        }
+        Ok(result)
+    }
+    fn bound(&self, q: &QuicRecords) -> Result<(), Error> {
+        if !q.is_bound_to(&self.connection) {
+            return Err(Error::WrongConnection);
+        }
+        Ok(())
+    }
+    /// Fence native publication FIRST, then retire only the optional lane on its
+    /// original connection. Never wait for a potentially hung native destructor.
+    pub fn retire(&mut self, q: &mut QuicRecords) -> Result<(), Error> {
+        self.bound(q)?;
+        self.shared.stop();
+        self.pending = None;
+        self.inflight = None;
+        if !self.retired {
+            self.retired = true;
+            self.lane.retire(q, &self.cx).map_err(Error::Transport)?;
+        }
+        Ok(())
+    }
+    fn admission(&self) -> Result<(u64, HostInstant), Error> {
+        let (local, host) = self.clock.sample(&self.cx)?;
+        if !self.shared.gate.is_open() {
+            return Err(Error::Closed);
+        }
+        let (a, b) = self.shared.gate.switches();
+        if (a.state(), b.state()) != self.switches || !a.is_enabled() || !b.is_enabled() {
+            return Err(Error::SwitchChanged);
+        }
+        if let Some((permit, until)) = &self.inflight {
+            permit.check_operation(host).map_err(Error::Session)?;
+            if local >= *until {
+                return Err(Error::HandoffExpired);
+            }
+        }
+        if let Some(p) = &self.pending {
+            p.permit.check_operation(host).map_err(Error::Session)?;
+            if local >= p.until {
+                return Err(Error::HandoffExpired);
+            }
+        }
+        let until = self
+            .shared
+            .inbound_until
+            .load(std::sync::atomic::Ordering::Acquire);
+        if until != 0 && local >= until {
+            return Err(Error::HandoffExpired);
+        }
+        Ok((local, host))
+    }
+    /// Bounded network turn. Native work happens only in `Worker::step`/`WorkerSeed::spawn`;
+    /// dispatch callbacks copy one bounded record with a fixed ingress deadline.
+    pub fn service(
+        &mut self,
+        q: &mut QuicRecords,
+        mut authorize: impl FnMut() -> bool,
+    ) -> Result<State, Error> {
+        self.bound(q)?;
+        if self.retired {
+            return Ok(State::Retired);
+        }
+        let mut turn = Turn::new(&self.shared);
+        // Retire before q.tick evaluates an expired retained clipboard record,
+        // preserving input/media when the stop happens BETWEEN I/O operations.
+        if let Err(reason) = self.admission() {
+            self.reason = Some(reason);
+            self.retire(q)?;
+            turn.complete();
+            return Ok(State::Retired);
+        }
+        q.tick(&self.cx, &mut authorize).map_err(Error::Transport)?;
+        if self.lane.check(q).is_err() {
+            self.reason = Some(Error::Closed);
+            self.retire(q)?;
+            turn.complete();
+            return Ok(State::Retired);
+        }
+        if self.inflight.is_some() && self.lane.send_drained(q).map_err(Error::Transport)? {
+            match self.shared.outbox.try_lock() {
+                Ok(mut outbox) => {
+                    self.inflight = None;
+                    outbox.busy = false;
+                    self.shared.wake();
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {}
+                Err(std::sync::TryLockError::Poisoned(_)) => return Err(Error::Poisoned),
+            }
+        }
+        if self.pending.is_none() && self.inflight.is_none() {
+            match self.shared.outbox.try_lock() {
+                Ok(mut outbox) => self.pending = outbox.item.take(),
+                Err(std::sync::TryLockError::WouldBlock) => {}
+                Err(std::sync::TryLockError::Poisoned(_)) => return Err(Error::Poisoned),
+            }
+        }
+        let (local, host) = match self.admission() {
+            Ok(v) => v,
+            Err(reason) => {
+                self.reason = Some(reason);
+                self.retire(q)?;
+                turn.complete();
+                return Ok(State::Retired);
+            }
+        };
+        if let Some(p) = &self.pending {
+            match self.lane.send(q, &self.cx, &p.bytes.0, p.until, || {
+                self.admission().is_ok() && authorize()
+            }) {
+                Ok(()) => {
+                    let p = self.pending.take().expect("accepted exact record");
+                    self.inflight = Some((p.permit, p.until));
+                }
+                Err(quic::Error::Backpressure) => {}
+                Err(e) => return Err(Error::Transport(e)),
+            }
+        }
+        self.lane
+            .dispatch(q, &self.cx, &mut authorize, |bytes| {
+                self.shared.accept(bytes, local, host)
+            })
+            .map_err(Error::Transport)?;
+        turn.complete();
+        Ok(State::Active)
+    }
+    /// Drives the EXISTING connection. Keep the containing session's admission
+    /// callback and service its other routes separately. Cancellation or authority
+    /// loss DURING an active native QUIC future remains connection-wide fail-closed.
+    /// Even dropping this future unpolled fences the original worker/connection.
+    pub fn drive<'a>(
+        &'a mut self,
+        q: &'a mut QuicRecords,
+        wait: Duration,
+        mut authorize: impl FnMut() -> bool + 'a,
+    ) -> impl std::future::Future<Output = Result<State, Error>> + 'a {
+        let bound = self.bound(q);
+        let mut guard = bound.is_ok().then(|| Drive {
+            q,
+            shared: self.shared.clone(),
+            complete: false,
+        });
+        async move {
+            bound?;
+            let io = guard.as_mut().expect("bound connection");
+            self.service(io.q, &mut authorize)?;
+            io.q.drive(&self.cx, wait, || {
+                (self.retired || self.admission().is_ok()) && authorize()
+            })
+            .await
+            .map_err(Error::Transport)?;
+            let state = self.service(io.q, &mut authorize)?;
+            io.complete = true;
+            Ok(state)
+        }
+    }
+}
+impl Drop for Bridge {
+    fn drop(&mut self) {
+        self.shared.stop();
+    }
+}
+struct Drive<'a> {
+    q: &'a mut QuicRecords,
+    shared: Arc<Shared>,
+    complete: bool,
+}
+impl Drop for Drive<'_> {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.shared.stop();
+            self.q.close();
+        }
+    }
+}

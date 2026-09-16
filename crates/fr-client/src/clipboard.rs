@@ -37,7 +37,9 @@ impl ControllerTransport {
     }
     pub fn sample(&self, now: ClientInstant) -> Result<HostInstant, Error> {
         let at = self.clock.sample(now)?;
-        self.transport.check(at)?;
+        if !self.transport.is_open() {
+            return Err(Error::Stopped);
+        }
         Ok(at)
     }
 }
@@ -69,13 +71,28 @@ impl From<SessionError> for Error {
 struct ProjectedClock {
     state: Weak<projection::State>,
     fallback: HostInstant,
+    cursor: std::sync::Arc<std::sync::Mutex<projection::Cursor>>,
 }
 impl ProjectedClock {
+    fn independent(&self) -> Self {
+        let cursor = self.cursor.lock().map_or(
+            projection::Cursor {
+                client: u64::MAX,
+                host: u64::MAX,
+            },
+            |v| *v,
+        );
+        Self {
+            state: self.state.clone(),
+            fallback: self.fallback,
+            cursor: std::sync::Arc::new(std::sync::Mutex::new(cursor)),
+        }
+    }
     fn sample(&self, now: ClientInstant) -> Result<HostInstant, Error> {
         self.state
             .upgrade()
             .ok_or(Error::Stopped)?
-            .sample(now, true)
+            .sample_cursor(now, &self.cursor)
     }
     /// The core clock callback is infallible. On projection failure, fence FIRST
     /// and return only the previous sample. That sample is unusable authority,
@@ -191,7 +208,7 @@ impl ControllerClipboard {
     pub fn transport(&self) -> ControllerTransport {
         ControllerTransport {
             transport: self.channel.transport(),
-            clock: self.clock.clone(),
+            clock: self.clock.independent(),
         }
     }
     pub fn local_switch(&self) -> ClipboardSwitch {
