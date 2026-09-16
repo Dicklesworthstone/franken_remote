@@ -12,6 +12,8 @@ use super::{
 };
 use crate::WireError;
 use core::fmt;
+
+pub mod observation;
 use fr_core::{
     clipboard::{
         ClipboardSession, ClipboardSink, ClipboardSwitch, Error, Publication, Receipt, Stamp,

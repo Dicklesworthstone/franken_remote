@@ -284,3 +284,6 @@ fn duplicate_remote_commit_never_discards_a_newer_genuine_local_copy() {
 
 #[path = "clipboard_session/faults.rs"]
 mod faults;
+
+#[path = "clipboard_session/observation.rs"]
+mod observation;
