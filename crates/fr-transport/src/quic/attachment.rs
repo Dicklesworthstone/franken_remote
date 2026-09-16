@@ -28,6 +28,9 @@ const PENDING: u8 = 0;
 const ARMED: u8 = 1;
 const ACTIVE: u8 = 2;
 const ABANDONED: u8 = 3;
+const RETIRED: u8 = 4;
+
+mod retire;
 const MAX_WAIT_US: u64 = 2_000_000;
 
 /// Retained through connection closure: consumed bindings and ticket identities
@@ -37,17 +40,22 @@ pub(super) struct Reservation {
     until: u64,
     ticket: Option<Ticket>,
     pub(super) inbound: StreamId,
+    outbound: StreamId,
+    retired_receive_accounted: u64,
     role: MediaRole,
     pub(super) binding: u32,
     pub(super) datagram_maximum: Option<usize>,
 }
 impl Reservation {
     pub(super) fn readable(&self) -> bool {
-        self.state.load(Ordering::Acquire) != PENDING
+        matches!(self.state.load(Ordering::Acquire), ARMED | ACTIVE)
+    }
+    pub(super) fn retired(&self) -> bool {
+        self.state.load(Ordering::Acquire) == RETIRED
     }
     pub(super) fn expired(&self, now: u64) -> bool {
         match self.state.load(Ordering::Acquire) {
-            ACTIVE => false,
+            ACTIVE | RETIRED => false,
             PENDING | ARMED => now >= self.until,
             _ => true,
         }
@@ -122,7 +130,7 @@ impl fmt::Debug for MediaChannel {
 }
 impl Drop for MediaChannel {
     fn drop(&mut self) {
-        if self.phase != Phase::Complete {
+        if self.phase != Phase::Complete && self.state.load(Ordering::Acquire) != RETIRED {
             self.state.store(ABANDONED, Ordering::Release);
         }
         self.pending.fill(0);
@@ -456,6 +464,8 @@ impl QuicRecords {
             until,
             ticket,
             inbound: inbound.stream,
+            outbound: outbound.stream,
+            retired_receive_accounted: 0,
             role: d.role,
             binding: d.binding.parent.id,
             datagram_maximum: has_datagram(d.role).then_some(
@@ -645,10 +655,14 @@ impl MediaChannel {
         Ok(self.parent)
     }
     pub fn is_complete(&self) -> bool {
-        self.phase == Phase::Complete
+        self.phase == Phase::Complete && self.state.load(Ordering::Acquire) == ACTIVE
     }
     pub fn close(&mut self) {
-        self.state.store(ABANDONED, Ordering::Release);
+        // A completed optional lane may already have been reset on its original
+        // connection. Its tombstone must survive Drop and repeated close calls.
+        if self.state.load(Ordering::Acquire) != RETIRED {
+            self.state.store(ABANDONED, Ordering::Release);
+        }
         self.phase = Phase::Closed;
         self.pending.fill(0);
         self.len = 0;

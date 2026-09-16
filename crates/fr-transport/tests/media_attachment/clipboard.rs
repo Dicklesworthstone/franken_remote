@@ -303,3 +303,6 @@ fn typed_clipboard_routes_check_scope_codec_and_original_connection() {
         assert!(l.h.is_closed());
     });
 }
+
+#[path = "clipboard/retire.rs"]
+mod retire;

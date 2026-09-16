@@ -139,6 +139,15 @@ impl ClipboardChannel {
     pub fn close(&mut self) {
         self.attachment.close();
     }
+    /// Gracefully retire only this completed clipboard pair on its ORIGINAL
+    /// connection. Clears queued records, resets native send/retransmission state,
+    /// and stops the peer direction. Control/input/media routes stay installed.
+    /// Call between I/O turns; no OS call, wait, or replacement grant is involved.
+    /// Drop without this explicit cleanup keeps its conservative connection fence.
+    /// Bytes already delivered to the peer/OS cannot be recalled by a stream reset.
+    pub fn retire(&mut self, q: &mut QuicRecords, cx: &Cx) -> Result<(), Error> {
+        self.attachment.retire_clipboard(q, cx)
+    }
     /// Whole-record admission, not a partial socket write or publication receipt.
     /// The absolute transport-clock deadline comes from the ORIGINAL operation,
     /// not the time it finally obtained queue capacity. Recheck authorization in

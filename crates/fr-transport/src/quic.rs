@@ -392,7 +392,13 @@ impl QuicRecords {
     }
     pub fn has_route(&self, route: Route) -> bool {
         match route {
-            Route::Stream(route) => self.streams.contains(&route),
+            Route::Stream(route) => {
+                self.streams.contains(&route)
+                    && !self
+                        .attachments
+                        .iter()
+                        .any(|r| r.binding == route.binding && r.retired())
+            }
             Route::Datagram(route) => self.datagrams.contains(&route),
         }
     }
@@ -422,7 +428,12 @@ impl QuicRecords {
             .streams()
             .stream(route.stream)
             .map_err(|_| Error::Native)?;
-        Ok(stream.final_size.is_some() || stream.recv_reset.is_some())
+        Ok(stream.final_size.is_some()
+            || stream.recv_reset.is_some()
+            || self
+                .attachments
+                .iter()
+                .any(|r| r.inbound == route.stream && r.retired()))
     }
     pub fn is_closed(&self) -> bool {
         self.native.is_none()
@@ -496,6 +507,7 @@ impl QuicRecords {
                 return Err(Error::Clock);
             }
             self.last_now = Some(now);
+            self.service_clipboard_retirements(cx)?;
             if self.attachments.iter().any(|r| r.expired(now)) {
                 return Err(Error::Expired);
             }
@@ -542,7 +554,7 @@ impl QuicRecords {
         let native = self.native.as_ref().ok_or(Error::Closed)?;
         match route {
             Route::Stream(r) => {
-                if !r.outbound || !self.streams.contains(&r) {
+                if !r.outbound || !self.has_route(Route::Stream(r)) {
                     return Err(Error::WrongRoute);
                 }
                 validate_record(bytes, r.maximum, r.binding, r.messages)?;
