@@ -275,7 +275,7 @@ fn automatic_bidirectional_copies_cross_two_real_desktops_without_echo_or_idle_r
     }
     let mut pair = Pair::new();
     for (index, text) in [
-        "".to_owned(),
+        String::new(),
         "automatic 🦀\n\0café".to_owned(),
         "🦀".repeat(262_144),
     ]
@@ -349,7 +349,7 @@ fn both_switches_cancel_pending_reads_and_reenable_waits_for_a_new_copy() {
         for _ in 0..30 {
             pair.step();
         }
-        assert!(pair.receipts[1].is_empty());
+        assert_eq!(pair.receipts[1], [] as [Stamp; 0]);
         assert_eq!(
             pair.ids[0], 1,
             "off/on must not replay the interrupted selection"
@@ -710,3 +710,6 @@ fn off_on_during_id_acquisition_cancels_without_destroying_the_channel() {
 
 #[path = "synchronize/publication.rs"]
 mod publication;
+
+#[path = "synchronize/controller.rs"]
+mod controller;

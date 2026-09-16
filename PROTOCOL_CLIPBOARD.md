@@ -161,8 +161,8 @@ FR_NATIVE_CLIPBOARD_REQUIRED=1 xvfb-run -a \
 These tests exercise actual X11 selections and the real codec/authority owners;
 the record handoff between endpoints is an explicit in-memory transport fixture.
 This is not live-tailnet or cross-platform clipboard qualification. GUI/session
-attachment, Wayland portal support, and a qualified viewer-side host-clock
-authority projection remain integration work.
+attachment and Wayland portal support remain integration work. The controller
+authority projection and its native integration are described below.
 
 
 ## Automatic native synchronization
@@ -229,7 +229,6 @@ Such an attempted external operation retains its conservative `UnknownEffect`
 receipt rather than being replayed. Deterministic real-X11 tests inject copies
 both before preparation and immediately after it, preserve the newer selection,
 and verify that its change notification still starts automatic propagation.
-
 ## Native QUIC attachment
 
 `native-clipboard-attachment` version 1 adds native auxiliary role 5 (Clipboard)
@@ -264,3 +263,69 @@ Dropping/closing the typed route retires its attachment and fences the original
 connection at the next checked operation. It never acts on a foreign connection
 whose numeric routes happen to match. Per-lane teardown, native worker handoff,
 and application session construction remain separate integration work.
+
+## Controller-side authority and native synchronization
+
+A viewer no longer needs to fabricate a host `InputSession` to participate in
+clipboard transfer. The core and wire clipboard owners now accept a read-only
+`fr_core::clipboard::authority::Monitor`. The existing host constructors still
+delegate to the original host input monitor. A controller obtains its monitor
+only after `RequestControl::accept` validates the matching host grant and initial
+ticket against this session's measured clock correlation. A bare
+`InputClient::new`, copied IDs, or queued challenge response is insufficient.
+
+After the separate clipboard capability, local OS grant, approval, and dedicated
+channel attachment have been validated, call `attach_clipboard_lane` on
+`InputClient` or `PresentedInput` with the completed route's `parent()`,
+`outgoing()`, and `limits()`, plus the separate local clipboard approval. This
+matches the original host boot, OS/remote session, parent binding, controller
+lease, and sender direction before consuming the one-use local attachment.
+Record and item limits can only decrease the original session ceilings; a small
+attached record allowance produces smaller chunks, never larger control messages.
+The caller still retains and checks the non-cloneable transport route: matching
+numeric metadata alone does not establish original connection identity.
+`attach_clipboard` is the convenience form for an already validated lane with
+unchanged session limits. Mapping and qualified presentation must be ready, and
+the lane must differ from the control, display, and input bindings.
+Only one clipboard attachment is allowed per original input owner; closing the
+lane does not permit recreating its replay ledger under the same grant.
+
+`ControllerClipboard` accepts client-clock samples for offers, bounded sends,
+and incoming records. It projects host time using the full measured uncertainty,
+checks exclusive expiry before and after native preparation, and never compares
+unrelated host/client clock origins directly. A better correlation cannot make
+its accounting clock stand still or extend an existing item's original deadline.
+Sending a control response does not prove a host renewal: only a validated newer
+host ticket can extend the still-live original projection, and never an already
+expired one. Ticket-only expiry does not shorten an otherwise live control lease.
+
+`ControllerClipboard::into_native(X11Clipboard)` produces a
+`ControllerSynchronizer<X11Clipboard>`, using the existing bounded native
+synchronizer, XFixes watcher, UTF-8/INCR reader, publisher, and protocol owners.
+Every `poll` and `receive` callback supplies **client** monotonic time. Poll during
+silence as well as traffic. The worker does not retain the input owner: drop,
+focus loss, suspend, disconnect, view expiry, missed input/control obligations,
+and clock failure fence it. Closing the clipboard alone does not revoke input.
+The `PresentedInput` join also retains a read-only lifetime of its exact media
+receiver; closing or dropping that receiver fences detached clipboard work
+immediately, even before the next presented-input tick. Equal numeric bindings
+on another receiver do not replace or revoke that original lifetime.
+
+The controller tests use actual grant, wire, authority, and media-receiver code
+with explicitly simulated grant/clock/decoder/visibility and record boundaries.
+The native integration target additionally exercises the controller path across
+two real Xvfb desktops for empty, Unicode, and one-MiB text, echo/idle behavior,
+original-owner cancellation during INCR, both off switches, and a smaller
+2-KiB record allowance without reducing the one-MiB item ceiling. These tests do
+not establish live-tailnet, independent interoperability, or cross-platform
+qualification. The running session still must negotiate and authenticate the
+dedicated clipboard lane, schedule its worker, connect its independent local
+lifecycle fence, and fence bytes already accepted by its transport. No listener,
+GUI hookup, host grant, alternate async runtime, or synthetic codec is introduced.
+
+```sh
+cargo test -p fr-core -p fr-wire -p fr-media -p fr-client --all-features --locked
+FR_NATIVE_CLIPBOARD_REQUIRED=1 xvfb-run -a \
+  -s '-screen 0 1280x1024x24 -noreset -nolisten tcp' \
+  cargo test -p fr-native --features linux-clipboard --test clipboard_x11 --locked
+```
