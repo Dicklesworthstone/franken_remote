@@ -41,6 +41,16 @@ pub trait NativeClipboard: ClipboardSink {
     fn watch(&mut self) -> Result<u64, Self::Error>;
     fn changes(&mut self) -> Result<NativeChanges, Self::Error>;
     fn revision(&self) -> u64;
+    /// Prepare without publishing, then service bounded native change metadata
+    /// and reject unless `revision` still describes the current selection.
+    /// Keep any discovered change pending for the next `changes` call. The core
+    /// rechecks authority and expiry AFTER this potentially blocking operation.
+    fn prepare_for_revision(
+        &mut self,
+        text: &str,
+        stamp: Stamp,
+        revision: u64,
+    ) -> Result<(), fr_core::clipboard::PlatformError>;
     fn begin_read(&mut self) -> Result<(), Self::Error>;
     fn poll_read(&mut self) -> Result<Option<Self::Text>, Self::Error>;
     fn cancel_read(&mut self);
@@ -442,10 +452,14 @@ impl<N: NativeClipboard> Synchronizer<N> {
             return Ok(Received::Deferred);
         }
         let previous = turn.owner.channel.last_publication;
+        let mut publication = PublicationGuard {
+            native: &mut turn.owner.native,
+            revision: turn.owner.seen_revision,
+        };
         let result = turn
             .owner
             .channel
-            .receive(bytes, &mut turn.owner.native, &mut clock);
+            .receive(bytes, &mut publication, &mut clock);
         let result = match result {
             Ok(receipt) => {
                 if turn.owner.channel.last_publication != previous {
@@ -471,5 +485,35 @@ impl<N: NativeClipboard> Synchronizer<N> {
 impl<N: NativeClipboard> Drop for Synchronizer<N> {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+// Native preparation can service a local copy that arrived AFTER native_changes
+// but BEFORE the final OS call. Do not overwrite it with the older incoming item.
+struct PublicationGuard<'a, N: NativeClipboard> {
+    native: &'a mut N,
+    revision: u64,
+}
+impl<N: NativeClipboard> ClipboardSink for PublicationGuard<'_, N> {
+    fn prepare(
+        &mut self,
+        text: &str,
+        stamp: Stamp,
+    ) -> Result<(), fr_core::clipboard::PlatformError> {
+        self.native.prepare_for_revision(text, stamp, self.revision)
+    }
+    fn publish(&mut self, text: &str, stamp: Stamp) -> fr_core::clipboard::Publication {
+        // Pure check only: no additional blocking work after the core's final
+        // clock, deadline and authority check. The native submission itself must
+        // retain its OS timestamp/owner fence for changes not yet serviced here.
+        if self.native.revision() != self.revision {
+            return fr_core::clipboard::Publication::NotSubmitted(
+                fr_core::clipboard::PlatformError::LocalChanged,
+            );
+        }
+        self.native.publish(text, stamp)
+    }
+    fn cancel_prepared(&mut self) {
+        self.native.cancel_prepared();
     }
 }

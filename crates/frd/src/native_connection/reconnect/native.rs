@@ -118,6 +118,7 @@ where
 /// `ViewingControl::request_control` after fresh mapping/visibility evidence.
 /// Neither this adapter nor the reconnect supervisor carries an old request,
 /// lease, ticket, held state, receipt sequence, approval, or media reference.
+#[allow(clippy::too_many_arguments)] // Independent UI callbacks and qualified policies, as in run_control_capable.
 pub fn native_control_view(
     observer_policy: ObserverPolicy,
     clock_policy: ClockPolicy,

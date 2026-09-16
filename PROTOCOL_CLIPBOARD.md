@@ -210,3 +210,22 @@ records, identifier faults and caught clock panics. X11 selection operations are
 real; the bounded single-record handoff is an explicit transport fixture, not
 live-tailnet qualification. Production channel attachment and interactive-worker
 scheduling remain separate integration gates.
+
+### Local copies during native publication
+
+Incoming commits preserve a local copy that arrives during native preparation,
+not just copies noticed before the commit starts. The synchronizer binds its
+publication adapter to the admitted native revision; preparation services bounded
+change metadata without consuming the notification needed for later propagation.
+A changed revision refuses before publication. All potentially blocking native
+validation still precedes the core's final authority, switch and deadline checks.
+
+The X11 adapter additionally establishes a real server-clock barrier strictly
+later than the prepared publication timestamp. Equal millisecond timestamps are
+not treated as evidence that preparation is current. The barrier services at most
+32 events and has the existing 100 ms preparation budget. A later selection
+change then fences the attempted native set through the server's timestamp rules.
+Such an attempted external operation retains its conservative `UnknownEffect`
+receipt rather than being replayed. Deterministic real-X11 tests inject copies
+both before preparation and immediately after it, preserve the newer selection,
+and verify that its change notification still starts automatic propagation.

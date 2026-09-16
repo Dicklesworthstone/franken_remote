@@ -707,3 +707,6 @@ fn off_on_during_id_acquisition_cancels_without_destroying_the_channel() {
     assert_eq!(record.accepted, 0);
     assert!(input.monitor().deadline(at(0)).is_ok());
 }
+
+#[path = "synchronize/publication.rs"]
+mod publication;
