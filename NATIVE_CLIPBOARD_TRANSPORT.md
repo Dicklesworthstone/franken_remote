@@ -86,15 +86,26 @@ use independent monotonic viewer-clock cursors, so a concurrent network check
 cannot replace the exact native sample awaiting its final publication check.
 Every cursor remains bound to the same original controller and presentation.
 
-There is one outbound queued-or-in-flight record and one incoming
-queued/executing/deferred/uncollected record. Taking a buffer out of its mailbox
-does not free capacity. Outbound admission remains occupied until the actual
-native empty-send witness accounts for queued, unsent, and retransmittable
-bytes; a local copy into QUIC is not enough. Egress permits remain checked until
-that point. An incoming Begin carries its original ingress deadline through
-worker queueing. Deferral cannot restart its three-second transfer lifetime.
-These handoff slots supplement, not replace, the already bounded native item
-buffers and native QUIC stream windows.
+There is one outbound handoff record and at most four records admitted to the
+native transport. Every admitted record retains its original Egress permit until
+the native empty-send witness accounts for queued, unsent, and retransmittable
+bytes. A local copy into QUIC frees the handoff slot, not the authorization permit.
+The fixed four-record batch and the existing bulk byte/record budget both apply;
+control and input reservations are never borrowed. A contended handoff-release
+lock cannot cause an already admitted record to be sent twice.
+
+There is one incoming queued/executing/deferred/uncollected record. Taking that
+buffer out of its mailbox does not free capacity. An incoming Begin carries its
+original ingress deadline through worker queueing; deferral cannot restart its
+three-second lifetime. These slots supplement, not replace, the already bounded
+native item buffers and native QUIC stream windows.
+
+A transport drive may flush up to eight 900-byte bulk prefixes before its single
+receive wait. A critical prefix takes priority and yields back to receive/service.
+Each prefix rechecks authority, original send deadlines, native congestion and
+flow credit, including reserved critical credit. One 250 ms outer bound covers
+the entire turn. The transport still relies on Asupersync for pacing, loss and
+congestion control; this is not an unbounded bulk-write loop.
 
 Collect `Bridge::take_received` regularly. A submitted, uncertain, or refused
 publication result is terminal for that record and retained until collected;
@@ -163,5 +174,56 @@ completion remains a separate native-cleanup witness, not an effect of calling
 `close`. The running-session regression tests use real startup, native input
 agent, clock exchange, decoder-backed grant and encrypted UDP/TLS, with explicit
 fixture grant metadata and clipboard OS implementations. Production native UI
-consent, optional channel negotiation and GUI callback plumbing remain required;
-this API does not implicitly grant them or claim live-tailnet qualification.
+consent and GUI callback plumbing remain required; the optional negotiation API
+below grants neither and does not claim live-tailnet qualification.
+
+## Automatic attachment in the running session
+
+When [native-clipboard-startup v1](PROTOCOL_CLIPBOARD_STARTUP.md) and its media/input/clipboard prerequisite
+profiles are selected, the host calls `ControlledHost::offer_clipboard(request,
+local_consent)` and the viewer calls `ControlledViewer::expect_clipboard(timeout,
+local_consent)`. The host request uses the already approved current display/view,
+a fresh auxiliary binding and a qualified unpredictable attachment ticket. Neither
+call opens the OS. Missing profile selection and invalid timeouts refuse without
+starting an exchange or disturbing the existing input session.
+
+Continue the normal controlled-session `drive` methods; they service attachment,
+clock exchange, media, input and lease renewal together. `clipboard_negotiating`
+reports pending setup. Once the native pair is promoted on both ends, a fixed
+`ClipboardReady` record on the original control lane exchanges independent local
+consent. A worker is released only after local readiness was queued and peer
+readiness consumed. This prevents early payloads from reaching an attachment-only
+framer and prevents refusal from resetting away the final attachment receipt.
+Handshake records are not forwarded to application callbacks.
+
+After success, `take_clipboard_worker()` returns the one-use seed exactly once.
+Move it to the interactive worker or use `seed.spawn(native_factory, new_id)` as
+above. The factory and item-ID qualification remain the application's obligation.
+Closing the session fences a seed whether it is uncollected, moved, or already
+running, including before native open. Native thread completion is still distinct
+from cancellation. The explicit pre-attached `attach_clipboard` API remains
+available for callers that do not select the new startup profile.
+
+Either endpoint may decline. The ready exchange still completes and both retire
+only clipboard, report `ConsentRequired`, release no seed, and keep input/viewing
+usable. Setup is one-use even after refusal: it cannot reset a replay ledger or
+reopen a consumed native stream. The original timeout (at most two seconds) starts
+at the API call, covers readiness, and is never renewed on a later first poll,
+backpressure, or phase transition. Cancellation, expiry, or malformed traffic
+while an attachment is incomplete conservatively closes the original session;
+only completed optional lanes support isolated retirement.
+
+The running-session tests exercise automatic negotiation without pre-attached
+clipboard routes, independent consent/refusal, in-flight keyboard input, empty,
+Unicode and full one-MiB transfers in both directions, retained-send bounds,
+unpolled cancellation, original timeouts, and cancellation of uncollected seeds.
+They use actual UDP/TLS, session/clock/input owners and native worker threads;
+clipboard OS contents and initial grant/consent metadata are explicit fixtures.
+The separate `clipboard_network` tests still exercise actual X11 desktops. Neither
+test group substitutes for GUI startup consent or live-tailnet qualification.
+
+The one-MiB success cases start each direction with an actual fresh host grant.
+An operation started near the end of an existing lease may correctly expire
+before completion, even if the session later renews. Faster queue progress does
+not extend its captured authority, view, or transfer deadlines; the application
+must report that terminal result rather than automatically replay the old copy.

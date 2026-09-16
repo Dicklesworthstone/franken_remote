@@ -12,7 +12,7 @@ fn scope() -> Scope {
     }
 }
 fn chunk(channel: &ClipboardChannel) -> Vec<u8> {
-    let payload = vec![0x5a; 6000];
+    let payload = vec![0x5a; 7800];
     let mut bytes = vec![0; 8192];
     let n = wire::encode(
         Message {
@@ -140,8 +140,13 @@ fn retire_discards_native_prefix_and_partial_receive_without_replaying_on_ack() 
         quiet(&mut l, &cx).await;
         h.send(&mut l.h, &cx, &chunk(&h), clock(&cx) + 1_000_000, || true)
             .unwrap();
+        // One host burst stages at most 7,200 bytes. Drive only the receiver
+        // afterward so this stays a genuinely partial record, not an ACK race.
+        l.h.drive(&cx, Duration::ZERO, || true).await.unwrap();
         for _ in 0..3 {
-            l.drive(&cx).await;
+            l.c.drive(&cx, Duration::from_millis(1), || true)
+                .await
+                .unwrap();
             c.dispatch(
                 &mut l.c,
                 &cx,
@@ -150,7 +155,7 @@ fn retire_discards_native_prefix_and_partial_receive_without_replaying_on_ack() 
             )
             .unwrap();
         }
-        assert!(l.c.usage().framed_capacity >= 6000);
+        assert!(l.c.usage().framed_capacity >= 7800);
         assert_eq!(l.h.usage().retained_send_records, 1);
         h.retire(&mut l.h, &cx).unwrap();
         peer_retired(&mut l, &cx, ca.inbound).await;
