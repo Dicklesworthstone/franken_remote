@@ -124,3 +124,42 @@ Recording sinks are explicitly test fixtures, not OS adapters. This is not
 native clipboard, live-tailnet, independent-peer, or GUI qualification. The
 full feature remains open until its platform/lifecycle attachment, switches,
 approval paths, automatic OS change detection, and desktop integration pass.
+
+## Opt-in Linux/X11 native observation
+
+`fr_native::clipboard::X11Clipboard` supports explicit `begin_read`, `poll_read`
+and `cancel_read` operations alongside native publication. Reads accept bounded
+`UTF8_STRING` and `INCR` selections, use a fresh requestor window per operation,
+and check the current owner and selection `TIMESTAMP` before exposing complete
+UTF-8 text. Owners without the required timestamp target refuse explicitly.
+Each turn reads at most 16 KiB; the selected item ceiling and a fixed three-second
+lifetime apply. Cancellation destroys only that read's requestor and private
+buffer, never a newer local selection. Native X server calls remain a local OS
+trust boundary and belong on the interactive worker, outside authority locks.
+
+`X11Clipboard::read_to_channel` connects the read to an existing admitted
+`ChannelSession`. Supply a qualified item ID and the original owner's clock,
+and call it for an actual current native change, not repeated stale notifications.
+The returned `ChannelRead` borrows both owners exclusively while pending. Its
+`poll` rechecks the original authority and both switches before and after native
+work; only a complete current selection can become `Offer::Queued`. Native text
+never escapes this bridge to its caller. Drop, errors, caught clock panics,
+revocation and an off/on switch cycle consume the read rather than retrying it.
+A new local revision fences stale incoming commits and old outgoing text before
+the potentially slow payload read, including when the new selection is missing
+or unsupported. Exact publication provenance suppresses echoes; equal bytes
+from a genuine new local copy are still eligible to send.
+
+Run the real X11/core/wire composition tests with:
+
+```sh
+FR_NATIVE_CLIPBOARD_REQUIRED=1 xvfb-run -a \
+  -s '-screen 0 1280x1024x24 -noreset -nolisten tcp' \
+  cargo test -p fr-native --features linux-clipboard --test clipboard_x11 --locked
+```
+
+These tests exercise actual X11 selections and the real codec/authority owners;
+the record handoff between endpoints is an explicit in-memory transport fixture.
+This is not live-tailnet or cross-platform clipboard qualification. Automatic
+native change watching, GUI/session attachment, Wayland portal support, and a
+qualified viewer-side host-clock authority projection remain integration work.

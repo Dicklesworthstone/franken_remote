@@ -21,6 +21,12 @@ concurrency:
   group: rust-verification-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+
 jobs:
   rust:
     runs-on: ubuntu-latest
@@ -31,7 +37,9 @@ jobs:
       - name: Install repository-pinned toolchain
         run: rustup show active-toolchain
       - name: Install Linux native media SDKs
-        run: sudo apt-get update && sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth
+        run: sudo apt-get update && sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxcb1-dev libxtst6 pkg-config xvfb xauth
+      - name: Exercise real X11 clipboard observation and authorized transfers
+        run: FR_NATIVE_CLIPBOARD_REQUIRED=1 xvfb-run -a -s '-screen 0 1280x1024x24 -noreset -nolisten tcp' cargo test -p fr-native --features linux-clipboard --test clipboard_x11 --locked
       - name: Run Rust verification
         run: ./scripts/verify.sh fast
       - name: Exercise real X11 capture and HEVC library delivery
