@@ -14,7 +14,13 @@ use crate::WireError;
 use core::fmt;
 use fr_core::clipboard::authority::Monitor;
 
+pub mod egress;
 pub mod observation;
+use egress::{Egress, Transport};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 pub mod synchronize;
 use fr_core::{
     clipboard::{
@@ -78,6 +84,16 @@ pub struct TransportFailure;
 /// This call must not wait for capacity, OS work, or an asynchronous completion.
 pub trait RecordSink {
     fn try_send(&mut self, record: &[u8]) -> Result<Admission, TransportFailure>;
+    /// Asynchronous handoffs retain this permit alongside the exact bytes and
+    /// recheck it before transport admission and while transport retains bytes.
+    /// The default is for an immediate, already-authorized synchronous sink.
+    fn try_send_checked(
+        &mut self,
+        record: &[u8],
+        _permit: Egress,
+    ) -> Result<Admission, TransportFailure> {
+        self.try_send(record)
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pump {
@@ -101,6 +117,8 @@ struct Pending {
 /// Numeric scope and channel fields are descriptions, never bearer authority.
 pub struct ChannelSession {
     receiver: ClipboardSession,
+    transport: Transport,
+    payload_live: Option<Arc<AtomicBool>>,
     monitor: Monitor,
     outgoing: Context,
     incoming: Context,
@@ -174,6 +192,7 @@ impl ChannelSession {
         now: HostInstant,
     ) -> Result<Self, SessionError> {
         let local = outgoing.validate()?;
+        let (monitor, live) = egress::lifetime(monitor);
         let receiver =
             ClipboardSession::with_monitor(monitor.clone(), local, limits, clipboard_granted, now)?;
         if receiver.binding() != outgoing.scope {
@@ -187,7 +206,17 @@ impl ChannelSession {
             },
             ..outgoing
         };
+        let transport = Transport::new(
+            monitor.clone(),
+            live,
+            outgoing,
+            limits,
+            receiver.local_switch(),
+            receiver.peer_switch(),
+        );
         Ok(Self {
+            transport,
+            payload_live: None,
             receiver,
             monitor,
             outgoing,
@@ -199,6 +228,9 @@ impl ChannelSession {
             pending: None,
             cancel: None,
         })
+    }
+    pub fn transport(&self) -> Transport {
+        self.transport.clone()
     }
     pub const fn is_closed(&self) -> bool {
         self.receiver.is_closed()
@@ -230,6 +262,8 @@ impl ChannelSession {
     /// Does not overwrite an OS clipboard or revoke unrelated input/media.
     /// The transport integration must also fence its already accepted records.
     pub fn close(&mut self) {
+        self.transport.close();
+        self.invalidate_payload();
         self.receiver.close();
         self.last_publication = None;
         self.pending = None;
@@ -253,7 +287,13 @@ impl ChannelSession {
             self.close();
         }
     }
+    fn invalidate_payload(&mut self) {
+        if let Some(live) = self.payload_live.take() {
+            live.store(false, Ordering::Release);
+        }
+    }
     fn discard_pending(&mut self, reason: CancelReason) {
+        self.invalidate_payload();
         if let Some(pending) = self.pending.take()
             && pending.started
         {
@@ -355,6 +395,7 @@ impl ChannelSession {
             return Err(Error::Expired.into());
         }
         let sender = Sender::new(text, stamp, self.outgoing, self.limits)?;
+        self.payload_live = Some(Arc::new(AtomicBool::new(true)));
         self.pending = Some(Pending {
             sender,
             deadline,
@@ -397,7 +438,8 @@ impl ChannelSession {
         } else {
             return Ok(Pump::Idle);
         };
-        let state = self.maintain(clock())?;
+        let now = clock();
+        let state = self.maintain(now)?;
         let still_current = if cancellation {
             self.cancel.is_some_and(|(current, _)| current == stamp)
         } else {
@@ -410,12 +452,30 @@ impl ChannelSession {
         if !still_current {
             return Ok(Pump::Deferred);
         }
+        let deadline = if cancellation {
+            now.checked_add(HostDuration::from_micros(1_000_000))
+                .ok_or(Error::Clock)?
+        } else {
+            self.pending
+                .as_ref()
+                .expect("checked current item")
+                .deadline
+        };
+        let permit = Egress::new(
+            self.transport.clone(),
+            deadline,
+            if cancellation {
+                None
+            } else {
+                self.payload_live.clone()
+            },
+        );
         let mut call = ExternalCall {
             owner: self,
             completed: false,
         };
         let admission = sink
-            .try_send(&scratch.0[..len])
+            .try_send_checked(&scratch.0[..len], permit)
             .map_err(|_| SessionError::Transport)?;
         call.completed = true;
         if admission == Admission::Backpressure {

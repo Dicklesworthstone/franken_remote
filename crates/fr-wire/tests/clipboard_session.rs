@@ -287,3 +287,6 @@ mod faults;
 
 #[path = "clipboard_session/observation.rs"]
 mod observation;
+
+#[path = "clipboard_session/egress.rs"]
+mod egress;

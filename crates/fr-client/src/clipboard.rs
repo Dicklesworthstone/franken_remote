@@ -24,6 +24,29 @@ use std::{
 };
 pub use synchronize::{ControllerSynchronizer, NativeError};
 
+/// Read-only network-side projection of the SAME accepted controller owner.
+/// It does no native work and cannot renew, revive, or manufacture authority.
+#[derive(Clone)]
+pub struct ControllerTransport {
+    transport: fr_wire::clipboard::session::egress::Transport,
+    clock: ProjectedClock,
+}
+impl ControllerTransport {
+    pub fn transport(&self) -> fr_wire::clipboard::session::egress::Transport {
+        self.transport.clone()
+    }
+    pub fn sample(&self, now: ClientInstant) -> Result<HostInstant, Error> {
+        let at = self.clock.sample(now)?;
+        self.transport.check(at)?;
+        Ok(at)
+    }
+}
+impl fmt::Debug for ControllerTransport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ControllerTransport([original owner])")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     NotGranted,
@@ -165,6 +188,12 @@ impl InputClient {
     }
 }
 impl ControllerClipboard {
+    pub fn transport(&self) -> ControllerTransport {
+        ControllerTransport {
+            transport: self.channel.transport(),
+            clock: self.clock.clone(),
+        }
+    }
     pub fn local_switch(&self) -> ClipboardSwitch {
         self.channel.local_switch()
     }

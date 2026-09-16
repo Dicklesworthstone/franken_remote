@@ -40,3 +40,22 @@ Payloads are codec fixtures; these tests do not claim native OS publication,
 GUI integration, or live-tailnet qualification. See
 [PROTOCOL_CLIPBOARD.md](PROTOCOL_CLIPBOARD.md) for the transfer and authority
 contracts used by the native worker.
+
+## Authorization across a worker handoff
+
+`ChannelSession::transport` is a read-only view of the original authority and
+channel lifetime. Closing it fences the core's final publication check even if
+the native worker is inside preparation; it never revokes unrelated input.
+Controller sessions expose `ControllerTransport` to sample their existing
+client-to-host projection rather than fabricate a host lease or clock.
+
+`RecordSink::try_send_checked` carries an `Egress` permit with the original
+absolute operation deadline. An asynchronous sink retains it beside the copied
+record, rechecks it before enqueue, and keeps checking while QUIC retains bytes.
+The permit is invalid after channel close, authority loss, a switch off/on cycle,
+or supersession, including a commit whose sender has already finished. A Cancel
+contains no payload and can release the peer while the switches are disabled;
+its handoff still has a fixed one-second deadline and original-owner check.
+The default sink method preserves immediate synchronous adapters, not permission
+to ignore metadata in a queued adapter. A successful check is not delivery or OS
+publication, and cannot recall an operation already performed by a peer.

@@ -207,7 +207,9 @@ impl ClipboardSwitch {
             }
         }
     }
-    fn state(&self) -> u64 {
+    /// Monotonic off/on revision for bounded asynchronous handoffs.
+    /// This is metadata, never clipboard or input authority.
+    pub fn state(&self) -> u64 {
         self.0.load(Ordering::Acquire)
     }
     pub fn is_enabled(&self) -> bool {
