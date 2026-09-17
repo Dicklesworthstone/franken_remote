@@ -292,7 +292,7 @@ impl Drop for Native<'_> {
         }
     }
 }
-fn local_display(display: &str) -> bool {
+pub(crate) fn local_display(display: &str) -> bool {
     let Some(number) = display.strip_prefix(':') else {
         return false;
     };

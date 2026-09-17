@@ -315,3 +315,6 @@ fn abandoned_map_wait_unregisters_without_closing_the_retained_window() {
 #[cfg(feature = "linux-desktop")]
 #[path = "viewer_window/desktop.rs"]
 mod desktop;
+
+#[path = "viewer_window/picker.rs"]
+mod picker;

@@ -53,3 +53,6 @@ pub mod viewer_window;
 
 #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
 pub mod desktop;
+
+#[cfg(all(target_os = "linux", feature = "linux-viewer-window"))]
+pub mod display_picker;
