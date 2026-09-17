@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "policy": "native/linux-ffmpeg.json",
+  "built": {
+    "builder": "hz3 (194.140.197.98, ubuntu)",
+    "platform": "Linux-7.0.0-31-generic-x86_64-with-glibc2.43",
+    "cc": "cc (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+    "recipe": "native/build_ffmpeg.py",
+    "configure_log": "evidence/command-1.log (configure summary: libraries avcodec avutil swscale; enabled decoders: hevc; no encoders, hwaccels, parsers, demuxers, muxers, protocols, filters, bsfs, programs; License: LGPL version 2.1 or later)"
+  },
+  "source": {
+    "version": "7.1.5",
+    "url": "https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz",
+    "sha256": "de668509caf9e35e3cd162473441fdb29538c6d96ed080292b3cf9e6fc5d558f",
+    "authentication": "pinned HTTPS digest only; upstream signature not authenticated"
+  },
+  "libraries": {
+    "libavcodec.so.61.19.101": {
+      "sha256": "05ac47fae76830d37d890cb1af2c7bdd407211a7cd294ceb1459cc4f71cb1b9e",
+      "soname": "libavcodec.so.61",
+      "needed": ["libavutil.so.59", "libc.so.6"]
+    },
+    "libavutil.so.59.39.100": {
+      "sha256": "b0be522c68b9782b97238335df1e77440e069038b27f01f1198c533295239fc7",
+      "soname": "libavutil.so.59",
+      "needed": ["libm.so.6", "libc.so.6"]
+    },
+    "libswscale.so.8.3.100": {
+      "sha256": "7ed9ec80aaf90a642951ece3985a779b1219118267d7286c956b3ac27bca367f",
+      "soname": "libswscale.so.8",
+      "needed": ["libavutil.so.59", "libm.so.6", "libc.so.6"]
+    }
+  },
+  "registered_components": ["CONFIG_HEVC_DECODER"],
+  "verification": {
+    "c_abi_probe": "cc -I sdk/include probe.c -L sdk/lib -lavcodec -lswscale -lavutil -lm; LD_LIBRARY_PATH=sdk/lib: decoder=1 encoder=0 libx265=0 avcodec_version=4002661, exit 0",
+    "fr_native_build": "cargo build -p fr-native --features linux-media --example native_roundtrip -j 1 against FR_NATIVE_INCLUDE_DIR/LIBRARY_DIR pointing at the isolated SDK; cold build passed in 13m52s",
+    "runtime_binding": "ldd of native_roundtrip under LD_LIBRARY_PATH resolves libavcodec.so.61, libavutil.so.59, libswscale.so.8 to the isolated SDK only; no x265, avformat, avdevice, avfilter, swresample, or postproc libraries appear",
+    "existing_media_path": "xvfb-run native_roundtrip --software-explicit -> Error: Unavailable, exit 1 (typed FR_UNAVAILABLE at fr_encoder_new: decode-only SDK intentionally contains no encoder; expected refusal, not a defect)"
+  },
+  "qualification_gaps": [
+    "no second-build reproducibility comparison",
+    "no protected-path installation or loader qualification",
+    "no hardware encode/decode qualification (no qualified GPU on any reachable worker)",
+    "no upstream signature authentication",
+    "no shipping license, corresponding-source, relinking, or HEVC patent review",
+    "decoder exercised only to registration/link level here; full decode path awaits an encoder source (hardware or test-only x265 build)"
+  ],
+  "status": "decode-only experiment built and ABI-verified; not a shipping or default hardware bundle"
+}
