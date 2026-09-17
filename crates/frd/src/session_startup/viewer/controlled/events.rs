@@ -1,5 +1,6 @@
 //! Bounded OS-event handoff to the original controlled session. The UI thread
 //! never borrows QUIC or holds an authority lock while making native calls.
+mod native;
 use super::{ControlledViewer, ViewerControl, now};
 use fr_client::input::{self, Action};
 pub use fr_client::input::{
@@ -12,6 +13,7 @@ use fr_core::{
     input::{KeyTransition, MAX_COMMITTED_TEXT_BYTES, PhysicalKey},
     input_submission::{Capabilities, Capability},
 };
+pub use native::{CaptureCleanup, CaptureStartError, NativeCapture};
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex, TryLockError, Weak},

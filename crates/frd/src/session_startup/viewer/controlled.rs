@@ -96,6 +96,7 @@ pub struct ControlledViewer {
     control: ViewerControl,
     last_result: Option<ResultEvent>,
     events: Option<events::Receiver>,
+    native_capture: Option<Box<dyn events::NativeCapture>>,
     clipboard: Option<crate::clipboard_quic::Bridge>,
     clipboard_setup: crate::session_startup::clipboard::Setup,
 }
@@ -188,6 +189,7 @@ impl ViewerSession {
             control,
             last_result: None,
             events: None,
+            native_capture: None,
             clipboard: None,
             clipboard_setup: crate::session_startup::clipboard::Setup::default(),
         })
@@ -234,6 +236,11 @@ impl ControlledViewer {
         self.last_result
     }
     pub fn close(&mut self) {
+        // Fence the original authority before invoking any adapter or cleanup.
+        self.control.stop();
+        if let Some(capture) = &self.native_capture {
+            capture.stop();
+        }
         if let Some(clipboard) = &self.clipboard {
             clipboard.stop();
         }

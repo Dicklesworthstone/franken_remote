@@ -445,6 +445,14 @@ impl StreamingViewer {
         self.close();
         self.presenter.reap(cleanup, deadline).await
     }
+    /// Reap the same native input producer after service exits, without exposing
+    /// a second mutable control owner or waiting on a native thread.
+    pub fn input_capture_cleanup(&mut self) -> super::controlled::events::CaptureCleanup {
+        self.peer.controlled().map_or(
+            super::controlled::events::CaptureCleanup::NotStarted,
+            super::controlled::ControlledViewer::input_capture_cleanup,
+        )
+    }
     /// Retain authentic input results after closure without replaying effects.
     pub fn last_result(&mut self) -> Option<ResultEvent> {
         self.peer.controlled().and_then(|v| v.last_result())

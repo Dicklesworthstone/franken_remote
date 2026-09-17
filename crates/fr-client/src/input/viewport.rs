@@ -229,13 +229,20 @@ impl Viewport {
         self.confirmed = true;
         Ok(())
     }
-    /// Half-open hit testing; toolbar/letterbox/outside events are refused, never
-    /// clamped onto a remote edge. All products fit i128 for the public bounds.
-    pub fn map(&self, event: &Located) -> Result<DesktopPoint, Error> {
-        self.current(&event.layout)?;
+    /// Check an already acknowledged local placement without acknowledging it
+    /// or admitting an input event. Native capture uses this before subscribing
+    /// to a renderer window; a layout from another viewer is never interchangeable.
+    pub fn check_layout(&self, layout: &Layout) -> Result<(), Error> {
+        self.current(layout)?;
         if !self.confirmed {
             return Err(Error::Unconfirmed);
         }
+        Ok(())
+    }
+    /// Half-open hit testing; toolbar/letterbox/outside events are refused, never
+    /// clamped onto a remote edge. All products fit i128 for the public bounds.
+    pub fn map(&self, event: &Located) -> Result<DesktopPoint, Error> {
+        self.check_layout(&event.layout)?;
         let layout = &event.layout;
         let destination = layout.destination;
         let offset_x = i128::from(event.point.x) - i128::from(destination.origin().x) * 256;

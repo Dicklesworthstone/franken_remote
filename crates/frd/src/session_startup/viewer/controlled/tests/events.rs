@@ -270,3 +270,5 @@ fn native_supervisor_gets_only_original_stop_and_granted_capabilities() {
         state.host.close();
     });
 }
+
+mod native;

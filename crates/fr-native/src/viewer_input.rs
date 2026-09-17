@@ -205,6 +205,27 @@ impl X11InputCapture {
             task: Some(task),
         })
     }
+    /// Attach to an already granted original viewer from its interactive UI
+    /// callback. The local renderer must have confirmed this exact Layout first.
+    /// The viewer, not the UI callback, retains the native thread through every
+    /// service exit. This returns only a revocation/status handle, never a Source
+    /// or another input owner. Call the viewer's `input_capture_cleanup` after
+    /// close until Complete to distinguish the fence from actual thread cleanup.
+    pub fn attach(
+        viewer: &mut frd::session_startup::ControlledViewer,
+        display: &str,
+        window: Window,
+        layout: Layout,
+    ) -> Result<CaptureControl, frd::session_startup::viewer_events::CaptureStartError<Error>> {
+        let mut control = None;
+        viewer.capture_input_owned(&layout.clone(), |source| {
+            let capture = Self::start(display, window, source, layout)?;
+            control = Some(capture.control());
+            Ok(capture)
+        })?;
+        // The factory must have completed exactly once for attachment to succeed.
+        Ok(control.expect("successful native capture factory"))
+    }
     pub fn control(&self) -> CaptureControl {
         self.control.clone()
     }
@@ -492,5 +513,14 @@ impl Decoder {
             location: layout.at(LocalPoint::pixels(event.x, event.y)),
             action,
         }))
+    }
+}
+
+impl frd::session_startup::viewer_events::NativeCapture for X11InputCapture {
+    fn stop(&self) {
+        self.control.stop();
+    }
+    fn try_reap(&mut self) -> bool {
+        self.finish().is_some()
     }
 }

@@ -195,6 +195,11 @@ impl NativeObserver {
     pub fn presentation_reports(&self) -> u64 {
         self.viewer.presentation_reports()
     }
+    /// Observe native input cleanup on the original session, including after a
+    /// stopped interactive service. Pending cleanup is never reported completed.
+    pub fn input_capture_cleanup(&mut self) -> super::controlled::events::CaptureCleanup {
+        self.viewer.input_capture_cleanup()
+    }
     pub fn last_result(&mut self) -> Option<fr_client::input::ResultEvent> {
         self.viewer.last_result()
     }
