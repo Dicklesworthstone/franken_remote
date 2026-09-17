@@ -47,6 +47,13 @@ impl fmt::Debug for Viewer {
     }
 }
 impl Viewer {
+    /// Retain the ORIGINAL session's terminal stop before native window/decoder
+    /// startup. The same context survives observation and input promotion; this
+    /// handle cannot acquire authority, replace a grant, or resume a session.
+    pub fn control(&self) -> streaming::StreamingViewerControl {
+        streaming::StreamingViewerControl::observing(self.cx.clone())
+    }
+
     /// Preserve the connector's independent destination lifetime across startup
     /// and every subsequent handoff of the original transport owner.
     pub(crate) fn retain_connection_check(
@@ -278,6 +285,13 @@ pub struct ViewerSession {
     closed: bool,
 }
 impl ViewerSession {
+    /// Retain the ORIGINAL session's terminal stop before native window/decoder
+    /// startup. The same context survives observation and input promotion; this
+    /// handle cannot acquire authority, replace a grant, or resume a session.
+    pub fn control(&self) -> streaming::StreamingViewerControl {
+        streaming::StreamingViewerControl::observing(self.cx.clone())
+    }
+
     /// Begin the one negotiated exchange on this original connection. Subsequent
     /// tick/drive and streaming turns service it, including idle periods. The
     /// policy is local and validated by the existing estimator; it is never

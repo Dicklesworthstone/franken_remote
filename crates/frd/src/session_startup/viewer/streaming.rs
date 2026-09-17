@@ -84,6 +84,14 @@ pub struct StreamingViewerControl {
     input: Option<ViewerControl>,
 }
 impl StreamingViewerControl {
+    pub(super) fn observing(cx: Cx) -> Self {
+        Self { cx, input: None }
+    }
+    /// Terminal cancellation of the ORIGINAL session, including a handle retained
+    /// before decoder startup or input promotion. This never grants authority.
+    pub fn is_stopped(&self) -> bool {
+        self.cx.is_cancel_requested() || self.input.as_ref().is_some_and(ViewerControl::is_stopped)
+    }
     pub fn stop(&self) {
         if let Some(input) = &self.input {
             input.stop();

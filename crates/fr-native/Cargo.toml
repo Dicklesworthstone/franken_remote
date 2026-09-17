@@ -28,6 +28,7 @@ linux-input = []
 linux-clipboard = []
 linux-session-ui = ["dep:frd"]
 linux-viewer-input = ["dep:frd"]
+linux-viewer-window = ["linux-viewer-input"]
 linux-input-agent = ["linux-input", "dep:frd", "dep:asupersync"]
 
 [lints.rust]

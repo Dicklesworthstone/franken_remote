@@ -70,7 +70,7 @@ impl ViewerControl {
         self.cx.cancel_fast(CancelKind::User);
     }
     pub fn is_stopped(&self) -> bool {
-        self.stopped.load(Ordering::Acquire)
+        self.stopped.load(Ordering::Acquire) || self.cx.is_cancel_requested()
     }
 }
 struct Pending {
