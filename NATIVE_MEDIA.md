@@ -61,3 +61,31 @@ including forced-IDR and encode/decode identity checks. NVENC/VAAPI, Windows/mac
 real compositor permissions, full host/client integration, and latency remain
 unqualified. System-library developer builds are not the curated signed distribution;
 FFmpeg/x265 provenance and licensing remain packaging requirements.
+
+## Curated decoder-only SDK experiment
+
+[`native/build_ffmpeg.py`](native/build_ffmpeg.py) consumes a supplied FFmpeg
+7.1.5 archive pinned by [`native/linux-ffmpeg.json`](native/linux-ffmpeg.json).
+It refuses an existing output directory and builds shared avcodec/avutil/swscale
+with only the HEVC decoder registered; no encoder or FFmpeg executable is built.
+
+```sh
+python3 native/build_ffmpeg.py /path/to/ffmpeg-7.1.5.tar.xz /new/output/directory
+```
+
+Use its `sdk/include` and `sdk/lib` with the paired SDK variables above.
+On September 17, 2026, two clean builds on the same Linux builder at the same
+absolute prefix produced identical hashes for all three libraries. A compiled
+Rust probe normalized a real HEVC Main IDR, passed `HevcGuard`, configured
+`HevcDecoder`, submitted it, and asserted frame identity, 64x64 geometry and
+all 4096 opaque black BGRA pixels. The offline sample generator was system
+FFmpeg/libx265, not a dependency of the stripped SDK. An initially incorrectly
+tagged sample was refused with `ColorMismatch`; validation was not weakened.
+
+The existing `native_roundtrip --software-explicit` compiled and loaded this
+SDK but returned `Unavailable`: this profile deliberately has no encoder.
+The successful single-frame decoder probe does not turn that full roundtrip
+into a pass. See the [evidence record](native/ffmpeg-7.1.5-linux-x86_64.evidence.json)
+for hashes and scope. Cross-builder/path reproducibility, protected-path loading,
+hardware encoding/decoding, presentation, signing and distribution review remain
+unqualified. Test-time `LD_LIBRARY_PATH` binding is not a protected installation.

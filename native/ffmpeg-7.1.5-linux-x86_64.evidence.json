@@ -33,18 +33,21 @@
   },
   "registered_components": ["CONFIG_HEVC_DECODER"],
   "verification": {
+    "reproducibility": "Two clean source extractions/builds on hz3 at the same original absolute prefix, with identical configure arguments and toolchain: all three installed library SHA256s match exactly. Cross-prefix and cross-builder reproducibility not tested.",
+    "rust_decode": "Compiled Rust probe using existing fr-core/fr-media/fr-native artifacts and stripped shared SDK: Annex B normalization -> HevcGuard -> hvcC configuration -> HevcDecoder::submit -> poll_output passed for one 64x64 HEVC Main IDR. Asserted frame ID 1, dimensions, and all 4096 opaque black BGRA pixels. Exit 0. No presentation or transport exercised by this probe.",
+    "decode_input": "System FFmpeg 8.0.1/libx265 4.1 used only as an offline sample generator, not linked into the SDK. Explicit x265 colorprim/transfer/colormatrix=bt709 and range=limited. Sample SHA256 711131afb564a71e143191c97baa5420c224ad4ebe6c623906ba07fac0c579fa. Initial sample without those explicit metadata settings was refused with ColorMismatch; guard unchanged.",
     "c_abi_probe": "cc -I sdk/include probe.c -L sdk/lib -lavcodec -lswscale -lavutil -lm; LD_LIBRARY_PATH=sdk/lib: decoder=1 encoder=0 libx265=0 avcodec_version=4002661, exit 0",
     "fr_native_build": "cargo build -p fr-native --features linux-media --example native_roundtrip -j 1 against FR_NATIVE_INCLUDE_DIR/LIBRARY_DIR pointing at the isolated SDK; cold build passed in 13m52s",
     "runtime_binding": "ldd of native_roundtrip under LD_LIBRARY_PATH resolves libavcodec.so.61, libavutil.so.59, libswscale.so.8 to the isolated SDK only; no x265, avformat, avdevice, avfilter, swresample, or postproc libraries appear",
     "existing_media_path": "xvfb-run native_roundtrip --software-explicit -> Error: Unavailable, exit 1 (typed FR_UNAVAILABLE at fr_encoder_new: decode-only SDK intentionally contains no encoder; expected refusal, not a defect)"
   },
   "qualification_gaps": [
-    "no second-build reproducibility comparison",
+    "cross-prefix and cross-builder reproducibility not tested",
     "no protected-path installation or loader qualification",
-    "no hardware encode/decode qualification (no qualified GPU on any reachable worker)",
+    "no hardware encode/decode qualification in this experiment",
     "no upstream signature authentication",
     "no shipping license, corresponding-source, relinking, or HEVC patent review",
-    "decoder exercised only to registration/link level here; full decode path awaits an encoder source (hardware or test-only x265 build)"
+    "only one synthetic black IDR decoded; inter-frame recovery, presentation and full hardware pipeline remain unqualified"
   ],
-  "status": "decode-only experiment built and ABI-verified; not a shipping or default hardware bundle"
+  "status": "decode-only experiment built twice with identical library hashes and real Rust-boundary IDR decode verified; not a shipping or default hardware bundle"
 }
