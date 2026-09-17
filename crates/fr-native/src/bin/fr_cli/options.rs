@@ -32,11 +32,14 @@ pub struct Connection {
 pub enum DisplayChoice {
     Handle(u128),
     Only,
+    Choose,
 }
 impl DisplayChoice {
     pub fn select(self, catalog: &fr_wire::display::Catalog) -> Option<u128> {
         match self {
             Self::Handle(handle) => catalog.find(handle).map(|d| d.handle),
+            // The session-owned native picker supplies this decision later.
+            Self::Choose => None,
             Self::Only => match catalog.displays() {
                 [display] => Some(display.handle),
                 _ => None,
@@ -144,6 +147,8 @@ fn parse_command(
                 let choice = value(&mut index)?;
                 display = Some(if choice == "only" {
                     DisplayChoice::Only
+                } else if choice == "choose" {
+                    DisplayChoice::Choose
                 } else {
                     let handle = choice.parse::<u128>().map_err(|_| usage())?;
                     if handle == 0 {
@@ -360,5 +365,26 @@ mod display_tests {
         ] {
             assert!(parse(&args(&format!("connect n-peer --view-only --experimental-native --worker /opt/fr/worker --trust-roots /opt/fr/ca.pem --display {choice}"))).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod picker_tests {
+    use super::*;
+    #[test]
+    fn native_choice_is_explicit_and_never_uses_the_first_or_only_alias() {
+        let args = "connect n-peer --view-only --experimental-native --worker /opt/fr/worker --trust-roots /opt/fr/ca.pem --display choose"
+            .split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+        let Command::Connect(connection) = parse(&args).unwrap().command else {
+            panic!("connection required")
+        };
+        assert_eq!(connection.display, DisplayChoice::Choose);
+        let catalog =
+            fr_wire::display::Catalog::new(1, &[], &fr_core::limits::ProtocolLimits::ABSOLUTE)
+                .unwrap();
+        assert_eq!(DisplayChoice::Choose.select(&catalog), None);
+        let mut duplicate = args;
+        duplicate.extend(["--display".into(), "only".into()]);
+        assert!(parse(&duplicate).is_err());
     }
 }

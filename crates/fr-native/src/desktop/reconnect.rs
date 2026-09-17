@@ -2,7 +2,7 @@
 //! Each attempt owns a fresh window, decoder, input queue and clipboard. Only
 //! positively completed native cleanup permits another attempt; no replay.
 #![forbid(unsafe_code)]
-use super::{CaptureCleanup, Cleanup, Configuration, Desktop, Error, WindowCleanup};
+use super::{CaptureCleanup, Cleanup, Configuration, Desktop, Error, PickerCleanup, WindowCleanup};
 use asupersync::{cx::Cx, time::sleep_until, types::Time};
 use fr_client::{input, startup::ApprovalNotice};
 use fr_core::input_submission::Capabilities;
@@ -140,6 +140,10 @@ impl<U> Session<U> {
             base.xauthority.as_deref(),
             epoch,
         )
+        .map(|mut configuration| {
+            configuration.display_picker = base.display_picker;
+            configuration
+        })
         .map_err(|_| ObserverError::Application)
     }
 }
@@ -210,7 +214,14 @@ impl<U: Ui> Application for Session<U> {
             }
         }
         .await;
-        self.error = outcome.as_ref().err().copied();
+        // Record genuine native cancellation BEFORE cleanup can stop a pending
+        // picker itself. It cannot relabel a deadline/link failure as user intent.
+        let selection_cancelled = outcome.is_err() && desktop.cancelled_selection();
+        self.error = if selection_cancelled {
+            Some(Error::Picker(crate::display_picker::Error::Cancelled))
+        } else {
+            outcome.as_ref().err().copied()
+        };
         outcome.map_err(|error| match error {
             Error::Observer(error) => error,
             _ => ObserverError::Application,
@@ -257,8 +268,28 @@ impl<U> Session<U> {
                 frd::session_startup::NativeObserver::input_capture_cleanup,
             );
             report.window = desktop.window_cleanup();
+            report.picker = desktop.picker_cleanup();
             if cleaned(report)? {
                 if !self.opened {
+                    // No renderer entry means no Launch could reach the decoder
+                    // supervisor. Collect every possible pre-render owner first;
+                    // a missing worker handle alone would NOT establish this.
+                    if !desktop.renderer_started
+                        && matches!(report.media, Ok(None))
+                        && report.input == CaptureCleanup::NotStarted
+                        && report.window == WindowCleanup::NotStarted
+                        && matches!(
+                            report.picker,
+                            PickerCleanup::NotStarted | PickerCleanup::Complete
+                        )
+                        && matches!(
+                            report.clipboard,
+                            Ok(frd::native_clipboard::Cleanup::NotStarted)
+                        )
+                    {
+                        self.desktop = None;
+                        return Ok(());
+                    }
                     return Err(CleanupFailure::BootstrapUnconfirmed);
                 }
                 if !matches!(report.media, Ok(Some(_))) {
@@ -304,7 +335,8 @@ fn cleaned(report: &Cleanup) -> Result<bool, CleanupFailure> {
     };
     Ok(clipboard
         && report.input != CaptureCleanup::Pending
-        && report.window != WindowCleanup::Pending)
+        && report.window != WindowCleanup::Pending
+        && report.picker != PickerCleanup::Pending)
 }
 // A caught UI panic must fence NOW, not when the retained async future is dropped.
 fn callback<T>(

@@ -117,7 +117,7 @@ fn unpolled_reconnect_attempt_has_no_native_owner_and_cancels_only_its_viewer() 
     assert!(session.last_cleanup().is_none());
 }
 #[test]
-fn pending_original_attempt_is_fenced_at_cleanup_call_and_never_silently_retried() {
+fn pending_original_attempt_is_fenced_and_no_renderer_entry_proves_native_absence() {
     let runtime = support::runtime();
     let original = viewer(&runtime);
     let stop = original.control();
@@ -137,19 +137,16 @@ fn pending_original_attempt_is_fenced_at_cleanup_call_and_never_silently_retried
     drop(session.cleanup(&cx, deadline));
     assert!(session.desktop().is_some());
     assert!(cx.checkpoint().is_ok());
-    assert_eq!(
-        runtime.block_on(session.cleanup(&cx, deadline)),
-        Err(CallbackError)
-    );
-    assert_eq!(
-        session.cleanup_failure(),
-        Some(CleanupFailure::BootstrapUnconfirmed)
-    );
+    assert_eq!(runtime.block_on(session.cleanup(&cx, deadline)), Ok(()));
+    assert_eq!(session.cleanup_failure(), None);
+    // The one-use renderer factory was never entered, so None is backed by
+    // positive no-launch evidence rather than dropping an unknown child.
+    assert!(session.desktop().is_none());
     assert!(matches!(session.last_cleanup().unwrap().media, Ok(None)));
     let replacement = viewer(&runtime);
     let replacement_stop = replacement.control();
     assert_eq!(
-        runtime.block_on(session.run(2, replacement)),
+        runtime.block_on(session.run(1, replacement)),
         Err(ObserverError::Order)
     );
     assert!(replacement_stop.is_stopped());
@@ -497,3 +494,6 @@ fn completed_desktop_reconnects_only_after_reap_with_fresh_workers_and_terminal_
         ));
     }
 }
+
+#[path = "reconnect/picker.rs"]
+mod picker;

@@ -372,3 +372,44 @@ fn display_inspection_argument_and_trust_refusals_do_not_echo_private_material()
         assert!(!text.contains("PRIVATE-ROOT") && !text.contains("n-private"));
     }
 }
+
+#[test]
+fn display_picker_command_keeps_trust_and_view_only_checks_before_native_work() {
+    let help = wait(command(&["--help"]).spawn().unwrap());
+    assert!(
+        String::from_utf8(help.stdout)
+            .unwrap()
+            .contains("--display HANDLE|only|choose")
+    );
+    let missing = path("private-roots.pem");
+    let output = wait(
+        command(&[
+            "connect",
+            "n-private",
+            "--view-only",
+            "--experimental-native",
+            "--worker",
+            "/private/worker",
+            "--trust-roots",
+            missing.to_str().unwrap(),
+            "--display",
+            "choose",
+            "--json",
+        ])
+        .spawn()
+        .unwrap(),
+    );
+    assert_eq!(output.status.code(), Some(1));
+    json(&output, "assert x['error']['code']=='invalid_trust_store'");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("n-private"));
+    let output = wait(
+        command(&["connect", "n-private", "--display", "choose", "--json"])
+            .spawn()
+            .unwrap(),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    json(
+        &output,
+        "assert x['error']['code']=='control_ui_unavailable'",
+    );
+}

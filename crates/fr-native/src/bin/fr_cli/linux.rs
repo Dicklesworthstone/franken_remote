@@ -233,6 +233,11 @@ fn connect(
         "invalid_worker_configuration",
         "Select a trusted locally installed worker and the matching local graphical-session settings.",
     ))?;
+    let configuration = if connection.display == DisplayChoice::Choose {
+        configuration.with_display_picker()
+    } else {
+        configuration
+    };
     let state = Rc::new(RefCell::new(Progress::default()));
     let mut application = Session::new(
         configuration,
@@ -297,6 +302,17 @@ fn completed(
         return Err(Failure::new(
             "cancelled",
             "Session stopped and the supervisor completed cleanup; no control/input was requested.",
+            130,
+        ));
+    }
+    if application.last_error()
+        == Some(fr_native::desktop::Error::Picker(
+            fr_native::display_picker::Error::Cancelled,
+        ))
+    {
+        return Err(Failure::new(
+            "display_selection_cancelled",
+            "Display choice cancelled and native cleanup completed; no renderer or input was started.",
             130,
         ));
     }

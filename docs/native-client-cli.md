@@ -60,9 +60,9 @@ permission. An empty catalog is a valid empty snapshot, not a ready display.
 **Handles are session-local.** This command is an inspection, not a reservation
 or an authority grant for a later connection. A new connection must obtain and
 validate its own catalog; a numeric match alone does not establish physical
-monitor continuity across sessions. The graphical in-session display picker is
-still unfinished. For a single-monitor host, use the explicit `--display only`
-policy below instead of having to know an opaque handle ahead of time.
+monitor continuity across sessions. Use `--display choose` to pick within the
+current connection, or the explicit `--display only` policy for a single-monitor
+host, instead of having to know an opaque handle ahead of time.
 
 ## Connect through the original native session
 
@@ -83,8 +83,8 @@ one to multiple displays refuses the next attempt instead of making a new choice
 `--display HANDLE` retains the existing explicit numeric selector for callers
 that know the current alias. A missing handle refuses the attempt rather than
 selecting another display. Neither numeric aliases nor `only` promise physical
-monitor continuity across different sessions. Use an in-session picker when that
-identity must be chosen by a human; that graphical UI remains unfinished.
+monitor continuity across different sessions. Use `--display choose` when a
+human must select from the current approved catalog.
 
 The node argument is a stable ID by default. `--by-name` instead selects an exact
 canonical tailnet FQDN through authenticated LocalAPI metadata. It does not enable
@@ -173,3 +173,39 @@ separately exercise the existing composed owner. None of these tests establishes
 an end-to-end installed-tailnet + FFmpeg-worker desktop, optical presentation,
 hardware acceleration, independent QUIC interoperability or a completed desktop
 shell. Existing required native-input and release qualification gates remain.
+
+## Choose a display in the current connection
+
+For multiple monitors, select in the same approved session instead of copying a
+session-local alias from an earlier inspection:
+
+```sh
+fr connect NODE_ID --view-only --experimental-native --display choose \
+  --worker /opt/fr/bin/fr-media-worker \
+  --trust-roots /opt/fr/share/ca-roots.pem
+```
+
+The native X11 chooser opens only after host approval (when required) and receipt
+of the current catalog. It lists the displays' pixel dimensions and signed
+desktop origins; click a row, use arrows then Enter, or press a row number.
+Nothing is preselected. Escape or closing the chooser cancels. No thumbnails,
+control grant, clipboard access or screen capture are introduced by this UI.
+
+Every reconnect asks again with a fresh picker and the new catalog; neither a
+row number nor an old handle carries over. The original startup/approval budget
+still applies while waiting for a choice. No blocking UI work or terminal output
+runs on the session thread. The picker is closed and joined before the display
+selection hands off to the native renderer, and its old handles are retired.
+
+The desktop/reconnect owner also retains picker cleanup after failure. A native
+call that has not ended prevents replacement. A genuine Escape/close *before*
+the one-use renderer factory starts has positive no-decoder evidence; after the
+picker is joined the command reports `display_selection_cancelled` (exit 130),
+not successful viewing or a fabricated decoder-reap receipt. Deadlines, link
+failures and unconfirmed decoder bootstrap are not relabelled as user intent.
+Cleanup errors still take precedence over cancellation.
+
+This is the existing bounded XCB shell, not a new toolkit or browser. It needs a
+local X11 display large enough for its fixed 560-pixel-wide menu. Wayland, scaled
+UI/accessibility, physical scanout, hardware codecs and a complete installed-
+Tailscale-to-FFmpeg desktop remain separate qualification work.

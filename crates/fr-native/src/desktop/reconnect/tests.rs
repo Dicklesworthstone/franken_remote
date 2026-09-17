@@ -66,6 +66,7 @@ fn report() -> Cleanup {
         media: Ok(None),
         input: CaptureCleanup::NotStarted,
         window: WindowCleanup::NotStarted,
+        picker: PickerCleanup::NotStarted,
         clipboard: Ok(frd::native_clipboard::Cleanup::NotStarted),
     }
 }
@@ -73,6 +74,9 @@ fn report() -> Cleanup {
 fn each_native_owner_must_finish_and_original_errors_are_preserved() {
     let mut report = report();
     assert_eq!(cleaned(&report), Ok(true));
+    report.picker = PickerCleanup::Pending;
+    assert_eq!(cleaned(&report), Ok(false));
+    report.picker = PickerCleanup::Complete;
     report.input = CaptureCleanup::Pending;
     assert_eq!(cleaned(&report), Ok(false));
     report.input = CaptureCleanup::Complete;
@@ -95,4 +99,18 @@ fn each_native_owner_must_finish_and_original_errors_are_preserved() {
     assert_eq!(cleaned(&report), Err(CleanupFailure::Clipboard));
     report.media = Err(frd::media::Error::Backpressure);
     assert_eq!(cleaned(&report), Err(CleanupFailure::Media));
+}
+
+#[test]
+fn native_picker_policy_survives_but_choices_and_owners_do_not_cross_attempts() {
+    let mut original = session(71);
+    assert!(!original.configuration(1).unwrap().display_picker);
+    original.configuration = original.configuration.with_display_picker();
+    for attempt in [1, 2, 32] {
+        let next = original.configuration(attempt).unwrap();
+        assert!(next.display_picker);
+        let desktop = Desktop::new(next);
+        assert!(desktop.picker().is_none());
+        assert!(!desktop.renderer_started);
+    }
 }

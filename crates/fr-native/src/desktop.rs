@@ -5,7 +5,10 @@
 //! failed session. Every native owner remains available for explicit cleanup.
 #![forbid(unsafe_code)]
 pub mod reconnect;
-use crate::viewer_window::{self, ViewerWindow, WindowControl};
+use crate::{
+    display_picker::{self, DisplayPicker},
+    viewer_window::{self, ViewerWindow, WindowControl},
+};
 use asupersync::{cx::Cx, process::ExitStatus};
 use fr_media::{freshness::ClockPolicy, worker::Role};
 use fr_wire::display::{Catalog, Display};
@@ -33,6 +36,7 @@ pub struct Configuration {
     display: String,
     xauthority: Option<PathBuf>,
     worker_epoch: u128,
+    display_picker: bool,
 }
 impl Configuration {
     pub fn new(
@@ -48,7 +52,16 @@ impl Configuration {
             display: display.into(),
             xauthority: xauthority.map(Path::to_path_buf),
             worker_epoch,
+            display_picker: false,
         })
+    }
+    /// Use a fresh native choice surface in THIS approved selection exchange.
+    /// The callback passed to `open` is not used to choose in this mode. No
+    /// catalog/handle/choice is retained across attempts or defaults to primary.
+    #[must_use]
+    pub const fn with_display_picker(mut self) -> Self {
+        self.display_picker = true;
+        self
     }
 }
 impl fmt::Debug for Configuration {
@@ -69,6 +82,7 @@ pub enum Error {
     NotViewing,
     Launch(frd::worker::Error),
     Window(viewer_window::Error),
+    Picker(display_picker::Error),
     Observer(ObserverError),
     Clipboard(frd::clipboard_quic::Error),
     InputCapture(
@@ -91,6 +105,7 @@ pub struct Cleanup {
     pub media: Result<Option<ExitStatus>, frd::media::Error>,
     pub input: CaptureCleanup,
     pub window: WindowCleanup,
+    pub picker: PickerCleanup,
     pub clipboard: Result<frd::native_clipboard::Cleanup, frd::clipboard_quic::Error>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +113,13 @@ pub enum WindowCleanup {
     NotStarted,
     Pending,
     Complete(viewer_window::StopReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerCleanup {
+    NotStarted,
+    Pending,
+    Complete,
 }
 
 /// One attempt only. Keep this owner even when `open` fails so native cleanup is
@@ -109,6 +131,8 @@ pub struct Desktop {
     state: State,
     observer: Option<NativeObserver>,
     window: Option<ViewerWindow>,
+    picker: Option<DisplayPicker>,
+    renderer_started: bool,
     stop: Option<StreamingViewerControl>,
     input: Option<crate::viewer_input::CaptureControl>,
 }
@@ -119,6 +143,8 @@ impl Desktop {
             state: State::New,
             observer: None,
             window: None,
+            picker: None,
+            renderer_started: false,
             stop: None,
             input: None,
         }
@@ -136,6 +162,28 @@ impl Desktop {
     }
     pub fn window(&self) -> Option<WindowControl> {
         self.window.as_ref().map(ViewerWindow::control)
+    }
+    /// Status/cancellation for the original attempt's native chooser. Consumed
+    /// handles are retired and cannot stop the later viewing window.
+    pub fn picker(&self) -> Option<display_picker::Control> {
+        self.picker.as_ref().map(DisplayPicker::control)
+    }
+    pub fn picker_cleanup(&mut self) -> PickerCleanup {
+        self.picker
+            .as_mut()
+            .map_or(PickerCleanup::NotStarted, |picker| {
+                if picker.finish() {
+                    PickerCleanup::Complete
+                } else {
+                    PickerCleanup::Pending
+                }
+            })
+    }
+    pub(super) fn cancelled_selection(&self) -> bool {
+        !self.renderer_started
+            && self.picker().is_some_and(|picker| {
+                picker.status() == display_picker::Status::Stopped(display_picker::Error::Cancelled)
+            })
     }
     pub fn display(&self) -> Option<Display> {
         self.observer.as_ref().map(NativeObserver::display)
@@ -189,7 +237,7 @@ impl Desktop {
         viewer: Viewer,
         policy: ObserverPolicy,
         clock: Option<ClockPolicy>,
-        choose: impl FnMut(&Catalog) -> Result<Option<u128>, ()> + 'a,
+        mut choose: impl FnMut(&Catalog) -> Result<Option<u128>, ()> + 'a,
         approval: impl FnMut(fr_client::startup::ApprovalNotice) -> Result<(), ()> + 'a,
     ) -> Result<impl Future<Output = Result<(), Error>> + 'a, Error> {
         if self.state != State::New {
@@ -200,13 +248,21 @@ impl Desktop {
         self.state = State::Opening;
         let configuration = &self.configuration;
         let window = &mut self.window;
+        let picker = &mut self.picker;
+        let renderer_started = &mut self.renderer_started;
+        let picker_stop = stop.clone();
         let observer = &mut self.observer;
         // One content-free failure slot, shared only by these startup futures.
         // This is not a native callback queue and retains no pixels or input.
         let failure = Rc::new(Cell::new(None));
         let report = failure.clone();
+        let selection_failure = failure.clone();
         let opening = viewer.observe_with_renderer(
             move |display, original| async move {
+                // Native decoders cannot start before this one-use factory is
+                // polled and returns a Launch. False is positive no-renderer
+                // evidence, not an inference from a missing worker handle.
+                *renderer_started = true;
                 let result = async {
                     *window = Some(ViewerWindow::start(
                         &configuration.display,
@@ -223,11 +279,29 @@ impl Desktop {
                     )
                 }
                 .await;
-                result.map_err(|error| report.set(Some(error)))
+                result.map_err(|error| report.set(Some(Error::Window(error))))
             },
             policy,
             clock,
-            choose,
+            move |catalog| {
+                if !configuration.display_picker {
+                    return choose(catalog);
+                }
+                let result = (|| {
+                    if picker.is_none() {
+                        *picker = Some(DisplayPicker::start(
+                            &configuration.display,
+                            *catalog,
+                            picker_stop.clone(),
+                        )?);
+                    }
+                    picker
+                        .as_mut()
+                        .ok_or(display_picker::Error::NativeFailure)?
+                        .poll(catalog)
+                })();
+                result.map_err(|error| selection_failure.set(Some(Error::Picker(error))))
+            },
             approval,
         );
         Ok(Operation {
@@ -238,7 +312,7 @@ impl Desktop {
             inner: Box::pin(async move {
                 let ready = opening
                     .await
-                    .map_err(|error| failure.get().map_or(Error::Observer(error), Error::Window))?;
+                    .map_err(|error| failure.get().unwrap_or(Error::Observer(error)))?;
                 *observer = Some(ready);
                 Ok(())
             }),
@@ -397,6 +471,7 @@ impl Desktop {
                 media,
                 input,
                 window: self.window_cleanup(),
+                picker: self.picker_cleanup(),
                 clipboard,
             }
         }
