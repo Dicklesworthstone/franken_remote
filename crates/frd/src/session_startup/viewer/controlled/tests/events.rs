@@ -248,3 +248,25 @@ fn future_sample_cannot_mint_a_longer_native_event_lifetime() {
 }
 
 mod text;
+
+#[test]
+fn native_supervisor_gets_only_original_stop_and_granted_capabilities() {
+    run(|client, host| async move {
+        let mut state = Box::pin(fixture_with_caps(
+            &client,
+            &host,
+            caps().with(Capability::Repeat),
+        ))
+        .await;
+        let source = state.viewer.capture_input().unwrap();
+        assert_eq!(source.capabilities(), caps().with(Capability::Repeat));
+        assert!(!source.supports_text());
+        let stop = source.control();
+        assert!(!stop.is_stopped());
+        stop.stop();
+        assert!(state.viewer.is_closed());
+        assert!(source.clock().is_err());
+        assert_eq!(state.viewer.action(key(true)), Err(Error::Closed));
+        state.host.close();
+    });
+}
