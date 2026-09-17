@@ -32,7 +32,7 @@ jobs:
         with:
           name: offline-source-and-dependencies
           path: ${{ runner.temp }}/offline-source/
-          retention-days: 1
+          retention-days: 7
           compression-level: 0
           if-no-files-found: error
       - name: Archive the repository-pinned Linux compiler
@@ -47,6 +47,6 @@ jobs:
         with:
           name: offline-rust-toolchain
           path: ${{ runner.temp }}/offline-rust/
-          retention-days: 1
+          retention-days: 7
           compression-level: 0
           if-no-files-found: error

@@ -1,5 +1,6 @@
 //! Bounded OS-event handoff to the original controlled session. The UI thread
 //! never borrows QUIC or holds an authority lock while making native calls.
+mod native;
 use super::{ControlledViewer, ViewerControl, now};
 use fr_client::input::{self, Action};
 pub use fr_client::input::{
@@ -10,8 +11,9 @@ pub use fr_core::held_state::HeldState;
 pub use fr_core::input::{CommittedText, TextError};
 use fr_core::{
     input::{KeyTransition, MAX_COMMITTED_TEXT_BYTES, PhysicalKey},
-    input_submission::Capability,
+    input_submission::{Capabilities, Capability},
 };
+pub use native::{CaptureCleanup, CaptureStartError, NativeCapture};
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex, TryLockError, Weak},
@@ -67,13 +69,24 @@ struct Queue {
 pub struct Source {
     queue: Weak<Mutex<Queue>>,
     control: ViewerControl,
-    text_supported: bool,
+    capabilities: Capabilities,
 }
 pub(super) struct Receiver {
     queue: Arc<Mutex<Queue>>,
     pending: Option<Captured>,
 }
 impl Source {
+    /// The ORIGINAL viewer's terminal fence, for a native supervisor that must
+    /// stop independently of a blocked platform call. This never grants input.
+    pub fn control(&self) -> ViewerControl {
+        self.control.clone()
+    }
+    /// Positively granted operations. Native adapters must not emulate missing
+    /// text, repeat or scroll modes with a different input operation.
+    pub const fn capabilities(&self) -> Capabilities {
+        self.capabilities
+    }
+
     pub fn clock(&self) -> Result<ClientInstant, Error> {
         if self.control.is_stopped() {
             return Err(Error::Closed);
@@ -94,7 +107,7 @@ impl Source {
     }
     /// The host-granted capability, not permission to bypass freshness or expiry.
     pub const fn supports_text(&self) -> bool {
-        self.text_supported
+        self.capabilities.contains(Capability::Text)
     }
     /// Capture one completed IME/software-keyboard commit. Do not also send the
     /// physical keys that produced the same text. No clipboard or layout fallback.
@@ -102,7 +115,7 @@ impl Source {
     pub fn commit_text(&mut self, text: &str, sampled: ClientInstant) -> Result<(), Error> {
         let result = (|| {
             check_age(sampled, self.clock()?)?;
-            if !self.text_supported {
+            if !self.capabilities.contains(Capability::Text) {
                 return Err(Error::UnsupportedText);
             }
             let text = CommittedText::new(text).map_err(Error::Text)?;
@@ -141,7 +154,7 @@ impl Source {
     fn push_inner(&mut self, event: Event, sampled: ClientInstant) -> Result<(), Error> {
         let current = self.clock()?;
         check_age(sampled, current)?;
-        if matches!(event, Event::Text(_)) && !self.text_supported {
+        if matches!(event, Event::Text(_)) && !self.capabilities.contains(Capability::Text) {
             return Err(Error::UnsupportedText);
         }
         let shared = self.queue.upgrade().ok_or(Error::Closed)?;
@@ -236,7 +249,7 @@ impl ControlledViewer {
         Ok(Source {
             queue: Arc::downgrade(&queue),
             control: self.control(),
-            text_supported: self.input.capabilities().contains(Capability::Text),
+            capabilities: self.input.capabilities(),
         })
     }
     pub(super) fn dispatch_captured(&mut self) -> Result<(), super::Error> {

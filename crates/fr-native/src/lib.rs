@@ -38,3 +38,12 @@ pub mod clipboard_observation;
 
 #[cfg(all(target_os = "linux", feature = "linux-session-ui"))]
 pub mod sharing_indicator;
+
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "linux-input", feature = "linux-viewer-input")
+))]
+mod key_names;
+
+#[cfg(all(target_os = "linux", feature = "linux-viewer-input"))]
+pub mod viewer_input;
