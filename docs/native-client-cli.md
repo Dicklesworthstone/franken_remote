@@ -1,8 +1,8 @@
 # Native client executable (`fr`)
 
 The `fr-native` package now includes a Linux `fr` binary behind `linux-desktop`.
-It provides machine discovery and an explicitly experimental, view-only native
-connection through the existing installed-tailnet client and composed desktop
+It provides machine and approved display discovery plus an explicitly experimental,
+view-only native connection through the existing installed-tailnet client and composed desktop
 owner. Installing or running it never enables hosting. This is not an installable
 remote-workstation release or a qualified transport/hardware support claim.
 
@@ -35,20 +35,56 @@ candidate/exclusion data. Candidate rows explicitly carry null
 `desktop_available` and `access_authorized`. This is a snapshot, not a reusable
 authority handle. Opaque identifiers are escaped in human terminal output.
 
+## Inspect approved remote displays without a local renderer
+
+```sh
+./target/debug/fr displays NODE_ID --experimental-native \
+  --trust-roots /opt/fr/share/ca-roots.pem --json
+```
+
+This is one freshly authenticated connection, using the same installed-tailnet
+identity, strict TLS, negotiation and optional host-local approval as viewing.
+It obtains the bounded display catalog and closes that session before output.
+No display is selected, no decoder/worker is launched, and no input is requested.
+It requires neither `DISPLAY`/`XAUTHORITY` nor a `--worker` or `--display` argument.
+No reconnection is attempted for inspection; the command preserves refusal,
+cancellation and timeout instead of publishing an old cached catalog.
+
+Rows report opaque handles, geometry generations, signed origins, pixel/logical
+sizes, rational scale and rotation. JSON encodes handles, generations and catalog
+revision as decimal strings to preserve all 128/64 bits. `snapshot_only`,
+`session_closed`, `display_selected`, `decoder_started`, `input_requested` and
+`transport_qualified` distinguish the actual result from an active desktop or
+permission. An empty catalog is a valid empty snapshot, not a ready display.
+
+**Handles are session-local.** This command is an inspection, not a reservation
+or an authority grant for a later connection. A new connection must obtain and
+validate its own catalog; a numeric match alone does not establish physical
+monitor continuity across sessions. The graphical in-session display picker is
+still unfinished. For a single-monitor host, use the explicit `--display only`
+policy below instead of having to know an opaque handle ahead of time.
+
 ## Connect through the original native session
 
 ```sh
 ./target/debug/fr connect NODE_ID \
-  --view-only --experimental-native --display DISPLAY_HANDLE \
+  --view-only --experimental-native --display only \
   --worker /opt/fr/bin/fr-media-worker \
   --trust-roots /opt/fr/share/ca-roots.pem
 ```
 
 Select an existing host running the compatible native host startup/listener; this
-command does not install, start or configure one. Supply its current explicit
-display handle from the host's display inventory. A graphical display picker and
-a display-inventory CLI command remain separate unfinished UI work. A missing
-handle refuses the attempt rather than selecting some other display.
+command does not install, start or configure one. `--display only` selects the
+sole entry in the current approved catalog and refuses zero or multiple entries;
+it never guesses the first or primary monitor. This explicit policy is evaluated
+again against every fresh reconnect catalog, not a cached handle. A change from
+one to multiple displays refuses the next attempt instead of making a new choice.
+
+`--display HANDLE` retains the existing explicit numeric selector for callers
+that know the current alias. A missing handle refuses the attempt rather than
+selecting another display. Neither numeric aliases nor `only` promise physical
+monitor continuity across different sessions. Use an in-session picker when that
+identity must be chosen by a human; that graphical UI remains unfinished.
 
 The node argument is a stable ID by default. `--by-name` instead selects an exact
 canonical tailnet FQDN through authenticated LocalAPI metadata. It does not enable
@@ -124,7 +160,12 @@ cargo test -p fr-native --features linux-desktop --test viewer_window_x11 --lock
 
 The CLI tests execute real child processes, parse output independently with
 Python's JSON parser, and check refusals, output errors, trust-store bounds and
-SIGINT during an actual stalled Unix/HTTP lookup. The metadata is an explicit
+SIGINT during an actual stalled Unix/HTTP lookup. Display inspection process
+tests prove that local renderer configuration is unnecessary and identity/trust
+failures remain explicit; they do not fake a successful remote catalog. The
+production inventory API is separately exercised over real localhost UDP/TLS
+with explicit host identity/catalog fixtures, including host-local approval,
+renewal, expiry and foreign-session refusal. The metadata is an explicit
 fixture, not a real installed Tailscale daemon. Running as root exercises positive
 CLI discovery; running as an ordinary user verifies that the same user-owned
 socket is refused. Production has no UID override. The native-window regressions

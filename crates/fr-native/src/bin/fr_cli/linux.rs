@@ -1,6 +1,8 @@
+#[path = "linux/displays.rs"]
+mod displays;
 use super::{
     Failure,
-    options::{Command, Connection, Options},
+    options::{Command, Connection, DisplayChoice, Options, Target},
     output,
 };
 use asupersync::{
@@ -175,6 +177,15 @@ pub fn run(options: &Options) -> Result<String, Failure> {
                 .map_err(tailnet)?;
             Ok(output::hosts(&snapshot, options.json))
         }
+        Command::Displays(target) => displays::run(
+            &runtime,
+            &cx,
+            &mut shutdown,
+            &stopped,
+            api,
+            target,
+            options.json,
+        ),
         Command::Connect(connection) => connect(
             &runtime,
             &cx,
@@ -195,7 +206,7 @@ fn connect(
     connection: &Connection,
     json: bool,
 ) -> Result<String, Failure> {
-    let roots = read_roots(&connection.roots)?;
+    let roots = read_roots(&connection.target.roots)?;
     let mut client = Client::new(api, roots, Duration::from_secs(5)).map_err(|_| {
         failure(
             "invalid_native_configuration",
@@ -232,14 +243,14 @@ fn connect(
             progress: state.clone(),
         },
     );
-    let selector = if connection.by_name {
-        PeerSelector::Name(&connection.node)
+    let selector = if connection.target.by_name {
+        PeerSelector::Name(&connection.target.node)
     } else {
-        PeerSelector::StableId(&connection.node)
+        PeerSelector::StableId(&connection.target.node)
     };
     let cfg = Configuration {
-        port: connection.port,
-        family: if connection.ipv6 {
+        port: connection.target.port,
+        family: if connection.target.ipv6 {
             AddressFamily::Ipv6
         } else {
             AddressFamily::Ipv4
@@ -292,7 +303,7 @@ fn completed(
     if progress.missing_display {
         return Err(failure(
             "display_not_offered",
-            "Select an explicit display handle currently offered by this host.",
+            "Run fr displays to inspect the host; --display only requires exactly one currently offered display.",
         ));
     }
     // Cleanup itself stops the window with User. Only intent recorded BEFORE
@@ -399,16 +410,17 @@ impl Progress {
     }
 }
 struct Interface {
-    display: u128,
+    display: DisplayChoice,
     progress: Rc<RefCell<Progress>>,
 }
 impl Ui for Interface {
     fn choose(&mut self, _: u8, catalog: &Catalog) -> Result<Option<u128>, CallbackError> {
-        if !catalog.displays().iter().any(|d| d.handle == self.display) {
+        let selected = self.display.select(catalog);
+        if selected.is_none() {
             self.progress.borrow_mut().missing_display = true;
             return Err(CallbackError);
         }
-        Ok(Some(self.display))
+        Ok(selected)
     }
     fn approval(
         &mut self,
@@ -506,7 +518,7 @@ mod tests {
     #[test]
     fn explicit_display_selection_never_falls_back_to_another_display() {
         let mut ui = Interface {
-            display: 99,
+            display: DisplayChoice::Handle(99),
             progress: Rc::new(RefCell::new(Progress::default())),
         };
         // Real wire catalog constructor also validates the selected display.
@@ -534,7 +546,7 @@ mod tests {
             ObserverPolicy::default(),
             Mode::Observe,
             Interface {
-                display: 9,
+                display: DisplayChoice::Handle(9),
                 progress: Rc::new(RefCell::new(Progress::default())),
             },
         )
