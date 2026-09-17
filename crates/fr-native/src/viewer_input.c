@@ -6,30 +6,48 @@
 #include <xcb/xcb.h>
 #include <xcb/xcbext.h>
 #include <X11/extensions/XKBproto.h>
+#include <X11/extensions/XI2proto.h>
+#include <X11/extensions/XI2.h>
 #include <sys/uio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
+/* Fixed output only; no native allocation or names escape this boundary. */
+struct fr_viewer_held { uint8_t keys[32], buttons[32]; };
 struct fr_viewer_input {
     xcb_connection_t *c;
     xcb_window_t window, clock;
     xcb_atom_t barrier;
     uint8_t xkb_event;
     uint32_t serial;
+    uint8_t xi_opcode;
+    uint16_t pointer;
+    uint32_t keys_query, pointer_query;
+    int held_pending;
+    struct fr_viewer_held held;
 };
 /* Matches Rust Raw; every consumed event (even ignored) counts toward its bound. */
 struct fr_viewer_event { uint32_t kind, time, detail; int32_t x, y; };
 enum { IGNORE, KEY_DOWN, KEY_UP, BUTTON_DOWN, BUTTON_UP, MOTION, BARRIER,
-       FOCUS_LOST, WINDOW_LOST, GEOMETRY, KEYMAP_CHANGED, SYNTHETIC };
+       FOCUS_LOST, WINDOW_LOST, GEOMETRY, KEYMAP_CHANGED, SYNTHETIC, DEVICES_CHANGED };
 static xcb_extension_t xkb = { "XKEYBOARD", 0 };
-static uint32_t request(struct fr_viewer_input *h, uint8_t opcode, int isvoid,
-                        void *body, size_t size) {
+static xcb_extension_t xi = { "XInputExtension", 0 };
+static uint32_t extension_request(struct fr_viewer_input *h, xcb_extension_t *ext,
+                                  uint8_t opcode, int isvoid, void *body, size_t size) {
     struct iovec parts[4] = {{0}};
     parts[2].iov_base = body; parts[2].iov_len = size;
     parts[3].iov_base = NULL; parts[3].iov_len = (-size) & 3;
-    xcb_protocol_request_t req = {2, &xkb, opcode, (uint8_t)isvoid};
+    xcb_protocol_request_t req = {2, ext, opcode, (uint8_t)isvoid};
     return xcb_send_request(h->c, XCB_REQUEST_CHECKED, parts+2, &req);
+}
+static uint32_t request(struct fr_viewer_input *h, uint8_t opcode, int isvoid,
+                        void *body, size_t size) {
+    return extension_request(h, &xkb, opcode, isvoid, body, size);
+}
+static uint32_t xi_request(struct fr_viewer_input *h, uint8_t opcode, int isvoid,
+                           void *body, size_t size) {
+    return extension_request(h, &xi, opcode, isvoid, body, size);
 }
 static void *reply(struct fr_viewer_input *h, uint32_t seq) {
     xcb_generic_error_t *error = NULL;
@@ -73,6 +91,115 @@ static int keyboard(struct fr_viewer_input *h, uint8_t names[256][4]) {
     if (ok) memcpy(names[n->firstKey], n+1, (size_t)n->nKeys * 4);
     free(n); return ok;
 }
+/* The core pointer mask covers only buttons 1-5. XI2 queries the FULL logical
+ * button mask (including Back/Forward). Core delivery can use multiple masters;
+ * do not assume its ClientPointer identifies every event. This adapter admits
+ * exactly one enabled master pair, verifies its actual ClientPointer, and ends
+ * the capture generation on ANY hierarchy change. No hard-coded device ID. */
+static int single_master_pair(struct fr_viewer_input *h, const xXIQueryDeviceReply *r) {
+    if (!r || r->num_devices != 2 || r->length > 4096) return 0;
+    const uint8_t *cursor = (const uint8_t *)(r + 1);
+    const uint8_t *end = cursor + (size_t)r->length * 4;
+    uint16_t pointer = 0, keyboard = 0, pointer_pair = 0, keyboard_pair = 0;
+    for (unsigned i = 0; i < 2; i++) {
+        if ((size_t)(end - cursor) < sizeof(xXIDeviceInfo)) return 0;
+        xXIDeviceInfo d; memcpy(&d, cursor, sizeof(d)); cursor += sizeof(d);
+        if (!d.enabled || d.deviceid <= 1 || d.num_classes > 64) return 0;
+        if (d.use == XIMasterPointer && !pointer) {
+            pointer = d.deviceid; pointer_pair = d.attachment;
+        } else if (d.use == XIMasterKeyboard && !keyboard) {
+            keyboard = d.deviceid; keyboard_pair = d.attachment;
+        } else return 0;
+        size_t name = ((size_t)d.name_len + 3) & ~(size_t)3;
+        if (name > (size_t)(end - cursor)) return 0;
+        cursor += name;
+        for (unsigned j = 0; j < d.num_classes; j++) {
+            if ((size_t)(end - cursor) < sizeof(xXIAnyInfo)) return 0;
+            xXIAnyInfo c; memcpy(&c, cursor, sizeof(c));
+            size_t size = (size_t)c.length * 4;
+            if (size < sizeof(c) || size > (size_t)(end - cursor)) return 0;
+            cursor += size;
+        }
+    }
+    if (cursor != end || !pointer || !keyboard ||
+        pointer_pair != keyboard || keyboard_pair != pointer) return 0;
+    h->pointer = pointer; return 1;
+}
+static uint32_t pointer_query(struct fr_viewer_input *h) {
+    xXIQueryPointerReq q = {0}; q.win = h->window; q.deviceid = h->pointer;
+    return xi_request(h, X_XIQueryPointer, 0, &q, sizeof(q));
+}
+static int pointer_bits(const xXIQueryPointerReply *r, uint8_t bits[32]) {
+    if (!r || !r->same_screen || r->buttons_len > 8 ||
+        r->length != 6u + r->buttons_len) return 0;
+    memset(bits, 0, 32);
+    memcpy(bits, r + 1, (size_t)r->buttons_len * 4);
+    return !(bits[0] & 1); /* XI button indices start at ONE, not zero. */
+}
+static int held_setup(struct fr_viewer_input *h) {
+    const xcb_query_extension_reply_t *ext = xcb_get_extension_data(h->c, &xi);
+    if (!ext || !ext->present) return 0;
+    h->xi_opcode = ext->major_opcode;
+    xXIQueryVersionReq v = {0}; v.major_version = 2;
+    xXIQueryVersionReply *version = reply(h, xi_request(h, X_XIQueryVersion, 0, &v, sizeof(v)));
+    int ok = version && !version->length && version->major_version >= 2;
+    free(version); if (!ok) return 0;
+    /* Hierarchy metadata only, on OUR InputOnly window; no root/raw-input mask. */
+    struct { xXISelectEventsReq request; xXIEventMask event; uint32_t mask; } select = {0};
+    select.request.win = h->clock; select.request.num_masks = 1;
+    select.event.deviceid = XIAllDevices; select.event.mask_len = 1;
+    select.mask = XI_HierarchyChangedMask;
+    xcb_void_cookie_t cookie = { xi_request(h, X_XISelectEvents, 1, &select, sizeof(select)) };
+    if (!checked(h, cookie)) return 0;
+    xXIQueryDeviceReq q = {0}; q.deviceid = XIAllMasterDevices;
+    xXIQueryDeviceReply *devices = reply(h, xi_request(h, X_XIQueryDevice, 0, &q, sizeof(q)));
+    ok = single_master_pair(h, devices); free(devices); if (!ok) return 0;
+    xXIGetClientPointerReq get = {0}; /* None means THIS requesting client. */
+    xXIGetClientPointerReply *client = reply(h, xi_request(h, X_XIGetClientPointer, 0, &get, sizeof(get)));
+    ok = client && !client->length && client->set && client->deviceid == h->pointer;
+    free(client); if (!ok) return 0;
+    xXIQueryPointerReply *p = reply(h, pointer_query(h));
+    uint8_t bits[32]; ok = pointer_bits(p, bits); free(p);
+    if (ok) for (unsigned i = 0; i < 32; i++) if (bits[i]) ok = 0;
+    return ok; /* A preexisting Back/Forward press is not an adopted gesture. */
+}
+/* One fixed pair, asynchronous after setup. The owning Rust turn enforces its
+ * original 50ms deadline and cancellation. No wait_for_reply in this path. */
+int fr_viewer_input_held_begin(struct fr_viewer_input *h) {
+    if (!h || h->held_pending || xcb_connection_has_error(h->c)) return 0;
+    memset(&h->held, 0, sizeof(h->held));
+    h->keys_query = xcb_query_keymap(h->c).sequence;
+    h->pointer_query = pointer_query(h);
+    h->held_pending = 1;
+    return h->keys_query && h->pointer_query;
+}
+int fr_viewer_input_held_poll(struct fr_viewer_input *h, struct fr_viewer_held *out) {
+    if (!h || !out || !h->held_pending || xcb_connection_has_error(h->c)) return -1;
+    if (h->keys_query) {
+        void *raw = NULL; xcb_generic_error_t *error = NULL;
+        int ready = xcb_poll_for_reply(h->c, h->keys_query, &raw, &error);
+        if (ready) {
+            xcb_query_keymap_reply_t *r = raw;
+            int ok = r && !error && r->length == 2;
+            if (ok) memcpy(h->held.keys, r->keys, 32);
+            free(raw); free(error); if (!ok) return -1;
+            h->keys_query = 0;
+        }
+    }
+    if (h->pointer_query) {
+        void *raw = NULL; xcb_generic_error_t *error = NULL;
+        int ready = xcb_poll_for_reply(h->c, h->pointer_query, &raw, &error);
+        if (ready) {
+            int ok = !error && pointer_bits(raw, h->held.buttons);
+            free(raw); free(error); if (!ok) return -1;
+            h->pointer_query = 0;
+        }
+    }
+    if (xcb_connection_has_error(h->c)) return -1;
+    if (h->keys_query || h->pointer_query) return 0;
+    *out = h->held; h->held_pending = 0; return 1;
+}
+
 /* Setup only. Native event processing uses no synchronous X request/reply. */
 struct fr_viewer_input *fr_viewer_input_open(const char *display, uint32_t window,
                                            uint32_t width, uint32_t height,
@@ -119,7 +246,7 @@ struct fr_viewer_input *fr_viewer_input_open(const char *display, uint32_t windo
     xcb_intern_atom_reply_t *atom = reply(h, xcb_intern_atom(h->c, 0, sizeof(name)-1, name).sequence);
     if (!atom) goto fail;
     h->barrier = atom->atom; free(atom);
-    if (!h->barrier) goto fail;
+    if (!h->barrier || !held_setup(h)) goto fail;
     return h;
 fail:
     fr_viewer_input_close(h); return NULL;
@@ -140,6 +267,12 @@ int fr_viewer_input_next(struct fr_viewer_input *h, struct fr_viewer_event *out)
     if (!kind) { free(e); return -1; }
     if (kind == h->xkb_event || kind == XCB_MAPPING_NOTIFY) out->kind = KEYMAP_CHANGED;
     else switch (kind) {
+    case XCB_GE_GENERIC: {
+        xcb_ge_generic_event_t *v = (void*)e;
+        if (v->extension == h->xi_opcode && v->event_type == XI_HierarchyChanged)
+            out->kind = DEVICES_CHANGED;
+        break;
+    }
     case XCB_PROPERTY_NOTIFY: {
         xcb_property_notify_event_t *v = (void*)e;
         if (!(e->response_type & 0x80) && v->window == h->clock && v->atom == h->barrier && v->state == XCB_PROPERTY_NEW_VALUE) {

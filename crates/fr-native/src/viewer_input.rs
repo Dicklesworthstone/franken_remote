@@ -2,11 +2,15 @@
 //! original granted viewer's bounded queue. No root/global capture, input grabs,
 //! key injection, text/IME guessing, window creation or replacement authority.
 //! Native work has one thread/connection owner, separate from codecs and QUIC.
+//! Requires XI2 and exactly one enabled master pointer/keyboard pair. Held input
+//! is sampled at most four times per second, never adopted from another device.
+//! No native queries are issued while nothing is held and no events arrive.
+mod held;
 #[cfg(test)]
 mod tests;
 mod timing;
 use fr_core::{
-    input::{KeyTransition, PhysicalKey, PointerButton, ScrollUnit},
+    input::{KeyTransition, PointerButton, ScrollUnit},
     input_submission::{Capabilities, Capability},
 };
 use frd::session_startup::{
@@ -89,6 +93,7 @@ pub enum StopReason {
     UnsupportedKey,
     InitialHeld,
     Queue,
+    InputDevicesChanged,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -144,6 +149,7 @@ fn state(value: u8) -> Status {
         11 => Status::Stopped(R::Clock),
         12 => Status::Stopped(R::UnsupportedKey),
         13 => Status::Stopped(R::InitialHeld),
+        15 => Status::Stopped(R::InputDevicesChanged),
         _ => Status::Stopped(R::Queue),
     }
 }
@@ -332,58 +338,28 @@ fn run(
     let native = Native(NonNull::new(raw).ok_or(StopReason::NativeFailure)?);
     let mut decoder = Decoder::new(&names, target.capabilities());
     let mut timeline: Option<Timeline> = None;
+    let mut sampler = held::Sampler::new(target.clock()?)?;
     loop {
-        // No clock properties, keyboard queries or native traffic while idle.
+        // No native traffic with nothing held. Held input gets bounded periodic
+        // release-only sampling even when no event arrives (e.g. a lost release).
         // The first dequeued event is retained, never retimestamped as fresh.
-        let mut first = if timeline.is_some() {
-            Some(await_event(&native, target)?)
+        let first = if timeline.is_some() {
+            await_event(&native, target, &decoder, &sampler)?
         } else {
             None
         };
         let before = target.clock()?;
-        // SAFETY: same live native owner, at most one pending clock property.
-        if unsafe { fr_viewer_input_barrier(native.0.as_ptr()) } != 1 {
-            return Err(StopReason::NativeFailure);
+        let sample = timeline.is_some() && sampler.due(&decoder, before);
+        if sample {
+            sampler.begin(&native, before)?;
         }
-        let mut events = [Raw::default(); MAX_NATIVE_EVENTS];
-        let mut used = 0;
-        let barrier = loop {
-            let now = target.clock()?;
-            if now.0.checked_sub(before.0).ok_or(StopReason::Clock)? >= NATIVE_TURN_US {
-                return Err(StopReason::Expired);
-            }
-            let event = if let Some(event) = first.take() {
-                event
-            } else {
-                let mut event = Raw::default();
-                // SAFETY: unique owner and a writable fixed-size output record.
-                match unsafe { fr_viewer_input_next(native.0.as_ptr(), &raw mut event) } {
-                    0 => {
-                        thread::sleep(TURN);
-                        continue;
-                    }
-                    1 => event,
-                    _ => return Err(StopReason::NativeFailure),
-                }
-            };
-            match event.kind {
-                6 => break event.time,
-                7 => return Err(StopReason::FocusLost),
-                8 => return Err(StopReason::WindowChanged),
-                9 if event.x != i32::try_from(window.width).unwrap()
-                    || event.y != i32::try_from(window.height).unwrap() =>
-                {
-                    return Err(StopReason::WindowChanged);
-                }
-                10 => return Err(StopReason::KeymapChanged),
-                11 => return Err(StopReason::SyntheticInput),
-                _ => {}
-            }
-            if used == MAX_NATIVE_EVENTS {
-                return Err(StopReason::Overflow);
-            }
-            events[used] = event;
-            used += 1;
+        let (events, used, barrier) = batch(&native, target, window, first, before)?;
+        // Consume both replies before the next turn, even when the snapshot is
+        // unusable. Nothing here increases the original native turn deadline.
+        let snapshot = if sample {
+            Some(held::complete(&native, target, before)?)
+        } else {
+            None
         };
         // Inspect the ENTIRE batch for lifecycle changes before admitting any
         // action. Native timestamps retain pre-dequeue age via a server barrier.
@@ -392,11 +368,18 @@ fn run(
             for event in &events[..used] {
                 target.clock()?;
                 if (1..=5).contains(&event.kind) {
-                    let sampled = timeline.sample(event.time, barrier, before)?;
+                    let captured_at = timeline.sample(event.time, barrier, before)?;
                     if let Some(event) = decoder.event(*event, layout)? {
-                        target.push(event, sampled)?;
+                        target.push(event, captured_at)?;
                     }
                 }
+            }
+            if let Some(snapshot) = snapshot.filter(|_| held::stable(&events[..used])) {
+                let observed = decoder.reconcile(&snapshot)?;
+                // Later native events occur after this server barrier. Preserve
+                // that lower bound across millisecond timestamp quantization.
+                timeline.fence(barrier, before)?;
+                target.push(observed, before)?;
             }
         } else {
             // Input occurring during initialization is never replayed. Refuse a
@@ -404,7 +387,7 @@ fn run(
             for event in &events[..used] {
                 let _ = decoder.event(*event, layout)?;
             }
-            if decoder.keys.iter().any(|down| *down) || decoder.buttons.iter().any(|down| *down) {
+            if decoder.has_held() {
                 return Err(StopReason::InitialHeld);
             }
             timeline = Some(Timeline::new(barrier, before));
@@ -413,14 +396,74 @@ fn run(
         thread::sleep(TURN);
     }
 }
-fn await_event(native: &Native, target: &impl Target) -> Result<Raw, StopReason> {
+fn batch(
+    native: &Native,
+    target: &impl Target,
+    window: Window,
+    mut first: Option<Raw>,
+    before: ClientInstant,
+) -> Result<([Raw; MAX_NATIVE_EVENTS], usize, u32), StopReason> {
+    // SAFETY: same live native owner, at most one pending clock property.
+    if unsafe { fr_viewer_input_barrier(native.0.as_ptr()) } != 1 {
+        return Err(StopReason::NativeFailure);
+    }
+    let mut events = [Raw::default(); MAX_NATIVE_EVENTS];
+    let mut used = 0;
+    let barrier = loop {
+        let now = target.clock()?;
+        if now.0.checked_sub(before.0).ok_or(StopReason::Clock)? >= NATIVE_TURN_US {
+            return Err(StopReason::Expired);
+        }
+        let event = if let Some(event) = first.take() {
+            event
+        } else {
+            let mut event = Raw::default();
+            // SAFETY: unique owner and a writable fixed-size output record.
+            match unsafe { fr_viewer_input_next(native.0.as_ptr(), &raw mut event) } {
+                0 => {
+                    thread::sleep(TURN);
+                    continue;
+                }
+                1 => event,
+                _ => return Err(StopReason::NativeFailure),
+            }
+        };
+        match event.kind {
+            6 => break event.time,
+            7 => return Err(StopReason::FocusLost),
+            8 => return Err(StopReason::WindowChanged),
+            9 if event.x != i32::try_from(window.width).unwrap()
+                || event.y != i32::try_from(window.height).unwrap() =>
+            {
+                return Err(StopReason::WindowChanged);
+            }
+            10 => return Err(StopReason::KeymapChanged),
+            11 => return Err(StopReason::SyntheticInput),
+            12 => return Err(StopReason::InputDevicesChanged),
+            _ => {}
+        }
+        if used == MAX_NATIVE_EVENTS {
+            return Err(StopReason::Overflow);
+        }
+        events[used] = event;
+        used += 1;
+    };
+    Ok((events, used, barrier))
+}
+fn await_event(
+    native: &Native,
+    target: &impl Target,
+    decoder: &Decoder,
+    sampler: &held::Sampler,
+) -> Result<Option<Raw>, StopReason> {
     loop {
         target.clock()?;
         let mut event = Raw::default();
         // SAFETY: unique owning thread, writable fixed-size event, no callbacks.
         match unsafe { fr_viewer_input_next(native.0.as_ptr(), &raw mut event) } {
+            0 if sampler.due(decoder, target.clock()?) => return Ok(None),
             0 => thread::sleep(TURN),
-            1 => return Ok(event),
+            1 => return Ok(Some(event)),
             _ => return Err(StopReason::NativeFailure),
         }
     }
@@ -445,12 +488,7 @@ impl Decoder {
             1 | 2 if self.caps.contains(Capability::Keys) => {
                 let index =
                     usize::try_from(event.detail).map_err(|_| StopReason::UnsupportedKey)?;
-                let name = self.names.get(index).ok_or(StopReason::UnsupportedKey)?;
-                let usage = crate::key_names::KEY_NAMES
-                    .iter()
-                    .find(|(_, n)| n == name)
-                    .ok_or(StopReason::UnsupportedKey)?
-                    .0;
+                let key = self.physical_key(index)?;
                 let pressed = event.kind == 1;
                 let transition = match (pressed, self.keys[index]) {
                     (true, false) => KeyTransition::Press,
@@ -460,10 +498,7 @@ impl Decoder {
                     (true, true) => return Ok(None),
                 };
                 self.keys[index] = pressed;
-                Ok(Some(Event::Key {
-                    key: PhysicalKey::new(usage).ok_or(StopReason::UnsupportedKey)?,
-                    transition,
-                }))
+                Ok(Some(Event::Key { key, transition }))
             }
             3 | 4 => self.button(event, layout),
             5 if self.caps.contains(Capability::Absolute) => Ok(Some(Event::Pointer(

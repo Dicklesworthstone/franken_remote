@@ -243,6 +243,7 @@ fn physical_keys_pointer_buttons_and_wheel_preserve_native_order_and_original_la
                     },
                 ..
             } => scroll += 1,
+            Event::HeldState(_) => {}
             _ => panic!("unexpected event category"),
         }
     }
@@ -435,3 +436,5 @@ fn native_flood_is_bounded_before_queue_admission() {
     assert_eq!(task.join().unwrap(), Err(StopReason::Overflow));
     assert!(probe.events.lock().unwrap().is_empty());
 }
+
+mod held;

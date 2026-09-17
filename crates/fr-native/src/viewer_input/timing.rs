@@ -22,6 +22,20 @@ impl Timeline {
         self.last_barrier = time;
         Ok(())
     }
+    /// The held-state queries and every preceding batch event have completed
+    /// before this server barrier. Only later events may inherit this bound; do
+    /// not use it to relabel the timestamps of events already in that batch.
+    pub(super) fn fence(&mut self, barrier: u32, before: ClientInstant) -> Result<(), StopReason> {
+        if barrier != self.last_barrier
+            || barrier.wrapping_sub(self.last_native) >= (1 << 31)
+            || before < self.lower
+        {
+            return Err(StopReason::Clock);
+        }
+        self.last_native = barrier;
+        self.lower = before;
+        Ok(())
+    }
     pub(super) fn sample(
         &mut self,
         time: u32,

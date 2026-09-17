@@ -23,6 +23,32 @@ sig(xt,'XTestFakeMotionEvent',c.c_int,D,c.c_int,c.c_int,c.c_int,W)
 sig(xt,'XTestFakeButtonEvent',c.c_int,D,c.c_uint,c.c_int,W)
 class Key(c.Structure):
     _fields_=[('type',c.c_int),('serial',W),('send_event',c.c_int),('display',D),('window',W),('root',W),('subwindow',W),('time',W),('x',c.c_int),('y',c.c_int),('x_root',c.c_int),('y_root',c.c_int),('state',c.c_uint),('keycode',c.c_uint),('same_screen',c.c_int)]
+# XI hierarchy changes are confined to the explicitly requested test X server.
+xi=c.CDLL('libXi.so.6')
+class Add(c.Structure):
+    _fields_=[('type',c.c_int),('name',c.c_char_p),('send_core',c.c_int),('enable',c.c_int)]
+class Remove(c.Structure):
+    _fields_=[('type',c.c_int),('deviceid',c.c_int),('return_mode',c.c_int),('return_pointer',c.c_int),('return_keyboard',c.c_int)]
+class Device(c.Structure):
+    _fields_=[('deviceid',c.c_int),('name',c.c_char_p),('use',c.c_int),('attachment',c.c_int),('enabled',c.c_int),('num_classes',c.c_int),('classes',D)]
+sig(xi,'XIQueryVersion',c.c_int,D,c.POINTER(c.c_int),c.POINTER(c.c_int))
+sig(xi,'XIChangeHierarchy',c.c_int,D,D,c.c_int)
+sig(xi,'XIQueryDevice',c.POINTER(Device),D,c.c_int,c.POINTER(c.c_int))
+sig(xi,'XIFreeDeviceInfo',None,c.POINTER(Device))
+masters=[]
+def add_master():
+    major=c.c_int(2);minor=c.c_int(0)
+    assert xi.XIQueryVersion(d,c.byref(major),c.byref(minor))==0
+    add=Add(1,b'fr-test',True,True)
+    assert xi.XIChangeHierarchy(d,c.byref(add),1)==0
+    count=c.c_int(); devices=xi.XIQueryDevice(d,1,c.byref(count)); assert devices
+    try:
+        for i in range(count.value):
+            dev=devices[i]
+            if dev.use==1 and dev.name==b'fr-test pointer': masters.append(dev.deviceid)
+    finally: xi.XIFreeDeviceInfo(devices)
+    assert masters
+
 d=x.XOpenDisplay(sys.argv[1].encode('ascii')); assert d
 root=x.XDefaultRootWindow(d)
 w=x.XCreateSimpleWindow(d,root,0,0,320,240,0,0,0xffffff); assert w
@@ -54,7 +80,13 @@ try:
         x.XSendEvent(d,w,False,1,buf)
     elif op=='flood':
         for i in range(100): xt.XTestFakeMotionEvent(d,x.XDefaultScreen(d),i+1,10,0)
+    elif op=='hierarchy': add_master()
     elif op=='quit': break
     else: raise RuntimeError('unknown test operation')
     x.XSync(d,0); print('ok',flush=True)
-finally: x.XCloseDisplay(d)
+finally:
+ for device in masters:
+    remove=Remove(2,device,2,0,0) # return attached slaves floating; no ID assumptions
+    xi.XIChangeHierarchy(d,c.byref(remove),1)
+ x.XSync(d,0)
+ x.XCloseDisplay(d)
