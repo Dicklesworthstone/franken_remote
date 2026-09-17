@@ -461,6 +461,26 @@ impl StreamingViewer {
             super::controlled::ControlledViewer::input_capture_cleanup,
         )
     }
+    /// Fence at call time and retain the original native input owner until its
+    /// nonblocking cleanup observation completes or the absolute budget expires.
+    pub fn reap_input_capture<'a>(
+        &'a mut self,
+        cleanup: &'a Cx,
+        deadline: Deadline,
+    ) -> impl Future<
+        Output = Result<
+            super::controlled::events::CaptureCleanup,
+            super::controlled::events::CaptureReapError,
+        >,
+    > + 'a {
+        self.close();
+        async move {
+            match self.peer.controlled() {
+                Some(viewer) => viewer.reap_input_capture(cleanup, deadline).await,
+                None => Ok(super::controlled::events::CaptureCleanup::NotStarted),
+            }
+        }
+    }
     /// Retain authentic input results after closure without replaying effects.
     pub fn last_result(&mut self) -> Option<ResultEvent> {
         self.peer.controlled().and_then(|v| v.last_result())

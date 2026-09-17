@@ -200,6 +200,21 @@ impl NativeObserver {
     pub fn input_capture_cleanup(&mut self) -> super::controlled::events::CaptureCleanup {
         self.viewer.input_capture_cleanup()
     }
+    /// Fence the original session immediately and await native input cleanup
+    /// under the SAME absolute budget as the other closing resources. A failure
+    /// retains the owner; reconnection must not assume the producer disappeared.
+    pub fn reap_input_capture<'a>(
+        &'a mut self,
+        cleanup: &'a Cx,
+        deadline: Deadline,
+    ) -> impl Future<
+        Output = Result<
+            super::controlled::events::CaptureCleanup,
+            super::controlled::events::CaptureReapError,
+        >,
+    > + 'a {
+        self.viewer.reap_input_capture(cleanup, deadline)
+    }
     pub fn last_result(&mut self) -> Option<fr_client::input::ResultEvent> {
         self.viewer.last_result()
     }
