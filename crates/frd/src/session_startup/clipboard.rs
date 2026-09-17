@@ -47,7 +47,7 @@ struct Ready {
     sent: bool,
     peer: Option<bool>,
 }
-fn selected(selection: &Selection) -> Result<(), Error> {
+pub(crate) fn selected(selection: &Selection) -> Result<(), Error> {
     if selection.role != Role::RequestControl
         || ![
             (attachment::CAPABILITY, attachment::VERSION),

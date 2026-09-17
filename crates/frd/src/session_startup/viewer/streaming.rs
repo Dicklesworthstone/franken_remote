@@ -33,6 +33,7 @@ use std::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Session(super::Error),
+    Clipboard(crate::clipboard_quic::Error),
     Control(super::controlled::Error),
     Startup(decoder_startup::Error),
     Media(media::Error),
@@ -214,6 +215,7 @@ impl Peer {
 /// Encoded memory remains charged across native awaits. No decoder thread, task
 /// or additional queue is spawned, and UI callbacks remain bounded/nonblocking.
 pub struct StreamingViewer {
+    clipboard: Option<crate::native_clipboard::Application>,
     peer: Peer,
     presenter: Presenter,
     receiver: ReceivePipeline,
@@ -351,6 +353,7 @@ impl StreamingViewer {
         };
         let input = peer.controlled().map(|v| v.control());
         Ok(Self {
+            clipboard: None,
             peer,
             presenter,
             receiver,
@@ -362,6 +365,44 @@ impl StreamingViewer {
             served: false,
             initial: None,
         })
+    }
+    pub(crate) fn configure_clipboard(
+        &mut self,
+        config: crate::native_clipboard::Configuration,
+    ) -> Result<crate::native_clipboard::Control, crate::clipboard_quic::Error> {
+        use crate::clipboard_quic::Error as E;
+        if self.served || self.clipboard.is_some() {
+            return Err(E::AlreadyAttached);
+        }
+        let (session, _) = self.peer.parts().map_err(|_| E::Closed)?;
+        session.check().map_err(|_| E::Closed)?;
+        crate::session_startup::clipboard::selected(&session.opened.selection)?;
+        let app = crate::native_clipboard::Application::new(config);
+        let control = app.control();
+        self.clipboard = Some(app);
+        Ok(control)
+    }
+    pub(crate) async fn reap_clipboard(
+        &mut self,
+        cx: &Cx,
+        deadline: Deadline,
+    ) -> Result<crate::native_clipboard::Cleanup, crate::clipboard_quic::Error> {
+        let Some(app) = &mut self.clipboard else {
+            return Ok(crate::native_clipboard::Cleanup::NotStarted);
+        };
+        let result = app.reap(cx, deadline).await;
+        if let Some(viewer) = self.peer.controlled() {
+            app.collect_received(viewer)?;
+        }
+        result
+    }
+    pub(crate) fn collect_clipboard(&mut self) -> Result<(), crate::clipboard_quic::Error> {
+        if let Some(app) = &mut self.clipboard
+            && let Some(viewer) = self.peer.controlled()
+        {
+            app.collect_received(viewer)?;
+        }
+        Ok(())
     }
     pub fn control(&self) -> StreamingViewerControl {
         self.control.clone()
@@ -387,6 +428,9 @@ impl StreamingViewer {
         // Fence before codec cancellation or memory retirement.
         self.control.stop();
         self.peer.close();
+        if let Some(app) = &mut self.clipboard {
+            app.close();
+        }
         self.receiver.close();
         self.presenter.abort();
         self.repair.clear();
@@ -459,6 +503,7 @@ impl StreamingViewer {
             let Some(job) = job else {
                 network(
                     &mut self.peer,
+                    self.clipboard.as_mut(),
                     &mut self.receiver,
                     &mut self.repair,
                     &mut self.statistics,
@@ -482,6 +527,7 @@ impl StreamingViewer {
                     let decoded = {
                         let turn = network(
                             &mut self.peer,
+                            self.clipboard.as_mut(),
                             &mut self.receiver,
                             &mut self.repair,
                             &mut self.statistics,
@@ -631,6 +677,7 @@ impl Repair {
 #[allow(clippy::too_many_arguments)]
 async fn network(
     peer: &mut Peer,
+    clipboard: Option<&mut crate::native_clipboard::Application>,
     receiver: &mut ReceivePipeline,
     repair: &mut Repair,
     statistics: &mut Statistics,
@@ -640,6 +687,11 @@ async fn network(
     result: &mut impl FnMut(ResultEvent),
     other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
 ) -> Result<(), Error> {
+    if let Some(app) = clipboard
+        && let Some(viewer) = peer.controlled()
+    {
+        app.viewer(viewer).map_err(Error::Clipboard)?;
+    }
     let (session, media) = peer.parts()?;
     let routes = media
         .viewer_routes(&session.transport)

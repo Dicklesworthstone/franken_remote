@@ -255,6 +255,7 @@ fn actual_quic_viewer_service_repairs_an_entirely_lost_final_picture() {
                 ),
                 network(
                     &mut peer,
+                    None,
                     &mut receiver,
                     &mut repair,
                     &mut stats,

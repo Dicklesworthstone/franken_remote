@@ -76,6 +76,7 @@ pub struct StreamingHost {
     stream: Stream,
     feedback: Option<HostFeedback>,
     presentation: Option<HostPresentation>,
+    clipboard: Option<crate::native_clipboard::Application>,
 }
 impl HostSession {
     pub fn into_streaming(self, stream: Stream) -> Result<StreamingHost, Error> {
@@ -158,7 +159,46 @@ impl StreamingHost {
             stream,
             feedback,
             presentation,
+            clipboard: None,
         })
+    }
+    pub(crate) fn configure_clipboard(
+        &mut self,
+        config: crate::native_clipboard::Configuration,
+    ) -> Result<crate::native_clipboard::Control, crate::clipboard_quic::Error> {
+        use crate::clipboard_quic::Error as E;
+        if self.stream.served || self.clipboard.is_some() {
+            return Err(E::AlreadyAttached);
+        }
+        let session = self.host.session().map_err(|_| E::Closed)?;
+        session.check().map_err(|_| E::Closed)?;
+        crate::session_startup::clipboard::selected(&session.opened.selected)?;
+        let app = crate::native_clipboard::Application::new(config);
+        let control = app.control();
+        self.clipboard = Some(app);
+        Ok(control)
+    }
+    pub(crate) async fn reap_clipboard(
+        &mut self,
+        cx: &Cx,
+        deadline: crate::worker::Deadline,
+    ) -> Result<crate::native_clipboard::Cleanup, crate::clipboard_quic::Error> {
+        let Some(app) = &mut self.clipboard else {
+            return Ok(crate::native_clipboard::Cleanup::NotStarted);
+        };
+        let result = app.reap(cx, deadline).await;
+        if let Host::Control(host) = &mut self.host {
+            app.collect_received(host)?;
+        }
+        result
+    }
+    pub(crate) fn collect_clipboard(&mut self) -> Result<(), crate::clipboard_quic::Error> {
+        if let Some(app) = &mut self.clipboard
+            && let Host::Control(host) = &mut self.host
+        {
+            app.collect_received(host)?;
+        }
+        Ok(())
     }
     pub fn statistics(&self) -> Statistics {
         self.stream.statistics()
@@ -187,6 +227,9 @@ impl StreamingHost {
     /// cleanup/late receipts remain with its original independently polled Driver.
     pub fn close(&mut self) {
         self.host.close();
+        if let Some(app) = &mut self.clipboard {
+            app.close();
+        }
         self.stream.close();
     }
     pub async fn reap_media(
@@ -255,6 +298,10 @@ impl StreamingHost {
             native: self.host.native(),
         };
         let stream = &mut self.stream;
+        let clipboard_view = stream
+            .sender
+            .feedback_view()
+            .map_err(Error::MediaTransport)?;
         let (credit, requests) = mpsc::channel(1);
         let (completed, results) = mpsc::channel(1);
         let mut producer = pin!(produce(
@@ -299,6 +346,13 @@ impl StreamingHost {
                     self.host
                         .drive(stream.policy.network_turn, nonce, ticket, &mut services)
                         .await?;
+                }
+                // Between complete network turns, not in transport/approval callbacks.
+                if let Some(app) = &mut self.clipboard
+                    && let Host::Control(host) = &mut self.host
+                {
+                    app.host(host, clipboard_view, nonce)
+                        .map_err(Error::Clipboard)?;
                 }
                 asupersync::runtime::yield_now().await;
             }

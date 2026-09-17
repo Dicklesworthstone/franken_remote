@@ -143,6 +143,34 @@ impl std::fmt::Debug for NativeObserver {
     }
 }
 impl NativeObserver {
+    /// Configure once before serving control. Factory/identifiers are local,
+    /// independently permitted and never received from the peer. Clipboard starts
+    /// automatically only after the ORIGINAL input grant and bilateral readiness;
+    /// merely observing a desktop never opens or reads a clipboard.
+    pub fn configure_clipboard(
+        &mut self,
+        config: crate::native_clipboard::Configuration,
+    ) -> Result<crate::native_clipboard::Control, crate::clipboard_quic::Error> {
+        if self.input.is_none() {
+            return Err(crate::clipboard_quic::Error::NotNegotiated);
+        }
+        self.viewer.configure_clipboard(config)
+    }
+    /// Nonblocking transfer of at most one retained terminal receipt to the UI
+    /// handle, including after close. Call again after collecting a full UI slot.
+    pub fn collect_clipboard(&mut self) -> Result<(), crate::clipboard_quic::Error> {
+        self.viewer.collect_clipboard()
+    }
+    /// Stop only the optional clipboard owner and observe native cleanup. A
+    /// timeout retains its thread handle and can be followed by another reap.
+    /// Media/input cleanup remain separately observable operations.
+    pub async fn reap_clipboard(
+        &mut self,
+        cleanup: &Cx,
+        deadline: Deadline,
+    ) -> Result<crate::native_clipboard::Cleanup, crate::clipboard_quic::Error> {
+        self.viewer.reap_clipboard(cleanup, deadline).await
+    }
     pub const fn display(&self) -> Display {
         self.display
     }
