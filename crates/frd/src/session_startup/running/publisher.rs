@@ -639,6 +639,15 @@ async fn bootstrap(
     if controlled {
         host.enable_clock_sync().map_err(Error::Clock)?;
     }
+    // The registered local surface must be ready BEFORE discovery or any native
+    // capture process starts. Keep the same call-time budget and canonical
+    // renewal/network driver running while its independent UI thread maps.
+    while !host
+        .sharing_surface_ready()
+        .map_err(|e| budget.fail(Error::Session(e)))?
+    {
+        drive(&mut host, budget, entropy, &mut block).await?;
+    }
     let control = budget.control.clone();
     let source = during(
         &mut host,

@@ -37,3 +37,6 @@ pub mod clipboard_quic;
 
 #[cfg(target_os = "linux")]
 pub mod native_clipboard;
+
+#[cfg(target_os = "linux")]
+pub mod local_sharing;

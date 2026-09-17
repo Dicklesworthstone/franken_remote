@@ -26,6 +26,7 @@ linux-media = []
 linux-displays = ["linux-media"]
 linux-input = []
 linux-clipboard = []
+linux-session-ui = ["dep:frd"]
 linux-input-agent = ["linux-input", "dep:frd", "dep:asupersync"]
 
 [lints.rust]

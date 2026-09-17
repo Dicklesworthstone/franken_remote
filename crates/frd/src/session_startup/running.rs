@@ -57,6 +57,7 @@ pub struct HostSession {
     opened: OpenedSession,
     renewal: ObservationRenewal,
     clock: Option<ClockSync>,
+    pub(crate) sharing_surface: Option<Box<dyn crate::local_sharing::Surface>>,
 }
 impl OpenedSession {
     /// Attach exactly one observation renewer after the binding acknowledgement.
@@ -74,10 +75,14 @@ impl OpenedSession {
             opened: self,
             renewal,
             clock: None,
+            sharing_surface: None,
         })
     }
 }
 impl HostSession {
+    pub(crate) fn original_observation(&self) -> ObservationControl {
+        self.opened.control.clone()
+    }
     /// Opt into session-owned clock service after positive capability selection.
     /// Existing explicitly owned `ClockSync` callers remain supported; the same
     /// connection can never claim both. No timestamp or authority is fabricated.
@@ -199,6 +204,14 @@ impl HostSession {
     }
 
     pub fn check(&mut self) -> Result<(), Error> {
+        if self
+            .sharing_surface
+            .as_ref()
+            .is_some_and(|s| s.state() == crate::local_sharing::State::Stopped)
+        {
+            self.close();
+            return Err(Error::Authority);
+        }
         self.opened.check()
     }
     pub fn binding(&self) -> ControlBinding {
@@ -208,6 +221,7 @@ impl HostSession {
         self.opened.selection()
     }
     pub fn observation(&mut self) -> Result<ObservationControl, Error> {
+        self.check()?;
         self.opened.observation()
     }
     pub fn renewed_until(&self) -> Option<HostInstant> {
@@ -216,10 +230,14 @@ impl HostSession {
     /// A loan of this same connection for the existing media/input senders. The
     /// bound owner is checked at the next turn; never replace the loaned value.
     pub fn io(&mut self) -> Result<(&mut QuicRecords, ControlRoutes), Error> {
+        self.check()?;
         self.opened.io()
     }
     pub fn close(&mut self) {
         self.opened.close();
+        if let Some(surface) = &self.sharing_surface {
+            surface.stop();
+        }
         self.renewal.stop();
         if let Some(clock) = &mut self.clock {
             clock.stop();
