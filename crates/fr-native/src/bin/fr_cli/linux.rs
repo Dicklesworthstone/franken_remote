@@ -270,7 +270,13 @@ fn completed(
     json: bool,
 ) -> Result<String, Failure> {
     // A signal or UI close never conceals unsuccessful native cleanup.
-    if application.cleanup_failure().is_some() || application.desktop().is_some() {
+    if application.cleanup_failure().is_some()
+        || application.desktop().is_some()
+        || matches!(
+            result,
+            Err(reconnect::Failure::Cleanup | reconnect::Failure::CleanupExpired)
+        )
+    {
         return Err(failure(
             "native_cleanup_incomplete",
             "Native cleanup was not confirmed; inspect remaining workers before another connection.",
@@ -289,12 +295,10 @@ fn completed(
             "Select an explicit display handle currently offered by this host.",
         ));
     }
-    let user_closed = progress
-        .window
-        .as_ref()
-        .is_some_and(|w| w.status() == WindowStatus::Stopped(StopReason::User));
+    // Cleanup itself stops the window with User. Only intent recorded BEFORE
+    // cleanup may explain an otherwise failed observation as a normal UI exit.
     if let Err(error) = result
-        && !user_closed
+        && !progress.user_closed
     {
         return Err(match error {
             reconnect::Failure::Connection(frd::native_connection::Error::Tailnet(e)) => tailnet(e),
@@ -370,7 +374,29 @@ struct Progress {
     presented: u64,
     approval_pending: bool,
     missing_display: bool,
+    user_closed: bool,
     window: Option<WindowControl>,
+}
+impl Progress {
+    fn begin(&mut self, attempt: u8) {
+        self.attempts = attempt;
+        self.user_closed = false;
+        self.missing_display = false;
+        self.approval_pending = false;
+        // The previous owner has already been reaped. Its stopped handle must
+        // not classify a connection failure before this attempt opens a window.
+        self.window = None;
+    }
+    fn before_cleanup(&mut self, window: Option<WindowStatus>) -> Result<(), CallbackError> {
+        self.user_closed = window == Some(WindowStatus::Stopped(StopReason::User));
+        if self.user_closed {
+            // Cleaning notification failure stops retries AFTER mandatory
+            // cleanup. A user's close must never reconnect another window.
+            Err(CallbackError)
+        } else {
+            Ok(())
+        }
+    }
 }
 struct Interface {
     display: u128,
@@ -407,8 +433,14 @@ impl Ui for Interface {
         Ok(())
     }
     fn status(&mut self, status: Status) -> Result<(), CallbackError> {
-        if let Status::Connecting { attempt } = status {
-            self.progress.borrow_mut().attempts = attempt;
+        let mut progress = self.progress.borrow_mut();
+        match status {
+            Status::Connecting { attempt } => progress.begin(attempt),
+            Status::Cleaning { .. } => {
+                let window = progress.window.as_ref().map(WindowControl::status);
+                return progress.before_cleanup(window);
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -495,5 +527,106 @@ mod tests {
             Catalog::new(1, &[display], &fr_core::limits::ProtocolLimits::ABSOLUTE).unwrap();
         assert_eq!(ui.choose(1, &catalog), Err(CallbackError));
         assert!(ui.progress.borrow().missing_display);
+    }
+    fn unused_session() -> Session<Interface> {
+        Session::new(
+            DesktopConfiguration::new(Path::new("/usr/bin/false"), ":0", None, 1).unwrap(),
+            ObserverPolicy::default(),
+            Mode::Observe,
+            Interface {
+                display: 9,
+                progress: Rc::new(RefCell::new(Progress::default())),
+            },
+        )
+    }
+    #[test]
+    fn cleanup_stopping_a_window_is_not_evidence_of_a_user_close() {
+        let mut progress = Progress::default();
+        progress.begin(1);
+        for before in [
+            None,
+            Some(WindowStatus::Mapped),
+            Some(WindowStatus::Stopped(StopReason::SessionEnded)),
+            Some(WindowStatus::Stopped(StopReason::NativeFailure)),
+        ] {
+            assert_eq!(progress.before_cleanup(before), Ok(()));
+            assert!(!progress.user_closed);
+            // Programmatic cleanup may now publish Stopped(User). It is never
+            // sampled here: the failure must retain its original disposition.
+            assert_eq!(
+                completed(
+                    &unused_session(),
+                    Err(reconnect::Failure::Connection(
+                        frd::native_connection::Error::Tailnet(TailnetError::LocalApiUnavailable)
+                    )),
+                    false,
+                    &progress,
+                    true
+                )
+                .unwrap_err()
+                .code,
+                "tailscale_unavailable"
+            );
+        }
+    }
+    #[test]
+    fn recorded_user_close_requests_a_terminal_notice_and_keeps_its_disposition() {
+        let mut progress = Progress::default();
+        progress.begin(1);
+        assert_eq!(
+            progress.before_cleanup(Some(WindowStatus::Stopped(StopReason::User))),
+            Err(CallbackError)
+        );
+        assert!(progress.user_closed);
+        assert!(
+            completed(
+                &unused_session(),
+                Err(reconnect::Failure::Notification),
+                false,
+                &progress,
+                true
+            )
+            .unwrap()
+            .contains("\"outcome\":\"stopped\"")
+        );
+    }
+    #[test]
+    fn a_new_attempt_cannot_inherit_the_old_windows_close_intent() {
+        let mut progress = Progress::default();
+        progress.begin(1);
+        let _ = progress.before_cleanup(Some(WindowStatus::Stopped(StopReason::User)));
+        progress.begin(2);
+        assert!(!progress.user_closed && progress.window.is_none());
+        assert_eq!(progress.before_cleanup(None), Ok(()));
+        assert!(
+            completed(
+                &unused_session(),
+                Err(reconnect::Failure::Observation(
+                    frd::session_startup::ObserverError::Order
+                )),
+                false,
+                &progress,
+                true
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn supervisor_cleanup_failure_cannot_be_masked_by_a_user_close_or_signal() {
+        let mut progress = Progress::default();
+        let _ = progress.before_cleanup(Some(WindowStatus::Stopped(StopReason::User)));
+        for error in [
+            reconnect::Failure::Cleanup,
+            reconnect::Failure::CleanupExpired,
+        ] {
+            for signal in [false, true] {
+                assert_eq!(
+                    completed(&unused_session(), Err(error), signal, &progress, true)
+                        .unwrap_err()
+                        .code,
+                    "native_cleanup_incomplete"
+                );
+            }
+        }
     }
 }

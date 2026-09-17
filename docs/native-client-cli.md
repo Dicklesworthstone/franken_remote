@@ -91,8 +91,13 @@ resize or window loss retain the existing terminal behavior.
 Close the window, or send SIGINT/Ctrl-C, SIGTERM or SIGHUP. A signal cancels the
 original supervisor but does not abandon its future: the same independent
 cleanup path still runs. Native cleanup failure takes precedence over a friendly
-"cancelled" result. Closing a window does not assert host-key release, physical
-pixel erasure or observed display scanout.
+"cancelled" result. A genuine user-close decision is sampled before cleanup;
+programmatic window cleanup cannot turn a connection failure into a successful
+user exit. That decision stops further retries only after mandatory cleanup, and
+is cleared before a new attempt. Supervisor cleanup errors still take precedence
+even when the application has already collected its window. Closing a window
+does not assert host-key release, physical pixel erasure or observed display
+scanout.
 
 Callbacks only retain bounded counters and the latest content-free window
 handle. They never print, block on terminal input, retain pixels, or build an
