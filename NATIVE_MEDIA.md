@@ -82,10 +82,27 @@ all 4096 opaque black BGRA pixels. The offline sample generator was system
 FFmpeg/libx265, not a dependency of the stripped SDK. An initially incorrectly
 tagged sample was refused with `ColorMismatch`; validation was not weakened.
 
+A subsequent three-frame stream (one IDR and two predicted frames) passed the
+same Rust boundary, with frame identity, geometry and every pixel checked for
+black, white and gray output. These uniform synthetic frames do not qualify
+representative desktop content, loss recovery, or presentation.
+
+The archive's detached release signature passed GPG verification with fingerprint
+`FCF986EA15E6E293A5644F10B4322F04D67658D8`, matched against FFmpeg's
+[official release-key publication](https://ffmpeg.org/download.html).
+This authenticates the source under that HTTPS-published key; it is not package
+signing or independent web-of-trust certification. The recipe still checks only
+the pinned archive digest.
+
+A third clean build at a different absolute prefix succeeded but all three
+library hashes differed. Cross-prefix byte reproducibility therefore **failed**;
+the same-prefix comparison remains passed. The byte-difference cause was not
+established, and the decoder probes used the original SDK, not this third build.
+
 The existing `native_roundtrip --software-explicit` compiled and loaded this
 SDK but returned `Unavailable`: this profile deliberately has no encoder.
-The successful single-frame decoder probe does not turn that full roundtrip
+The successful decoder probes do not turn that full roundtrip
 into a pass. See the [evidence record](native/ffmpeg-7.1.5-linux-x86_64.evidence.json)
-for hashes and scope. Cross-builder/path reproducibility, protected-path loading,
+for hashes and scope. Cross-builder reproducibility, protected-path loading,
 hardware encoding/decoding, presentation, signing and distribution review remain
 unqualified. Test-time `LD_LIBRARY_PATH` binding is not a protected installation.

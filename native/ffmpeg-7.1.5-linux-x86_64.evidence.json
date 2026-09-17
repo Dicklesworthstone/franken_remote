@@ -12,7 +12,7 @@
     "version": "7.1.5",
     "url": "https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz",
     "sha256": "de668509caf9e35e3cd162473441fdb29538c6d96ed080292b3cf9e6fc5d558f",
-    "authentication": "pinned HTTPS digest only; upstream signature not authenticated"
+    "authentication": "Detached release signature verified by gpg, exit 0, fingerprint FCF986EA15E6E293A5644F10B4322F04D67658D8. Full fingerprint matched official HTTPS https://ffmpeg.org/download.html Release Verification publication. Key fetched from hkps://keyserver.ubuntu.com; no independent web-of-trust certification claimed. Recipe itself checks the archive digest, not the signature."
   },
   "libraries": {
     "libavcodec.so.61.19.101": {
@@ -33,21 +33,32 @@
   },
   "registered_components": ["CONFIG_HEVC_DECODER"],
   "verification": {
-    "reproducibility": "Two clean source extractions/builds on hz3 at the same original absolute prefix, with identical configure arguments and toolchain: all three installed library SHA256s match exactly. Cross-prefix and cross-builder reproducibility not tested.",
+    "reproducibility": "Two clean source extractions/builds on hz3 at the same original absolute prefix, with identical configure arguments and toolchain: all three installed library SHA256s match exactly. Third build at a different prefix succeeded but all three hashes differed; cross-prefix byte reproducibility failed. Cross-builder reproducibility not tested.",
     "rust_decode": "Compiled Rust probe using existing fr-core/fr-media/fr-native artifacts and stripped shared SDK: Annex B normalization -> HevcGuard -> hvcC configuration -> HevcDecoder::submit -> poll_output passed for one 64x64 HEVC Main IDR. Asserted frame ID 1, dimensions, and all 4096 opaque black BGRA pixels. Exit 0. No presentation or transport exercised by this probe.",
     "decode_input": "System FFmpeg 8.0.1/libx265 4.1 used only as an offline sample generator, not linked into the SDK. Explicit x265 colorprim/transfer/colormatrix=bt709 and range=limited. Sample SHA256 711131afb564a71e143191c97baa5420c224ad4ebe6c623906ba07fac0c579fa. Initial sample without those explicit metadata settings was refused with ColorMismatch; guard unchanged.",
+    "rust_inter_decode": "Compiled probe linked to stripped SDK decoded one IDR followed by two Predicted access units referencing frame IDs 1 and 2 respectively. All three outputs matched IDs, 64x64 geometry, and all 4096 opaque BGRA pixels with RGB expectations 0, 255, 128 (tolerance 2). Exit 0. System x265 reported one I-frame and two P-frames. Annex B stream SHA256 8a982c7f8b580f5551aa8634166574e32179e4eecef57e0ee32324e176cb5a7e. Synthetic uniform black/white/gray input, not representative desktop or recovery qualification.",
+    "cross_prefix": {
+      "status": "failed byte comparison; build passed",
+      "original_prefix": "/tmp/fr-curated-20260917/run-1/sdk",
+      "comparison_prefix": "/tmp/fr-crossprefix-check/sdk/sdk",
+      "comparison_libraries": {
+        "libavcodec.so.61.19.101": "3a216f7dd7455be48c21e8b9549f880bc8ed08b45bf1f9fceb8c03b9fb75aef6",
+        "libavutil.so.59.39.100": "16e1f8af884233f158089218440c830a74ba9df7a53dff7c7701abc08580128b",
+        "libswscale.so.8.3.100": "fe1eda8855330c0bdda5827b38e4fddc9388ccfe261ac2523261f13abd34dcbd"
+      },
+      "scope": "Same builder/compiler and recipe, different source/output/prefix paths; root cause of byte differences not established. No decoder runtime test against this third build."
+    },
     "c_abi_probe": "cc -I sdk/include probe.c -L sdk/lib -lavcodec -lswscale -lavutil -lm; LD_LIBRARY_PATH=sdk/lib: decoder=1 encoder=0 libx265=0 avcodec_version=4002661, exit 0",
     "fr_native_build": "cargo build -p fr-native --features linux-media --example native_roundtrip -j 1 against FR_NATIVE_INCLUDE_DIR/LIBRARY_DIR pointing at the isolated SDK; cold build passed in 13m52s",
     "runtime_binding": "ldd of native_roundtrip under LD_LIBRARY_PATH resolves libavcodec.so.61, libavutil.so.59, libswscale.so.8 to the isolated SDK only; no x265, avformat, avdevice, avfilter, swresample, or postproc libraries appear",
     "existing_media_path": "xvfb-run native_roundtrip --software-explicit -> Error: Unavailable, exit 1 (typed FR_UNAVAILABLE at fr_encoder_new: decode-only SDK intentionally contains no encoder; expected refusal, not a defect)"
   },
   "qualification_gaps": [
-    "cross-prefix and cross-builder reproducibility not tested",
+    "cross-prefix byte reproducibility failed; cross-builder reproducibility not tested",
     "no protected-path installation or loader qualification",
     "no hardware encode/decode qualification in this experiment",
-    "no upstream signature authentication",
     "no shipping license, corresponding-source, relinking, or HEVC patent review",
-    "only one synthetic black IDR decoded; inter-frame recovery, presentation and full hardware pipeline remain unqualified"
+    "single-IDR and three-frame I-P-P synthetic software decode only; recovery, presentation and full hardware pipeline remain unqualified"
   ],
-  "status": "decode-only experiment built twice with identical library hashes and real Rust-boundary IDR decode verified; not a shipping or default hardware bundle"
+  "status": "decode-only experiment with matching same-prefix build hashes, authenticated source signature and real Rust-boundary I-P-P decode verified; not a shipping or default hardware bundle"
 }
