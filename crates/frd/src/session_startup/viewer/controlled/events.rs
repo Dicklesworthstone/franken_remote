@@ -13,7 +13,7 @@ use fr_core::{
     input::{KeyTransition, MAX_COMMITTED_TEXT_BYTES, PhysicalKey},
     input_submission::{Capabilities, Capability},
 };
-pub use native::{CaptureCleanup, CaptureStartError, NativeCapture};
+pub use native::{CaptureCleanup, CaptureReapError, CaptureStartError, NativeCapture};
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex, TryLockError, Weak},

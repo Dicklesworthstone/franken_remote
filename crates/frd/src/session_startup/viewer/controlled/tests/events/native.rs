@@ -4,6 +4,7 @@ use super::*;
 use crate::session_startup::viewer_events::{
     CaptureCleanup, CaptureStartError, Layout, NativeCapture, Source,
 };
+use crate::worker::Deadline;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[derive(Default)]
@@ -190,5 +191,110 @@ fn owned_capture_moves_with_original_stream_and_is_reapable_after_service_abando
         assert_eq!(stream.input_capture_cleanup(), CaptureCleanup::Complete);
         observation.revoke();
         host.close();
+    });
+}
+
+#[test]
+fn native_capture_reap_fences_at_call_and_retains_pending_owner_after_abandonment() {
+    run(|c, h| async move {
+        let mut state = Box::pin(fixture(&c, &h)).await;
+        let layout = layout(&mut state);
+        let native = own(&mut state.viewer, &layout);
+        let stop = state.viewer.control();
+        let deadline = Deadline::after(&h, Duration::from_secs(1)).unwrap();
+        let mut reap = Box::pin(state.viewer.reap_input_capture(&h, deadline));
+        assert!(
+            stop.is_stopped(),
+            "cleanup must fence before its first poll"
+        );
+        assert!(native.stops.load(Ordering::Acquire) > 0);
+        std::future::poll_fn(|task| {
+            assert!(std::future::Future::poll(reap.as_mut(), task).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(reap);
+        assert_eq!(native.drops.load(Ordering::Acquire), 0);
+        assert_eq!(
+            state.viewer.input_capture_cleanup(),
+            CaptureCleanup::Pending
+        );
+        native.finished.store(true, Ordering::Release);
+        assert_eq!(
+            state.viewer.reap_input_capture(&h, deadline).await,
+            Ok(CaptureCleanup::Complete)
+        );
+        assert_eq!(native.drops.load(Ordering::Acquire), 0);
+        assert_eq!(state.effects.lock().unwrap().operations, []);
+        assert!(
+            h.checkpoint().is_ok(),
+            "independent cleanup context was cancelled"
+        );
+        state.host.close();
+    });
+}
+
+#[test]
+fn native_capture_reap_uses_the_original_deadline_and_cannot_convert_stop_to_completion() {
+    use crate::session_startup::viewer_events::CaptureReapError;
+    run(|c, h| async move {
+        let mut state = Box::pin(fixture(&c, &h)).await;
+        let layout = layout(&mut state);
+        let native = own(&mut state.viewer, &layout);
+        let deadline = Deadline::after(&h, Duration::from_millis(10)).unwrap();
+        let reap = state.viewer.reap_input_capture(&h, deadline);
+        asupersync::time::sleep(h.now(), Duration::from_millis(20)).await;
+        assert_eq!(reap.await, Err(CaptureReapError::Expired));
+        assert_eq!(
+            state.viewer.input_capture_cleanup(),
+            CaptureCleanup::Pending
+        );
+        assert_eq!(native.drops.load(Ordering::Acquire), 0);
+        // Re-collect the same stopped producer; this does not create a new grant,
+        // refresh the failed operation or retrospectively pass its old deadline.
+        native.finished.store(true, Ordering::Release);
+        assert_eq!(
+            state.viewer.reap_input_capture(&h, deadline).await,
+            Err(CaptureReapError::Expired)
+        );
+        let collect = Deadline::after(&h, Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            state.viewer.reap_input_capture(&h, collect).await,
+            Ok(CaptureCleanup::Complete)
+        );
+        assert!(state.viewer.is_closed());
+        assert_eq!(state.effects.lock().unwrap().operations, []);
+        state.host.close();
+    });
+}
+
+#[test]
+fn native_capture_reap_does_not_use_the_cancelled_session_as_its_cleanup_context() {
+    use crate::session_startup::viewer_events::CaptureReapError;
+    run(|c, h| async move {
+        let mut state = Box::pin(fixture(&c, &h)).await;
+        let layout = layout(&mut state);
+        let native = own(&mut state.viewer, &layout);
+        let deadline = Deadline::after(&h, Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            state.viewer.reap_input_capture(&c, deadline).await,
+            Err(CaptureReapError::Cancelled)
+        );
+        assert_eq!(
+            state.viewer.input_capture_cleanup(),
+            CaptureCleanup::Pending
+        );
+        let completed = native.clone();
+        let now = h.now();
+        let (result, ()) =
+            support::both(state.viewer.reap_input_capture(&h, deadline), async move {
+                asupersync::time::sleep(now, Duration::from_millis(5)).await;
+                completed.finished.store(true, Ordering::Release);
+            })
+            .await;
+        assert_eq!(result, Ok(CaptureCleanup::Complete));
+        assert_eq!(native.drops.load(Ordering::Acquire), 0);
+        assert_eq!(state.effects.lock().unwrap().operations, []);
+        state.host.close();
     });
 }
