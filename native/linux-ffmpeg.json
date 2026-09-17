@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "profile": "linux-x86_64-hevc-cpu-decode-experiment",
+  "purpose": "Decode-only experiment, not a shipping or default hardware bundle",
+  "source": {
+    "version": "7.1.5",
+    "url": "https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz",
+    "sha256": "de668509caf9e35e3cd162473441fdb29538c6d96ed080292b3cf9e6fc5d558f",
+    "authentication": "Pinned HTTPS download digest; upstream signature not authenticated"
+  },
+  "source_date_epoch": 1767225600,
+  "libraries": ["avcodec", "avutil", "swscale"],
+  "registered_components": ["CONFIG_HEVC_DECODER"],
+  "hardware_encoding": {
+    "status": "unsupported",
+    "reason": "hardware_encoder_not_built_or_qualified"
+  },
+  "qualification_gaps": [
+    "No second-build reproducibility comparison",
+    "No protected-path installation or loader qualification",
+    "No hardware encode/decode qualification",
+    "No upstream signature authentication",
+    "No shipping license, corresponding-source, relinking or HEVC patent review",
+    "X11 development SDK remains an external prerequisite for fr-native"
+  ],
+  "configure_flags": [
+    "--prefix=/sdk",
+    "--libdir=/sdk/lib",
+    "--disable-everything",
+    "--disable-autodetect",
+    "--disable-programs",
+    "--disable-doc",
+    "--disable-network",
+    "--disable-avformat",
+    "--disable-avdevice",
+    "--disable-avfilter",
+    "--disable-swresample",
+    "--disable-postproc",
+    "--disable-static",
+    "--enable-shared",
+    "--enable-avcodec",
+    "--enable-avutil",
+    "--enable-swscale",
+    "--enable-decoder=hevc",
+    "--disable-gpl",
+    "--disable-nonfree",
+    "--disable-version3",
+    "--disable-x86asm",
+    "--disable-debug",
+    "--enable-pthreads",
+    "--cc=cc",
+    "--cxx=c++",
+    "--ar=ar",
+    "--ranlib=ranlib",
+    "--strip=strip"
+  ]
+}
