@@ -26,7 +26,7 @@ use std::{sync::Arc, time::Duration};
 mod shared;
 mod worker;
 use shared::{Clock, Outgoing, Shared, Turn};
-pub use worker::{Worker, WorkerSeed, WorkerTask};
+pub use worker::{Worker, WorkerControl, WorkerSeed, WorkerTask};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {

@@ -26,7 +26,29 @@ impl Drop for WorkerSeed {
         }
     }
 }
+/// Independent terminal stop for the original native worker; not a grant or
+/// proof of cleanup. Stopping before `open` prevents the factory from running.
+#[derive(Clone)]
+pub struct WorkerControl {
+    shared: Arc<Shared>,
+}
+impl WorkerControl {
+    pub fn stop(&self) {
+        self.shared.stop();
+    }
+}
+impl std::fmt::Debug for WorkerControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ClipboardWorkerControl([original worker fence])")
+    }
+}
 impl WorkerSeed {
+    pub fn control(&self) -> WorkerControl {
+        WorkerControl {
+            shared: self.shared.clone(),
+        }
+    }
+
     /// Initialization must target the locally approved OS session/display and
     /// must not read clipboard text. The resulting native owner need not be Send.
     pub fn open<N: NativeClipboard>(
