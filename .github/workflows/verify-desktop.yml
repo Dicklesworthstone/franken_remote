@@ -1,0 +1,50 @@
+name: Verify composed native desktop
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/verify-desktop.yml'
+      - 'crates/fr-native/**'
+      - 'crates/fr-client/**'
+      - 'crates/frd/**'
+      - 'crates/fr-media/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+permissions:
+  contents: read
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Install native window and input prerequisites
+        run: |
+          rustup show active-toolchain
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxext-dev libxi-dev libxcb1-dev libxtst6 pkg-config xvfb xauth openssl
+      - name: Check and lint the real composed feature
+        run: |
+          cargo fmt --all --check
+          cargo check -p fr-native --features linux-desktop --all-targets --locked
+          cargo clippy -p fr-native --features linux-desktop --all-targets --locked -- -D warnings
+      - name: Native windows and original-session lifecycle
+        run: cargo test -p fr-native --features linux-desktop --test viewer_window_x11 --locked -- --test-threads=1
+      - name: Required native input and desktop policy tests
+        run: |
+          FR_NATIVE_INPUT_CAPTURE_REQUIRED=1 xvfb-run -a -s '-screen 0 640x480x24 -noreset -nolisten tcp' \
+            cargo test -p fr-native --features linux-desktop --lib --locked -- --test-threads=1
+      - name: Original daemon session regression suite
+        run: cargo test -p frd --lib --locked -- --test-threads=1
+      - name: Check source remained unchanged
+        run: |
+          git diff --exit-code
+          git diff --cached --exit-code

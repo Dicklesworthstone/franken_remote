@@ -9,12 +9,15 @@ use frd::{session_startup::StreamingViewerControl, worker::Launch};
 use std::{
     ffi::{CString, c_char, c_int, c_void},
     fmt,
+    future::Future,
     path::Path,
+    pin::Pin,
     ptr::NonNull,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU8, AtomicU32, Ordering},
     },
+    task::{Context, Poll, Waker},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -75,6 +78,7 @@ pub enum Error {
     SessionEnded,
     ThreadUnavailable,
     NotReady,
+    NativeStopped(StopReason),
     Launch(frd::worker::Error),
 }
 struct Shared {
@@ -83,8 +87,20 @@ struct Shared {
     window: AtomicU32,
     width: u32,
     height: u32,
+    waiter: Mutex<Option<Waker>>,
 }
 impl Shared {
+    fn notify(&self) {
+        let wake = self
+            .waiter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        // Never run a wake callback under the registration lock.
+        if let Some(wake) = wake {
+            wake.wake();
+        }
+    }
     fn stop(&self, reason: StopReason) {
         // No native lock, codec call, network round trip, or replacement grant.
         // Fence first; publishing Stopped never claims cleanup has completed.
@@ -94,6 +110,7 @@ impl Shared {
             .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
                 (state < 2).then_some(reason as u8)
             });
+        self.notify();
     }
     fn live(&self) -> bool {
         if self.state.load(Ordering::Acquire) >= 2 {
@@ -190,6 +207,7 @@ impl ViewerWindow {
             window: AtomicU32::new(0),
             width,
             height,
+            waiter: Mutex::new(None),
         }));
         let shared = control.0.clone();
         let started = Instant::now();
@@ -207,6 +225,13 @@ impl ViewerWindow {
             control,
             task: Some(task),
         })
+    }
+    /// Wait for the actual native map event without polling timers or blocking
+    /// the session runtime. At most one waiter is registered. Dropping this wait
+    /// only unregisters it; the enclosing owner still decides session teardown.
+    /// Mapping is not a visibility witness and does not grant input.
+    pub fn ready(&mut self) -> impl Future<Output = Result<X11Target, Error>> + '_ {
+        Ready { window: self }
     }
     pub fn control(&self) -> WindowControl {
         self.control.clone()
@@ -343,11 +368,55 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
             shared.stop(StopReason::EventFlood);
             return;
         }
-        if mapped && shared.live() {
-            let _ = shared
+        if mapped
+            && shared.live()
+            && shared
                 .state
-                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            shared.notify();
         }
         thread::sleep(TURN);
+    }
+}
+
+// Exclusive borrowing prevents concurrent ready futures from replacing each
+// other's registration. Recheck after registration to close the map/stop race.
+struct Ready<'a> {
+    window: &'a mut ViewerWindow,
+}
+impl Future for Ready<'_> {
+    type Output = Result<X11Target, Error>;
+    fn poll(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Self::Output> {
+        let shared = &self.window.control.0;
+        if self.window.control.status() == Status::Opening {
+            let mut waiter = shared
+                .waiter
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !waiter
+                .as_ref()
+                .is_some_and(|wake| wake.will_wake(task.waker()))
+            {
+                *waiter = Some(task.waker().clone());
+            }
+        }
+        match self.window.control.status() {
+            Status::Opening => Poll::Pending,
+            Status::Mapped => Poll::Ready(self.window.control.target()),
+            Status::Stopped(reason) => Poll::Ready(Err(Error::NativeStopped(reason))),
+        }
+    }
+}
+impl Drop for Ready<'_> {
+    fn drop(&mut self) {
+        self.window
+            .control
+            .0
+            .waiter
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
     }
 }

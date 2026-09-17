@@ -259,3 +259,59 @@ fn actual_selected_drawable_receives_pixels_and_outlives_its_borrowed_presenter(
     control.stop();
     finish(&mut window, StopReason::User);
 }
+
+#[test]
+fn native_map_and_stop_wake_the_async_owner_without_polling_a_timer() {
+    let desktop = Desktop::start();
+    let runtime = support::runtime();
+    let session = viewer(&runtime);
+    let mut window = ViewerWindow::start(&desktop.display, 320, 240, session.control()).unwrap();
+    let target = runtime.block_on(window.ready()).unwrap();
+    assert_eq!(window.control().target().unwrap(), target);
+    assert!(!session.control().is_stopped());
+    window.control().stop();
+    assert_eq!(
+        runtime.block_on(window.ready()),
+        Err(Error::NativeStopped(StopReason::User))
+    );
+    finish(&mut window, StopReason::User);
+}
+
+#[test]
+fn abandoned_map_wait_unregisters_without_closing_the_retained_window() {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::task::{Context, Wake, Waker};
+    struct Counter(AtomicUsize);
+    impl Wake for Counter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+    let desktop = Desktop::start();
+    let runtime = support::runtime();
+    let session = viewer(&runtime);
+    let mut window = ViewerWindow::start(&desktop.display, 320, 240, session.control()).unwrap();
+    let count = Arc::new(Counter(AtomicUsize::new(0)));
+    let wake = Waker::from(count.clone());
+    {
+        let mut ready = pin!(window.ready());
+        let _ = ready.as_mut().poll(&mut Context::from_waker(&wake));
+    }
+    // A different executor can await the same retained owner after cancellation.
+    let target = runtime.block_on(window.ready()).unwrap();
+    assert_eq!(window.control().target().unwrap(), target);
+    assert!(!session.control().is_stopped());
+    window.control().stop();
+    finish(&mut window, StopReason::User);
+    // Native completion and terminal stop did not retain the discarded executor.
+    assert_eq!(Arc::strong_count(&count), 2);
+}
+
+#[cfg(feature = "linux-desktop")]
+#[path = "viewer_window/desktop.rs"]
+mod desktop;
