@@ -35,17 +35,17 @@ def main():
         archive.extractall(source, members=members, filter="data")
     source = source / ("ffmpeg-" + policy["source"]["version"])
     sdk = output / "sdk"
-    command = [str(source / "configure")] + [
-        flag.replace("=/sdk", "=" + str(sdk)) for flag in policy["configure_flags"]
-    ]
+    # Keep build paths out of FFmpeg's embedded configuration; stage /sdk below output.
+    command = ["./configure"] + policy["configure_flags"]
+    install = ["make", "install", "DESTDIR=" + str(output)]
     environment = os.environ.copy()
     environment.update(SOURCE_DATE_EPOCH=str(policy["source_date_epoch"]), LC_ALL="C")
     record = {"policy": policy, "configure": command, "platform": platform.platform(),
-              "source_sha256": digest, "status": "started"}
+              "install": install, "source_sha256": digest, "status": "started"}
     manifest = evidence / "manifest.json"
     manifest.write_text(json.dumps(record, indent=2) + "\n")
     try:
-        for index, cmd in enumerate((["cc", "--version"], command, ["make", "-j1"], ["make", "install"])):
+        for index, cmd in enumerate((["cc", "--version"], command, ["make", "-j1"], install)):
             print("COMMAND", cmd, flush=True)
             with (evidence / f"command-{index}.log").open("wb") as log:
                 result = subprocess.run(cmd, cwd=source, env=environment, stdout=log, stderr=subprocess.STDOUT)
