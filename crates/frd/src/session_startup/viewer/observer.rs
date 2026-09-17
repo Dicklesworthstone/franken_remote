@@ -342,7 +342,13 @@ impl Viewer {
         choose: impl FnMut(&Catalog) -> Result<Option<u128>, ()> + 'a,
         approval: impl FnMut(ApprovalNotice) -> Result<(), ()> + 'a,
     ) -> impl Future<Output = Result<NativeObserver, Error>> + 'a {
-        self.observe_native(launch, policy, None, choose, approval)
+        self.observe_native(
+            move |_, _| async move { Ok(launch) },
+            policy,
+            None,
+            choose,
+            approval,
+        )
     }
     /// Prepare control after the SAME approved startup, display selection and
     /// first native decode. Positive capability selection is required; this
@@ -355,11 +361,38 @@ impl Viewer {
         choose: impl FnMut(&Catalog) -> Result<Option<u128>, ()> + 'a,
         approval: impl FnMut(ApprovalNotice) -> Result<(), ()> + 'a,
     ) -> impl Future<Output = Result<NativeObserver, Error>> + 'a {
-        self.observe_native(launch, policy, Some(clock), choose, approval)
+        self.observe_native(
+            move |_, _| async move { Ok(launch) },
+            policy,
+            Some(clock),
+            choose,
+            approval,
+        )
     }
-    fn observe_native<'a>(
+    /// Create the local renderer only AFTER approved, explicit display selection.
+    /// The one-use factory receives the exact selected geometry and the ORIGINAL
+    /// terminal stop. Its future runs alongside renewal/control under the same
+    /// call-time bootstrap deadline. Polling the factory must not block. Keep the
+    /// native window owner outside the
+    /// future through streaming and decoder cleanup. This does not grant input
+    /// or turn a map/submission receipt into visibility evidence. Some(clock)
+    /// requires the existing positive control-capability/intent negotiation.
+    pub fn observe_with_renderer<'a, F>(
+        self,
+        renderer: impl FnOnce(Display, streaming::StreamingViewerControl) -> F + 'a,
+        policy: Policy,
+        clock: Option<ClockPolicy>,
+        choose: impl FnMut(&Catalog) -> Result<Option<u128>, ()> + 'a,
+        approval: impl FnMut(ApprovalNotice) -> Result<(), ()> + 'a,
+    ) -> impl Future<Output = Result<NativeObserver, Error>> + 'a
+    where
+        F: Future<Output = Result<Launch, ()>> + 'a,
+    {
+        self.observe_native(renderer, policy, clock, choose, approval)
+    }
+    fn observe_native<'a, F: Future<Output = Result<Launch, ()>> + 'a>(
         mut self,
-        launch: Launch,
+        launch: impl FnOnce(Display, streaming::StreamingViewerControl) -> F + 'a,
         policy: Policy,
         clock: Option<ClockPolicy>,
         mut choose: impl FnMut(&Catalog) -> Result<Option<u128>, ()> + 'a,
@@ -404,7 +437,7 @@ impl ViewerSession {
         policy: Policy,
         choose: impl FnMut(&Catalog) -> Result<Option<u128>, ()> + 'a,
     ) -> impl Future<Output = Result<NativeObserver, Error>> + 'a {
-        self.observe_native(launch, policy, None, choose)
+        self.observe_native(move |_, _| async move { Ok(launch) }, policy, None, choose)
     }
     /// The same explicit path for an already approved session. The existing
     /// session must not already own a clock: there is exactly one estimator.
@@ -415,11 +448,31 @@ impl ViewerSession {
         clock: ClockPolicy,
         choose: impl FnMut(&Catalog) -> Result<Option<u128>, ()> + 'a,
     ) -> impl Future<Output = Result<NativeObserver, Error>> + 'a {
-        self.observe_native(launch, policy, Some(clock), choose)
+        self.observe_native(
+            move |_, _| async move { Ok(launch) },
+            policy,
+            Some(clock),
+            choose,
+        )
     }
-    fn observe_native<'a>(
+    /// Deferred local renderer for this already-approved ORIGINAL session.
+    /// Selection, factory waiting and first decode share one existing deadline;
+    /// this is the same path as `Viewer::observe_with_renderer`, not a reconnect.
+    pub fn observe_with_renderer<'a, F>(
         self,
-        launch: Launch,
+        renderer: impl FnOnce(Display, streaming::StreamingViewerControl) -> F + 'a,
+        policy: Policy,
+        clock: Option<ClockPolicy>,
+        choose: impl FnMut(&Catalog) -> Result<Option<u128>, ()> + 'a,
+    ) -> impl Future<Output = Result<NativeObserver, Error>> + 'a
+    where
+        F: Future<Output = Result<Launch, ()>> + 'a,
+    {
+        self.observe_native(renderer, policy, clock, choose)
+    }
+    fn observe_native<'a, F: Future<Output = Result<Launch, ()>> + 'a>(
+        self,
+        launch: impl FnOnce(Display, streaming::StreamingViewerControl) -> F + 'a,
         policy: Policy,
         clock: Option<ClockPolicy>,
         mut choose: impl FnMut(&Catalog) -> Result<Option<u128>, ()> + 'a,
@@ -646,10 +699,24 @@ async fn attach_media(
 
 /// A successful native result is held until the already-polled network turn
 /// finishes. No select/race drops a healthy QUIC drive when the codec completes.
-async fn during<T>(
+fn during<T>(
     session: &mut ViewerSession,
     budget: &Budget,
     native: impl Future<Output = Result<T, decoder_startup::Error>>,
+) -> impl Future<Output = Result<T, Error>> {
+    // Return the canonical future directly: another async wrapper would retain
+    // a second large decoder future in composed startup stack frames.
+    during_application(session, budget, async move {
+        native.await.map_err(Error::Decoder)
+    })
+}
+
+// One canonical network/native join. Success never drops an already-polled
+// network turn. Failure/cancellation fences before releasing foreign work.
+async fn during_application<T>(
+    session: &mut ViewerSession,
+    budget: &Budget,
+    native: impl Future<Output = Result<T, Error>>,
 ) -> Result<T, Error> {
     let mut native = pin!(native);
     loop {
@@ -664,7 +731,7 @@ async fn during<T>(
             }
             if let Some(Err(error)) = result.as_ref() {
                 budget.cx.cancel_fast(CancelKind::User);
-                return Poll::Ready(Err(Error::Decoder(*error)));
+                return Poll::Ready(Err(*error));
             }
             match network.as_mut().poll(task) {
                 Poll::Ready(Err(error)) => {
@@ -678,13 +745,13 @@ async fn during<T>(
         .await?;
         if let Some(value) = result {
             budget.remaining()?;
-            return value.map_err(Error::Decoder);
+            return value;
         }
     }
 }
-async fn bootstrap(
+async fn bootstrap<F: Future<Output = Result<Launch, ()>>>(
     mut session: ViewerSession,
-    launch: Launch,
+    launch: impl FnOnce(Display, streaming::StreamingViewerControl) -> F,
     budget: &Budget,
     choose: &mut impl FnMut(&Catalog) -> Result<Option<u128>, ()>,
     clock: Option<ClockPolicy>,
@@ -699,6 +766,15 @@ async fn bootstrap(
     let selected = choose_display(&mut session, budget, choose).await?;
     let display = selected
         .display(session.io().map_err(Error::Session)?.0)
+        .map_err(Error::Display)?;
+    let stop = session.control();
+    let launch = during_application(&mut session, budget, async move {
+        launch(display, stop).await.map_err(|()| Error::Application)
+    })
+    .await?;
+    // Native setup must never outlive the original selection/authority budget.
+    selected
+        .check(session.io().map_err(Error::Session)?.0)
         .map_err(Error::Display)?;
     let (media, route, input) =
         attach_media(&mut session, budget, &selected, clock.is_some()).await?;

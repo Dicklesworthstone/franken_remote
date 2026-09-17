@@ -1165,3 +1165,17 @@ fn session_clock_handoff_preserves_measurement_and_control_renewal() {
 }
 
 mod clipboard;
+
+#[test]
+fn original_context_stop_is_visible_to_the_promoted_input_owner_immediately() {
+    run(|c, h| async move {
+        let state = Box::pin(fixture(&c, &h)).await;
+        let early = super::super::streaming::StreamingViewerControl::observing(c.clone());
+        let input = state.viewer.control();
+        assert!(!input.is_stopped());
+        early.stop();
+        assert!(input.is_stopped());
+        assert!(!h.is_cancel_requested());
+        drop(state);
+    });
+}

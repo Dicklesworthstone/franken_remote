@@ -280,3 +280,69 @@ fn decoder_startup_bounds_are_checked_before_reading_configuration_bytes() {
         .is_err()
     );
 }
+
+#[test]
+fn ui_destination_is_private_bounded_and_geometry_bound() {
+    use fr_media::worker::presentation::{TARGET_BYTES, X11Target};
+    let limits = ProtocolLimits::ABSOLUTE;
+    let maximum = 28 + fr_media::hevc::MAX_DECODER_RECORD_BYTES + TARGET_BYTES;
+    for (kind, code) in [
+        (Kind::ConfigurePresentation, 14_u16),
+        (Kind::PresentationReady, 272),
+    ] {
+        let h = Header {
+            kind,
+            identity: id(),
+            length: maximum,
+        };
+        let bytes = h.encode(&limits).unwrap();
+        assert_eq!(&bytes[6..8], &code.to_be_bytes());
+        assert_eq!(Header::decode(&bytes, &limits), Ok(h));
+        for length in [
+            0,
+            28,
+            28 + 22 + TARGET_BYTES,
+            maximum + 1,
+            u32::MAX as usize,
+        ] {
+            let mut bytes = bytes;
+            bytes[32..].copy_from_slice(&u32::try_from(length).unwrap().to_be_bytes());
+            assert_eq!(
+                Record::read(&mut Cursor::new(bytes), &limits).unwrap_err(),
+                Error::ResourceLimit
+            );
+        }
+    }
+    let mut body = config().encode().unwrap();
+    body.extend_from_slice(&[0; 23]); // Framing only; not a valid decoder record.
+    body.extend_from_slice(&19_u32.to_be_bytes());
+    body.extend_from_slice(&config().width.to_be_bytes());
+    body.extend_from_slice(&config().height.to_be_bytes());
+    let (c, record, target) = X11Target::decode_decoder(&body).unwrap();
+    assert_eq!(c, config());
+    assert_eq!(record, &[0; 23]);
+    assert_eq!(target, X11Target::new(19, c.width, c.height).unwrap());
+    let offset = body.len() - TARGET_BYTES;
+    body[offset..offset + 4].copy_from_slice(&0_u32.to_be_bytes());
+    assert_eq!(X11Target::decode_decoder(&body), Err(Error::Malformed));
+    body[offset..offset + 4].copy_from_slice(&19_u32.to_be_bytes());
+    body[offset + 4..offset + 8].copy_from_slice(&(c.width + 2).to_be_bytes());
+    assert_eq!(
+        X11Target::decode_decoder(&body),
+        Err(Error::GeometryChanged)
+    );
+    for length in 0..28 + 23 + TARGET_BYTES {
+        assert!(X11Target::decode_decoder(&body[..length.min(body.len())]).is_err());
+    }
+    for (w, h) in [
+        (0, 64),
+        (64, 0),
+        (15, 64),
+        (65, 64),
+        (64, 65),
+        (u32::MAX, 64),
+        (8192, 8192),
+    ] {
+        assert!(X11Target::new(19, w, h).is_err());
+    }
+}

@@ -53,6 +53,7 @@ mod linux {
         role: Role,
         configuration: Configuration,
         record: Option<&[u8]>,
+        target: Option<worker::presentation::X11Target>,
     ) -> Result<Media, Error> {
         let limits = configuration.limits()?;
         let config = configuration.codec()?;
@@ -62,12 +63,15 @@ mod linux {
                 capture_media(surface, configuration)?
             }
             Role::Present => Media::Present {
-                surface: X11Surface::presenter(
-                    None,
-                    configuration.width,
-                    configuration.height,
-                    limits,
-                )
+                surface: match target {
+                    Some(target) => X11Surface::present_in(None, target, limits),
+                    None => X11Surface::presenter(
+                        None,
+                        configuration.width,
+                        configuration.height,
+                        limits,
+                    ),
+                }
                 .map_err(native)?,
                 codec: HevcDecoder::new(config, limits, record.ok_or(Error::WrongState)?)
                     .map_err(native)?,
@@ -194,11 +198,20 @@ mod linux {
         let (configuration, media, ready) = match (role, first.header.kind) {
             (Role::Capture, Kind::Configure) => {
                 let c = Configuration::decode(first.body())?;
-                (c, open(role, c, None)?, Kind::Ready)
+                (c, open(role, c, None, None)?, Kind::Ready)
             }
             (Role::Present, Kind::ConfigureDecoder) => {
                 let (c, record) = Configuration::decode_decoder(first.body())?;
-                (c, open(role, c, Some(record))?, Kind::DecoderReady)
+                (c, open(role, c, Some(record), None)?, Kind::DecoderReady)
+            }
+            (Role::Present, Kind::ConfigurePresentation) => {
+                let (c, record, target) =
+                    worker::presentation::X11Target::decode_decoder(first.body())?;
+                (
+                    c,
+                    open(role, c, Some(record), Some(target))?,
+                    Kind::PresentationReady,
+                )
             }
             _ => return Err(Error::WrongState),
         };

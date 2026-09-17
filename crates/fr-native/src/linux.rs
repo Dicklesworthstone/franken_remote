@@ -69,6 +69,14 @@ unsafe extern "C" {
         width: *mut c_int,
         height: *mut c_int,
     ) -> c_int;
+    fn fr_x11_attach(
+        display: *const c_char,
+        window: u32,
+        w: c_int,
+        h: c_int,
+        out: *mut *mut c_void,
+    ) -> c_int;
+    fn fr_x11_target(p: *mut c_void, window: *mut u32) -> c_int;
     fn fr_x11_free(p: *mut c_void);
     fn fr_x11_validate(x: *mut c_void) -> c_int;
     fn fr_x11_capture(p: *mut c_void, bytes: *mut u8, len: usize) -> c_int;
@@ -665,6 +673,53 @@ impl X11Surface {
     ) -> Result<Self, NativeError> {
         frame_len(width, height, &limits)?;
         Self::open(display, Some((width, height)), limits)
+    }
+    /// Present in an existing local UI-owned window. Cleanup drops this worker's
+    /// GC/connection, never the window. Resize, unmap or reparent is terminal for
+    /// this attachment; returning to the old size does not restore it. Like all
+    /// Xlib media work, call only outside the authority path/in a media worker.
+    pub fn present_in(
+        display: Option<&str>,
+        target: fr_media::worker::presentation::X11Target,
+        limits: ProtocolLimits,
+    ) -> Result<Self, NativeError> {
+        frame_len(target.width(), target.height(), &limits)?;
+        crate::xlib::initialize_threads().map_err(|_| NativeError::DisplayUnavailable)?;
+        let name = display
+            .map(CString::new)
+            .transpose()
+            .map_err(|_| NativeError::DisplayUnavailable)?;
+        let mut ptr = core::ptr::null_mut();
+        // SAFETY: the string and writable output live through this call. The C
+        // adapter independently validates the XID and owns only its GC/connection.
+        status(unsafe {
+            fr_x11_attach(
+                name.as_ref().map_or(core::ptr::null(), |n| n.as_ptr()),
+                target.window(),
+                c_int::try_from(target.width()).map_err(|_| NativeError::InvalidConfiguration)?,
+                c_int::try_from(target.height()).map_err(|_| NativeError::InvalidConfiguration)?,
+                &raw mut ptr,
+            )
+        })?;
+        Ok(Self {
+            raw: NonNull::new(ptr).ok_or(NativeError::DisplayUnavailable)?,
+            width: target.width(),
+            height: target.height(),
+            limits,
+            _thread: PhantomData,
+        })
+    }
+    /// Export only a window this local owner created, never the capture root or
+    /// a borrowed decoder destination. This does not grant input or certify a
+    /// visible frame. Retain this owner until attached workers have stopped.
+    pub fn presentation_target(
+        &mut self,
+    ) -> Result<fr_media::worker::presentation::X11Target, NativeError> {
+        let mut window = 0;
+        // SAFETY: unique thread-confined context and writable scalar output.
+        status(unsafe { fr_x11_target(self.raw.as_ptr(), &raw mut window) })?;
+        fr_media::worker::presentation::X11Target::new(window, self.width, self.height)
+            .map_err(|_| NativeError::InvalidConfiguration)
     }
     fn open(
         display: Option<&str>,

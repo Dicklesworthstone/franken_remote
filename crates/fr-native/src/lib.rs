@@ -47,3 +47,9 @@ mod key_names;
 
 #[cfg(all(target_os = "linux", feature = "linux-viewer-input"))]
 pub mod viewer_input;
+
+#[cfg(all(target_os = "linux", feature = "linux-viewer-window"))]
+pub mod viewer_window;
+
+#[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+pub mod desktop;

@@ -257,6 +257,19 @@ static int fr_x11_geometry(FrX11 *x) {
     if (x->invalid) return FR_GEOMETRY;
     XWindowAttributes a; XEvent event;
     if (!XGetWindowAttributes(x->display,x->window,&a)) return FR_DISPLAY;
+    if (x->presenter==2) {
+        /* This connection subscribes only to its selected UI window. Bound
+           event draining; a resize-away-and-back or unmap is still terminal. */
+        int count=0;
+        while (XCheckWindowEvent(x->display,x->window,StructureNotifyMask,&event)) {
+            if (++count>32 || event.type==UnmapNotify || event.type==DestroyNotify ||
+                event.type==ReparentNotify || (event.type==ConfigureNotify &&
+                (event.xconfigure.width!=x->w || event.xconfigure.height!=x->h))) {
+                x->invalid=1; return FR_GEOMETRY;
+            }
+        }
+        if (a.map_state!=IsViewable) { x->invalid=1; return FR_GEOMETRY; }
+    }
     if (a.width!=x->w || a.height!=x->h || (!x->presenter &&
         XCheckTypedWindowEvent(x->display,x->window,ConfigureNotify,&event))) {
         x->invalid=1; return FR_GEOMETRY;
@@ -270,7 +283,7 @@ int fr_x11_validate(FrX11 *x) {
 }
 void fr_x11_free(FrX11 *x) {
     if (!x) return;
-    if (x->display) { if (x->gc) XFreeGC(x->display,x->gc); if (x->presenter && x->window) XDestroyWindow(x->display,x->window); XCloseDisplay(x->display); }
+    if (x->display) { if (x->gc) XFreeGC(x->display,x->gc); if (x->presenter==1 && x->window) XDestroyWindow(x->display,x->window); XCloseDisplay(x->display); }
     free(x);
 }
 int fr_x11_new(const char *display,int presenter,int w,int h,FrX11 **out,int *width,int *height) {
@@ -297,6 +310,35 @@ int fr_x11_new(const char *display,int presenter,int w,int h,FrX11 **out,int *wi
     }
     *width=x->w; *height=x->h; *out=x; return FR_OK;
 }
+/* Attach, but never adopt ownership of, a UI-selected destination. No peer or
+   codec chooses it. X11 remains a shared-server trust boundary, not a sandbox. */
+int fr_x11_attach(const char *display,uint32_t window,int w,int h,FrX11 **out) {
+    if (!out) return FR_INVALID;
+    *out=NULL;
+    if (!window || !geometry(w,h)) return FR_INVALID;
+    FrX11 *x=calloc(1,sizeof(*x)); if (!x) return FR_MEMORY;
+    x->presenter=2; x->display=XOpenDisplay(display);
+    if (!x->display) { free(x); return FR_DISPLAY; }
+    x->screen=DefaultScreen(x->display); x->window=(Window)window; x->w=w; x->h=h;
+    XWindowAttributes a;
+    if (!XGetWindowAttributes(x->display,x->window,&a)) { fr_x11_free(x); return FR_DISPLAY; }
+    if (x->window==a.root || a.class!=InputOutput || a.depth!=24 ||
+        a.visual!=DefaultVisual(x->display,x->screen) || !screen_visual(x->display,x->screen)) {
+        fr_x11_free(x); return FR_UNAVAILABLE;
+    }
+    if (a.width!=w || a.height!=h || a.map_state!=IsViewable) { fr_x11_free(x); return FR_GEOMETRY; }
+    XSelectInput(x->display,x->window,StructureNotifyMask);
+    x->gc=XCreateGC(x->display,x->window,0,NULL);
+    XSync(x->display,False);
+    int code=fr_x11_geometry(x);
+    if (!x->gc || code!=FR_OK) { fr_x11_free(x); return code==FR_OK?FR_DISPLAY:code; }
+    *out=x; return FR_OK;
+}
+int fr_x11_target(FrX11 *x,uint32_t *window) {
+    if (!x || !window || x->presenter!=1 || x->window>UINT32_MAX) return FR_INVALID;
+    int code=fr_x11_geometry(x); if (code!=FR_OK) return code;
+    *window=(uint32_t)x->window; return FR_OK;
+}
 int fr_x11_capture(FrX11 *x,uint8_t *out,size_t len) {
     if (!x || !out || !bgra_buffer(x->w,x->h,len)) return FR_INVALID;
     int code=fr_x11_geometry(x); if (code!=FR_OK) return code;
@@ -310,12 +352,15 @@ int fr_x11_capture(FrX11 *x,uint8_t *out,size_t len) {
 }
 int fr_x11_present(FrX11 *x,const uint8_t *bgra,size_t len) {
     if (!x || !x->presenter || !bgra || !bgra_buffer(x->w,x->h,len)) return FR_INVALID;
+    int code=fr_x11_geometry(x); if (code!=FR_OK) return code;
     XImage *im=XCreateImage(x->display,DefaultVisual(x->display,x->screen),24,ZPixmap,0,NULL,x->w,x->h,32,0);
     if (!im) return FR_MEMORY;
     if (im->bits_per_pixel!=32 || im->byte_order!=LSBFirst || im->bytes_per_line<x->w*4) { XDestroyImage(im); return FR_UNAVAILABLE; }
     im->data=calloc((size_t)im->bytes_per_line,(size_t)x->h); if (!im->data) { XDestroyImage(im); return FR_MEMORY; }
     for (int y=0;y<x->h;y++) memcpy(im->data+(size_t)y*im->bytes_per_line,bgra+(size_t)y*x->w*4,(size_t)x->w*4);
-    XRaiseWindow(x->display,x->window); XPutImage(x->display,x->window,x->gc,im,0,0,0,0,x->w,x->h); XSync(x->display,False); XDestroyImage(im); return FR_OK;
+    if (x->presenter==1) XRaiseWindow(x->display,x->window);
+    XPutImage(x->display,x->window,x->gc,im,0,0,0,0,x->w,x->h);
+    XSync(x->display,False); XDestroyImage(im); return fr_x11_geometry(x);
 }
 
 /* Borrowed X connection, selected whole-monitor rectangle. This never captures
