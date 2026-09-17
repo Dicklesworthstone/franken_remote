@@ -82,8 +82,11 @@ struct Pending {
 /// One fixed-size pending record holds an action, pointer OR held-state snapshot.
 /// Subsequent UI events are backpressured BEFORE consuming another identity.
 pub struct ControlledViewer {
-    session: ViewerSession,
-    input: PresentedInput,
+    // These owners contain fixed protocol buffers and replay ledgers. Keep
+    // them at stable addresses across promotion/async results instead of copying
+    // their full inline storage through every nested Poll/Result on the stack.
+    session: Box<ViewerSession>,
+    input: Box<PresentedInput>,
     viewport: fr_client::input::viewport::Viewport,
     channels: NegotiatedInput,
     media: NegotiatedMedia,
@@ -174,8 +177,8 @@ impl ViewerSession {
         };
         let viewport = input.viewport();
         Ok(ControlledViewer {
-            session: self,
-            input,
+            session: Box::new(self),
+            input: Box::new(input),
             viewport,
             channels,
             media,
@@ -606,3 +609,12 @@ impl Drop for Operation<'_> {
 
 #[cfg(test)]
 mod tests;
+
+#[test]
+fn inline_viewer_owners_fit_composed_native_service_stacks() {
+    // A full native suite on ordinary test-thread stacks exposed aborts while
+    // moving the inline session/input owners through nested async completions.
+    // Guard the public owners rather than hiding it with a bigger test stack.
+    assert!(std::mem::size_of::<ControlledViewer>() <= 16 * 1024);
+    assert!(std::mem::size_of::<super::streaming::StreamingViewer>() <= 20 * 1024);
+}
