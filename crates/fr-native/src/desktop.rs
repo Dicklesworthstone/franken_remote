@@ -4,6 +4,7 @@
 //! no unqualified transport, invents no visibility witness, and never retries a
 //! failed session. Every native owner remains available for explicit cleanup.
 #![forbid(unsafe_code)]
+pub mod reconnect;
 use crate::viewer_window::{self, ViewerWindow, WindowControl};
 use asupersync::{cx::Cx, process::ExitStatus};
 use fr_media::{freshness::ClockPolicy, worker::Role};
