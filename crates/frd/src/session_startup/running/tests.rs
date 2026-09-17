@@ -47,6 +47,20 @@ pub(in crate::session_startup) async fn pair_initialized(
     capabilities: Vec<fr_wire::negotiation::Capability>,
     initialize: impl FnOnce(&mut Host),
 ) -> (HostSession, ViewerSession) {
+    let (mut host, viewer) = pair_before_finish(c, h, capabilities).await;
+    initialize(&mut host);
+    (
+        host.finish().unwrap().into_running().unwrap(),
+        viewer.finish().unwrap(),
+    )
+}
+/// Actual completed startup, before consuming the viewer into a running owner.
+/// Used by application adapters that own that same transition themselves.
+pub(in crate::session_startup) async fn pair_before_finish(
+    c: &Cx,
+    h: &Cx,
+    capabilities: Vec<fr_wire::negotiation::Capability>,
+) -> (Host, Viewer) {
     let cfg = Configuration {
         offer: Offer {
             versions: vec![0],
@@ -94,11 +108,7 @@ pub(in crate::session_startup) async fn pair_initialized(
         a.unwrap();
         b.unwrap();
     }
-    initialize(&mut h);
-    (
-        h.finish().unwrap().into_running().unwrap(),
-        viewer.finish().unwrap(),
-    )
+    (h, viewer)
 }
 fn no_other(_: Route, _: &[u8]) -> Result<Disposition, ()> {
     Err(())

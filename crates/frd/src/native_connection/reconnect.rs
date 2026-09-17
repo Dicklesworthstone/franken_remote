@@ -1,7 +1,7 @@
 //! Bounded observation reconnection on the canonical installed-tailnet client.
 //! No input owner, old action, decoder reference, approval or lease crosses attempts.
 mod native;
-pub use native::{native_control_view, native_view};
+pub use native::{native_control_view, native_control_view_with_setup, native_view};
 
 use super::{Client, Configuration, Error as ConnectionError};
 use crate::session_startup::{ObserverError, StreamingViewerError, Viewer};

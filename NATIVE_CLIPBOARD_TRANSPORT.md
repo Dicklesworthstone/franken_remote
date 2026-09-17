@@ -227,3 +227,7 @@ An operation started near the end of an existing lease may correctly expire
 before completion, even if the session later renews. Faster queue progress does
 not extend its captured authority, view, or transfer deadlines; the application
 must report that terminal result rather than automatically replay the old copy.
+
+The public native publisher/observer can now configure and own this lifecycle
+through the [native application clipboard API](NATIVE_CLIPBOARD_APPLICATION.md),
+without manually driving attachment or transporting worker seeds in UI callbacks.
