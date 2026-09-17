@@ -6,7 +6,7 @@
     "version": "7.1.5",
     "url": "https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz",
     "sha256": "de668509caf9e35e3cd162473441fdb29538c6d96ed080292b3cf9e6fc5d558f",
-    "authentication": "Pinned HTTPS download digest; upstream signature not authenticated"
+    "authentication": "Recipe checks pinned archive digest only; manual release-signature verification is recorded in ffmpeg-7.1.5-linux-x86_64.evidence.json"
   },
   "source_date_epoch": 1767225600,
   "libraries": ["avcodec", "avutil", "swscale"],
@@ -16,10 +16,10 @@
     "reason": "hardware_encoder_not_built_or_qualified"
   },
   "qualification_gaps": [
-    "No second-build reproducibility comparison",
+    "Cross-builder reproducibility not tested; fixed-prefix cross-staging-root comparison recorded in evidence",
     "No protected-path installation or loader qualification",
     "No hardware encode/decode qualification",
-    "No upstream signature authentication",
+    "Recipe does not automatically verify upstream signature",
     "No shipping license, corresponding-source, relinking or HEVC patent review",
     "X11 development SDK remains an external prerequisite for fr-native"
   ],

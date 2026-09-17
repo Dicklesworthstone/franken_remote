@@ -74,6 +74,11 @@ python3 native/build_ffmpeg.py /path/to/ffmpeg-7.1.5.tar.xz /new/output/director
 ```
 
 Use its `sdk/include` and `sdk/lib` with the paired SDK variables above.
+The recipe uses a fixed configured prefix `/sdk` and `make install DESTDIR=<output>`:
+installation remains under `<output>/sdk`, never the global `/sdk`. The manifest
+records both configure and install commands. Generated pkg-config files retain
+the configured `/sdk` prefix; use the paired explicit SDK variables above, or
+configure the consuming build's pkg-config sysroot for the staging root.
 On September 17, 2026, two clean builds on the same Linux builder at the same
 absolute prefix produced identical hashes for all three libraries. A compiled
 Rust probe normalized a real HEVC Main IDR, passed `HevcGuard`, configured
@@ -94,10 +99,17 @@ This authenticates the source under that HTTPS-published key; it is not package
 signing or independent web-of-trust certification. The recipe still checks only
 the pinned archive digest.
 
-A third clean build at a different absolute prefix succeeded but all three
-library hashes differed. Cross-prefix byte reproducibility therefore **failed**;
-the same-prefix comparison remains passed. The byte-difference cause was not
-established, and the decoder probes used the original SDK, not this third build.
+The original recipe embedded its temporary install prefix in FFmpeg's configuration
+string and data directories. Different prefixes produced different library hashes.
+The fixed recipe preserves `/sdk` and stages with `DESTDIR`, without rewriting
+generated metadata. Two fresh RCH builds on hz3 in different build/staging roots
+produced identical hashes for all three libraries and identical `config.h` files.
+Both resulting SDKs passed the existing single-IDR and I-P-P Rust probes with
+`ldd` confirming their library paths. This proves same-builder reproducibility
+across staging roots, not across different configured prefixes or builders.
+The evidence record retains the original failure and the new hashes separately.
+Upstream compiler warnings remain in build logs; they were not suppressed or
+adjudicated, and a successful build does not establish media safety.
 
 The existing `native_roundtrip --software-explicit` compiled and loaded this
 SDK but returned `Unavailable`: this profile deliberately has no encoder.

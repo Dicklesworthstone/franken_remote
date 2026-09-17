@@ -33,7 +33,7 @@
   },
   "registered_components": ["CONFIG_HEVC_DECODER"],
   "verification": {
-    "reproducibility": "Two clean source extractions/builds on hz3 at the same original absolute prefix, with identical configure arguments and toolchain: all three installed library SHA256s match exactly. Third build at a different prefix succeeded but all three hashes differed; cross-prefix byte reproducibility failed. Cross-builder reproducibility not tested.",
+    "reproducibility": "Original recipe matched only at identical install prefixes. Fixed recipe configures /sdk and uses DESTDIR staging: two fresh RCH builds on hz3 in /tmp/fr-canonical-a and /tmp/fr-canonical-b passed, with identical installed library SHA256s and config.h. Different build/staging roots tested; different configured installation prefixes and different builders are not claimed reproducible.",
     "rust_decode": "Compiled Rust probe using existing fr-core/fr-media/fr-native artifacts and stripped shared SDK: Annex B normalization -> HevcGuard -> hvcC configuration -> HevcDecoder::submit -> poll_output passed for one 64x64 HEVC Main IDR. Asserted frame ID 1, dimensions, and all 4096 opaque black BGRA pixels. Exit 0. No presentation or transport exercised by this probe.",
     "decode_input": "System FFmpeg 8.0.1/libx265 4.1 used only as an offline sample generator, not linked into the SDK. Explicit x265 colorprim/transfer/colormatrix=bt709 and range=limited. Sample SHA256 711131afb564a71e143191c97baa5420c224ad4ebe6c623906ba07fac0c579fa. Initial sample without those explicit metadata settings was refused with ColorMismatch; guard unchanged.",
     "rust_inter_decode": "Compiled probe linked to stripped SDK decoded one IDR followed by two Predicted access units referencing frame IDs 1 and 2 respectively. All three outputs matched IDs, 64x64 geometry, and all 4096 opaque BGRA pixels with RGB expectations 0, 255, 128 (tolerance 2). Exit 0. System x265 reported one I-frame and two P-frames. Annex B stream SHA256 8a982c7f8b580f5551aa8634166574e32179e4eecef57e0ee32324e176cb5a7e. Synthetic uniform black/white/gray input, not representative desktop or recovery qualification.",
@@ -48,17 +48,30 @@
       },
       "scope": "Same builder/compiler and recipe, different source/output/prefix paths; root cause of byte differences not established. No decoder runtime test against this third build."
     },
+    "fixed_prefix": {
+      "status": "passed",
+      "configure_prefix": "/sdk",
+      "staging_roots": ["/tmp/fr-canonical-a", "/tmp/fr-canonical-b"],
+      "libraries": {
+        "libavcodec.so.61.19.101": "533b7ab7f23eeb0b48c2ee60f84c5e6941491faac4764ad61ba29b7a45a6848d",
+        "libavutil.so.59.39.100": "ebf4d27d87f305c2c3e2430c0dbaa56cf8c1eef2a0f657c1f423457fb5f45ee8",
+        "libswscale.so.8.3.100": "49bfab7338a9040ed3f3088cf7c6ea2a65633476d78fa85670d68a22fcc75cf0"
+      },
+      "decode": "Existing compiled Rust single-IDR and I-P-P probes passed against each staged SDK, all frame IDs, geometry and pixels checked; ldd confirmed each selected SDK. No Rust rebuild claimed.",
+      "diagnosis": "Original config.h differed in FFMPEG_CONFIGURATION and data directories derived from the temporary install prefix. Preserve policy /sdk and record make install DESTDIR instead of embedding staging roots; no generated metadata rewritten.",
+      "compiler_warnings": "Upstream GCC warnings, including HEVC stringop-overflow and VLC array-bounds diagnostics, retained in command-2.log; not adjudicated or suppressed. Build success is not a safety qualification."
+    },
     "c_abi_probe": "cc -I sdk/include probe.c -L sdk/lib -lavcodec -lswscale -lavutil -lm; LD_LIBRARY_PATH=sdk/lib: decoder=1 encoder=0 libx265=0 avcodec_version=4002661, exit 0",
     "fr_native_build": "cargo build -p fr-native --features linux-media --example native_roundtrip -j 1 against FR_NATIVE_INCLUDE_DIR/LIBRARY_DIR pointing at the isolated SDK; cold build passed in 13m52s",
     "runtime_binding": "ldd of native_roundtrip under LD_LIBRARY_PATH resolves libavcodec.so.61, libavutil.so.59, libswscale.so.8 to the isolated SDK only; no x265, avformat, avdevice, avfilter, swresample, or postproc libraries appear",
     "existing_media_path": "xvfb-run native_roundtrip --software-explicit -> Error: Unavailable, exit 1 (typed FR_UNAVAILABLE at fr_encoder_new: decode-only SDK intentionally contains no encoder; expected refusal, not a defect)"
   },
   "qualification_gaps": [
-    "cross-prefix byte reproducibility failed; cross-builder reproducibility not tested",
+    "cross-builder reproducibility not tested; changing the configured installation prefix still changes embedded metadata",
     "no protected-path installation or loader qualification",
     "no hardware encode/decode qualification in this experiment",
     "no shipping license, corresponding-source, relinking, or HEVC patent review",
     "single-IDR and three-frame I-P-P synthetic software decode only; recovery, presentation and full hardware pipeline remain unqualified"
   ],
-  "status": "decode-only experiment with matching same-prefix build hashes, authenticated source signature and real Rust-boundary I-P-P decode verified; not a shipping or default hardware bundle"
+  "status": "decode-only experiment reproducible across two build/staging roots at fixed /sdk prefix, with authenticated source and real Rust decode verified; not a shipping or default hardware bundle"
 }
