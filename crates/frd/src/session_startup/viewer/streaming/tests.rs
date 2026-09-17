@@ -484,3 +484,27 @@ fn actual_quic_backpressure_preserves_pending_metrics_without_reencoding() {
         viewer.close();
     });
 }
+
+#[test]
+fn pre_decoder_stop_handle_survives_the_original_session_handoff() {
+    run(|c, h| async move {
+        let (host, viewer) =
+            crate::session_startup::running::tests::pair_before_finish(&c, &h, vec![]).await;
+        let early = viewer.control();
+        assert!(!early.is_stopped());
+        let mut session = viewer.finish().unwrap();
+        let later = session.control();
+        assert!(!later.is_stopped());
+        early.stop();
+        assert!(later.is_stopped());
+        assert!(c.is_cancel_requested());
+        assert!(!h.is_cancel_requested());
+        assert!(
+            session
+                .drive(Duration::from_millis(1), block)
+                .await
+                .is_err()
+        );
+        drop(host);
+    });
+}

@@ -442,3 +442,139 @@ fn abandoning_an_already_open_sessions_observer_cannot_leave_its_connection_live
         assert!(h.checkpoint().is_ok());
     });
 }
+
+#[test]
+fn deferred_renderer_is_one_use_gets_selected_geometry_and_keeps_renewal_alive() {
+    run(|c, h| async move {
+        let (host, viewer) = initial(&c, &h, false).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let original = viewer.control();
+        let attempt = viewer.observe_with_renderer(
+            move |display, stop| async move {
+                assert_eq!(count.fetch_add(1, Ordering::Relaxed), 0);
+                assert_eq!(display, catalog().displays()[0]);
+                assert!(!stop.is_stopped());
+                std::future::pending::<Result<Launch, ()>>().await
+            },
+            Policy {
+                timeout: Duration::from_millis(3200),
+                ..Policy::default()
+            },
+            None,
+            |_| Ok(Some(9)),
+            |_| Ok(()),
+        );
+        let serve = async {
+            let mut host = Box::pin(ready_host(host)).await;
+            let control = host.observation().unwrap();
+            let initial = control.deadline(Duration::from_secs(3)).unwrap().time();
+            let mut n = 7000;
+            let _selected = selected_host(&mut host, &mut n).await;
+            let mut renewed = false;
+            while !original.is_stopped() {
+                renewed |= control.deadline(Duration::from_secs(3)).unwrap().time() != initial;
+                if host_turn(&mut host, &mut n).await.is_err() {
+                    break;
+                }
+            }
+            renewed
+        };
+        let (result, renewed) = Box::pin(support::both(attempt, serve)).await;
+        assert!(matches!(result, Err(Error::Expired)), "{result:?}");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(renewed);
+        assert!(original.is_stopped());
+    });
+}
+
+#[test]
+fn deferred_renderer_is_not_called_before_approval_or_by_an_unpolled_attempt() {
+    for unpolled in [true, false] {
+        run(|c, h| async move {
+            let (host, viewer) = initial(&c, &h, true).await;
+            let original = viewer.control();
+            let attempt = viewer.observe_with_renderer(
+                |_, _| async { panic!("renderer before local approval") },
+                Policy {
+                    timeout: Duration::from_millis(120),
+                    ..Policy::default()
+                },
+                None,
+                |_| panic!("selection before approval"),
+                |_| Ok(()),
+            );
+            if unpolled {
+                drop(attempt);
+            } else {
+                let serve = async {
+                    let mut host = host;
+                    while c.checkpoint().is_ok() {
+                        if host.drive(Duration::from_millis(1)).await.is_err() {
+                            break;
+                        }
+                    }
+                };
+                let (result, ()) = Box::pin(support::both(attempt, serve)).await;
+                assert!(matches!(result, Err(Error::Expired)), "{result:?}");
+            }
+            assert!(original.is_stopped());
+        });
+    }
+}
+
+#[test]
+fn deferred_renderer_expiry_fences_before_dropping_local_factory_state() {
+    struct LocalState {
+        original: streaming::StreamingViewerControl,
+        checked: Arc<AtomicBool>,
+    }
+    impl Drop for LocalState {
+        fn drop(&mut self) {
+            self.checked
+                .store(self.original.is_stopped(), Ordering::Release);
+        }
+    }
+    run(|c, h| async move {
+        let (host, viewer) = initial(&c, &h, false).await;
+        let original = viewer.control();
+        let checked = Arc::new(AtomicBool::new(false));
+        // Deliberately pending foreign work retained until the common deadline.
+        // This tests the real enclosing attempt's fence-before-drop ordering.
+        let local = LocalState {
+            original: original.clone(),
+            checked: checked.clone(),
+        };
+        let entered = Arc::new(AtomicBool::new(false));
+        let entered_factory = entered.clone();
+        let attempt = viewer.observe_with_renderer(
+            move |_, _| async move {
+                let _local = local;
+                entered_factory.store(true, Ordering::Release);
+                std::future::pending::<Result<Launch, ()>>().await
+            },
+            Policy {
+                timeout: Duration::from_millis(300),
+                ..Policy::default()
+            },
+            None,
+            |_| Ok(Some(9)),
+            |_| Ok(()),
+        );
+        let serve = async {
+            let mut host = Box::pin(ready_host(host)).await;
+            let mut n = 8000;
+            let _selected = selected_host(&mut host, &mut n).await;
+            while c.checkpoint().is_ok() {
+                if host_turn(&mut host, &mut n).await.is_err() {
+                    break;
+                }
+            }
+        };
+        let (result, ()) = Box::pin(support::both(attempt, serve)).await;
+        assert!(matches!(result, Err(Error::Expired)), "{result:?}");
+        assert!(entered.load(Ordering::Acquire));
+        assert!(checked.load(Ordering::Acquire));
+        assert!(original.is_stopped());
+    });
+}
