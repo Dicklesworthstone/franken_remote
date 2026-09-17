@@ -429,3 +429,5 @@ mod handoff;
 mod interactive;
 
 mod clipboard;
+
+mod sharing;

@@ -308,3 +308,25 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
         thread::sleep(TURN);
     }
 }
+
+/// The host can retain this native owner throughout bootstrap/control promotion.
+/// Waiting for Ready never grants observation or proves compositor visibility.
+impl frd::local_sharing::Surface for SharingIndicator {
+    fn original(&self) -> &ObservationControl {
+        &self.control.0.observation
+    }
+    fn state(&self) -> frd::local_sharing::State {
+        use frd::local_sharing::State;
+        match self.control.status() {
+            Status::Opening => State::Opening,
+            Status::Mapped => State::Ready,
+            Status::Stopped(_) => State::Stopped,
+        }
+    }
+    fn stop(&self) {
+        self.control.0.stop(StopReason::AuthorityEnded);
+    }
+    fn finish(&mut self) -> bool {
+        SharingIndicator::finish(self).is_some()
+    }
+}

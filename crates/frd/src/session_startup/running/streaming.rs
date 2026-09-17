@@ -238,7 +238,11 @@ impl StreamingHost {
         deadline: crate::worker::Deadline,
     ) -> Result<asupersync::process::ExitStatus, crate::worker::Error> {
         self.close();
-        self.stream.reap(cx, deadline).await
+        let status = self.stream.reap(cx, deadline).await?;
+        if let Ok(session) = self.host.session() {
+            session.reap_sharing_surface(cx, deadline).await?;
+        }
+        Ok(status)
     }
     pub fn collect_after_close(
         &mut self,

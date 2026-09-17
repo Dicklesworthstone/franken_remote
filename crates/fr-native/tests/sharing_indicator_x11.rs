@@ -157,7 +157,9 @@ fn rendered_stop_button_revokes_original_input_and_observation_not_equal_id_fore
     let (foreign, _other_input) = gate(&r, 3_000_000);
     let mut panel = SharingIndicator::start(&display, observation.clone()).unwrap();
     let control = mapped(&panel);
-    peer(&display, &control, "snapshot", &[]);
+    let snapshot = std::env::var("FR_NATIVE_INDICATOR_SNAPSHOT").ok();
+    let args: Vec<_> = snapshot.as_deref().into_iter().collect();
+    peer(&display, &control, "snapshot", &args);
     peer(&display, &control, "miss", &[]);
     assert_eq!(control.status(), Status::Mapped);
     assert!(observation.check().is_ok());
@@ -242,4 +244,28 @@ fn native_open_failure_idle_expiry_owner_drop_and_independent_stop_are_terminal(
     assert_eq!(control.status(), Status::Stopped(StopReason::OwnerDropped));
     thread::sleep(Duration::from_millis(40));
     assert_eq!(control.status(), Status::Stopped(StopReason::OwnerDropped));
+}
+
+#[test]
+fn native_surface_contract_retains_the_real_thread_until_cleanup() {
+    use frd::local_sharing::{State, Surface};
+    let _lock = SERIAL.lock().unwrap();
+    let Some(display) = display() else { return };
+    let r = runtime();
+    let (observation, _input) = gate(&r, 3_000_000);
+    let panel = SharingIndicator::start(&display, observation.clone()).unwrap();
+    mapped(&panel);
+    let mut surface: Box<dyn Surface> = Box::new(panel);
+    assert_eq!(surface.state(), State::Ready);
+    assert!(surface.original().check().is_ok());
+    assert!(!surface.finish());
+    surface.stop();
+    assert!(observation.check().is_err());
+    assert_eq!(surface.state(), State::Stopped);
+    let until = Instant::now() + Duration::from_secs(2);
+    while !surface.finish() {
+        assert!(Instant::now() < until);
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(surface.finish());
 }
