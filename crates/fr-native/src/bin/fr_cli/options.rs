@@ -10,17 +10,39 @@ pub enum Command {
     Help,
     Hosts,
     Connect(Connection),
+    Displays(Target),
 }
-pub struct Connection {
+pub struct Target {
     pub node: String,
     pub by_name: bool,
-    pub display: u128,
-    pub worker: PathBuf,
     pub roots: PathBuf,
-    pub x_display: Option<String>,
     pub port: u16,
     pub ipv6: bool,
+}
+pub struct Connection {
+    pub target: Target,
+    pub display: DisplayChoice,
+    pub worker: PathBuf,
+    pub x_display: Option<String>,
     pub attempts: u8,
+}
+/// Explicit policies only. `Only` refuses ambiguity; it is never "first" or an
+/// invented primary display. Both policies are reevaluated on each live catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayChoice {
+    Handle(u128),
+    Only,
+}
+impl DisplayChoice {
+    pub fn select(self, catalog: &fr_wire::display::Catalog) -> Option<u128> {
+        match self {
+            Self::Handle(handle) => catalog.find(handle).map(|d| d.handle),
+            Self::Only => match catalog.displays() {
+                [display] => Some(display.handle),
+                _ => None,
+            },
+        }
+    }
 }
 fn usage() -> Failure {
     Failure::new(
@@ -58,13 +80,13 @@ pub fn parse(args: &[String]) -> Result<Options, Failure> {
             socket: None,
         });
     }
-    let connect = match args[0].as_str() {
+    let remote = match args[0].as_str() {
         "hosts" => false,
-        "connect" => true,
+        "connect" | "displays" => true,
         _ => return Err(usage()),
     };
     let mut index = 1;
-    let node = if connect {
+    let node = if remote {
         let node = args.get(index).ok_or_else(usage)?;
         if node.is_empty()
             || node.len() > 254
@@ -81,14 +103,16 @@ pub fn parse(args: &[String]) -> Result<Options, Failure> {
     } else {
         None
     };
-    parse_command(args, index, node)
+    parse_command(args, index, node, args[0] == "displays")
 }
 fn parse_command(
     args: &[String],
     mut index: usize,
     node: Option<String>,
+    inspect: bool,
 ) -> Result<Options, Failure> {
-    let connect = node.is_some();
+    let remote = node.is_some();
+    let connect = remote && !inspect;
     let mut seen = BTreeSet::new();
     let (mut json, mut socket, mut by_name, mut view_only, mut experimental, mut ipv6) =
         (false, None, false, false, false, false);
@@ -112,17 +136,26 @@ fn parse_command(
         match flag {
             "--json" => json = true,
             "--socket" => socket = Some(path(value(&mut index)?)?),
-            "--by-name" if connect => by_name = true,
+            "--by-name" if remote => by_name = true,
             "--view-only" if connect => view_only = true,
-            "--experimental-native" if connect => experimental = true,
-            "--ipv6" if connect => ipv6 = true,
+            "--experimental-native" if remote => experimental = true,
+            "--ipv6" if remote => ipv6 = true,
             "--display" if connect => {
-                display = Some(value(&mut index)?.parse::<u128>().map_err(|_| usage())?);
+                let choice = value(&mut index)?;
+                display = Some(if choice == "only" {
+                    DisplayChoice::Only
+                } else {
+                    let handle = choice.parse::<u128>().map_err(|_| usage())?;
+                    if handle == 0 {
+                        return Err(usage());
+                    }
+                    DisplayChoice::Handle(handle)
+                });
             }
             "--worker" if connect => worker = Some(path(value(&mut index)?)?),
-            "--trust-roots" if connect => roots = Some(path(value(&mut index)?)?),
+            "--trust-roots" if remote => roots = Some(path(value(&mut index)?)?),
             "--x-display" if connect => x_display = Some(value(&mut index)?),
-            "--port" if connect => port = value(&mut index)?.parse().map_err(|_| usage())?,
+            "--port" if remote => port = value(&mut index)?.parse().map_err(|_| usage())?,
             "--attempts" if connect => {
                 attempts = value(&mut index)?.parse().map_err(|_| usage())?;
             }
@@ -130,7 +163,7 @@ fn parse_command(
         }
     }
     let command = if let Some(node) = node {
-        if !view_only {
+        if connect && !view_only {
             return Err(Failure::new(
                 "control_ui_unavailable",
                 "This client currently requires --view-only; no control is silently granted or requested.",
@@ -144,24 +177,27 @@ fn parse_command(
                 2,
             ));
         }
-        if (!by_name && node.len() > 128)
-            || port == 0
-            || !(1..=32).contains(&attempts)
-            || display == Some(0)
-        {
+        if (!by_name && node.len() > 128) || port == 0 || !(1..=32).contains(&attempts) {
             return Err(usage());
         }
-        Command::Connect(Connection {
+        let target = Target {
             node,
             by_name,
-            display: display.ok_or_else(usage)?,
-            worker: worker.ok_or_else(usage)?,
             roots: roots.ok_or_else(usage)?,
-            x_display,
             port,
             ipv6,
-            attempts,
-        })
+        };
+        if inspect {
+            Command::Displays(target)
+        } else {
+            Command::Connect(Connection {
+                target,
+                display: display.ok_or_else(usage)?,
+                worker: worker.ok_or_else(usage)?,
+                x_display,
+                attempts,
+            })
+        }
     } else {
         Command::Hosts
     };
@@ -195,11 +231,11 @@ mod tests {
         let Command::Connect(c) = o.command else {
             panic!("connection required")
         };
-        assert_eq!(c.node, "n-host");
-        assert_eq!(c.display, 9);
+        assert_eq!(c.target.node, "n-host");
+        assert_eq!(c.display, DisplayChoice::Handle(9));
         assert_eq!(c.attempts, 2);
-        assert!(c.ipv6 && o.json);
-        assert!(!c.by_name);
+        assert!(c.target.ipv6 && o.json);
+        assert!(!c.target.by_name);
     }
     #[test]
     fn unknown_duplicate_credential_and_policy_switches_are_not_ignored() {
@@ -225,6 +261,104 @@ mod tests {
         ] {
             let error = parse(&a).err().unwrap();
             assert!(!format!("{error:?}").contains("private"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+    use fr_core::{ids::DisplayGeometryGeneration, limits::ProtocolLimits};
+    use fr_wire::display::{Catalog, Display};
+    fn args(text: &str) -> Vec<String> {
+        text.split_whitespace().map(str::to_owned).collect()
+    }
+    fn catalog(handles: &[u128]) -> Catalog {
+        let displays = handles
+            .iter()
+            .map(|handle| Display {
+                handle: *handle,
+                geometry: DisplayGeometryGeneration::INITIAL,
+                x: -1920,
+                y: 0,
+                pixel_width: 1920,
+                pixel_height: 1080,
+                logical_width: 1280,
+                logical_height: 720,
+                scale_numerator: 3,
+                scale_denominator: 2,
+                rotation: 0,
+            })
+            .collect::<Vec<_>>();
+        Catalog::new(1, &displays, &ProtocolLimits::ABSOLUTE).unwrap()
+    }
+    #[test]
+    fn explicit_only_policy_refuses_zero_or_multiple_displays_and_rechecks_new_catalogs() {
+        for handles in [&[][..], &[1, 2][..]] {
+            assert_eq!(DisplayChoice::Only.select(&catalog(handles)), None);
+        }
+        assert_eq!(
+            DisplayChoice::Only.select(&catalog(&[u128::MAX])),
+            Some(u128::MAX)
+        );
+        assert_eq!(DisplayChoice::Handle(9).select(&catalog(&[9, 10])), Some(9));
+        assert_eq!(DisplayChoice::Handle(9).select(&catalog(&[10])), None);
+        assert_eq!(DisplayChoice::Only.select(&catalog(&[9, 10])), None);
+    }
+    #[test]
+    fn inventory_needs_trust_and_experimental_opt_in_but_no_display_or_worker() {
+        let o = parse(&args("displays n-peer --experimental-native --trust-roots /opt/fr/ca.pem --ipv6 --port 1234 --json")).unwrap();
+        let Command::Displays(t) = o.command else {
+            panic!("inventory required")
+        };
+        assert_eq!(t.node, "n-peer");
+        assert_eq!(t.port, 1234);
+        assert!(t.ipv6 && o.json);
+        assert_eq!(
+            parse(&args("displays n-peer --json")).err().unwrap().code,
+            "native_transport_unqualified"
+        );
+        for extra in [
+            "--worker /bin/false",
+            "--display 9",
+            "--view-only",
+            "--attempts 2",
+            "--x-display :0",
+            "--port 0",
+            "--token secret",
+        ] {
+            assert!(
+                parse(&args(&format!(
+                    "displays n-peer --experimental-native --trust-roots /opt/fr/ca.pem {extra}"
+                )))
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn connection_only_selection_is_explicit_and_handle_precision_is_preserved() {
+        for choice in ["only".to_string(), u128::MAX.to_string()] {
+            let o=parse(&args(&format!("connect n-peer --view-only --experimental-native --worker /opt/fr/worker --trust-roots /opt/fr/ca.pem --display {choice}"))).unwrap();
+            let Command::Connect(c) = o.command else {
+                panic!("connection required")
+            };
+            assert_eq!(
+                c.display,
+                if choice == "only" {
+                    DisplayChoice::Only
+                } else {
+                    DisplayChoice::Handle(u128::MAX)
+                }
+            );
+        }
+        for choice in [
+            "0",
+            "first",
+            "primary",
+            "-1",
+            "340282366920938463463374607431768211456",
+        ] {
+            assert!(parse(&args(&format!("connect n-peer --view-only --experimental-native --worker /opt/fr/worker --trust-roots /opt/fr/ca.pem --display {choice}"))).is_err());
         }
     }
 }

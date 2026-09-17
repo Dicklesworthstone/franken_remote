@@ -269,3 +269,106 @@ fn sigint_terminates_a_stalled_lookup_without_claiming_success() {
         json(&output, "assert x['error']['code']=='untrusted_localapi'");
     }
 }
+
+#[test]
+fn display_inspection_requires_no_local_renderer_and_keeps_identity_failures_explicit() {
+    let root = path("inspection-root.pem");
+    let key = path("inspection-key.pem");
+    let openssl = Command::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "ec",
+            "-pkeyopt",
+            "ec_paramgen_curve:P-256",
+            "-nodes",
+            "-keyout",
+            key.to_str().unwrap(),
+            "-out",
+            root.to_str().unwrap(),
+            "-days",
+            "1",
+            "-subj",
+            "/CN=Explicit test root",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        openssl.status.success(),
+        "{}",
+        String::from_utf8_lossy(&openssl.stderr)
+    );
+    let missing = path("inspection-absent.sock");
+    let output = wait(
+        command(&[
+            "displays",
+            "n-peer",
+            "--experimental-native",
+            "--trust-roots",
+            root.to_str().unwrap(),
+            "--socket",
+            missing.to_str().unwrap(),
+            "--json",
+        ])
+        .spawn()
+        .unwrap(),
+    );
+    // No DISPLAY, XAUTHORITY, --worker or --display exists in this process. It
+    // reaches the real strict LocalAPI lookup instead of native-window setup.
+    assert_eq!(output.status.code(), Some(1));
+    json(
+        &output,
+        "assert x['error']['code']=='tailscale_unavailable'\nassert 'displays' not in x",
+    );
+}
+#[test]
+fn display_inspection_argument_and_trust_refusals_do_not_echo_private_material() {
+    let root = path("bad-inspection-root.pem");
+    File::create(&root)
+        .unwrap()
+        .write_all(b"PRIVATE-ROOT-MATERIAL")
+        .unwrap();
+    for (args, expected, exit) in [
+        (
+            vec!["displays", "n-private", "--json"],
+            "native_transport_unqualified",
+            2,
+        ),
+        (
+            vec![
+                "displays",
+                "n-private",
+                "--experimental-native",
+                "--trust-roots",
+                root.to_str().unwrap(),
+                "--json",
+            ],
+            "invalid_trust_store",
+            1,
+        ),
+        (
+            vec![
+                "displays",
+                "n-private",
+                "--experimental-native",
+                "--trust-roots",
+                root.to_str().unwrap(),
+                "--display",
+                "9",
+                "--json",
+            ],
+            "invalid_arguments",
+            2,
+        ),
+    ] {
+        let output = wait(command(&args).spawn().unwrap());
+        assert_eq!(output.status.code(), Some(exit));
+        json(
+            &output,
+            &format!("assert x['error']['code']=='{expected}'\nassert x['outcome']=='refused'"),
+        );
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(!text.contains("PRIVATE-ROOT") && !text.contains("n-private"));
+    }
+}
