@@ -98,6 +98,7 @@ pub struct Launch {
     xauthority: Option<PathBuf>,
     role: Role,
     epoch: u128,
+    target: Option<worker::presentation::X11Target>,
 }
 impl Launch {
     pub fn new(
@@ -125,7 +126,18 @@ impl Launch {
             xauthority: xauthority.map(Path::to_path_buf),
             role,
             epoch,
+            target: None,
         })
+    }
+    /// Select a locally owned UI window before decoder startup. This is private
+    /// launch configuration, never a peer request or a decoder-selected input
+    /// source. The UI must retain its window until native cleanup completes.
+    pub fn present_in(mut self, target: worker::presentation::X11Target) -> Result<Self, Error> {
+        if self.role != Role::Present || self.target.is_some() {
+            return Err(Error::InvalidLaunch);
+        }
+        self.target = Some(target);
+        Ok(self)
     }
 }
 /// One absolute deadline covers the complete write and reply, including a
@@ -268,16 +280,17 @@ impl Worker {
         if launch.role != Role::Present {
             return Err(Error::Protocol(worker::Error::WrongRole));
         }
-        let body = configuration.encode_decoder(record)?;
-        Self::start_with_body(
-            cx,
-            launch,
-            configuration,
-            body,
-            Kind::ConfigureDecoder,
-            deadline,
-        )
-        .await
+        let (kind, body) = match launch.target {
+            Some(target) => (
+                Kind::ConfigurePresentation,
+                target.encode_decoder(configuration, record)?,
+            ),
+            None => (
+                Kind::ConfigureDecoder,
+                configuration.encode_decoder(record)?,
+            ),
+        };
+        Self::start_with_body(cx, launch, configuration, body, kind, deadline).await
     }
     async fn start_with_body(
         cx: &Cx,
@@ -294,10 +307,10 @@ impl Worker {
         }
         let mut worker = Self::spawn(launch, limits)?;
         let result = worker.exchange(cx, kind, body.clone(), deadline).await;
-        let expected = if kind == Kind::ConfigureDecoder {
-            Kind::DecoderReady
-        } else {
-            Kind::Ready
+        let expected = match kind {
+            Kind::ConfigureDecoder => Kind::DecoderReady,
+            Kind::ConfigurePresentation => Kind::PresentationReady,
+            _ => Kind::Ready,
         };
         match result {
             Ok(reply) if reply.header.kind == expected && reply.body() == body => {
@@ -321,6 +334,7 @@ impl Worker {
             xauthority,
             role,
             epoch,
+            target: _, // Already bound into the immutable private configuration.
         } = launch;
         let mut command = Command::new(image);
         command
@@ -612,6 +626,7 @@ fn allowed_reply(request: Kind, reply: Kind) -> bool {
             Kind::CheckMonitor => reply == Kind::MonitorValid,
             Kind::ConfigureCapture => reply == Kind::CaptureReady,
             Kind::ConfigureDecoder => reply == Kind::DecoderReady,
+            Kind::ConfigurePresentation => reply == Kind::PresentationReady,
             Kind::Capture => matches!(reply, Kind::Unit | Kind::NeedInput | Kind::NeedDrain),
             Kind::CaptureIfChanged => matches!(
                 reply,

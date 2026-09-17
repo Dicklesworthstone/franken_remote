@@ -745,3 +745,6 @@ fn unavailable_monitor_profile_refuses_without_falling_back_to_screen_capture() 
     assert_eq!(refusal.body(), &(Error::Unsupported as u16).to_be_bytes());
     assert!(!child.child.wait().unwrap().success());
 }
+
+#[path = "worker_process/presentation_target.rs"]
+mod presentation_target;

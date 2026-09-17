@@ -19,6 +19,7 @@ pub const HEADER_BYTES: usize = 36;
 pub const UNIT_PREFIX_BYTES: usize = 40;
 const CONFIG_BYTES: usize = 28;
 pub mod capture;
+pub mod presentation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
@@ -36,6 +37,7 @@ pub enum Kind {
     DiscoverMonitors = 11,
     ConfigureMonitor = 12,
     CheckMonitor = 13,
+    ConfigurePresentation = 14,
     Ready = 257,
     Unit = 258,
     NeedInput = 259,
@@ -51,6 +53,7 @@ pub enum Kind {
     CaptureMonitors = 269,
     MonitorReady = 270,
     MonitorValid = 271,
+    PresentationReady = 272,
 }
 impl Kind {
     fn parse(n: u16) -> Result<Self, Error> {
@@ -68,6 +71,7 @@ impl Kind {
             11 => Self::DiscoverMonitors,
             12 => Self::ConfigureMonitor,
             13 => Self::CheckMonitor,
+            14 => Self::ConfigurePresentation,
             257 => Self::Ready,
             258 => Self::Unit,
             259 => Self::NeedInput,
@@ -83,6 +87,7 @@ impl Kind {
             269 => Self::CaptureMonitors,
             270 => Self::MonitorReady,
             271 => Self::MonitorValid,
+            272 => Self::PresentationReady,
             _ => return Err(Error::Malformed),
         })
     }
@@ -107,6 +112,12 @@ impl Kind {
             }
             Self::ConfigureMonitor | Self::MonitorReady => {
                 length == capture::monitors::SELECTED_CONFIG_BYTES
+                    && length <= limits.max_control_message_bytes() as usize
+            }
+            Self::ConfigurePresentation | Self::PresentationReady => {
+                length
+                    .checked_sub(presentation::TARGET_BYTES)
+                    .is_some_and(|n| Self::ConfigureDecoder.accepts_length(n, limits))
                     && length <= limits.max_control_message_bytes() as usize
             }
             Self::ConfigureDecoder | Self::DecoderReady => {
