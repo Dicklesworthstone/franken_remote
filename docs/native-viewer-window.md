@@ -151,3 +151,57 @@ native decoder/control/clipboard session, authenticated live-tailnet admission,
 optical visibility, hardware media, or the desktop-shell phase gate. The full
 native input suite remains a separate required check, not replaced by these
 focused tests.
+
+## Reconnecting the complete desktop
+
+`desktop::reconnect::Session<U>` implements the existing
+`frd::native_connection::reconnect::Application` contract. Supply it to the
+canonical `Client::run_observing`, or use `Mode::ControlCapable` with
+`Client::run_control_capable`. The existing supervisor still owns installed
+Tailscale identity validation, TLS, the retry classification, finite attempt
+count and bounded backoff. This adapter introduces no alternate dialer or
+credential path and does not enable an unqualified transport profile.
+
+Each application attempt creates a new `Desktop`, approved display choice,
+window, decoder and monotonically increasing checked worker epoch. Numeric
+session/display/window identifiers are not ownership: an old window handle
+remains terminal even when a later X connection reuses an XID. `Ui::ready` is
+called once after successful startup and may configure that attempt's existing
+clipboard owner. UI callbacks are bounded and nonblocking. Callback failure or
+unwinding fences the original session immediately, including when the caller
+catches a panic while retaining the failed future.
+
+`Mode::Observe` cannot request input. `Mode::ControlCapable` starts in the existing
+viewing state on every attempt; the UI must make a **new explicit request** using
+fresh layout and presentation evidence. No previous request, grant, ticket,
+queued action, held state, clipboard contents or decoder reference is copied.
+Returning one exact confirmed native-pixel `Layout` after the new grant attaches
+that session's native input owner. The reconnect adapter does not fabricate the
+visibility witness or automatically retake control.
+
+Cleanup is required before another application attempt. It stops the desktop at
+call time, even if its future is never polled, then uses the supervisor's same
+independent cleanup context and original deadline. Media process exit, native
+input completion, native window completion and clipboard thread completion are
+checked separately. Pending resources or failures retain the original desktop
+and the full `last_cleanup` report; no retry follows. A finished clipboard
+operation can retain an operation error while still proving its native thread
+ended. Neither that distinction nor worker exit asserts external-effect rollback.
+
+Interrupted startup without a returned native decoder owner remains
+`CleanupFailure::BootstrapUnconfirmed`. Window cleanup alone cannot prove an
+earlier decoder process was reaped. This deliberately remains a terminal retry
+boundary until the underlying startup API can return that missing cleanup owner.
+`desktop()`, `last_error()`, `last_cleanup()` and `cleanup_failure()` preserve the
+available status without exposing input or clipboard payloads.
+
+The added tests drive two real TLS/UDP connections, actual XCB windows and
+supervised test children through configuration, recovery delivery, a first-decode
+reply, link loss, authority expiry and reaping. They deliberately reuse numeric
+session bindings while proving old handles cannot cancel the new owner. The
+children use the existing recorded HEVC corpus and explicit **test-only**
+capture/decoder/compositor replies; this is process/lifecycle evidence, not real
+FFmpeg decode, physical visibility, hardware media or authenticated tailnet
+qualification. Additional cases cover abandoned work, original deadlines,
+callback panic, epoch overflow and refusal to retry incomplete bootstrap. All
+existing required native-input tests remain enabled independently.

@@ -243,13 +243,12 @@ async fn send_message(q: &mut QuicRecords, cx: &Cx, routes: ControlRoutes, messa
     send(q, cx, routes, &body[..len]).await;
 }
 /// Explicit test peer, NOT `Host::from_admitted` and never a production bypass.
-async fn select_peer(
+async fn startup_peer(
     mut q: QuicRecords,
     cx: &Cx,
     mut routes: ControlRoutes,
-    stop: frd::session_startup::StreamingViewerControl,
     chosen: bool,
-) {
+) -> (QuicRecords, ControlRoutes, ControlBinding) {
     let hello = receive(&mut q, cx, routes).await;
     assert!(matches!(
         negotiation::decode(&hello, negotiation::MAX_RECORD, 0).unwrap(),
@@ -332,6 +331,16 @@ async fn select_peer(
             display::Message::Select(catalog.selection(9).unwrap())
         );
     }
+    (q, routes, binding)
+}
+async fn select_peer(
+    q: QuicRecords,
+    cx: &Cx,
+    routes: ControlRoutes,
+    stop: frd::session_startup::StreamingViewerControl,
+    chosen: bool,
+) {
+    let (mut q, _, _) = Box::pin(startup_peer(q, cx, routes, chosen)).await;
     // No media channel or false codec/presentation completion. The ORIGINAL
     // desktop's budget must fence the local window while awaiting those stages.
     while !stop.is_stopped() {
@@ -447,3 +456,6 @@ fn a_panicking_ui_fences_before_the_caller_drops_the_retained_open_future() {
     assert!(desktop.window().is_none());
     assert!(h.checkpoint().is_ok());
 }
+
+#[path = "desktop/reconnect.rs"]
+mod reconnect;
