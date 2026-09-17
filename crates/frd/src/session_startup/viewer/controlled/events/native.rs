@@ -1,7 +1,9 @@
 //! Session-owned native capture. The platform owns its native thread and the
 //! original controlled viewer owns its lifetime. No alternate input/authority path.
 use super::{ControlledViewer, Layout, Source};
-use crate::session_startup::ControlledViewerError;
+use crate::{session_startup::ControlledViewerError, worker::Deadline};
+use asupersync::cx::Cx;
+use std::future::Future;
 
 /// One native producer's nonblocking lifecycle boundary. `stop` must not wait on
 /// native calls, locks, the network, or a thread join. `try_reap` may join ONLY an
@@ -20,6 +22,20 @@ pub enum CaptureCleanup {
     /// Native cleanup finished. This does not acknowledge host input release.
     Complete,
 }
+/// Failure to observe native cleanup, not a claim that input remains authorized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureReapError {
+    Cancelled,
+    Clock,
+    Expired,
+}
+impl std::fmt::Display for CaptureReapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+impl std::error::Error for CaptureReapError {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureStartError<E> {
     Viewer(ControlledViewerError),
@@ -69,6 +85,19 @@ impl ControlledViewer {
         operation.complete = true;
         Ok(())
     }
+    /// Fence the original session at CALL time and wait for its native producer
+    /// to finish under an independent cleanup context and the supplied absolute
+    /// deadline. Expiry, cancellation and abandonment RETAIN the same producer;
+    /// the caller may collect it later but must not start a replacement yet.
+    /// Complete proves only native cleanup, never remote key/button release.
+    pub fn reap_input_capture<'a>(
+        &'a mut self,
+        cleanup: &'a Cx,
+        deadline: Deadline,
+    ) -> impl Future<Output = Result<CaptureCleanup, CaptureReapError>> + 'a {
+        self.close();
+        wait_for_capture(cleanup, deadline, || self.input_capture_cleanup())
+    }
     /// Nonblocking cleanup observation, also available after closure. `close`
     /// requests stop; a Pending result retains the owner for subsequent reaping.
     pub fn input_capture_cleanup(&mut self) -> CaptureCleanup {
@@ -82,5 +111,32 @@ impl ControlledViewer {
                 }
             }
         }
+    }
+}
+
+/// Shared bounded wait for the original owner; no blocking native join and no
+/// reset timeout. An expired/cancelled wait does not consume a completion claim.
+pub(crate) async fn wait_for_capture(
+    cx: &Cx,
+    deadline: Deadline,
+    mut collect: impl FnMut() -> CaptureCleanup,
+) -> Result<CaptureCleanup, CaptureReapError> {
+    let mut previous = cx.timer_driver().ok_or(CaptureReapError::Clock)?.now();
+    loop {
+        cx.checkpoint().map_err(|_| CaptureReapError::Cancelled)?;
+        let now = cx.timer_driver().ok_or(CaptureReapError::Clock)?.now();
+        if now < previous {
+            return Err(CaptureReapError::Clock);
+        }
+        previous = now;
+        if now >= deadline.time() {
+            return Err(CaptureReapError::Expired);
+        }
+        let state = collect();
+        if state != CaptureCleanup::Pending {
+            return Ok(state);
+        }
+        let wake = now.saturating_add_nanos(1_000_000).min(deadline.time());
+        asupersync::time::sleep_until(wake).await;
     }
 }
