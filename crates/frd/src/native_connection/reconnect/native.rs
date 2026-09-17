@@ -96,9 +96,11 @@ where
         if let Some(observer) = self.observer.as_mut() {
             observer.close(); // Fence input/publication before either foreign cleanup.
             let media = observer.reap_media(cx, deadline).await;
+            let input = observer.reap_input_capture(cx, deadline).await;
             let clipboard = observer.reap_clipboard(cx, deadline).await;
             media.map_err(|_| CallbackError)?;
-            clipboard.map_err(|_| CallbackError)?;
+            input.map_err(|_| CallbackError)?;
+            clipboard_finished(clipboard.map_err(|_| CallbackError)?)?;
             self.observer = None;
             self.started = false;
             Ok(())
@@ -259,9 +261,11 @@ where
         if let Some(observer) = self.observer.as_mut() {
             observer.close(); // Fence input/publication before either foreign cleanup.
             let media = observer.reap_media(cx, deadline).await;
+            let input = observer.reap_input_capture(cx, deadline).await;
             let clipboard = observer.reap_clipboard(cx, deadline).await;
             media.map_err(|_| CallbackError)?;
-            clipboard.map_err(|_| CallbackError)?;
+            input.map_err(|_| CallbackError)?;
+            clipboard_finished(clipboard.map_err(|_| CallbackError)?)?;
             self.observer = None;
             self.started = false;
             Ok(())
@@ -273,5 +277,33 @@ where
     }
     fn status(&mut self, status: Status) -> Result<(), CallbackError> {
         (self.status)(status)
+    }
+}
+
+fn clipboard_finished(cleanup: crate::native_clipboard::Cleanup) -> Result<(), CallbackError> {
+    use crate::native_clipboard::Cleanup;
+    match cleanup {
+        // Finished contains the worker's OPERATION outcome; either outcome
+        // proves its thread was joined. Do not confuse cancellation of work
+        // with an uncollected native owner or replay the failed operation.
+        Cleanup::NotStarted | Cleanup::Finished(_) => Ok(()),
+        Cleanup::Pending => Err(CallbackError),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cleanup_is_not_success_just_because_the_clipboard_call_returned() {
+        use crate::native_clipboard::Cleanup;
+        for state in [
+            Cleanup::NotStarted,
+            Cleanup::Finished(Ok(())),
+            Cleanup::Finished(Err(crate::clipboard_quic::Error::Closed)),
+        ] {
+            assert_eq!(clipboard_finished(state), Ok(()));
+        }
+        assert_eq!(clipboard_finished(Cleanup::Pending), Err(CallbackError));
     }
 }
