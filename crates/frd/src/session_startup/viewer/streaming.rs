@@ -489,6 +489,13 @@ impl StreamingViewer {
             return Err(Error::Closed);
         }
         self.served = true;
+        if matches!(self.peer, Peer::Acquiring { .. } | Peer::Viewing { .. }) {
+            let (session, _) = self.peer.parts()?;
+            crate::native_clipboard::Application::decline_unconfigured(
+                &mut self.clipboard,
+                crate::session_startup::clipboard::selected(&session.opened.selection).is_ok(),
+            );
+        }
         let cx = &self.control.cx.clone();
         acquisition::notify(&mut self.peer, &self.receiver, &mut self.control, None, ui)?;
         loop {

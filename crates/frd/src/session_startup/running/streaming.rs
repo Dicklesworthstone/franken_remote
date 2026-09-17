@@ -293,6 +293,13 @@ impl StreamingHost {
             return Err(Error::Closed);
         }
         self.stream.served = true;
+        if acquisition.is_some() {
+            let session = self.host.session()?;
+            crate::native_clipboard::Application::decline_unconfigured(
+                &mut self.clipboard,
+                crate::session_startup::clipboard::selected(&session.opened.selected).is_ok(),
+            );
+        }
         let fence = Fence {
             control: self.stream.control.clone(),
             native: self.host.native(),

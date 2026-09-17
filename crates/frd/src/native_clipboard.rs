@@ -186,6 +186,20 @@ impl Application {
             }))),
         }
     }
+    /// Positive profile negotiation is not a native application configuration.
+    /// Participate with metadata-only refusal so a configured peer is not left
+    /// waiting for its original setup deadline. There is deliberately no factory.
+    /// Call only while beginning a new native control-acquisition service, never
+    /// to replace a pre-attached lane on an already controlled session.
+    pub(crate) fn decline_unconfigured(slot: &mut Option<Self>, profile_selected: bool) {
+        if slot.is_none() && profile_selected {
+            *slot = Some(Self::new(Configuration {
+                timeout: Duration::from_secs(2),
+                consent: false,
+                launch: None,
+            }));
+        }
+    }
     pub(crate) fn control(&self) -> Control {
         self.control.clone()
     }
