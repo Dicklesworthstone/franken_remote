@@ -50,7 +50,7 @@ fixed UI slot. Reap collects it before the native owner can be discarded; both
 results remain available through the old content-free handle after reconnect.
 An uncollected result is never overwritten. No clipboard contents are retained.
 
-Eight public-bootstrap regressions exercise actual UDP/TLS connections, supervised
+Eleven public-bootstrap regressions exercise actual UDP/TLS connections, supervised
 media child fixtures, original input owners and native clipboard threads. They
 cover both transfer directions (empty/Unicode), no echoes, independent refusal,
 continued input after between-turn optional shutdown and pre-control disable/stop,
@@ -59,6 +59,24 @@ unpolled-service cancellation, failed/panicked factories and bounded cleanup of
 a blocked factory. Clipboard contents, recorded HEVC, native injection, permission,
 and compositor visibility in those tests are explicitly fixtures. This is native
 shell API integration, not a rendered GUI, hardware proof or live-tailnet claim.
+
+## An unconfigured clipboard is a refusal, not a disconnect
+
+Selecting the clipboard startup profile advertises protocol support, not local
+permission or the existence of a native factory. At the start of a new native
+control-acquisition service, an endpoint with no clipboard configuration installs
+a metadata-only declining participant. It exchanges readiness only after the
+original control grant exists. There is no native factory or item-ID callback
+in this participant, so neither side can read or publish clipboard contents.
+Either or both applications may omit configuration and still use keyboard, mouse
+and viewing. The original setup timeout and one-use attachment rules still apply;
+this is not an implicit retry, permission default, or replacement channel.
+
+Explicit configurations are preserved. Pure observation services and already
+controlled sessions with externally attached channels are not retroactively
+configured or renegotiated. Three new public-bootstrap UDP/TLS regressions cover
+missing host, missing viewer and both missing configurations, including continued
+keyboard receipts, no native initialization and cleanup of the original workers.
 
 ## Reconnect adapter
 

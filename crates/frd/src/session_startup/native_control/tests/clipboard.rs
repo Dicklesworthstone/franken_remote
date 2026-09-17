@@ -580,3 +580,6 @@ fn native_application_precontrol_stop_or_disable_declines_without_ending_control
 
 #[path = "clipboard/reconnect.rs"]
 mod reconnect;
+
+#[path = "clipboard/optional.rs"]
+mod optional;
