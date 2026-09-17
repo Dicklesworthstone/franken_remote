@@ -51,3 +51,8 @@ required-features = ["linux-media"]
 name = "fr-media-worker"
 path = "src/bin/media_worker.rs"
 required-features = ["linux-media"]
+
+[[bin]]
+name = "fr"
+path = "src/bin/fr.rs"
+required-features = ["linux-desktop"]
