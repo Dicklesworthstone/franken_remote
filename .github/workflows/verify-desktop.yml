@@ -9,6 +9,7 @@ on:
       - 'crates/fr-client/**'
       - 'crates/frd/**'
       - 'crates/fr-media/**'
+      - 'crates/fr-tailnet/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
 permissions:
@@ -36,6 +37,10 @@ jobs:
           cargo fmt --all --check
           cargo check -p fr-native --features linux-desktop --all-targets --locked
           cargo clippy -p fr-native --features linux-desktop --all-targets --locked -- -D warnings
+      - name: Native client commands and installed-tailnet discovery
+        run: |
+          cargo test -p fr-tailnet --locked
+          cargo test -p fr-native --features linux-desktop --bin fr --test fr_cli --locked -- --test-threads=1
       - name: Native windows and original-session lifecycle
         run: cargo test -p fr-native --features linux-desktop --test viewer_window_x11 --locked -- --test-threads=1
       - name: Required native input and desktop policy tests

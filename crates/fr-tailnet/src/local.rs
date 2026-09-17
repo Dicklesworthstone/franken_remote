@@ -330,3 +330,6 @@ pub use target::{PeerSelector, PeerTarget};
 
 mod dial;
 pub use dial::{ConnectedPeer, DialRoute, NativeClient};
+
+mod discovery;
+pub use discovery::{DiscoveredPeer, Discovery, DiscoveryExclusions};

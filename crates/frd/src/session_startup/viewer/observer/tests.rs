@@ -578,3 +578,5 @@ fn deferred_renderer_expiry_fences_before_dropping_local_factory_state() {
         assert!(original.is_stopped());
     });
 }
+
+mod inventory;

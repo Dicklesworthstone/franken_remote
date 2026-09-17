@@ -1,5 +1,6 @@
 //! One native observer bootstrap, from approved startup to continuous receiving.
 //! The selected display, connection and decoder are transferred, never recreated.
+mod inventory;
 use super::{Viewer, ViewerSession, now, streaming};
 use crate::input_quic::NegotiatedInput;
 use crate::session_startup::native_control;
@@ -406,7 +407,7 @@ impl Viewer {
         self.observe_native(renderer, policy, clock, choose, approval)
     }
     fn observe_native<'a, F: Future<Output = Result<Launch, ()>> + 'a>(
-        mut self,
+        self,
         launch: impl FnOnce(Display, streaming::StreamingViewerControl) -> F + 'a,
         policy: Policy,
         clock: Option<ClockPolicy>,
@@ -420,19 +421,8 @@ impl Viewer {
             complete: false,
             inner: Box::pin(async move {
                 let budget = budget?;
-                let mut notified = None;
-                while !self.is_complete() {
-                    self.drive(budget.wait()?).await.map_err(Error::Session)?;
-                    if let Some(notice) = self.approval()
-                        && notified != Some(notice)
-                    {
-                        approval(notice).map_err(|()| Error::Application)?;
-                        notified = Some(notice);
-                        budget.remaining()?;
-                    }
-                }
                 Box::pin(bootstrap(
-                    self.finish().map_err(Error::Session)?,
+                    Box::pin(approved(self, &budget, &mut approval)).await?,
                     launch,
                     &budget,
                     &mut choose,
@@ -534,6 +524,40 @@ impl<F> Drop for Attempt<F> {
 #[allow(clippy::unnecessary_wraps)]
 fn retain(_: Route, _: &[u8]) -> Result<Disposition, ()> {
     Ok(Disposition::Blocked)
+}
+
+// The same negotiation/approval driver serves both metadata inspection and
+// decoder startup. Neither path supplies its own authority or approval decision.
+async fn approved(
+    mut viewer: Viewer,
+    budget: &Budget,
+    approval: &mut impl FnMut(ApprovalNotice) -> Result<(), ()>,
+) -> Result<ViewerSession, Error> {
+    let mut notified = None;
+    while !viewer.is_complete() {
+        viewer.drive(budget.wait()?).await.map_err(Error::Session)?;
+        if let Some(notice) = viewer.approval()
+            && notified != Some(notice)
+        {
+            // Fence even when an embedding UI catches a callback panic while
+            // retaining the failed startup future instead of dropping it.
+            struct Notify<'a>(&'a Cx, bool);
+            impl Drop for Notify<'_> {
+                fn drop(&mut self) {
+                    if !self.1 {
+                        self.0.cancel_fast(CancelKind::User);
+                    }
+                }
+            }
+            let mut notification = Notify(&budget.cx, false);
+            approval(notice).map_err(|()| Error::Application)?;
+            notification.1 = true;
+            notified = Some(notice);
+            budget.remaining()?;
+        }
+    }
+    budget.remaining()?;
+    viewer.finish().map_err(Error::Session)
 }
 
 async fn choose_display(

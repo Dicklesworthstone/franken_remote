@@ -6,7 +6,8 @@ use crate::session_startup::Viewer;
 use asupersync::{
     cx::Cx, net::quic_native::NativeQuicUdpConnection, tls::Certificate, types::CancelKind,
 };
-use fr_tailnet::{DialRoute, LocalApi, NativeClient, PeerSelector};
+use fr_tailnet::{DialRoute, NativeClient};
+pub use fr_tailnet::{Discovery, Error as TailnetError, LocalApi, PeerSelector};
 use fr_transport::quic::Policy;
 use fr_wire::negotiation::Offer;
 use std::{
