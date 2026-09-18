@@ -4,7 +4,7 @@
 use super::*;
 use crate::{
     DESKTOP_CAPABILITY, Permissions, Scope,
-    metadata::{Status, WhoIs, evaluate},
+    metadata::{Status, WhoIs, evaluate, evaluate_membership},
 };
 use asupersync::{
     Budget,
