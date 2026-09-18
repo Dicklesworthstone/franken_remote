@@ -47,6 +47,13 @@ tests exercise actual wire requests and sender/receiver round trips, including
 all nonempty eight-fragment loss patterns with one through four repair ranges;
 these are deterministic delivery checks, not hardware or network qualification.
 
+Once streaming, a complete independent picture supersedes older queued media,
+including unsent repair requests, without waiting for decoder availability. This
+prevents obsolete reference deadlines from killing an already-available recovery
+candidate. Reliable startup must still decode first; incomplete independent
+pictures do not replace the working chain, and in-flight decoder ownership,
+reference deadlines, HEVC validation and visibility checks are not bypassed.
+
 ### Native host publication
 
 The Linux `HostSession::publish_display` path now joins an already-approved

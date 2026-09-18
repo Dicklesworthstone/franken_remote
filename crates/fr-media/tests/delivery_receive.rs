@@ -637,3 +637,6 @@ fn delivery_handoff_checks_all_bindings_generations_and_limits() {
             .is_err()
     );
 }
+
+#[path = "delivery_receive/independent.rs"]
+mod independent;

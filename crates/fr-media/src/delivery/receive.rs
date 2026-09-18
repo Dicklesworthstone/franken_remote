@@ -578,6 +578,37 @@ impl ReceivePipeline {
     fn obsolete(&self, frame: u64) -> bool {
         self.last_decoded.is_some_and(|last| frame <= last)
             || self.in_flight.is_some_and(|pending| frame <= pending.frame)
+            || self
+                .queued_independent_frame()
+                .is_some_and(|newer| frame < newer)
+    }
+    fn queued_independent_frame(&self) -> Option<u64> {
+        if self.state != ReceiveState::Streaming {
+            return None;
+        }
+        self.slots
+            .iter()
+            .flatten()
+            .filter(|a| {
+                a.complete() && a.reliable_offset.is_none() && a.descriptor.reference.is_none()
+            })
+            .map(|a| a.descriptor.frame)
+            .max()
+    }
+    /// A complete independent candidate makes older queued references useless.
+    /// Retire them on completion, not at dequeue: their deadlines and repairs
+    /// must not poison the new candidate while a decoder is still busy. This
+    /// does not acknowledge decode, reset a deadline, or release in-flight bytes.
+    /// Native HEVC validation and successful decode are still required.
+    fn discard_superseded(&mut self) {
+        let Some(frame) = self.queued_independent_frame() else {
+            return;
+        };
+        for slot in &mut self.slots {
+            if slot.as_ref().is_some_and(|a| a.descriptor.frame < frame) {
+                *slot = None;
+            }
+        }
     }
     fn slot(
         &mut self,
@@ -626,10 +657,14 @@ impl ReceivePipeline {
             return Err(DeliveryError::WrongState);
         }
         let index = self.slot(fragment.descriptor, now, false)?;
-        self.slots[index]
+        let update = self.slots[index]
             .as_mut()
             .expect("inserted")
-            .fragment(fragment)
+            .fragment(fragment)?;
+        if update == ReceiveUpdate::PictureComplete {
+            self.discard_superseded();
+        }
+        Ok(update)
     }
     fn on_recovery(
         &mut self,
@@ -786,6 +821,9 @@ impl ReceivePipeline {
         self.in_flight = None;
         self.recovery_until = None;
         self.state = ReceiveState::Streaming;
+        // A candidate may have arrived while reliable startup was decoding.
+        // Only this successful completion may first enable normal streaming.
+        self.discard_superseded();
         Ok(())
     }
     /// Preserve the original display deadline after actual decoder completion.
