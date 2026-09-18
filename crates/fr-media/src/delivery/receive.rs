@@ -413,6 +413,9 @@ pub struct ReceivePipeline {
     budget: MediaBudget,
     state: ReceiveState,
     failure: Option<DeliveryError>,
+    // Negotiated storage is a ceiling. The decoder's admitted frame rate
+    // narrows active dependency retention before any media is accepted.
+    active_slots: usize,
     slots: [Option<Assembly>; SLOTS],
     last_now: Option<u64>,
     recovery_until: Option<u64>,
@@ -427,6 +430,7 @@ impl fmt::Debug for ReceivePipeline {
             .field("state", &self.state)
             .field("epoch", &self.config.epoch)
             .field("last_decoded", &self.last_decoded)
+            .field("dependency_window_pictures", &self.active_slots)
             .field("usage", &self.budget.usage())
             .finish_non_exhaustive()
     }
@@ -443,6 +447,7 @@ impl ReceivePipeline {
             budget,
             state: ReceiveState::AwaitingConfiguration,
             failure: None,
+            active_slots: usize::from(config.limits.protocol().reassembly_window_pictures()),
             slots: core::array::from_fn(|_| None),
             last_now: None,
             recovery_until: None,
@@ -485,6 +490,47 @@ impl ReceivePipeline {
     }
     pub fn budget_usage(&self) -> super::BudgetUsage {
         self.budget.usage()
+    }
+    /// Narrow the active reference/reassembly count from the admitted frame rate
+    /// and receiver-local reference horizon. This is called before opening the
+    /// decoder, when no picture can exist. The negotiated 2..=12 window remains
+    /// an upper bound and the independent MediaBudget remains the byte bound.
+    ///
+    /// ceil(fps * horizon) + 2 retains the useful dependency horizon plus one
+    /// frame on either side for reorder/production jitter. A later recovery under
+    /// the same codec configuration retains this exact window; it cannot grow it.
+    pub fn configure_frame_rate(&mut self, fps: u16) -> Result<u8, DeliveryError> {
+        if self.state != ReceiveState::AwaitingConfiguration
+            || self.in_flight.is_some()
+            || self.slots.iter().any(Option::is_some)
+            || !(1..=240).contains(&fps)
+        {
+            return Err(if !(1..=240).contains(&fps) {
+                DeliveryError::InvalidPolicy
+            } else {
+                DeliveryError::WrongState
+            });
+        }
+        let numerator = u64::from(fps)
+            .checked_mul(self.config.policy.reference_budget_micros)
+            .and_then(|value| value.checked_add(999_999))
+            .ok_or(DeliveryError::InvalidPolicy)?;
+        let horizon_frames = numerator / 1_000_000;
+        let requested = horizon_frames
+            .checked_add(2)
+            .ok_or(DeliveryError::InvalidPolicy)?;
+        let negotiated = u64::from(
+            self.config
+                .limits
+                .protocol()
+                .reassembly_window_pictures(),
+        );
+        let active = requested.clamp(2, negotiated);
+        self.active_slots = usize::try_from(active).map_err(|_| DeliveryError::InvalidPolicy)?;
+        u8::try_from(active).map_err(|_| DeliveryError::InvalidPolicy)
+    }
+    pub fn dependency_window_pictures(&self) -> u8 {
+        u8::try_from(self.active_slots).expect("protocol window is at most twelve")
     }
     /// Preflight before opening a foreign decoder. This native slice requires
     /// the same admitted limits; it never enlarges the receiver's reservation.
@@ -629,6 +675,7 @@ impl ReceivePipeline {
         let index = self
             .slots
             .iter()
+            .take(self.active_slots)
             .position(Option::is_none)
             .ok_or(DeliveryError::ResourceLimit)?;
         let until = if reliable {

@@ -510,6 +510,9 @@ impl Presenter {
     ) -> Result<Self, Error> {
         let limits = configuration.limits()?;
         receiver
+            .configure_frame_rate(configuration.fps)
+            .map_err(Error::Receiver)?;
+        receiver
             .check_decoder_configuration(configuration.generation, &limits)
             .map_err(Error::Receiver)?;
         let mut receiving = ReceiveOperation::new(receiver);
