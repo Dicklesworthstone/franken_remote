@@ -11,6 +11,7 @@ pub mod clipboard;
 pub mod clock;
 pub mod decoder;
 pub mod display;
+pub mod files;
 pub mod held_state;
 pub mod input;
 pub mod input_result;

@@ -131,6 +131,11 @@ pub enum Kind {
     ClipboardCommit = 0x0052,
     ClipboardCancel = 0x0053,
     ClipboardReady = 0x0054,
+    FileOffer = 0x0070,
+    FileAccept = 0x0071,
+    FileChunk = 0x0072,
+    FileComplete = 0x0073,
+    FileCancel = 0x0074,
     PresentedState = 0x0080,
     StageMetrics = 0x0082,
     ClockProbe = 0x0084,
@@ -187,6 +192,11 @@ impl Kind {
             0x0052 => Ok(Self::ClipboardCommit),
             0x0053 => Ok(Self::ClipboardCancel),
             0x0054 => Ok(Self::ClipboardReady),
+            0x0070 => Ok(Self::FileOffer),
+            0x0071 => Ok(Self::FileAccept),
+            0x0072 => Ok(Self::FileChunk),
+            0x0073 => Ok(Self::FileComplete),
+            0x0074 => Ok(Self::FileCancel),
             0x0080 => Ok(Self::PresentedState),
             0x0082 => Ok(Self::StageMetrics),
             0x0084 => Ok(Self::ClockProbe),
@@ -234,6 +244,11 @@ impl Kind {
             | Self::ClipboardCommit
             | Self::ClipboardCancel
             | Self::ClipboardReady
+            | Self::FileOffer
+            | Self::FileAccept
+            | Self::FileChunk
+            | Self::FileComplete
+            | Self::FileCancel
             | Self::PresentedState
             | Self::StageMetrics
             | Self::ClockProbe
