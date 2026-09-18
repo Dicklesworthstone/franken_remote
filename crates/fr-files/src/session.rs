@@ -5,7 +5,7 @@
 //! There is one active object, bounded shared disk reservations, and no payload
 //! queue. Transport attachment and positive capability negotiation are separate.
 use crate::receive::{self, DropDirectory, MAX_CHUNK_BYTES, PendingFile, Publication};
-use asupersync::atp::object::ContentId;
+use asupersync::atp::{object::ContentId, safety::validate_portable_path_component};
 use fr_core::{
     ids::{InputLeaseId, InputTicketId, RemoteSessionId},
     input_submission::{InputMonitor, InputSession, Refusal},
@@ -75,6 +75,11 @@ pub struct Policy {
     pub bytes_per_second: u32,
     pub burst_bytes: u32,
     pub transfer_lifetime: HostDuration,
+    /// Cumulative declarations, not just currently reserved staging bytes.
+    pub max_session_bytes: u64,
+    /// Includes admitted attempts that later fail or are cancelled; zero-byte
+    /// objects cannot bypass a finite metadata/disk-operation budget.
+    pub max_session_transfers: u32,
 }
 impl Policy {
     pub fn conservative() -> Self {
@@ -82,6 +87,8 @@ impl Policy {
             bytes_per_second: 8 * 1024 * 1024,
             burst_bytes: 2 * (65_536 + 128),
             transfer_lifetime: HostDuration::from_micros(1_800_000_000),
+            max_session_bytes: 16 * 1024 * 1024 * 1024,
+            max_session_transfers: 1024,
         }
     }
     fn validate(self) -> Result<Self, Error> {
@@ -90,6 +97,8 @@ impl Policy {
             || !(minimum..=4 * minimum).contains(&u64::from(self.burst_bytes))
             || self.transfer_lifetime.as_micros() == 0
             || self.transfer_lifetime.as_micros() > 3_600_000_000
+            || self.max_session_bytes == 0
+            || self.max_session_transfers == 0
         {
             return Err(Error::Policy);
         }
@@ -100,6 +109,7 @@ impl Policy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Protocol,
+    UnknownEffect,
     Policy,
     Permission,
     WrongBinding,
@@ -107,6 +117,7 @@ pub enum Error {
     Busy,
     NoTransfer,
     RateLimited,
+    Quota,
     Clock,
     Expired,
     Closed,
@@ -132,6 +143,21 @@ pub struct Receipt {
     pub bytes: u64,
     pub publication: Publication,
 }
+/// Non-refundable session admission counters; no path, name or content hash.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Usage {
+    pub transfers: u32,
+    pub declared_bytes: u64,
+}
+
+pub(crate) struct VerifiedOffer<'a> {
+    pub binding: Binding,
+    pub id: u64,
+    pub name: &'a str,
+    pub size: u64,
+    pub expected: receive::Expected,
+}
+
 struct Active {
     id: u64,
     size: u64,
@@ -159,6 +185,7 @@ pub struct HostReceiver {
     binding: Binding,
     permission: Permission,
     policy: Policy,
+    usage: Usage,
     last_time: HostInstant,
     tokens: u128,
     floor: Option<u64>,
@@ -191,6 +218,7 @@ impl HostReceiver {
             },
             permission,
             policy,
+            usage: Usage::default(),
             last_time: now,
             tokens: u128::from(policy.burst_bytes) * MICRO,
             floor: None,
@@ -202,6 +230,9 @@ impl HostReceiver {
     }
     pub fn binding(&self) -> Binding {
         self.binding
+    }
+    pub fn usage(&self) -> Usage {
+        self.usage
     }
     pub fn progress(&self) -> Option<Progress> {
         self.active.as_ref().map(Active::progress)
@@ -215,6 +246,23 @@ impl HostReceiver {
     pub fn begin(
         &mut self,
         offer: Offer<'_>,
+        clock: impl FnMut() -> HostInstant,
+    ) -> Result<Progress, Error> {
+        self.begin_verified(
+            VerifiedOffer {
+                binding: offer.binding,
+                id: offer.id,
+                name: offer.name,
+                size: offer.size,
+                expected: receive::Expected::Content(offer.content),
+            },
+            clock,
+        )
+    }
+
+    pub(crate) fn begin_verified(
+        &mut self,
+        offer: VerifiedOffer<'_>,
         mut clock: impl FnMut() -> HostInstant,
     ) -> Result<Progress, Error> {
         self.binding_check(offer.binding)?;
@@ -226,17 +274,34 @@ impl HostReceiver {
         if self.floor.is_some_and(|floor| offer.id <= floor) {
             return Err(Error::Sequence);
         }
-        if offer.name.len() > 255 {
+        if offer.name.len() > 255
+            || offer.name.starts_with(".fr-part-")
+            || validate_portable_path_component(offer.name).is_err()
+        {
             return Err(Error::Storage(receive::Error::InvalidName));
+        }
+        let declared_bytes = self
+            .usage
+            .declared_bytes
+            .checked_add(offer.size)
+            .ok_or(Error::Quota)?;
+        if self.usage.transfers >= self.policy.max_session_transfers
+            || declared_bytes > self.policy.max_session_bytes
+        {
+            return Err(Error::Quota);
         }
         self.charge(RECORD_COST + offer.name.len() as u64)?;
         let deadline = now
             .checked_add(self.policy.transfer_lifetime)
             .ok_or(Error::Clock)?;
         self.floor = Some(offer.id);
+        // Never refund on cancellation, conflict, write failure or publication:
+        // releasing a temporary reservation is not permission for unlimited disk.
+        self.usage.transfers += 1;
+        self.usage.declared_bytes = declared_bytes;
         let file = self
             .directory
-            .begin(offer.name, offer.size, offer.content)
+            .begin_verified(offer.name, offer.size, offer.expected)
             .map_err(Error::Storage)?;
         self.active = Some(Active {
             id: offer.id,

@@ -97,3 +97,34 @@ and unchanged dependency libraries retained by Actions run 35351324850.
 This focused build is not a fresh full-workspace Cargo or live-tailnet gate.
 The transport must still consume the separately authenticated file attachment;
 this worker neither opens a listener nor advertises file support.
+
+## Portable full-object manifests
+
+`atp::receive::Receiver` extends the same worker, without replacing its existing
+content-ID API. It admits a bounded single-regular-file `TransferManifest` from
+Asupersync 0.5.0, streams the upstream full-object data layout, and verifies both
+the plain SHA-256 and the flat graph root using upstream `StagedEntryReceive`.
+A domain-separated content ID is never substituted for the manifest digest.
+Only actual publication can produce a committed upstream `ReceiveReceipt` proof.
+Directories, metadata, delta, resumption, and repair profiles explicitly refuse.
+
+Session limits now include cumulative declared bytes and transfer attempts;
+cancellation, conflict, and storage failure do not refund those counters. The
+existing worker API and its tests remain intact. In unwinding builds, a panic during an admitted
+operation fences file permission and preserves an unknown-effect result rather
+than leaving an eternally pending mailbox or claiming no external effect.
+Abort/process termination still means a missing result, never a no-effect receipt.
+
+Reconciled source based on `8736df9` passes 61 focused file tests, including all
+37 existing cases, and strict pedantic Clippy with nightly-2026-08-31 and the
+repository's retained, unchanged Asupersync 0.5.0 dependency libraries. These are
+real-filesystem/core-authority tests with deterministic clocks, not a fresh full
+workspace build, live tailnet file transfer, or hardware qualification.
+
+`wire::HostReceiver` joins those manifest/data operations to the five FRD0 file
+envelopes in [PROTOCOL_FILES.md](PROTOCOL_FILES.md). It preserves original role,
+direction, channel, lease and approved directory-handle binding. Cancellation
+bypasses reply backpressure; failed serialization retains the actual result.
+Eight wire-to-filesystem tests exercise seven-byte record reads, wrong bindings,
+outer/inner operation confusion, integrity refusal and retained publication proof.
+No input is read from a network listener by this module yet.

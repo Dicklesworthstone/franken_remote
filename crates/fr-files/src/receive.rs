@@ -5,8 +5,11 @@
 //! users must not be able to mutate the drop directory. Peer metadata never
 //! supplies an absolute path, an executable mode, or a symlink to materialize.
 use asupersync::atp::{
-    object::{ContentId, ContentIdHasher},
+    object::{ContentId, ObjectId},
     safety::validate_portable_path_component,
+};
+use asupersync::net::atp::transport_common::{
+    StagedEntryReceive, flat_merkle_root_from_digests, hex_encode,
 };
 use rustix::{
     fd::OwnedFd,
@@ -134,6 +137,15 @@ impl DropDirectory {
     /// must already hold separately approved file-receive permission. `expected`
     /// is ATP's domain-separated `ContentId`, NOT a plain SHA-256 file digest.
     pub fn begin(&self, name: &str, size: u64, expected: ContentId) -> Result<PendingFile, Error> {
+        self.begin_verified(name, size, Expected::Content(expected))
+    }
+
+    pub(crate) fn begin_verified(
+        &self,
+        name: &str,
+        size: u64,
+        expected: Expected,
+    ) -> Result<PendingFile, Error> {
         if name.len() > 255
             || name.starts_with(STAGING_PREFIX)
             || validate_portable_path_component(name).is_err()
@@ -151,6 +163,10 @@ impl DropDirectory {
             OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::from_raw_mode(0o600),
         )?;
+        // ATP's streaming verifier performs no filesystem access. Its private,
+        // relative staging label is bookkeeping; our pinned fd owns all I/O.
+        let mut hasher = StagedEntryReceive::new(staging.clone().into());
+        hasher.mark_created();
         Ok(PendingFile {
             reservation,
             file: fd.into(),
@@ -159,10 +175,20 @@ impl DropDirectory {
             size,
             received: 0,
             expected,
-            hasher: ContentId::streaming(),
+            hasher: Some(hasher),
             state: State::Receiving,
         })
     }
+}
+
+/// Select one existing ATP integrity contract, never reinterpret a plain hash
+/// as a domain-separated content id. Manifest values are validated by `atp`.
+pub(crate) enum Expected {
+    Content(ContentId),
+    Manifest {
+        sha256_hex: String,
+        merkle_root_hex: String,
+    },
 }
 
 struct Reservation {
@@ -226,8 +252,8 @@ pub struct PendingFile {
     destination: String,
     size: u64,
     received: u64,
-    expected: ContentId,
-    hasher: ContentIdHasher,
+    expected: Expected,
+    hasher: Option<StagedEntryReceive>,
     state: State,
 }
 impl fmt::Debug for PendingFile {
@@ -267,7 +293,10 @@ impl PendingFile {
             return Err(Error::InvalidChunk);
         }
         self.file.write_all(bytes)?;
-        self.hasher.update(bytes);
+        self.hasher
+            .as_mut()
+            .ok_or(Error::Retired)?
+            .update_with_chunk(bytes);
         self.received = end;
         self.state = State::Receiving;
         Ok(())
@@ -284,7 +313,23 @@ impl PendingFile {
         if self.received != self.size {
             return Err(Error::Incomplete);
         }
-        if self.hasher.clone().finalize() != self.expected {
+        let (digest, _, _) = self
+            .hasher
+            .take()
+            .ok_or(Error::Retired)?
+            .finalize(self.destination.clone());
+        let valid = match &self.expected {
+            Expected::Content(id) => digest.content_id == ObjectId::content(id.clone()),
+            Expected::Manifest {
+                sha256_hex,
+                merkle_root_hex,
+            } => {
+                hex_encode(&digest.content_sha256) == *sha256_hex
+                    && flat_merkle_root_from_digests(std::slice::from_ref(&digest))
+                        == *merkle_root_hex
+            }
+        };
+        if !valid || digest.size != self.size {
             return Err(Error::Integrity);
         }
         self.file.sync_all()?;

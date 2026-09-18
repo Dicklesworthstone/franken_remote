@@ -17,3 +17,6 @@ pub mod worker;
 
 #[cfg(target_os = "linux")]
 pub mod atp;
+
+#[cfg(target_os = "linux")]
+pub mod wire;

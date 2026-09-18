@@ -82,3 +82,6 @@ fn encode(frame: Frame) -> Result<Vec<u8>, Error> {
         .map_err(|_| Error::Protocol)?;
     Ok(out.to_vec())
 }
+
+/// Full-object manifests and verified replies on the same disk owner.
+pub mod receive;

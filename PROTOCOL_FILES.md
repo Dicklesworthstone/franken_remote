@@ -25,3 +25,6 @@ Six new tests independently construct bytes for all five kinds, exhaust every
 truncation point, and exercise binding/direction/handle refusal, complete-record
 budgets, forged lengths and contradictory receipts. Source Cargo tests and strict
 Clippy pass for fr-wire; this is not independent wire interoperability.
+
+The native pair uses one logical nonzero binding for both unidirectional streams.
+Both contexts must retain that same binding; role identifies the sender.

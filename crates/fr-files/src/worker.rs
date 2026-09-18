@@ -4,8 +4,8 @@
 //! thread; revoke and mailbox admission never wait for that thread. A stuck OS
 //! call cannot be safely killed as a Rust thread, and is not claimed cancelled.
 use crate::{
-    receive::{DropDirectory, MAX_CHUNK_BYTES},
-    session::{self, Binding, HostReceiver, Offer, Permission, Policy, Progress},
+    receive::{DropDirectory, Expected, MAX_CHUNK_BYTES},
+    session::{self, Binding, HostReceiver, Permission, Policy, Progress, VerifiedOffer},
 };
 use asupersync::{
     atp::{object::ContentId, safety::validate_portable_path_component},
@@ -14,6 +14,7 @@ use asupersync::{
 };
 use fr_core::{input_submission::InputSession, time::HostInstant};
 use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Mutex, OnceLock, TryLockError},
     thread::{self, JoinHandle, Thread},
     time::Duration,
@@ -22,6 +23,8 @@ use std::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Busy,
+    WrongBinding,
+    UnknownEffect,
     Closed,
     InvalidName,
     InvalidChunk,
@@ -58,7 +61,7 @@ enum Command {
         id: u64,
         name: String,
         size: u64,
-        expected: ContentId,
+        expected: Expected,
     },
     Chunk {
         id: u64,
@@ -131,25 +134,44 @@ impl Mailbox {
     }
     /// Success means queued only. Collect the separately staged actual result.
     pub fn begin(&self, id: u64, name: &str, size: u64, expected: ContentId) -> Result<u64, Error> {
-        if name.len() > 255
-            || name.starts_with(".fr-part-")
-            || validate_portable_path_component(name).is_err()
+        self.begin_verified(VerifiedOffer {
+            binding: self.binding(),
+            id,
+            name,
+            size,
+            expected: Expected::Content(expected),
+        })
+    }
+    pub(crate) fn begin_verified(&self, offer: VerifiedOffer<'_>) -> Result<u64, Error> {
+        if offer.binding != self.binding() {
+            return Err(Error::WrongBinding);
+        }
+        if offer.name.len() > 255
+            || offer.name.starts_with(".fr-part-")
+            || validate_portable_path_component(offer.name).is_err()
         {
             return Err(Error::InvalidName);
         }
         self.submit(|| {
             let mut owned = String::new();
             owned
-                .try_reserve_exact(name.len())
+                .try_reserve_exact(offer.name.len())
                 .map_err(|_| Error::Allocation)?;
-            owned.push_str(name);
+            owned.push_str(offer.name);
             Ok(Command::Begin {
-                id,
+                id: offer.id,
                 name: owned,
-                size,
-                expected,
+                size: offer.size,
+                expected: offer.expected,
             })
         })
+    }
+    /// Cancellation fences admission even before the worker's next timer turn.
+    pub fn is_closed(&self) -> bool {
+        if self.shared.cx.is_cancel_requested() {
+            self.shared.stop();
+        }
+        !self.shared.permission.is_approved()
     }
     pub fn write_chunk(&self, id: u64, offset: u64, bytes: &[u8]) -> Result<u64, Error> {
         if bytes.is_empty() || bytes.len() > MAX_CHUNK_BYTES {
@@ -211,7 +233,7 @@ impl Mailbox {
         }
     }
     fn submit(&self, make: impl FnOnce() -> Result<Command, Error>) -> Result<u64, Error> {
-        if !self.shared.permission.is_approved() {
+        if self.is_closed() {
             return Err(Error::Closed);
         }
         let mut inbox = self
@@ -219,7 +241,7 @@ impl Mailbox {
             .inbox
             .try_lock()
             .map_err(|error| lock_error(&error))?;
-        if !self.shared.permission.is_approved() {
+        if self.is_closed() {
             return Err(Error::Closed);
         }
         if !matches!(inbox.slot, Slot::Idle) {
@@ -342,13 +364,13 @@ fn execute(
             size,
             expected,
         } => receiver
-            .begin(
-                Offer {
+            .begin_verified(
+                VerifiedOffer {
                     binding,
                     id,
                     name: &name,
                     size,
-                    content: expected,
+                    expected,
                 },
                 || shared.sample(),
             )
@@ -411,7 +433,15 @@ fn run(mut receiver: HostReceiver, shared: &Shared) -> Result<(), Error> {
         if let Some(work) = work {
             let receipt = Receipt {
                 sequence: work.sequence,
-                result: execute(&mut receiver, shared, work.command),
+                result: catch_unwind(AssertUnwindSafe(|| {
+                    execute(&mut receiver, shared, work.command)
+                }))
+                .unwrap_or_else(|_| {
+                    // A panic after rename may have committed. Fence files,
+                    // retain an explicit uncertain effect, and never retry.
+                    shared.stop();
+                    Err(session::Error::UnknownEffect)
+                }),
             };
             let mut inbox = shared.inbox.lock().map_err(|_| Error::Poisoned)?;
             inbox.slot = Slot::Complete(receipt);
