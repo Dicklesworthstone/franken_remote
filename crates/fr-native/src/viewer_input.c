@@ -15,6 +15,7 @@
 
 /* Fixed output only; no native allocation or names escape this boundary. */
 struct fr_viewer_held { uint8_t keys[32], buttons[32]; };
+#define FR_KEYMAP_BYTES (64u * 1024u)
 struct fr_viewer_input {
     xcb_connection_t *c;
     xcb_window_t window, clock;
@@ -26,6 +27,11 @@ struct fr_viewer_input {
     uint32_t keys_query, pointer_query;
     int held_pending;
     struct fr_viewer_held held;
+    uint8_t keymap[FR_KEYMAP_BYTES], keynames[256][4];
+    size_t keymap_size;
+    uint32_t map_query, names_query;
+    uint8_t keyboard_id, min_keycode, max_keycode;
+    int map_failed;
 };
 /* Matches Rust Raw; every consumed event (even ignored) counts toward its bound. */
 struct fr_viewer_event { uint32_t kind, time, detail; int32_t x, y; };
@@ -65,6 +71,81 @@ void fr_viewer_input_close(struct fr_viewer_input *h) {
     if (h->c) xcb_disconnect(h->c); /* releases ONLY our resources and event mask */
     free(h);
 }
+/* A master keyboard may announce an unchanged map when its active slave changes
+ * (including the first XTest key). Keep the original map, never adopt a new one.
+ * Only an identity/range-preserving NewKeyboardNotify may be revalidated; real
+ * MapNotify/NamesNotify, device changes and synthetic events still fence input.
+ * One bounded pair of replies pauses dequeue inside the owner's existing turn
+ * deadline. No synchronous request, event replay or timestamp refresh occurs. */
+static uint32_t keymap_query(struct fr_viewer_input *h) {
+    xkbGetMapReq q = {0}; q.deviceSpec = XkbUseCoreKbd;
+    q.full = XkbAllMapComponentsMask;
+    return request(h, X_kbGetMap, 0, &q, sizeof(q));
+}
+static uint32_t keynames_query(struct fr_viewer_input *h) {
+    xkbGetNamesReq q = {0}; q.deviceSpec = XkbUseCoreKbd;
+    q.which = XkbKeyNamesMask;
+    return request(h, X_kbGetNames, 0, &q, sizeof(q));
+}
+static size_t keymap_size(xkbGetMapReply *r) {
+    if (!r || r->type != 1 /* X reply */ || r->length < 2 ||
+        r->length > (FR_KEYMAP_BYTES - 32) / 4 ||
+        r->minKeyCode < 8 || r->minKeyCode > r->maxKeyCode) return 0;
+    /* Transport sequencing and reserved bytes are not keyboard identity. */
+    r->sequenceNumber = 0; r->pad1 = 0; r->pad2 = 0;
+    return 32 + (size_t)r->length * 4;
+}
+static int remember_keymap(struct fr_viewer_input *h, const uint8_t names[256][4]) {
+    xkbGetMapReply *r = reply(h, keymap_query(h));
+    size_t size = keymap_size(r);
+    if (size) {
+        memcpy(h->keymap, r, size); h->keymap_size = size;
+        memcpy(h->keynames, names, sizeof(h->keynames));
+        h->keyboard_id = r->deviceID;
+        h->min_keycode = r->minKeyCode; h->max_keycode = r->maxKeyCode;
+    }
+    free(r); return size != 0;
+}
+static int recheck_keyboard(struct fr_viewer_input *h, const xkbNewKeyboardNotify *n) {
+    if ((n->type & 0x80) || n->xkbType != XkbNewKeyboardNotify ||
+        n->deviceID != h->keyboard_id || n->oldDeviceID != h->keyboard_id ||
+        n->minKeyCode != h->min_keycode || n->oldMinKeyCode != h->min_keycode ||
+        n->maxKeyCode != h->max_keycode || n->oldMaxKeyCode != h->max_keycode ||
+        (n->changed & ~(XkbNKN_KeycodesMask | XkbNKN_GeometryMask)) ||
+        h->map_query || h->names_query) return 0;
+    h->map_query = keymap_query(h); h->names_query = keynames_query(h);
+    return h->map_query && h->names_query && xcb_flush(h->c) > 0;
+}
+/* -1 refuses, 0 awaits the original queries, 1 proves the original map unchanged. */
+static int keyboard_unchanged(struct fr_viewer_input *h) {
+    if (h->map_query) {
+        void *raw = NULL; xcb_generic_error_t *error = NULL;
+        if (xcb_poll_for_reply(h->c, h->map_query, &raw, &error)) {
+            xkbGetMapReply *r = raw;
+            size_t size = keymap_size(r);
+            int ok = !error && size && size == h->keymap_size &&
+                !memcmp(h->keymap, r, size);
+            free(raw); free(error); if (!ok) return -1;
+            h->map_query = 0;
+        }
+    }
+    if (h->names_query) {
+        void *raw = NULL; xcb_generic_error_t *error = NULL;
+        if (xcb_poll_for_reply(h->c, h->names_query, &raw, &error)) {
+            xkbGetNamesReply *r = raw;
+            int ok = !error && r && r->type == 1 /* X reply */ &&
+                r->deviceID == h->keyboard_id && r->which == XkbKeyNamesMask &&
+                r->firstKey == h->min_keycode &&
+                r->nKeys == (unsigned)h->max_keycode - h->min_keycode + 1 &&
+                r->length == r->nKeys &&
+                !memcmp(h->keynames[r->firstKey], r + 1, (size_t)r->nKeys * 4);
+            free(raw); free(error); if (!ok) return -1;
+            h->names_query = 0;
+        }
+    }
+    if (xcb_connection_has_error(h->c)) return -1;
+    return !h->map_query && !h->names_query;
+}
 static int keyboard(struct fr_viewer_input *h, uint8_t names[256][4]) {
     const xcb_query_extension_reply_t *ext = xcb_get_extension_data(h->c, &xkb);
     if (!ext || !ext->present) return 0;
@@ -89,7 +170,7 @@ static int keyboard(struct fr_viewer_input *h, uint8_t names[256][4]) {
     ok = n && n->which == XkbKeyNamesMask && n->nKeys &&
         (unsigned)n->firstKey + n->nKeys <= 256 && n->length == n->nKeys;
     if (ok) memcpy(names[n->firstKey], n+1, (size_t)n->nKeys * 4);
-    free(n); return ok;
+    free(n); return ok && remember_keymap(h, names);
 }
 /* The core pointer mask covers only buttons 1-5. XI2 queries the FULL logical
  * button mask (including Back/Forward). Core delivery can use multiple masters;
@@ -260,12 +341,27 @@ int fr_viewer_input_barrier(struct fr_viewer_input *h) {
 }
 int fr_viewer_input_next(struct fr_viewer_input *h, struct fr_viewer_event *out) {
     if (!h || !out || xcb_connection_has_error(h->c)) return -1;
+    memset(out, 0, sizeof(*out));
+    if (h->map_failed) { out->kind = KEYMAP_CHANGED; return 1; }
+    if (h->map_query || h->names_query) {
+        int verified = keyboard_unchanged(h);
+        if (!verified) return 0;
+        if (verified < 0) {
+            h->map_failed = 1; out->kind = KEYMAP_CHANGED; return 1;
+        }
+    }
     xcb_generic_event_t *e = xcb_poll_for_event(h->c);
     if (!e) return xcb_connection_has_error(h->c) ? -1 : 0;
     memset(out, 0, sizeof(*out));
     uint8_t kind = e->response_type & 0x7f;
     if (!kind) { free(e); return -1; }
-    if (kind == h->xkb_event || kind == XCB_MAPPING_NOTIFY) out->kind = KEYMAP_CHANGED;
+    if (kind == h->xkb_event || kind == XCB_MAPPING_NOTIFY) {
+        if (kind != h->xkb_event || !recheck_keyboard(h, (const void*)e)) {
+            h->map_failed = 1; out->kind = KEYMAP_CHANGED;
+        }
+        /* Even an unchanged-map candidate counts as a consumed event and starts
+         * a bounded Rust turn before any asynchronous verification can wait. */
+    }
     else switch (kind) {
     case XCB_GE_GENERIC: {
         xcb_ge_generic_event_t *v = (void*)e;
