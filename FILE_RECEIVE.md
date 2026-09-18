@@ -74,3 +74,26 @@ between verification and publication, equal-ID replacement, post-create refusal,
 idle timeout, exact rate backpressure, and cleanup independent of desktop input.
 The test clocks deliberately place events at boundaries; these are not live
 Tailscale, kernel-timeout, multi-GB resumption, or transport-saturation claims.
+
+## Nonblocking disk worker
+
+`fr_files::worker::spawn` runs the existing `HostReceiver` on one supervised
+thread. A single mailbox slot includes queued work, executing work, and its
+uncollected receipt. No enqueue, receipt poll, stop, or task-drop waits for disk
+I/O; bounded copies occur only after the slot is available. `Busy` is explicitly
+pre-admission, not a reason to replay an already queued operation.
+
+The worker retains the original Asupersync context and timer. Every receiver
+clock callback also fences parent cancellation through the revoke-only file
+permission, including the check after verification and immediately before
+publication. A timer turn services lease expiry even without incoming traffic.
+Stop revokes only file permission. Completed publication receipts survive stop
+and worker exit; an in-flight syscall is not claimed to be cancellable, and
+`Task::try_finish` reports actual thread completion separately.
+
+Eight additional real-filesystem/thread/core-authority tests pass, along with
+all 24 existing file tests and strict pedantic Clippy, using the pinned compiler
+and unchanged dependency libraries retained by Actions run 35351324850.
+This focused build is not a fresh full-workspace Cargo or live-tailnet gate.
+The transport must still consume the separately authenticated file attachment;
+this worker neither opens a listener nor advertises file support.
