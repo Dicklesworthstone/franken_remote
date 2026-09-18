@@ -65,6 +65,10 @@ enum Command {
         offset: u64,
         bytes: Payload,
     },
+    Atp {
+        id: u64,
+        bytes: Payload,
+    },
     Complete(u64),
     Cancel(u64),
 }
@@ -160,6 +164,24 @@ impl Mailbox {
             Ok(Command::Chunk {
                 id,
                 offset,
+                bytes: Payload(owned),
+            })
+        })
+    }
+    /// Queue one complete, bounded upstream ATP frame. Parsing and disk work
+    /// stay on the worker; accepting the handoff is not a publication receipt.
+    pub fn atp_record(&self, id: u64, bytes: &[u8]) -> Result<u64, Error> {
+        if bytes.is_empty() || bytes.len() > crate::atp::MAX_FRAME_BYTES {
+            return Err(Error::InvalidChunk);
+        }
+        self.submit(|| {
+            let mut owned = Vec::new();
+            owned
+                .try_reserve_exact(bytes.len())
+                .map_err(|_| Error::Allocation)?;
+            owned.extend_from_slice(bytes);
+            Ok(Command::Atp {
+                id,
                 bytes: Payload(owned),
             })
         })
@@ -334,6 +356,23 @@ fn execute(
         Command::Chunk { id, offset, bytes } => receiver
             .write(binding, id, offset, &bytes.0, || shared.sample())
             .map(Completion::Written),
+        Command::Atp { id, bytes } => {
+            let record = match crate::atp::ObjectRecord::decode(&bytes.0) {
+                Ok(record) => record,
+                Err(error) => {
+                    let _ = receiver.close();
+                    return Err(error);
+                }
+            };
+            match record.data() {
+                Some((offset, data)) => receiver
+                    .write(binding, id, offset, data, || shared.sample())
+                    .map(Completion::Written),
+                None => receiver
+                    .complete(binding, id, || shared.sample())
+                    .map(Completion::Published),
+            }
+        }
         Command::Complete(id) => receiver
             .complete(binding, id, || shared.sample())
             .map(Completion::Published),

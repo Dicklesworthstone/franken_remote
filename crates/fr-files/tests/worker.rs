@@ -269,3 +269,55 @@ fn original_owner_revoke_blocks_publication_without_waiting_for_peer() {
     f.empty();
     assert_eq!(m.complete(1), Err(Error::Closed));
 }
+
+#[test]
+fn upstream_atp_frames_flow_through_worker_to_real_verified_publication() {
+    let f = Fixture::new();
+    let (m, mut t) = f.spawn();
+    let bytes = vec![42; 9_000];
+    let seq = enqueue(|| {
+        m.begin(
+            1,
+            "atp-file",
+            bytes.len() as u64,
+            ContentId::from_bytes(&bytes),
+        )
+    });
+    assert!(matches!(collect(&m, seq), Completion::Begun(_)));
+    let mut offset = 0;
+    for data in bytes.chunks(2_048) {
+        let record = fr_files::atp::encode_data(offset, data).unwrap();
+        let seq = enqueue(|| m.atp_record(1, &record));
+        offset += data.len() as u64;
+        assert!(matches!(collect(&m,seq),Completion::Written(p) if p.staged_bytes==offset));
+        assert!(!f.path.join("atp-file").exists());
+    }
+    let record = fr_files::atp::encode_complete().unwrap();
+    let seq = enqueue(|| m.atp_record(1, &record));
+    assert!(matches!(collect(&m,seq),Completion::Published(r) if r.bytes==bytes.len() as u64));
+    assert_eq!(fs::read(f.path.join("atp-file")).unwrap(), bytes);
+    m.stop();
+    finish(&mut t);
+}
+#[test]
+fn malformed_atp_is_terminal_and_cleans_the_private_partial_file() {
+    let f = Fixture::new();
+    let (m, mut t) = f.spawn();
+    stage(&m);
+    let seq = enqueue(|| m.atp_record(1, b"not ATP"));
+    let until = Instant::now() + Duration::from_secs(2);
+    loop {
+        match m.take_receipt() {
+            Ok(Some(r)) => {
+                assert_eq!(r.sequence, seq);
+                assert_eq!(r.result, Err(fr_files::session::Error::Protocol));
+                break;
+            }
+            Ok(None) | Err(Error::Busy) if Instant::now() < until => std::thread::yield_now(),
+            e => panic!("receipt: {e:?}"),
+        }
+    }
+    finish(&mut t);
+    f.empty();
+    assert_eq!(m.complete(1), Err(Error::Closed));
+}
