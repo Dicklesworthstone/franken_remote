@@ -36,6 +36,17 @@ The input implementation and its verification limits are described in [PROTOCOL_
 
 The `full` lane additionally requires UBS and fails explicitly when it is unavailable. The `release` lane remains blocked until native artifacts and qualification exist. CI calls the same repository-owned commands; it does not replace native builder or hardware evidence. See the [implementation status](IMPLEMENTATION_STATUS.md) for integration boundaries and remaining work.
 
+### Bounded fragment repair
+
+Selective repair covers every missing fragment even when disjoint holes exceed
+its negotiated range count. It coalesces the smallest already-received gaps
+instead of silently omitting later holes, minimizing duplicate fragments within
+the existing range limit. Sender byte/rate limits, retry counts and the original
+receiver reference deadline still bound recovery. The `fr-media` repair-coverage
+tests exercise actual wire requests and sender/receiver round trips, including
+all nonempty eight-fragment loss patterns with one through four repair ranges;
+these are deterministic delivery checks, not hardware or network qualification.
+
 ### Native host publication
 
 The Linux `HostSession::publish_display` path now joins an already-approved

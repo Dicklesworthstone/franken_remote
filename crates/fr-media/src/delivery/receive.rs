@@ -356,7 +356,10 @@ impl Assembly {
         let total = self.descriptor.fragment_count()?;
         let mut index = 0;
         let mut count = 0;
-        while index < total && count < ranges.len() {
+        if ranges.is_empty() {
+            return Err(DeliveryError::ResourceLimit);
+        }
+        while index < total {
             if self.has_fragment(index) {
                 index += 1;
                 continue;
@@ -365,8 +368,33 @@ impl Assembly {
             while index < total && !self.has_fragment(index) {
                 index += 1;
             }
-            ranges[count] = RepairRange { start, end: index };
-            count += 1;
+            let missing = RepairRange { start, end: index };
+            if count < ranges.len() {
+                ranges[count] = missing;
+                count += 1;
+                continue;
+            }
+            // Every hole must be covered by the bounded request. Truncating at
+            // the range cap starves later holes and spends retries repairing
+            // only a prefix. Merge across the smallest received gap instead.
+            // Keeping the largest count-1 gaps minimizes duplicate fragments;
+            // the sender's existing byte, retry and time budgets still apply.
+            let mut merge = count - 1;
+            let mut gap = missing.start - ranges[merge].end;
+            for i in 0..count - 1 {
+                let candidate = ranges[i + 1].start - ranges[i].end;
+                if candidate < gap {
+                    merge = i;
+                    gap = candidate;
+                }
+            }
+            if merge == count - 1 {
+                ranges[merge].end = missing.end;
+            } else {
+                ranges[merge].end = ranges[merge + 1].end;
+                ranges.copy_within(merge + 2..count, merge + 1);
+                ranges[count - 1] = missing;
+            }
         }
         Ok(count)
     }
