@@ -47,8 +47,10 @@ pub enum Error {
     IdentityMismatch,
     ScopeDenied,
     ExplicitScopeRequired,
-    /// Authenticated `WhoIs` did not positively report machine approval.
+    /// Authenticated `WhoIs` positively reported that the machine is not approved.
     MachineNotAuthorized,
+    /// Installed authority did not provide positive machine-membership evidence.
+    TailnetMembershipUnverifiable,
     CapabilityDenied,
     InvalidCapability,
     CertificateRejected,
@@ -139,6 +141,12 @@ impl ConnectionAddresses {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdmissionProfile {
+    Membership,
+    AppCapability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Permissions {
     observe: bool,
     control: bool,
@@ -161,6 +169,7 @@ pub struct Authorization {
     daemon_pid: i32,
     addresses: ConnectionAddresses,
     permissions: Permissions,
+    profile: AdmissionProfile,
     policy: GrantPolicy,
     issued_us: u64,
     expires_us: u64,
@@ -190,6 +199,7 @@ impl Authorization {
             && self.daemon_pid == other.daemon_pid
             && self.identity == other.identity
             && self.addresses == other.addresses
+            && self.profile == other.profile
             && self.policy == other.policy
     }
     /// Supply the same host clock domain that was used for `LocalAPI` admission.

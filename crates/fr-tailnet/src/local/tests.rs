@@ -53,6 +53,22 @@ fn evaluate_fixture(status: &Value, who: &Value, scope: Scope) -> Result<Permiss
     )
     .map(|(_, p, _)| p)
 }
+fn evaluate_membership_fixture(
+    status: &Value,
+    who: &Value,
+    scope: Scope,
+) -> Result<Permissions, Error> {
+    evaluate_membership(
+        &Status::parse(&serde_json::to_vec(status).unwrap())?,
+        &WhoIs::parse(&serde_json::to_vec(who).unwrap())?,
+        endpoints(),
+        GrantPolicy {
+            scope,
+            ..Default::default()
+        },
+    )
+    .map(|(_, p, _)| p)
+}
 fn peer_mut(status: &mut Value) -> &mut Value {
     status["Peer"]
         .as_object_mut()
@@ -327,6 +343,12 @@ fn source_membership_is_not_inferred_from_names_prefixes_or_node_capabilities() 
         evaluate_fixture(&status, &who, Scope::Tailnet),
         Err(Error::CapabilityDenied)
     );
+    // The membership profile succeeds only from the exact Status/WhoIs node
+    // join above. The injected name/Node CapMap/Capabilities are deliberately
+    // irrelevant; removing the positive machine bit still refuses below.
+    let p = evaluate_membership_fixture(&status, &who, Scope::Tailnet).unwrap();
+    assert!(p.observe());
+    assert!(p.control());
 }
 #[test]
 fn same_user_default_different_owners_and_tagged_hosts_have_explicit_scope() {
@@ -454,9 +476,9 @@ fn changed_identity_backend_and_known_key_expiry_refuse() {
     );
 }
 #[test]
-fn machine_approval_requires_positive_evidence_even_with_an_app_grant() {
+fn machine_approval_requires_positive_evidence_for_every_profile() {
     let (status, mut who) = fixtures();
-    for approval in [None, Some(json!(null)), Some(json!(false))] {
+    for approval in [None, Some(json!(null))] {
         let node = who["Node"].as_object_mut().unwrap();
         if let Some(value) = approval {
             node.insert("MachineAuthorized".into(), value);
@@ -464,13 +486,26 @@ fn machine_approval_requires_positive_evidence_even_with_an_app_grant() {
             node.remove("MachineAuthorized");
         }
         assert_eq!(
+            evaluate_membership_fixture(&status, &who, Scope::OwnUser),
+            Err(Error::TailnetMembershipUnverifiable)
+        );
+        assert_eq!(
             evaluate_fixture(&status, &who, Scope::OwnUser),
-            Err(Error::MachineNotAuthorized)
+            Err(Error::TailnetMembershipUnverifiable)
         );
     }
-    who["Node"]["MachineAuthorized"] = json!("true");
+    who["Node"]["MachineAuthorized"] = json!(false);
+    assert_eq!(
+        evaluate_membership_fixture(&status, &who, Scope::OwnUser),
+        Err(Error::MachineNotAuthorized)
+    );
     assert_eq!(
         evaluate_fixture(&status, &who, Scope::OwnUser),
+        Err(Error::MachineNotAuthorized)
+    );
+    who["Node"]["MachineAuthorized"] = json!("true");
+    assert_eq!(
+        evaluate_membership_fixture(&status, &who, Scope::OwnUser),
         Err(Error::MalformedMetadata)
     );
     who["Node"]["MachineAuthorized"] = json!(true);
@@ -480,7 +515,11 @@ fn machine_approval_requires_positive_evidence_even_with_an_app_grant() {
         evaluate_fixture(&status, &who, Scope::OwnUser),
         Err(Error::CapabilityDenied)
     );
+    let membership = evaluate_membership_fixture(&status, &who, Scope::OwnUser).unwrap();
+    assert!(membership.observe());
+    assert!(membership.control());
 }
+
 #[test]
 fn installed_linux_1_102_3_projection_preserves_the_live_refusal() {
     let status: Value = serde_json::from_str(include_str!(
@@ -513,11 +552,59 @@ fn installed_linux_1_102_3_projection_preserves_the_live_refusal() {
                     },
                 )
                 .await;
-            assert!(matches!(result, Err(Error::MachineNotAuthorized)));
+            assert!(matches!(result, Err(Error::TailnetMembershipUnverifiable)));
             assert_eq!(server.calls.load(Ordering::SeqCst), 3);
         });
     }
 }
+#[test]
+fn membership_profile_survives_real_localapi_lookup_and_revalidation_without_capmap() {
+    let (status, mut who) = fixtures();
+    who["CapMap"] = json!(null);
+    let server = Server::new(
+        vec![
+            response(&status, false),
+            response(&who, false),
+            response(&status, false),
+            response(&status, false),
+            response(&who, false),
+            response(&status, false),
+        ],
+        Duration::ZERO,
+    );
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let proof = server
+            .client
+            .authorize_membership(&cx, endpoints(), GrantPolicy::default())
+            .await
+            .unwrap();
+        assert!(proof.permissions().observe());
+        assert!(proof.permissions().control());
+        let renewed = server
+            .client
+            .revalidate(&cx, &proof, endpoints())
+            .await
+            .unwrap();
+        assert!(proof.matches_identity(&renewed));
+        assert_eq!(server.calls.load(Ordering::SeqCst), 6);
+    });
+
+    let denied = Server::fixture(&status, &who, false);
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        assert_eq!(
+            denied
+                .client
+                .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
+                .await
+                .unwrap_err(),
+            Error::CapabilityDenied
+        );
+        assert_eq!(denied.calls.load(Ordering::SeqCst), 3);
+    });
+}
+
 #[test]
 fn grant_union_is_bounded_and_cannot_ignore_unknown_restrictions() {
     let (s, mut w) = fixtures();

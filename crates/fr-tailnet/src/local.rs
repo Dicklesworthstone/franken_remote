@@ -2,7 +2,7 @@
 //! ambient HTTP proxy, redirect, or public listener. Certificate provisioning is
 //! an explicit local opt-in; identity queries never issue certificates.
 use crate::{
-    Authorization, ConnectionAddresses, Error, GrantPolicy, expiry,
+    AdmissionProfile, Authorization, ConnectionAddresses, Error, GrantPolicy, expiry,
     metadata::{self, Status, WhoIs},
 };
 use asupersync::{
@@ -75,11 +75,37 @@ impl LocalApi {
     /// Exact endpoint tuple MUST originate at a TUN-restricted, established
     /// transport. This proves identity/grants, not the listener's ingress path.
     /// At most one lookup per shared client; at most two three-request attempts.
+    /// Default product profile: authorize exact Tailscale membership and local
+    /// sharing scope from the installed daemon. Missing machine-approval evidence
+    /// is a typed refusal; this never falls back to names, prefixes or CapMap.
+    pub async fn authorize_membership(
+        &self,
+        cx: &Cx,
+        addresses: ConnectionAddresses,
+        policy: GrantPolicy,
+    ) -> Result<Authorization, Error> {
+        self.authorize(cx, addresses, policy, AdmissionProfile::Membership)
+            .await
+    }
+
+    /// Explicit administrator-selected app-capability profile. This is not the
+    /// default own-user path and never serves as a fallback for membership.
     pub async fn authorize_app_capability(
         &self,
         cx: &Cx,
         addresses: ConnectionAddresses,
         policy: GrantPolicy,
+    ) -> Result<Authorization, Error> {
+        self.authorize(cx, addresses, policy, AdmissionProfile::AppCapability)
+            .await
+    }
+
+    async fn authorize(
+        &self,
+        cx: &Cx,
+        addresses: ConnectionAddresses,
+        policy: GrantPolicy,
+        profile: AdmissionProfile,
     ) -> Result<Authorization, Error> {
         policy.validate()?;
         addresses.validate()?;
@@ -106,8 +132,14 @@ impl LocalApi {
                     if first != last || process != who_process || process != last_process {
                         continue;
                     }
-                    let (identity, permissions, expiries) =
-                        metadata::evaluate(&last, &who, addresses, policy)?;
+                    let (identity, permissions, expiries) = match profile {
+                        AdmissionProfile::Membership => {
+                            metadata::evaluate_membership(&last, &who, addresses, policy)?
+                        }
+                        AdmissionProfile::AppCapability => {
+                            metadata::evaluate(&last, &who, addresses, policy)?
+                        }
+                    };
                     return Ok((
                         identity,
                         permissions,
@@ -134,6 +166,7 @@ impl LocalApi {
             daemon_pid,
             addresses,
             permissions,
+            profile,
             policy,
             issued_us,
             expires_us,
@@ -153,7 +186,7 @@ impl LocalApi {
     ) -> Result<Authorization, Error> {
         self.check(cx, old, addresses)?;
         let new = self
-            .authorize_app_capability(cx, addresses, old.policy)
+            .authorize(cx, addresses, old.policy, old.profile)
             .await?;
         // Original authority must still be live after awaiting the local daemon.
         self.check(cx, old, addresses)?;

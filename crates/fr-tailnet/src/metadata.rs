@@ -299,12 +299,12 @@ impl WhoIs {
 }
 /// A grant is authoritative because it is a per-connection `CapMap` from the
 /// locally authenticated daemon. Node `CapMap`/Capabilities and names NEVER grant.
-pub(crate) fn evaluate(
+fn evaluate_identity(
     status: &Status,
     who: &WhoIs,
     endpoints: ConnectionAddresses,
     policy: GrantPolicy,
-) -> Result<(Identity, Permissions, Vec<Option<String>>), Error> {
+) -> Result<(Identity, Vec<Option<String>>), Error> {
     status.validate(endpoints)?;
     let n = &who.node;
     let peer = status.peers.get(&n.key.0).ok_or(Error::IdentityMismatch)?;
@@ -315,8 +315,10 @@ pub(crate) fn evaluate(
     if n.sharer != 0 {
         return Err(Error::SharedPeer);
     }
-    if n.authorized != Some(true) {
-        return Err(Error::MachineNotAuthorized);
+    match n.authorized {
+        Some(true) => {}
+        Some(false) => return Err(Error::MachineNotAuthorized),
+        None => return Err(Error::TailnetMembershipUnverifiable),
     }
     if n.jailed || n.peer_api_only || !peer.in_map {
         return Err(Error::CapabilityDenied);
@@ -353,6 +355,52 @@ pub(crate) fn evaluate(
             return Err(Error::ScopeDenied);
         }
     }
+    let expiries = [&status.this.expiry, &peer.expiry, &n.expiry]
+        .iter()
+        .map(|v| v.as_ref().map(|s| s.0.clone()))
+        .collect();
+    Ok((
+        Identity {
+            host: status.this.clone(),
+            peer: peer.clone(),
+            version: status.version.clone(),
+            tailnet: status.tailnet.clone(),
+        },
+        expiries,
+    ))
+}
+
+/// Default product admission: exact installed-daemon membership/scope evidence.
+/// This grants eligibility to request observation/control; local sharing,
+/// capability support, controller ownership and optional approval remain
+/// independent gates. No application grant, name, address prefix or missing
+/// metadata can substitute for the positive identity evidence above.
+pub(crate) fn evaluate_membership(
+    status: &Status,
+    who: &WhoIs,
+    endpoints: ConnectionAddresses,
+    policy: GrantPolicy,
+) -> Result<(Identity, Permissions, Vec<Option<String>>), Error> {
+    let (identity, expiries) = evaluate_identity(status, who, endpoints, policy)?;
+    Ok((
+        identity,
+        Permissions {
+            observe: true,
+            control: true,
+        },
+        expiries,
+    ))
+}
+
+/// Explicit administrator-selected application-capability profile. The same
+/// membership/scope evidence is mandatory; CapMap can only narrow eligibility.
+pub(crate) fn evaluate(
+    status: &Status,
+    who: &WhoIs,
+    endpoints: ConnectionAddresses,
+    policy: GrantPolicy,
+) -> Result<(Identity, Permissions, Vec<Option<String>>), Error> {
+    let (identity, expiries) = evaluate_identity(status, who, endpoints, policy)?;
     let mut permissions = Permissions {
         observe: false,
         control: false,
@@ -367,20 +415,7 @@ pub(crate) fn evaluate(
     if !permissions.observe {
         return Err(Error::CapabilityDenied);
     }
-    let expiries = [&status.this.expiry, &peer.expiry, &n.expiry]
-        .iter()
-        .map(|v| v.as_ref().map(|s| s.0.clone()))
-        .collect();
-    Ok((
-        Identity {
-            host: status.this.clone(),
-            peer: peer.clone(),
-            version: status.version.clone(),
-            tailnet: status.tailnet.clone(),
-        },
-        permissions,
-        expiries,
-    ))
+    Ok((identity, permissions, expiries))
 }
 
 /// Local status projection deliberately excludes unrelated peer churn.
