@@ -579,6 +579,15 @@ name = "fr-core"
 version = "0.1.0"
 
 [[package]]
+name = "fr-files"
+version = "0.1.0"
+dependencies = [
+ "asupersync",
+ "getrandom 0.4.3",
+ "rustix",
+]
+
+[[package]]
 name = "fr-lab"
 version = "0.1.0"
 dependencies = [

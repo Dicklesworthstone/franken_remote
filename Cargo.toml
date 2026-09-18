@@ -26,6 +26,7 @@ asupersync = { version = "=0.5.0", default-features = false }
 # First-party crates, wired by path in exactly one place; consumers write
 # `fr-core.workspace = true`.
 fr-core = { path = "crates/fr-core" }
+fr-files = { path = "crates/fr-files" }
 fr-lab = { path = "crates/fr-lab" }
 fr-media = { path = "crates/fr-media" }
 fr-wire = { path = "crates/fr-wire" }
