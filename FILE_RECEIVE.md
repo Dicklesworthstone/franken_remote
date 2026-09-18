@@ -44,3 +44,33 @@ Strict pedantic Clippy passes for the new library and tests with those same
 inputs. A clean local `cargo check -p fr-files --all-targets --offline` was killed
 while compiling Asupersync (SIGKILL at the container memory limit); it did not
 complete. No dependency, gate, or assertion was weakened to bypass that limit.
+
+## Original-controller receive owner
+
+`session::HostReceiver` now joins real staged files to the original
+`fr-core::input_submission::InputSession` monitor and a separate one-way
+file-permission handle. Construction cannot create control, a new lease, an
+input ticket, or OS permission. Numeric session/lease matches alone are not
+authority: the existing monitor also checks opaque native-owner identity.
+
+The owner permits one active object, rejects stale session/lease bindings and
+reused transfer IDs, and charges a bounded token bucket for data and metadata.
+Rate refusal occurs before a write and leaves its offset unconsumed. The absolute
+transfer deadline never slides with progress. `service` retires and cleans idle
+transfers on disk-worker timer turns; cancellation is never rate-limited.
+
+`complete` verifies and flushes first, then resamples the qualified host clock,
+original authority, and file permission before the atomic rename. Lease expiry,
+local revoke, controller destruction, permission loss, and clock regression
+cannot publish the staged destination. Successful publication is not converted
+into a refusal by a later cancellation. Closing files does not revoke desktop
+control. All disk calls and cleanup still belong on the disk worker, not under
+an authority lock or on the reactor. This is a host-side application owner, not
+yet a negotiated network file lane or a browser/mobile receiver.
+
+Fourteen additional real-file/core-authority integration tests pass with the
+pinned compiler and retained dependencies. They include cancellation/expiry
+between verification and publication, equal-ID replacement, post-create refusal,
+idle timeout, exact rate backpressure, and cleanup independent of desktop input.
+The test clocks deliberately place events at boundaries; these are not live
+Tailscale, kernel-timeout, multi-GB resumption, or transport-saturation claims.

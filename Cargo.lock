@@ -583,6 +583,7 @@ name = "fr-files"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "fr-core",
  "getrandom 0.4.3",
  "rustix",
 ]

@@ -8,7 +8,7 @@ use fr_media::delivery::{
     DeliveryError, MediaBindings, MediaBudget, MediaEpoch, ReceiveConfig, ReceivePipeline,
     ReceivePolicy,
 };
-use fr_wire::{Fragment, MediaLimits, encode_fragment, Channel};
+use fr_wire::{Channel, Fragment, MediaLimits, encode_fragment};
 
 fn config(window: u8, horizon: u64) -> ReceiveConfig {
     let protocol = ProtocolLimits::with_overrides(LimitOverrides {
@@ -58,7 +58,10 @@ fn window_configuration_is_fail_closed_and_cannot_change_after_decoder_setup() {
     let c = config(12, 250_000);
     let mut r = receiver(c);
     assert_eq!(r.configure_frame_rate(0), Err(DeliveryError::InvalidPolicy));
-    assert_eq!(r.configure_frame_rate(241), Err(DeliveryError::InvalidPolicy));
+    assert_eq!(
+        r.configure_frame_rate(241),
+        Err(DeliveryError::InvalidPolicy)
+    );
     assert_eq!(r.configure_frame_rate(30), Ok(10));
     r.decoder_configured(0).unwrap();
     assert_eq!(r.configure_frame_rate(1), Err(DeliveryError::WrongState));
@@ -89,7 +92,8 @@ fn active_window_not_static_ceiling_bounds_incomplete_picture_metadata() {
         &mut recovery_packet,
     )
     .unwrap();
-    r.receive(Channel::Recovery, &recovery_packet[..n], 0).unwrap();
+    r.receive(Channel::Recovery, &recovery_packet[..n], 0)
+        .unwrap();
     let picture = r.take_decodable(0).unwrap().unwrap();
     r.acknowledge_decode(&picture, true, 0).unwrap();
     drop(picture);

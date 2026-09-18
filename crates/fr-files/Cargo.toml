@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 asupersync.workspace = true
+fr-core.workspace = true
 getrandom = "=0.4.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -494,7 +494,7 @@ impl ReceivePipeline {
     /// Narrow the active reference/reassembly count from the admitted frame rate
     /// and receiver-local reference horizon. This is called before opening the
     /// decoder, when no picture can exist. The negotiated 2..=12 window remains
-    /// an upper bound and the independent MediaBudget remains the byte bound.
+    /// an upper bound and the independent `MediaBudget` remains the byte bound.
     ///
     /// ceil(fps * horizon) + 2 retains the useful dependency horizon plus one
     /// frame on either side for reorder/production jitter. A later recovery under
@@ -505,10 +505,10 @@ impl ReceivePipeline {
             || self.slots.iter().any(Option::is_some)
             || !(1..=240).contains(&fps)
         {
-            return Err(if !(1..=240).contains(&fps) {
-                DeliveryError::InvalidPolicy
-            } else {
+            return Err(if (1..=240).contains(&fps) {
                 DeliveryError::WrongState
+            } else {
+                DeliveryError::InvalidPolicy
             });
         }
         let numerator = u64::from(fps)
@@ -519,12 +519,7 @@ impl ReceivePipeline {
         let requested = horizon_frames
             .checked_add(2)
             .ok_or(DeliveryError::InvalidPolicy)?;
-        let negotiated = u64::from(
-            self.config
-                .limits
-                .protocol()
-                .reassembly_window_pictures(),
-        );
+        let negotiated = u64::from(self.config.limits.protocol().reassembly_window_pictures());
         let active = requested.clamp(2, negotiated);
         self.active_slots = usize::try_from(active).map_err(|_| DeliveryError::InvalidPolicy)?;
         u8::try_from(active).map_err(|_| DeliveryError::InvalidPolicy)
