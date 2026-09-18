@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 //! Installed Tailscale authority, not a VPN, identity database, or proxy.
-//! The initial Linux adapter implements the explicit app-capability profile.
-//! It does NOT guess zero-setup same-tailnet membership from names or addresses.
+//! The Linux adapter implements exact installed-daemon membership admission and
+//! an explicit app-capability alternative. It never infers membership from names,
+//! routed prefixes, reachability, or missing authority evidence.
 mod expiry;
 #[cfg(target_os = "linux")]
 mod outbound;

@@ -393,7 +393,7 @@ pub(crate) fn evaluate_membership(
 }
 
 /// Explicit administrator-selected application-capability profile. The same
-/// membership/scope evidence is mandatory; CapMap can only narrow eligibility.
+/// membership/scope evidence is mandatory; `CapMap` can only narrow eligibility.
 pub(crate) fn evaluate(
     status: &Status,
     who: &WhoIs,

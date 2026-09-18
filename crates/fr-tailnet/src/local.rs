@@ -77,7 +77,7 @@ impl LocalApi {
     /// At most one lookup per shared client; at most two three-request attempts.
     /// Default product profile: authorize exact Tailscale membership and local
     /// sharing scope from the installed daemon. Missing machine-approval evidence
-    /// is a typed refusal; this never falls back to names, prefixes or CapMap.
+    /// is a typed refusal; this never falls back to names, prefixes or `CapMap`.
     pub async fn authorize_membership(
         &self,
         cx: &Cx,
