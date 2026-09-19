@@ -14,6 +14,10 @@ def reply(header, kind, body):
     os.write(1, header[:6]+struct.pack('>H', kind)+header[8:32]+struct.pack('>I', len(body))+body)
 h = read(36)
 b = read(struct.unpack('>I', h[32:])[0])
+if MODE == 'stall-configure':
+    time.sleep(60)
+if MODE == 'exit-configure':
+    raise SystemExit(7)
 if MODE == 'hold-writer':
     # Keep the descriptor outside the parallel Rust test process so unrelated
     # forks cannot inherit it. Configure acknowledges that the writer is open.
