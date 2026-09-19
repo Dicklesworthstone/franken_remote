@@ -17,6 +17,10 @@ pub enum Error {
     Delivery(DeliveryError),
     Transport(quic::Error),
     NotNegotiated,
+    /// The actual failed chain cannot get three fresh role pairs on this
+    /// connection. Carry its original cause so a native decode failure is never
+    /// relabeled as retryable transport/resource exhaustion.
+    NamespaceExhausted(fr_wire::recovery_request::Reason),
     WrongBinding,
     Closed,
 }
@@ -244,6 +248,13 @@ impl Receiver {
         self.requestor
             .authorize_write(receiver, offer, now)
             .map_err(Error::Delivery)?;
+        // Only a real fenced receiver failure reaches this check. A healthy
+        // stream may keep using the last available namespace indefinitely.
+        // Detect exhaustion before emitting a request which the host cannot
+        // satisfy, instead of losing the cause behind its subsequent closure.
+        if q.remaining_channel_pairs() < 3 {
+            return Err(Error::NamespaceExhausted(offer.reason()));
+        }
         let mut refusal = None;
         let sent = q.send(
             cx,

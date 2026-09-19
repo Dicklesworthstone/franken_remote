@@ -773,3 +773,6 @@ fn dropping_a_started_replacement_keeps_the_original_partial_exchange_fence() {
 
 #[path = "recovery_replacement/handoff.rs"]
 mod handoff;
+
+#[path = "recovery_replacement/exhaustion.rs"]
+mod exhaustion;

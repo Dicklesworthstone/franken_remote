@@ -364,6 +364,9 @@ fn notify(app: &mut impl Application, status: Status) -> Result<(), Failure> {
 /// typed transport errors share the policy, not their input/authority failures.
 /// Closed, cancelled, unauthorized, malformed, handler and actual codec failures
 /// remain terminal. A generic closure is not guessed to be network or frame loss.
+/// A reference-expiry report which cannot obtain three fresh media roles may
+/// restart observation AFTER cleanup. The old namespace/decoder is never reused,
+/// and decode failure does not become retryable merely because roles ran out.
 pub fn retryable(failure: Failure) -> bool {
     use crate::session_startup::ControlledViewerError;
 
@@ -372,9 +375,17 @@ pub fn retryable(failure: Failure) -> bool {
             fr_tailnet::Error::LocalApiUnavailable
             | fr_tailnet::Error::BackendNotRunning
             | fr_tailnet::Error::Timeout,
-        )) => true,
+        ))
+        | Failure::Observation(ObserverError::Streaming(StreamingViewerError::Recovery(
+            crate::media_quic::recovery::Error::NamespaceExhausted(
+                fr_wire::recovery_request::Reason::ReferenceExpired
+                | fr_wire::recovery_request::Reason::RecoveryExpired,
+            ),
+        ))) => true,
         Failure::Observation(ObserverError::Streaming(
             StreamingViewerError::Transport(e)
+            | StreamingViewerError::Recovery(crate::media_quic::recovery::Error::Transport(e))
+            | StreamingViewerError::Replacement(crate::media_quic::replacement::Error::Transport(e))
             | StreamingViewerError::Routes(crate::media_quic::Error::Transport(e))
             | StreamingViewerError::Feedback(crate::media::ReceiverFeedbackError::Transport(e))
             | StreamingViewerError::PresentedState(crate::media::PresentedStateError::Transport(e))
@@ -515,3 +526,7 @@ async fn cleanup(cx: Cx, budget: Duration, app: &mut impl Application) -> Result
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "reconnect/recovery_tests.rs"]
+mod recovery_tests;

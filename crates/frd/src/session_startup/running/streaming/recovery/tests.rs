@@ -507,3 +507,5 @@ fn missing_negotiation_and_control_intent_cannot_enable_automatic_recovery() {
         });
     }
 }
+
+mod namespace;

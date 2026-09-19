@@ -17,8 +17,14 @@ pub struct RecoveryOffer {
     scope: Arc<AtomicBool>,
     bytes: usize,
     until: u64,
+    reason: Reason,
 }
 impl RecoveryOffer {
+    /// Original failed-chain cause, not inferred from transport availability.
+    pub const fn reason(&self) -> Reason {
+        self.reason
+    }
+
     pub const fn byte_len(&self) -> usize {
         self.bytes
     }
@@ -142,6 +148,7 @@ impl RecoveryRequestor {
             scope: self.scope.clone(),
             bytes,
             until: pending.until,
+            reason: pending.request.reason,
         }))
     }
     /// Checks the original receiver scope and original recovery deadline, not
