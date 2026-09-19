@@ -32,13 +32,14 @@ pub mod session_driver;
 
 pub use artifacts::{ArtifactBundle, RunManifest, RunSummary};
 pub use assertions::{
-    assert_no_input_executed_after_revoke, assert_no_lease_resurrection_on_reconnect,
-    assert_orderly_teardown, assert_queue_high_water, evaluate_all_assertions, AssertionResult,
+    AssertionResult, assert_no_input_executed_after_revoke,
+    assert_no_lease_resurrection_on_reconnect, assert_orderly_teardown, assert_queue_high_water,
+    evaluate_all_assertions,
 };
 pub use event::{AuthorityState, EventKind, EventSource, InputStage, StructuredLogEvent};
 pub use fault::{FaultAction, FaultInjector, PlantedViolationKind};
 pub use harness::{E2eHarness, HarnessConfig, HarnessReport};
 pub use scenario::{
-    phase1_canonical, phase1_planted_violation, Scenario, ScenarioBuilder, ScenarioStep,
+    Scenario, ScenarioBuilder, ScenarioStep, phase1_canonical, phase1_planted_violation,
 };
 pub use session_driver::SessionDriver;

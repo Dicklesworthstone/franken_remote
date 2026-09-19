@@ -30,7 +30,11 @@ impl AssertionResult {
     }
 
     #[must_use]
-    pub const fn fail(name: String, message: String, offending_event: Option<StructuredLogEvent>) -> Self {
+    pub const fn fail(
+        name: String,
+        message: String,
+        offending_event: Option<StructuredLogEvent>,
+    ) -> Self {
         Self {
             assertion_name: name,
             passed: false,
@@ -186,7 +190,9 @@ pub fn assert_orderly_teardown(events: &[StructuredLogEvent]) -> AssertionResult
     {
         return AssertionResult::fail(
             name,
-            format!("VIOLATION: Session closed at {close_ts} ns before control was revoked at {rev_ts} ns!"),
+            format!(
+                "VIOLATION: Session closed at {close_ts} ns before control was revoked at {rev_ts} ns!"
+            ),
             None,
         );
     }

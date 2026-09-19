@@ -29,7 +29,9 @@ fn test_canonical_phase1_scenario_succeeds_with_full_artifacts() {
         max_queue_bytes: 65536,
     });
 
-    let report = harness.run_canonical_phase1(42).expect("run_canonical_phase1 failed");
+    let report = harness
+        .run_canonical_phase1(42)
+        .expect("run_canonical_phase1 failed");
 
     // 1. Assert scenario succeeded
     assert!(
@@ -41,10 +43,22 @@ fn test_canonical_phase1_scenario_succeeds_with_full_artifacts() {
 
     // 2. Assert artifact bundle files exist
     let run_dir = &report.artifact_dir;
-    assert!(run_dir.join("manifest.json").exists(), "manifest.json missing");
-    assert!(run_dir.join("events.jsonl").exists(), "events.jsonl missing");
-    assert!(run_dir.join("summary.json").exists(), "summary.json missing");
-    assert!(run_dir.join("reproduce.sh").exists(), "reproduce.sh missing");
+    assert!(
+        run_dir.join("manifest.json").exists(),
+        "manifest.json missing"
+    );
+    assert!(
+        run_dir.join("events.jsonl").exists(),
+        "events.jsonl missing"
+    );
+    assert!(
+        run_dir.join("summary.json").exists(),
+        "summary.json missing"
+    );
+    assert!(
+        run_dir.join("reproduce.sh").exists(),
+        "reproduce.sh missing"
+    );
 
     // 3. Inspect summary.json content
     let summary_bytes = fs::read(run_dir.join("summary.json")).unwrap();

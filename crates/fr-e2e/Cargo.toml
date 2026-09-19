@@ -14,9 +14,5 @@ fr-wire.workspace = true
 fr-client.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-
-[target.'cfg(target_os = "linux")'.dependencies]
-frd.workspace = true
-
 [lints]
 workspace = true

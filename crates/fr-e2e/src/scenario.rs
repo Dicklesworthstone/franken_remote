@@ -212,7 +212,9 @@ impl ScenarioBuilder {
 #[must_use]
 pub fn phase1_canonical(seed: u64) -> Scenario {
     ScenarioBuilder::new("phase1_canonical")
-        .description("Canonical Phase 1 connect, authorize, observe, control, revoke, reconnect sequence")
+        .description(
+            "Canonical Phase 1 connect, authorize, observe, control, revoke, reconnect sequence",
+        )
         .seed(seed)
         .connect(5000)
         .authorize("prompt_always", 5000)
@@ -232,7 +234,9 @@ pub fn phase1_planted_violation(seed: u64, delay_ms: u64) -> Scenario {
     use crate::fault::PlantedViolationKind;
 
     ScenarioBuilder::new("phase1_planted_violation")
-        .description("Planted violation scenario with delayed revoke fence to verify assertion failure")
+        .description(
+            "Planted violation scenario with delayed revoke fence to verify assertion failure",
+        )
         .seed(seed)
         .connect(5000)
         .authorize("prompt_always", 5000)

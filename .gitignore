@@ -19,6 +19,7 @@ target-*/
 target_*/
 crates/*/target/
 dist/
+artifacts/
 
 # Native media build outputs (recipes/manifests under native/ are tracked;
 # compiled FFmpeg/Opus artifacts and SDK payloads are not)

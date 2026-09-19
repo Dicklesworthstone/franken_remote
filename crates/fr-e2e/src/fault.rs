@@ -18,7 +18,10 @@ pub enum PlantedViolationKind {
     /// Deliberately restore an input lease across reconnect without a new grant.
     ResurrectLeaseAcrossReconnect { lease_id: u64 },
     /// Deliberately inflate a queue beyond its byte ceiling.
-    QueueLimitBreach { queue_name: String, excess_bytes: usize },
+    QueueLimitBreach {
+        queue_name: String,
+        excess_bytes: usize,
+    },
 }
 
 /// Actions the fault injector can apply to a running session.
@@ -34,7 +37,11 @@ pub enum FaultAction {
     /// Expire an input ticket before OS submission.
     ExpireTicket { ticket_id: u64 },
     /// Change the virtual display geometry during active viewing.
-    ResizeDisplay { width: u32, height: u32, scale_pct: u32 },
+    ResizeDisplay {
+        width: u32,
+        height: u32,
+        scale_pct: u32,
+    },
     /// Planted violation for proving the test harness assertion layer fails on bugs.
     PlantedViolation(PlantedViolationKind),
 }
@@ -98,7 +105,8 @@ impl FaultInjector {
     pub fn planted_delayed_revoke(delay_ms: u64) -> Self {
         Self {
             name: "planted_delayed_revoke".to_string(),
-            description: "Planted violation: delay revoke fence to test assertion failure".to_string(),
+            description: "Planted violation: delay revoke fence to test assertion failure"
+                .to_string(),
             action: FaultAction::PlantedViolation(PlantedViolationKind::DelayedRevokeFence {
                 delay_ms,
             }),

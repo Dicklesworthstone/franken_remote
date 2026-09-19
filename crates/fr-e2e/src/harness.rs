@@ -5,7 +5,7 @@
 
 use crate::artifacts::{ArtifactBundle, RunSummary};
 use crate::assertions::evaluate_all_assertions;
-use crate::scenario::{phase1_canonical, phase1_planted_violation, Scenario};
+use crate::scenario::{Scenario, phase1_canonical, phase1_planted_violation};
 use crate::session_driver::SessionDriver;
 use std::io;
 use std::path::PathBuf;
@@ -60,7 +60,8 @@ impl E2eHarness {
     /// Run a scenario, collect all structured logs, evaluate assertions, and persist artifacts.
     pub fn run_scenario(&self, scenario: &Scenario) -> io::Result<HarnessReport> {
         let start_time = std::time::Instant::now();
-        let mut bundle = ArtifactBundle::new(&self.config.artifacts_dir, &scenario.name, scenario.seed)?;
+        let mut bundle =
+            ArtifactBundle::new(&self.config.artifacts_dir, &scenario.name, scenario.seed)?;
 
         let mut driver = SessionDriver::new(&mut bundle, scenario.seed);
         let execution_result = driver.execute_scenario(scenario);

@@ -586,7 +586,6 @@ dependencies = [
  "fr-client",
  "fr-core",
  "fr-wire",
- "frd",
  "serde",
  "serde_json",
 ]
