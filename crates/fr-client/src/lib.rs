@@ -14,3 +14,10 @@ pub mod control_grant;
 
 /// Controller-only clipboard tied to the original accepted grant.
 pub mod clipboard;
+
+/// Shared client session core, auto-reconnect, presentation policy, and input fencing.
+pub mod session;
+pub use session::{
+    ClientSession, CloseReason, DecoderScheduler, QueuedPicture, ReconnectPolicy, ReconnectReason,
+    SessionDiagnostics, SessionError, SessionState, SuspendReason,
+};
