@@ -483,7 +483,7 @@ pub(super) fn notify(
             .into_controlled_synchronized(request.channels, media, input)
             .map_err(Error::Control)?;
         control.input = Some(viewer.control());
-        *peer = Peer::Control(viewer);
+        *peer = Peer::Control(Box::new(viewer));
     }
     Ok(())
 }

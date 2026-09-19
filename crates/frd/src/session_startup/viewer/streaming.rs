@@ -112,7 +112,7 @@ enum Peer {
         session: ViewerSession,
         media: NegotiatedMedia,
     },
-    Control(ControlledViewer),
+    Control(Box<ControlledViewer>),
     Viewing {
         session: ViewerSession,
         media: NegotiatedMedia,
@@ -197,7 +197,7 @@ impl Peer {
     }
     fn controlled(&mut self) -> Option<&mut ControlledViewer> {
         match self {
-            Self::Control(v) => Some(v),
+            Self::Control(v) => Some(v.as_mut()),
             Self::Observe { .. } | Self::Acquiring { .. } | Self::Viewing { .. } | Self::Closed => {
                 None
             }
@@ -298,7 +298,7 @@ impl ControlledViewer {
         presenter: Presenter,
         receiver: ReceivePipeline,
     ) -> Result<StreamingViewer, Error> {
-        StreamingViewer::new(Peer::Control(self), presenter, receiver)
+        StreamingViewer::new(Peer::Control(Box::new(self)), presenter, receiver)
     }
 }
 impl StreamingViewer {
