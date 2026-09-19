@@ -591,6 +591,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fr-ffi"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "fr-core",
+ "fr-media",
+]
+
+[[package]]
 name = "fr-files"
 version = "0.1.0"
 dependencies = [

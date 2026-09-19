@@ -1,0 +1,27 @@
+[package]
+name = "fr-ffi"
+version = "0.1.0"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+description = "FFmpeg hardware codec wrapper implementing fr-media contracts"
+build = "build.rs"
+
+[dependencies]
+fr-core = { workspace = true }
+fr-media = { workspace = true }
+
+[build-dependencies]
+cc = "1.0"
+
+[lints.rust]
+# fr-ffi is a named FFI boundary crate wrapping the FFmpeg C ABI per AGENTS.md §3.2.
+# Unsafe code is confined strictly to this crate behind safe Encoder/Decoder interfaces.
+unsafe_code = "allow"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
