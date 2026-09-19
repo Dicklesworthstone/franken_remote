@@ -38,6 +38,7 @@ pub enum Kind {
     ConfigureMonitor = 12,
     CheckMonitor = 13,
     ConfigurePresentation = 14,
+    ConfigureFittedPresentation = 15,
     Ready = 257,
     Unit = 258,
     NeedInput = 259,
@@ -54,6 +55,7 @@ pub enum Kind {
     MonitorReady = 270,
     MonitorValid = 271,
     PresentationReady = 272,
+    FittedPresentationReady = 273,
 }
 impl Kind {
     fn parse(n: u16) -> Result<Self, Error> {
@@ -72,6 +74,7 @@ impl Kind {
             12 => Self::ConfigureMonitor,
             13 => Self::CheckMonitor,
             14 => Self::ConfigurePresentation,
+            15 => Self::ConfigureFittedPresentation,
             257 => Self::Ready,
             258 => Self::Unit,
             259 => Self::NeedInput,
@@ -88,6 +91,7 @@ impl Kind {
             270 => Self::MonitorReady,
             271 => Self::MonitorValid,
             272 => Self::PresentationReady,
+            273 => Self::FittedPresentationReady,
             _ => return Err(Error::Malformed),
         })
     }
@@ -114,7 +118,10 @@ impl Kind {
                 length == capture::monitors::SELECTED_CONFIG_BYTES
                     && length <= limits.max_control_message_bytes() as usize
             }
-            Self::ConfigurePresentation | Self::PresentationReady => {
+            Self::ConfigurePresentation
+            | Self::PresentationReady
+            | Self::ConfigureFittedPresentation
+            | Self::FittedPresentationReady => {
                 length
                     .checked_sub(presentation::TARGET_BYTES)
                     .is_some_and(|n| Self::ConfigureDecoder.accepts_length(n, limits))

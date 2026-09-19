@@ -6,7 +6,7 @@ mod linux {
     use fr_core::limits::ProtocolLimits;
     use fr_media::worker::{self, Backend, Configuration, Error, Kind, Record, Role, Sequence};
     use fr_native::{
-        EncodeBackend, HevcDecoder, HevcEncoder, NativeError, X11Screens, X11Surface,
+        EncodeBackend, FittedFrame, HevcDecoder, HevcEncoder, NativeError, X11Screens, X11Surface,
         bind_worker_parent,
         capture::{CaptureOutput, ChangeAwareCapture},
     };
@@ -20,6 +20,7 @@ mod linux {
             surface: X11Surface,
             codec: HevcDecoder,
             display_next: Option<bool>,
+            fitted: Option<FittedFrame>,
         },
     }
     fn native(e: NativeError) -> Error {
@@ -54,6 +55,7 @@ mod linux {
         configuration: Configuration,
         record: Option<&[u8]>,
         target: Option<worker::presentation::X11Target>,
+        fit: bool,
     ) -> Result<Media, Error> {
         let limits = configuration.limits()?;
         let config = configuration.codec()?;
@@ -76,6 +78,19 @@ mod linux {
                 codec: HevcDecoder::new(config, limits, record.ok_or(Error::WrongState)?)
                     .map_err(native)?,
                 display_next: None,
+                fitted: if fit {
+                    Some(
+                        FittedFrame::new(
+                            configuration.width,
+                            configuration.height,
+                            target.ok_or(Error::WrongState)?,
+                            limits,
+                        )
+                        .map_err(native)?,
+                    )
+                } else {
+                    None
+                },
             },
         })
     }
@@ -91,13 +106,18 @@ mod linux {
                     surface,
                     codec,
                     display_next,
+                    fitted,
                 } => match codec.poll_output() {
                     Ok((frame, pixels)) => {
                         let display = display_next.take().ok_or(Error::WrongState)?;
                         if !display {
                             return Ok((Kind::Decoded, frame.as_raw().to_be_bytes().to_vec()));
                         }
-                        surface.present(&pixels).map_err(native)?;
+                        let pixels = match fitted {
+                            Some(fitted) => fitted.render(&pixels).map_err(native)?,
+                            None => &pixels,
+                        };
+                        surface.present(pixels).map_err(native)?;
                         // Explicit local verification mode only, never a remote peer option.
                         // Production does not read every presented frame back from the GPU/X server.
                         if verify && surface.snapshot().map_err(native)?.pixels() != pixels.pixels()
@@ -198,19 +218,32 @@ mod linux {
         let (configuration, media, ready) = match (role, first.header.kind) {
             (Role::Capture, Kind::Configure) => {
                 let c = Configuration::decode(first.body())?;
-                (c, open(role, c, None, None)?, Kind::Ready)
+                (c, open(role, c, None, None, false)?, Kind::Ready)
             }
             (Role::Present, Kind::ConfigureDecoder) => {
                 let (c, record) = Configuration::decode_decoder(first.body())?;
-                (c, open(role, c, Some(record), None)?, Kind::DecoderReady)
+                (
+                    c,
+                    open(role, c, Some(record), None, false)?,
+                    Kind::DecoderReady,
+                )
             }
             (Role::Present, Kind::ConfigurePresentation) => {
                 let (c, record, target) =
                     worker::presentation::X11Target::decode_decoder(first.body())?;
                 (
                     c,
-                    open(role, c, Some(record), Some(target))?,
+                    open(role, c, Some(record), Some(target), false)?,
                     Kind::PresentationReady,
+                )
+            }
+            (Role::Present, Kind::ConfigureFittedPresentation) => {
+                let (c, record, target) =
+                    worker::presentation::X11Target::decode_fitted_decoder(first.body())?;
+                (
+                    c,
+                    open(role, c, Some(record), Some(target), true)?,
+                    Kind::FittedPresentationReady,
                 )
             }
             _ => return Err(Error::WrongState),

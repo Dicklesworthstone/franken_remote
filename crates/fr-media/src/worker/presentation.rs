@@ -82,3 +82,93 @@ impl X11Target {
         Ok((configuration, record, target))
     }
 }
+
+/// Integer, half-open placement of the full remote image in a local window.
+/// This is a local rendering choice, not a changed remote display generation or
+/// input grant. The same rectangle must be used by the input viewport. Scaling
+/// is downwards only and never changes the decoder's original dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fit {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+impl Fit {
+    pub fn new(source_width: u32, source_height: u32, target: X11Target) -> Result<Self, Error> {
+        ProtocolLimits::ABSOLUTE
+            .validate_coded_dimensions(source_width, source_height)
+            .map_err(|_| Error::ResourceLimit)?;
+        if source_width < 16
+            || source_height < 16
+            || !source_width.is_multiple_of(2)
+            || !source_height.is_multiple_of(2)
+            || target.width > source_width
+            || target.height > source_height
+        {
+            return Err(Error::GeometryChanged);
+        }
+        let (sw, sh) = (u64::from(source_width), u64::from(source_height));
+        let (tw, th) = (u64::from(target.width), u64::from(target.height));
+        let (width, height) = if tw * sh <= th * sw {
+            (tw, tw * sh / sw)
+        } else {
+            (th * sw / sh, th)
+        };
+        if width == 0 || height == 0 {
+            return Err(Error::GeometryChanged);
+        }
+        // All products are below the checked u32 dimension ceiling squared;
+        // outputs cannot exceed the already validated target dimensions.
+        Ok(Self {
+            x: u32::try_from((tw - width) / 2).map_err(|_| Error::ResourceLimit)?,
+            y: u32::try_from((th - height) / 2).map_err(|_| Error::ResourceLimit)?,
+            width: u32::try_from(width).map_err(|_| Error::ResourceLimit)?,
+            height: u32::try_from(height).map_err(|_| Error::ResourceLimit)?,
+        })
+    }
+}
+impl X11Target {
+    /// Explicit local fit mode uses a different IPC kind. Older workers refuse
+    /// it rather than interpreting a resized image as a native-pixel mapping.
+    pub fn encode_fitted_decoder(
+        self,
+        configuration: Configuration,
+        record: &DecoderRecord,
+    ) -> Result<Vec<u8>, Error> {
+        Fit::new(configuration.width, configuration.height, self)?;
+        configuration
+            .limits()?
+            .validate_coded_dimensions(self.width, self.height)
+            .map_err(|_| Error::ResourceLimit)?;
+        let mut body = configuration.encode_decoder(record)?;
+        body.try_reserve_exact(TARGET_BYTES)
+            .map_err(|_| Error::Allocation)?;
+        body.extend_from_slice(&self.window.to_be_bytes());
+        body.extend_from_slice(&self.width.to_be_bytes());
+        body.extend_from_slice(&self.height.to_be_bytes());
+        if !Kind::ConfigureFittedPresentation.accepts_length(body.len(), &configuration.limits()?) {
+            return Err(Error::ResourceLimit);
+        }
+        Ok(body)
+    }
+    pub fn decode_fitted_decoder(body: &[u8]) -> Result<(Configuration, &[u8], Self), Error> {
+        if !Kind::ConfigureFittedPresentation.accepts_length(body.len(), &ProtocolLimits::ABSOLUTE)
+        {
+            return Err(Error::ResourceLimit);
+        }
+        let (decoder, target) = body.split_at(body.len() - TARGET_BYTES);
+        let (configuration, record) = Configuration::decode_decoder(decoder)?;
+        let target = Self::new(
+            u32::from_be_bytes(target[0..4].try_into().unwrap()),
+            u32::from_be_bytes(target[4..8].try_into().unwrap()),
+            u32::from_be_bytes(target[8..12].try_into().unwrap()),
+        )?;
+        Fit::new(configuration.width, configuration.height, target)?;
+        configuration
+            .limits()?
+            .validate_coded_dimensions(target.width, target.height)
+            .map_err(|_| Error::ResourceLimit)?;
+        Ok((configuration, record, target))
+    }
+}

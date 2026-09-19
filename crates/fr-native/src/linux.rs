@@ -1,3 +1,7 @@
+#[path = "presentation_fit.rs"]
+mod presentation_fit;
+pub use presentation_fit::FittedFrame;
+
 use core::{
     ffi::{c_char, c_int, c_void},
     fmt,

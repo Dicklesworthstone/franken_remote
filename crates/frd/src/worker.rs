@@ -101,6 +101,7 @@ pub struct Launch {
     role: Role,
     epoch: u128,
     target: Option<worker::presentation::X11Target>,
+    fit_target: bool,
     retirement: Option<retirement::Registration>,
 }
 impl Launch {
@@ -130,6 +131,7 @@ impl Launch {
             role,
             epoch,
             target: None,
+            fit_target: false,
             retirement: None,
         })
     }
@@ -153,6 +155,14 @@ impl Launch {
         }
         self.target = Some(target);
         Ok(self)
+    }
+    /// Explicitly downscale the full image into this immutable UI-owned window.
+    /// The worker preserves decoder geometry and refuses an older/native-only
+    /// IPC peer. Rendering and input must use the same returned fit rectangle.
+    pub fn present_fitted_in(self, target: worker::presentation::X11Target) -> Result<Self, Error> {
+        let mut launch = self.present_in(target)?;
+        launch.fit_target = true;
+        Ok(launch)
     }
 }
 /// One absolute deadline covers the complete write and reply, including a
@@ -297,6 +307,10 @@ impl Worker {
             return Err(Error::Protocol(worker::Error::WrongRole));
         }
         let (kind, body) = match launch.target {
+            Some(target) if launch.fit_target => (
+                Kind::ConfigureFittedPresentation,
+                target.encode_fitted_decoder(configuration, record)?,
+            ),
             Some(target) => (
                 Kind::ConfigurePresentation,
                 target.encode_decoder(configuration, record)?,
@@ -326,6 +340,7 @@ impl Worker {
         let expected = match kind {
             Kind::ConfigureDecoder => Kind::DecoderReady,
             Kind::ConfigurePresentation => Kind::PresentationReady,
+            Kind::ConfigureFittedPresentation => Kind::FittedPresentationReady,
             _ => Kind::Ready,
         };
         match result {
@@ -351,6 +366,7 @@ impl Worker {
             role,
             epoch,
             target: _, // Already bound into the immutable private configuration.
+            fit_target: _,
             retirement,
         } = launch;
         let mut command = Command::new(image);
@@ -706,6 +722,7 @@ fn allowed_reply(request: Kind, reply: Kind) -> bool {
             Kind::ConfigureCapture => reply == Kind::CaptureReady,
             Kind::ConfigureDecoder => reply == Kind::DecoderReady,
             Kind::ConfigurePresentation => reply == Kind::PresentationReady,
+            Kind::ConfigureFittedPresentation => reply == Kind::FittedPresentationReady,
             Kind::Capture => matches!(reply, Kind::Unit | Kind::NeedInput | Kind::NeedDrain),
             Kind::CaptureIfChanged => matches!(
                 reply,
