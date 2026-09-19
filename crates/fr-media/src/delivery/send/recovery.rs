@@ -96,6 +96,10 @@ impl SendCache {
                 return Err(error.into());
             }
         };
+        // A chronically failing subscription is refused BEFORE issuing another
+        // unique demand to the shared encoder. Replacement recognizes this epoch
+        // as already charged; duplicate requests and fresh bindings cannot refund it.
+        self.admit_recovery(now)?;
         // Stop old originals, repairs and already-prepared PacketOffers before
         // handing any demand to a shared capture owner. Other caches are untouched.
         self.clear();
@@ -115,10 +119,200 @@ impl SendCache {
         }))
     }
     pub(super) fn check_recovery_deadline(&mut self, now: u64) -> Result<(), SendError> {
-        if self.recovery_request.as_ref().is_some_and(|p| now >= p.until) {
+        if self
+            .recovery_request
+            .as_ref()
+            .is_some_and(|p| now >= p.until)
+        {
             self.close();
             return Err(DeliveryError::RecoveryExpired.into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::delivery::{IdrCoalescer, MediaBindings, MediaEpoch, SendPolicy};
+    use fr_core::{ids::*, limits::ProtocolLimits};
+    use fr_wire::{Channel, MediaLimits, recovery_request::Reason};
+
+    fn cache() -> SendCache {
+        SendCache::new(
+            MediaLimits::new(ProtocolLimits::ABSOLUTE, 1150, 16_384, 64).unwrap(),
+            MediaBindings::new(1, 2, 3, 4).unwrap(),
+            MediaEpoch {
+                configuration: CodecConfigurationGeneration::INITIAL,
+                recovery: RecoveryGeneration::INITIAL,
+            },
+            SendPolicy {
+                max_recoveries_per_window: 2,
+                recovery_window_micros: 1_000_000,
+                ..SendPolicy::default()
+            },
+        )
+        .unwrap()
+    }
+    fn binding(cache: &SendCache) -> Binding {
+        Binding {
+            parent: fr_wire::negotiation::ControlBinding {
+                id: 1000,
+                host_boot: HostBootId::from_raw(1),
+                os_session: OsSessionId::from_raw(2),
+                remote_session: RemoteSessionId::from_raw(3),
+            },
+            display: 4,
+            geometry: DisplayGeometryGeneration::INITIAL,
+            configuration: cache.epoch.configuration,
+            recovery: cache.epoch.recovery,
+            viewport: ViewportMappingGeneration::INITIAL,
+        }
+    }
+    fn record(binding: Binding, frame: Option<u64>) -> Vec<u8> {
+        let mut bytes = vec![0; recovery_request::REQUEST_BYTES];
+        let n = recovery_request::encode(
+            Request {
+                reason: Reason::DecodeFailed,
+                last_useful_frame: frame,
+            },
+            binding,
+            &ProtocolLimits::ABSOLUTE,
+            &mut bytes,
+            InputDirection::ViewerToHost,
+            InputDelivery::Reliable,
+        )
+        .unwrap();
+        assert_eq!(n, bytes.len());
+        bytes
+    }
+    fn request(cache: &mut SendCache, now: u64) -> Result<RecoveryDisposition, SendError> {
+        let binding = binding(cache);
+        cache.request_recovery(&record(binding, None), binding, now)
+    }
+    fn accepted(cache: &mut SendCache, now: u64) -> RecoveryDemand {
+        match request(cache, now).unwrap() {
+            RecoveryDisposition::Accepted(demand) => demand,
+            RecoveryDisposition::Coalesced => panic!("expected a new generation"),
+        }
+    }
+    fn replace(cache: &mut SendCache, now: u64) {
+        let base = cache.bindings.for_channel(Channel::Control) + 1;
+        cache
+            .replace(
+                MediaEpoch {
+                    recovery: cache.epoch.recovery.next().unwrap(),
+                    ..cache.epoch
+                },
+                MediaBindings::new(base, base + 1, base + 2, base + 3).unwrap(),
+                now,
+            )
+            .unwrap();
+    }
+    #[test]
+    fn exhausted_viewer_cannot_issue_another_shared_encoder_demand() {
+        let mut failed = cache();
+        let mut healthy = cache();
+        let mut encoder = IdrCoalescer::new(100_000).unwrap();
+        for now in [0, 100_000] {
+            let demand = accepted(&mut failed, now);
+            encoder.queue(&failed, demand, now).unwrap();
+            assert!(encoder.take(now).unwrap().is_some());
+            replace(&mut failed, now + 1);
+        }
+        assert!(matches!(
+            request(&mut failed, 200_000),
+            Err(SendError::RecoveryLimitExceeded)
+        ));
+        assert_eq!(encoder.next_deadline(), None);
+        assert_eq!(encoder.take(200_000).unwrap(), None);
+        assert!(matches!(
+            request(&mut failed, 2_000_000),
+            Err(SendError::Closed)
+        ));
+        let demand = accepted(&mut healthy, 2_000_000);
+        encoder.queue(&healthy, demand, 2_000_000).unwrap();
+        assert!(encoder.take(2_000_000).unwrap().is_some());
+        assert_eq!(healthy.epoch.recovery, RecoveryGeneration::INITIAL);
+    }
+    #[test]
+    fn duplicate_flood_and_replacement_charge_exactly_once_per_generation() {
+        let mut cache = cache();
+        let first = accepted(&mut cache, 0);
+        let deadline = first.deadline_micros();
+        for now in 1..10_000 {
+            assert!(matches!(
+                request(&mut cache, now),
+                Ok(RecoveryDisposition::Coalesced)
+            ));
+            assert_eq!(cache.next_deadline(), Some(deadline));
+        }
+        assert_eq!(cache.recoveries.iter().flatten().count(), 1);
+        replace(&mut cache, 10_000);
+        assert_eq!(cache.recoveries.iter().flatten().count(), 1);
+        let second = accepted(&mut cache, 10_001);
+        assert_eq!(cache.recoveries.iter().flatten().count(), 2);
+        replace(&mut cache, 10_002);
+        assert!(first.check(&cache, 10_002).is_err());
+        assert!(second.check(&cache, 10_002).is_err());
+        assert!(matches!(
+            request(&mut cache, 10_003),
+            Err(SendError::RecoveryLimitExceeded)
+        ));
+    }
+    #[test]
+    fn invalid_requests_do_not_spend_allowance_or_fence_a_healthy_generation() {
+        let mut cache = cache();
+        drop(accepted(&mut cache, 0));
+        replace(&mut cache, 1);
+        let installed = binding(&cache);
+        let mut stale = installed;
+        stale.parent.remote_session = RemoteSessionId::from_raw(90);
+        for now in 2..100 {
+            assert!(
+                cache
+                    .request_recovery(&record(stale, None), installed, now)
+                    .is_err()
+            );
+            assert_eq!(
+                cache
+                    .request_recovery(&record(installed, Some(1)), installed, now)
+                    .unwrap_err(),
+                SendError::InvalidSequence
+            );
+            assert!(cache.request_recovery(&[0; 8], installed, now).is_err());
+            assert!(!cache.needs_recovery());
+            assert_eq!(cache.recoveries.iter().flatten().count(), 1);
+        }
+        drop(accepted(&mut cache, 100));
+        replace(&mut cache, 101);
+        assert!(!cache.needs_recovery());
+    }
+    #[test]
+    fn dropping_a_demand_does_not_refund_the_subscription_allowance() {
+        let mut cache = cache();
+        for now in [0, 10] {
+            drop(accepted(&mut cache, now));
+            replace(&mut cache, now + 1);
+        }
+        assert!(matches!(
+            request(&mut cache, 20),
+            Err(SendError::RecoveryLimitExceeded)
+        ));
+    }
+    #[test]
+    fn request_window_uses_original_admission_time_not_replacement_time() {
+        let mut cache = cache();
+        drop(accepted(&mut cache, 0));
+        replace(&mut cache, 100);
+        drop(accepted(&mut cache, 200));
+        replace(&mut cache, 300);
+        drop(accepted(&mut cache, 1_000_000));
+        assert_eq!(cache.recoveries.iter().flatten().count(), 2);
+        replace(&mut cache, 1_000_001);
+        assert!(matches!(
+            request(&mut cache, 1_000_002),
+            Err(SendError::RecoveryLimitExceeded)
+        ));
     }
 }
