@@ -765,8 +765,8 @@ fn parse_x509_not_after(der: &[u8]) -> Result<u64, Error> {
             if not_after_bytes.len() < 13 || not_after_bytes[12] != b'Z' {
                 return Err(Error::CertificateRejected);
             }
-            let yy = (not_after_bytes[0].wrapping_sub(b'0') as u16) * 10
-                + (not_after_bytes[1].wrapping_sub(b'0') as u16);
+            let yy = u16::from(not_after_bytes[0].wrapping_sub(b'0')) * 10
+                + u16::from(not_after_bytes[1].wrapping_sub(b'0'));
             let year = if yy >= 50 { 1900 + yy } else { 2000 + yy };
             let rfc = format!(
                 "{:04}-{}-{}T{}:{}:{}Z",
