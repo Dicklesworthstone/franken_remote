@@ -288,3 +288,68 @@ fn closing_unpolled_turn_keeps_original_file_result_and_cleanup_accessible() {
 }
 
 mod negotiation;
+
+#[test]
+fn streaming_shutdown_retains_the_file_receipt_and_original_source_through_failed_reap() {
+    run(|c, h| async move {
+        let mut state = Box::pin(fixture_with_clipboard(
+            &c,
+            &h,
+            caps(),
+            true,
+            false,
+            false,
+            ClipboardMode::Files,
+        ))
+        .await;
+        let source = Disk::new();
+        let dest = Disk::new();
+        join(&mut state, &dest, Permission::new(true));
+        assert_eq!(
+            state
+                .viewer
+                .send_file(source.source(&vec![0x52; 120_007]), "pending")
+                .unwrap(),
+            1
+        );
+        let mut streaming = state
+            .viewer
+            .into_streaming(state.presenter.take().unwrap(), state.receiver)
+            .unwrap();
+        let control = streaming.control();
+        let until = crate::worker::Deadline::after(&h, Duration::from_millis(1)).unwrap();
+        asupersync::time::sleep(h.now(), Duration::from_millis(5)).await;
+        let cleanup = streaming.reap_files(&h, until);
+        // Merely constructing a closing operation fences the original controller,
+        // even if the caller never polls it. Actual disk cleanup is still separate.
+        assert!(control.is_stopped());
+        assert_eq!(cleanup.await, Err(SendError::Expired));
+        let receipt = streaming.file_result().unwrap();
+        assert_eq!(receipt.id, 1);
+        assert_eq!(
+            receipt.outcome,
+            Outcome::InterruptedBeforePublication(SendError::Cancelled)
+        );
+        streaming
+            .reap_files(
+                &h,
+                crate::worker::Deadline::after(&h, Duration::from_secs(1)).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(streaming.file_result(), Some(receipt));
+        assert_eq!(streaming.take_file_result(), Some(receipt));
+        assert_eq!(streaming.take_file_result(), None);
+        assert!(!dest.0.join("pending").exists());
+        streaming
+            .reap_media(
+                &h,
+                crate::worker::Deadline::after(&h, Duration::from_secs(1)).unwrap(),
+            )
+            .await
+            .unwrap();
+        state.host.close();
+        assert!(state.driver.take().unwrap().await.handoff_safe());
+        assert!(!state.seat.is_occupied());
+    });
+}

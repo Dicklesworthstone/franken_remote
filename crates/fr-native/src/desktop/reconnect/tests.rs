@@ -68,6 +68,8 @@ fn report() -> Cleanup {
         window: WindowCleanup::NotStarted,
         picker: PickerCleanup::NotStarted,
         clipboard: Ok(frd::native_clipboard::Cleanup::NotStarted),
+        files: Ok(()),
+        file_result: None,
     }
 }
 #[test]
@@ -113,4 +115,32 @@ fn native_picker_policy_survives_but_choices_and_owners_do_not_cross_attempts() 
         assert!(desktop.picker().is_none());
         assert!(!desktop.renderer_started);
     }
+}
+
+#[test]
+fn a_file_cleanup_failure_blocks_next_attempt_and_keeps_its_original_receipt() {
+    use frd::session_startup::{FileSendError, FileSendReceipt};
+    let mut report = report();
+    // This fixture isolates the policy, not actual source I/O. A real receipt
+    // from the original sender is retained by Desktop's cleanup implementation.
+    report.file_result = Some(FileSendReceipt {
+        id: 17,
+        outcome: frd::session_startup::FileSendOutcome::PublicationUnknown,
+    });
+    for reason in [
+        FileSendError::Expired,
+        FileSendError::Cancelled,
+        FileSendError::Worker,
+    ] {
+        report.files = Err(reason);
+        assert_eq!(cleaned(&report), Err(CleanupFailure::Files));
+        assert_eq!(report.files, Err(reason));
+        assert_eq!(report.file_result.unwrap().id, 17);
+    }
+    report.files = Ok(());
+    assert_eq!(cleaned(&report), Ok(true));
+    assert_eq!(
+        report.file_result.unwrap().outcome,
+        frd::session_startup::FileSendOutcome::PublicationUnknown
+    );
 }

@@ -172,6 +172,23 @@ impl NativeObserver {
     ) -> Result<crate::native_clipboard::Cleanup, crate::clipboard_quic::Error> {
         self.viewer.reap_clipboard(cleanup, deadline).await
     }
+    /// The original file publication receipt, including after closing this
+    /// observer. Neither cleanup nor reconnection can undo the reported effect.
+    pub fn file_result(&mut self) -> Option<super::super::FileSendReceipt> {
+        self.viewer.file_result()
+    }
+    pub fn take_file_result(&mut self) -> Option<super::super::FileSendReceipt> {
+        self.viewer.take_file_result()
+    }
+    /// Fence at call time and join the original file source under the existing
+    /// closing budget. This observer must be retained until cleanup completes.
+    pub fn reap_files<'a>(
+        &'a mut self,
+        cleanup: &'a Cx,
+        deadline: Deadline,
+    ) -> impl Future<Output = Result<(), super::super::FileSendError>> + 'a {
+        self.viewer.reap_files(cleanup, deadline)
+    }
     pub const fn display(&self) -> Display {
         self.display
     }

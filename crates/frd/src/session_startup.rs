@@ -42,6 +42,9 @@ pub use running::{
 };
 
 mod viewer;
+pub use fr_files::sender::{
+    Error as FileSendError, Outcome as FileSendOutcome, Receipt as FileSendReceipt,
+};
 pub use viewer::controlled::events as viewer_events;
 pub use viewer::controlled::{ControlledViewer, Error as ControlledViewerError, ViewerControl};
 pub use viewer::observer::{Error as ObserverError, NativeObserver, Policy as ObserverPolicy};

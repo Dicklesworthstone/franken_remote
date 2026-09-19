@@ -107,6 +107,11 @@ pub struct Cleanup {
     pub window: WindowCleanup,
     pub picker: PickerCleanup,
     pub clipboard: Result<frd::native_clipboard::Cleanup, frd::clipboard_quic::Error>,
+    /// Ok proves no outstanding source or a joined original source thread; a
+    /// timeout/cancellation keeps the Desktop owned and blocks the next attempt.
+    pub files: Result<(), frd::session_startup::FileSendError>,
+    /// Preserve committed/unknown file effects even after this attempt is freed.
+    pub file_result: Option<frd::session_startup::FileSendReceipt>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowCleanup {
@@ -487,9 +492,18 @@ impl Desktop {
                 Some(observer) => observer.reap_clipboard(cleanup, deadline).await,
                 None => Ok(frd::native_clipboard::Cleanup::NotStarted),
             };
+            let (files, file_result) = match &mut self.observer {
+                Some(observer) => {
+                    let cleanup = observer.reap_files(cleanup, deadline).await;
+                    (cleanup, observer.file_result())
+                }
+                None => (Ok(()), None),
+            };
             Cleanup {
                 media,
                 input,
+                files,
+                file_result,
                 window: self.window_cleanup(),
                 picker: self.picker_cleanup(),
                 clipboard,

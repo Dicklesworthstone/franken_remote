@@ -68,6 +68,7 @@ pub enum CleanupFailure {
     /// it cannot be promoted to proof that every spawned worker was reaped.
     BootstrapUnconfirmed,
     Media,
+    Files,
     Clipboard,
     Expired,
     Cancelled,
@@ -318,6 +319,9 @@ fn cleanup_clock(
 fn cleaned(report: &Cleanup) -> Result<bool, CleanupFailure> {
     if report.media.is_err() {
         return Err(CleanupFailure::Media);
+    }
+    if report.files.is_err() {
+        return Err(CleanupFailure::Files);
     }
     let clipboard = match report.clipboard {
         Ok(

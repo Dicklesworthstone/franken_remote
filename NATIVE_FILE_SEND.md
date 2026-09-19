@@ -100,3 +100,25 @@ denial, original-deadline expiry (both idle and serviced), unfinished cancellati
 permission revocation, unpolled abandonment and another display's offer. Together
 with the four running-sender cases these are 13 integration tests, not a complete
 native picker, live-tailnet, download, resumption or folder-sync qualification.
+
+## Closing native desktops with file work
+
+The streaming viewer and `NativeObserver` retain access to the original file
+receipt after control ends. Their `reap_files` fences the original session at
+call time, before the returned future is polled, and waits only for the original
+source under an independent, absolute closing budget. A failed or abandoned wait
+keeps both the source and its publication/unknown-effect result available.
+
+`Desktop::reap` now includes file-source cleanup and retains the file receipt in
+its `Cleanup` report. The reconnect application refuses to release an attempt
+with a file-cleanup error; it cannot start another desktop while silently leaving
+a blocked file reader behind. A successful cleanup means no outstanding source
+or that the original thread was joined, not that a file was published. The
+separate receipt remains authoritative for that external effect.
+
+A real supervised-presentation/ATP source test promotes an existing controller
+into streaming, expires its first cleanup budget, then joins the same source and
+collects its original interruption receipt without replay. A separate native
+reconnect-policy test proves that file cleanup errors block another attempt and
+retain an unknown-publication receipt. These do not qualify hardware codecs or
+physical presentation.

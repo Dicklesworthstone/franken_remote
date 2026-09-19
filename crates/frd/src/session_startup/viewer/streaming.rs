@@ -444,6 +444,34 @@ impl StreamingViewer {
     pub fn control(&self) -> StreamingViewerControl {
         self.control.clone()
     }
+    /// Actual original file results remain readable after service/connection
+    /// closure. Reading a receipt never retries an uncertain publication.
+    pub fn file_result(&mut self) -> Option<fr_files::sender::Receipt> {
+        self.peer
+            .controlled()
+            .and_then(|viewer| viewer.file_result())
+    }
+    pub fn take_file_result(&mut self) -> Option<fr_files::sender::Receipt> {
+        self.peer
+            .controlled()
+            .and_then(ControlledViewer::take_file_result)
+    }
+    /// Fence the parent at CALL time, then collect the original file source.
+    /// Success proves either that no source remains or that its thread was
+    /// joined. Expired/cancelled/abandoned waits keep its owner and receipt here.
+    pub fn reap_files<'a>(
+        &'a mut self,
+        cleanup: &'a Cx,
+        deadline: Deadline,
+    ) -> impl Future<Output = Result<(), fr_files::sender::Error>> + 'a {
+        self.close();
+        async move {
+            match self.peer.controlled() {
+                Some(viewer) => viewer.reap_files(cleanup, deadline).await,
+                None => Ok(()),
+            }
+        }
+    }
     pub fn worker_id(&self) -> Option<u32> {
         self.presenter.worker_id()
     }
