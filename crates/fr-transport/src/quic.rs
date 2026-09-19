@@ -112,7 +112,16 @@ impl Messages {
             Self::SessionControl => {
                 matches!(
                     kind,
-                    0x0012..=0x001e | 0x0020 | 0x0022 | 0x0054 | 0x0080 | 0x0082 | 0x0084 | 0x0085
+                    0x0012
+                        ..=0x001e
+                            | 0x0020
+                            | 0x0022
+                            | 0x0036
+                            | 0x0054
+                            | 0x0080
+                            | 0x0082
+                            | 0x0084
+                            | 0x0085
                 )
             }
             // Release-only HeldState and InputMode share the ordered action

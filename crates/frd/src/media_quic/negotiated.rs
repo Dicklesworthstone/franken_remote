@@ -131,6 +131,16 @@ impl NegotiatedMedia {
         }
         Ok(())
     }
+    pub(super) fn check_recovery_capability(&self) -> Result<(), Error> {
+        if self.selection.capabilities.iter().any(|cap| {
+            cap.name == fr_wire::recovery_request::CAPABILITY
+                && cap.version == fr_wire::recovery_request::VERSION
+        }) {
+            Ok(())
+        } else {
+            Err(Error::InvalidRoutes)
+        }
+    }
     pub const fn limits(&self) -> MediaLimits {
         self.limits
     }
