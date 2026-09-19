@@ -93,6 +93,22 @@ impl Egress {
         self.buffer.fill(0);
         Ok(accepted)
     }
+    /// Admit on the network owner while the capture worker is still borrowed.
+    /// The original subscription, not a new sender, owns the unique demand.
+    pub(crate) fn admit_recovery_request(
+        &mut self,
+        bytes: &[u8],
+        binding: fr_wire::decoder::Binding,
+    ) -> Result<Option<fr_media::delivery::RecoveryDemand>, Error> {
+        let demand = self
+            .subscription
+            .as_mut()
+            .ok_or(Error::Send(fr_media::delivery::SendError::Closed))?
+            .admit_recovery_request(bytes, binding)?;
+        self.pending = None;
+        self.buffer.fill(0);
+        Ok(demand)
+    }
     /// Rebind the ORIGINAL failed subscription after fresh channel admission.
     /// Never construct a new cache here: that would refill recovery/repair
     /// credit. The session must fence/retire the old transport lanes first.

@@ -42,6 +42,40 @@ impl NegotiatedMedia {
         route: Route,
         bytes: &[u8],
     ) -> Result<bool, Error> {
+        let view = self.check_recovery_host(q, control, parent, sender, route)?;
+        sender
+            .egress
+            .request_recovery(source, bytes, view)
+            .map_err(Error::Media)
+    }
+
+    /// Same original control-route validation as the synchronous request API,
+    /// without borrowing capture across network dispatch. Scheduling rechecks the
+    /// source when its previous native operation returns.
+    pub(crate) fn admit_recovery_request(
+        &self,
+        q: &QuicRecords,
+        control: ControlRoutes,
+        parent: ControlBinding,
+        sender: &mut QuicEgress,
+        bytes: &[u8],
+    ) -> Result<Option<fr_media::delivery::RecoveryDemand>, Error> {
+        let view =
+            self.check_recovery_host(q, control, parent, sender, Route::Stream(control.inbound))?;
+        sender
+            .egress
+            .admit_recovery_request(bytes, view)
+            .map_err(Error::Media)
+    }
+
+    pub(crate) fn check_recovery_host(
+        &self,
+        q: &QuicRecords,
+        control: ControlRoutes,
+        parent: ControlBinding,
+        sender: &QuicEgress,
+        route: Route,
+    ) -> Result<fr_wire::decoder::Binding, Error> {
         self.check(q)?;
         self.check_recovery_capability()?;
         if self.selection.role != Role::Observe
@@ -52,18 +86,14 @@ impl NegotiatedMedia {
         {
             return Err(Error::InvalidRoutes);
         }
-        let view = super::super::recovery::control_binding(
+        super::super::recovery::control_binding(
             q,
             control,
             parent,
             self.binding(),
             *self.limits.protocol(),
         )
-        .map_err(|_| Error::InvalidRoutes)?;
-        sender
-            .egress
-            .request_recovery(source, bytes, view)
-            .map_err(Error::Media)
+        .map_err(|_| Error::InvalidRoutes)
     }
 
     /// Install the completed NEXT recovery attachment set on the same sender.
@@ -108,5 +138,23 @@ impl NegotiatedMedia {
         sender.routes = routes;
         sender.view = Some(self.binding());
         Ok(setup)
+    }
+}
+
+impl QuicEgress {
+    pub(crate) fn schedule_recovery(
+        &self,
+        q: &QuicRecords,
+        source: &mut CaptureSource,
+        demand: fr_media::delivery::RecoveryDemand,
+    ) -> Result<(), Error> {
+        if self.connection.as_ref().is_none_or(|b| !q.is_bound_to(b)) || q.is_closed() {
+            return Err(Error::ForeignConnection);
+        }
+        self.egress
+            .stream_subscription()
+            .map_err(Error::Media)?
+            .schedule_recovery(source, demand)
+            .map_err(Error::Media)
     }
 }

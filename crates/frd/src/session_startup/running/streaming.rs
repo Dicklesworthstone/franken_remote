@@ -3,6 +3,7 @@
 //! exact pending record. Neither codec waits nor admission refresh block the
 //! other owner's maintenance. The native input Driver remains independent.
 pub(super) mod acquisition;
+mod recovery;
 use super::{ControlledHost, Error, HostSession, Services, now};
 use crate::{
     input_watchdog::{Control, StopReason},
@@ -72,6 +73,7 @@ impl Host {
 /// The stream is already configured and its bootstrap acknowledged. Control,
 /// when present, must already come from the existing initial-grant broker.
 pub struct StreamingHost {
+    recovery: Option<crate::media_quic::NegotiatedMedia>,
     host: Host,
     stream: Stream,
     feedback: Option<HostFeedback>,
@@ -160,6 +162,7 @@ impl StreamingHost {
             feedback,
             presentation,
             clipboard: None,
+            recovery: None,
         })
     }
     pub(crate) fn configure_clipboard(
@@ -297,6 +300,12 @@ impl StreamingHost {
             return Err(Error::Closed);
         }
         self.stream.served = true;
+        if self.recovery.is_some() {
+            if acquisition.is_some() || !matches!(self.host, Host::Observe(_)) {
+                return Err(Error::Order);
+            }
+            return recovery::serve(self, nonce, ticket, other).await;
+        }
         if acquisition.is_some() {
             let session = self.host.session()?;
             crate::native_clipboard::Application::decline_unconfigured(
