@@ -26,8 +26,12 @@ The engineering thesis, from the plan:
 The current workspace contains `fr-core`, `fr-wire`, `fr-media`, `fr-native`, `frd`, and `fr-lab`. From a checkout with Rustup installed, the repository's `rust-toolchain.toml` selects the exact nightly:
 
 ```bash
-./scripts/verify.sh fast
-./scripts/verify.sh docs
+./scripts/verify.sh fast                  # format, workspace check, strict clippy, tests
+./scripts/verify.sh docs                  # verify markdown links & required core design docs
+./scripts/verify.sh count                 # fixed line counter & size discipline budget check
+./scripts/verify.sh audit                 # feature-resolved target dependency & unsafe audit
+./scripts/verify.sh test-fixtures         # planted over-budget and architectural violation tests
+./scripts/verify.sh crate <name> [action] # per-crate verification (fast|check|clippy|test|fmt)
 ```
 
 The fast lane runs formatting, workspace compilation, strict Clippy, and tests with all features, including the explicitly test-only media backend. At source commit `e7d57d5a1a284ec0b8da6374d3eda8613167c1e1`, the [retained Linux verification run](https://github.com/Dicklesworthstone/franken_remote/actions/runs/34231571592) passed **47 core unit tests, 17 media unit tests, 9 media contract tests, and 3 compile-fail doctests**. These are source/policy and fake-backend contract results, not live Asupersync, Tailscale, OS-input, or HEVC hardware qualification.
