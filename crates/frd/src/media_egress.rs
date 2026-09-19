@@ -131,6 +131,17 @@ impl Egress {
             .ok_or(Error::Send(fr_media::delivery::SendError::Closed))?
             .enqueue(unit)
     }
+    /// Native source provenance and each viewer's logical budget remain checked.
+    /// Shared payloads do not bypass the final per-packet authority/pacing gate.
+    pub fn enqueue_shared_capture(
+        &mut self,
+        update: &crate::media::SharedCaptureUpdate,
+    ) -> Result<(), Error> {
+        self.subscription
+            .as_mut()
+            .ok_or(Error::Send(fr_media::delivery::SendError::Closed))?
+            .enqueue_shared_capture(update)
+    }
     pub fn enqueue_capture(&mut self, update: CaptureUpdate) -> Result<(), Error> {
         self.subscription
             .as_mut()

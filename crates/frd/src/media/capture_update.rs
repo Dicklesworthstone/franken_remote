@@ -8,6 +8,9 @@ use fr_core::ids::CodecConfigurationGeneration;
 use fr_media::worker::{Kind, UnchangedCapture, capture_payload, parse_unit};
 use std::{fmt, sync::Arc, time::Duration};
 
+mod shared;
+pub use shared::{FanoutReport, SharedCaptureUpdate};
+
 /// A complete worker result. Only `CaptureSource` can construct this proof. It
 /// owns either one encoded buffer or fixed metadata; no raw capture escapes the
 /// worker. Taking encoded bytes out deliberately loses source provenance.

@@ -13,8 +13,8 @@ use fr_core::{
 use fr_media::{
     access_unit::{EncodedAccessUnit, FrameId, FrameKind},
     delivery::{
-        BudgetUsage, DecodedFrame, DecoderBinding, DeliveryError, DeliveryMode,
-        MediaBindings, MediaEpoch, PacketOffer, ReceivePipeline, SendCache, SendError, SendPolicy,
+        BudgetUsage, DecodedFrame, DecoderBinding, DeliveryError, DeliveryMode, MediaBindings,
+        MediaEpoch, PacketOffer, ReceivePipeline, SendCache, SendError, SendPolicy,
     },
     worker::{Configuration, Kind, Role},
 };
@@ -34,14 +34,14 @@ pub(crate) mod presentation;
 pub(crate) mod presented;
 mod recovery;
 mod recovery_source;
-pub use recovery_source::CaptureRecovery;
 pub use presented::Error as PresentedStateError;
+pub use recovery_source::CaptureRecovery;
 pub(crate) mod receiver_feedback;
 pub use receiver_feedback::Error as ReceiverFeedbackError;
 pub mod renewal;
 #[cfg(target_os = "linux")]
 pub mod streaming;
-pub use capture_update::CaptureUpdate;
+pub use capture_update::{CaptureUpdate, FanoutReport, SharedCaptureUpdate};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
