@@ -212,22 +212,25 @@ fn root_symlinks_and_foreign_writable_directory_are_refused() {
 #[test]
 fn replacing_root_path_does_not_redirect_descriptor_relative_publication() {
     let scratch = Scratch::new();
-    fs::create_dir(scratch.0.join("drop")).unwrap();
+    let drop_path = scratch.0.join("drop");
+    fs::create_dir(&drop_path).unwrap();
+    fs::set_permissions(&drop_path, fs::Permissions::from_mode(0o700)).unwrap();
     let limits = Limits {
         max_file_bytes: 10,
         max_reserved_bytes: 10,
         max_transfers: 1,
     };
-    let root = DropDirectory::open(&scratch.0.join("drop"), limits).unwrap();
+    let root = DropDirectory::open(&drop_path, limits).unwrap();
     let mut transfer = root
         .begin("result", 3, ContentId::from_bytes(b"abc"))
         .unwrap();
-    fs::rename(scratch.0.join("drop"), scratch.0.join("original")).unwrap();
-    fs::create_dir(scratch.0.join("drop")).unwrap();
+    fs::rename(&drop_path, scratch.0.join("original")).unwrap();
+    fs::create_dir(&drop_path).unwrap();
+    fs::set_permissions(&drop_path, fs::Permissions::from_mode(0o700)).unwrap();
     transfer.write_chunk(0, b"abc").unwrap();
     transfer.verify().unwrap();
     transfer.publish().unwrap();
-    assert!(!scratch.0.join("drop/result").exists());
+    assert!(!drop_path.join("result").exists());
     assert_eq!(fs::read(scratch.0.join("original/result")).unwrap(), b"abc");
 }
 
