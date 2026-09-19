@@ -58,6 +58,7 @@ fn sender_cache_enforces_byte_budget_including_metadata() {
         max_repair_rounds: 3,
         repair_bytes_per_window: 2_048,
         repair_window_micros: 250_000,
+        ..SendPolicy::default()
     };
     let (mut tx, limits) = make_sender(custom_policy);
 
@@ -109,6 +110,7 @@ fn sender_cache_enforces_picture_count_limit() {
         max_repair_rounds: 3,
         repair_bytes_per_window: 256_000,
         repair_window_micros: 250_000,
+        ..SendPolicy::default()
     };
     let (mut tx, limits) = make_sender(custom_policy);
 
@@ -165,6 +167,7 @@ fn time_eviction_reclaims_completed_pictures() {
         max_repair_rounds: 3,
         repair_bytes_per_window: 50_000,
         repair_window_micros: 100_000,
+        ..SendPolicy::default()
     };
     let (mut tx, limits) = make_sender(custom_policy);
 
@@ -219,6 +222,7 @@ fn unsent_picture_expiration_fences_dependents_and_forces_recovery() {
         max_repair_rounds: 3,
         repair_bytes_per_window: 50_000,
         repair_window_micros: 100_000,
+        ..SendPolicy::default()
     };
     let (mut tx, limits) = make_sender(custom_policy);
 
