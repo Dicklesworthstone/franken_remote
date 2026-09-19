@@ -271,17 +271,11 @@ impl<U> Session<U> {
             report.picker = desktop.picker_cleanup();
             if cleaned(report)? {
                 if !self.opened {
-                    // No renderer entry means no Launch could reach the decoder
-                    // supervisor. Collect every possible pre-render owner first;
-                    // a missing worker handle alone would NOT establish this.
-                    if !desktop.renderer_started
-                        && matches!(report.media, Ok(None))
-                        && report.input == CaptureCleanup::NotStarted
-                        && report.window == WindowCleanup::NotStarted
-                        && matches!(
-                            report.picker,
-                            PickerCleanup::NotStarted | PickerCleanup::Complete
-                        )
+                    // Desktop retains the one-shot Launch's cleanup custody
+                    // before it can escape to startup. Its successful media
+                    // receipt now proves either no child started or that the
+                    // exact retired child was reaped, even before open returned.
+                    if report.input == CaptureCleanup::NotStarted
                         && matches!(
                             report.clipboard,
                             Ok(frd::native_clipboard::Cleanup::NotStarted)

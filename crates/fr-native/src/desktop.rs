@@ -17,7 +17,7 @@ use frd::{
         NativeObserver, ObserverError, ObserverPolicy, Presentation, StreamingViewerControl,
         StreamingViewerError, Viewer, ViewerStatistics, viewer_events::CaptureCleanup,
     },
-    worker::{Deadline, Launch},
+    worker::{Deadline, Launch, Retirement},
 };
 use std::{
     cell::Cell,
@@ -133,6 +133,7 @@ pub struct Desktop {
     window: Option<ViewerWindow>,
     picker: Option<DisplayPicker>,
     renderer_started: bool,
+    retirement: Option<Retirement>,
     stop: Option<StreamingViewerControl>,
     input: Option<crate::viewer_input::CaptureControl>,
 }
@@ -145,6 +146,7 @@ impl Desktop {
             window: None,
             picker: None,
             renderer_started: false,
+            retirement: None,
             stop: None,
             input: None,
         }
@@ -250,6 +252,7 @@ impl Desktop {
         let window = &mut self.window;
         let picker = &mut self.picker;
         let renderer_started = &mut self.renderer_started;
+        let retirement = &mut self.retirement;
         let picker_stop = stop.clone();
         let observer = &mut self.observer;
         // One content-free failure slot, shared only by these startup futures.
@@ -272,11 +275,19 @@ impl Desktop {
                     )?);
                     let window = window.as_mut().ok_or(viewer_window::Error::NotReady)?;
                     window.ready().await?;
-                    window.decoder_launch(
+                    let launch = window.decoder_launch(
                         &configuration.image,
                         configuration.xauthority.as_deref(),
                         configuration.worker_epoch,
-                    )
+                    )?;
+                    let (launch, owner) = launch
+                        .retain_cleanup()
+                        .map_err(viewer_window::Error::Launch)?;
+                    // Store custody BEFORE the Launch escapes into any nested
+                    // startup future. Failure, timeout, panic and future-drop
+                    // then retain the exact child in this original attempt.
+                    *retirement = Some(owner);
+                    Ok(launch)
                 }
                 .await;
                 result.map_err(|error| report.set(Some(Error::Window(error))))
@@ -457,7 +468,16 @@ impl Desktop {
         async move {
             let media = match &mut self.observer {
                 Some(observer) => observer.reap_media(cleanup, deadline).await.map(Some),
-                None => Ok(None),
+                None => match &mut self.retirement {
+                    Some(owner) => owner
+                        .reap(cleanup, deadline)
+                        .await
+                        .map_err(frd::media::Error::Worker),
+                    // The only Launch factory stores retirement before returning
+                    // it. Absence here proves no launch escaped, even if a native
+                    // window was opened and then failed before decoder startup.
+                    None => Ok(None),
+                },
             };
             let input = self.observer.as_mut().map_or(
                 CaptureCleanup::NotStarted,
