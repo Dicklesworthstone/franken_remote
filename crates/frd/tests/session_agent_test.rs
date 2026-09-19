@@ -181,7 +181,7 @@ fn test_indicator_immediate_revoke_latency_and_async_cleanup() {
     assert!(outcome.os_cleanup.is_complete());
 
     // Releases synthesized
-    assert!(releases.is_empty());
+    assert_eq!(releases.len(), 0);
 }
 
 #[test]
