@@ -572,3 +572,6 @@ fn an_unfinished_decoder_cannot_enter_shared_publication() {
             .unwrap();
     });
 }
+
+#[path = "publisher/service.rs"]
+mod service;

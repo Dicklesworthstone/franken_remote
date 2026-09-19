@@ -85,3 +85,33 @@ and attaching the coordinator to the OS session registry remain separate work.
 No new control path, codec profile, dependency pin, or protocol limit was added.
 
 Refs: plan sections 7, 11.2, 12.3, 17 and 19; fr-p1-frame-pipeline-am1 remains open.
+
+## Continuous source service
+
+`Publisher::serve(capture_interval, report)` owns the continuing raw-capture
+cadence while subscriber connection tasks run independently. The interval must
+respect the configured codec frame rate and cannot exceed one second. Completion
+and backpressure both schedule the next opportunity from the current time;
+missed opportunities do not accumulate into catch-up captures. All-viewer pressure
+pauses raw work rather than producing references that nobody can accept.
+
+While waiting, the loop schedules consent and per-viewer retention maintenance
+within ten milliseconds, or at an earlier media deadline. Timers do not certify
+unchanged pixels or renew source/viewer authority. Last-viewer departure and source
+revocation remain terminal; cancellation before polling or during idle sleep
+fences the cohort and aborts the original worker, which remains available to reap.
+The bounded report callback runs outside policy locks and reports actual capture
+admission only. It receives neither pixels nor authority and cannot trigger an
+encoder catch-up burst by taking time. Connections still service UDP, their
+original observation renewal, and repairs on their own tasks; this source loop
+is not a replacement session transport driver.
+
+Six additional real TLS/UDP/child-process integration tests exercise this service:
+continued delivery after one of two viewers leaves, all-viewer pressure, delayed
+native completion without catch-up, idle source revocation, cancellation before
+polling and during sleep, and invalid cadence refusal. All 25 shared-startup tests
+pass with the updated daemon library. Four private cadence tests also pass in a
+narrow harness containing the exact production Cadence implementation and its
+unchanged inline tests. Strict daemon-library and shared-startup Clippy, formatting
+and diff checks pass. Source/dependency and synthetic-codec qualification limits
+remain those stated above; no current full-workspace or real-HEVC claim is added.
