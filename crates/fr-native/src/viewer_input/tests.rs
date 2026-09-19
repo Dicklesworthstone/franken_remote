@@ -142,6 +142,9 @@ impl Target for Recording {
     fn capabilities(&self) -> Capabilities {
         self.caps
     }
+    fn stop(&self, _: StopReason) {
+        self.probe.stopped.store(true, Ordering::Release);
+    }
     fn push(&mut self, event: Event, sampled: ClientInstant) -> Result<(), StopReason> {
         assert!(self.clock()?.0 - sampled.0 < 100_000);
         let mut events = self.probe.events.lock().unwrap();
@@ -438,3 +441,5 @@ fn native_flood_is_bounded_before_queue_admission() {
 }
 
 mod held;
+
+mod escape;

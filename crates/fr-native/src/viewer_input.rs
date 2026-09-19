@@ -5,6 +5,10 @@
 //! Requires XI2 and exactly one enabled master pointer/keyboard pair. Held input
 //! is sampled at most four times per second, never adopted from another device.
 //! No native queries are issued while nothing is held and no events arrive.
+//! Physical Ctrl+Alt+Shift+Escape is always a local stop, including when remote
+//! keyboard input was not negotiated. Its entire native batch is withheld. The
+//! host agent still owns release of previously submitted remote modifiers.
+mod escape;
 mod held;
 #[cfg(test)]
 mod tests;
@@ -94,6 +98,8 @@ pub enum StopReason {
     InitialHeld,
     Queue,
     InputDevicesChanged,
+    EscapeUnavailable,
+    LocalEscape,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -150,6 +156,8 @@ fn state(value: u8) -> Status {
         12 => Status::Stopped(R::UnsupportedKey),
         13 => Status::Stopped(R::InitialHeld),
         15 => Status::Stopped(R::InputDevicesChanged),
+        16 => Status::Stopped(R::EscapeUnavailable),
+        17 => Status::Stopped(R::LocalEscape),
         _ => Status::Stopped(R::Queue),
     }
 }
@@ -292,6 +300,8 @@ trait Target {
     fn capabilities(&self) -> Capabilities;
     fn push(&mut self, event: Event, sampled: ClientInstant) -> Result<(), StopReason>;
     fn ready(&self);
+    /// Fence the original input owner before any native cleanup can run.
+    fn stop(&self, reason: StopReason);
 }
 struct NativeTarget {
     source: Source,
@@ -308,6 +318,9 @@ impl Target for NativeTarget {
         self.source
             .push(event, sampled)
             .map_err(|_| StopReason::Queue)
+    }
+    fn stop(&self, reason: StopReason) {
+        self.shared.stop(reason);
     }
     fn ready(&self) {
         let _ = self
@@ -336,7 +349,34 @@ fn run(
         )
     };
     let native = Native(NonNull::new(raw).ok_or(StopReason::NativeFailure)?);
-    let mut decoder = Decoder::new(&names, target.capabilities());
+    let guard = NativeRun { native, target };
+    let result = run_events(&guard.native, window, layout, &names, guard.target);
+    guard
+        .target
+        .stop(result.err().unwrap_or(StopReason::Closed));
+    result
+}
+/// Drop order alone is not enough: the target is a borrow and may outlive this
+/// stack. Explicitly fence it BEFORE dropping the native connection, including
+/// unwind. Normal exits record their precise reason before this fallback.
+struct NativeRun<'a, T: Target> {
+    native: Native,
+    target: &'a mut T,
+}
+impl<T: Target> Drop for NativeRun<'_, T> {
+    fn drop(&mut self) {
+        self.target.stop(StopReason::NativeFailure);
+    }
+}
+fn run_events(
+    native: &Native,
+    window: Window,
+    layout: &Layout,
+    names: &[[u8; 4]; 256],
+    target: &mut impl Target,
+) -> Result<(), StopReason> {
+    let mut escape = escape::LocalEscape::new(names)?;
+    let mut decoder = Decoder::new(names, target.capabilities());
     let mut timeline: Option<Timeline> = None;
     let mut sampler = held::Sampler::new(target.clock()?)?;
     loop {
@@ -344,20 +384,24 @@ fn run(
         // release-only sampling even when no event arrives (e.g. a lost release).
         // The first dequeued event is retained, never retimestamped as fresh.
         let first = if timeline.is_some() {
-            await_event(&native, target, &decoder, &sampler)?
+            await_event(native, target, &decoder, &sampler)?
         } else {
             None
         };
         let before = target.clock()?;
         let sample = timeline.is_some() && sampler.due(&decoder, before);
         if sample {
-            sampler.begin(&native, before)?;
+            sampler.begin(native, before)?;
         }
-        let (events, used, barrier) = batch(&native, target, window, first, before)?;
+        let (events, used, barrier) = batch(native, target, window, first, before)?;
+        // Local escape is negative authority only. Scan the complete bounded
+        // native batch BEFORE waiting for held-state replies or exporting any
+        // event. The triggering key and all its batch companions stay local.
+        escape.inspect(&events[..used])?;
         // Consume both replies before the next turn, even when the snapshot is
         // unusable. Nothing here increases the original native turn deadline.
         let snapshot = if sample {
-            Some(held::complete(&native, target, before)?)
+            Some(held::complete(native, target, before)?)
         } else {
             None
         };
@@ -375,6 +419,7 @@ fn run(
                 }
             }
             if let Some(snapshot) = snapshot.filter(|_| held::stable(&events[..used])) {
+                escape.reconcile(&snapshot.keys);
                 let observed = decoder.reconcile(&snapshot)?;
                 // Later native events occur after this server barrier. Preserve
                 // that lower bound across millisecond timestamp quantization.
