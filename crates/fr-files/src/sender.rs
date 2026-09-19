@@ -149,7 +149,7 @@ struct Transfer {
 /// only requests local source shutdown; it cannot retire a connection it does not
 /// own or certify completion of a blocked kernel read.
 pub struct Sender<'a> {
-    lane: &'a mut FilesChannel,
+    lane: ChannelOwner<'a>,
     connection: ConnectionBinding,
     cx: Cx,
     clock: TimerDriverHandle,
@@ -157,6 +157,44 @@ pub struct Sender<'a> {
     next: u64,
     transfer: Option<Transfer>,
     closed: bool,
+}
+// Both entry points use the same transfer state machine and sequence domain.
+// Owning the channel avoids a self-referential running session; borrowing keeps
+// the existing API and its exclusive-access guarantees intact.
+enum ChannelOwner<'a> {
+    Borrowed(&'a mut FilesChannel),
+    Owned(Box<FilesChannel>),
+}
+impl std::ops::Deref for ChannelOwner<'_> {
+    type Target = FilesChannel;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(channel) => channel,
+            Self::Owned(channel) => channel,
+        }
+    }
+}
+impl std::ops::DerefMut for ChannelOwner<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Borrowed(channel) => channel,
+            Self::Owned(channel) => channel,
+        }
+    }
+}
+impl Sender<'static> {
+    /// Consume the completed original channel for storage in a running session.
+    /// No new attachment, authority, transfer identity or runtime is created.
+    /// Call `cancel` before closing the parent and keep this owner until source
+    /// cleanup/results are collected. Abandonment conservatively fences the lane.
+    pub fn owning(
+        cx: Cx,
+        q: &QuicRecords,
+        lane: FilesChannel,
+        policy: Policy,
+    ) -> Result<Self, Error> {
+        Self::with_channel(cx, q, ChannelOwner::Owned(Box::new(lane)), policy)
+    }
 }
 impl std::fmt::Debug for Sender<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -170,6 +208,14 @@ impl<'a> Sender<'a> {
         cx: Cx,
         q: &QuicRecords,
         lane: &'a mut FilesChannel,
+        policy: Policy,
+    ) -> Result<Self, Error> {
+        Self::with_channel(cx, q, ChannelOwner::Borrowed(lane), policy)
+    }
+    fn with_channel(
+        cx: Cx,
+        q: &QuicRecords,
+        lane: ChannelOwner<'a>,
         policy: Policy,
     ) -> Result<Self, Error> {
         lane.check(q).map_err(Error::Transport)?;
@@ -198,6 +244,11 @@ impl<'a> Sender<'a> {
             transfer: None,
             closed: false,
         })
+    }
+    /// The containing session must reserve this route for this owner, including
+    /// while a transfer is pending or its result has not yet been collected.
+    pub fn owns_inbound(&self, route: quic::Route) -> bool {
+        self.lane.owns_inbound(route)
     }
     pub fn stage(&self) -> Stage {
         self.transfer.as_ref().map_or(
