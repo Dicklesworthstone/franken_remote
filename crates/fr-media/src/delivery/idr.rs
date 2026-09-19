@@ -43,6 +43,13 @@ impl IdrCoalescer {
         self.check_clock(now)?;
         demand.check(cache, now)?;
         let until = demand.deadline_micros();
+        // An idle encoder owner may receive a new request before polling take().
+        // Retire an already expired cohort instead of poisoning the new viewer's
+        // valid demand with its deadline. This never changes next_allowed, and
+        // invalid demands cannot retire work because ownership was checked first.
+        if self.pending.is_some_and(|pending| now >= pending.until) {
+            self.pending = None;
+        }
         // Consume the unique proof even when another viewer already queued work.
         drop(demand);
         match &mut self.pending {
@@ -106,5 +113,141 @@ impl IdrCoalescer {
         }
         self.last_now = Some(now);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::delivery::{MediaBindings, MediaEpoch, RecoveryDisposition, SendPolicy};
+    use fr_core::{ids::*, limits::ProtocolLimits};
+    use fr_wire::{
+        MediaLimits,
+        decoder::Binding,
+        input::{InputDelivery, InputDirection},
+        negotiation::ControlBinding,
+        recovery_request::{self, Reason, Request},
+    };
+
+    fn sender(horizon: u64) -> SendCache {
+        SendCache::new(
+            MediaLimits::new(ProtocolLimits::ABSOLUTE, 1150, 16_384, 64).unwrap(),
+            MediaBindings::new(1, 2, 3, 4).unwrap(),
+            MediaEpoch {
+                configuration: CodecConfigurationGeneration::INITIAL,
+                recovery: RecoveryGeneration::INITIAL,
+            },
+            SendPolicy {
+                recovery_horizon_micros: horizon,
+                ..SendPolicy::default()
+            },
+        )
+        .unwrap()
+    }
+    fn demand(cache: &mut SendCache, now: u64) -> RecoveryDemand {
+        let binding = Binding {
+            parent: ControlBinding {
+                id: 10,
+                host_boot: HostBootId::from_raw(1),
+                os_session: OsSessionId::from_raw(2),
+                remote_session: RemoteSessionId::from_raw(3),
+            },
+            display: 4,
+            geometry: DisplayGeometryGeneration::INITIAL,
+            configuration: CodecConfigurationGeneration::INITIAL,
+            recovery: RecoveryGeneration::INITIAL,
+            viewport: ViewportMappingGeneration::INITIAL,
+        };
+        let mut bytes = [0; recovery_request::REQUEST_BYTES];
+        recovery_request::encode(
+            Request {
+                reason: Reason::ReferenceExpired,
+                last_useful_frame: None,
+            },
+            binding,
+            &ProtocolLimits::ABSOLUTE,
+            &mut bytes,
+            InputDirection::ViewerToHost,
+            InputDelivery::Reliable,
+        )
+        .unwrap();
+        match cache.request_recovery(&bytes, binding, now).unwrap() {
+            RecoveryDisposition::Accepted(demand) => demand,
+            RecoveryDisposition::Coalesced => panic!("expected a new request"),
+        }
+    }
+    fn queue(idr: &mut IdrCoalescer, cache: &mut SendCache, now: u64) {
+        let demand = demand(cache, now);
+        idr.queue(cache, demand, now).unwrap();
+    }
+    #[test]
+    fn a_late_viewer_does_not_inherit_an_expired_cohorts_deadline() {
+        let mut idr = IdrCoalescer::new(500_000).unwrap();
+        let mut old = sender(100);
+        let mut new = sender(2_000_000);
+        queue(&mut idr, &mut old, 0);
+        // The capture owner has not polled take() yet. Expired work belongs to
+        // the failed cohort, not the next viewer admitted on this same source.
+        queue(&mut idr, &mut new, 101);
+        assert_eq!(idr.next_deadline(), Some(101));
+        assert_eq!(idr.take(101).unwrap(), Some(2_000_101));
+        assert_eq!(
+            old.tick(101),
+            Err(crate::delivery::SendError::Delivery(
+                DeliveryError::RecoveryExpired
+            ))
+        );
+        assert_eq!(new.next_deadline(), Some(2_000_101));
+    }
+    #[test]
+    fn the_exact_expiry_boundary_starts_a_new_cohort() {
+        let mut idr = IdrCoalescer::new(100_000).unwrap();
+        queue(&mut idr, &mut sender(100), 0);
+        queue(&mut idr, &mut sender(2_000_000), 100);
+        assert_eq!(idr.take(100).unwrap(), Some(2_000_100));
+    }
+    #[test]
+    fn an_unexpired_cohort_keeps_its_original_deadline() {
+        let mut idr = IdrCoalescer::new(100_000).unwrap();
+        queue(&mut idr, &mut sender(100), 0);
+        queue(&mut idr, &mut sender(2_000_000), 99);
+        assert_eq!(idr.take(99).unwrap(), Some(100));
+    }
+    #[test]
+    fn retiring_expired_work_never_refills_encoder_rate_credit() {
+        let mut idr = IdrCoalescer::new(500_000).unwrap();
+        queue(&mut idr, &mut sender(2_000_000), 0);
+        assert_eq!(idr.take(0).unwrap(), Some(2_000_000));
+        queue(&mut idr, &mut sender(100_000), 1);
+        // Even repeated expiry/arrival cycles cannot create an early enqueue.
+        for now in [100_001, 200_001, 300_001, 400_001] {
+            queue(&mut idr, &mut sender(100_000), now);
+            assert_eq!(idr.take(now).unwrap(), None);
+        }
+        queue(&mut idr, &mut sender(2_000_000), 500_001);
+        assert_eq!(idr.take(500_001).unwrap(), Some(2_500_001));
+        queue(&mut idr, &mut sender(2_000_000), 500_002);
+        assert_eq!(idr.next_deadline(), Some(1_000_001));
+        assert_eq!(idr.take(1_000_000).unwrap(), None);
+        assert_eq!(idr.take(1_000_001).unwrap(), Some(2_500_002));
+    }
+    #[test]
+    fn invalid_demands_cannot_clear_or_extend_another_cohort() {
+        let mut idr = IdrCoalescer::new(500_000).unwrap();
+        queue(&mut idr, &mut sender(2_000_000), 0);
+        let mut foreign = sender(2_000_000);
+        let wrong_owner = sender(2_000_000);
+        assert_eq!(
+            idr.queue(&wrong_owner, demand(&mut foreign, 1), 1),
+            Err(DeliveryError::StaleGeneration)
+        );
+        let mut expired = sender(10);
+        let proof = demand(&mut expired, 2);
+        assert_eq!(
+            idr.queue(&expired, proof, 12),
+            Err(DeliveryError::RecoveryExpired)
+        );
+        assert_eq!(idr.next_deadline(), Some(0));
+        assert_eq!(idr.take(12).unwrap(), Some(2_000_000));
     }
 }
