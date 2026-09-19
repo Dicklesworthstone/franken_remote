@@ -379,3 +379,6 @@ fn an_expired_failed_viewer_does_not_reset_the_shared_capture_worker() {
         stop(&mut source, &cx).await;
     });
 }
+
+#[path = "native_recovery/split.rs"]
+mod split;

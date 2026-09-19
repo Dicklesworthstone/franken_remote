@@ -93,14 +93,14 @@ impl DiscoveredSource {
             control.check()?;
             let worker = discovery.into_worker()?;
             guard.complete = true;
+            let source = Arc::new(());
             Ok(CaptureSource {
                 worker,
                 configuration,
                 next: Some(FrameId::FIRST),
-                source: Arc::new(()),
+                source: source.clone(),
                 last_capture: None,
-                recovery: fr_media::delivery::IdrCoalescer::new(500_000)
-                    .map_err(Error::Receiver)?,
+                recovery: super::recovery_source::SourceRecovery::new(&source)?,
                 selected_control: Some(control),
             })
         })

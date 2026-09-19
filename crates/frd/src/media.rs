@@ -13,7 +13,7 @@ use fr_core::{
 use fr_media::{
     access_unit::{EncodedAccessUnit, FrameId, FrameKind},
     delivery::{
-        BudgetUsage, DecodedFrame, DecoderBinding, DeliveryError, DeliveryMode, IdrCoalescer,
+        BudgetUsage, DecodedFrame, DecoderBinding, DeliveryError, DeliveryMode,
         MediaBindings, MediaEpoch, PacketOffer, ReceivePipeline, SendCache, SendError, SendPolicy,
     },
     worker::{Configuration, Kind, Role},
@@ -33,6 +33,8 @@ mod grant;
 pub(crate) mod presentation;
 pub(crate) mod presented;
 mod recovery;
+mod recovery_source;
+pub use recovery_source::CaptureRecovery;
 pub use presented::Error as PresentedStateError;
 pub(crate) mod receiver_feedback;
 pub use receiver_feedback::Error as ReceiverFeedbackError;
@@ -259,7 +261,7 @@ pub struct CaptureSource {
     next: Option<FrameId>,
     source: Arc<()>,
     last_capture: Option<FrameId>,
-    recovery: IdrCoalescer,
+    recovery: recovery_source::SourceRecovery,
     selected_control: Option<ObservationControl>,
 }
 impl CaptureSource {
@@ -280,13 +282,14 @@ impl CaptureSource {
             return Err(Error::InvalidFrame);
         }
         control.check()?;
+        let source = Arc::new(());
         Ok(Self {
             worker,
             configuration,
             next: Some(FrameId::FIRST),
-            source: Arc::new(()),
+            source: source.clone(),
             last_capture: None,
-            recovery: IdrCoalescer::new(500_000).map_err(Error::Receiver)?,
+            recovery: recovery_source::SourceRecovery::new(&source)?,
             selected_control: None,
         })
     }
@@ -303,7 +306,7 @@ impl CaptureSource {
         }
         self.source = Arc::new(());
         self.last_capture = None;
-        self.recovery.cancel_pending();
+        self.recovery.retire(&self.source);
         &mut self.worker
     }
 }

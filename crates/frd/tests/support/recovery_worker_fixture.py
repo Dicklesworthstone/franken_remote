@@ -44,6 +44,8 @@ while True:
         reply(h, 259, b"")
         continue
     if kind == 7 and not force and last is not None:
+        if MODE == "delay-unchanged":
+            time.sleep(0.05)
         reply(h, 265, struct.pack(">QQQ", frame, last, observed))
         continue
     idr = last is None or (force and MODE != "ignore-force")
