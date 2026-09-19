@@ -244,6 +244,17 @@ fn connect(
         "invalid_worker_configuration",
         "Select a trusted locally installed worker and the matching local graphical-session settings.",
     ))?;
+    let configuration = match connection.fit_window {
+        Some((width, height)) => configuration
+            .with_fitted_window(width, height)
+            .map_err(|_| {
+                failure(
+                    "invalid_window_size",
+                    "Choose bounded, even physical-pixel dimensions for --fit.",
+                )
+            })?,
+        None => configuration,
+    };
     let configuration = if connection.display == DisplayChoice::Choose {
         configuration.with_display_picker()
     } else {

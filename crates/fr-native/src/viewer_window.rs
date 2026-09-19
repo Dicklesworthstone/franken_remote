@@ -1,4 +1,4 @@
-//! A client-owned native-pixel X11 window, never a decoder-selected input target.
+//! A client-owned fixed-size X11 window, never a decoder-selected input target.
 //!
 //! Retain the ORIGINAL viewer stop handle before starting this window or its
 //! decoder. One locally created drawable is shared with the supervised decoder
@@ -248,6 +248,20 @@ impl ViewerWindow {
         let target = self.control.target()?;
         Launch::new(image, &self.display, xauthority, Role::Present, epoch)
             .and_then(|launch| launch.present_in(target))
+            .map_err(Error::Launch)
+    }
+    /// Explicit local downscale into this immutable window. This retains the
+    /// same native target and lifetime as `decoder_launch`; it never resizes the
+    /// remote desktop or treats a changed target as renewed input authority.
+    pub fn fitted_decoder_launch(
+        &self,
+        image: &Path,
+        xauthority: Option<&Path>,
+        epoch: u128,
+    ) -> Result<Launch, Error> {
+        let target = self.control.target()?;
+        Launch::new(image, &self.display, xauthority, Role::Present, epoch)
+            .and_then(|launch| launch.present_fitted_in(target))
             .map_err(Error::Launch)
     }
     /// Nonblocking and idempotent. Some proves only this native thread ended,

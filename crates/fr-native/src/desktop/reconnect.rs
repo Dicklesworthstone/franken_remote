@@ -47,7 +47,7 @@ pub trait Ui {
         Err(CallbackError)
     }
     /// Only this callback may explicitly request control on Viewing. Return a
-    /// confirmed native-pixel Layout once Controlled to attach original input.
+    /// confirmed renderer-matching Layout once Controlled to attach original input.
     fn interactive(
         &mut self,
         _attempt: u8,
@@ -143,6 +143,7 @@ impl<U> Session<U> {
         )
         .map(|mut configuration| {
             configuration.display_picker = base.display_picker;
+            configuration.fit_window = base.fit_window;
             configuration
         })
         .map_err(|_| ObserverError::Application)

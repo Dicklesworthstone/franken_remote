@@ -144,3 +144,27 @@ fn a_file_cleanup_failure_blocks_next_attempt_and_keeps_its_original_receipt() {
         frd::session_startup::FileSendOutcome::PublicationUnknown
     );
 }
+
+#[test]
+fn fit_policy_survives_reconnect_without_reusing_native_owners_or_input() {
+    let mut original = session(71);
+    assert_eq!(original.configuration(1).unwrap().fit_window, None);
+    original.configuration = original.configuration.with_fitted_window(960, 540).unwrap();
+    for attempt in [1, 2, 32] {
+        let next = original.configuration(attempt).unwrap();
+        assert_eq!(next.fit_window, Some((960, 540)));
+        assert_eq!(next.worker_epoch, 70 + u128::from(attempt));
+        let desktop = Desktop::new(next);
+        assert!(desktop.window().is_none());
+        assert!(!desktop.renderer_started);
+        assert!(desktop.stop.is_none());
+    }
+    for (width, height) in [(0, 540), (959, 540), (960, 539), (u32::MAX, 540)] {
+        assert!(
+            session(71)
+                .configuration
+                .with_fitted_window(width, height)
+                .is_err()
+        );
+    }
+}

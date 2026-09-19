@@ -37,6 +37,7 @@ pub struct Configuration {
     xauthority: Option<PathBuf>,
     worker_epoch: u128,
     display_picker: bool,
+    fit_window: Option<(u32, u32)>,
 }
 impl Configuration {
     pub fn new(
@@ -53,7 +54,18 @@ impl Configuration {
             xauthority: xauthority.map(Path::to_path_buf),
             worker_epoch,
             display_picker: false,
+            fit_window: None,
         })
+    }
+    /// Explicit maximum window size in physical pixels. The full remote image
+    /// is aspect-fit with nearest-neighbour CPU sampling and opaque black bars;
+    /// native resolution is unchanged and no input is granted. Actual window
+    /// dimensions are capped at the selected image to forbid upscaling.
+    pub fn with_fitted_window(mut self, width: u32, height: u32) -> Result<Self, Error> {
+        fr_media::worker::presentation::X11Target::new(1, width, height)
+            .map_err(|_| Error::Window(viewer_window::Error::InvalidSize))?;
+        self.fit_window = Some((width, height));
+        Ok(self)
     }
     /// Use a fresh native choice surface in THIS approved selection exchange.
     /// The callback passed to `open` is not used to choose in this mode. No
@@ -272,19 +284,32 @@ impl Desktop {
                 // evidence, not an inference from a missing worker handle.
                 *renderer_started = true;
                 let result = async {
+                    let (width, height) = configuration
+                        .fit_window
+                        .map_or((display.pixel_width, display.pixel_height), |(w, h)| {
+                            (w.min(display.pixel_width), h.min(display.pixel_height))
+                        });
                     *window = Some(ViewerWindow::start(
                         &configuration.display,
-                        display.pixel_width,
-                        display.pixel_height,
+                        width,
+                        height,
                         original,
                     )?);
                     let window = window.as_mut().ok_or(viewer_window::Error::NotReady)?;
                     window.ready().await?;
-                    let launch = window.decoder_launch(
-                        &configuration.image,
-                        configuration.xauthority.as_deref(),
-                        configuration.worker_epoch,
-                    )?;
+                    let launch = if configuration.fit_window.is_some() {
+                        window.fitted_decoder_launch(
+                            &configuration.image,
+                            configuration.xauthority.as_deref(),
+                            configuration.worker_epoch,
+                        )?
+                    } else {
+                        window.decoder_launch(
+                            &configuration.image,
+                            configuration.xauthority.as_deref(),
+                            configuration.worker_epoch,
+                        )?
+                    };
                     let (launch, owner) = launch
                         .retain_cleanup()
                         .map_err(viewer_window::Error::Launch)?;
@@ -380,6 +405,7 @@ impl Desktop {
         if self.state() != State::Viewing {
             return Err(Error::NotViewing);
         }
+        let fitted = self.configuration.fit_window.is_some();
         let window = self.window().ok_or(Error::NotViewing)?;
         let display = self.observer.as_ref().ok_or(Error::NotViewing)?.display();
         let local = &self.configuration.display;
@@ -403,7 +429,11 @@ impl Desktop {
                                     return Err(Error::CaptureAlreadyStarted);
                                 }
                                 let target = window.input_window().map_err(Error::Window)?;
-                                check_layout(display, target, &layout)?;
+                                if fitted {
+                                    check_fitted_layout(display, target, &layout)?;
+                                } else {
+                                    check_layout(display, target, &layout)?;
+                                }
                                 *input = Some(
                                     crate::viewer_input::X11InputCapture::attach(
                                         viewer, local, target, layout,
@@ -549,6 +579,40 @@ fn check_layout(
         || layout.source() != source
         || layout.destination() != destination
     {
+        return Err(Error::LayoutMismatch);
+    }
+    Ok(())
+}
+
+fn check_fitted_layout(
+    display: Display,
+    window: crate::viewer_input::Window,
+    layout: &frd::session_startup::viewer_events::Layout,
+) -> Result<(), Error> {
+    use fr_client::input::viewport::SurfaceRect;
+    use fr_core::input::{DesktopPoint, InputBounds};
+    use fr_media::worker::presentation::{Fit, X11Target};
+    let source = InputBounds::new(
+        DesktopPoint {
+            x: display.x,
+            y: display.y,
+        },
+        display.pixel_width,
+        display.pixel_height,
+    )
+    .ok_or(Error::LayoutMismatch)?;
+    let target = X11Target::new(window.id, window.width, window.height)
+        .map_err(|_| Error::LayoutMismatch)?;
+    let fit = Fit::new(display.pixel_width, display.pixel_height, target)
+        .map_err(|_| Error::LayoutMismatch)?;
+    let destination = SurfaceRect::new(
+        i32::try_from(fit.x).map_err(|_| Error::LayoutMismatch)?,
+        i32::try_from(fit.y).map_err(|_| Error::LayoutMismatch)?,
+        fit.width,
+        fit.height,
+    )
+    .map_err(|_| Error::LayoutMismatch)?;
+    if layout.source() != source || layout.destination() != destination {
         return Err(Error::LayoutMismatch);
     }
     Ok(())

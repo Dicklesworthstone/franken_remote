@@ -318,3 +318,47 @@ mod desktop;
 
 #[path = "viewer_window/picker.rs"]
 mod picker;
+
+#[cfg(feature = "linux-media")]
+#[test]
+fn fitted_renderer_uses_the_original_ui_drawable_and_window_stop_owner() {
+    use fr_native::{BgraFrame, FittedFrame, X11Surface};
+    let desktop = Desktop::start();
+    let runtime = support::runtime();
+    let session = viewer(&runtime);
+    let original = session.control();
+    let mut window = ViewerWindow::start(&desktop.display, 160, 160, original.clone()).unwrap();
+    let (control, id) = mapped(&window);
+    let target = control.target().unwrap();
+    let input = control.input_window().unwrap();
+    assert_eq!((input.id, input.width, input.height), (id, 160, 160));
+    let launch = window
+        .fitted_decoder_launch(Path::new("/qualified/package/fr-media-worker"), None, 17)
+        .unwrap();
+    // A launch descriptor is not a started decoder, permission or visibility.
+    drop(launch);
+    assert!(!original.is_stopped());
+    let limits = ProtocolLimits::ABSOLUTE;
+    let mut renderer = X11Surface::present_in(Some(&desktop.display), target, limits).unwrap();
+    let mut readback = X11Surface::present_in(Some(&desktop.display), target, limits).unwrap();
+    let mut fit = FittedFrame::new(320, 240, target, limits).unwrap();
+    let source = BgraFrame::new(320, 240, [29, 51, 83, 255].repeat(320 * 240), &limits).unwrap();
+    let output = fit.render(&source).unwrap();
+    renderer.present(output).unwrap();
+    let observed = readback.snapshot().unwrap();
+    assert_eq!(observed.pixels(), output.pixels());
+    assert_eq!(&observed.pixels()[..4], &[0, 0, 0, 255]);
+    let first_image_pixel = 20 * 160 * 4;
+    assert_eq!(
+        &observed.pixels()[first_image_pixel..first_image_pixel + 4],
+        &[29, 51, 83, 255]
+    );
+    drop(renderer);
+    drop(readback);
+    assert_eq!(desktop.peer(id, "exists"), "1");
+    assert!(!original.is_stopped());
+    control.stop();
+    assert!(original.is_stopped());
+    finish(&mut window, StopReason::User);
+    assert_eq!(desktop.peer(id, "exists"), "0");
+}

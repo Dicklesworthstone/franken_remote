@@ -30,6 +30,7 @@ pub struct Connection {
     pub worker: PathBuf,
     pub x_display: Option<String>,
     pub attempts: u8,
+    pub fit_window: Option<(u32, u32)>,
 }
 /// Explicit policies only. `Only` refuses ambiguity; it is never "first" or an
 /// invented primary display. Both policies are reevaluated on each live catalog.
@@ -114,6 +115,20 @@ pub fn parse(args: &[String]) -> Result<Options, Failure> {
     };
     parse_command(args, index, node, args[0] == "displays", doctor)
 }
+fn fitted_size(dimensions: &str) -> Result<(u32, u32), Failure> {
+    let (w, h) = dimensions.split_once('x').ok_or_else(usage)?;
+    if w.is_empty()
+        || h.is_empty()
+        || !w.bytes().all(|c| c.is_ascii_digit())
+        || !h.bytes().all(|c| c.is_ascii_digit())
+    {
+        return Err(usage());
+    }
+    let width = w.parse::<u32>().map_err(|_| usage())?;
+    let height = h.parse::<u32>().map_err(|_| usage())?;
+    fr_media::worker::presentation::X11Target::new(1, width, height).map_err(|_| usage())?;
+    Ok((width, height))
+}
 fn parse_command(
     args: &[String],
     mut index: usize,
@@ -128,6 +143,7 @@ fn parse_command(
         (false, None, false, false, false, false);
     let (mut display, mut worker, mut roots, mut x_display) = (None, None, None, None);
     let (mut port, mut attempts) = (8443_u16, 5_u8);
+    let mut fit_window = None;
     while index < args.len() {
         let flag = args[index].as_str();
         index += 1;
@@ -164,6 +180,7 @@ fn parse_command(
                     DisplayChoice::Handle(handle)
                 });
             }
+            "--fit" if connect => fit_window = Some(fitted_size(&value(&mut index)?)?),
             "--worker" if connect => worker = Some(path(value(&mut index)?)?),
             "--trust-roots" if remote || doctor => roots = Some(path(value(&mut index)?)?),
             "--x-display" if connect => x_display = Some(value(&mut index)?),
@@ -210,6 +227,7 @@ fn parse_command(
                 worker: worker.ok_or_else(usage)?,
                 x_display,
                 attempts,
+                fit_window,
             })
         }
     } else if doctor {
@@ -400,6 +418,69 @@ mod picker_tests {
         let mut duplicate = args;
         duplicate.extend(["--display".into(), "only".into()]);
         assert!(parse(&duplicate).is_err());
+    }
+}
+
+#[cfg(test)]
+mod fit_tests {
+    use super::*;
+    const CONNECT: &str = "connect n-peer --view-only --experimental-native --worker /opt/fr/worker --trust-roots /opt/fr/ca.pem --display only";
+    fn options(s: &str) -> Result<Options, Failure> {
+        parse(&s.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
+    }
+    #[test]
+    fn fit_is_an_explicit_bounded_local_rendering_choice() {
+        for (suffix, expected) in [
+            ("", None),
+            (" --fit 960x540", Some((960, 540))),
+            (" --fit 16x16", Some((16, 16))),
+        ] {
+            let Command::Connect(connection) =
+                options(&format!("{CONNECT}{suffix}")).unwrap().command
+            else {
+                panic!("connection required")
+            };
+            assert_eq!(connection.fit_window, expected);
+            assert_eq!(connection.display, DisplayChoice::Only);
+        }
+        assert_eq!(
+            options("connect n-peer --fit 960x540").err().unwrap().code,
+            "control_ui_unavailable"
+        );
+    }
+    #[test]
+    fn malformed_oversized_and_non_connection_fit_settings_refuse_before_io() {
+        for value in [
+            "",
+            "0x0",
+            "15x16",
+            "960x539",
+            "959x540",
+            "4294967296x540",
+            "16384x16384",
+            "960X540",
+            "960x540x2",
+            "+960x540",
+            "-960x540",
+            "960x",
+            "x540",
+            "960.0x540",
+            "960x540 --fit 320x240",
+        ] {
+            assert_eq!(
+                options(&format!("{CONNECT} --fit {value}"))
+                    .err()
+                    .unwrap()
+                    .code,
+                "invalid_arguments"
+            );
+        }
+        for command in [
+            "hosts --fit 960x540",
+            "displays n-peer --experimental-native --trust-roots /opt/fr/ca.pem --fit 960x540",
+        ] {
+            assert_eq!(options(command).err().unwrap().code, "invalid_arguments");
+        }
     }
 }
 
