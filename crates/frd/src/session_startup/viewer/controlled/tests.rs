@@ -86,6 +86,7 @@ fn block(_: Route, _: &[u8]) -> Result<Disposition, ()> {
     Ok(Disposition::Blocked)
 }
 struct Fixture {
+    file_channels: Option<(quic::MediaChannel, quic::MediaChannel)>,
     clipboard_channels: Option<(quic::MediaChannel, quic::MediaChannel)>,
     presenter: Option<crate::media::Presenter>,
     video: quic::DatagramRoute,
@@ -173,6 +174,7 @@ enum ClipboardMode {
     Disabled,
     Attached,
     Negotiate,
+    Files,
 }
 #[allow(clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 async fn fixture_with_clipboard(
@@ -198,7 +200,10 @@ async fn fixture_with_clipboard(
         required: true,
     })
     .collect();
-    if clipboard != ClipboardMode::Disabled {
+    if matches!(
+        clipboard,
+        ClipboardMode::Attached | ClipboardMode::Negotiate
+    ) {
         for name in [
             attachment::CLIPBOARD_CAPABILITY,
             fr_wire::clipboard::CAPABILITY,
@@ -216,6 +221,15 @@ async fn fixture_with_clipboard(
             version: 1,
             required: false,
         });
+    }
+    if clipboard == ClipboardMode::Files {
+        for name in [attachment::FILES_CAPABILITY, fr_wire::files::CAPABILITY] {
+            wire_capabilities.push(WireCapability {
+                name: name.into(),
+                version: 1,
+                required: false,
+            });
+        }
     }
     if feedback {
         wire_capabilities.push(WireCapability {
@@ -271,6 +285,21 @@ async fn fixture_with_clipboard(
         11,
     )
     .await;
+    let file_channels = if clipboard == ClipboardMode::Files {
+        Some(
+            attach(
+                &mut host,
+                &mut viewer,
+                client_cx,
+                host_cx,
+                MediaRole::Files,
+                12,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
     let clipboard_channels = if clipboard == ClipboardMode::Attached {
         Some(
             attach(
@@ -533,6 +562,7 @@ async fn fixture_with_clipboard(
             .unwrap()
     };
     Fixture {
+        file_channels,
         clipboard_channels,
         presenter,
         video,
@@ -612,6 +642,7 @@ async fn turn(
         clock.service(state.host.io().unwrap().0).unwrap();
     }
     Box::pin(support::both(state.host.drive(Duration::from_millis(1),||nonce(counter),||{*stamp+=1;Some(InputTicketId::from_raw(*stamp))},block),state.viewer.drive(Duration::from_millis(1),|_|{},|route,bytes| {
+        assert!(!matches!(route,Route::Stream(s) if s.messages==quic::Messages::Files), "file records escaped into media callback");
         if matches!(route,Route::Stream(s) if s.messages==quic::Messages::Exact(Kind::Progress as u16)) {
             state.receiver.receive(Channel::MediaConfig,bytes,now(client_cx).unwrap()).map_err(|_|())?;Ok(Disposition::Consumed)
         }else{Ok(Disposition::Blocked)}
@@ -1179,3 +1210,5 @@ fn original_context_stop_is_visible_to_the_promoted_input_owner_immediately() {
         drop(state);
     });
 }
+
+mod files;

@@ -2,6 +2,7 @@
 //! Decode/present work stays off this task; qualified callbacks arrive between turns.
 mod clipboard;
 pub mod events;
+mod files;
 pub mod request;
 mod viewport;
 use super::{ViewerSession, now};
@@ -32,6 +33,7 @@ use std::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Clipboard(crate::clipboard_quic::Error),
+    Files(fr_files::sender::Error),
     Session(super::Error),
     Input(input_quic::Error),
     View(presentation::Error),
@@ -99,6 +101,7 @@ pub struct ControlledViewer {
     native_capture: Option<Box<dyn events::NativeCapture>>,
     clipboard: Option<crate::clipboard_quic::Bridge>,
     clipboard_setup: crate::session_startup::clipboard::Setup,
+    files: files::Slot,
 }
 impl std::fmt::Debug for ControlledViewer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -192,6 +195,7 @@ impl ViewerSession {
             native_capture: None,
             clipboard: None,
             clipboard_setup: crate::session_startup::clipboard::Setup::default(),
+            files: files::Slot::default(),
         })
     }
 }
@@ -238,6 +242,7 @@ impl ControlledViewer {
     pub fn close(&mut self) {
         // Fence the original authority before invoking any adapter or cleanup.
         self.control.stop();
+        let _ = self.files.stop(&mut self.session.transport);
         if let Some(capture) = &self.native_capture {
             capture.stop();
         }
@@ -441,13 +446,15 @@ impl ControlledViewer {
         let limits = self.media.limits();
         let inbound = self.session.routes.inbound;
         let cx = self.session.cx.clone();
+        let files = &self.files;
         let clipboard = &self.clipboard;
         let clipboard_setup = &self.clipboard_setup;
         let input = &mut self.input;
         let last_result = &mut self.last_result;
         let mut failure = None;
         let receive = self.session.step(&mut |route, bytes| {
-            if clipboard.as_ref().is_some_and(|c| c.owns_inbound(route))
+            if files.owns(route)
+                || clipboard.as_ref().is_some_and(|c| c.owns_inbound(route))
                 || clipboard_setup.owns(route, bytes)
             {
                 return Ok(Disposition::Blocked);
@@ -511,6 +518,8 @@ impl ControlledViewer {
         receive?;
         self.service_clipboard()?;
         self.send()?;
+        // One bounded bulk turn follows input, clock and authority servicing.
+        self.service_files()?;
         self.check_inner().map(|_| ())
     }
     /// Run during idle as well as packet/UI activity. Observation responses,
@@ -579,10 +588,11 @@ impl ControlledViewer {
                 .session
                 .transport
                 .drive(cx, wait.min(Duration::from_micros(remaining)), || {
-                    viewer
-                        .clipboard
-                        .as_ref()
-                        .is_none_or(crate::clipboard_quic::Bridge::permits_io)
+                    viewer.files.permits_io()
+                        && viewer
+                            .clipboard
+                            .as_ref()
+                            .is_none_or(crate::clipboard_quic::Bridge::permits_io)
                         && viewer.clipboard_setup.permits_io()
                         && permitted(&mut viewer.input, &viewer.control, cx)
                 })

@@ -43,3 +43,30 @@ These use explicit admission/controller fixtures, not live Tailscale or native
 file-picker authority. Normal host/client optional-channel setup and user-facing
 file selection still need integration. Resumption, folder sync and host-to-client
 sending are not implemented by this single regular-file profile.
+
+## Running controller integration
+
+`ControlledViewer::attach_files` now consumes one completed optional channel on
+its original connection and decoder-backed control grant. It checks the selected
+file capabilities and display/generation tuple, uses the already agreed nonzero
+file-scope handle, and requires a separate local `Permission`. It does not open
+or read a source. `send_file` accepts an explicitly selected descriptor and a
+portable basename; ordinary `drive` turns service the sender after input and
+renewal. File records are reserved for this owner, never a media/UI callback.
+
+The owner exposes stage, queued-byte progress, actual host receipts and errors.
+`cancel_files` retires the completed file pair without stopping desktop input.
+`reap_files` uses an independent cleanup context and absolute deadline, joins only
+an already-finished original source, and preserves the outcome. A blocked kernel
+read is not declared cleaned; a dropped/expired cleanup future retains the owner.
+Receipts remain collectable after controller closure, including unknown effects
+and already-published files. No retry or new controller is created.
+
+The running-viewer tests use both ordinary controller loops and real TLS/UDP,
+ATP hashing and filesystem publication. They cover successive 120,007-byte and
+empty files, input and renewal beyond the initial lease, partial cancellation,
+local file-permission denial, and abandoning an unpolled drive. Their initial
+consent, source-visibility evidence and counted input sink are explicit fixtures,
+not native desktop or live-Tailscale qualification. Native file selection,
+viewer-side automatic attachment, file-scope agreement, resumption, downloads
+and folder synchronization are not completed by this slice.

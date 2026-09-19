@@ -140,6 +140,7 @@ struct Transfer {
     packet: Option<Packet>,
     completion_admitted: bool,
     result: Option<Receipt>,
+    cleanup: Option<Result<(), Error>>,
 }
 
 /// Exclusive borrow prevents independent senders from recreating the channel's
@@ -273,6 +274,18 @@ impl<'a> Sender<'a> {
     pub fn cleanup_finished(&self) -> bool {
         self.transfer.as_ref().is_none_or(|t| t.source.finished())
     }
+    /// Join only an already-finished original source thread. This never blocks
+    /// on a kernel read, clears a publication receipt, or needs a live session.
+    /// A panic is a retained cleanup failure, not a fabricated successful drain.
+    pub fn try_finish_cleanup(&mut self) -> Option<Result<(), Error>> {
+        let Some(t) = &mut self.transfer else {
+            return Some(Ok(()));
+        };
+        if t.cleanup.is_none() {
+            t.cleanup = t.source.reap();
+        }
+        t.cleanup
+    }
     /// File is a locally approved descriptor, not a wire path. The name is only
     /// the portable destination basename. Preparation is bounded and asynchronous.
     pub fn begin(&mut self, q: &QuicRecords, file: File, name: &str) -> Result<u64, Error> {
@@ -317,6 +330,7 @@ impl<'a> Sender<'a> {
             packet: None,
             completion_admitted: false,
             result: None,
+            cleanup: None,
         });
         Ok(id)
     }
@@ -328,7 +342,9 @@ impl<'a> Sender<'a> {
         if !t.source.finished() {
             return None;
         }
-        let _ = t.source.reap();
+        if t.cleanup.is_none() {
+            t.cleanup = t.source.reap();
+        }
         self.transfer = None;
         Some(result)
     }
