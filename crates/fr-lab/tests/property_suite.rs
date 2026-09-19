@@ -331,7 +331,7 @@ fn prop_old_lease_never_controls_new_session() {
                 InputTicketId::from_raw(1),
                 delivery.now,
             );
-            refused = attempt == Err(AuthorityError::StaleLease);
+            refused = matches!(attempt, Err(AuthorityError::StaleLease));
         }
         0
     })
