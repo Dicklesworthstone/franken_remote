@@ -3,6 +3,7 @@
 //! Disk work stays in fr-files' single bounded worker. The regular control turn
 //! services this lane only after input and renewal; no application callback sees
 //! its records. Retirement never erases an already committed publication.
+mod negotiation;
 use super::ControlledHost;
 use crate::worker::Deadline;
 use asupersync::{cx::Cx, time::sleep_until, types::Time};
@@ -14,11 +15,13 @@ use fr_files::{
 };
 use fr_transport::quic::{self, MediaChannel, QuicRecords, Route, files::FilesChannel};
 use fr_wire::{files, negotiation::Role};
+use negotiation::Pending;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     AlreadyAttached,
     NotNegotiated,
+    PermissionRequired,
     WrongBinding,
     Closed,
     Clock,
@@ -39,24 +42,72 @@ pub enum Cleanup {
 #[derive(Default)]
 pub(super) struct Slot {
     used: bool,
+    pending: Option<Pending>,
     receiver: Option<HostReceiver>,
     reason: Option<Error>,
     cleanup: Option<Result<(), worker::Error>>,
 }
 impl Slot {
     pub(super) fn stop(&mut self) {
+        if self.pending.take().is_some() {
+            self.reason.get_or_insert(Error::Cancelled);
+        }
         if let Some(receiver) = &mut self.receiver {
             receiver.stop();
         }
     }
-    pub(super) fn owns(&self, route: Route) -> bool {
-        self.receiver
-            .as_ref()
-            .is_some_and(|r| r.owns_inbound(route))
+    pub(super) fn owns(&self, route: Route, bytes: &[u8]) -> bool {
+        self.pending.as_ref().is_some_and(|p| p.owns(route, bytes))
+            || self
+                .receiver
+                .as_ref()
+                .is_some_and(|r| r.owns_inbound(route))
     }
-    pub(super) fn service(&mut self, q: &mut QuicRecords, authorize: impl FnMut() -> bool) {
+    /// Recheck the pending exchange during actual UDP I/O, not just admission.
+    pub(super) fn permitted(&mut self) -> bool {
+        match self.pending.as_mut().map(Pending::check) {
+            Some(Err(error)) => {
+                self.reason.get_or_insert(Error::Transport(error));
+                false
+            }
+            _ => true,
+        }
+    }
+    pub(super) fn service(
+        &mut self,
+        q: &mut QuicRecords,
+        mut authorize: impl FnMut() -> bool,
+    ) -> Result<(), quic::Error> {
+        if let Some(pending) = &mut self.pending {
+            match pending.advance(q, &mut authorize) {
+                Ok(false) => return Ok(()),
+                Ok(true) => {}
+                Err(error) => {
+                    self.reason.get_or_insert(Error::Transport(error));
+                    // An unfinished ticket exchange has no independently retired
+                    // lane yet. The normal session guard fences the parent.
+                    return Err(error);
+                }
+            }
+            let pending = self.pending.take().ok_or(quic::Error::Closed)?;
+            let result = pending.start_receiver(q);
+            match result {
+                Ok(receiver) => self.receiver = Some(receiver),
+                Err(Error::Transport(error)) => {
+                    self.reason.get_or_insert(Error::Transport(error));
+                    return Err(error);
+                }
+                Err(error) => {
+                    // Setup failed before a file owner was established. The peer
+                    // may not have consumed its final attachment reply yet: never
+                    // reset it while claiming independently successful teardown.
+                    self.reason.get_or_insert(error);
+                    return Err(quic::Error::Handler);
+                }
+            }
+        }
         let Some(receiver) = &mut self.receiver else {
-            return;
+            return Ok(());
         };
         if let Err(error) = receiver.service(q, authorize) {
             // This owner retires only the optional file pair. A native transport
@@ -66,6 +117,7 @@ impl Slot {
         if receiver.state() == State::Retired {
             self.collect();
         }
+        Ok(())
     }
     fn collect(&mut self) {
         let Some(receiver) = &mut self.receiver else {
@@ -149,6 +201,10 @@ impl ControlledHost {
             }
         }
     }
+    /// The pending metadata exchange has not started a disk worker yet.
+    pub fn file_receive_negotiating(&self) -> bool {
+        self.files.pending.is_some()
+    }
     pub fn file_receive_state(&self) -> Option<State> {
         self.files.receiver.as_ref().map(HostReceiver::state)
     }
@@ -171,7 +227,13 @@ impl ControlledHost {
     }
     /// Stop and reset only file streams. The controller and its renewal remain
     /// live. Keep driving or call `reap_files` to observe original disk cleanup.
+    /// Cancelling an unfinished ticket exchange instead fences the parent: there
+    /// is not yet a completed optional pair that can be reset independently.
     pub fn retire_files(&mut self) -> Result<(), Error> {
+        if self.files.pending.is_some() {
+            self.close();
+            return Err(Error::Cancelled);
+        }
         if let Some(receiver) = &mut self.files.receiver {
             let result = receiver
                 .retire(&mut self.session.opened.transport)

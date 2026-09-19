@@ -371,3 +371,6 @@ fn independent_file_permission_denial_does_not_allocate_a_disk_owner_or_revoke_i
         assert!(!seat.is_occupied());
     });
 }
+
+#[path = "files/negotiation.rs"]
+mod negotiation;

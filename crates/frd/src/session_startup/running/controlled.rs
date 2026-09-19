@@ -225,7 +225,8 @@ where
     F: Services,
 {
     fn permitted(&mut self) -> bool {
-        self.clipboard_setup.permits_io()
+        self.files.permitted()
+            && self.clipboard_setup.permits_io()
             && self.renewal.permitted()
             && self.other.permitted()
             && self
@@ -317,16 +318,18 @@ where
         }
         // Bulk work gets one bounded receive/reply turn AFTER native input and
         // renewal. Its disk worker never blocks this authority/transport owner.
-        self.files.service(q, || {
-            self.renewal.permitted() && self.observation.check().is_ok()
-        });
+        self.files
+            .service(q, || {
+                self.renewal.permitted() && self.observation.check().is_ok()
+            })
+            .map_err(Error::Transport)?;
         self.other.maintain(q, nonce)
     }
     fn receive(&mut self, route: Route, bytes: &[u8]) -> Result<Disposition, ()> {
         // These records belong to the owners serviced immediately before/after
         // observation dispatch, never to an application callback or a new queue.
         let kind = bytes.get(6..8);
-        if self.files.owns(route)
+        if self.files.owns(route, bytes)
             || self
                 .clipboard
                 .as_ref()
