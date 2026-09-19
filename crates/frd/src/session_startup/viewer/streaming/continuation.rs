@@ -564,7 +564,7 @@ impl super::StreamingViewer {
         self.presenter
             .check_stream(&session.transport, &media, &self.receiver)
             .map_err(Error::Media)?;
-        self.recovery = Some(report);
+        self.recovery = Some(Box::new(report));
         self.statistics.presented(receipt.stage);
         self.statistics.recovered_streams = self.statistics.recovered_streams.saturating_add(1);
         self.peer = super::Peer::Observe { session, media };

@@ -245,7 +245,7 @@ pub struct StreamingViewer {
     presenter: Presenter,
     receiver: ReceivePipeline,
     repair: Repair,
-    recovery: Option<recovery_control::Receiver>,
+    recovery: Option<Box<recovery_control::Receiver>>,
     feedback: Option<ViewerFeedback>,
     presentation: Option<ViewerPresentation>,
     control: StreamingViewerControl,
@@ -409,7 +409,7 @@ impl StreamingViewer {
             presenter,
             receiver,
             repair: Repair::default(),
-            recovery,
+            recovery: recovery.map(Box::new),
             feedback,
             presentation,
             control: StreamingViewerControl { cx, input },
@@ -505,7 +505,7 @@ impl StreamingViewer {
     /// The original failure deadline remains active until session replacement.
     pub fn recovery_state(&self) -> Option<recovery_control::State> {
         self.recovery
-            .as_ref()
+            .as_deref()
             .map(recovery_control::Receiver::state)
     }
     pub fn budget_usage(&self) -> BudgetUsage {
@@ -621,7 +621,7 @@ impl StreamingViewer {
             // during silence, with no packet or decoder completion to wake it.
             let recovering = recovery::service(
                 &mut self.peer,
-                self.recovery.as_mut(),
+                self.recovery.as_deref_mut(),
                 &mut self.receiver,
                 &mut self.repair,
                 cx,
@@ -654,7 +654,7 @@ impl StreamingViewer {
                     self.clipboard.as_mut(),
                     &mut self.receiver,
                     &mut self.repair,
-                    self.recovery.as_mut(),
+                    self.recovery.as_deref_mut(),
                     &mut self.statistics,
                     self.feedback.as_mut(),
                     self.presentation.as_mut(),
@@ -679,7 +679,7 @@ impl StreamingViewer {
                             self.clipboard.as_mut(),
                             &mut self.receiver,
                             &mut self.repair,
-                            self.recovery.as_mut(),
+                            self.recovery.as_deref_mut(),
                             &mut self.statistics,
                             self.feedback.as_mut(),
                             self.presentation.as_mut(),
