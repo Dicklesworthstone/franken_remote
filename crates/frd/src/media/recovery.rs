@@ -9,6 +9,10 @@ use fr_wire::decoder::Binding;
 use std::sync::Arc;
 
 impl Subscription {
+    pub(crate) fn recovery_pending(&self, limits: fr_wire::MediaLimits) -> bool {
+        self.cache.needs_recovery() && self.limits == limits
+    }
+
     /// Called by the admitted control route after negotiating reference-recovery.
     /// `binding` is the INSTALLED full view binding, never a peer-proposed tuple.
     /// The subscription must already have consumed this actual source's output;
