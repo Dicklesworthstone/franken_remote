@@ -7,6 +7,26 @@ use fr_wire::negotiation::{ControlBinding, Role};
 use std::time::Duration;
 
 impl NegotiatedMedia {
+    /// A recovery startup retains the previous full view and its local absolute
+    /// deadline. Positive capability selection and the completed NEXT attachment
+    /// set are required; this does not validate native decoder ownership.
+    pub fn recovery_decoder_setup(
+        &self,
+        q: &QuicRecords,
+        mut previous: fr_wire::decoder::Binding,
+        until_micros: u64,
+    ) -> Result<crate::media::decoder_startup::Setup, Error> {
+        self.check(q)?;
+        self.check_recovery_capability()?;
+        previous.recovery = previous.recovery.next().ok_or(Error::InvalidRoutes)?;
+        if self.selection.role != Role::Observe || !same_view(previous, self.binding()) {
+            return Err(Error::InvalidRoutes);
+        }
+        self.decoder_setup(q, std::time::Duration::from_secs(2))
+            .map(|setup| setup.capped_at(until_micros))
+            .map_err(|_| Error::InvalidRoutes)
+    }
+
     /// Route only the original negotiated control lane to its actual capture
     /// owner. Media-channel numbers and peer-proposed view tuples are not
     /// authority. An input-owning session needs explicit reacquisition and is

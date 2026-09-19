@@ -58,6 +58,7 @@ pub(crate) async fn presenter(cx: &Cx, receiver: &mut ReceivePipeline, mode: &st
         configuration,
         binding,
         stream_binding: None,
+        decoder_record: Vec::new(), // This fixture never qualifies wire configuration.
     }
 }
 fn runtime() -> asupersync::runtime::Runtime {

@@ -497,6 +497,8 @@ pub struct PresentationReceipt {
 }
 pub struct Presenter {
     worker: Worker,
+    // One bounded canonical hvcC, retained to refuse unannounced parameter changes.
+    decoder_record: Vec<u8>,
     configuration: Configuration,
     binding: DecoderBinding,
     stream_binding: Option<(
@@ -519,6 +521,14 @@ impl Presenter {
         receiver
             .check_decoder_configuration(configuration.generation, &limits)
             .map_err(Error::Receiver)?;
+        let mut decoder_record = Vec::new();
+        decoder_record
+            .try_reserve_exact(record.bytes().len())
+            .map_err(|_| Error::Receiver(DeliveryError::AllocationFailed))?;
+        if decoder_record.capacity() > fr_media::hevc::MAX_DECODER_RECORD_BYTES {
+            return Err(Error::Receiver(DeliveryError::ResourceLimit));
+        }
+        decoder_record.extend_from_slice(record.bytes());
         let mut receiving = ReceiveOperation::new(receiver);
         let worker = Worker::start_decoder(
             cx,
@@ -541,6 +551,7 @@ impl Presenter {
             configuration,
             binding,
             stream_binding: None,
+            decoder_record,
         })
     }
     /// Reuse this running decoder for a new IDR under the SAME receiver and

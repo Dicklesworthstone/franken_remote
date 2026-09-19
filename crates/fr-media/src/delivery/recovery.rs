@@ -1,5 +1,8 @@
 //! One bounded recovery request for one actual receiver generation.
-use super::{DecodedFrame, DeliveryError, ReceiveConfig, ReceivePipeline, ReceiveState, deadline};
+use super::{
+    DecodedFrame, DeliveryError, MediaBindings, ReceiveConfig, ReceivePipeline, ReceiveState,
+    deadline,
+};
 use fr_wire::{
     decoder::Binding,
     input::{InputDelivery, InputDirection},
@@ -171,6 +174,35 @@ impl RecoveryRequestor {
         self.authorize_write(receiver, offer, now)?;
         self.pending.as_mut().expect("authorized offer").sent = true;
         Ok(())
+    }
+    /// Authorize only the next view on this ORIGINAL failed receiver, after
+    /// actual request submission. Returns the original absolute deadline; fresh
+    /// channels cannot widen limits, reset the budget, or follow a new scope.
+    pub fn authorize_replacement(
+        &mut self,
+        receiver: &ReceivePipeline,
+        binding: Binding,
+        limits: fr_wire::MediaLimits,
+        bindings: MediaBindings,
+        now: u64,
+    ) -> Result<u64, DeliveryError> {
+        self.check(receiver, now)?;
+        let pending = self.pending.as_ref().ok_or(DeliveryError::WrongState)?;
+        if !pending.sent || receiver.state() != ReceiveState::NeedsRecovery {
+            return Err(DeliveryError::WrongState);
+        }
+        let mut expected = self.binding;
+        expected.recovery = expected
+            .recovery
+            .next()
+            .ok_or(DeliveryError::StaleGeneration)?;
+        if binding != expected || !bindings.all_newer_than(self.config.bindings) {
+            return Err(DeliveryError::StaleGeneration);
+        }
+        if limits != self.config.limits {
+            return Err(DeliveryError::ResourceLimit);
+        }
+        Ok(pending.until)
     }
     /// Includes waiting for replacement after a successful send. Polling or
     /// duplicate offers do not buy more time; the owner must service this timer.

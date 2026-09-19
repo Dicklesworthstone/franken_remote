@@ -69,10 +69,8 @@ pub struct Setup {
     configuration: StreamRoute,
     replies: StreamRoute,
     timeout_micros: u64,
+    until: u64,
     required_display: Option<(u32, u32)>,
-    // A recovery transition keeps its original local deadline across attachments
-    // and native setup; computing a new stage timeout must never extend it.
-    absolute_deadline: u64,
 }
 impl Setup {
     pub fn new(
@@ -99,12 +97,15 @@ impl Setup {
             configuration,
             replies,
             timeout_micros: u64::try_from(timeout.as_micros()).map_err(|_| Error::Expired)?,
+            until: u64::MAX,
             required_display: None,
-            absolute_deadline: u64::MAX,
         })
     }
-    pub(crate) fn capped_at(mut self, until: u64) -> Self {
-        self.absolute_deadline = self.absolute_deadline.min(until);
+    /// Carry the ORIGINAL local recovery deadline through channel attachment
+    /// and decoder startup. Repeated capping can only shorten the budget.
+    #[must_use]
+    pub fn capped_at(mut self, until_micros: u64) -> Self {
+        self.until = self.until.min(until_micros);
         self
     }
     pub(crate) fn require_display(mut self, width: u32, height: u32) -> Result<Self, Error> {
@@ -154,7 +155,7 @@ impl Bound {
         }
         let last = host_now(&cx)?.as_micros();
         let until = last.checked_add(us).ok_or(Error::Expired)?;
-        let until = until.min(setup.absolute_deadline);
+        let until = setup.until.min(until);
         let mut this = Self {
             cx,
             connection: transport.binding(),
@@ -542,312 +543,5 @@ impl Host {
         result
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ViewerPhase {
-    Configured,
-    AwaitingPicture,
-    Decoded,
-    Complete,
-    Closed,
-}
-/// A native decoder and its receiver, not a forgeable "configured" boolean.
-/// Construction runs the real process startup; failures/cancellation close the
-/// receiver and worker. Pending acknowledgements have a fixed original deadline.
-pub struct Viewer {
-    bound: Bound,
-    receiver: ReceivePipeline,
-    presenter: Presenter,
-    phase: ViewerPhase,
-    bytes: [u8; decoder::FIRST_DECODED_BYTES],
-    len: usize,
-}
-/// Owned preparation keeps the original deadline, validated parameter sets and
-/// receiver reservation while the session independently drives network work.
-pub(crate) struct PreparedViewer {
-    bound: Bound,
-    receiver: ReceivePipeline,
-    configuration: Configuration,
-    record: DecoderRecord,
-}
-impl PreparedViewer {
-    pub(crate) async fn configure(mut self, launch: Launch) -> Result<Viewer, Error> {
-        let n = self.bound.tick()?;
-        let result = timeout(
-            self.bound.cx.now(),
-            Duration::from_micros(self.bound.until - n),
-            Presenter::start(
-                &self.bound.cx,
-                launch,
-                self.configuration,
-                &self.record,
-                &mut self.receiver,
-            ),
-        )
-        .await;
-        let mut presenter = match result {
-            Ok(Ok(presenter)) => presenter,
-            Ok(Err(error)) => return Err(Error::Media(error)),
-            Err(_) => {
-                self.receiver.close();
-                return Err(Error::Expired);
-            }
-        };
-        // Original expiry still governs queueing/configuration; transfer does
-        // not re-create Bound or begin a new startup lifetime.
-        if let Err(error) = self.bound.tick() {
-            self.receiver.close();
-            presenter.abort();
-            return Err(error);
-        }
-        let binding = self.bound.setup.binding;
-        let limits = self.bound.setup.limits;
-        let mut viewer = Viewer {
-            bound: self.bound,
-            receiver: self.receiver,
-            presenter,
-            phase: ViewerPhase::Configured,
-            bytes: [0; decoder::FIRST_DECODED_BYTES],
-            len: 0,
-        };
-        viewer.len = decoder::encode(
-            Message::Configured,
-            binding,
-            &limits,
-            &mut viewer.bytes,
-            Direction::ViewerToHost,
-            Delivery::Reliable,
-        )?;
-        Ok(viewer)
-    }
-}
-impl Viewer {
-    pub async fn start(
-        cx: Cx,
-        transport: &QuicRecords,
-        setup: Setup,
-        bytes: &[u8],
-        launch: Launch,
-        receive: ReceiveConfig,
-    ) -> Result<Self, Error> {
-        let prepared = Self::prepare(cx, transport, setup, bytes, receive)?;
-        let mut viewer = prepared.configure(launch).await?;
-        viewer.check_transport(transport)?;
-        Ok(viewer)
-    }
-    /// Validate and own the bounded configuration before launching native work.
-    /// No transport borrow survives preparation. The enclosing session MUST
-    /// continue its original connection and authority service during configure.
-    pub(crate) fn prepare(
-        cx: Cx,
-        transport: &QuicRecords,
-        setup: Setup,
-        bytes: &[u8],
-        receive: ReceiveConfig,
-    ) -> Result<PreparedViewer, Error> {
-        let bound = Bound::new(cx, transport, setup, StreamRole::Client)?;
-        if receive.epoch.configuration != setup.binding.configuration
-            || receive.epoch.recovery != setup.binding.recovery
-            || receive.limits.protocol() != &setup.limits
-        {
-            return Err(Error::InvalidRoutes);
-        }
-        let (configuration, record) = admit(bytes, setup)?;
-        let budget =
-            MediaBudget::new(&setup.limits).map_err(|_| Error::UnsupportedConfiguration)?;
-        let receiver =
-            ReceivePipeline::new(receive, budget).map_err(|_| Error::UnsupportedConfiguration)?;
-        Ok(PreparedViewer {
-            bound,
-            receiver,
-            configuration,
-            record,
-        })
-    }
-    /// Finish a native wait only on the original still-live transport. No
-    /// successful native reply alone establishes permission to acknowledge it.
-    pub(crate) fn check_transport(&mut self, transport: &QuicRecords) -> Result<(), Error> {
-        let result = self
-            .tick()
-            .and_then(|()| self.bound.check(transport).map(|_| ()));
-        if result.is_err() {
-            self.close();
-        }
-        result
-    }
-    pub fn close(&mut self) {
-        self.bound.closed = true;
-        self.receiver.close();
-        self.presenter.abort();
-        self.bytes.fill(0);
-        self.len = 0;
-        self.phase = ViewerPhase::Closed;
-    }
-    pub fn tick(&mut self) -> Result<(), Error> {
-        let result = (|| {
-            let n = self.bound.tick()?;
-            self.receiver.tick(n).map_err(|_| Error::Closed)
-        })();
-        if result.is_err() {
-            self.close();
-        }
-        result
-    }
-    pub fn transmit(&mut self, transport: &mut QuicRecords) -> Result<bool, Error> {
-        let result = (|| {
-            self.tick()?;
-            self.bound.check(transport)?;
-            if self.len == 0 {
-                return Err(Error::WrongState);
-            }
-            match transport.send(
-                &self.bound.cx,
-                Route::Stream(self.bound.setup.replies),
-                &self.bytes[..self.len],
-                self.bound.until,
-                || self.bound.live(),
-            ) {
-                Ok(()) => {
-                    self.phase = match self.phase {
-                        ViewerPhase::Configured => ViewerPhase::AwaitingPicture,
-                        ViewerPhase::Decoded => ViewerPhase::Complete,
-                        _ => return Err(Error::WrongState),
-                    };
-                    self.len = 0;
-                    self.bytes.fill(0);
-                    Ok(true)
-                }
-                Err(quic::Error::Backpressure) => Ok(false),
-                Err(e) => Err(e.into()),
-            }
-        })();
-        if result.is_err() {
-            self.close();
-        }
-        result
-    }
-    /// The authenticated dispatcher maps an installed media route to `channel`.
-    /// Receiver binding and epoch checks reject stale/foreign records. No media
-    /// is accepted until the real configured acknowledgement enters transport.
-    pub fn receive_media(&mut self, channel: Channel, bytes: &[u8]) -> Result<(), Error> {
-        let result = (|| {
-            self.tick()?;
-            if self.phase != ViewerPhase::AwaitingPicture {
-                return Err(Error::WrongState);
-            }
-            self.receiver
-                .receive(channel, bytes, self.bound.last)
-                .map_err(|_| Error::Closed)?;
-            Ok(())
-        })();
-        if result.is_err() {
-            self.close();
-        }
-        result
-    }
-    /// The genuine decoder completion supplies the first-frame report. Returning
-    /// a compositor-submission receipt still does not certify visible pixels.
-    pub async fn present_first(&mut self) -> Result<Option<PresentationReceipt>, Error> {
-        self.tick()?;
-        if self.phase != ViewerPhase::AwaitingPicture {
-            self.close();
-            return Err(Error::WrongState);
-        }
-        let mut operation = PresentOperation {
-            viewer: self,
-            complete: false,
-        };
-        let result = operation
-            .viewer
-            .presenter
-            .present_next(&operation.viewer.bound.cx, &mut operation.viewer.receiver)
-            .await?;
-        operation.viewer.tick()?;
-        if let Some(receipt) = &result {
-            let message = Message::FirstDecoded {
-                frame: receipt.frame.as_raw(),
-                decoder_micros: operation.viewer.bound.last,
-            };
-            operation.viewer.len = decoder::encode(
-                message,
-                operation.viewer.bound.setup.binding,
-                &operation.viewer.bound.setup.limits,
-                &mut operation.viewer.bytes,
-                Direction::ViewerToHost,
-                Delivery::Reliable,
-            )?;
-            operation.viewer.phase = ViewerPhase::Decoded;
-        }
-        operation.complete = true;
-        Ok(result)
-    }
-    pub fn is_complete(&self) -> bool {
-        self.phase == ViewerPhase::Complete
-    }
-    pub fn worker_id(&self) -> Option<u32> {
-        self.presenter.worker_id()
-    }
-    /// Finalize a refused/cancelled startup using a separate live cleanup Cx.
-    /// Revoke the receiver first; no acknowledgement or pixel effect is replayed.
-    pub async fn reap(
-        &mut self,
-        cleanup: &Cx,
-        deadline: crate::worker::Deadline,
-    ) -> Result<asupersync::process::ExitStatus, Error> {
-        self.close();
-        self.presenter
-            .reap(cleanup, deadline)
-            .await
-            .map_err(Error::Media)
-    }
-    /// Join only the original authenticated connection and its completed media
-    /// attachments. Numeric decoder IDs alone do not authorize this transfer.
-    pub(crate) fn finish_stream(
-        mut self,
-        transport: &QuicRecords,
-        media: &crate::media_quic::NegotiatedMedia,
-    ) -> Result<(Presenter, ReceivePipeline), Error> {
-        let checked = (|| {
-            self.bound.check(transport)?;
-            media.check(transport).map_err(|_| Error::InvalidRoutes)?;
-            if self.bound.setup.binding != media.binding()
-                || self.bound.setup.limits != *media.limits().protocol()
-            {
-                return Err(Error::InvalidRoutes);
-            }
-            let config = media
-                .receiver_config(transport, fr_media::delivery::ReceivePolicy::default())
-                .map_err(|_| Error::InvalidRoutes)?;
-            self.receiver
-                .check_delivery_configuration(config.limits, config.bindings, config.epoch)
-                .map_err(|_| Error::InvalidRoutes)?;
-            Ok(())
-        })();
-        if let Err(error) = checked {
-            self.close();
-            return Err(error);
-        }
-        self.finish()
-    }
-    /// Move the configured owner into the regular session, preserving receiver
-    /// identity, reference state, decoder reservations and native process.
-    pub fn finish(mut self) -> Result<(Presenter, ReceivePipeline), Error> {
-        self.tick()?;
-        if self.phase != ViewerPhase::Complete {
-            return Err(Error::WrongState);
-        }
-        self.presenter.stream_binding =
-            Some((self.bound.connection.clone(), self.bound.setup.binding));
-        Ok((self.presenter, self.receiver))
-    }
-}
-struct PresentOperation<'a> {
-    viewer: &'a mut Viewer,
-    complete: bool,
-}
-impl Drop for PresentOperation<'_> {
-    fn drop(&mut self) {
-        if !self.complete {
-            self.viewer.close();
-        }
-    }
-}
+mod viewer;
+pub use viewer::{Viewer, ViewerRecovery};

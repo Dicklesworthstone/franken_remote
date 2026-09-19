@@ -284,3 +284,91 @@ fn a_healthy_peer_is_untouched_by_another_viewers_recovery_request() {
             .is_none()
     );
 }
+
+#[test]
+fn replacement_requires_actual_sent_request_and_preserves_the_original_deadline() {
+    let mut r = receiver();
+    let mut q = RecoveryRequestor::new(&r, binding()).unwrap();
+    let mut s = bootstrap(&mut r, &mut q);
+    publish(&mut s, &mut r, 1, 10, false);
+    let fresh = Binding {
+        recovery: binding().recovery.next().unwrap(),
+        ..binding()
+    };
+    let channels = MediaBindings::new(11, 12, 13, 14).unwrap();
+    assert_eq!(
+        q.authorize_replacement(&r, fresh, config().limits, channels, 250_000),
+        Err(DeliveryError::WrongState)
+    );
+    let offer = q
+        .offer(&mut r, 250_010, &mut [0; REQUEST_BYTES])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        q.authorize_replacement(&r, fresh, config().limits, channels, 250_010),
+        Err(DeliveryError::WrongState)
+    );
+    q.mark_sent(&r, &offer, 250_010).unwrap();
+    for now in [250_010, 1_000_000, 2_250_009] {
+        assert_eq!(
+            q.authorize_replacement(&r, fresh, config().limits, channels, now),
+            Ok(2_250_010)
+        );
+    }
+    assert_eq!(
+        q.authorize_replacement(&r, fresh, config().limits, channels, 2_250_010),
+        Err(DeliveryError::RecoveryExpired)
+    );
+    assert_eq!(q.next_deadline(), None);
+}
+
+#[test]
+fn fresh_attachments_cannot_change_receiver_limits_view_or_scope() {
+    let mut r = receiver();
+    let mut q = RecoveryRequestor::new(&r, binding()).unwrap();
+    r.decoder_configured(0).unwrap();
+    let offer = q
+        .offer(&mut r, 2_000_000, &mut [0; REQUEST_BYTES])
+        .unwrap()
+        .unwrap();
+    q.mark_sent(&r, &offer, 2_000_000).unwrap();
+    let fresh = Binding {
+        recovery: binding().recovery.next().unwrap(),
+        ..binding()
+    };
+    let channels = MediaBindings::new(11, 12, 13, 14).unwrap();
+    for wrong in [
+        binding(),
+        Binding {
+            display: 90,
+            ..fresh
+        },
+        Binding {
+            viewport: fresh.viewport.next().unwrap(),
+            ..fresh
+        },
+    ] {
+        assert_eq!(
+            q.authorize_replacement(&r, wrong, config().limits, channels, 2_000_001),
+            Err(DeliveryError::StaleGeneration)
+        );
+    }
+    assert_eq!(
+        q.authorize_replacement(&r, fresh, config().limits, config().bindings, 2_000_001),
+        Err(DeliveryError::StaleGeneration)
+    );
+    let different = MediaLimits::new(ProtocolLimits::ABSOLUTE, 1200, 16_384, 64).unwrap();
+    assert_eq!(
+        q.authorize_replacement(&r, fresh, different, channels, 2_000_001),
+        Err(DeliveryError::ResourceLimit)
+    );
+    assert_eq!(
+        q.authorize_replacement(&r, fresh, config().limits, channels, 2_000_001),
+        Ok(4_000_000)
+    );
+    assert_eq!(
+        q.authorize_replacement(&receiver(), fresh, config().limits, channels, 2_000_001),
+        Err(DeliveryError::StaleGeneration)
+    );
+    assert_eq!(q.next_deadline(), None);
+}

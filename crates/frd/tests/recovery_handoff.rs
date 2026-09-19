@@ -498,3 +498,6 @@ fn replacement_cannot_renew_an_expired_senders_deadline() {
         stop(&mut source, &cx).await;
     });
 }
+
+#[path = "recovery_handoff/decoder.rs"]
+mod decoder_recovery;

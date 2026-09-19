@@ -132,6 +132,48 @@ impl NegotiatedMedia {
     }
 }
 impl Receiver {
+    /// A completed fresh attachment still needs the original sent request's
+    /// receiver-scope proof and deadline. This does not replace the receiver or
+    /// acknowledge a decoder. A foreign connection is refused before mutation.
+    pub fn replacement_deadline(
+        &mut self,
+        cx: &Cx,
+        q: &QuicRecords,
+        receiver: &ReceivePipeline,
+        media: &NegotiatedMedia,
+    ) -> Result<u64, Error> {
+        if !q.is_bound_to(&self.connection) {
+            return Err(Error::WrongBinding);
+        }
+        if self.state != State::Requested {
+            return Err(Error::Closed);
+        }
+        if q.is_closed()
+            || !q.has_route(Route::Stream(self.routes.outbound))
+            || q.receive_ended(self.routes.inbound)
+                .map_err(Error::Transport)?
+        {
+            return Err(Error::Closed);
+        }
+        cx.checkpoint()
+            .map_err(|_| Error::Transport(quic::Error::Cancelled))?;
+        media.check(q).map_err(Error::Media)?;
+        media
+            .check_recovery_capability()
+            .map_err(|_| Error::NotNegotiated)?;
+        let mut binding = media.binding();
+        binding.parent.id = self.routes.outbound.binding;
+        self.requestor
+            .authorize_replacement(
+                receiver,
+                binding,
+                media.limits(),
+                media.bindings(),
+                quic_now(cx)?,
+            )
+            .map_err(Error::Delivery)
+    }
+
     pub const fn state(&self) -> State {
         self.state
     }
