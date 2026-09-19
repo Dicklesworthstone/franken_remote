@@ -176,6 +176,7 @@ enum ClipboardMode {
     Negotiate,
     Files,
     FilesNegotiate,
+    FileDrop,
 }
 #[allow(clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 async fn fixture_with_clipboard(
@@ -225,7 +226,7 @@ async fn fixture_with_clipboard(
     }
     if matches!(
         clipboard,
-        ClipboardMode::Files | ClipboardMode::FilesNegotiate
+        ClipboardMode::Files | ClipboardMode::FilesNegotiate | ClipboardMode::FileDrop
     ) {
         for name in [attachment::FILES_CAPABILITY, fr_wire::files::CAPABILITY] {
             wire_capabilities.push(WireCapability {
@@ -234,6 +235,13 @@ async fn fixture_with_clipboard(
                 required: false,
             });
         }
+    }
+    if clipboard == ClipboardMode::FileDrop {
+        wire_capabilities.push(WireCapability {
+            name: fr_wire::files::CHANNEL_SCOPE_CAPABILITY.into(),
+            version: fr_wire::files::CHANNEL_SCOPE_VERSION,
+            required: false,
+        });
     }
     if feedback {
         wire_capabilities.push(WireCapability {

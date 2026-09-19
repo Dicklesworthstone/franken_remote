@@ -24,7 +24,7 @@ pub(super) struct Pending {
     selection: Selection,
     expected: Binding,
     lease: InputLeaseId,
-    handle: u128,
+    handle: Option<u128>,
     permission: Permission,
     policy: Policy,
     until: u64,
@@ -164,8 +164,13 @@ impl Pending {
         }
         self.check()?;
         let channel = self.channel.take().ok_or(Error::Closed)?;
-        let lane =
-            FilesChannel::new(q, channel, self.lease, self.handle).map_err(Error::Transport)?;
+        // Read the scope only from the exact completed attachment. The existing
+        // full-view check and role-specific ticket exchange have already bound it
+        // to this controller; a copied numeric handle is never permission.
+        let handle = self
+            .handle
+            .unwrap_or_else(|| u128::from(channel.descriptor().binding.parent.id));
+        let lane = FilesChannel::new(q, channel, self.lease, handle).map_err(Error::Transport)?;
         let sender = Sender::owning(self.cx, q, lane, self.policy)?;
         Ok((sender, self.permission))
     }
@@ -183,11 +188,47 @@ impl ControlledViewer {
         policy: Policy,
         timeout: Duration,
     ) -> Result<(), Error> {
+        self.expect_scope(Some(handle), permission, policy, timeout)
+    }
+    /// Accept a locally approved host drop lane without a prearranged handle.
+    /// Requires positive `file-channel-scope` v1 negotiation. The authenticated
+    /// completed Files binding names the host's separately approved directory;
+    /// it does not permit browsing, arbitrary paths, or observer file access.
+    /// No local descriptor is opened or read until explicit `send_file`.
+    pub fn expect_file_drop(
+        &mut self,
+        permission: Permission,
+        policy: Policy,
+        timeout: Duration,
+    ) -> Result<(), Error> {
+        self.files_admitted(&permission)?;
+        if !self
+            .session
+            .opened
+            .selection
+            .capabilities
+            .iter()
+            .any(|cap| {
+                cap.name == fr_wire::files::CHANNEL_SCOPE_CAPABILITY
+                    && cap.version == fr_wire::files::CHANNEL_SCOPE_VERSION
+            })
+        {
+            return Err(Error::WrongRole);
+        }
+        self.expect_scope(None, permission, policy, timeout)
+    }
+    fn expect_scope(
+        &mut self,
+        handle: Option<u128>,
+        permission: Permission,
+        policy: Policy,
+        timeout: Duration,
+    ) -> Result<(), Error> {
         if self.files.used || self.files.stopped || self.clipboard_setup.negotiating() {
             return Err(Error::Busy);
         }
         self.files_admitted(&permission)?;
-        if handle == 0 {
+        if handle == Some(0) {
             return Err(Error::Wire(fr_wire::WireError::InvalidBinding));
         }
         let lifetime = u64::try_from(timeout.as_micros()).map_err(|_| Error::Limits)?;

@@ -14,6 +14,11 @@ use fr_core::{
 
 pub const CAPABILITY: &str = "file-atp-full";
 pub const VERSION: u16 = 1;
+/// Optional, positively negotiated scope agreement for a host drop directory.
+/// Its handle is the completed Files attachment's binding ID, widened to u128.
+/// This names an already locally approved endpoint; it grants no authority.
+pub const CHANNEL_SCOPE_CAPABILITY: &str = "file-channel-scope";
+pub const CHANNEL_SCOPE_VERSION: u16 = 1;
 pub const ATP_PORTABLE_FULL: u16 = 1;
 /// Largest extension-free 0.5.0 ATP data header plus entry index/offset.
 pub const ATP_DATA_OVERHEAD: usize = 20;

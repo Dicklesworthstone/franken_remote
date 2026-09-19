@@ -122,3 +122,31 @@ collects its original interruption receipt without replay. A separate native
 reconnect-policy test proves that file cleanup errors block another attempt and
 retain an unknown-publication receipt. These do not qualify hardware codecs or
 physical presentation.
+
+## Drop-directory scope without prearranged handles
+
+`ControlledHost::offer_file_drop(request, configuration)` and
+`ControlledViewer::expect_file_drop(permission, policy, timeout)` use the optional
+`file-channel-scope` v1 capability. Unlike the explicit-handle APIs, neither takes
+a separately agreed file handle. The host maps its fresh Files attachment to the
+already opened, locally approved `DropDirectory`; both endpoints derive its
+handle from the authenticated completed channel binding. The viewer never sends
+a host path, chooses another root, or uses a numeric label as authority.
+
+The original full-view check, one-use ticket exchange, controlling lease, local
+permission, setup deadlines and single-use lane remain unchanged. The viewer
+reads the binding only after the exact attachment completes. No source opens
+until the caller explicitly supplies its selected descriptor to `send_file`.
+Multiple selected files then reuse this lane with increasing transfer IDs.
+Established file cancellation remains independent of desktop control. Older
+peers retain the explicit-handle APIs; new methods refuse absent/wrong-version
+capability selection before allocating a lane or spending the one-shot slot.
+
+Five real UDP/TLS/controller/ATP/filesystem tests exercise scope agreement and
+120,007-byte plus empty-file publication with input, refusal without capability
+selection or local permission, the immutable pre-poll deadline, and another
+selected display's authenticated offer. Native input effects and presentation
+are explicit fixtures, not hardware or live-tailnet qualification. This removes
+the pre-agreed numeric-scope prerequisite for the drop APIs; graphical selection,
+a complete command-line upload workflow, downloads, resume and folder sync still
+require their separate implementations.

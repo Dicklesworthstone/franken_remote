@@ -343,3 +343,6 @@ fn host_offered_other_display_is_not_adopted_as_this_viewers_file_scope() {
         assert!(done.handoff_safe());
     });
 }
+
+#[path = "negotiation/scope.rs"]
+mod scope;

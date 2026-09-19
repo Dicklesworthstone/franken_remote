@@ -80,6 +80,28 @@ impl Pending {
     }
 }
 impl ControlledHost {
+    /// Offer the locally approved drop directory without out-of-band handle
+    /// agreement. Both peers must select `file-channel-scope` version 1. The
+    /// one-use Files attachment agrees its binding ID as this directory's handle;
+    /// the peer never supplies a host path or chooses another local endpoint.
+    /// Original control authority, independent permission and deadlines are still
+    /// enforced by `offer_files`. No disk worker starts before the exchange ends.
+    pub fn offer_file_drop(
+        &mut self,
+        request: ChannelRequest,
+        configuration: Configuration,
+    ) -> Result<(), Error> {
+        self.session.check().map_err(|_| Error::Closed)?;
+        if !self.session.opened.selected.capabilities.iter().any(|cap| {
+            cap.name == files::CHANNEL_SCOPE_CAPABILITY
+                && cap.version == files::CHANNEL_SCOPE_VERSION
+        }) {
+            return Err(Error::NotNegotiated);
+        }
+        let handle = u128::from(request.binding.parent.id);
+        self.offer_files(request, handle, configuration)
+    }
+
     /// Offer a separately bounded file lane on the existing controlled session.
     /// Normal `drive` turns perform the complete one-use role/ticket exchange,
     /// then start receipt on the locally selected directory and original input
