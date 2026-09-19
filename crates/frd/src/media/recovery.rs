@@ -4,7 +4,9 @@ use fr_core::{
     authority::{AuthorityError, SessionAuthority},
     time::HostInstant,
 };
-use fr_media::delivery::{DeliveryError, RecoveryDisposition, SendCache, SendError};
+use fr_media::delivery::{
+    DeliveryError, RecoveryDemand, RecoveryDisposition, SendCache, SendError,
+};
 use fr_wire::decoder::Binding;
 use std::sync::Arc;
 
@@ -51,6 +53,53 @@ impl Subscription {
         bytes: &[u8],
         binding: Binding,
     ) -> Result<bool, Error> {
+        // Keep the synchronous API's noninterference guarantee: an unrelated
+        // source is refused before changing this subscription's authority/cache.
+        self.check_recovery_source(source)?;
+        let Some(demand) = self.admit_recovery_request(bytes, binding)? else {
+            return Ok(false);
+        };
+        self.schedule_recovery(source, demand)?;
+        Ok(true)
+    }
+
+    /// Stage one runs on the network owner while the original source may be
+    /// completing a capture. Fence media/input and charge the recovery allowance
+    /// NOW, not after a native await. The unique demand retains that deadline.
+    pub(crate) fn admit_recovery_request(
+        &mut self,
+        bytes: &[u8],
+        binding: Binding,
+    ) -> Result<Option<RecoveryDemand>, Error> {
+        self.control.check()?;
+        if self.capture_source.is_none() {
+            return Err(Error::InvalidFrame);
+        }
+        let mut authority = self.control.authority.lock().map_err(|_| Error::Poisoned)?;
+        let now = host_now(&self.control.cx)?;
+        match admit(&mut self.cache, &mut authority, bytes, binding, now)? {
+            RecoveryDisposition::Accepted(demand) => Ok(Some(demand)),
+            RecoveryDisposition::Coalesced => Ok(None),
+        }
+    }
+
+    /// Stage two runs only after any old native capture has completed. The
+    /// original source AND still-failed cache must match; replacement, mutable
+    /// worker escape, expiry and foreign subscriptions cannot redirect the work.
+    /// Waiting does not refund admission or buy another recovery budget.
+    pub(crate) fn schedule_recovery(
+        &self,
+        source: &mut CaptureSource,
+        demand: RecoveryDemand,
+    ) -> Result<(), Error> {
+        self.check_recovery_source(source)?;
+        source
+            .recovery
+            .queue(&self.cache, demand, self.control.check()?.as_micros())
+            .map_err(Error::Receiver)
+    }
+
+    fn check_recovery_source(&self, source: &CaptureSource) -> Result<(), Error> {
         self.control.check()?;
         if source.configuration.generation != self.epoch.configuration
             || self
@@ -64,24 +113,7 @@ impl Subscription {
         {
             return Err(Error::InvalidFrame);
         }
-        // Pure authority and bounded parsing only. Never hold this lock through
-        // scheduling, native IPC, cleanup acknowledgement or an await point.
-        let (disposition, now) = {
-            let mut authority = self.control.authority.lock().map_err(|_| Error::Poisoned)?;
-            let now = host_now(&self.control.cx)?;
-            let disposition = admit(&mut self.cache, &mut authority, bytes, binding, now)?;
-            (disposition, now)
-        };
-        match disposition {
-            RecoveryDisposition::Accepted(demand) => {
-                source
-                    .recovery
-                    .queue(&self.cache, demand, now.as_micros())
-                    .map_err(Error::Receiver)?;
-                Ok(true)
-            }
-            RecoveryDisposition::Coalesced => Ok(false),
-        }
+        Ok(())
     }
 }
 impl CaptureSource {
@@ -362,5 +394,73 @@ mod tests {
         ));
         assert!(input(&mut authority, 2, 10_000).is_err());
         assert_eq!(cache.tick(10_000), Err(SendError::Closed));
+    }
+    #[test]
+    fn staged_demand_keeps_admission_deadline_and_input_fence_while_capture_drains() {
+        let mut cache = cache();
+        let mut authority = authority();
+        let binding = binding();
+        let RecoveryDisposition::Accepted(demand) = admit(
+            &mut cache,
+            &mut authority,
+            &request(binding, None),
+            binding,
+            at(100),
+        )
+        .unwrap() else {
+            panic!("new demand")
+        };
+        let until = demand.deadline_micros();
+        assert_eq!(until, 10_100);
+        assert!(input(&mut authority, 1, 100).is_err());
+        assert!(matches!(cache.tick(101), Err(SendError::NeedsRecovery)));
+        // This pause represents finishing the old native operation, not a new
+        // timeout. Only the later source scheduling consumes the unique demand.
+        let mut queue = fr_media::delivery::IdrCoalescer::new(500_000).unwrap();
+        queue.queue(&cache, demand, 9_000).unwrap();
+        assert_eq!(queue.take(9_000).unwrap(), Some(until));
+        assert_eq!(cache.next_deadline(), Some(until));
+        assert!(input(&mut authority, 1, 9_000).is_err());
+    }
+    #[test]
+    fn staged_demand_cannot_cross_expiry_or_failed_cache_replacement() {
+        for replace in [false, true] {
+            let mut cache = cache();
+            let mut authority = authority();
+            let binding = binding();
+            let RecoveryDisposition::Accepted(demand) = admit(
+                &mut cache,
+                &mut authority,
+                &request(binding, None),
+                binding,
+                at(0),
+            )
+            .unwrap() else {
+                panic!("new demand")
+            };
+            if replace {
+                cache
+                    .replace(
+                        MediaEpoch {
+                            recovery: binding.recovery.next().unwrap(),
+                            configuration: binding.configuration,
+                        },
+                        MediaBindings::new(11, 12, 13, 14).unwrap(),
+                        1,
+                    )
+                    .unwrap();
+            }
+            let mut queue = fr_media::delivery::IdrCoalescer::new(500_000).unwrap();
+            assert_eq!(
+                queue.queue(&cache, demand, if replace { 2 } else { 10_000 }),
+                Err(if replace {
+                    DeliveryError::StaleGeneration
+                } else {
+                    DeliveryError::RecoveryExpired
+                })
+            );
+            assert_eq!(queue.next_deadline(), None);
+            assert!(input(&mut authority, 1, 10_000).is_err());
+        }
     }
 }
