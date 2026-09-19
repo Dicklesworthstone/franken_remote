@@ -159,10 +159,7 @@ fn minimum_reduce_dwell_prevents_back_to_back_reductions() {
     s4.network.send_queue_capacity = 100_000;
     let d4 = c.update(s4).unwrap();
     assert!(matches!(d4.reason, DecisionReason::NetworkBackoff { .. }));
-    assert_eq!(
-        d4.current_point.target_bitrate_bps,
-        first_reduced * 3 / 4
-    );
+    assert_eq!(d4.current_point.target_bitrate_bps, first_reduced * 3 / 4);
 }
 
 #[test]

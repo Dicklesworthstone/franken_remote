@@ -126,7 +126,8 @@ impl OperatingPoint {
         if total_viewers == 0 {
             return self.target_bitrate_bps;
         }
-        let per_viewer_cap = self.aggregate_ceiling_bps / (total_viewers as u64);
+        let viewers_u64 = u64::try_from(total_viewers).unwrap_or(u64::MAX);
+        let per_viewer_cap = self.aggregate_ceiling_bps / viewers_u64;
         self.target_bitrate_bps.min(per_viewer_cap)
     }
 }
@@ -274,10 +275,7 @@ pub enum DecisionReason {
         excessive_work: bool,
     },
     /// Presentation throttle: view hidden/backgrounded or presentation stalled.
-    PresentationThrottle {
-        hidden: bool,
-        stalled: bool,
-    },
+    PresentationThrottle { hidden: bool, stalled: bool },
     /// Upward probe: sustained headroom across all dimensions for >= 2.0 seconds.
     HeadroomProbe,
     /// Held unchanged: screen is stationary/idle (application-limited).
@@ -685,8 +683,8 @@ impl QualityController {
         }
 
         // Bitrate reduction: step down by 25%
-        let reduced = (self.current_point.target_bitrate_bps * 3 / 4)
-            .max(self.policy.min_bitrate_bps);
+        let reduced =
+            (self.current_point.target_bitrate_bps * 3 / 4).max(self.policy.min_bitrate_bps);
         self.current_point.target_bitrate_bps = reduced;
         self.current_point.budget = BandwidthBudget::from_total(reduced);
         self.current_point.generation = self.current_point.generation.wrapping_add(1);
