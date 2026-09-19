@@ -580,3 +580,6 @@ fn fanout_turn_limit_is_checked_before_mutating_any_recipient() {
 
 #[path = "shared_capture/reservation.rs"]
 mod reservation;
+
+#[path = "shared_capture/production.rs"]
+mod production;

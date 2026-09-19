@@ -18,6 +18,9 @@ use fr_wire::{
 };
 use std::{fmt, time::Duration};
 
+mod host_capture;
+use host_capture::Bootstrap;
+
 const MAX_STARTUP_US: u64 = 2_000_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -312,7 +315,7 @@ enum HostPhase {
 pub struct Host {
     bound: Bound,
     control: ObservationControl,
-    update: Option<CaptureUpdate>,
+    update: Option<Bootstrap>,
     first: u64,
     bytes: Vec<u8>,
     phase: HostPhase,
@@ -324,6 +327,15 @@ impl Host {
         setup: Setup,
         cfg: Configuration,
         update: CaptureUpdate,
+    ) -> Result<Self, Error> {
+        Self::from_capture(control, transport, setup, cfg, Bootstrap::Unique(update))
+    }
+    fn from_capture(
+        control: ObservationControl,
+        transport: &QuicRecords,
+        setup: Setup,
+        cfg: Configuration,
+        update: Bootstrap,
     ) -> Result<Self, Error> {
         let mut bound = Bound::new(control.cx.clone(), transport, setup, StreamRole::Server)?;
         let n = control.check()?.as_micros();
@@ -342,16 +354,16 @@ impl Host {
         {
             return Err(Error::UnsupportedConfiguration);
         }
-        let unit = update.encoded().ok_or(Error::WrongState)?;
-        if !unit.is_idr()
-            || unit.config_generation() != setup.binding.configuration
+        let unit = update.view()?;
+        if !unit.idr
+            || unit.configuration != setup.binding.configuration
             || cfg.generation != setup.binding.configuration
-            || unit.capture_micros() > n
+            || unit.capture_micros > n
         {
             return Err(Error::WrongState);
         }
         bound.until = bound.until.min(
-            unit.capture_micros()
+            unit.capture_micros
                 .checked_add(MAX_STARTUP_US)
                 .ok_or(Error::Expired)?,
         );
@@ -361,7 +373,7 @@ impl Host {
             setup.limits,
             4,
         )?;
-        guard.validate_length_prefixed(unit.bytes(), true)?;
+        guard.validate_length_prefixed(unit.bytes, true)?;
         let record = guard.decoder_record()?;
         let codec = codec_identifier(&record)?;
         let c = declaration(cfg, &codec, &record)?;
@@ -381,7 +393,7 @@ impl Host {
             Delivery::Reliable,
         )?;
         Ok(Self {
-            first: unit.frame().as_raw(),
+            first: unit.frame,
             bound,
             control,
             update: Some(update),
@@ -529,8 +541,14 @@ impl Host {
         if self.phase != HostPhase::RecoveryReady {
             return Ok(None);
         }
+        if !matches!(self.update, Some(Bootstrap::Unique(_))) {
+            return Err(Error::WrongState);
+        }
+        let Some(Bootstrap::Unique(update)) = self.update.take() else {
+            return Err(Error::WrongState);
+        };
         self.phase = HostPhase::AwaitingDecode;
-        Ok(self.update.take())
+        Ok(Some(update))
     }
     /// Service FIN, cancellation and deadlines even when there are no replies.
     pub fn check_transport(&mut self, transport: &QuicRecords) -> Result<(), Error> {
