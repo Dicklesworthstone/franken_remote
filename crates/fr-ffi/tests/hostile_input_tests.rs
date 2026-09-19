@@ -20,6 +20,7 @@ fn test_config() -> CodecConfiguration {
 }
 
 #[test]
+#[allow(clippy::cast_possible_truncation)]
 fn decoder_safely_handles_corrupted_and_fuzzed_bitstreams() {
     let mut dec = FfmpegDecoder::new(SurfaceBackend::Fake);
     dec.configure(test_config()).unwrap();
@@ -27,9 +28,9 @@ fn decoder_safely_handles_corrupted_and_fuzzed_bitstreams() {
     let limits = ProtocolLimits::ABSOLUTE;
 
     // Deterministic pseudo-random bytes sequence for hostile fuzzing
-    let mut seed: u64 = 0xDEADBEEFCAFE1234;
+    let mut seed: u64 = 0xDEAD_BEEF_CAFE_1234;
     let mut rand_byte = || {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
         (seed >> 33) as u8
     };
 

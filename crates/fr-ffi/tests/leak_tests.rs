@@ -37,10 +37,10 @@ fn ten_thousand_cycle_memory_stability_test() {
     );
 
     // 10,000 encode/drain cycles to verify complete memory reclamation
-    for i in 1..=10_000 {
+    for i in 1..=10_000u64 {
         let force_idr = i % 60 == 1;
         enc.submit(&surface, EncodeRequest { force_idr }).unwrap();
         let au = enc.poll_output().unwrap();
-        assert_eq!(au.frame().as_raw(), i as u64);
+        assert_eq!(au.frame().as_raw(), i);
     }
 }
