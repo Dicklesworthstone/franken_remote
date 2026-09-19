@@ -35,7 +35,7 @@ fn fenced_completion_is_retired_without_receipt_or_deadline_refresh() {
         asupersync::time::sleep(c.now(), Duration::from_millis(100)).await;
         let dropped = Rc::new(Cell::new(false));
         let held = Retired(dropped.clone());
-        let receipt = recovery_flow::complete(
+        let receipt = recovery_flow::admit::<media::PresentationReceipt>(
             &mut peer,
             Some(&mut watcher),
             &mut receiver,
@@ -58,7 +58,7 @@ fn fenced_completion_is_retired_without_receipt_or_deadline_refresh() {
         let original = watcher.next_deadline().unwrap();
         asupersync::time::sleep(c.now(), Duration::from_millis(10)).await;
         assert!(
-            recovery_flow::complete(
+            recovery_flow::admit::<media::PresentationReceipt>(
                 &mut peer,
                 Some(&mut watcher),
                 &mut receiver,
@@ -85,7 +85,7 @@ fn expiry_between_completion_preflight_and_receiver_acceptance_is_reported_once(
         lose(&mut peer, &mut receiver, &c);
         let mut repairs = Repair::default();
         let called = Cell::new(false);
-        let receipt = recovery_flow::complete(
+        let receipt = recovery_flow::admit::<media::PresentationReceipt>(
             &mut peer,
             Some(&mut watcher),
             &mut receiver,
@@ -123,7 +123,7 @@ fn completion_without_recovery_negotiation_keeps_terminal_expiry() {
         let (mut host, mut peer, mut receiver, mut watcher, _) = Box::pin(pair(&c, &h)).await;
         lose(&mut peer, &mut receiver, &c);
         asupersync::time::sleep(c.now(), Duration::from_millis(130)).await;
-        let result = recovery_flow::complete(
+        let result = recovery_flow::admit::<media::PresentationReceipt>(
             &mut peer,
             None,
             &mut receiver,
@@ -152,7 +152,7 @@ fn unrelated_completion_errors_cannot_fabricate_recovery_or_suppress_failure() {
             media::Error::InvalidFrame,
             media::Error::Receiver(DeliveryError::DecodeFailed),
         ] {
-            let result = recovery_flow::complete(
+            let result = recovery_flow::admit::<media::PresentationReceipt>(
                 &mut peer,
                 Some(&mut watcher),
                 &mut receiver,

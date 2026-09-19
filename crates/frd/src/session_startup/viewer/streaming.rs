@@ -642,9 +642,15 @@ impl StreamingViewer {
             }
             let ready = !recovering && self.peer.prepare_decode(&self.receiver)?;
             let job = if ready {
-                self.presenter
-                    .take_next(cx, &mut self.receiver)
-                    .map_err(Error::Media)?
+                recovery::admit(
+                    &mut self.peer,
+                    self.recovery.as_mut(),
+                    &mut self.receiver,
+                    &mut self.repair,
+                    cx,
+                    |receiver| self.presenter.take_next(cx, receiver),
+                )?
+                .flatten()
             } else {
                 None
             };
@@ -720,7 +726,7 @@ impl StreamingViewer {
                     )?;
                 }
             };
-            let receipt = recovery::complete(
+            let receipt = recovery::admit(
                 &mut self.peer,
                 self.recovery.as_mut(),
                 &mut self.receiver,

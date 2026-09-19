@@ -103,27 +103,27 @@ pub(super) fn prepare(
     }
 }
 
-/// Native completion and receiver acceptance are different milestones. Finish
-/// the canonical network turn first, then check the ORIGINAL recovery owner
-/// before accepting a completion. The closure owns the native job: dropping it
-/// retires its still-charged bytes, never another receiver's reservation.
+/// Guard transitions which can discover expiry on their own clock read: taking
+/// a queued picture and accepting a completed native job use the same ORIGINAL
+/// recovery owner. None means no result can be used from this failed chain;
+/// neither selection nor native completion can restart its deadline.
 ///
-/// Expiry can also win between this check and `complete_decode`'s clock read.
-/// Report that same failure without restarting its deadline. Protocol errors,
-/// foreign scopes, cancellation and input-owning peers remain terminal.
-pub(super) fn complete(
+/// A completion closure owns its native job. Skipping/dropping it retires the
+/// still-charged bytes, never another receiver's reservation or native reply.
+/// Protocol errors, foreign scopes, cancellation and control remain terminal.
+pub(super) fn admit<T>(
     peer: &mut Peer,
     mut report: Option<&mut recovery_control::Receiver>,
     receiver: &mut ReceivePipeline,
     repair: &mut Repair,
     cx: &Cx,
-    decode: impl FnOnce(&mut ReceivePipeline) -> Result<media::PresentationReceipt, media::Error>,
-) -> Result<Option<media::PresentationReceipt>, Error> {
+    operation: impl FnOnce(&mut ReceivePipeline) -> Result<T, media::Error>,
+) -> Result<Option<T>, Error> {
     if service(peer, report.as_deref_mut(), receiver, repair, cx)? {
         return Ok(None);
     }
-    match decode(receiver) {
-        Ok(receipt) => Ok(Some(receipt)),
+    match operation(receiver) {
+        Ok(value) => Ok(Some(value)),
         Err(media::Error::Receiver(error))
             if enabled(peer, report.as_deref()) && recoverable(error) =>
         {
