@@ -60,10 +60,8 @@ impl ArtifactBundle {
             .unwrap_or("development_tree")
             .to_string();
 
-        let reproduce_command = format!(
-            "scripts/e2e/run.sh --scenario {} --seed {}",
-            scenario_name, seed
-        );
+        let reproduce_command =
+            format!("scripts/e2e/run.sh --scenario {scenario_name} --seed {seed}");
 
         let manifest = RunManifest {
             run_id: run_id.clone(),

@@ -1,4 +1,4 @@
-//! Integration tests for the FrankenRemote E2E test harness (`fr-e2e`).
+//! Integration tests for the `FrankenRemote` E2E test harness (`fr-e2e`).
 //!
 //! Acceptance verification:
 //! - Canonical Phase 1 pair connects, authorizes, controls, revokes, reconnects, with full artifacts.
@@ -14,7 +14,8 @@ use std::fs;
 use std::path::PathBuf;
 
 fn test_temp_dir(suffix: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("fr_e2e_test_{}_{}", suffix, std::process::id()));
+    let pid = std::process::id();
+    let dir = std::env::temp_dir().join(format!("fr_e2e_test_{suffix}_{pid}"));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir

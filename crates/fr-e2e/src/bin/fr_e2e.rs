@@ -1,7 +1,7 @@
-//! Standalone CLI executable for running FrankenRemote E2E scenarios.
+//! Standalone CLI executable for running `FrankenRemote` E2E scenarios.
 //!
 //! Usage:
-//!   fr_e2e [--scenario <name>] [--seed <num>] [--artifacts-dir <dir>] [--planted-delay <ms>]
+//!   `fr_e2e` [--scenario <name>] [--seed <num>] [--artifacts-dir <dir>] [--planted-delay <ms>]
 
 use fr_e2e::harness::{E2eHarness, HarnessConfig};
 use std::env;
@@ -10,7 +10,7 @@ use std::process::ExitCode;
 
 fn print_usage() {
     eprintln!(
-        r#"FrankenRemote End-to-End Test Runner (`fr_e2e`)
+        r"FrankenRemote End-to-End Test Runner (`fr_e2e`)
 
 Usage:
     fr_e2e [OPTIONS]
@@ -21,7 +21,7 @@ Options:
     --artifacts-dir <PATH>  Output directory for run artifacts (default: artifacts)
     --planted-delay <MS>    Delay in milliseconds for planted violation test (default: 50)
     --help, -h              Print this help text
-"#
+"
     );
 }
 
@@ -39,7 +39,7 @@ fn main() -> ExitCode {
             "--scenario" => {
                 idx += 1;
                 if idx < args.len() {
-                    scenario_name = args[idx].clone();
+                    scenario_name.clone_from(&args[idx]);
                 }
             }
             "--seed" => {

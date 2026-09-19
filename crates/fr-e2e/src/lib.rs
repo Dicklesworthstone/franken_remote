@@ -1,11 +1,11 @@
 #![forbid(unsafe_code)]
 //! Scripted end-to-end session harness with structured logging and artifact capture
-//! for FrankenRemote (`fr-e2e`).
+//! for `FrankenRemote` (`fr-e2e`).
 //!
 //! # Architecture & Scope (Plan Sections 23 Phase 1 Gate, 24.2)
 //!
 //! This crate provides the runnable spine for all end-to-end integration and
-//! fault-injection testing across FrankenRemote.
+//! fault-injection testing across `FrankenRemote`.
 //!
 //! - **Data-driven Scenarios**: Scenarios script sessions as pure data (`ScenarioStep`),
 //!   exercising real client cores (`fr_client::ClientSession`) and host authority.
