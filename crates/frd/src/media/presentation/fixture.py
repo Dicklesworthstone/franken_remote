@@ -22,6 +22,8 @@ try:
         assert k in (4,6)
         if MODE=='stall': time.sleep(60)
         if MODE=='slow': time.sleep(.04)
+        if MODE=='drain': time.sleep(.09)
+        if MODE=='bad-reply': b = (999).to_bytes(8, 'big')
         reply(h,261 if k==4 else 264,b[:8])
 except (EOFError,BrokenPipeError):
     pass

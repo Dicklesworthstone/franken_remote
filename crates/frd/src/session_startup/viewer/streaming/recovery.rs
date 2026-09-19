@@ -1,5 +1,5 @@
 //! Recovery reports in the canonical observation loop, not UI callbacks.
-use super::{Error, Peer, Repair, now, recovery_control};
+use super::{Error, Peer, Repair, media, now, recovery_control};
 use asupersync::cx::Cx;
 use fr_media::delivery::{DeliveryError, ReceivePipeline};
 
@@ -10,6 +10,12 @@ pub(super) fn recoverable(error: DeliveryError) -> bool {
             | DeliveryError::RecoveryExpired
             | DeliveryError::DecodeFailed
     )
+}
+
+/// Only a positively negotiated, observation-only session can retain its
+/// decoder across a failed chain. Acquiring/viewing peers may own input state.
+pub(super) fn enabled(peer: &Peer, report: Option<&recovery_control::Receiver>) -> bool {
+    report.is_some() && matches!(peer, Peer::Observe { .. })
 }
 
 /// Fences the real receiver before any new decode or transport work. There is
@@ -94,5 +100,39 @@ pub(super) fn prepare(
             Ok(())
         }
         Err(error) => Err(error),
+    }
+}
+
+/// Native completion and receiver acceptance are different milestones. Finish
+/// the canonical network turn first, then check the ORIGINAL recovery owner
+/// before accepting a completion. The closure owns the native job: dropping it
+/// retires its still-charged bytes, never another receiver's reservation.
+///
+/// Expiry can also win between this check and `complete_decode`'s clock read.
+/// Report that same failure without restarting its deadline. Protocol errors,
+/// foreign scopes, cancellation and input-owning peers remain terminal.
+pub(super) fn complete(
+    peer: &mut Peer,
+    mut report: Option<&mut recovery_control::Receiver>,
+    receiver: &mut ReceivePipeline,
+    repair: &mut Repair,
+    cx: &Cx,
+    decode: impl FnOnce(&mut ReceivePipeline) -> Result<media::PresentationReceipt, media::Error>,
+) -> Result<Option<media::PresentationReceipt>, Error> {
+    if service(peer, report.as_deref_mut(), receiver, repair, cx)? {
+        return Ok(None);
+    }
+    match decode(receiver) {
+        Ok(receipt) => Ok(Some(receipt)),
+        Err(media::Error::Receiver(error))
+            if enabled(peer, report.as_deref()) && recoverable(error) =>
+        {
+            if service(peer, report, receiver, repair, cx)? {
+                Ok(None)
+            } else {
+                Err(Error::Media(media::Error::Receiver(error)))
+            }
+        }
+        Err(error) => Err(Error::Media(error)),
     }
 }
