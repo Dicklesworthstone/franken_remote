@@ -1,6 +1,6 @@
 # Native file sending
 
-`fr_files::sender::Sender` exclusively borrows the original completed
+`fr_files::sender::Sender` exclusively borrows or consumes the original completed
 `FilesChannel`; its parent continues to own and drive the existing QUIC
 connection. `begin` accepts a locally selected `std::fs::File` and a portable
 basename, never a peer-supplied source path. Hashing, metadata checks, seeks and
@@ -40,8 +40,8 @@ multiple 120,007-byte files, an empty file, replaced source paths, changed conte
 hostile acceptance, contradictory proofs, missing proof after real publication,
 no-overwrite conflicts, and queued record expiry without destroying control.
 These use explicit admission/controller fixtures, not live Tailscale or native
-file-picker authority. Normal host/client optional-channel setup and user-facing
-file selection still need integration. Resumption, folder sync and host-to-client
+file-picker authority. Running host/viewer optional-channel setup is described below; user-facing
+file selection still needs integration. Resumption, folder sync and host-to-client
 sending are not implemented by this single regular-file profile.
 
 ## Running controller integration
@@ -67,6 +67,36 @@ ATP hashing and filesystem publication. They cover successive 120,007-byte and
 empty files, input and renewal beyond the initial lease, partial cancellation,
 local file-permission denial, and abandoning an unpolled drive. Their initial
 consent, source-visibility evidence and counted input sink are explicit fixtures,
-not native desktop or live-Tailscale qualification. Native file selection,
-viewer-side automatic attachment, file-scope agreement, resumption, downloads
-and folder synchronization are not completed by this slice.
+not native desktop or live-Tailscale qualification. Native file selection, file-scope agreement, resumption, downloads and folder
+synchronization are not completed by this slice.
+
+## Automatic viewer attachment
+
+After local file-scope agreement, call `ControlledViewer::expect_files` with the
+nonzero handle, independent local permission, sender policy and a bounded setup
+timeout. `ControlledHost::offer_files` supplies the matching host offer. Both
+normal controller loops now perform the role-specific binding/ticket exchange
+and promote the same completed channel. Neither a manual attachment pump nor a
+second connection is required. The viewer checks the full selected display and
+generation tuple; an offered alternate display cannot replace its local scope.
+
+The original setup deadline starts at `expect_files`, including idle time before
+the first poll, and bounds actual UDP service and presentation-callback waits.
+No file source starts before completion. `send_file` returns `Busy` while setup
+is pending, without reading the supplied descriptor. Pending clipboard and file
+handshakes are serialized on the common control route; established lanes remain
+independent. Duplicate expectations cannot spend another channel slot.
+
+Cancellation, permission loss, malformed/foreign binding or expiry during the
+uncompleted exchange fences the parent. There is no safely completed file lane
+to retire independently yet. Established file transfer still cancels separately.
+A failed sender construction after attachment also fences instead of discarding
+an unacknowledged peer handshake. No setup failure fabricates a publication or
+source-cleanup receipt.
+
+Nine additional UDP/TLS controller tests cover automatic establishment and real
+120,007-byte publication with input, local refusals before admission, capability
+denial, original-deadline expiry (both idle and serviced), unfinished cancellation,
+permission revocation, unpolled abandonment and another display's offer. Together
+with the four running-sender cases these are 13 integration tests, not a complete
+native picker, live-tailnet, download, resumption or folder-sync qualification.

@@ -286,3 +286,5 @@ fn closing_unpolled_turn_keeps_original_file_result_and_cleanup_accessible() {
         assert!(state.driver.take().unwrap().await.handoff_safe());
     });
 }
+
+mod negotiation;

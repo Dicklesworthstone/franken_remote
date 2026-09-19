@@ -175,6 +175,7 @@ enum ClipboardMode {
     Attached,
     Negotiate,
     Files,
+    FilesNegotiate,
 }
 #[allow(clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 async fn fixture_with_clipboard(
@@ -222,7 +223,10 @@ async fn fixture_with_clipboard(
             required: false,
         });
     }
-    if clipboard == ClipboardMode::Files {
+    if matches!(
+        clipboard,
+        ClipboardMode::Files | ClipboardMode::FilesNegotiate
+    ) {
         for name in [attachment::FILES_CAPABILITY, fr_wire::files::CAPABILITY] {
             wire_capabilities.push(WireCapability {
                 name: name.into(),

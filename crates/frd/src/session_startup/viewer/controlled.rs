@@ -262,6 +262,7 @@ impl ControlledViewer {
         if self.is_closed() {
             return Err(Error::Closed);
         }
+        self.files.check_pending().map_err(Error::Files)?;
         self.session.check()?;
         self.channels
             .viewer_routes(&self.session.transport)
@@ -453,7 +454,7 @@ impl ControlledViewer {
         let last_result = &mut self.last_result;
         let mut failure = None;
         let receive = self.session.step(&mut |route, bytes| {
-            if files.owns(route)
+            if files.owns(route, bytes)
                 || clipboard.as_ref().is_some_and(|c| c.owns_inbound(route))
                 || clipboard_setup.owns(route, bytes)
             {
@@ -542,6 +543,14 @@ impl ControlledViewer {
             if wait > Duration::from_millis(100) {
                 return Err(Error::Session(super::Error::InvalidConfiguration));
             }
+            // Check the file setup horizon without sampling the input clock.
+            // Clipboard permission/service advances that same input clock, so
+            // tick's timestamp must be obtained AFTER clipboard servicing.
+            operation
+                .viewer
+                .files
+                .check_pending()
+                .map_err(Error::Files)?;
             operation.viewer.service_clipboard()?;
             let t = operation.viewer.check_inner()?;
             // A submitted frame is not yet a visible frame. Pause all network
@@ -550,7 +559,10 @@ impl ControlledViewer {
             // preceding view and every queued action keep their old deadlines.
             if !operation.viewer.input.tick(t)? {
                 let viewer = &mut *operation.viewer;
-                let until = viewer.input.maintenance_deadline(t)?.0;
+                let mut until = viewer.input.maintenance_deadline(t)?.0;
+                if let Some(deadline) = viewer.files.deadline_us() {
+                    until = until.min(deadline);
+                }
                 let remaining = until
                     .checked_sub(now(&viewer.session.cx)?)
                     .ok_or(Error::Expired)?;
@@ -579,6 +591,9 @@ impl ControlledViewer {
             }
             if let Some(d) = viewer.session.responder.response_deadline() {
                 until = until.min(d.0);
+            }
+            if let Some(deadline) = viewer.files.deadline_us() {
+                until = until.min(deadline);
             }
             if let Some(deadline) = viewer.clipboard_setup.deadline_us() {
                 until = until.min(deadline);

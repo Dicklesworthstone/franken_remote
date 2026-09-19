@@ -1,4 +1,5 @@
 //! One file sender carried by the original running controller, never a new grant.
+mod negotiation;
 use super::{ControlledViewer, permitted};
 use asupersync::cx::Cx;
 use fr_files::{
@@ -11,23 +12,43 @@ use fr_wire::{
     decoder::Binding,
     negotiation::{ControlBinding, Role},
 };
+use negotiation::Pending;
 use std::fs::File;
 
 #[derive(Default)]
 pub(super) struct Slot {
+    used: bool,
+    pending: Option<Pending>,
     sender: Option<Sender<'static>>,
     permission: Option<Permission>,
     failure: Option<Error>,
     stopped: bool,
 }
 impl Slot {
-    pub(super) fn owns(&self, route: Route) -> bool {
-        self.sender.as_ref().is_some_and(|s| s.owns_inbound(route))
+    pub(super) fn owns(&self, route: Route, bytes: &[u8]) -> bool {
+        self.pending.as_ref().is_some_and(|p| p.owns(route, bytes))
+            || self.sender.as_ref().is_some_and(|s| s.owns_inbound(route))
     }
-    pub(super) fn permits_io(&self) -> bool {
-        self.stopped || self.permission.as_ref().is_none_or(Permission::is_approved)
+    pub(super) fn deadline_us(&self) -> Option<u64> {
+        self.pending.as_ref().map(Pending::deadline)
+    }
+    pub(super) fn check_pending(&mut self) -> Result<(), Error> {
+        if let Some(pending) = &mut self.pending
+            && let Err(error) = pending.check()
+        {
+            self.failure.get_or_insert(error);
+            return Err(error);
+        }
+        Ok(())
+    }
+    pub(super) fn permits_io(&mut self) -> bool {
+        self.check_pending().is_ok()
+            && (self.stopped || self.permission.as_ref().is_none_or(Permission::is_approved))
     }
     pub(super) fn stop(&mut self, q: &mut QuicRecords) -> Result<(), Error> {
+        if self.pending.take().is_some() {
+            self.failure.get_or_insert(Error::Cancelled);
+        }
         if !self.stopped {
             self.stopped = true;
             if let Some(sender) = &mut self.sender {
@@ -39,8 +60,30 @@ impl Slot {
     pub(super) fn service(
         &mut self,
         q: &mut QuicRecords,
-        authorize: impl FnMut() -> bool,
+        mut authorize: impl FnMut() -> bool,
     ) -> Result<(), Error> {
+        if let Some(pending) = &mut self.pending {
+            match pending.advance(q, &mut authorize) {
+                Ok(false) => return Ok(()),
+                Ok(true) => {}
+                Err(error) => {
+                    self.failure.get_or_insert(error);
+                    // The peer may still own its final handshake response. An
+                    // incomplete attachment cannot be retired as a file-only lane.
+                    return Err(error);
+                }
+            }
+            match self.pending.take().ok_or(Error::Closed)?.start(q) {
+                Ok((sender, permission)) => {
+                    self.sender = Some(sender);
+                    self.permission = Some(permission);
+                }
+                Err(error) => {
+                    self.failure.get_or_insert(error);
+                    return Err(error);
+                }
+            }
+        }
         if !self.permits_io() {
             self.failure.get_or_insert(Error::Cancelled);
             return self.stop(q);
@@ -79,7 +122,7 @@ impl ControlledViewer {
         permission: Permission,
         policy: Policy,
     ) -> Result<(), Error> {
-        if self.files.sender.is_some() || self.files.stopped {
+        if self.files.used || self.files.stopped {
             return Err(Error::Busy);
         }
         self.files_admitted(&permission)?;
@@ -98,6 +141,9 @@ impl ControlledViewer {
         }
         let lane = FilesChannel::new(q, channel, self.input.binding().lease, handle)
             .map_err(Error::Transport)?;
+        // The completed attachment has spent this single-use channel identity,
+        // even if local sender configuration is subsequently refused.
+        self.files.used = true;
         let sender = Sender::owning(self.session.cx.clone(), q, lane, policy)?;
         self.files.sender = Some(sender);
         self.files.permission = Some(permission);
@@ -133,6 +179,9 @@ impl ControlledViewer {
     /// source cleanup must be collected before a subsequent file can be started.
     pub fn send_file(&mut self, file: File, name: &str) -> Result<u64, Error> {
         self.check().map_err(|_| Error::Closed)?;
+        if self.files.pending.is_some() {
+            return Err(Error::Busy);
+        }
         if !self.files.permits_io() || self.files.stopped {
             self.cancel_files()?;
             return Err(Error::Cancelled);
@@ -168,8 +217,13 @@ impl ControlledViewer {
             .as_ref()
             .is_none_or(Sender::cleanup_finished)
     }
-    /// Retire files only. Input, observation and their identities stay unchanged.
+    /// A completed file lane retires independently. An unfinished attachment
+    /// instead fences the parent: a partially acknowledged pair is not clean.
     pub fn cancel_files(&mut self) -> Result<(), Error> {
+        if self.files.pending.is_some() {
+            self.close();
+            return Err(Error::Cancelled);
+        }
         self.files.stop(&mut self.session.transport)
     }
     /// Stop files, then join the already-finished original disk source using a separate
