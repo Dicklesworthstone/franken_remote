@@ -296,12 +296,12 @@ fn probe_detailed_logging_contract() {
 
 #[test]
 fn compile_time_api_review_no_foreign_codec_types() {
-    log("compile-time API review: public signatures only expose first-party types");
-
     // Trait object assertions for public interfaces
     fn assert_is_encoder<T: Encoder>() {}
     fn assert_is_decoder<T: Decoder>() {}
     fn assert_is_surface<T: fr_media::surface::GpuSurface>() {}
+
+    log("compile-time API review: public signatures only expose first-party types");
 
     assert_is_encoder::<FakeEncoder>();
     assert_is_decoder::<FakeDecoder>();
