@@ -226,6 +226,7 @@ async fn channel(l: &mut Link, cx: &Cx, id: u32, role: MediaRole) -> (MediaChann
 pub struct Running {
     pub link: Link,
     pub host: HostReceiver,
+    pub host_files: StreamRoute,
     pub client: FilesChannel,
     pub input: InputSession,
     pub path: PathBuf,
@@ -266,6 +267,7 @@ impl Running {
             },
         )
         .unwrap();
+        let host_files = hc.completed_on(&link.h).unwrap().outbound;
         let h = FilesChannel::new(&link.h, hc, InputLeaseId::from_raw(2), 456).unwrap();
         let client = FilesChannel::new(&link.c, cc, InputLeaseId::from_raw(2), 456).unwrap();
         let host = HostReceiver::spawn(
@@ -284,6 +286,7 @@ impl Running {
         Self {
             link,
             host,
+            host_files,
             client,
             input,
             path,

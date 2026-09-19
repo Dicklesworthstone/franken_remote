@@ -155,3 +155,6 @@ fn published_receipt_survives_local_retirement_and_completed_cleanup() {
         assert_eq!(fs::read(f.path.join("received.bin")).unwrap(),b"durable");f.input_live(&cx);
     });
 }
+
+#[path = "native_quic/sender.rs"]
+mod sender;
