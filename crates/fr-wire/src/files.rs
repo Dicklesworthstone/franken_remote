@@ -12,6 +12,8 @@ use fr_core::{
     limits::ProtocolLimits,
 };
 
+pub const CAPABILITY: &str = "file-atp-full";
+pub const VERSION: u16 = 1;
 pub const ATP_PORTABLE_FULL: u16 = 1;
 /// Largest extension-free 0.5.0 ATP data header plus entry index/offset.
 pub const ATP_DATA_OVERHEAD: usize = 20;

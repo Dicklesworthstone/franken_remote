@@ -33,6 +33,10 @@ pub const INPUT_VERSION: u16 = 1;
 /// This capability does not grant native clipboard or input authority.
 pub const CLIPBOARD_CAPABILITY: &str = "native-clipboard-attachment";
 pub const CLIPBOARD_VERSION: u16 = 1;
+/// Dedicated full-object file-receive pair, separately negotiated and locally
+/// approved. Requires the original completed input attachment, not observation.
+pub const FILES_CAPABILITY: &str = "native-file-receive";
+pub const FILES_VERSION: u16 = 1;
 pub const BINDING_RECORD_BYTES: usize = HEADER_BYTES + 118;
 pub const GRANT_RECORD_BYTES: usize = BINDING_RECORD_BYTES + 44;
 
@@ -46,12 +50,17 @@ pub enum MediaRole {
     Video = 3,
     Input = 4,
     Clipboard = 5,
+    Files = 6,
 }
 impl MediaRole {
     /// Wire direction: 1 = host-to-viewer, 2 = viewer-to-host. This describes
     /// application data, not the fixed directions of the attachment handshake.
     pub const fn primary_direction(self) -> u8 {
-        if matches!(self, Self::Input) { 2 } else { 1 }
+        if matches!(self, Self::Input | Self::Files) {
+            2
+        } else {
+            1
+        }
     }
     fn read(v: u8) -> Result<Self, WireError> {
         match v {
@@ -60,6 +69,7 @@ impl MediaRole {
             3 => Ok(Self::Video),
             4 => Ok(Self::Input),
             5 => Ok(Self::Clipboard),
+            6 => Ok(Self::Files),
             _ => Err(WireError::InvalidValue),
         }
     }

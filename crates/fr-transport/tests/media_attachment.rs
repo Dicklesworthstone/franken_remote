@@ -657,3 +657,6 @@ mod input;
 
 #[path = "media_attachment/clipboard.rs"]
 mod clipboard;
+
+#[path = "media_attachment/files.rs"]
+mod files;

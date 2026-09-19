@@ -22,6 +22,7 @@ use std::{
 mod lifetime;
 
 pub mod clipboard;
+pub mod files;
 
 mod attachment;
 pub use attachment::{AttachedChannel, ChannelRequest, ChannelScope, MediaChannel};
@@ -87,6 +88,8 @@ pub enum Messages {
     InputFeedback,
     /// Only bounded Begin/Chunk/Commit/Cancel records, on a dedicated pair.
     Clipboard,
+    /// Separately attached file records, never an input/control parser exception.
+    Files,
     /// Decoder configuration and first-frame acknowledgements, one ordered lane.
     DecoderReplies,
     /// Initial native control only, before the host installs a binding.
@@ -101,6 +104,7 @@ impl Messages {
             Self::Exact(expected) => kind == expected,
             Self::InputFeedback => matches!(kind, 0x0017 | 0x0048),
             Self::Clipboard => matches!(kind, 0x0050..=0x0053),
+            Self::Files => matches!(kind, 0x0070..=0x0074),
             Self::DecoderReplies => matches!(kind, 0x0031 | 0x0033),
             Self::Negotiation => matches!(kind, 0x0001..=0x0003 | 0x0010 | 0x0011),
             Self::SessionControl => {
@@ -510,7 +514,7 @@ impl QuicRecords {
                 return Err(Error::Clock);
             }
             self.last_now = Some(now);
-            self.service_clipboard_retirements(cx)?;
+            self.service_optional_retirements(cx)?;
             if self.attachments.iter().any(|r| r.expired(now)) {
                 return Err(Error::Expired);
             }

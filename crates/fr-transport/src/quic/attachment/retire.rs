@@ -6,6 +6,7 @@ use asupersync::bytes::Bytes;
 // Application cancellation of the optional clipboard pair. No new FRD0 kind,
 // acknowledgment, authority token, or retry semantics are introduced.
 const CLIPBOARD_RETIRED: u64 = 0x4652_4350;
+const FILES_RETIRED: u64 = 0x4652_4649;
 
 impl MediaChannel {
     /// Retire only a COMPLETED optional clipboard pair on the original connection.
@@ -13,8 +14,21 @@ impl MediaChannel {
     /// running-session readiness exchange. Never releases IDs for reuse or
     /// grants clipboard access. Incomplete exchanges cannot use this escape.
     pub fn retire_clipboard(&mut self, q: &mut QuicRecords, cx: &Cx) -> Result<(), Error> {
+        self.retire_optional(q, cx, MediaRole::Clipboard)
+    }
+    /// Retire only the completed file pair. Retain its consumed ticket, binding
+    /// and stream IDs; a second attachment cannot reset cumulative file quotas.
+    pub fn retire_files(&mut self, q: &mut QuicRecords, cx: &Cx) -> Result<(), Error> {
+        self.retire_optional(q, cx, MediaRole::Files)
+    }
+    fn retire_optional(
+        &mut self,
+        q: &mut QuicRecords,
+        cx: &Cx,
+        role: MediaRole,
+    ) -> Result<(), Error> {
         // Reject a foreign object BEFORE any operation or error can mutate it.
-        if !q.is_bound_to(&self.connection) || self.descriptor.role != MediaRole::Clipboard {
+        if !q.is_bound_to(&self.connection) || self.descriptor.role != role {
             return Err(Error::WrongRoute);
         }
         if self.state.load(Ordering::Acquire) == RETIRED {
@@ -27,7 +41,7 @@ impl MediaChannel {
             .iter()
             .position(|r| std::sync::Arc::ptr_eq(&r.state, &self.state))
             .ok_or(Error::WrongRoute)?;
-        if let Err(error) = q.retire_clipboard_at(cx, index) {
+        if let Err(error) = q.retire_optional_at(cx, index) {
             self.close();
             q.close();
             return Err(error);
@@ -41,10 +55,10 @@ impl QuicRecords {
     /// Run before framing/retained-record deadline checks. A peer's reset/FIN
     /// cancels this optional pair; it is not EOF on the critical input stream.
     /// Retired reservations remain forever to prevent replay-ledger recreation.
-    pub(crate) fn service_clipboard_retirements(&mut self, cx: &Cx) -> Result<(), Error> {
+    pub(crate) fn service_optional_retirements(&mut self, cx: &Cx) -> Result<(), Error> {
         for index in 0..self.attachments.len() {
             let r = &self.attachments[index];
-            if r.role != MediaRole::Clipboard {
+            if !matches!(r.role, MediaRole::Clipboard | MediaRole::Files) {
                 continue;
             }
             if r.state.load(Ordering::Acquire) == ACTIVE {
@@ -62,7 +76,7 @@ impl QuicRecords {
                     || incoming.recv_reset.is_some()
                     || incoming.final_size.is_some()
                 {
-                    self.retire_clipboard_at(cx, index)?;
+                    self.retire_optional_at(cx, index)?;
                 }
             }
             if self.attachments[index].retired() {
@@ -71,12 +85,19 @@ impl QuicRecords {
         }
         self.refresh_retired_credit(cx)
     }
-    fn retire_clipboard_at(&mut self, cx: &Cx, index: usize) -> Result<(), Error> {
+    fn retire_optional_at(&mut self, cx: &Cx, index: usize) -> Result<(), Error> {
         let r = &self.attachments[index];
-        if r.role != MediaRole::Clipboard || r.state.load(Ordering::Acquire) != ACTIVE {
+        if !matches!(r.role, MediaRole::Clipboard | MediaRole::Files)
+            || r.state.load(Ordering::Acquire) != ACTIVE
+        {
             return Err(Error::WrongRoute);
         }
         let (outbound, inbound, binding) = (r.outbound, r.inbound, r.binding);
+        let code = if r.role == MediaRole::Files {
+            FILES_RETIRED
+        } else {
+            CLIPBOARD_RETIRED
+        };
         let native = self.native.as_mut().ok_or(Error::Closed)?;
         let outgoing = native
             .connection()
@@ -90,7 +111,7 @@ impl QuicRecords {
             // It does not discard other streams' retransmissions/control frames.
             native
                 .connection_mut()
-                .reset_stream(cx, outbound, CLIPBOARD_RETIRED)
+                .reset_stream(cx, outbound, code)
                 .map_err(|_| Error::Native)?;
         }
         let incoming = native
@@ -102,7 +123,7 @@ impl QuicRecords {
         self.attachments[index].retired_receive_accounted = incoming.read_offset;
         native
             .connection_mut()
-            .stop_stream_receiving(cx, inbound, CLIPBOARD_RETIRED)
+            .stop_stream_receiving(cx, inbound, code)
             .map_err(|_| Error::Native)?;
         self.pending_writes.retain(|p| p.route.stream != outbound);
         for sender in &mut self.senders {

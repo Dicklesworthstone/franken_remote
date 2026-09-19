@@ -199,6 +199,19 @@ fn validate_role(scope: &ChannelScope<'_>, role: MediaRole) -> Result<(), Error>
                 attachment::CLIPBOARD_VERSION,
             )
         }
+        MediaRole::Files => {
+            if scope.selection.role != fr_wire::negotiation::Role::RequestControl
+                || !scope.selection.capabilities.iter().any(|c| {
+                    c.name == fr_wire::files::CAPABILITY && c.version == fr_wire::files::VERSION
+                })
+                || !scope.selection.capabilities.iter().any(|c| {
+                    c.name == attachment::INPUT_CAPABILITY && c.version == attachment::INPUT_VERSION
+                })
+            {
+                return Err(Error::WrongRoute);
+            }
+            (attachment::FILES_CAPABILITY, attachment::FILES_VERSION)
+        }
         MediaRole::Input => {
             if scope.selection.role != fr_wire::negotiation::Role::RequestControl {
                 return Err(Error::WrongRoute);
@@ -221,7 +234,9 @@ fn has_datagram(role: MediaRole) -> bool {
 }
 
 fn priority(role: MediaRole, host_direction: bool) -> Priority {
-    if role == MediaRole::Clipboard || (role == MediaRole::Recovery && host_direction) {
+    if matches!(role, MediaRole::Clipboard | MediaRole::Files)
+        || (role == MediaRole::Recovery && host_direction)
+    {
         Priority::Bulk
     } else {
         Priority::Critical
@@ -238,6 +253,7 @@ fn messages(role: MediaRole, host_direction: bool) -> Messages {
         (MediaRole::Input, true) => Messages::InputFeedback,
         (MediaRole::Input, false) => Messages::InputActions,
         (MediaRole::Clipboard, _) => Messages::Clipboard,
+        (MediaRole::Files, _) => Messages::Files,
     }
 }
 impl QuicRecords {
@@ -247,7 +263,7 @@ impl QuicRecords {
             .min(self.policy.critical_send_bytes as u64);
         match role {
             MediaRole::Configuration => base,
-            MediaRole::Recovery | MediaRole::Clipboard => {
+            MediaRole::Recovery | MediaRole::Clipboard | MediaRole::Files => {
                 base.min(self.policy.retained_send_bytes as u64)
             }
             // The same advertised cap bounds progress, repairs AND video.
@@ -329,15 +345,12 @@ impl QuicRecords {
         // Clipboard is a single ordering domain for the original controller,
         // never a read-only observation route or a replacement sequence floor.
         // Retired reservations are deliberately not reusable on this connection.
-        if d.role == MediaRole::Clipboard
-            && (self
-                .attachments
-                .iter()
-                .any(|r| r.role == MediaRole::Clipboard)
+        if matches!(d.role, MediaRole::Clipboard | MediaRole::Files)
+            && (self.attachments.iter().any(|r| r.role == d.role)
                 || self
                     .streams
                     .iter()
-                    .any(|r| r.messages == Messages::Clipboard)
+                    .any(|r| r.messages == messages(d.role, true))
                 || !self.attachments.iter().any(|r| {
                     r.role == MediaRole::Input && r.state.load(Ordering::Acquire) == ACTIVE
                 }))
