@@ -20,3 +20,6 @@ pub mod atp;
 
 #[cfg(target_os = "linux")]
 pub mod wire;
+
+#[cfg(target_os = "linux")]
+pub mod quic;
