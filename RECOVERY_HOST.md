@@ -65,3 +65,36 @@ The fixed transport namespace currently allows one complete three-role media
 replacement; later exhaustion refuses rather than recycling tombstones.
 
 Refs: plan 7, 11, 12, 17 and 19; fr-p1-loss-recovery-20s.
+
+## Cancellation-ordering reconciliation
+
+The automatic host implementation that landed while the earlier host patch was
+awaiting publication is retained. Its original source scheduler, attachment
+handoff, sender history and publisher integration are not replaced with the
+older parallel implementation.
+
+Recovery now also fences authority inside each native-work scope on failure.
+The outer serving guard alone is insufficient for an inner error: a pinned
+native future can be dropped while that error unwinds, before the outer caller
+observes it. The failure guard is deliberately declared after the protected
+futures, so it revokes observation/input authority before their destructors run.
+A successful old-capture drain or recovery-capture handoff disarms that guard;
+it does not terminate the continuing session or create a new authority grant.
+
+Four regression tests inspect authority from the native future's destructor.
+They cover an already expired budget, application permission refusal, a network
+failure after native polling, and cancellation during an in-flight handoff.
+Three fail against the original production implementation and all four pass
+with the fence. All four existing automatic-host tests also pass, including
+both canonical peers recovering on their original workers and continuing past
+the initial observation lease. Test admission uses actual TLS/UDP; the destructor
+witness is a deliberately synthetic pending future, not a codec qualification.
+
+These eight tests were run with the pinned compiler against the checksum-verified
+9f1e141 source plus this reconciliation. All eight first-party libraries were
+rebuilt using unchanged, compiler-matched upstream artifacts from run 35421807938.
+Strict Clippy checks the complete daemon unit-test source; changed Rust files
+pass formatting and whitespace checks. Runtime test registration was limited to
+these eight tests in an external source copy; all production code, test helpers,
+and selected assertions were retained. No repository test was ignored or
+weakened. This is not a cold dependency build or a full-workspace runtime pass.
