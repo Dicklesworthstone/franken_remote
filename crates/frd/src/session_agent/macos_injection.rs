@@ -1,6 +1,6 @@
 //! macOS keyboard/pointer injection adapter with submission-time checkpoints (plan §§5.3, 7.3, 15.2).
 //!
-//! Posts CGEvents under the macOS Accessibility permission (`kTCCServiceAccessibility`).
+//! Posts `CGEvents` under the macOS Accessibility permission (`kTCCServiceAccessibility`).
 //! Enforces:
 //! 1. Submission-time Accessibility permission check: typed refusal if permission missing.
 //! 2. Separation of physical key identity from committed text (plan §15.2):
@@ -9,7 +9,7 @@
 //! 3. Desktop coordinate bounds validation.
 
 use fr_core::{
-    input::{DesktopPoint, InputBounds, KeyTransition, PhysicalKey, PointerButton, ScrollUnit},
+    input::{DesktopPoint, InputBounds, KeyTransition, PointerButton, ScrollUnit},
     input_submission::{Capabilities, Capability, InputSink, Operation, PlatformError, Submission},
 };
 
@@ -106,32 +106,24 @@ pub fn hid_to_macos_keycode(usage: u16) -> Option<MacOsKeyCode> {
     }
 }
 
-/// A dispatched CGEvent representation for posting and inspection.
+/// A dispatched `CGEvent` representation for posting and inspection.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PostedCgEvent {
-    /// Keyboard physical key event posted via CGEventCreateKeyboardEvent.
-    Key {
-        keycode: MacOsKeyCode,
-        down: bool,
-    },
-    /// Unicode committed text posted via CGEventKeyboardSetUnicodeString.
+    /// Keyboard physical key event posted via `CGEventCreateKeyboardEvent`.
+    Key { keycode: MacOsKeyCode, down: bool },
+    /// Unicode committed text posted via `CGEventKeyboardSetUnicodeString`.
     /// This is strictly distinct from physical key events (plan §15.2).
-    Text {
-        character: char,
-    },
-    /// Pointer movement event (kCGEventMouseMoved).
-    MouseMove {
-        x: f64,
-        y: f64,
-    },
-    /// Pointer button event (LeftMouseDown, RightMouseDown, OtherMouseDown, etc.).
+    Text { character: char },
+    /// Pointer movement event (`kCGEventMouseMoved`).
+    MouseMove { x: f64, y: f64 },
+    /// Pointer button event (`LeftMouseDown`, `RightMouseDown`, `OtherMouseDown`, etc.).
     MouseButton {
         button: u32,
         down: bool,
         x: f64,
         y: f64,
     },
-    /// Scroll event (kCGEventScrollWheel).
+    /// Scroll event (`kCGEventScrollWheel`).
     Scroll {
         dx: i32,
         dy: i32,
@@ -139,15 +131,15 @@ pub enum PostedCgEvent {
     },
 }
 
-/// Abstract contract for posting CGEvents to the macOS window server.
+/// Abstract contract for posting `CGEvents` to the macOS window server.
 pub trait MacOsEventPoster: Send {
     /// Check whether the process holds macOS Accessibility permission (`kTCCServiceAccessibility`).
     fn has_accessibility_permission(&self) -> bool;
-    /// Post a synthetic CGEvent.
+    /// Post a synthetic `CGEvent`.
     fn post_event(&mut self, event: PostedCgEvent) -> Result<(), PlatformError>;
 }
 
-/// Test/Mock event poster that records all posted CGEvents for verification.
+/// Test/Mock event poster that records all posted `CGEvents` for verification.
 #[derive(Default)]
 pub struct RecordingPoster {
     pub has_permission: bool,
@@ -201,7 +193,7 @@ impl<P: MacOsEventPoster> MacOsInputSink<P> {
             poster,
             bounds,
             capabilities,
-            cursor_pos: DesktopPoint::new(0, 0),
+            cursor_pos: DesktopPoint { x: 0, y: 0 },
             prepared: None,
         }
     }
@@ -236,10 +228,8 @@ impl<P: MacOsEventPoster> MacOsInputSink<P> {
                     return Err(PlatformError::GeometryChanged);
                 }
             }
-            Operation::Key { key, .. } => {
-                if hid_to_macos_keycode(key.usage()).is_none() {
-                    return Err(PlatformError::Unsupported);
-                }
+            Operation::Key { key, .. } if hid_to_macos_keycode(key.usage()).is_none() => {
+                return Err(PlatformError::Unsupported);
             }
             _ => {}
         }

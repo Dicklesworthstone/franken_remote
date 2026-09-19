@@ -37,11 +37,21 @@ pub struct UncertainReleaseReport {
 }
 
 /// Tracks remotely injected held keys and buttons for synthetic cleanup and audit.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RemoteHeldTracker {
     keys: [bool; 256],
     buttons: [bool; 5],
     last_certainty: Option<ReleaseCertainty>,
+}
+
+impl Default for RemoteHeldTracker {
+    fn default() -> Self {
+        Self {
+            keys: [false; 256],
+            buttons: [false; 5],
+            last_certainty: None,
+        }
+    }
 }
 
 impl RemoteHeldTracker {
@@ -76,11 +86,7 @@ impl RemoteHeldTracker {
     /// Check if a specific physical key is currently held by remote injection.
     pub fn is_key_held(&self, key: PhysicalKey) -> bool {
         let usage = key.usage() as usize;
-        if usage < 256 {
-            self.keys[usage]
-        } else {
-            false
-        }
+        if usage < 256 { self.keys[usage] } else { false }
     }
 
     /// Check if a specific pointer button is currently held by remote injection.
@@ -135,28 +141,33 @@ impl RemoteHeldTracker {
         let mut releases = Vec::new();
 
         // 1. Release buttons first
-        for btn_idx in 0..5 {
-            if self.buttons[btn_idx] {
-                if let Some(button) = PointerButton::new(btn_idx as u8 + 1) {
-                    releases.push(Operation::Button {
-                        button,
-                        pressed: false,
-                    });
-                }
-                self.buttons[btn_idx] = false;
+        for (btn_idx, held) in self.buttons.iter_mut().enumerate() {
+            if *held {
+                let button = match btn_idx {
+                    0 => PointerButton::Primary,
+                    1 => PointerButton::Secondary,
+                    2 => PointerButton::Middle,
+                    3 => PointerButton::Back,
+                    _ => PointerButton::Forward,
+                };
+                releases.push(Operation::Button {
+                    button,
+                    pressed: false,
+                });
+                *held = false;
             }
         }
 
         // 2. Release keys
-        for usage in 0..256 {
-            if self.keys[usage] {
-                if let Some(key) = PhysicalKey::new(usage as u16) {
+        for (usage, held) in self.keys.iter_mut().enumerate() {
+            if *held {
+                if let Some(key) = u16::try_from(usage).ok().and_then(PhysicalKey::new) {
                     releases.push(Operation::Key {
                         key,
                         transition: KeyTransition::Release,
                     });
                 }
-                self.keys[usage] = false;
+                *held = false;
             }
         }
 
@@ -169,8 +180,8 @@ impl RemoteHeldTracker {
     /// This produces an honest `UncertainReleaseReport` documenting how many keys/buttons
     /// were held without pretending they were cleanly released.
     pub fn record_worker_crash(&mut self) -> UncertainReleaseReport {
-        let keys_uncertain = self.held_key_count() as u16;
-        let buttons_uncertain = self.held_button_count() as u8;
+        let keys_uncertain = u16::try_from(self.held_key_count()).unwrap_or(u16::MAX);
+        let buttons_uncertain = u8::try_from(self.held_button_count()).unwrap_or(u8::MAX);
 
         let certainty = if keys_uncertain == 0 && buttons_uncertain == 0 {
             ReleaseCertainty::Clean
@@ -189,8 +200,8 @@ impl RemoteHeldTracker {
 
     /// Record a native submission failure or unknown effect.
     pub fn record_native_error(&mut self) -> UncertainReleaseReport {
-        let keys_uncertain = self.held_key_count() as u16;
-        let buttons_uncertain = self.held_button_count() as u8;
+        let keys_uncertain = u16::try_from(self.held_key_count()).unwrap_or(u16::MAX);
+        let buttons_uncertain = u8::try_from(self.held_button_count()).unwrap_or(u8::MAX);
 
         let certainty = if keys_uncertain == 0 && buttons_uncertain == 0 {
             ReleaseCertainty::Clean

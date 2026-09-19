@@ -76,6 +76,7 @@ impl core::fmt::Debug for ImmediateRevokeOutcome {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ImmediateRevokeOutcome")
             .field("latency_ns", &self.latency_ns)
+            .field("at", &self.at)
             .field("os_cleanup_complete", &self.os_cleanup.is_complete())
             .finish()
     }
@@ -92,7 +93,7 @@ enum RevokeTarget {
 pub struct SharingIndicator {
     state: Mutex<IndicatorDisplayState>,
     targets: Mutex<Vec<RevokeTarget>>,
-    os_cleanup: OsCleanupTracker,
+    os_cleanup: Mutex<OsCleanupTracker>,
     last_revoke: Mutex<Option<ImmediateRevokeOutcome>>,
 }
 
@@ -107,7 +108,7 @@ impl SharingIndicator {
         Self {
             state: Mutex::new(IndicatorDisplayState::Hidden),
             targets: Mutex::new(Vec::new()),
-            os_cleanup: OsCleanupTracker::new(),
+            os_cleanup: Mutex::new(OsCleanupTracker::new()),
             last_revoke: Mutex::new(None),
         }
     }
@@ -231,11 +232,14 @@ impl SharingIndicator {
 
         // Measure synchronous elapsed time
         let elapsed = t0.elapsed();
-        let latency_ns = elapsed.as_nanos().min(u128::from(u64::MAX)) as u64;
+        let latency_ns = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
 
         // Reset cleanup tracker for the new teardown
         let cleanup_tracker = OsCleanupTracker::new();
-        self.os_cleanup.store_tracker(&cleanup_tracker);
+        *self
+            .os_cleanup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = cleanup_tracker.clone();
 
         // Update indicator display state
         {
@@ -270,7 +274,10 @@ impl SharingIndicator {
 
     /// Mark OS cleanup complete (called by native cleanup loop/worker when OS release finishes).
     pub fn mark_os_cleanup_complete(&self) {
-        self.os_cleanup.mark_complete();
+        self.os_cleanup
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .mark_complete();
         let mut state = self
             .state
             .lock()
@@ -299,12 +306,5 @@ impl SharingIndicator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
-    }
-}
-
-impl OsCleanupTracker {
-    fn store_tracker(&self, other: &OsCleanupTracker) {
-        self.complete
-            .store(other.complete.load(Ordering::Acquire), Ordering::Release);
     }
 }

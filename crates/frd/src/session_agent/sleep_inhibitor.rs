@@ -1,6 +1,6 @@
 //! Active session idle sleep inhibitor (plan §§5.3, 19.1).
 //!
-//! Holds the platform idle-sleep inhibitor (IOKit assertion on macOS, SetThreadExecutionState
+//! Holds the platform idle-sleep inhibitor (`IOKit` assertion on macOS, `SetThreadExecutionState`
 //! on Windows, systemd/logind inhibitor on Linux) while at least one session is actively shared.
 //! It prevents idle sleep ONLY — it never defeats lid-close policy or a deliberate local lock,
 //! and it releases immediately when the last session ends or on worker crash.

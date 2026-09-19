@@ -45,15 +45,19 @@ pub enum AudioScope {
 impl AudioScope {
     /// Returns true if `self` is a subset of or equal to `allowed`.
     pub fn is_subset_of(&self, allowed: AudioScope) -> bool {
-        match (self, allowed) {
-            (AudioScope::None, _) => true,
-            (AudioScope::PlaybackOnly, AudioScope::PlaybackOnly | AudioScope::Bidirectional) => true,
-            (AudioScope::MicrophoneOnly, AudioScope::MicrophoneOnly | AudioScope::Bidirectional) => {
-                true
-            }
-            (AudioScope::Bidirectional, AudioScope::Bidirectional) => true,
-            _ => false,
-        }
+        matches!(
+            (self, allowed),
+            (AudioScope::None, _)
+                | (
+                    AudioScope::PlaybackOnly,
+                    AudioScope::PlaybackOnly | AudioScope::Bidirectional
+                )
+                | (
+                    AudioScope::MicrophoneOnly,
+                    AudioScope::MicrophoneOnly | AudioScope::Bidirectional
+                )
+                | (AudioScope::Bidirectional, AudioScope::Bidirectional)
+        )
     }
 }
 
@@ -237,8 +241,11 @@ impl ApprovalManager {
                     };
                     ApprovalState::Approved(grant)
                 } else {
-                    let timeout_nanos = APPROVAL_TIMEOUT.as_nanos();
-                    let deadline = now.add_nanos(timeout_nanos.min(u128::from(u64::MAX)) as u64);
+                    let timeout_micros =
+                        u64::try_from(APPROVAL_TIMEOUT.as_micros()).unwrap_or(u64::MAX);
+                    let deadline = now
+                        .checked_add(fr_core::time::HostDuration::from_micros(timeout_micros))
+                        .unwrap_or(HostInstant::from_micros(u64::MAX));
                     ApprovalState::Pending {
                         requested_at: now,
                         expires_at: deadline,
@@ -246,8 +253,11 @@ impl ApprovalManager {
                 }
             }
             ApprovalMode::PromptAlways => {
-                let timeout_nanos = APPROVAL_TIMEOUT.as_nanos();
-                let deadline = now.add_nanos(timeout_nanos.min(u128::from(u64::MAX)) as u64);
+                let timeout_micros =
+                    u64::try_from(APPROVAL_TIMEOUT.as_micros()).unwrap_or(u64::MAX);
+                let deadline = now
+                    .checked_add(fr_core::time::HostDuration::from_micros(timeout_micros))
+                    .unwrap_or(HostInstant::from_micros(u64::MAX));
                 ApprovalState::Pending {
                     requested_at: now,
                     expires_at: deadline,
@@ -285,7 +295,6 @@ impl ApprovalManager {
                     return Err(DenialReason::TimedOut);
                 }
                 if !granted.is_clamped_subset_of(&record.requested) {
-                    record.state = ApprovalState::Denied(DenialReason::PolicyForbidden);
                     return Err(DenialReason::PolicyForbidden);
                 }
                 record.state = ApprovalState::Approved(granted.clone());
@@ -371,10 +380,9 @@ impl ApprovalManager {
     /// Clean up expired pending requests.
     pub fn purge_expired(&mut self, now: HostInstant) {
         for record in self.requests.values_mut() {
-            if let ApprovalState::Pending { expires_at, .. } = record.state {
-                if now >= expires_at {
-                    record.state = ApprovalState::Denied(DenialReason::TimedOut);
-                }
+            if matches!(record.state, ApprovalState::Pending { expires_at, .. } if now >= expires_at)
+            {
+                record.state = ApprovalState::Denied(DenialReason::TimedOut);
             }
         }
     }

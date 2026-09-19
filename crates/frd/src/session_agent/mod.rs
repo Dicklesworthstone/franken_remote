@@ -21,9 +21,7 @@ pub use approval::{
     ApprovalManager, ApprovalMode, ApprovalRecord, ApprovalState, AudioScope, DenialReason,
     GrantedScope, PeerIdentity, RequestedScope, SessionRole,
 };
-pub use held_state::{
-    ReleaseCertainty, RemoteHeldTracker, UncertainReleaseReport,
-};
+pub use held_state::{ReleaseCertainty, RemoteHeldTracker, UncertainReleaseReport};
 pub use indicator::{
     ImmediateRevokeOutcome, IndicatorDisplayState, OsCleanupTracker, SharingIndicator,
 };
@@ -32,8 +30,8 @@ pub use local_priority::{
     LocalPrioritySuspended,
 };
 pub use macos_injection::{
-    MacOsEventPoster, MacOsInjectionAdapter, MacOsInputSink, MacOsKeyCode, PostedCgEvent,
-    RecordingPoster, hid_to_macos_keycode,
+    MacOsEventPoster, MacOsInputSink, MacOsKeyCode, PostedCgEvent, RecordingPoster,
+    hid_to_macos_keycode,
 };
 pub use permissions::{
     PermissionKind, PermissionStatus, PermissionsManager, PlatformKind, PlatformPermissionError,
@@ -50,8 +48,8 @@ use fr_core::{
     input_submission::{Operation, RevokeHandle},
     time::HostInstant,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Typed refusal reason when an operation fails the submission-time checkpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +66,8 @@ pub enum SubmissionRefusal {
     OutOfBounds,
     /// Requested input action is unsupported on this platform.
     Unsupported,
+    /// Control lease has expired at the submission checkpoint.
+    LeaseExpired,
 }
 
 impl core::fmt::Display for SubmissionRefusal {
@@ -77,10 +77,14 @@ impl core::fmt::Display for SubmissionRefusal {
             Self::Revoked => write!(f, "Input authority has been revoked"),
             Self::Permission(e) => write!(f, "Platform permission error: {e}"),
             Self::LocalPrioritySuspended(until) => {
-                write!(f, "Remote input suspended by local activity until {until:?}")
+                write!(
+                    f,
+                    "Remote input suspended by local activity until {until:?}"
+                )
             }
             Self::OutOfBounds => write!(f, "Input coordinates out of desktop bounds"),
             Self::Unsupported => write!(f, "Input operation unsupported"),
+            Self::LeaseExpired => write!(f, "Input lease expired at submission checkpoint"),
         }
     }
 }
@@ -194,11 +198,13 @@ impl SessionAgent {
     pub fn request_session(
         &mut self,
         session_id: RemoteSessionId,
-        peer: PeerIdentity,
-        requested: RequestedScope,
+        peer: &PeerIdentity,
+        requested: &RequestedScope,
         now: HostInstant,
     ) -> Result<ApprovalState, DenialReason> {
-        let state = self.approval.request_approval(session_id, peer.clone(), requested.clone(), now)?;
+        let state =
+            self.approval
+                .request_approval(session_id, peer.clone(), requested.clone(), now)?;
 
         if let ApprovalState::Approved(ref grant) = state {
             // If immediately approved (e.g. Unattended or pre-authorized), update indicator and sleep inhibitor
@@ -218,8 +224,7 @@ impl SessionAgent {
         let peer_name = self
             .approval
             .get_record(session_id)
-            .map(|r| r.peer.node_name.clone())
-            .unwrap_or_else(|| "remote-peer".into());
+            .map_or_else(|| "remote-peer".into(), |r| r.peer.node_name.clone());
 
         let grant = self.approval.approve(session_id, granted, now)?;
         self.on_grant_activated(session_id, &peer_name, &grant, now);
@@ -233,13 +238,15 @@ impl SessionAgent {
         grant: &GrantedScope,
         now: HostInstant,
     ) {
-        let display_count = grant.displays.len() as u32;
+        let display_count = u32::try_from(grant.displays.len()).unwrap_or(u32::MAX);
         match grant.role {
             SessionRole::Observer => {
-                self.indicator.show_observing(session_id, peer_name, display_count);
+                self.indicator
+                    .show_observing(session_id, peer_name, display_count);
             }
             SessionRole::Controller => {
-                self.indicator.show_controlling(session_id, peer_name, display_count, true);
+                self.indicator
+                    .show_controlling(session_id, peer_name, display_count, true);
             }
         }
         let _ = self.sleep_inhibitor.acquire(session_id, now);
@@ -320,6 +327,14 @@ impl SessionAgent {
             return Err(SubmissionRefusal::NotApproved);
         }
 
+        // Check 2b: Lease expiry check immediately before submission
+        if let Some(grant) = self.approval.granted_scope(session_id)
+            && let Some(expires_at) = grant.expires_at
+            && now >= expires_at
+        {
+            return Err(SubmissionRefusal::LeaseExpired);
+        }
+
         // Check 3: Local input priority suspension
         if let Err(susp) = self.local_priority.verify_submission_allowed(now) {
             return Err(SubmissionRefusal::LocalPrioritySuspended(
@@ -333,16 +348,10 @@ impl SessionAgent {
         }
 
         // Check 5: Bounds verification
-        match operation {
-            Operation::Absolute(pt) => {
-                if !self.bounds.contains(*pt) {
-                    return Err(SubmissionRefusal::OutOfBounds);
-                }
-            }
-            Operation::Text(_) => {
-                // Unicode committed text path
-            }
-            _ => {}
+        if let Operation::Absolute(pt) = operation
+            && !self.bounds.contains(*pt)
+        {
+            return Err(SubmissionRefusal::OutOfBounds);
         }
 
         // Check 6: Update remote held state tracker
@@ -358,7 +367,9 @@ impl SessionAgent {
         self.revoked.store(true, Ordering::Release);
         let report = self.held_state.record_worker_crash();
         let _ = self.sleep_inhibitor.emergency_release_all(now);
-        let _ = self.indicator.immediate_revoke(now, StopReason::NativeFailure);
+        let _ = self
+            .indicator
+            .immediate_revoke(now, StopReason::NativeFailure);
         report
     }
 

@@ -28,9 +28,7 @@ pub enum LocalPriorityOutcome {
     /// Platform cannot distinguish local vs synthetic input; limitation presented honestly.
     UnsupportedPlatformHeuristic,
     /// Genuine local input detected on a distinguishable platform; remote lease suspended.
-    Suspended {
-        until: HostInstant,
-    },
+    Suspended { until: HostInstant },
 }
 
 /// Refusal reason when remote injection is rejected due to active local priority suspension.
@@ -41,7 +39,10 @@ pub struct LocalPrioritySuspended {
 
 impl core::fmt::Display for LocalPrioritySuspended {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Remote input suspended due to active local user activity")
+        write!(
+            f,
+            "Remote input suspended due to active local user activity"
+        )
     }
 }
 
@@ -110,13 +111,16 @@ impl LocalInputPriority {
     }
 
     /// Submission checkpoint check: returns Err if remote injection is suspended.
-    pub fn verify_submission_allowed(&self, now: HostInstant) -> Result<(), LocalPrioritySuspended> {
-        if let Some(until) = self.suspended_until {
-            if now < until {
-                return Err(LocalPrioritySuspended {
-                    suspended_until: until,
-                });
-            }
+    pub fn verify_submission_allowed(
+        &self,
+        now: HostInstant,
+    ) -> Result<(), LocalPrioritySuspended> {
+        if let Some(until) = self.suspended_until
+            && now < until
+        {
+            return Err(LocalPrioritySuspended {
+                suspended_until: until,
+            });
         }
         Ok(())
     }
@@ -137,8 +141,11 @@ impl LocalInputPriority {
                 LocalPriorityOutcome::UnsupportedPlatformHeuristic
             }
             Distinguishability::Distinguishable => {
-                let dur_nanos = self.config.suspension_duration.as_nanos();
-                let until = now.add_nanos(dur_nanos.min(u128::from(u64::MAX)) as u64);
+                let dur_micros =
+                    u64::try_from(self.config.suspension_duration.as_micros()).unwrap_or(u64::MAX);
+                let until = now
+                    .checked_add(fr_core::time::HostDuration::from_micros(dur_micros))
+                    .unwrap_or(HostInstant::from_micros(u64::MAX));
                 self.suspended_until = Some(until);
                 LocalPriorityOutcome::Suspended { until }
             }
