@@ -86,11 +86,7 @@ impl RemoteHeldTracker {
     /// Check if a specific physical key is currently held by remote injection.
     pub fn is_key_held(&self, key: PhysicalKey) -> bool {
         let usage = key.usage() as usize;
-        if usage < 256 {
-            self.keys[usage]
-        } else {
-            false
-        }
+        if usage < 256 { self.keys[usage] } else { false }
     }
 
     /// Check if a specific pointer button is currently held by remote injection.

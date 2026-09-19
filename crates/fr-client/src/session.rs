@@ -17,8 +17,8 @@
 
 use crate::input::ClientInstant;
 use fr_core::ids::{
-    DisplayGeometryGeneration, HostBootId, InputLeaseId, InputTicketId, RemoteSessionId,
-    ViewportMappingGeneration,
+    DisplayGeometryGeneration, HostBootId, InputLeaseId, InputTicketId, OsSessionId,
+    RemoteSessionId, ViewportMappingGeneration,
 };
 use fr_wire::negotiation::ControlBinding;
 use std::fmt;
@@ -637,6 +637,69 @@ impl ClientSession {
                 reason: SuspendReason::WindowHidden,
             };
             eprintln!("[StateTrace: Controlling -> Suspended reason=WindowHidden]");
+        }
+    }
+
+    /// Handle client window focus loss.
+    ///
+    /// When controlling, input is suspended immediately with `SuspendReason::FocusLost`.
+    /// The active ticket is cleared to refuse late-arriving local actions, and the
+    /// state transition is logged.
+    pub fn on_focus_loss(&mut self) {
+        if let SessionState::Controlling { session, .. } = self.state {
+            self.state = SessionState::Suspended {
+                session,
+                reason: SuspendReason::FocusLost,
+            };
+            eprintln!(
+                "[StateTrace: Controlling -> Suspended reason=FocusLost session={session:?}]"
+            );
+        }
+    }
+
+    /// Handle client window focus restoration.
+    ///
+    /// If suspended specifically due to focus loss, input control can only be restored
+    /// if view freshness is established and the active input lease has not expired or been revoked.
+    /// Returns Ok(true) if control was resumed, Ok(false) otherwise.
+    pub fn on_focus_gained(&mut self, _now: ClientInstant) -> Result<bool, SessionError> {
+        match self.state {
+            SessionState::Suspended {
+                session,
+                reason: SuspendReason::FocusLost,
+            } => {
+                if !self.view_fresh {
+                    return Ok(false);
+                }
+                if let (Some(lease), Some(ticket)) = (self.active_lease, self.active_ticket) {
+                    self.state = SessionState::Controlling {
+                        session,
+                        lease,
+                        ticket,
+                        input_ready: true,
+                    };
+                    eprintln!(
+                        "[StateTrace: Suspended -> Controlling (focus regained) lease={lease:?}]"
+                    );
+                    Ok(true)
+                } else {
+                    // Lease expired or was cleared while unfocused: return to Viewing
+                    let binding = self.active_binding.unwrap_or_else(|| ControlBinding {
+                        id: 0,
+                        host_boot: HostBootId::from_raw(0),
+                        os_session: OsSessionId::from_raw(0),
+                        remote_session: session,
+                    });
+                    self.state = SessionState::Viewing {
+                        session,
+                        binding,
+                        view_fresh: self.view_fresh,
+                    };
+                    eprintln!("[StateTrace: Suspended -> Viewing (lease expired while unfocused)]");
+                    Ok(false)
+                }
+            }
+            _ => Ok(false),
         }
     }
 

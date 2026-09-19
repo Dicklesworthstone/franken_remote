@@ -24,3 +24,14 @@ pub use session::{
 
 /// Implemented native observation capability profile, not transport qualification.
 pub mod native;
+
+/// Per-platform system shortcut capture and routing capability table (Plan §§15.1, 16.1).
+pub mod shortcut;
+pub use shortcut::{
+    PlatformCapabilityRow, PlatformId, ShortcutCaptureController, ShortcutCaptureError,
+    ShortcutCaptureMode, ShortcutRoutingMechanism, ShortcutSupportStatus,
+};
+
+/// Minimal desktop client toolbar model (Plan §16.1).
+pub mod toolbar;
+pub use toolbar::ToolbarModel;

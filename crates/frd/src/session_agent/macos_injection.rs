@@ -110,20 +110,12 @@ pub fn hid_to_macos_keycode(usage: u16) -> Option<MacOsKeyCode> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PostedCgEvent {
     /// Keyboard physical key event posted via `CGEventCreateKeyboardEvent`.
-    Key {
-        keycode: MacOsKeyCode,
-        down: bool,
-    },
+    Key { keycode: MacOsKeyCode, down: bool },
     /// Unicode committed text posted via `CGEventKeyboardSetUnicodeString`.
     /// This is strictly distinct from physical key events (plan §15.2).
-    Text {
-        character: char,
-    },
+    Text { character: char },
     /// Pointer movement event (`kCGEventMouseMoved`).
-    MouseMove {
-        x: f64,
-        y: f64,
-    },
+    MouseMove { x: f64, y: f64 },
     /// Pointer button event (`LeftMouseDown`, `RightMouseDown`, `OtherMouseDown`, etc.).
     MouseButton {
         button: u32,
