@@ -74,7 +74,7 @@ impl CaptureSource {
 /// Called only under the original subscription authority mutex, after source
 /// provenance checks. Failed parsing is not permission to disrupt a healthy
 /// view. A terminal sender error, however, must fence input BEFORE it escapes
-/// this lock, even though no RecoveryDemand will be issued to the encoder.
+/// this lock, even though no `RecoveryDemand` will be issued to the encoder.
 fn admit(
     cache: &mut SendCache,
     authority: &mut SessionAuthority,
@@ -95,12 +95,13 @@ fn admit(
     if matches!(
         result,
         Ok(_)
-            | Err(SendError::RecoveryLimitExceeded | SendError::Closed)
-            | Err(SendError::Delivery(
-                DeliveryError::RecoveryExpired
-                    | DeliveryError::ClockRegression
-                    | DeliveryError::ClockOverflow
-            ))
+            | Err(SendError::RecoveryLimitExceeded
+                | SendError::Closed
+                | SendError::Delivery(
+                    DeliveryError::RecoveryExpired
+                        | DeliveryError::ClockRegression
+                        | DeliveryError::ClockOverflow
+                ))
     ) {
         authority.mark_view_stale();
     }

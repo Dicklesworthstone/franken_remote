@@ -229,3 +229,84 @@ impl QuicRecords {
         Ok(())
     }
 }
+
+impl QuicRecords {
+    /// Non-consuming namespace capacity, including all retired tombstones.
+    /// This is not an admission reservation: concurrent/unfinished exchanges
+    /// and the native peer's limits are still validated by offer/accept.
+    pub fn remaining_channel_pairs(&self) -> usize {
+        ((crate::quic::MAX_STREAMS.saturating_sub(self.streams.len())) / 2)
+            .min(((crate::quic::MAX_STREAMS - 2) / 2).saturating_sub(self.attachments.len()))
+    }
+
+    /// Retire a completed configuration/recovery/video set retained by its
+    /// original connection owner. Validate the ENTIRE set before resetting any
+    /// stream; metadata is not a replacement for the opaque connection proof.
+    /// The caller fences its view/input first. This grants no new authority.
+    /// Peer-retired sets are idempotent, and all consumed IDs remain tombstones.
+    pub fn retire_media_set(
+        &mut self,
+        cx: &Cx,
+        original: &crate::quic::ConnectionBinding,
+        pairs: [super::AttachedChannel; 3],
+    ) -> Result<(), Error> {
+        if !self.is_bound_to(original) {
+            return Err(Error::WrongRoute);
+        }
+        if self.is_closed() {
+            return Err(Error::Closed);
+        }
+        cx.checkpoint().map_err(|_| Error::Cancelled)?;
+        let mut indices = [0; 3];
+        let view = pairs[0].descriptor.binding;
+        for (index, (pair, role)) in pairs
+            .iter()
+            .zip([
+                MediaRole::Configuration,
+                MediaRole::Recovery,
+                MediaRole::Video,
+            ])
+            .enumerate()
+        {
+            let mut binding = pair.descriptor.binding;
+            binding.parent.id = view.parent.id;
+            if binding != view
+                || pair.descriptor.role != role
+                || !pair.outbound.outbound
+                || pair.inbound.outbound
+                || pair.outbound.binding != pair.descriptor.binding.parent.id
+                || pair.inbound.binding != pair.outbound.binding
+                || !self.streams.contains(&pair.outbound)
+                || !self.streams.contains(&pair.inbound)
+            {
+                return Err(Error::WrongRoute);
+            }
+            let found = self
+                .attachments
+                .iter()
+                .position(|r| {
+                    r.role == role
+                        && r.binding == pair.outbound.binding
+                        && r.outbound == pair.outbound.stream
+                        && r.inbound == pair.inbound.stream
+                        && matches!(r.state.load(Ordering::Acquire), ACTIVE | RETIRED)
+                })
+                .ok_or(Error::WrongRoute)?;
+            if indices[..index].contains(&found) {
+                return Err(Error::WrongRoute);
+            }
+            indices[index] = found;
+        }
+        for index in indices {
+            if !self.attachments[index].retired()
+                && let Err(error) = self.retire_optional_at(cx, index)
+            {
+                // Native failure can have partially reset this set. Never
+                // expose an apparently reusable connection after that effect.
+                self.close();
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+}

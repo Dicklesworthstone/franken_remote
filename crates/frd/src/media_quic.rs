@@ -3,7 +3,7 @@
 //! identity, input authority, second packet queue, or independent congestion loop.
 mod negotiated;
 pub mod recovery;
-pub use negotiated::NegotiatedMedia;
+pub use negotiated::{NegotiatedMedia, replacement};
 
 use crate::{
     media,
