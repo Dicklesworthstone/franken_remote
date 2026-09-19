@@ -321,6 +321,11 @@ fn unacknowledged_offer_expires_without_refresh_or_disk_start() {
                                 quic::Error::Expired | quic::Error::Unauthorized
                             )
                         )
+                        | crate::session_startup::Error::ControlRenewal(
+                            crate::input_quic::control::Error::Transport(
+                                quic::Error::Expired | quic::Error::Unauthorized
+                            )
+                        )
                 ));
                 // Closure cancels the authority context; inspect its retained timer,
                 // not an API that requires live authority after the fence.
