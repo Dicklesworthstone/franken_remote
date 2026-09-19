@@ -90,6 +90,24 @@ impl PreparedSharedCapture<'_> {
     /// selected-display checks, authority and fixed native deadline. No parallel
     /// encoder, clock, reference identity, or recovery rate allowance is created.
     pub async fn capture_if_changed(self, force_idr: bool) -> Result<SharedCaptureUpdate, Error> {
+        self.capture(force_idr, None).await
+    }
+    /// Attempt one already-authorized late-join cohort on this source's original
+    /// IDR/recovery rate allowance. Rate pressure yields normal dependent/static
+    /// output, not a reset or a new encoder. Only an actual returned IDR can
+    /// bootstrap a join. Expired joins do not poison healthy capture. Capacity
+    /// remains reserved BEFORE the rate allowance is consumed or IPC is issued.
+    /// The join owner must reject expired joins after completion; its deadline
+    /// cannot shorten a capture still needed by healthy viewers. Native work
+    /// retains its original fixed source/recovery deadline, never a renewed one.
+    pub async fn capture_for_join(self, until_micros: u64) -> Result<SharedCaptureUpdate, Error> {
+        self.capture(false, Some(until_micros)).await
+    }
+    async fn capture(
+        self,
+        force_idr: bool,
+        join_until: Option<u64>,
+    ) -> Result<SharedCaptureUpdate, Error> {
         let update = self
             .source
             .capture_request(
@@ -97,6 +115,7 @@ impl PreparedSharedCapture<'_> {
                 force_idr,
                 true,
                 Some(self.reservation.maximum_capacity()),
+                join_until,
             )
             .await?;
         let result = update.share_reserved(self.reservation);

@@ -32,12 +32,29 @@ impl SourceRecovery {
             .scheduler
             .queue(cache, demand, now)
     }
-    pub(super) fn take(&mut self, now: u64) -> Result<Option<u64>, DeliveryError> {
-        self.0
-            .lock()
-            .map_err(|_| DeliveryError::WrongState)?
-            .scheduler
-            .take(now)
+    /// Charge only the original source scheduler. Newcomer expiry cannot abort
+    /// a capture still needed by healthy viewers: it limits final join admission,
+    /// not that capture's native timeout. A loss recovery retains its original
+    /// cap; its already-admitted IDR also satisfies coincident waiting joins.
+    pub(super) fn admit_capture(
+        &mut self,
+        now: u64,
+        join_until: Option<u64>,
+    ) -> Result<(bool, Option<u64>), DeliveryError> {
+        let mut queue = self.0.lock().map_err(|_| DeliveryError::WrongState)?;
+        let recovery_until = match queue.scheduler.take(now) {
+            Ok(until) => until,
+            Err(DeliveryError::RecoveryExpired) => None,
+            Err(error) => return Err(error),
+        };
+        let join_idr = if recovery_until.is_none()
+            && let Some(until) = join_until.filter(|&until| now < until)
+        {
+            queue.scheduler.take_for_join(now, until)?.is_some()
+        } else {
+            false
+        };
+        Ok((recovery_until.is_some() || join_idr, recovery_until))
     }
     pub(super) fn next_deadline(&self) -> Option<u64> {
         self.0.lock().ok()?.scheduler.next_deadline()
@@ -70,7 +87,7 @@ impl std::fmt::Debug for CaptureRecovery {
 }
 impl Subscription {
     /// Bind only after this subscription consumed an actual result from this
-    /// worker. Matching numeric frame/configuration IDs are not source identity.
+    /// worker. Matching numeric frame/config IDs are not source identity.
     /// The returned handle does not retain or borrow the worker itself.
     pub fn recovery_target(&self, source: &CaptureSource) -> Result<CaptureRecovery, Error> {
         self.control.check()?;

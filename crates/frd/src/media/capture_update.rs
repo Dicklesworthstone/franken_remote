@@ -66,7 +66,7 @@ impl CaptureSource {
         force_idr: bool,
     ) -> Result<EncodedAccessUnit, Error> {
         match self
-            .capture_request(control, force_idr, false, None)
+            .capture_request(control, force_idr, false, None, None)
             .await?
             .content
         {
@@ -82,7 +82,8 @@ impl CaptureSource {
         control: &ObservationControl,
         force_idr: bool,
     ) -> Result<CaptureUpdate, Error> {
-        self.capture_request(control, force_idr, true, None).await
+        self.capture_request(control, force_idr, true, None, None)
+            .await
     }
     async fn capture_request(
         &mut self,
@@ -90,6 +91,7 @@ impl CaptureSource {
         force_idr: bool,
         conditional: bool,
         maximum_capacity: Option<usize>,
+        join_until: Option<u64>,
     ) -> Result<CaptureUpdate, Error> {
         #[cfg(target_os = "linux")]
         let mut selection = super::discovery::SelectionGuard::capture(self, control)?;
@@ -97,12 +99,11 @@ impl CaptureSource {
         // Service requests on the original capture loop, not in a parallel
         // worker or per-viewer encoder. An expired cohort cannot reset healthy
         // capture; those failed senders retain their own terminal deadlines.
-        let recovery_until = match self.recovery.take(issued.as_micros()) {
-            Ok(until) => until,
-            Err(fr_media::delivery::DeliveryError::RecoveryExpired) => None,
-            Err(error) => return Err(Error::Receiver(error)),
-        };
-        let force_idr = force_idr || recovery_until.is_some();
+        let (scheduled_idr, recovery_until) = self
+            .recovery
+            .admit_capture(issued.as_micros(), join_until)
+            .map_err(Error::Receiver)?;
+        let force_idr = force_idr || scheduled_idr;
         let mut deadline = control.deadline(Duration::from_secs(2))?;
         if let Some(until) = recovery_until {
             let nanos = until.checked_mul(1000).ok_or(worker::Error::Deadline)?;

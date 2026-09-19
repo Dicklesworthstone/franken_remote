@@ -69,14 +69,36 @@ impl IdrCoalescer {
     /// The caller must not reset a healthy viewer's bindings or source lifetime.
     pub fn take(&mut self, now: u64) -> Result<Option<u64>, DeliveryError> {
         self.check_clock(now)?;
-        let Some(p) = self.pending else {
-            return Ok(None);
-        };
-        if now >= p.until {
+        if self.pending.is_some_and(|p| now >= p.until) {
             self.pending = None;
             return Err(DeliveryError::RecoveryExpired);
         }
-        if now < p.ready {
+        self.admit(now, None)
+    }
+    /// Admit a locally authorized late-join cohort on the SAME encoder rate
+    /// allowance as loss recovery. The caller owns its bounded join slots and
+    /// immutable deadline; this method stores no join request or viewer state.
+    /// Calling again, cancelling a join or expiring a cohort never refills credit.
+    /// A coincident recovery demand is satisfied by this one IDR, with the earlier
+    /// deadline. This is scheduling only, not permission to observe a source.
+    pub fn take_for_join(&mut self, now: u64, until: u64) -> Result<Option<u64>, DeliveryError> {
+        self.check_clock(now)?;
+        if now >= until {
+            return Err(DeliveryError::RecoveryExpired);
+        }
+        if self.pending.is_some_and(|p| now >= p.until) {
+            self.pending = None;
+        }
+        self.admit(now, Some(until))
+    }
+    fn admit(&mut self, now: u64, join_until: Option<u64>) -> Result<Option<u64>, DeliveryError> {
+        let until = match (self.pending, join_until) {
+            (Some(p), Some(until)) => p.until.min(until),
+            (Some(p), None) => p.until,
+            (None, Some(until)) => until,
+            (None, None) => return Ok(None),
+        };
+        if now < self.next_allowed || self.pending.is_some_and(|p| now < p.ready) {
             return Ok(None);
         }
         self.next_allowed = match deadline(now, self.interval) {
@@ -87,7 +109,7 @@ impl IdrCoalescer {
             }
         };
         self.pending = None;
-        Ok(Some(p.until))
+        Ok(Some(until))
     }
     pub const fn next_deadline(&self) -> Option<u64> {
         match self.pending {
@@ -249,5 +271,53 @@ mod tests {
         );
         assert_eq!(idr.next_deadline(), Some(0));
         assert_eq!(idr.take(12).unwrap(), Some(2_000_000));
+    }
+    #[test]
+    fn joins_and_recoveries_share_one_rate_allowance_and_earliest_deadline() {
+        let mut idr = IdrCoalescer::new(500_000).unwrap();
+        assert_eq!(idr.take_for_join(0, 2_000_000).unwrap(), Some(2_000_000));
+        let mut cache = sender(2_000_000);
+        queue(&mut idr, &mut cache, 1);
+        assert_eq!(idr.take(1).unwrap(), None);
+        assert_eq!(idr.take_for_join(499_999, 900_000).unwrap(), None);
+        assert_eq!(idr.take_for_join(500_000, 900_000).unwrap(), Some(900_000));
+        assert_eq!(idr.next_deadline(), None);
+        assert_eq!(idr.take(500_000).unwrap(), None);
+        assert_eq!(idr.take_for_join(999_999, 2_000_000).unwrap(), None);
+        assert_eq!(
+            idr.take_for_join(1_000_000, 2_000_000).unwrap(),
+            Some(2_000_000)
+        );
+    }
+    #[test]
+    fn join_expiry_and_cancellation_do_not_refill_or_extend_recovery_credit() {
+        let mut idr = IdrCoalescer::new(500_000).unwrap();
+        queue(&mut idr, &mut sender(100), 0);
+        assert_eq!(idr.take_for_join(0, 0), Err(DeliveryError::RecoveryExpired));
+        assert_eq!(idr.next_deadline(), Some(0));
+        assert_eq!(idr.take_for_join(1, 2_000_000).unwrap(), Some(100));
+        idr.cancel_pending();
+        assert_eq!(idr.take_for_join(500_000, 2_000_000).unwrap(), None);
+        assert_eq!(
+            idr.take_for_join(500_001, 2_000_000).unwrap(),
+            Some(2_000_000)
+        );
+    }
+    #[test]
+    fn fresh_join_retires_expired_demand_but_never_revives_closed_scheduler() {
+        let mut idr = IdrCoalescer::new(500_000).unwrap();
+        queue(&mut idr, &mut sender(100), 0);
+        assert_eq!(idr.take_for_join(100, 2_000_000).unwrap(), Some(2_000_000));
+        idr.close();
+        assert_eq!(
+            idr.take_for_join(1_000_000, 2_000_000),
+            Err(DeliveryError::WrongState)
+        );
+        let mut idr = IdrCoalescer::new(500_000).unwrap();
+        idr.take_for_join(100, 2_000_000).unwrap();
+        assert_eq!(
+            idr.take_for_join(99, 2_000_000),
+            Err(DeliveryError::ClockRegression)
+        );
     }
 }
