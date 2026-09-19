@@ -64,15 +64,60 @@ impl CertificatePolicy {
     }
 }
 
+/// Lifecycle event for certificate provisioning, rotation, and failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CertificateEventKind {
+    /// Initial certificate provisioned.
+    Provisioned,
+    /// Certificate renewed and rotated atomically.
+    Rotated,
+    /// Renewal attempted but failed; still-valid certificate kept in service.
+    RenewalFailed,
+    /// Certificate expired.
+    Expired,
+    /// Host or tailnet identity changed.
+    IdentityChanged,
+    /// Service explicitly stopped.
+    Stopped,
+}
+
+/// Recorded event with generation, timestamps, optional error reason, and next retry.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CertificateEvent {
+    pub kind: CertificateEventKind,
+    pub generation: u64,
+    pub timestamp_wall_us: u64,
+    pub not_after_wall_us: Option<u64>,
+    pub reason: Option<Error>,
+    pub next_refresh_us: Option<u64>,
+}
+
 /// Sanitized scheduling information, never certificate material or a hostname.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CredentialStatus {
     pub generation: u64,
     pub next_refresh_us: u64,
+    pub not_after_wall_us: Option<u64>,
+    pub last_event: Option<CertificateEvent>,
 }
+
+impl CredentialStatus {
+    /// Countdown in seconds until the active certificate expires, or None if unknown.
+    pub fn expiry_countdown_secs(&self, now_wall_us: u64) -> Option<u64> {
+        self.not_after_wall_us.map(|not_after| {
+            if not_after > now_wall_us {
+                (not_after - now_wall_us) / 1_000_000
+            } else {
+                0
+            }
+        })
+    }
+}
+
 struct Pair {
     chain: CertificateChain,
     acceptor: TlsAcceptor,
+    not_after_wall_us: u64,
 }
 impl Pair {
     fn parse(bytes: &[u8]) -> Result<Self, Error> {
@@ -83,6 +128,7 @@ impl Pair {
         if certificates.is_empty() || certificates.len() > MAX_CERTIFICATES {
             return Err(Error::CertificateRejected);
         }
+        let not_after_wall_us = parse_x509_not_after(certificates[0].as_der())?;
         let chain = CertificateChain::from(certificates);
         let acceptor = TlsAcceptor::builder(chain.clone(), key)
             .alpn_protocols_required(vec![ALPN.to_vec()])
@@ -91,7 +137,11 @@ impl Pair {
             .max_protocol_version(0x0304u16.into())
             .build()
             .map_err(|_| Error::CertificateRejected)?;
-        Ok(Self { chain, acceptor })
+        Ok(Self {
+            chain,
+            acceptor,
+            not_after_wall_us,
+        })
     }
     fn verify(&self, verifier: &QuicServerIdentityVerifier, name: &str) -> Result<(), Error> {
         // Use the same time source rustls will use, not a guessed 90-day lifetime
@@ -117,6 +167,7 @@ struct State {
     last_us: u64,
     last_wall_us: u64,
     renewing: bool,
+    events: Vec<CertificateEvent>,
 }
 impl State {
     fn check(&mut self, current: u64, wall: u64) -> Result<(), Error> {
@@ -126,6 +177,30 @@ impl State {
         if current < self.last_us || wall < self.last_wall_us {
             self.active = None;
             return Err(Error::Clock);
+        }
+        let expired = self.active.as_ref().and_then(|pair| {
+            if wall >= pair.not_after_wall_us {
+                Some(pair.not_after_wall_us)
+            } else {
+                None
+            }
+        });
+        if let Some(not_after) = expired {
+            self.active = None;
+            let event = CertificateEvent {
+                kind: CertificateEventKind::Expired,
+                generation: self.status.generation,
+                timestamp_wall_us: wall,
+                not_after_wall_us: Some(not_after),
+                reason: Some(Error::Expired),
+                next_refresh_us: Some(self.status.next_refresh_us),
+            };
+            self.events.push(event.clone());
+            if self.events.len() > 32 {
+                self.events.remove(0);
+            }
+            self.status.last_event = Some(event);
+            return Err(Error::Expired);
         }
         self.last_us = current;
         self.last_wall_us = wall;
@@ -209,17 +284,29 @@ impl LocalApi {
         );
         let (node, pair) = self.load_pair(cx, &verifier, policy, None).await?;
         let current = now(cx)?;
+        let not_after = pair.not_after_wall_us;
+        let event = CertificateEvent {
+            kind: CertificateEventKind::Provisioned,
+            generation: 1,
+            timestamp_wall_us: wall_now()?,
+            not_after_wall_us: Some(not_after),
+            reason: None,
+            next_refresh_us: Some(later(current, policy.refresh_interval)?),
+        };
         let state = State {
             anchor: Arc::new(node),
             active: Some(Arc::new(pair)),
             status: CredentialStatus {
                 generation: 1,
                 next_refresh_us: later(current, policy.refresh_interval)?,
+                not_after_wall_us: Some(not_after),
+                last_event: Some(event.clone()),
             },
             retry_us: micros(policy.retry_initial)?,
             last_us: current,
             last_wall_us: wall_now()?,
             renewing: false,
+            events: vec![event],
         };
         Ok(NativeServerIdentity {
             api: self.clone(),
@@ -279,7 +366,12 @@ impl NativeServerIdentity {
     pub fn status(&self, cx: &Cx) -> Result<CredentialStatus, Error> {
         let mut state = self.state()?;
         state.check(now(cx)?, wall_now()?)?;
-        Ok(state.status)
+        Ok(state.status.clone())
+    }
+    /// Return the history of recent certificate lifecycle events.
+    pub fn events(&self) -> Result<Vec<CertificateEvent>, Error> {
+        let state = self.state()?;
+        Ok(state.events.clone())
     }
     /// Stop is shared and terminal. A pending successful renewal cannot revive
     /// it. Already-created connections retain their independent admission and
@@ -288,6 +380,19 @@ impl NativeServerIdentity {
     pub fn stop(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.active = None;
+            let event = CertificateEvent {
+                kind: CertificateEventKind::Stopped,
+                generation: state.status.generation,
+                timestamp_wall_us: wall_now().unwrap_or(0),
+                not_after_wall_us: state.status.not_after_wall_us,
+                reason: None,
+                next_refresh_us: None,
+            };
+            state.events.push(event.clone());
+            if state.events.len() > 32 {
+                state.events.remove(0);
+            }
+            state.status.last_event = Some(event);
         }
         self.service.stop();
     }
@@ -437,13 +542,32 @@ impl NativeServerIdentity {
             .api
             .load_pair(cx, &self.verifier, self.policy, Some(&anchor))
             .await;
-        if matches!(
-            candidate,
-            Err(Error::IdentityChanged | Error::UntrustedLocalApi)
-        ) {
-            self.stop();
+        if let Err(err) = candidate {
+            if let Ok(mut state) = self.state.lock() {
+                let event = CertificateEvent {
+                    kind: CertificateEventKind::RenewalFailed,
+                    generation: state.status.generation,
+                    timestamp_wall_us: wall_now().unwrap_or(0),
+                    not_after_wall_us: state.status.not_after_wall_us,
+                    reason: Some(err),
+                    next_refresh_us: Some(state.status.next_refresh_us),
+                };
+                state.events.push(event.clone());
+                if state.events.len() > 32 {
+                    state.events.remove(0);
+                }
+                state.status.last_event = Some(event);
+            }
+            if matches!(
+                err,
+                Error::IdentityChanged | Error::UntrustedLocalApi
+            ) {
+                self.stop();
+            }
+            return Err(err);
         }
-        let (node, pair) = candidate?;
+        let (node, pair) = candidate.unwrap();
+        let not_after = pair.not_after_wall_us;
         let mut state = self.state()?;
         state.check(now(cx)?, wall_now()?)?;
         self.api.check_node(cx, &node)?;
@@ -457,10 +581,24 @@ impl NativeServerIdentity {
         pair.verify(&self.verifier, node.certificate_name())?;
         let generation = state.status.generation.checked_add(1).ok_or(Error::Clock)?;
         let next_refresh_us = later(now(cx)?, self.policy.refresh_interval)?;
+        let event = CertificateEvent {
+            kind: CertificateEventKind::Rotated,
+            generation,
+            timestamp_wall_us: wall_now().unwrap_or(0),
+            not_after_wall_us: Some(not_after),
+            reason: None,
+            next_refresh_us: Some(next_refresh_us),
+        };
+        state.events.push(event.clone());
+        if state.events.len() > 32 {
+            state.events.remove(0);
+        }
         state.active = Some(Arc::new(pair));
         state.status = CredentialStatus {
             generation,
             next_refresh_us,
+            not_after_wall_us: Some(not_after),
+            last_event: Some(event),
         };
         state.retry_us = micros(self.policy.retry_initial)?;
         Ok(())
@@ -540,6 +678,127 @@ fn check_pem(bytes: &[u8]) -> Result<usize, Error> {
         return Err(Error::CertificateRejected);
     }
     split.ok_or(Error::CertificateRejected)
+}
+
+fn read_tlv_from<'a>(input: &'a [u8], cursor: &mut usize) -> Result<(u8, &'a [u8]), Error> {
+    if *cursor >= input.len() {
+        return Err(Error::CertificateRejected);
+    }
+    let tag = input[*cursor];
+    *cursor += 1;
+    if *cursor >= input.len() {
+        return Err(Error::CertificateRejected);
+    }
+    let len_byte = input[*cursor];
+    *cursor += 1;
+    let len = if len_byte < 0x80 {
+        len_byte as usize
+    } else {
+        let count = (len_byte & 0x7F) as usize;
+        if count == 0 || count > 4 || *cursor + count > input.len() {
+            return Err(Error::CertificateRejected);
+        }
+        let mut value = 0usize;
+        for _ in 0..count {
+            value = value
+                .checked_shl(8)
+                .ok_or(Error::CertificateRejected)?
+                | (input[*cursor] as usize);
+            *cursor += 1;
+        }
+        value
+    };
+    if *cursor + len > input.len() {
+        return Err(Error::CertificateRejected);
+    }
+    let content = &input[*cursor..*cursor + len];
+    *cursor += len;
+    Ok((tag, content))
+}
+
+fn parse_x509_not_after(der: &[u8]) -> Result<u64, Error> {
+    let mut cursor = 0;
+    // Certificate SEQUENCE
+    let (tag, cert_content) = read_tlv_from(der, &mut cursor)?;
+    if tag != 0x30 {
+        return Err(Error::CertificateRejected);
+    }
+    let mut cert_cursor = 0;
+    // TBSCertificate SEQUENCE
+    let (tag, tbs) = read_tlv_from(cert_content, &mut cert_cursor)?;
+    if tag != 0x30 {
+        return Err(Error::CertificateRejected);
+    }
+    let mut tbs_cursor = 0;
+    // Check for optional version [0] EXPLICIT
+    if tbs_cursor < tbs.len() && tbs[tbs_cursor] == 0xA0 {
+        let _ = read_tlv_from(tbs, &mut tbs_cursor)?;
+    }
+    // serialNumber (INTEGER, 0x02)
+    let (tag, _) = read_tlv_from(tbs, &mut tbs_cursor)?;
+    if tag != 0x02 {
+        return Err(Error::CertificateRejected);
+    }
+    // signature (SEQUENCE, 0x30)
+    let (tag, _) = read_tlv_from(tbs, &mut tbs_cursor)?;
+    if tag != 0x30 {
+        return Err(Error::CertificateRejected);
+    }
+    // issuer (SEQUENCE, 0x30)
+    let (tag, _) = read_tlv_from(tbs, &mut tbs_cursor)?;
+    if tag != 0x30 {
+        return Err(Error::CertificateRejected);
+    }
+    // validity (SEQUENCE, 0x30)
+    let (tag, validity) = read_tlv_from(tbs, &mut tbs_cursor)?;
+    if tag != 0x30 {
+        return Err(Error::CertificateRejected);
+    }
+    let mut val_cursor = 0;
+    // notBefore (UTCTime 0x17 or GeneralizedTime 0x18)
+    let _ = read_tlv_from(validity, &mut val_cursor)?;
+    // notAfter (UTCTime 0x17 or GeneralizedTime 0x18)
+    let (tag, not_after_bytes) = read_tlv_from(validity, &mut val_cursor)?;
+    match tag {
+        0x17 => {
+            // UTCTime: YYMMDDHHMMSSZ (13 bytes)
+            if not_after_bytes.len() < 13 || not_after_bytes[12] != b'Z' {
+                return Err(Error::CertificateRejected);
+            }
+            let yy = (not_after_bytes[0].wrapping_sub(b'0') as u16) * 10
+                + (not_after_bytes[1].wrapping_sub(b'0') as u16);
+            let year = if yy >= 50 { 1900 + yy } else { 2000 + yy };
+            let rfc = format!(
+                "{:04}-{}-{}T{}:{}:{}Z",
+                year,
+                std::str::from_utf8(&not_after_bytes[2..4]).map_err(|_| Error::CertificateRejected)?,
+                std::str::from_utf8(&not_after_bytes[4..6]).map_err(|_| Error::CertificateRejected)?,
+                std::str::from_utf8(&not_after_bytes[6..8]).map_err(|_| Error::CertificateRejected)?,
+                std::str::from_utf8(&not_after_bytes[8..10]).map_err(|_| Error::CertificateRejected)?,
+                std::str::from_utf8(&not_after_bytes[10..12]).map_err(|_| Error::CertificateRejected)?,
+            );
+            crate::expiry::unix_micros(&rfc)?
+                .ok_or(Error::CertificateRejected)
+        }
+        0x18 => {
+            // GeneralizedTime: YYYYMMDDHHMMSSZ (15 bytes)
+            if not_after_bytes.len() < 15 || not_after_bytes[14] != b'Z' {
+                return Err(Error::CertificateRejected);
+            }
+            let rfc = format!(
+                "{}-{}-{}T{}:{}:{}Z",
+                std::str::from_utf8(&not_after_bytes[0..4]).map_err(|_| Error::CertificateRejected)?,
+                std::str::from_utf8(&not_after_bytes[4..6]).map_err(|_| Error::CertificateRejected)?,
+                std::str::from_utf8(&not_after_bytes[6..8]).map_err(|_| Error::CertificateRejected)?,
+                std::str::from_utf8(&not_after_bytes[8..10]).map_err(|_| Error::CertificateRejected)?,
+                std::str::from_utf8(&not_after_bytes[10..12]).map_err(|_| Error::CertificateRejected)?,
+                std::str::from_utf8(&not_after_bytes[12..14]).map_err(|_| Error::CertificateRejected)?,
+            );
+            crate::expiry::unix_micros(&rfc)?
+                .ok_or(Error::CertificateRejected)
+        }
+        _ => Err(Error::CertificateRejected),
+    }
 }
 
 #[cfg(test)]

@@ -356,7 +356,10 @@ pub use node::NodeIdentity;
 mod tests;
 
 mod certificate;
-pub use certificate::{CertificatePolicy, CredentialStatus, NativeServerIdentity};
+pub use certificate::{
+    CertificateEvent, CertificateEventKind, CertificatePolicy, CredentialStatus,
+    NativeServerIdentity,
+};
 
 mod target;
 pub use target::{PeerSelector, PeerTarget};
