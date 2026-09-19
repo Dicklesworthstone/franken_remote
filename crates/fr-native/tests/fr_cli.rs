@@ -413,3 +413,49 @@ fn display_picker_command_keeps_trust_and_view_only_checks_before_native_work() 
         "assert x['error']['code']=='control_ui_unavailable'",
     );
 }
+
+#[test]
+fn doctor_cli_checks_help_and_refuses_invalid_arguments() {
+    let help = wait(command(&["--help"]).spawn().unwrap());
+    let help_text = String::from_utf8(help.stdout).unwrap();
+    assert!(help_text.contains("fr doctor"));
+    assert!(help_text.contains(
+        "Doctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle."
+    ));
+
+    // Port 0 refused
+    let output = wait(
+        command(&["doctor", "--port", "0", "--json"])
+            .spawn()
+            .unwrap(),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    json(&output, "assert x['error']['code']=='invalid_arguments'");
+
+    // Unrelated flags refused
+    let output = wait(
+        command(&["doctor", "--view-only", "--json"])
+            .spawn()
+            .unwrap(),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    json(&output, "assert x['error']['code']=='invalid_arguments'");
+
+    // Positional arguments refused
+    let output = wait(command(&["doctor", "extra", "--json"]).spawn().unwrap());
+    assert_eq!(output.status.code(), Some(2));
+    json(&output, "assert x['error']['code']=='invalid_arguments'");
+
+    // Absent socket reported as tailscale_unavailable
+    let missing = path("doctor-absent.sock");
+    let output = wait(
+        command(&["doctor", "--socket", missing.to_str().unwrap(), "--json"])
+            .spawn()
+            .unwrap(),
+    );
+    assert_eq!(output.status.code(), Some(1));
+    json(
+        &output,
+        "assert x['error']['code']=='tailscale_unavailable'",
+    );
+}

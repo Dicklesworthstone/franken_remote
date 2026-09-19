@@ -1,6 +1,7 @@
 //! Recovery on the original observation host: fence network output immediately,
 //! drain at most one native capture, then replace channels without a new sender.
 mod handoff;
+#[allow(clippy::wildcard_imports)]
 use super::*;
 use crate::media_quic::NegotiatedMedia;
 use fr_media::delivery::RecoveryDemand;

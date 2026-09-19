@@ -1,4 +1,5 @@
 //! One absolute failure budget covers fresh channels, native IDR and peer decode.
+#[allow(clippy::wildcard_imports)]
 use super::*;
 use crate::media::{decoder_startup, streaming::Policy};
 use crate::media_quic::replacement;

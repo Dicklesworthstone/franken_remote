@@ -11,6 +11,11 @@ pub enum Command {
     Hosts,
     Connect(Connection),
     Displays(Target),
+    Doctor(DoctorOptions),
+}
+pub struct DoctorOptions {
+    pub port: u16,
+    pub roots: Option<PathBuf>,
 }
 pub struct Target {
     pub node: String,
@@ -83,9 +88,10 @@ pub fn parse(args: &[String]) -> Result<Options, Failure> {
             socket: None,
         });
     }
-    let remote = match args[0].as_str() {
-        "hosts" => false,
-        "connect" | "displays" => true,
+    let (remote, doctor) = match args[0].as_str() {
+        "hosts" => (false, false),
+        "doctor" => (false, true),
+        "connect" | "displays" => (true, false),
         _ => return Err(usage()),
     };
     let mut index = 1;
@@ -106,13 +112,14 @@ pub fn parse(args: &[String]) -> Result<Options, Failure> {
     } else {
         None
     };
-    parse_command(args, index, node, args[0] == "displays")
+    parse_command(args, index, node, args[0] == "displays", doctor)
 }
 fn parse_command(
     args: &[String],
     mut index: usize,
     node: Option<String>,
     inspect: bool,
+    doctor: bool,
 ) -> Result<Options, Failure> {
     let remote = node.is_some();
     let connect = remote && !inspect;
@@ -158,9 +165,11 @@ fn parse_command(
                 });
             }
             "--worker" if connect => worker = Some(path(value(&mut index)?)?),
-            "--trust-roots" if remote => roots = Some(path(value(&mut index)?)?),
+            "--trust-roots" if remote || doctor => roots = Some(path(value(&mut index)?)?),
             "--x-display" if connect => x_display = Some(value(&mut index)?),
-            "--port" if remote => port = value(&mut index)?.parse().map_err(|_| usage())?,
+            "--port" if remote || doctor => {
+                port = value(&mut index)?.parse().map_err(|_| usage())?
+            }
             "--attempts" if connect => {
                 attempts = value(&mut index)?.parse().map_err(|_| usage())?;
             }
@@ -203,6 +212,11 @@ fn parse_command(
                 attempts,
             })
         }
+    } else if doctor {
+        if port == 0 {
+            return Err(usage());
+        }
+        Command::Doctor(DoctorOptions { port, roots })
     } else {
         Command::Hosts
     };
@@ -386,5 +400,61 @@ mod picker_tests {
         let mut duplicate = args;
         duplicate.extend(["--display".into(), "only".into()]);
         assert!(parse(&duplicate).is_err());
+    }
+}
+
+#[cfg(test)]
+mod doctor_tests {
+    use super::*;
+
+    #[test]
+    fn parses_doctor_defaults_and_explicit_port() {
+        let o = parse(&["doctor".into()]).unwrap();
+        let doc = match o.command {
+            Command::Doctor(doc) => doc,
+            _ => return assert!(false, "doctor required"),
+        };
+        assert_eq!(doc.port, 8443);
+        assert!(doc.roots.is_none());
+        assert!(!o.json);
+        assert!(o.socket.is_none());
+
+        let o = parse(&[
+            "doctor".into(),
+            "--port".into(),
+            "9443".into(),
+            "--socket".into(),
+            "/var/run/custom.sock".into(),
+            "--trust-roots".into(),
+            "/etc/ssl/roots.pem".into(),
+            "--json".into(),
+        ])
+        .unwrap();
+        let doc = match o.command {
+            Command::Doctor(doc) => doc,
+            _ => return assert!(false, "doctor required"),
+        };
+        assert_eq!(doc.port, 9443);
+        assert_eq!(doc.roots, Some(PathBuf::from("/etc/ssl/roots.pem")));
+        assert!(o.json);
+        assert_eq!(o.socket, Some(PathBuf::from("/var/run/custom.sock")));
+    }
+
+    #[test]
+    fn doctor_rejects_zero_port_or_unrelated_flags() {
+        assert!(parse(&["doctor".into(), "--port".into(), "0".into()]).is_err());
+        assert!(parse(&["doctor".into(), "--view-only".into()]).is_err());
+        assert!(parse(&["doctor".into(), "--worker".into(), "/bin/false".into()]).is_err());
+        assert!(parse(&["doctor".into(), "extra_positional".into()]).is_err());
+        assert!(
+            parse(&[
+                "doctor".into(),
+                "--port".into(),
+                "8443".into(),
+                "--port".into(),
+                "8443".into()
+            ])
+            .is_err()
+        );
     }
 }

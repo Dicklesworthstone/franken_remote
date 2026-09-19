@@ -13,6 +13,7 @@ fr-media.workspace = true
 fr-wire.workspace = true
 frd = { workspace = true, optional = true }
 asupersync = { workspace = true, optional = true }
+fr-tailnet = { workspace = true, optional = true }
 
 [dev-dependencies]
 fr-transport.workspace = true
@@ -20,6 +21,7 @@ fr-client.workspace = true
 fr-wire.workspace = true
 frd.workspace = true
 asupersync.workspace = true
+fr-tailnet.workspace = true
 
 [features]
 default = []
@@ -30,7 +32,7 @@ linux-clipboard = []
 linux-session-ui = ["dep:frd"]
 linux-viewer-input = ["dep:frd"]
 linux-viewer-window = ["linux-viewer-input"]
-linux-desktop = ["linux-viewer-window", "dep:asupersync", "dep:fr-client"]
+linux-desktop = ["linux-viewer-window", "dep:asupersync", "dep:fr-client", "dep:fr-tailnet"]
 linux-input-agent = ["linux-input", "dep:frd", "dep:asupersync"]
 
 [lints.rust]

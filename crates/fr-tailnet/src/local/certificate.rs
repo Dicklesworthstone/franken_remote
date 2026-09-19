@@ -558,10 +558,7 @@ impl NativeServerIdentity {
                 }
                 state.status.last_event = Some(event);
             }
-            if matches!(
-                err,
-                Error::IdentityChanged | Error::UntrustedLocalApi
-            ) {
+            if matches!(err, Error::IdentityChanged | Error::UntrustedLocalApi) {
                 self.stop();
             }
             return Err(err);
@@ -700,10 +697,8 @@ fn read_tlv_from<'a>(input: &'a [u8], cursor: &mut usize) -> Result<(u8, &'a [u8
         }
         let mut value = 0usize;
         for _ in 0..count {
-            value = value
-                .checked_shl(8)
-                .ok_or(Error::CertificateRejected)?
-                | (input[*cursor] as usize);
+            value =
+                value.checked_shl(8).ok_or(Error::CertificateRejected)? | (input[*cursor] as usize);
             *cursor += 1;
         }
         value
@@ -771,14 +766,18 @@ fn parse_x509_not_after(der: &[u8]) -> Result<u64, Error> {
             let rfc = format!(
                 "{:04}-{}-{}T{}:{}:{}Z",
                 year,
-                std::str::from_utf8(&not_after_bytes[2..4]).map_err(|_| Error::CertificateRejected)?,
-                std::str::from_utf8(&not_after_bytes[4..6]).map_err(|_| Error::CertificateRejected)?,
-                std::str::from_utf8(&not_after_bytes[6..8]).map_err(|_| Error::CertificateRejected)?,
-                std::str::from_utf8(&not_after_bytes[8..10]).map_err(|_| Error::CertificateRejected)?,
-                std::str::from_utf8(&not_after_bytes[10..12]).map_err(|_| Error::CertificateRejected)?,
+                std::str::from_utf8(&not_after_bytes[2..4])
+                    .map_err(|_| Error::CertificateRejected)?,
+                std::str::from_utf8(&not_after_bytes[4..6])
+                    .map_err(|_| Error::CertificateRejected)?,
+                std::str::from_utf8(&not_after_bytes[6..8])
+                    .map_err(|_| Error::CertificateRejected)?,
+                std::str::from_utf8(&not_after_bytes[8..10])
+                    .map_err(|_| Error::CertificateRejected)?,
+                std::str::from_utf8(&not_after_bytes[10..12])
+                    .map_err(|_| Error::CertificateRejected)?,
             );
-            crate::expiry::unix_micros(&rfc)?
-                .ok_or(Error::CertificateRejected)
+            crate::expiry::unix_micros(&rfc)?.ok_or(Error::CertificateRejected)
         }
         0x18 => {
             // GeneralizedTime: YYYYMMDDHHMMSSZ (15 bytes)
@@ -787,15 +786,20 @@ fn parse_x509_not_after(der: &[u8]) -> Result<u64, Error> {
             }
             let rfc = format!(
                 "{}-{}-{}T{}:{}:{}Z",
-                std::str::from_utf8(&not_after_bytes[0..4]).map_err(|_| Error::CertificateRejected)?,
-                std::str::from_utf8(&not_after_bytes[4..6]).map_err(|_| Error::CertificateRejected)?,
-                std::str::from_utf8(&not_after_bytes[6..8]).map_err(|_| Error::CertificateRejected)?,
-                std::str::from_utf8(&not_after_bytes[8..10]).map_err(|_| Error::CertificateRejected)?,
-                std::str::from_utf8(&not_after_bytes[10..12]).map_err(|_| Error::CertificateRejected)?,
-                std::str::from_utf8(&not_after_bytes[12..14]).map_err(|_| Error::CertificateRejected)?,
+                std::str::from_utf8(&not_after_bytes[0..4])
+                    .map_err(|_| Error::CertificateRejected)?,
+                std::str::from_utf8(&not_after_bytes[4..6])
+                    .map_err(|_| Error::CertificateRejected)?,
+                std::str::from_utf8(&not_after_bytes[6..8])
+                    .map_err(|_| Error::CertificateRejected)?,
+                std::str::from_utf8(&not_after_bytes[8..10])
+                    .map_err(|_| Error::CertificateRejected)?,
+                std::str::from_utf8(&not_after_bytes[10..12])
+                    .map_err(|_| Error::CertificateRejected)?,
+                std::str::from_utf8(&not_after_bytes[12..14])
+                    .map_err(|_| Error::CertificateRejected)?,
             );
-            crate::expiry::unix_micros(&rfc)?
-                .ok_or(Error::CertificateRejected)
+            crate::expiry::unix_micros(&rfc)?.ok_or(Error::CertificateRejected)
         }
         _ => Err(Error::CertificateRejected),
     }

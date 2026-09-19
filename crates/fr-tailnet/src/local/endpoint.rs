@@ -82,8 +82,7 @@ pub fn honest_quic_endpoint(fqdn: &str, port: u16) -> String {
 }
 
 /// Notice explaining Certificate Transparency (CT) visibility of the machine name.
-pub const CERTIFICATE_TRANSPARENCY_NOTICE: &str =
-    "Tailscale HTTPS certificates are issued via Let's Encrypt and published to public \
+pub const CERTIFICATE_TRANSPARENCY_NOTICE: &str = "Tailscale HTTPS certificates are issued via Let's Encrypt and published to public \
      Certificate Transparency logs. The machine name and tailnet domain are publicly visible \
      in CT logs. See https://tailscale.com/kb/1153/enabling-https";
 

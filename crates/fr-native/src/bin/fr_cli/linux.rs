@@ -1,8 +1,10 @@
 #[path = "linux/displays.rs"]
 mod displays;
+#[path = "linux/doctor.rs"]
+mod doctor;
 use super::{
     Failure,
-    options::{Command, Connection, DisplayChoice, Options, Target},
+    options::{Command, Connection, DisplayChoice, DoctorOptions, Options, Target},
     output,
 };
 use asupersync::{
@@ -184,6 +186,15 @@ pub fn run(options: &Options) -> Result<String, Failure> {
             &stopped,
             api,
             target,
+            options.json,
+        ),
+        Command::Doctor(doctor_opts) => doctor::run(
+            &runtime,
+            &cx,
+            &mut shutdown,
+            &stopped,
+            api,
+            doctor_opts,
             options.json,
         ),
         Command::Connect(connection) => connect(

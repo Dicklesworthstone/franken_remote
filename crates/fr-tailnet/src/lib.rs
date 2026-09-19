@@ -12,13 +12,13 @@ pub use outbound::{TargetLease, TargetOwner};
 mod lease;
 #[cfg(target_os = "linux")]
 pub use lease::{Admission, Lease};
-#[cfg(target_os = "linux")]
-mod local;
 #[path = "local/endpoint.rs"]
 pub mod endpoint;
+#[cfg(target_os = "linux")]
+mod local;
 pub use endpoint::{
-    CERTIFICATE_TRANSPARENCY_NOTICE, DEFAULT_SERVICE_PORT, PROJECT_ALPN, WEBTRANSPORT_ALPN,
-    PortCollision, TransportProtocol, check_port_collision, honest_https_endpoint,
+    CERTIFICATE_TRANSPARENCY_NOTICE, DEFAULT_SERVICE_PORT, PROJECT_ALPN, PortCollision,
+    TransportProtocol, WEBTRANSPORT_ALPN, check_port_collision, honest_https_endpoint,
     honest_quic_endpoint,
 };
 mod metadata;
