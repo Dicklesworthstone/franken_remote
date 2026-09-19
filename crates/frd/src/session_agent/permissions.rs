@@ -96,30 +96,15 @@ pub enum PlatformPermissionError {
 impl core::fmt::Display for PlatformPermissionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::MissingAccessibility => write!(
-                f,
-                "macOS Accessibility permission not granted (CGEvent injection forbidden)"
-            ),
-            Self::MissingRemoteDesktopPortal => {
-                write!(f, "Wayland RemoteDesktop portal permission not granted")
-            }
-            Self::MissingInputPermission(k) => {
-                write!(f, "Input injection permission {k:?} not granted")
-            }
+            Self::MissingAccessibility => write!(f, "macOS Accessibility permission not granted (CGEvent injection forbidden)"),
+            Self::MissingRemoteDesktopPortal => write!(f, "Wayland RemoteDesktop portal permission not granted"),
+            Self::MissingInputPermission(k) => write!(f, "Input injection permission {k:?} not granted"),
             Self::MissingScreenCapture => write!(f, "Screen capture permission not granted"),
             Self::SessionLocked => write!(f, "OS session is locked"),
-            Self::SessionChanged {
-                previous_session_id,
-                current_session_id,
-            } => {
-                write!(
-                    f,
-                    "OS user session changed from {previous_session_id} to {current_session_id}"
-                )
+            Self::SessionChanged { previous_session_id, current_session_id } => {
+                write!(f, "OS user session changed from {previous_session_id} to {current_session_id}")
             }
-            Self::PermissionLost(k) => {
-                write!(f, "Permission {k:?} was revoked during active session")
-            }
+            Self::PermissionLost(k) => write!(f, "Permission {k:?} was revoked during active session"),
         }
     }
 }
@@ -138,22 +123,10 @@ impl PermissionsManager {
     pub fn new(platform: PlatformKind, os_session_id: u32) -> Self {
         let mut permissions = HashMap::new();
         // Safe default: unknown/prompt needed until probed
-        permissions.insert(
-            PermissionKind::ScreenCapture,
-            PermissionStatus::PromptNeeded,
-        );
-        permissions.insert(
-            PermissionKind::AccessibilityInput,
-            PermissionStatus::PromptNeeded,
-        );
-        permissions.insert(
-            PermissionKind::RemoteDesktopPortal,
-            PermissionStatus::PromptNeeded,
-        );
-        permissions.insert(
-            PermissionKind::DesktopDuplication,
-            PermissionStatus::Granted,
-        );
+        permissions.insert(PermissionKind::ScreenCapture, PermissionStatus::PromptNeeded);
+        permissions.insert(PermissionKind::AccessibilityInput, PermissionStatus::PromptNeeded);
+        permissions.insert(PermissionKind::RemoteDesktopPortal, PermissionStatus::PromptNeeded);
+        permissions.insert(PermissionKind::DesktopDuplication, PermissionStatus::Granted);
         permissions.insert(PermissionKind::AudioCapture, PermissionStatus::PromptNeeded);
         permissions.insert(PermissionKind::SleepInhibition, PermissionStatus::Granted);
 
@@ -259,7 +232,10 @@ impl PermissionsManager {
     }
 
     /// Handle runtime permission loss (e.g. user toggles TCC permission off in System Settings).
-    pub fn on_permission_revoked(&mut self, kind: PermissionKind) -> PlatformPermissionError {
+    pub fn on_permission_revoked(
+        &mut self,
+        kind: PermissionKind,
+    ) -> PlatformPermissionError {
         self.permissions.insert(kind, PermissionStatus::Denied);
         PlatformPermissionError::PermissionLost(kind)
     }

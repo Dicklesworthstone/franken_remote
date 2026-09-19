@@ -48,14 +48,8 @@ impl AudioScope {
         matches!(
             (self, allowed),
             (AudioScope::None, _)
-                | (
-                    AudioScope::PlaybackOnly,
-                    AudioScope::PlaybackOnly | AudioScope::Bidirectional
-                )
-                | (
-                    AudioScope::MicrophoneOnly,
-                    AudioScope::MicrophoneOnly | AudioScope::Bidirectional
-                )
+                | (AudioScope::PlaybackOnly, AudioScope::PlaybackOnly | AudioScope::Bidirectional)
+                | (AudioScope::MicrophoneOnly, AudioScope::MicrophoneOnly | AudioScope::Bidirectional)
                 | (AudioScope::Bidirectional, AudioScope::Bidirectional)
         )
     }
@@ -295,6 +289,7 @@ impl ApprovalManager {
                     return Err(DenialReason::TimedOut);
                 }
                 if !granted.is_clamped_subset_of(&record.requested) {
+                    record.state = ApprovalState::Denied(DenialReason::PolicyForbidden);
                     return Err(DenialReason::PolicyForbidden);
                 }
                 record.state = ApprovalState::Approved(granted.clone());
@@ -380,8 +375,7 @@ impl ApprovalManager {
     /// Clean up expired pending requests.
     pub fn purge_expired(&mut self, now: HostInstant) {
         for record in self.requests.values_mut() {
-            if matches!(record.state, ApprovalState::Pending { expires_at, .. } if now >= expires_at)
-            {
+            if matches!(record.state, ApprovalState::Pending { expires_at, .. } if now >= expires_at) {
                 record.state = ApprovalState::Denied(DenialReason::TimedOut);
             }
         }

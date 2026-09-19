@@ -93,7 +93,7 @@ enum RevokeTarget {
 pub struct SharingIndicator {
     state: Mutex<IndicatorDisplayState>,
     targets: Mutex<Vec<RevokeTarget>>,
-    os_cleanup: Mutex<OsCleanupTracker>,
+    os_cleanup: OsCleanupTracker,
     last_revoke: Mutex<Option<ImmediateRevokeOutcome>>,
 }
 
@@ -108,7 +108,7 @@ impl SharingIndicator {
         Self {
             state: Mutex::new(IndicatorDisplayState::Hidden),
             targets: Mutex::new(Vec::new()),
-            os_cleanup: Mutex::new(OsCleanupTracker::new()),
+            os_cleanup: OsCleanupTracker::new(),
             last_revoke: Mutex::new(None),
         }
     }
@@ -236,10 +236,7 @@ impl SharingIndicator {
 
         // Reset cleanup tracker for the new teardown
         let cleanup_tracker = OsCleanupTracker::new();
-        *self
-            .os_cleanup
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = cleanup_tracker.clone();
+        self.os_cleanup.store_tracker(&cleanup_tracker);
 
         // Update indicator display state
         {
@@ -274,10 +271,7 @@ impl SharingIndicator {
 
     /// Mark OS cleanup complete (called by native cleanup loop/worker when OS release finishes).
     pub fn mark_os_cleanup_complete(&self) {
-        self.os_cleanup
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .mark_complete();
+        self.os_cleanup.mark_complete();
         let mut state = self
             .state
             .lock()
@@ -306,5 +300,12 @@ impl SharingIndicator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+}
+
+impl OsCleanupTracker {
+    fn store_tracker(&self, other: &OsCleanupTracker) {
+        self.complete
+            .store(other.complete.load(Ordering::Acquire), Ordering::Release);
     }
 }
