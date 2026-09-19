@@ -21,6 +21,13 @@
 //! overwritten. An unwinding scenario prints its sanitized history as well, so
 //! an assertion in a receiver retains the schedule. Reproduce with the same
 //! scenario code, dependency lock and seed.
+//!
+//! # Permanent Section 24.1 Regression Gate
+//!
+//! The deterministic property suite in `tests/property_suite.rs` acts as the
+//! permanent regression gate for all 16 plan section 24.1 invariants and
+//! `P1_RECOVERY` model rows against production state machines (`fr-core`,
+//! `fr-media`, `fr-wire`).
 
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::types::Time;
