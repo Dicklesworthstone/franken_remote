@@ -14,6 +14,7 @@ use recovery::PendingRecovery;
 pub use recovery::{RecoveryDemand, RecoveryDisposition};
 
 const CACHE_SLOTS: usize = 64;
+const RECOVERY_SLOTS: usize = 16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SendPolicy {
     pub max_cached_pictures: usize,
@@ -24,6 +25,11 @@ pub struct SendPolicy {
     pub max_repair_rounds: u8,
     pub repair_bytes_per_window: usize,
     pub repair_window_micros: u64,
+    /// Failed generations admitted per subscription in a sliding time window.
+    /// Exceeding this allowance terminally refuses only this sender. A lower
+    /// independent operating point requires a separate application admission.
+    pub max_recoveries_per_window: u8,
+    pub recovery_window_micros: u64,
 }
 impl Default for SendPolicy {
     fn default() -> Self {
@@ -36,6 +42,8 @@ impl Default for SendPolicy {
             max_repair_rounds: 3,
             repair_bytes_per_window: 1024 * 1024,
             repair_window_micros: 250_000,
+            max_recoveries_per_window: 4,
+            recovery_window_micros: 10_000_000,
         }
     }
 }
@@ -53,6 +61,8 @@ impl SendPolicy {
             || self.repair_bytes_per_window == 0
             || self.repair_bytes_per_window > self.max_cached_bytes
             || !(1..=1_000_000).contains(&self.repair_window_micros)
+            || !(1..=RECOVERY_SLOTS).contains(&usize::from(self.max_recoveries_per_window))
+            || !(1_000_000..=60_000_000).contains(&self.recovery_window_micros)
         {
             return Err(SendError::InvalidPolicy);
         }
@@ -80,6 +90,9 @@ pub enum SendError {
     OriginalExpired,
     InvalidObservation,
     ObservationExpired,
+    /// Chronic reference failure exhausted this subscription's recovery window.
+    /// The cache is closed; a later clock value or generation cannot revive it.
+    RecoveryLimitExceeded,
 }
 impl From<WireError> for SendError {
     fn from(e: WireError) -> Self {
@@ -206,6 +219,10 @@ pub struct SendCache {
     closed: bool,
     needs_recovery: bool,
     recovery_request: Option<PendingRecovery>,
+    // Fixed metadata belongs to the subscription, not a replaceable generation.
+    // Neither clear(), payload eviction nor codec reconfiguration refills it.
+    recoveries: [Option<u64>; RECOVERY_SLOTS],
+    recovery_charged_epoch: Option<MediaEpoch>,
 }
 impl fmt::Debug for SendCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -245,6 +262,8 @@ impl SendCache {
             closed: false,
             needs_recovery: false,
             recovery_request: None,
+            recoveries: [None; RECOVERY_SLOTS],
+            recovery_charged_epoch: None,
         })
     }
     pub const fn cached_bytes(&self) -> usize {
@@ -628,12 +647,44 @@ impl SendCache {
         if !epoch.replaces(self.epoch) || !bindings.all_newer_than(self.bindings) {
             return Err(DeliveryError::StaleGeneration.into());
         }
+        // Replacing an expired original without first ticking must not bypass
+        // the same failure allowance used by the ordinary recovery path.
+        if self.needs_recovery
+            || self
+                .pictures
+                .iter()
+                .flatten()
+                .any(|p| now >= p.send_by && !p.original_complete())
+        {
+            self.admit_recovery(now)?;
+        }
         self.clear();
         self.epoch = epoch;
         self.bindings = bindings;
         self.last_inserted = None;
         self.needs_recovery = false;
-        // Session-wide repair allowance is deliberately NOT reset by recovery.
+        // Subscription-wide repair AND recovery allowances survive replacement.
+        Ok(())
+    }
+    /// Charge at most once for a failed generation. Call only after validating
+    /// the request/replacement and checking the subscription's monotonic clock.
+    /// The sliding window avoids a fresh burst at an arbitrary window boundary.
+    fn admit_recovery(&mut self, now: u64) -> Result<(), SendError> {
+        if self.recovery_charged_epoch == Some(self.epoch) {
+            return Ok(());
+        }
+        let slots = &mut self.recoveries[..usize::from(self.policy.max_recoveries_per_window)];
+        for slot in slots.iter_mut() {
+            if slot.is_some_and(|at| now.saturating_sub(at) >= self.policy.recovery_window_micros) {
+                *slot = None;
+            }
+        }
+        let Some(slot) = slots.iter_mut().find(|slot| slot.is_none()) else {
+            self.close();
+            return Err(SendError::RecoveryLimitExceeded);
+        };
+        *slot = Some(now);
+        self.recovery_charged_epoch = Some(self.epoch);
         Ok(())
     }
     pub fn close(&mut self) {
@@ -664,5 +715,217 @@ impl SendCache {
         }
         self.last_now = Some(now);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod recovery_limit_tests {
+    use super::*;
+    use fr_core::{ids::*, limits::ProtocolLimits};
+    use fr_wire::{FrameDescriptor, PipelineState, SourceObservation};
+
+    fn policy() -> SendPolicy {
+        SendPolicy {
+            // Deterministic expiry, not a claim about native codec timing.
+            recovery_horizon_micros: 1,
+            max_recoveries_per_window: 2,
+            recovery_window_micros: 1_000_000,
+            ..SendPolicy::default()
+        }
+    }
+    fn cache(policy: SendPolicy) -> SendCache {
+        SendCache::new(
+            MediaLimits::new(ProtocolLimits::ABSOLUTE, 1150, 16_384, 64).unwrap(),
+            MediaBindings::new(1, 2, 3, 4).unwrap(),
+            MediaEpoch {
+                configuration: CodecConfigurationGeneration::INITIAL,
+                recovery: RecoveryGeneration::INITIAL,
+            },
+            policy,
+        )
+        .unwrap()
+    }
+    fn picture(cache: &mut SendCache, now: u64) {
+        cache
+            .push(
+                Progress {
+                    descriptor: FrameDescriptor {
+                        frame: 0,
+                        total_bytes: 128,
+                        stride: cache.limits.fragment_stride(),
+                        capture_micros: now,
+                        reference: None,
+                    },
+                    observed_micros: now,
+                    observation: SourceObservation::Captured,
+                    pipeline: PipelineState::Running,
+                },
+                vec![7; 128],
+                DeliveryMode::Recovery,
+                now,
+            )
+            .unwrap();
+    }
+    fn replacement(cache: &SendCache) -> (MediaEpoch, MediaBindings) {
+        let base = cache.bindings.for_channel(Channel::Control) + 1;
+        (
+            MediaEpoch {
+                recovery: cache.epoch.recovery.next().unwrap(),
+                ..cache.epoch
+            },
+            MediaBindings::new(base, base + 1, base + 2, base + 3).unwrap(),
+        )
+    }
+    fn replace(cache: &mut SendCache, now: u64) -> Result<(), SendError> {
+        let (epoch, bindings) = replacement(cache);
+        cache.replace(epoch, bindings, now)
+    }
+    fn failed_generation(cache: &mut SendCache, now: u64) {
+        picture(cache, now);
+        assert_eq!(cache.tick(now + 1), Err(SendError::OriginalExpired));
+        replace(cache, now + 1).unwrap();
+    }
+    #[test]
+    fn chronic_failure_is_terminal_and_isolated_to_one_subscription() {
+        let mut failed = cache(policy());
+        let mut healthy = cache(policy());
+        failed_generation(&mut failed, 0);
+        failed_generation(&mut failed, 10);
+        picture(&mut failed, 20);
+        let mut bytes = [0; 1150];
+        let old_offer = failed.next_packet(20, &mut bytes).unwrap().unwrap();
+        assert_eq!(failed.tick(21), Err(SendError::OriginalExpired));
+        assert_eq!(
+            replace(&mut failed, 21),
+            Err(SendError::RecoveryLimitExceeded)
+        );
+        assert_eq!(failed.cached_bytes(), 0);
+        assert_eq!(failed.cached_pictures(), 0);
+        assert_eq!(failed.next_deadline(), None);
+        assert_eq!(
+            failed.authorize_write(&old_offer, 21),
+            Err(SendError::Closed)
+        );
+        assert_eq!(replace(&mut failed, 2_000_000), Err(SendError::Closed));
+        picture(&mut healthy, 21);
+        assert!(healthy.next_packet(21, &mut bytes).unwrap().is_some());
+        assert_eq!(healthy.epoch.recovery, RecoveryGeneration::INITIAL);
+    }
+    #[test]
+    fn replacing_without_tick_cannot_hide_an_expired_original() {
+        let mut cache = cache(policy());
+        for now in [0, 10] {
+            picture(&mut cache, now);
+            replace(&mut cache, now + 1).unwrap();
+        }
+        picture(&mut cache, 20);
+        assert_eq!(
+            replace(&mut cache, 21),
+            Err(SendError::RecoveryLimitExceeded)
+        );
+    }
+    #[test]
+    fn healthy_reconfiguration_does_not_spend_or_refill_recovery_credit() {
+        let mut cache = cache(policy());
+        for now in 0..20 {
+            replace(&mut cache, now).unwrap();
+        }
+        failed_generation(&mut cache, 20);
+        let (mut epoch, bindings) = replacement(&cache);
+        epoch.configuration = epoch.configuration.next().unwrap();
+        cache.replace(epoch, bindings, 22).unwrap();
+        failed_generation(&mut cache, 23);
+        picture(&mut cache, 25);
+        assert_eq!(
+            replace(&mut cache, 26),
+            Err(SendError::RecoveryLimitExceeded)
+        );
+    }
+    #[test]
+    fn invalid_replacement_does_not_spend_credit_or_change_the_failed_epoch() {
+        let mut cache = cache(policy());
+        failed_generation(&mut cache, 0);
+        picture(&mut cache, 2);
+        cache.tick(3).unwrap_err();
+        let epoch = cache.epoch;
+        let (_, bindings) = replacement(&cache);
+        for _ in 0..100 {
+            assert_eq!(
+                cache.replace(epoch, bindings, 3),
+                Err(DeliveryError::StaleGeneration.into())
+            );
+        }
+        replace(&mut cache, 3).unwrap();
+        assert!(!cache.needs_recovery());
+    }
+    #[test]
+    fn sliding_window_does_not_reset_at_a_calendar_boundary() {
+        let mut cache = cache(policy());
+        failed_generation(&mut cache, 100);
+        failed_generation(&mut cache, 999_900);
+        picture(&mut cache, 1_000_000);
+        assert_eq!(
+            replace(&mut cache, 1_000_001),
+            Err(SendError::RecoveryLimitExceeded)
+        );
+    }
+    #[test]
+    fn oldest_failure_expires_at_its_exact_window_boundary() {
+        let mut cache = cache(policy());
+        failed_generation(&mut cache, 0);
+        failed_generation(&mut cache, 10);
+        picture(&mut cache, 1_000_000);
+        replace(&mut cache, 1_000_001).unwrap();
+        assert_eq!(cache.recoveries.iter().flatten().count(), 2);
+        picture(&mut cache, 1_000_002);
+        assert_eq!(
+            replace(&mut cache, 1_000_003),
+            Err(SendError::RecoveryLimitExceeded)
+        );
+    }
+    #[test]
+    fn backwards_clock_is_terminal_without_refilling_the_window() {
+        let mut cache = cache(policy());
+        failed_generation(&mut cache, 100);
+        assert_eq!(
+            replace(&mut cache, 99),
+            Err(DeliveryError::ClockRegression.into())
+        );
+        assert_eq!(replace(&mut cache, 2_000_000), Err(SendError::Closed));
+    }
+    #[test]
+    fn recovery_policy_is_bounded_and_cannot_disable_refusal() {
+        let limits = cache(policy()).limits;
+        for count in [0, 17, u8::MAX] {
+            assert_eq!(
+                SendPolicy {
+                    max_recoveries_per_window: count,
+                    ..policy()
+                }
+                .validate(&limits),
+                Err(SendError::InvalidPolicy)
+            );
+        }
+        for window in [0, 999_999, 60_000_001, u64::MAX] {
+            assert_eq!(
+                SendPolicy {
+                    recovery_window_micros: window,
+                    ..policy()
+                }
+                .validate(&limits),
+                Err(SendError::InvalidPolicy)
+            );
+        }
+        for count in [1, 16] {
+            for window in [1_000_000, 60_000_000] {
+                SendPolicy {
+                    max_recoveries_per_window: count,
+                    recovery_window_micros: window,
+                    ..policy()
+                }
+                .validate(&limits)
+                .unwrap();
+            }
+        }
     }
 }
