@@ -644,7 +644,7 @@ impl StreamingViewer {
             let job = if ready {
                 recovery::admit(
                     &mut self.peer,
-                    self.recovery.as_mut(),
+                    self.recovery.as_deref_mut(),
                     &mut self.receiver,
                     &mut self.repair,
                     cx,
@@ -677,7 +677,7 @@ impl StreamingViewer {
                     .map_err(Error::Feedback)?;
             }
             let job = {
-                let drain_observation = recovery::enabled(&self.peer, self.recovery.as_ref());
+                let drain_observation = recovery::enabled(&self.peer, self.recovery.as_deref());
                 let mut decoding =
                     pin!(self.presenter.decode_stream_job(cx, job, drain_observation));
                 loop {
@@ -728,7 +728,7 @@ impl StreamingViewer {
             };
             let receipt = recovery::admit(
                 &mut self.peer,
-                self.recovery.as_mut(),
+                self.recovery.as_deref_mut(),
                 &mut self.receiver,
                 &mut self.repair,
                 cx,
