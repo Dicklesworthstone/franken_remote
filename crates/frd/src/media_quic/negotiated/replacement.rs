@@ -146,6 +146,19 @@ impl NegotiatedMedia {
     }
 }
 impl Replacement {
+    /// Leave this exchange's records with its bounded transport slots while the
+    /// parent dispatches renewal and unrelated services. Never route a partial
+    /// attachment or early configuration payload to application callbacks.
+    pub(crate) fn owns_record(&self, route: Route, bytes: &[u8]) -> bool {
+        (route == Route::Stream(self.routes.inbound)
+            && bytes.get(6..8).is_some_and(|k| {
+                (0x0018..=0x001c).contains(&u16::from_be_bytes([k[0], k[1]]))
+            }))
+            || self.channels.iter().flatten().any(|channel| {
+                matches!(route, Route::Stream(r) if r.binding == channel.descriptor().binding.parent.id)
+            })
+    }
+
     pub const fn deadline_micros(&self) -> u64 {
         self.until
     }

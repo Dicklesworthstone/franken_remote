@@ -541,3 +541,5 @@ fn pre_decoder_stop_handle_survives_the_original_session_handoff() {
 }
 
 mod recovery;
+
+mod continuation;

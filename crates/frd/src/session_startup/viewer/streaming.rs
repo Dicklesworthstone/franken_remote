@@ -1,6 +1,7 @@
 //! Continuous native receiving without lending the connection to a codec.
 //! One owned picture stays charged while QUIC, repairs and control keep moving.
 mod acquisition;
+mod continuation;
 mod interactive;
 mod recovery;
 use super::{
@@ -41,6 +42,7 @@ pub enum Error {
     Routes(crate::media_quic::Error),
     Delivery(DeliveryError),
     Recovery(recovery_control::Error),
+    Replacement(crate::media_quic::replacement::Error),
     Transport(quic::Error),
     Feedback(feedback::Error),
     PresentedState(presented::Error),
@@ -69,6 +71,8 @@ pub struct Statistics {
     pub compositor_submissions: u64,
     pub repair_requests: u64,
     pub network_turns: u64,
+    /// Completed recovery handshakes, not visibility or renewed control grants.
+    pub recovered_streams: u64,
 }
 impl Statistics {
     fn presented(&mut self, stage: PresentationStage) {
@@ -178,6 +182,17 @@ impl Peer {
             }
             Self::Control(v) => v.streaming_parts().map_err(Error::Control),
             Self::Closed => Err(Error::Closed),
+        }
+    }
+    /// Parent-only service during a failed observation. Retired media cannot
+    /// suppress original renewal, clocks or advisory reply cleanup.
+    fn parent(&mut self) -> Result<&mut ViewerSession, Error> {
+        match self {
+            Self::Observe { session, .. } => {
+                session.check().map_err(Error::Session)?;
+                Ok(session)
+            }
+            _ => self.parts().map(|(session, _)| session),
         }
     }
     fn controlled(&mut self) -> Option<&mut ControlledViewer> {
@@ -611,6 +626,20 @@ impl StreamingViewer {
                 &mut self.repair,
                 cx,
             )?;
+            if recovering
+                && matches!(self.peer, Peer::Observe { .. })
+                && self.recovery_state() == Some(recovery_control::State::Requested)
+            {
+                let event = self.resume_observation(ui, other).await?;
+                acquisition::notify(
+                    &mut self.peer,
+                    &self.receiver,
+                    &mut self.control,
+                    Some(event),
+                    ui,
+                )?;
+                continue;
+            }
             let ready = !recovering && self.peer.prepare_decode(&self.receiver)?;
             let job = if ready {
                 self.presenter
@@ -890,7 +919,7 @@ async fn network(
         } else {
             peer.presented_sample(receiver)?
         };
-        let (session, _) = peer.parts()?;
+        let session = peer.parent()?;
         presentation
             .service(
                 &mut session.transport,
@@ -902,7 +931,7 @@ async fn network(
     }
     // The session's renewal, repair and input services get their turn first.
     if let Some(feedback) = feedback {
-        let (session, _) = peer.parts()?;
+        let session = peer.parent()?;
         feedback
             .service(&mut session.transport, cx, now(cx).map_err(Error::Session)?)
             .map_err(Error::Feedback)?;

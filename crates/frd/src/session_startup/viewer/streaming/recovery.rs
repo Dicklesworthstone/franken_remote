@@ -36,7 +36,7 @@ pub(super) fn service(
             .map_err(Error::Delivery)?;
         return Ok(false);
     }
-    let (session, _) = peer.parts()?;
+    let session = peer.parent()?;
     let until = session.heard_until;
     let state = report
         .service(cx, &mut session.transport, receiver, || {

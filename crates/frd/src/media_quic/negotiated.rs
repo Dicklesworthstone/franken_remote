@@ -42,6 +42,20 @@ fn same_view(a: Binding, mut b: Binding) -> bool {
     a == b
 }
 impl NegotiatedMedia {
+    #[cfg(test)]
+    pub(crate) fn packet_route_for_test(&self, channel: Channel) -> Route {
+        match channel {
+            Channel::MediaConfig => Route::Stream(self.video.outbound),
+            Channel::Recovery => Route::Stream(self.recovery.outbound),
+            Channel::Video => Route::Datagram(self.video.datagram.unwrap()),
+            Channel::Control => Route::Stream(self.video.inbound),
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn decoder_routes_for_test(&self) -> (StreamRoute, StreamRoute) {
+        (self.configuration.outbound, self.configuration.inbound)
+    }
+
     pub fn new(
         q: &QuicRecords,
         selection: &Selection,
@@ -132,6 +146,35 @@ impl NegotiatedMedia {
             return Err(Error::InvalidRoutes);
         }
         Ok(())
+    }
+    /// Preserve only the original dispatch map after reference failure. The
+    /// peer may already have reset media before its next offer reaches control;
+    /// connection identity and negotiated observation scope still must match.
+    pub(crate) fn retiring_viewer_routes(&self, q: &QuicRecords) -> Result<[Route; 4], Error> {
+        if !q.is_bound_to(&self.connection) {
+            return Err(Error::ForeignConnection);
+        }
+        self.check_recovery_capability()?;
+        if q.is_closed()
+            || self.is_host()
+            || self.selection.role != fr_wire::negotiation::Role::Observe
+        {
+            return Err(Error::InvalidRoutes);
+        }
+        Ok([
+            Route::Stream(self.configuration.inbound),
+            Route::Stream(self.recovery.inbound),
+            Route::Stream(self.video.inbound),
+            Route::Datagram(self.video.datagram.ok_or(Error::InvalidRoutes)?),
+        ])
+    }
+    /// Exact current configuration route, never a peer-supplied stream number.
+    pub(crate) fn viewer_configuration_route(&self, q: &QuicRecords) -> Result<StreamRoute, Error> {
+        self.check(q)?;
+        if self.is_host() {
+            return Err(Error::InvalidRoutes);
+        }
+        Ok(self.configuration.inbound)
     }
     pub(super) fn check_recovery_capability(&self) -> Result<(), Error> {
         if self.selection.capabilities.iter().any(|cap| {
