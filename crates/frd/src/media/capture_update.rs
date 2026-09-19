@@ -8,6 +8,8 @@ use fr_core::ids::CodecConfigurationGeneration;
 use fr_media::worker::{Kind, UnchangedCapture, capture_payload, parse_unit};
 use std::{fmt, sync::Arc, time::Duration};
 
+mod prepared;
+pub use prepared::PreparedSharedCapture;
 mod shared;
 pub use shared::{FanoutReport, SharedCaptureUpdate};
 
@@ -64,7 +66,7 @@ impl CaptureSource {
         force_idr: bool,
     ) -> Result<EncodedAccessUnit, Error> {
         match self
-            .capture_request(control, force_idr, false)
+            .capture_request(control, force_idr, false, None)
             .await?
             .content
         {
@@ -80,13 +82,14 @@ impl CaptureSource {
         control: &ObservationControl,
         force_idr: bool,
     ) -> Result<CaptureUpdate, Error> {
-        self.capture_request(control, force_idr, true).await
+        self.capture_request(control, force_idr, true, None).await
     }
     async fn capture_request(
         &mut self,
         control: &ObservationControl,
         force_idr: bool,
         conditional: bool,
+        maximum_capacity: Option<usize>,
     ) -> Result<CaptureUpdate, Error> {
         #[cfg(target_os = "linux")]
         let mut selection = super::discovery::SelectionGuard::capture(self, control)?;
@@ -112,7 +115,7 @@ impl CaptureSource {
         let mut operation = MediaOperation::new(&mut self.worker);
         let mut reply = operation
             .worker
-            .request(
+            .request_with_response_capacity(
                 &control.cx,
                 if conditional {
                     Kind::CaptureIfChanged
@@ -120,6 +123,7 @@ impl CaptureSource {
                     Kind::Capture
                 },
                 capture_payload(frame, issued.as_micros(), force_idr),
+                maximum_capacity,
                 deadline,
             )
             .await?;
@@ -167,7 +171,13 @@ impl CaptureSource {
                     sleep(now, Duration::from_millis(1)).await;
                     reply = operation
                         .worker
-                        .request(&control.cx, Kind::Poll, vec![], deadline)
+                        .request_with_response_capacity(
+                            &control.cx,
+                            Kind::Poll,
+                            vec![],
+                            maximum_capacity,
+                            deadline,
+                        )
                         .await?;
                 }
                 _ => return Err(Error::Backpressure),

@@ -577,3 +577,6 @@ fn fanout_turn_limit_is_checked_before_mutating_any_recipient() {
         stop(&mut s, &cx).await;
     });
 }
+
+#[path = "shared_capture/reservation.rs"]
+mod reservation;

@@ -52,6 +52,9 @@ impl SharedFramePool {
             limits,
         })
     }
+    pub const fn limits(&self) -> &ProtocolLimits {
+        &self.limits
+    }
     pub fn usage(&self) -> BudgetUsage {
         self.ledger
             .lock()

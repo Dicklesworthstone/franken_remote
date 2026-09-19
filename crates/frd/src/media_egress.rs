@@ -70,6 +70,18 @@ impl Egress {
             maximum,
         }
     }
+    pub(crate) fn shared_capture_credit(
+        &mut self,
+        source: &crate::media::CaptureSource,
+        charged: usize,
+    ) -> Result<bool, Error> {
+        let ready = self
+            .subscription
+            .as_mut()
+            .ok_or(Error::Send(fr_media::delivery::SendError::Closed))?
+            .shared_capture_credit(source, charged)?;
+        Ok(ready && self.pending.is_none())
+    }
     pub(crate) fn stream_subscription(&self) -> Result<&Subscription, Error> {
         self.subscription
             .as_ref()

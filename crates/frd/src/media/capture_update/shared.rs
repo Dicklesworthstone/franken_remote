@@ -4,7 +4,7 @@ use crate::media_egress::Egress;
 use fr_core::ids::CodecConfigurationGeneration;
 use fr_media::{
     access_unit::FrameId,
-    delivery::{DeliveryMode, SharedFrame, SharedFramePool},
+    delivery::{DeliveryMode, SharedFrame, SharedFramePool, SharedFrameReservation},
     worker::UnchangedCapture,
 };
 use std::sync::Arc;
@@ -45,6 +45,29 @@ impl CaptureUpdate {
                 SharedContent::Encoded(pool.share(unit).map_err(Error::Receiver)?)
             }
             Content::Unchanged(proof) => SharedContent::Unchanged(proof),
+        };
+        Ok(SharedCaptureUpdate {
+            source: self.source,
+            configuration: self.configuration,
+            content,
+        })
+    }
+}
+impl CaptureUpdate {
+    /// Finish a pre-admitted native capture on its original physical reservation.
+    /// A static observation releases unused picture/byte credit immediately.
+    pub fn share_reserved(
+        self,
+        reservation: SharedFrameReservation,
+    ) -> Result<SharedCaptureUpdate, Error> {
+        let content = match self.content {
+            Content::Encoded(unit) => {
+                SharedContent::Encoded(reservation.share(unit).map_err(Error::Receiver)?)
+            }
+            Content::Unchanged(proof) => {
+                drop(reservation);
+                SharedContent::Unchanged(proof)
+            }
         };
         Ok(SharedCaptureUpdate {
             source: self.source,

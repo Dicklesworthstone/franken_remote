@@ -47,14 +47,47 @@ viewers and recovery generations; sharing multiple encoders requires an aggregat
 pool/owner rather than independently multiplying its allowance.
 
 Before producing a picture, service each viewer's idle/retention deadlines and
-check physical and logical capacity. `can_share_capacity` is a non-reserving
-snapshot for a serialized producer, not a permit for simultaneous encoders.
-`share` receives an already allocated output: the producer must bound allocation
-before native capture, not after it. Broker registry size, first-viewer/last-viewer
-source lifetime, bounded per-connection send scheduling and network publication
-across multiple viewers still require their own OS-share-session integration.
-This does not change the current native publisher into an automatic shared broker,
-and the eight-recipient turn bound is not a global subscription admission limit.
+check physical and logical capacity. `SharedFramePool::reserve_capacity` reserves
+physical bytes and one picture slot atomically, even across cloned pools and
+concurrent producers. `SharedFrameReservation::share` transfers that SAME credit
+to the completed output without copying or reacquiring a slot; actual Vec capacity,
+not just encoded length, determines the final charge. Drop returns unused credit.
+The legacy `can_share_capacity` remains only a non-reserving snapshot.
+
+`CaptureSource::prepare_shared_capture` joins the reservation to the original
+native source before advancing a frame identity or issuing IPC. It reserves the
+configured maximum access unit plus the IPC prefix retained by the parser. An
+impossible pool/profile refuses; a temporarily full pool returns backpressure
+without encoding a reference that would have to be silently discarded. The
+returned `PreparedSharedCapture` exclusively borrows the original source while
+other network owners can continue to use their own egresses. Its existing native
+capture path retains authority, topology, source provenance, deadlines and the
+shared recovery scheduler. The same reserved allocation ceiling reaches the
+worker's `request_with_response_capacity` for BOTH the initial exchange and every
+Poll reply; declared length is checked before allocation or payload reads, and
+actual capacity is checked before pixels enter the buffer. Revocation between
+preparation and polling refuses.
+
+Preparation can preflight an already-joined egress through `check_recipient`,
+including shared allocation metadata and that viewer's own cache metadata. This
+logical-credit check does not reserve a recipient or hold its borrow across IPC;
+the serialized producer must not enqueue other outputs in between. Final egress
+admission still runs. A blocked viewer does not force another viewer to wait.
+First-viewer admission remains a separate authenticated decoder handshake.
+
+An unpolled preparation frees credit without native side effects. Cancelling an
+in-flight capture uses the existing native-operation abort/poison path before its
+parent-side output reservation is released. The child process retains its own
+separate native memory bounds: this reservation is not accounting for child/GPU
+surfaces. Static unchanged results release unused picture credit and carry only
+fixed source-verification metadata. A returned allocation larger than the bound
+is refused rather than allowing a silently broken reference chain to continue.
+
+Broker registry size, first-viewer/last-viewer source lifetime, bounded
+per-connection send scheduling and network publication across multiple viewers
+still require their own OS-share-session integration. These APIs do not change
+the current native publisher into an automatic shared broker, and the
+eight-recipient turn bound is not a global subscription admission limit.
 
 ## Executed verification
 
@@ -89,3 +122,26 @@ A full daemon runtime binary build exceeded the execution limit without producin
 results, so no full daemon/workspace runtime pass is claimed.
 
 Refs: comprehensive plan 7, 11.2, 12.3 and 19; fr-p1-frame-pipeline-am1.
+
+## Pre-production reservation verification
+
+Six new physical-ledger tests cover byte/count reservation, eight concurrent
+producers, cloned pools, actual-capacity overflow, release and in-place transfer.
+The pinned, locked offline core/wire/media suite passes 595 tests including
+doctests and strict all-target/all-feature Clippy. Eight new native preparation
+tests pass alongside the eight original native-sharing tests (16 total), covering
+pool/profile refusal before IPC, intact reference numbering, pending capture,
+cancellation, static output, logical preflight, foreign source and revoked consent.
+They use production code and supervised child IPC with opaque codec fixtures,
+not real HEVC or hardware qualification.
+
+The current native slice rebuilds all eight first-party libraries from the
+checksum-verified b1b2d366 source archive plus these changes and the exact
+concurrent 98186a2 worker-capacity implementation (worker blob 98416a295), with unchanged
+compiler/lock-matched upstream libraries retained by workflow 35466193560 and
+nightly-2026-08-31. Complete daemon test-source metadata and the affected native
+integration target pass strict Clippy. Production-library Clippy still identifies
+the two existing host-recovery wildcard imports described above. This is not a
+cold dependency build, current combined-main full-workspace runtime pass, or
+automatic multi-viewer broker qualification. Concurrent file-selection,
+broker, tailnet and later viewer changes are preserved but outside this baseline.
