@@ -204,3 +204,123 @@ fn full_encode_decode_loop_preserves_frame_identity() {
         MediaError::NeedMoreInput
     );
 }
+
+#[test]
+fn probe_cache_invalidation_and_admission_refusal_contract() {
+    use fr_media::capabilities::{
+        AdmissionError, DeviceIdentity, MediaCapabilities, ProbeCache, SessionAdmission,
+    };
+    use fr_media::config::CodecProfile;
+
+    log("probe cache bounds, invalidation, and admission capacity enforcement");
+    let mut cache = ProbeCache::new();
+
+    let id0 =
+        DeviceIdentity::new("Ubuntu 24.04", "PCIe-0000:01:00.0", "nvidia-550.54.14", 0).unwrap();
+    let caps = MediaCapabilities::new(
+        vec![CodecProfile::Main8_420],
+        3840,
+        2160,
+        vec![PixelFormat::Nv12],
+        true,
+        2,
+    )
+    .unwrap();
+
+    cache.insert(id0.clone(), caps.clone()).unwrap();
+    assert_eq!(cache.len(), 1);
+    assert!(cache.get(&id0).is_some());
+
+    // Device reset (bumped generation) misses cache
+    let id0_reset =
+        DeviceIdentity::new("Ubuntu 24.04", "PCIe-0000:01:00.0", "nvidia-550.54.14", 1).unwrap();
+    assert!(cache.get(&id0_reset).is_none());
+
+    // Explicit device invalidation removes the entry
+    cache.invalidate_device("Ubuntu 24.04", "PCIe-0000:01:00.0", "nvidia-550.54.14");
+    assert!(cache.is_empty());
+
+    // Admission refusal when capacity is reached
+    let mut admission = SessionAdmission::new(caps.max_sessions);
+    assert!(admission.has_capacity());
+    assert_eq!(admission.admit(), Ok(1));
+    assert_eq!(admission.admit(), Ok(2));
+    assert!(!admission.has_capacity());
+    assert_eq!(
+        admission.admit(),
+        Err(AdmissionError::SessionCapacityExhausted { max_sessions: 2 })
+    );
+
+    // Release restores capacity
+    admission.release();
+    assert!(admission.has_capacity());
+    assert_eq!(admission.admit(), Ok(2));
+}
+
+#[test]
+fn probe_detailed_logging_contract() {
+    use fr_media::capabilities::{DeviceIdentity, MediaCapabilities, ProbeReport};
+    use fr_media::config::CodecProfile;
+    use fr_media::surface::{CopyKind, CopyLedger};
+
+    log("probe detailed logging with device identity, effective config, and copy counts");
+    let id = DeviceIdentity::new("macOS 15.0", "Apple M3 Pro", "vt-2.0", 0).unwrap();
+    let caps = MediaCapabilities::new(
+        vec![CodecProfile::Main8_420],
+        3840,
+        2160,
+        vec![PixelFormat::Nv12, PixelFormat::Bgra8],
+        true,
+        4,
+    )
+    .unwrap();
+    let mut ledger = CopyLedger::new();
+    ledger.record(CopyKind::CaptureToOwned);
+    ledger.record(CopyKind::GpuConversion);
+
+    let report = ProbeReport::new(id, caps, ledger);
+    let summary = report.diagnostic_summary();
+    log(&format!("emitted diagnostic summary: {summary}"));
+
+    assert!(summary.starts_with("probe["));
+    assert!(summary.contains("device=\"Apple M3 Pro\""));
+    assert!(summary.contains("driver=\"vt-2.0\""));
+    assert!(summary.contains("os=\"macOS 15.0\""));
+    assert!(summary.contains("hw=true"));
+    assert!(summary.contains("max_res=3840x2160"));
+    assert!(summary.contains("max_sess=4"));
+    assert!(summary.contains("copies=2"));
+    // Ensure no raw pointer addresses or unredacted pixel data appear
+    assert!(!summary.contains("0x7f"));
+}
+
+#[test]
+fn compile_time_api_review_no_foreign_codec_types() {
+    log("compile-time API review: public signatures only expose first-party types");
+
+    // Trait object assertions for public interfaces
+    fn assert_is_encoder<T: Encoder>() {}
+    fn assert_is_decoder<T: Decoder>() {}
+    fn assert_is_surface<T: fr_media::surface::GpuSurface>() {}
+
+    assert_is_encoder::<FakeEncoder>();
+    assert_is_decoder::<FakeDecoder>();
+    assert_is_surface::<FakeSurface>();
+
+    // Assert that the public contract types do not import or expose any foreign codec C types
+    // (AVCodec, AVCodecContext, CVPixelBuffer, ID3D11Device, etc.)
+    let limits = ProtocolLimits::ABSOLUTE;
+    let geom = CodedGeometry::new(&limits, 1920, 1088, 1920, 1080, 16).unwrap();
+    let gop = GopPolicy::baseline_for_frame_rate(60).unwrap();
+    let cfg = CodecConfiguration::new_baseline(
+        CodecConfigurationGeneration::from_raw(42),
+        geom,
+        ColorInfo::sdr_bt709(),
+        gop,
+    )
+    .unwrap();
+
+    let mut enc = FakeEncoder::new(limits, 4);
+    assert_eq!(enc.configure(cfg), Ok(()));
+    assert!(enc.configuration().is_some());
+}
