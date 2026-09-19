@@ -1,6 +1,7 @@
 //! Join completed native attachments to the actual media owners. This is not
 //! admission: the containing session still selects the view and services consent,
 //! observation renewal, revocation and input cleanup independently of the codec.
+mod handoff;
 pub mod replacement;
 use super::{Error, QuicEgress, Routes};
 use crate::{

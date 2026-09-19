@@ -75,6 +75,40 @@ impl Egress {
             .as_ref()
             .ok_or(Error::Send(fr_media::delivery::SendError::Closed))
     }
+    /// Fence this subscription on a validated failure without destroying its
+    /// generation-persistent recovery allowance. Invalid records leave any
+    /// prepared healthy packet intact; accepted failures retire it immediately.
+    pub fn request_recovery(
+        &mut self,
+        source: &mut crate::media::CaptureSource,
+        bytes: &[u8],
+        binding: fr_wire::decoder::Binding,
+    ) -> Result<bool, Error> {
+        let accepted = self
+            .subscription
+            .as_mut()
+            .ok_or(Error::Send(fr_media::delivery::SendError::Closed))?
+            .request_recovery(source, bytes, binding)?;
+        self.pending = None;
+        self.buffer.fill(0);
+        Ok(accepted)
+    }
+    /// Rebind the ORIGINAL failed subscription after fresh channel admission.
+    /// Never construct a new cache here: that would refill recovery/repair
+    /// credit. The session must fence/retire the old transport lanes first.
+    pub fn recover(
+        &mut self,
+        epoch: fr_media::delivery::MediaEpoch,
+        bindings: fr_media::delivery::MediaBindings,
+    ) -> Result<(), Error> {
+        self.subscription
+            .as_mut()
+            .ok_or(Error::Send(fr_media::delivery::SendError::Closed))?
+            .recover(epoch, bindings)?;
+        self.pending = None;
+        self.buffer.fill(0);
+        Ok(())
+    }
     pub fn enqueue(&mut self, unit: EncodedAccessUnit) -> Result<(), Error> {
         self.subscription
             .as_mut()
