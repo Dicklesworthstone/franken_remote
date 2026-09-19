@@ -1,12 +1,13 @@
 # Bounded reference recovery
 
 The delivery layer implements `RecoveryRequest` (`0x0036`, protocol section 6),
-per-subscription sender fencing, and one fixed-space shared-encoder IDR admission
-queue. Native subscriptions also join accepted requests to their actual input
-authority and capture worker. This is not yet automatic control-stream routing,
-channel reattachment or hardware qualification. The application must negotiate `reference-recovery` version 1,
-route requests through the original admitted control connection, and perform the
-existing fresh-binding and decoder recovery handshake.
+per-subscription sender fencing and chronic-failure refusal, and one fixed-space
+shared-encoder IDR admission queue. Native subscriptions also join accepted
+requests and terminal sender failures to their actual input authority and capture
+worker. This is not yet automatic control-stream routing, channel reattachment
+or hardware qualification. The application must negotiate `reference-recovery`
+version 1, route requests through the original admitted control connection, and
+perform the existing fresh-binding and decoder recovery handshake.
 
 ## Receiver and control record
 
@@ -47,12 +48,41 @@ new generation and newer channel bindings under the existing rules.
 
 Keep one `IdrCoalescer` for the shared encoder lifetime, not per viewer or
 recovery generation. Its sole slot consumes authentic sender demands and keeps
-the earliest cohort deadline. Its configured 100 ms to 1 s minimum interval
-bounds enqueue rate, including failed enqueue attempts. New generations and
-cancellation do not replenish the rate allowance. A different viewer's request
+the earliest live cohort deadline. A valid newly arriving demand retires an
+already expired cohort before joining the queue, even when the idle source has
+not polled `take` yet. The new viewer does not inherit the old viewer's expired
+deadline; the old subscription still expires independently. Invalid demands
+cannot discard another cohort's work.
+
+The configured 100 ms to 1 s minimum interval bounds enqueue rate, including
+failed enqueue attempts. New generations, cancellation and expired-cohort
+retirement do not replenish the rate allowance. A different viewer's request
 never resets healthy bindings or decoder state. The actual native owner must
 check authority, fence stale-view input, and enqueue force-IDR work within the
 returned deadline; this delivery API is not itself an input grant or an encoder.
+
+## Chronic-viewer refusal
+
+`SendPolicy::max_recoveries_per_window` and `recovery_window_micros` default to
+four accepted failed generations in a sliding ten-second window. Configuration
+is bounded to 1..=16 recoveries and 1..=60 seconds. Fixed timestamp storage belongs
+to the subscription, not its replaceable media generation; there is no growing
+request history or per-request allocation.
+
+A validated recovery request spends one admission BEFORE a `RecoveryDemand` can
+reach the shared encoder. Generation replacement does not charge that same
+failure again. Duplicate requests, dropped demands, payload eviction, recovery
+and codec-generation changes do not refund credit or move its original timestamp.
+Invalid requests/replacements spend nothing. Replacing an already expired unsent
+original also consumes an admission even when the owner has not called `tick`.
+Healthy reconfiguration does not consume or replenish recovery credit.
+
+Exhaustion returns `SendError::RecoveryLimitExceeded` and closes only that sender,
+clearing cached payloads and invalidating prepared packet offers. Later timestamps
+and fresh channel bindings cannot revive the closed cache. Do not automatically
+construct replacement subscriptions to bypass this refusal. An independently
+admitted lower operating point remains a separate application decision; this
+policy does not silently change the shared encoder or another viewer's quality.
 
 ## Native authority and capture
 
@@ -63,6 +93,12 @@ The installed session identity is checked under the original shared authority
 mutex. After bounded request admission, view readiness and old input tickets are
 invalidated under that same mutex, before any native work; malformed requests
 leave a healthy view alone. No authority lock is held across IPC or an await.
+
+Terminal sender refusal also invalidates readiness and old input tickets before
+returning from that mutex, even though no encoder demand is issued. This includes
+chronic-failure exhaustion, closed senders, recovery expiry and sender clock
+failure. Restoring readiness alone cannot revive an invalidated ticket. Refusal
+does not cancel another viewer's queued IDR work or revoke observation authority.
 
 Each source owns one `IdrCoalescer` with a 500 ms interval for its entire lifetime.
 The existing `capture` / `capture_if_changed` loop consumes due work and sets the
@@ -78,39 +114,51 @@ Successful capture does not make the view ready, renew a ticket, or install a
 channel. Fresh binding admission, reliable recovery delivery and actual decoder /
 presentation evidence are still required before a new control grant.
 
-## Verification and remaining integration
+## Verification
 
-The two request test suites and sender/coalescer suite use production parsers,
-packetizers, budgets and state machines. They cover full-picture loss, fixed
-failure deadlines, stale and malformed requests, foreign owners, held decoder
-buffers, duplicate floods by repeated calls, shared admission, reliable recovery
-under fresh bindings, resumed dependent frames, and an unaffected healthy viewer.
-Decoder completion in these tests is explicitly simulated, not HEVC proof.
+The request and sender/coalescer suites use production parsers, packetizers,
+budgets and state machines. They cover full-picture loss, fixed failure deadlines,
+stale and malformed requests, foreign owners, held decoder buffers, duplicate
+floods, shared admission, reliable recovery under fresh bindings, resumed dependent
+frames, and an unaffected healthy viewer. Decoder completion in these tests is
+explicitly simulated, not HEVC proof.
 
 Run with the repository-pinned compiler:
 
 ```sh
 cargo test -p fr-core -p fr-wire -p fr-media --all-features --locked
 cargo clippy -p fr-core -p fr-wire -p fr-media --all-targets --all-features --locked -- -D warnings
+cargo test -p frd --lib media::recovery::tests --locked
 ```
 
-The core/wire/media slice passes 507 tests including doctests and strict Clippy
-using locked offline dependency sources. Native integration adds five tests with
-real child processes and the production IPC/authority/capture owners; all five,
-plus 22 existing authority/egress/worker regressions, pass. Strict Clippy passes
-for the daemon library and new native tests. Test child payloads are deliberately
-not HEVC and are not platform or codec evidence.
+The recovery-isolation changes (`bfe2f34`, `8a27041`, `053e659`, `cb9176d`) add
+23 regressions: eight for persistent subscription limits, five for request-time
+admission, five for native authority fencing, and five for expired shared cohorts.
+Three of the cohort tests fail against the original implementation and pass with
+the fix. The duplicate-request test makes 9,999 repeated calls without refilling
+credit or extending the deadline.
 
-Native local checks rebuild all eight relevant first-party libraries with the
-pinned compiler against unchanged, matching Asupersync 0.5.0 and other upstream
-libraries retained by GitHub run 35421807938 (source 38f1b0c). Archive hashes were
-verified; no dependency pin was changed. This is not a cold dependency rebuild.
-The same first commit passed 59 transport integration tests and a workspace
-Cargo check in that CI run; workspace Clippy stopped in untouched desktop
-reconnect tests. A broader local daemon unit-test build exceeded the execution
-limit before producing test results, so no complete daemon/workspace test pass
-is claimed.
+Local verification with the pinned compiler passed 235 media tests across 23
+targets, including the current eight-test recovery-sender suite. Five additional
+authority tests pass in a targeted harness containing the exact production
+admission helper and its inline tests, using the real cache/parser/authority
+implementations. Another 22 existing native authority, egress and worker-supervision
+tests pass, including actual child-process cleanup. Strict Clippy passes for the
+media unit-test target, daemon library and targeted authority harness; changed
+Rust files pass formatting checks.
+
+All eight relevant first-party libraries were rebuilt from retained sources with
+the current recovery changes against matching, unchanged Asupersync 0.5.0 and
+other upstream libraries from GitHub run 35421807938 (source 38f1b0c). This is not
+a cold dependency rebuild or a fresh full-workspace checkout/build. The full
+daemon unit-test build exceeded the local execution limit before producing test
+results; no full daemon/workspace test pass is claimed. These checks are not
+native HEVC, platform-capture, network-loss or shipping-transport qualification.
+
+## Remaining integration
 
 Automatic control-stream routing and capability advertisement, fresh channel
-reattachment, chronic-viewer refusal policy, and real-HEVC injected-loss
-qualification remain open under `fr-p1-loss-recovery-20s`.
+reattachment, independently admitted lower operating points, and real-HEVC
+injected-loss qualification remain open under `fr-p1-loss-recovery-20s`.
+The chronic-viewer refusal path is implemented; the overall recovery bead is
+not complete. No dependency, compiler or shipping-transport pin was changed.
