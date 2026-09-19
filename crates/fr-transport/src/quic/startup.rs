@@ -112,6 +112,15 @@ impl QuicRecords {
         let native = self.native.as_ref().ok_or(Error::Closed)?;
         Ok((native.local_addr(), native.peer_addr()))
     }
+    /// Inner MTU payload budget based on the peer's actual IP version.
+    pub fn packet_budget(&self) -> Result<super::PacketBudget, Error> {
+        let (_, peer) = self.addresses()?;
+        let ip_version = match peer {
+            SocketAddr::V4(_) => super::IpVersion::V4,
+            SocketAddr::V6(_) => super::IpVersion::V6,
+        };
+        Ok(super::PacketBudget::for_tailnet(ip_version))
+    }
     pub fn role(&self) -> Result<StreamRole, Error> {
         Ok(self
             .native

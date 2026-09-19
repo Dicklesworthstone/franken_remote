@@ -21,8 +21,10 @@ use std::{
 
 mod lifetime;
 
+pub mod budget;
 pub mod clipboard;
 pub mod files;
+pub use budget::{BudgetError, IpVersion, PacketBudget};
 
 mod attachment;
 pub use attachment::{AttachedChannel, ChannelRequest, ChannelScope, MediaChannel};
