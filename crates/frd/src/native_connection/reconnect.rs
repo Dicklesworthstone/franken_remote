@@ -356,10 +356,17 @@ fn notify(app: &mut impl Application, status: Status) -> Result<(), Failure> {
     app.status(status).map_err(|_| Failure::Notification)
 }
 
-/// Retry only explicit transient transport/availability outcomes. Closed,
-/// cancelled, unauthorized, malformed, handler and codec failures are terminal;
-/// a generic closure is never guessed to be a recoverable network outage.
+/// Retry explicit transient transport/availability outcomes and exhausted media
+/// delivery horizons during streaming. The latter restart the entire observation
+/// through authenticated startup and a fresh decoder, ONLY after native cleanup;
+/// they never resume an invalid reference chain or restore an old input lease.
+/// Established control and telemetry can wrap the same transport failure; their
+/// typed transport errors share the policy, not their input/authority failures.
+/// Closed, cancelled, unauthorized, malformed, handler and actual codec failures
+/// remain terminal. A generic closure is not guessed to be network or frame loss.
 pub fn retryable(failure: Failure) -> bool {
+    use crate::session_startup::ControlledViewerError;
+
     match failure {
         Failure::Connection(ConnectionError::Tailnet(
             fr_tailnet::Error::LocalApiUnavailable
@@ -368,18 +375,36 @@ pub fn retryable(failure: Failure) -> bool {
         )) => true,
         Failure::Observation(ObserverError::Streaming(
             StreamingViewerError::Transport(e)
-            | StreamingViewerError::Routes(crate::media_quic::Error::Transport(e)),
+            | StreamingViewerError::Routes(crate::media_quic::Error::Transport(e))
+            | StreamingViewerError::Feedback(crate::media::ReceiverFeedbackError::Transport(e))
+            | StreamingViewerError::PresentedState(crate::media::PresentedStateError::Transport(e))
+            | StreamingViewerError::Control(
+                ControlledViewerError::Media(crate::media_quic::Error::Transport(e))
+                | ControlledViewerError::Input(crate::input_quic::Error::Transport(e)),
+            ),
         )) => transport_retryable(e),
-        Failure::Observation(ObserverError::Streaming(StreamingViewerError::Session(e))) => {
-            e == crate::session_startup::Error::Expired || session_retryable(e)
-        }
+        Failure::Observation(ObserverError::Streaming(
+            StreamingViewerError::Session(e)
+            | StreamingViewerError::Control(ControlledViewerError::Session(e)),
+        )) => session_retryable(e),
+        Failure::Observation(ObserverError::Streaming(
+            StreamingViewerError::Delivery(e)
+            | StreamingViewerError::Media(crate::media::Error::Receiver(e)),
+        )) => matches!(
+            e,
+            fr_media::delivery::DeliveryError::ReferenceExpired
+                | fr_media::delivery::DeliveryError::RecoveryExpired
+        ),
         _ => false,
     }
 }
 fn session_retryable(error: crate::session_startup::Error) -> bool {
     match error {
         crate::session_startup::Error::Transport(e) => transport_retryable(e),
-        crate::session_startup::Error::ClientRenewal(fr_client::authority::Error::Expired) => true,
+        crate::session_startup::Error::Expired
+        | crate::session_startup::Error::ClientRenewal(fr_client::authority::Error::Expired) => {
+            true
+        }
         _ => false,
     }
 }
