@@ -1,6 +1,7 @@
 //! The existing media packet owner joined to the sole Asupersync QUIC adapter.
 //! Session admission installs these routes. This module creates no listener,
 //! identity, input authority, second packet queue, or independent congestion loop.
+pub mod fanout;
 mod negotiated;
 pub mod recovery;
 pub use negotiated::{NegotiatedMedia, replacement};

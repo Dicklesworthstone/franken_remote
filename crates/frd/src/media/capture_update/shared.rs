@@ -185,3 +185,23 @@ impl Subscription {
         result
     }
 }
+
+impl Subscription {
+    pub(crate) fn shared_identity(&self) -> Result<Arc<()>, Error> {
+        if self.first {
+            return Err(Error::InvalidFrame);
+        }
+        self.capture_source.clone().ok_or(Error::InvalidFrame)
+    }
+    pub(crate) fn fence_shared_view(&mut self) {
+        if let Ok(mut authority) = self.control.authority.lock() {
+            authority.mark_view_stale();
+        }
+        self.cache.close();
+    }
+}
+impl SharedCaptureUpdate {
+    pub(crate) fn belongs_to_shared_source(&self, source: &Arc<()>) -> bool {
+        Arc::ptr_eq(&self.source, source)
+    }
+}

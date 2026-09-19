@@ -215,6 +215,9 @@ impl Egress {
         self.subscription.is_none()
     }
     pub fn close(&mut self) {
+        if let Some(subscription) = &mut self.subscription {
+            subscription.fence_shared_view();
+        }
         self.subscription = None;
         self.buffer = Vec::new();
         self.pending = None;
