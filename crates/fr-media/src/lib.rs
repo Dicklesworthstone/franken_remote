@@ -38,3 +38,5 @@ pub mod worker;
 pub mod receiver_feedback;
 
 pub mod presented;
+
+pub mod quality;
