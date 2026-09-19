@@ -40,3 +40,6 @@ pub mod native_clipboard;
 
 #[cfg(target_os = "linux")]
 pub mod local_sharing;
+
+#[cfg(target_os = "linux")]
+pub mod broker;
