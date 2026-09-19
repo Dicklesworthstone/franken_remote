@@ -129,6 +129,14 @@ impl Reply {
             chunked: false,
         }
     }
+    fn status(code: u16) -> Self {
+        Self {
+            body: vec![],
+            content_type: "text/plain".into(),
+            code,
+            chunked: false,
+        }
+    }
     fn bytes(&self) -> Vec<u8> {
         let mut out = format!(
             "HTTP/1.1 {} Fixture\r\nContent-Type: {}\r\nConnection: close\r\n",
@@ -665,3 +673,55 @@ fn actual_quic_uses_the_localapi_pair_and_rotated_leaf() {
         }
     });
 }
+
+#[test]
+fn events_recorded_and_expiry_countdown_computable() {
+    let fixture = Fixture::new();
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let identity = fixture.identity(&cx).await;
+        let status = identity.status(&cx).unwrap();
+        assert_eq!(status.generation, 1);
+        assert!(status.not_after_wall_us.is_some());
+        let wall = wall_now().unwrap();
+        let countdown = status.expiry_countdown_secs(wall);
+        assert!(countdown.is_some());
+        assert!(countdown.unwrap() > 0);
+
+        let events = identity.events().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, CertificateEventKind::Provisioned);
+        assert_eq!(events[0].generation, 1);
+        assert!(events[0].reason.is_none());
+
+        // Refresh with failure
+        *fixture.reply.lock().unwrap() = Reply::status(403);
+        due(&identity, &cx);
+        let err = identity.refresh(&cx).await.unwrap_err();
+        assert_eq!(err, Error::LocalApiDenied);
+
+        let events = identity.events().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].kind, CertificateEventKind::RenewalFailed);
+        assert_eq!(events[1].reason, Some(Error::LocalApiDenied));
+        assert_eq!(events[1].generation, 1);
+
+        // Successful refresh
+        *fixture.reply.lock().unwrap() = Reply::pair("two");
+        due(&identity, &cx);
+        identity.refresh(&cx).await.unwrap();
+
+        let events = identity.events().unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[2].kind, CertificateEventKind::Rotated);
+        assert_eq!(events[2].generation, 2);
+        assert!(events[2].reason.is_none());
+
+        // Stop
+        identity.stop();
+        let events = identity.events().unwrap();
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[3].kind, CertificateEventKind::Stopped);
+    });
+}
+
