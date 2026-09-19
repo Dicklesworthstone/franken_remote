@@ -74,6 +74,18 @@ pub trait GpuSurface: fmt::Debug {
     fn width(&self) -> u32;
     /// Visible height in pixels.
     fn height(&self) -> u32;
+    /// Borrowed raw pixel bytes if CPU-staged/readable; `None` for opaque hardware textures.
+    fn raw_bytes(&self) -> Option<&[u8]> {
+        None
+    }
+    /// Platform opaque handle (e.g. DMABUF fd, D3D11 texture pointer, or surface handle).
+    fn opaque_handle(&self) -> Option<u64> {
+        None
+    }
+    /// Downcast support for concrete surface implementations where needed.
+    fn as_any(&self) -> Option<&dyn core::any::Any> {
+        None
+    }
 }
 
 /// A category of copy along a media path, for the [`CopyLedger`]. The point of
