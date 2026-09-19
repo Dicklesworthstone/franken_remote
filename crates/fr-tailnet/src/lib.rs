@@ -14,12 +14,19 @@ mod lease;
 pub use lease::{Admission, Lease};
 #[cfg(target_os = "linux")]
 mod local;
+#[path = "local/endpoint.rs"]
+pub mod endpoint;
+pub use endpoint::{
+    CERTIFICATE_TRANSPARENCY_NOTICE, DEFAULT_SERVICE_PORT, PROJECT_ALPN, WEBTRANSPORT_ALPN,
+    PortCollision, TransportProtocol, check_port_collision, honest_https_endpoint,
+    honest_quic_endpoint,
+};
 mod metadata;
 #[cfg(target_os = "linux")]
 pub use local::{
-    CertificatePolicy, ConnectedPeer, CredentialStatus, DialRoute, DiscoveredPeer, Discovery,
-    DiscoveryExclusions, LocalApi, NativeClient, NativeServerIdentity, NodeIdentity, PeerSelector,
-    PeerTarget,
+    CertificateEvent, CertificateEventKind, CertificatePolicy, ConnectedPeer, CredentialStatus,
+    DialRoute, DiscoveredPeer, Discovery, DiscoveryExclusions, LocalApi, NativeClient,
+    NativeServerIdentity, NodeIdentity, PeerSelector, PeerTarget,
 };
 
 use std::{fmt, net::SocketAddr, time::Duration};
@@ -27,7 +34,7 @@ use std::{fmt, net::SocketAddr, time::Duration};
 pub const DESKTOP_CAPABILITY: &str = "github.com/Dicklesworthstone/franken_remote/cap/desktop";
 
 /// Content-free failure: never carries response bodies, paths or peer names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum Error {
     InvalidPolicy,
@@ -73,7 +80,7 @@ impl fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Scope {
     #[default]
     OwnUser,
