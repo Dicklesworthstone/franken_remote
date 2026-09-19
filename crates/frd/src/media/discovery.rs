@@ -99,6 +99,8 @@ impl DiscoveredSource {
                 next: Some(FrameId::FIRST),
                 source: Arc::new(()),
                 last_capture: None,
+                recovery: fr_media::delivery::IdrCoalescer::new(500_000)
+                    .map_err(Error::Receiver)?,
                 selected_control: Some(control),
             })
         })

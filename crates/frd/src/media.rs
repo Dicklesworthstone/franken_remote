@@ -13,8 +13,8 @@ use fr_core::{
 use fr_media::{
     access_unit::{EncodedAccessUnit, FrameId, FrameKind},
     delivery::{
-        BudgetUsage, DecodedFrame, DecoderBinding, DeliveryError, DeliveryMode, MediaBindings,
-        MediaEpoch, PacketOffer, ReceivePipeline, SendCache, SendError, SendPolicy,
+        BudgetUsage, DecodedFrame, DecoderBinding, DeliveryError, DeliveryMode, IdrCoalescer,
+        MediaBindings, MediaEpoch, PacketOffer, ReceivePipeline, SendCache, SendError, SendPolicy,
     },
     worker::{Configuration, Kind, Role},
 };
@@ -32,6 +32,7 @@ pub mod discovery;
 mod grant;
 pub(crate) mod presentation;
 pub(crate) mod presented;
+mod recovery;
 pub use presented::Error as PresentedStateError;
 pub(crate) mod receiver_feedback;
 pub use receiver_feedback::Error as ReceiverFeedbackError;
@@ -258,6 +259,7 @@ pub struct CaptureSource {
     next: Option<FrameId>,
     source: Arc<()>,
     last_capture: Option<FrameId>,
+    recovery: IdrCoalescer,
     selected_control: Option<ObservationControl>,
 }
 impl CaptureSource {
@@ -284,6 +286,7 @@ impl CaptureSource {
             next: Some(FrameId::FIRST),
             source: Arc::new(()),
             last_capture: None,
+            recovery: IdrCoalescer::new(500_000).map_err(Error::Receiver)?,
             selected_control: None,
         })
     }
@@ -300,6 +303,7 @@ impl CaptureSource {
         }
         self.source = Arc::new(());
         self.last_capture = None;
+        self.recovery.cancel_pending();
         &mut self.worker
     }
 }

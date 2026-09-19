@@ -2,8 +2,9 @@
 
 The delivery layer implements `RecoveryRequest` (`0x0036`, protocol section 6),
 per-subscription sender fencing, and one fixed-space shared-encoder IDR admission
-queue. This is not yet automatic native-session channel reattachment or hardware
-qualification. The application must negotiate `reference-recovery` version 1,
+queue. Native subscriptions also join accepted requests to their actual input
+authority and capture worker. This is not yet automatic control-stream routing,
+channel reattachment or hardware qualification. The application must negotiate `reference-recovery` version 1,
 route requests through the original admitted control connection, and perform the
 existing fresh-binding and decoder recovery handshake.
 
@@ -53,6 +54,30 @@ never resets healthy bindings or decoder state. The actual native owner must
 check authority, fence stale-view input, and enqueue force-IDR work within the
 returned deadline; this delivery API is not itself an input grant or an encoder.
 
+## Native authority and capture
+
+`Subscription::request_recovery(source, bytes, installed_binding)` joins an
+accepted request to the actual `CaptureSource` which supplied that subscription.
+A foreign worker with equal frame/configuration IDs cannot receive the demand.
+The installed session identity is checked under the original shared authority
+mutex. After bounded request admission, view readiness and old input tickets are
+invalidated under that same mutex, before any native work; malformed requests
+leave a healthy view alone. No authority lock is held across IPC or an await.
+
+Each source owns one `IdrCoalescer` with a 500 ms interval for its entire lifetime.
+The existing `capture` / `capture_if_changed` loop consumes due work and sets the
+real worker force-IDR flag. The original recovery deadline caps the entire IPC
+operation, including repeated NeedInput / Poll replies and time spent waiting
+before capture. A worker returning a dependent picture despite force-IDR is
+refused and poisoned, not presented as a recovery frame. An expired cohort is
+discarded without resetting healthy capture; failed subscriptions still expire
+independently. Unrestricted worker access abandons queued work without refilling
+rate credit. Idle source owners must wake at `next_recovery_deadline`.
+
+Successful capture does not make the view ready, renew a ticket, or install a
+channel. Fresh binding admission, reliable recovery delivery and actual decoder /
+presentation evidence are still required before a new control grant.
+
 ## Verification and remaining integration
 
 The two request test suites and sender/coalescer suite use production parsers,
@@ -69,10 +94,23 @@ cargo test -p fr-core -p fr-wire -p fr-media --all-features --locked
 cargo clippy -p fr-core -p fr-wire -p fr-media --all-targets --all-features --locked -- -D warnings
 ```
 
-The checked slice passes 507 tests including doctests and strict Clippy using
-locked offline dependency sources. A separate clean `cargo check -p frd --locked`
-was killed by the local memory limit while compiling Asupersync; it is not a
-passed full-workspace check. Live transport routing, authority fencing joined to
-native force-IDR, automatic channel reattachment, chronic-viewer refusal policy,
-and real-HEVC injected-loss qualification remain open under
-`fr-p1-loss-recovery-20s`. No dependency or shipping transport pin changed.
+The core/wire/media slice passes 507 tests including doctests and strict Clippy
+using locked offline dependency sources. Native integration adds five tests with
+real child processes and the production IPC/authority/capture owners; all five,
+plus 22 existing authority/egress/worker regressions, pass. Strict Clippy passes
+for the daemon library and new native tests. Test child payloads are deliberately
+not HEVC and are not platform or codec evidence.
+
+Native local checks rebuild all eight relevant first-party libraries with the
+pinned compiler against unchanged, matching Asupersync 0.5.0 and other upstream
+libraries retained by GitHub run 35421807938 (source 38f1b0c). Archive hashes were
+verified; no dependency pin was changed. This is not a cold dependency rebuild.
+The same first commit passed 59 transport integration tests and a workspace
+Cargo check in that CI run; workspace Clippy stopped in untouched desktop
+reconnect tests. A broader local daemon unit-test build exceeded the execution
+limit before producing test results, so no complete daemon/workspace test pass
+is claimed.
+
+Automatic control-stream routing and capability advertisement, fresh channel
+reattachment, chronic-viewer refusal policy, and real-HEVC injected-loss
+qualification remain open under `fr-p1-loss-recovery-20s`.
