@@ -710,9 +710,12 @@ impl Repair {
         {
             self.len = offer.bytes;
             self.frame = offer.frame;
-            self.until = offer
-                .reference_deadline_us
-                .min(current.checked_add(80_000).ok_or(Error::Closed)?);
+            // Repair is useful until the ORIGINAL missing reference expires.
+            // An unrelated 80 ms send timeout killed otherwise recoverable
+            // desktops while the admitted reference still had time to arrive.
+            // Keep this exact offer through backpressure; neither a poll nor
+            // transport admission creates a new lifetime or another attempt.
+            self.until = offer.reference_deadline_us;
         }
         Ok(())
     }
