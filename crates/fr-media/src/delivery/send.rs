@@ -1,5 +1,5 @@
 //! One-copy encoded-frame ownership and bounded selective retransmission.
-use super::{DeliveryError, MediaBindings, MediaEpoch, deadline};
+use super::{DeliveryError, MediaBindings, MediaEpoch, SharedFrame, deadline};
 use core::fmt;
 use fr_wire::{
     Channel, Fragment, MediaLimits, Progress, Record, RecoveryChunk, RepairRange, WireError,
@@ -154,9 +154,34 @@ impl PartialEq for OfferOrigin {
 }
 impl Eq for OfferOrigin {}
 
+// The legacy single-viewer path still moves its Vec without an Arc allocation.
+// Shared payloads retain one physical pool charge while each viewer is charged
+// for all the bytes it can pin, not one fraction of a shared allocation.
+enum PictureBytes {
+    Owned(Vec<u8>),
+    Shared(SharedFrame),
+}
+impl PictureBytes {
+    fn charge(&self) -> usize {
+        match self {
+            Self::Owned(bytes) => bytes.capacity(),
+            Self::Shared(frame) => frame.allocation_charge(),
+        }
+    }
+}
+impl core::ops::Deref for PictureBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes,
+            Self::Shared(frame) => frame.bytes(),
+        }
+    }
+}
+
 struct CachedPicture {
     progress: Progress,
-    bytes: Vec<u8>,
+    bytes: PictureBytes,
     mode: DeliveryMode,
     charged: usize,
     send_by: u64,
@@ -315,6 +340,37 @@ impl SendCache {
         mode: DeliveryMode,
         now: u64,
     ) -> Result<(), SendError> {
+        self.push_picture(progress, PictureBytes::Owned(bytes), mode, now)
+    }
+    /// Share one encoded allocation with other admitted subscribers. Frame,
+    /// dependency, configuration and capture time come from the immutable frame;
+    /// the local subscription alone supplies stride, channels and recovery epoch.
+    /// A shared IDR is ordinary independent video for an already healthy viewer,
+    /// and reliable recovery for a newly attached/recovered viewer. This method
+    /// neither authenticates the source nor certifies opaque bytes as HEVC.
+    pub fn push_shared(
+        &mut self,
+        frame: &SharedFrame,
+        mode: DeliveryMode,
+        now: u64,
+    ) -> Result<(), SendError> {
+        if frame.configuration() != self.epoch.configuration {
+            return Err(DeliveryError::StaleGeneration.into());
+        }
+        self.push_picture(
+            frame.progress(self.limits.fragment_stride())?,
+            PictureBytes::Shared(frame.clone()),
+            mode,
+            now,
+        )
+    }
+    fn push_picture(
+        &mut self,
+        progress: Progress,
+        bytes: PictureBytes,
+        mode: DeliveryMode,
+        now: u64,
+    ) -> Result<(), SendError> {
         self.tick(now)?;
         let d = progress.descriptor;
         d.validate(&self.limits)?;
@@ -334,7 +390,7 @@ impl SendCache {
             return Err(SendError::InvalidRecovery);
         }
         let charged = bytes
-            .capacity()
+            .charge()
             .checked_add(core::mem::size_of::<CachedPicture>())
             .ok_or(SendError::CacheFull)?;
         let used = self
