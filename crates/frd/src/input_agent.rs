@@ -179,6 +179,8 @@ impl SeatReservation {
         let authority_cx = cx.clone();
         #[cfg(target_os = "linux")]
         let clipboard_monitor = fr_core::clipboard::authority::Monitor::from_input(&session);
+        #[cfg(target_os = "linux")]
+        let file_authority = fr_files::session::Authority::from_input(&session);
         let shared = Arc::new(Shared {
             mailbox: Mutex::new(Mailbox::default()),
             control: control.clone(),
@@ -245,6 +247,8 @@ impl SeatReservation {
             authority_cx,
             #[cfg(target_os = "linux")]
             clipboard_monitor,
+            #[cfg(target_os = "linux")]
+            file_authority,
         };
         let driver = Driver {
             watchdog,
@@ -448,8 +452,18 @@ pub struct Agent {
     authority_cx: Cx,
     #[cfg(target_os = "linux")]
     clipboard_monitor: fr_core::clipboard::authority::Monitor,
+    #[cfg(target_os = "linux")]
+    file_authority: fr_files::session::Authority,
 }
 impl Agent {
+    /// The same read-only file authority retained BEFORE moving `InputSession` to
+    /// its native worker. This creates no input owner, lease or file permission.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn file_authority(&self) -> Option<fr_files::session::Authority> {
+        self.shared.check_admission();
+        (!self.shared.control.is_stopped()).then(|| self.file_authority.clone())
+    }
+
     /// Read-only access to the SAME native authority after its session has moved
     /// to the worker. This cannot issue tickets or recreate an input owner.
     #[cfg(target_os = "linux")]

@@ -683,6 +683,7 @@ dependencies = [
  "asupersync",
  "fr-client",
  "fr-core",
+ "fr-files",
  "fr-media",
  "fr-tailnet",
  "fr-transport",

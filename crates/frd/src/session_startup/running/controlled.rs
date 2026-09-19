@@ -2,6 +2,7 @@
 //! The native Driver remains independently polled; no native operation runs here.
 use super::{Error, HostSession, ObservationControl, Services};
 mod clipboard;
+pub(crate) mod files;
 use crate::{
     input_agent::{InputReply, Reply, Status},
     input_quic::{self, Progress, QuicInput, Routes, control::ControlRenewal},
@@ -24,6 +25,7 @@ pub struct ControlledHost {
     submitted: super::input_wake::Submitted,
     clipboard: Option<crate::clipboard_quic::Bridge>,
     clipboard_setup: crate::session_startup::clipboard::Setup,
+    files: files::Slot,
 }
 impl std::fmt::Debug for ControlledHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -63,6 +65,7 @@ impl HostSession {
             submitted: super::input_wake::Submitted::default(),
             clipboard: None,
             clipboard_setup: crate::session_startup::clipboard::Setup::default(),
+            files: files::Slot::default(),
         })
     }
 }
@@ -98,11 +101,12 @@ impl ControlledHost {
     /// Native cleanup and destruction progress through the original Driver, not
     /// through this call. Other viewers' share-session capture is not cancelled.
     pub fn close(&mut self) {
+        self.input.control().stop(StopReason::LocalRevoke);
+        self.files.stop();
         if let Some(clipboard) = &self.clipboard {
             clipboard.stop();
         }
         self.clipboard_setup.stop();
-        self.input.control().stop(StopReason::LocalRevoke);
         self.renewal.stop();
         self.session.close();
     }
@@ -130,6 +134,7 @@ impl ControlledHost {
     ) -> Result<(), Error> {
         let mut services = InputServices {
             input: &mut self.input,
+            files: &mut self.files,
             clipboard: &mut self.clipboard,
             clipboard_setup: &mut self.clipboard_setup,
             cx: self.session.opened.cx.clone(),
@@ -195,6 +200,7 @@ impl Drop for Operation<'_> {
 }
 struct InputServices<'a, T, F> {
     input: &'a mut QuicInput,
+    files: &'a mut files::Slot,
     clipboard: &'a mut Option<crate::clipboard_quic::Bridge>,
     clipboard_setup: &'a mut crate::session_startup::clipboard::Setup,
     cx: asupersync::cx::Cx,
@@ -309,16 +315,22 @@ where
         if !self.renewal.permitted() {
             return Err(Error::Closed);
         }
+        // Bulk work gets one bounded receive/reply turn AFTER native input and
+        // renewal. Its disk worker never blocks this authority/transport owner.
+        self.files.service(q, || {
+            self.renewal.permitted() && self.observation.check().is_ok()
+        });
         self.other.maintain(q, nonce)
     }
     fn receive(&mut self, route: Route, bytes: &[u8]) -> Result<Disposition, ()> {
         // These records belong to the owners serviced immediately before/after
         // observation dispatch, never to an application callback or a new queue.
         let kind = bytes.get(6..8);
-        if self
-            .clipboard
-            .as_ref()
-            .is_some_and(|c| c.owns_inbound(route))
+        if self.files.owns(route)
+            || self
+                .clipboard
+                .as_ref()
+                .is_some_and(|c| c.owns_inbound(route))
             || self.clipboard_setup.owns(route, bytes)
             || is_input(self.input.routes(), route)
             || (route == Route::Stream(self.control.inbound)
