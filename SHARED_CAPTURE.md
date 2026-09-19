@@ -145,3 +145,49 @@ the two existing host-recovery wildcard imports described above. This is not a
 cold dependency build, current combined-main full-workspace runtime pass, or
 automatic multi-viewer broker qualification. Concurrent file-selection,
 broker, tailnet and later viewer changes are preserved but outside this baseline.
+
+## Independent decoder startup from shared capture
+
+`decoder_startup::Host::new_shared` starts one already-authorized viewer from a
+`SharedCaptureUpdate`. It uses the SAME host acknowledgement state machine as the
+unique-output constructor, including exact connection/session binding, selected
+display dimensions, bounded HEVC parameter parsing and capture-anchored expiry.
+The full physical allocation charge must fit that viewer's negotiated retention
+ceiling; the encoded payload length alone is insufficient.
+
+Each startup owner retains only its own shared reference, configuration record,
+consent and deadline. One viewer's delayed acknowledgement, expiry or cancellation
+cannot prevent a different viewer from reaching its own decoder-configured gate.
+`take_shared_recovery` transfers this viewer's original source-bound alias only
+after its matching Configured record. The existing shared egress then sends its
+reliable IDR, and the SAME host owner waits for the matching FirstDecoded record.
+Neither acknowledgement grants input or asserts physical visibility. Calling the
+unique transfer method on a shared startup (or the shared method on a unique
+startup) refuses without consuming the pending output.
+
+This is actual decoder-startup integration, not automatic viewer admission or a
+second encoder. The parent OS share-session still must admit the correct source,
+bound pending startup owners, rate-limit late-join IDRs, keep the shared capture
+lifetime independent of any one viewer, and service each connection fairly.
+It must not give every newly arriving viewer an arbitrarily old cached IDR: shared
+startup preserves the original capture timestamp and cannot refresh its deadline.
+
+Seven new `shared_startup` integration tests pass using two independently
+configured TLS/UDP connections, production channel attachment, HEVC validation,
+packetizers, receivers and supervised decoder child IPC. One completed native
+capture and one physical allocation feed both startups. The tests cover independent
+acknowledgements, per-viewer cancellation/expiry, exact single-use transfer,
+unique-output compatibility, malformed/static bootstrap refusal and full logical
+retention charging. Child encoder/decoder results remain explicit synthetic
+fixtures, not HEVC encode/decode or hardware qualification.
+
+After the startup refactor, all 16 shared-capture tests and 48 existing native
+recovery, replacement, authority, egress and worker-supervision tests pass alongside
+these seven tests (71 executed native integration tests total). Strict Clippy passes
+for the new integration target and the complete baseline daemon unit-test source
+metadata. The source-rebuilt daemon uses the same verified b1b2d366 + reservation /
+prepared-capture baseline and exact 98186a2 worker source described above, with the
+pinned compiler and matching unchanged upstream CI libraries. The two baseline
+production-only host-recovery wildcard lints remain; no lint configuration or
+assertion was relaxed. This is not a complete combined-current-main workspace
+runtime, broker, live-tailnet, hardware or independent interoperability pass.
