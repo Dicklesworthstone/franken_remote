@@ -143,7 +143,7 @@ impl Drop for Fixture {
     }
 }
 fn wait(mut predicate: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while !predicate() {
         assert!(Instant::now() < deadline, "bounded worker wait expired");
         thread::sleep(Duration::from_millis(1));

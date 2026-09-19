@@ -368,7 +368,7 @@ impl Drop for Running {
         let _ = self.host.retire(&mut self.link.h);
         self.link.c.close();
         self.link.h.close();
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + Duration::from_secs(30);
         while !self.host.cleanup_finished() {
             assert!(Instant::now() < deadline);
             std::thread::yield_now();

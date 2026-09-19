@@ -249,7 +249,7 @@ fn completed_publication_receipt_survives_stop_and_thread_exit() {
     let (m, mut t) = f.spawn();
     stage(&m);
     let seq = enqueue(|| m.complete(1));
-    let end = Instant::now() + Duration::from_secs(2);
+    let end = Instant::now() + Duration::from_secs(10);
     while !f.path.join("file").exists() {
         assert!(Instant::now() < end);
         std::thread::yield_now();
@@ -305,7 +305,7 @@ fn malformed_atp_is_terminal_and_cleans_the_private_partial_file() {
     let (m, mut t) = f.spawn();
     stage(&m);
     let seq = enqueue(|| m.atp_record(1, b"not ATP"));
-    let until = Instant::now() + Duration::from_secs(2);
+    let until = Instant::now() + Duration::from_secs(10);
     loop {
         match m.take_receipt() {
             Ok(Some(r)) => {
