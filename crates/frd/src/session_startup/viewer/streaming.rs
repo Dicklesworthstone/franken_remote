@@ -2,6 +2,7 @@
 //! One owned picture stays charged while QUIC, repairs and control keep moving.
 mod acquisition;
 mod interactive;
+mod recovery;
 use super::{
     ViewerSession,
     controlled::{ControlledViewer, ViewerControl},
@@ -11,7 +12,7 @@ use crate::{
     media::presented::{self as presented, ViewSample, ViewerPresentation},
     media::receiver_feedback::{self as feedback, Setup, ViewerFeedback},
     media::{self, PresentationStage, Presenter, decoder_startup},
-    media_quic::NegotiatedMedia,
+    media_quic::{NegotiatedMedia, recovery as recovery_control},
     worker::Deadline,
 };
 pub use acquisition::{PendingControl, State as ControlState};
@@ -39,6 +40,7 @@ pub enum Error {
     Media(media::Error),
     Routes(crate::media_quic::Error),
     Delivery(DeliveryError),
+    Recovery(recovery_control::Error),
     Transport(quic::Error),
     Feedback(feedback::Error),
     PresentedState(presented::Error),
@@ -228,6 +230,7 @@ pub struct StreamingViewer {
     presenter: Presenter,
     receiver: ReceivePipeline,
     repair: Repair,
+    recovery: Option<recovery_control::Receiver>,
     feedback: Option<ViewerFeedback>,
     presentation: Option<ViewerPresentation>,
     control: StreamingViewerControl,
@@ -246,6 +249,11 @@ impl ViewerSession {
         initial: media::PresentationReceipt,
     ) -> Result<StreamingViewer, Error> {
         let mut viewer = self.into_streaming(media, startup)?;
+        if let Some(recovery) = &mut viewer.recovery {
+            recovery
+                .observe_decoded(&initial.decoded)
+                .map_err(Error::Recovery)?;
+        }
         viewer.initial = Some(initial);
         Ok(viewer)
     }
@@ -288,6 +296,9 @@ impl StreamingViewer {
         initial: media::PresentationReceipt,
     ) -> Self {
         let mut viewer = Self::new(Peer::Observe { session, media }, presenter, receiver).unwrap();
+        if let Some(recovery) = &mut viewer.recovery {
+            recovery.observe_decoded(&initial.decoded).unwrap();
+        }
         viewer.initial = Some(initial);
         viewer
     }
@@ -348,9 +359,26 @@ impl StreamingViewer {
                 now(&cx).map_err(Error::Session)?,
             )
             .map_err(Error::PresentedState)?;
-            Ok((feedback, presentation))
+            let recovery = if session.opened.selection.capabilities.iter().any(|cap| {
+                cap.name == fr_wire::recovery_request::CAPABILITY
+                    && cap.version == fr_wire::recovery_request::VERSION
+            }) {
+                Some(
+                    media
+                        .recovery_receiver(
+                            &session.transport,
+                            session.routes,
+                            session.opened.binding,
+                            &receiver,
+                        )
+                        .map_err(Error::Recovery)?,
+                )
+            } else {
+                None
+            };
+            Ok((feedback, presentation, recovery))
         })();
-        let (feedback, presentation) = match setup {
+        let (feedback, presentation, recovery) = match setup {
             Ok(owners) => owners,
             Err(error) => {
                 peer.close();
@@ -366,6 +394,7 @@ impl StreamingViewer {
             presenter,
             receiver,
             repair: Repair::default(),
+            recovery,
             feedback,
             presentation,
             control: StreamingViewerControl { cx, input },
@@ -429,6 +458,13 @@ impl StreamingViewer {
     pub fn presentation_reports(&self) -> u64 {
         self.presentation.as_ref().map_or(0, |p| p.sent)
     }
+    /// A request admitted to transport is not a healed decoder or a new grant.
+    /// The original failure deadline remains active until session replacement.
+    pub fn recovery_state(&self) -> Option<recovery_control::State> {
+        self.recovery
+            .as_ref()
+            .map(recovery_control::Receiver::state)
+    }
     pub fn budget_usage(&self) -> BudgetUsage {
         self.receiver.budget_usage()
     }
@@ -442,6 +478,9 @@ impl StreamingViewer {
         self.receiver.close();
         self.presenter.abort();
         self.repair.clear();
+        if let Some(recovery) = &mut self.recovery {
+            recovery.close();
+        }
         self.initial = None;
     }
     /// Reaping is a separate observed OS result, not implied by cancellation.
@@ -535,7 +574,16 @@ impl StreamingViewer {
         let cx = &self.control.cx.clone();
         acquisition::notify(&mut self.peer, &self.receiver, &mut self.control, None, ui)?;
         loop {
-            let ready = self.peer.prepare_decode(&self.receiver)?;
+            // Tick before selecting native work. A lost reference may expire
+            // during silence, with no packet or decoder completion to wake it.
+            let recovering = recovery::service(
+                &mut self.peer,
+                self.recovery.as_mut(),
+                &mut self.receiver,
+                &mut self.repair,
+                cx,
+            )?;
+            let ready = !recovering && self.peer.prepare_decode(&self.receiver)?;
             let job = if ready {
                 self.presenter
                     .take_next(cx, &mut self.receiver)
@@ -549,6 +597,7 @@ impl StreamingViewer {
                     self.clipboard.as_mut(),
                     &mut self.receiver,
                     &mut self.repair,
+                    self.recovery.as_mut(),
                     &mut self.statistics,
                     self.feedback.as_mut(),
                     self.presentation.as_mut(),
@@ -573,6 +622,7 @@ impl StreamingViewer {
                             self.clipboard.as_mut(),
                             &mut self.receiver,
                             &mut self.repair,
+                            self.recovery.as_mut(),
                             &mut self.statistics,
                             self.feedback.as_mut(),
                             self.presentation.as_mut(),
@@ -621,6 +671,11 @@ impl StreamingViewer {
                 frame: receipt.frame,
                 stage,
             };
+            if let Some(recovery) = &mut self.recovery {
+                recovery
+                    .observe_decoded(&receipt.decoded)
+                    .map_err(Error::Recovery)?;
+            }
             self.peer.decoded(receipt)?;
             self.statistics.presented(stage);
             // Completion releases the original decode reservation only after native borrowing.
@@ -726,6 +781,7 @@ async fn network(
     clipboard: Option<&mut crate::native_clipboard::Application>,
     receiver: &mut ReceivePipeline,
     repair: &mut Repair,
+    mut recovery: Option<&mut recovery_control::Receiver>,
     statistics: &mut Statistics,
     mut feedback: Option<&mut ViewerFeedback>,
     presentation: Option<&mut ViewerPresentation>,
@@ -738,11 +794,11 @@ async fn network(
     {
         app.viewer(viewer).map_err(Error::Clipboard)?;
     }
+    recovery::prepare(peer, recovery.as_deref_mut(), receiver, repair, cx)?;
     let (session, media) = peer.parts()?;
     let routes = media
         .viewer_routes(&session.transport)
         .map_err(Error::Routes)?;
-    repair.prepare(receiver, now(cx).map_err(Error::Session)?)?;
     if repair.len != 0 {
         let route = Route::Stream(
             media
@@ -762,6 +818,7 @@ async fn network(
             Err(e) => return Err(Error::Transport(e)),
         }
     }
+    let allow_recovery = recovery.is_some() && matches!(peer, Peer::Observe { .. });
     let mut failure = None;
     let driven = peer
         .drive(Duration::from_millis(5), result, |route, bytes| {
@@ -780,9 +837,11 @@ async fn network(
                 let current = now(cx).map_err(|e| {
                     failure = Some(Error::Session(e));
                 })?;
-                receiver.receive(*channel, bytes, current).map_err(|e| {
-                    failure = Some(Error::Delivery(e));
-                })?;
+                recovery::receive(receiver, *channel, bytes, current, allow_recovery).map_err(
+                    |error| {
+                        failure = Some(Error::Delivery(error));
+                    },
+                )?;
                 Ok(Disposition::Consumed)
             } else {
                 other(route, bytes)
@@ -793,13 +852,16 @@ async fn network(
         return Err(error);
     }
     driven?;
-    receiver
-        .tick(now(cx).map_err(Error::Session)?)
-        .map_err(Error::Delivery)?;
+    let recovering = recovery::service(peer, recovery, receiver, repair, cx)?;
     // Source evidence is serviced independently of codec progress and before
     // advisory telemetry. No report can be derived from decode completion alone.
     if let Some(presentation) = presentation {
-        let sample = peer.presented_sample(receiver)?;
+        let sample = if recovering {
+            // A failure report cannot turn old pixels into a fresh view.
+            ViewSample::Pending
+        } else {
+            peer.presented_sample(receiver)?
+        };
         let (session, _) = peer.parts()?;
         presentation
             .service(

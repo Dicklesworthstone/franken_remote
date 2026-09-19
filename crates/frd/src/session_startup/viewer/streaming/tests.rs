@@ -276,6 +276,7 @@ fn lost_final_picture(ack_stall: Duration) {
                     None,
                     &mut receiver,
                     &mut repair,
+                    None,
                     &mut stats,
                     None,
                     None,
@@ -538,3 +539,5 @@ fn pre_decoder_stop_handle_survives_the_original_session_handoff() {
         drop(host);
     });
 }
+
+mod recovery;
