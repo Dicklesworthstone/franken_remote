@@ -579,3 +579,6 @@ fn a_waiting_viewer_must_admit_the_full_shared_retention_charge() {
         stop(&mut source, &cx).await;
     });
 }
+
+#[path = "shared_startup/publisher.rs"]
+mod publisher;

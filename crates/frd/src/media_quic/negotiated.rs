@@ -121,6 +121,20 @@ impl NegotiatedMedia {
             .map_err(|_| Error::InvalidRoutes)?;
         Ok(this)
     }
+    pub(crate) fn check_shared_publication(
+        &self,
+        q: &QuicRecords,
+        view: Binding,
+    ) -> Result<(), Error> {
+        self.check(q)?;
+        if !self.is_host()
+            || self.selection.role != fr_wire::negotiation::Role::Observe
+            || self.binding() != view
+        {
+            return Err(Error::InvalidRoutes);
+        }
+        Ok(())
+    }
     pub fn check(&self, q: &QuicRecords) -> Result<(), Error> {
         if !q.is_bound_to(&self.connection) {
             return Err(Error::ForeignConnection);

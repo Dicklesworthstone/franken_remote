@@ -275,6 +275,11 @@ impl core::fmt::Debug for SharedFrame {
     }
 }
 impl SharedFrame {
+    /// Exact physical ledger identity, not equal configured byte ceilings.
+    pub fn belongs_to_pool(&self, pool: &SharedFramePool) -> bool {
+        Arc::ptr_eq(&self.0.permit.pool.ledger, &pool.ledger)
+    }
+
     pub fn bytes(&self) -> &[u8] {
         &self.0.bytes
     }

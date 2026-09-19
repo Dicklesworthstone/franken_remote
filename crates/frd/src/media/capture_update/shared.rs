@@ -77,6 +77,23 @@ impl CaptureUpdate {
     }
 }
 impl SharedCaptureUpdate {
+    pub(crate) fn check_publisher_source(
+        &self,
+        source: &crate::media::CaptureSource,
+        pool: &SharedFramePool,
+    ) -> Result<(), Error> {
+        if !Arc::ptr_eq(&self.source, &source.source)
+            || self.configuration != source.configuration.generation
+            || Some(self.frame()) != source.last_capture
+            || self
+                .encoded()
+                .is_none_or(|frame| !frame.belongs_to_pool(pool))
+        {
+            return Err(Error::InvalidFrame);
+        }
+        Ok(())
+    }
+
     pub fn frame(&self) -> FrameId {
         match &self.content {
             SharedContent::Encoded(frame) => frame.frame(),

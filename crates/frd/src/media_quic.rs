@@ -268,11 +268,24 @@ impl QuicEgress {
         transport: &mut QuicRecords,
         lane: Lane,
     ) -> Result<Progress, Error> {
+        self.transmit_authorized(cx, transport, lane, || true)
+    }
+    /// The OS source adds a downward-only final authority gate. This can only
+    /// refuse a write; the original subscription/packet guard still runs.
+    pub(crate) fn transmit_authorized(
+        &mut self,
+        cx: &Cx,
+        transport: &mut QuicRecords,
+        lane: Lane,
+        mut source_live: impl FnMut() -> bool,
+    ) -> Result<Progress, Error> {
         self.check_connection(transport)?;
         let routes = self.routes;
         let result = self.egress.transmit(lane, |offer, bytes, guard| {
             let route = routes.outbound(offer.channel())?;
-            match transport.send(cx, route, bytes, offer.send_by_micros(), || guard().is_ok()) {
+            match transport.send(cx, route, bytes, offer.send_by_micros(), || {
+                source_live() && guard().is_ok()
+            }) {
                 Ok(()) => Ok(Admission::Accepted),
                 Err(quic::Error::Backpressure) => Ok(Admission::Backpressure),
                 Err(error) => Err(Error::Transport(error)),
@@ -363,3 +376,5 @@ impl Drop for DriveGuard<'_> {
         }
     }
 }
+
+mod shared_publisher;

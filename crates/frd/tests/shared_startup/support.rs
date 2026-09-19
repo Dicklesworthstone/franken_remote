@@ -251,6 +251,16 @@ fn fixture(script: &str, prefix: &str) -> PathBuf {
     path
 }
 pub(super) async fn source(control: &ObservationControl, valid: bool) -> CaptureSource {
+    source_variant(control, valid, false, false).await
+}
+/// Synthetic changed-frame and pending-IPC modes for shared publisher tests.
+/// Native codec output is still canned, never a hardware qualification claim.
+pub(super) async fn source_variant(
+    control: &ObservationControl,
+    valid: bool,
+    changing: bool,
+    delayed: bool,
+) -> CaptureSource {
     // Canned parameter sets and a slice for real bounded host parsing, not a
     // live HEVC encoder. Subsequent decoder completion is explicitly synthetic.
     let mut au = Vec::new();
@@ -274,6 +284,22 @@ pub(super) async fn source(control: &ObservationControl, valid: bool) -> Capture
         script.replace(
             "b\"test-only-unit\"",
             &format!("bytes.fromhex('{payload}')"),
+        )
+    } else {
+        script
+    };
+    let script = if changing {
+        script.replace(
+            "if kind == 7 and not force and last is not None:",
+            "if False:",
+        )
+    } else {
+        script
+    };
+    let script = if delayed {
+        script.replace(
+            "frame, observed, force = struct.unpack",
+            "time.sleep(0.05)\n    frame, observed, force = struct.unpack",
         )
     } else {
         script

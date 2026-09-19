@@ -692,3 +692,6 @@ impl Drop for MediaOperation<'_> {
         }
     }
 }
+
+/// Bounded OS-share-session publication over independently owned transports.
+pub mod shared_publisher;
