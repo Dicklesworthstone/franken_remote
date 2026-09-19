@@ -452,6 +452,21 @@ impl Worker {
         body: Vec<u8>,
         deadline: Deadline,
     ) -> Result<Record, Error> {
+        self.request_with_response_capacity(cx, kind, body, None, deadline)
+            .await
+    }
+    /// Bound a reply's allocation before reading its payload. The caller owns
+    /// matching physical credit for the entire exchange; this cannot widen the
+    /// worker's negotiated protocol limits. None retains the ordinary per-worker
+    /// bound. An oversized reply poisons the IPC sequence before any body read.
+    pub async fn request_with_response_capacity(
+        &mut self,
+        cx: &Cx,
+        kind: Kind,
+        body: Vec<u8>,
+        maximum_capacity: Option<usize>,
+        deadline: Deadline,
+    ) -> Result<Record, Error> {
         if self.state != State::Running {
             return Err(Error::Unavailable);
         }
@@ -468,13 +483,28 @@ impl Worker {
         if kind == Kind::CheckMonitor && self.selected.is_none() {
             return Err(Error::Protocol(worker::Error::WrongState));
         }
-        self.exchange(cx, kind, body, deadline).await
+        if maximum_capacity == Some(0) {
+            return Err(Error::Protocol(worker::Error::ResourceLimit));
+        }
+        self.exchange_with_response_capacity(cx, kind, body, maximum_capacity, deadline)
+            .await
     }
     async fn exchange(
         &mut self,
         cx: &Cx,
         kind: Kind,
         body: Vec<u8>,
+        deadline: Deadline,
+    ) -> Result<Record, Error> {
+        self.exchange_with_response_capacity(cx, kind, body, None, deadline)
+            .await
+    }
+    async fn exchange_with_response_capacity(
+        &mut self,
+        cx: &Cx,
+        kind: Kind,
+        body: Vec<u8>,
+        maximum_capacity: Option<usize>,
         deadline: Deadline,
     ) -> Result<Record, Error> {
         runtime_ready(cx)?;
@@ -511,9 +541,17 @@ impl Worker {
             if !allowed_reply(kind, h.kind) {
                 return Err(Error::Protocol(worker::Error::WrongState));
             }
+            if maximum_capacity.is_some_and(|maximum| h.length > maximum) {
+                return Err(Error::Protocol(worker::Error::ResourceLimit));
+            }
             let mut body = Vec::new();
             body.try_reserve_exact(h.length)
                 .map_err(|_| Error::Protocol(worker::Error::Allocation))?;
+            // Vec may reserve more than requested. Never read pixels into an
+            // allocation which exceeds the caller's retained physical credit.
+            if maximum_capacity.is_some_and(|maximum| body.capacity() > maximum) {
+                return Err(Error::Protocol(worker::Error::ResourceLimit));
+            }
             body.resize(h.length, 0);
             output
                 .read_exact(&mut body)
