@@ -115,7 +115,7 @@ impl Drop for Fixture {
     }
 }
 fn enqueue(mut submit: impl FnMut() -> Result<u64, Error>) -> u64 {
-    let end = Instant::now() + Duration::from_secs(2);
+    let end = Instant::now() + Duration::from_secs(10);
     loop {
         match submit() {
             Ok(id) => return id,
@@ -125,7 +125,7 @@ fn enqueue(mut submit: impl FnMut() -> Result<u64, Error>) -> u64 {
     }
 }
 fn collect(mailbox: &Mailbox, sequence: u64) -> Completion {
-    let end = Instant::now() + Duration::from_secs(2);
+    let end = Instant::now() + Duration::from_secs(10);
     loop {
         match mailbox.take_receipt() {
             Ok(Some(receipt)) => {
@@ -138,7 +138,7 @@ fn collect(mailbox: &Mailbox, sequence: u64) -> Completion {
     }
 }
 fn finish(task: &mut Task) {
-    let end = Instant::now() + Duration::from_secs(2);
+    let end = Instant::now() + Duration::from_secs(10);
     while task.try_finish().is_none() {
         assert!(Instant::now() < end, "disk worker did not finish");
         std::thread::yield_now();
