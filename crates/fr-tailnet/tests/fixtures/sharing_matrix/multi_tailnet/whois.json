@@ -1,0 +1,27 @@
+{
+  "CapMap": {
+    "github.com/Dicklesworthstone/franken_remote/cap/desktop": [
+      {
+        "control": true,
+        "observe": true,
+        "version": 1
+      }
+    ]
+  },
+  "Node": {
+    "Addresses": [
+      "100.64.0.99/32",
+      "fd7a:115c:a1e0::99/128"
+    ],
+    "ID": 99,
+    "Key": "nodekey:9999999999999999999999999999999999999999999999999999999999999999",
+    "KeyExpiry": "2027-02-19T01:13:05Z",
+    "MachineAuthorized": true,
+    "StableID": "n-other-tailnet",
+    "User": 7
+  },
+  "UserProfile": {
+    "ID": 7,
+    "LoginName": "test-user@fixture.invalid"
+  }
+}

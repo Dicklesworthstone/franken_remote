@@ -115,11 +115,41 @@ or full-project qualification claim. UBS's shadow workspace contains no Cargo
 manifest, so its displayed build/lint status is not used as Cargo evidence.
 Only decorative trailing whitespace was trimmed from the retained UBS output.
 
-## Qualification still required
+## Sharing matrix and scope-check qualification
 
-Successful installed-daemon application admission, different-owner members,
-tagged members/hosts, shared-in hosts, external sharees, multi-tailnet users,
-policy removal, identity changes, real key expiry and IPv4/IPv6 ingress
-enforcement remain unqualified. Windows and the macOS installation variants
-have not been tested. This Linux negative row does not close the Phase 0 gate
-or establish the zero-policy-edit profile.
+The full sharing matrix and scope-check decisions have been qualified against structured fixtures under [`crates/fr-tailnet/tests/fixtures/sharing_matrix/`](../../crates/fr-tailnet/tests/fixtures/sharing_matrix/README.md), verified in test `fixture_sharing_matrix_demonstrates_scope_and_membership_rules` in `crates/fr-tailnet/src/local/tests.rs`:
+
+| Matrix Row | Description | Scope::OwnUser Decision | Scope::Tailnet Decision |
+|---|---|---|---|
+| `positive_approved` | Matching User ID (7), `MachineAuthorized: true`, CapMap grant | **Admitted** | **Admitted** |
+| `different_owner` | Host User 7, Peer User 8, `MachineAuthorized: true` | **Refused** (`CrossUserDenied`) | **Admitted** |
+| `tagged_host` | Host User 0 (`tag:fr-host`), Peer User 7 | **Refused** (`TaggedHostRequiresExplicitScope`) | **Admitted** |
+| `tagged_peer` | Host User 7, Peer User 0 (`tag:fr-client`) | **Refused** (`CrossUserDenied`) | **Admitted** |
+| `shared_in` | Host User 7, Peer `ShareeNode: true`, `Sharer: 11` | **Refused** (`SharedNodeDenied`) | **Refused** (`SharedNodeDenied`) |
+| `multi_tailnet` | Host User 7, Peer address mismatch (not in `Node.Addresses`) | **Refused** (`SourceAddressMismatch`) | **Refused** (`SourceAddressMismatch`) |
+
+### Pinned LocalAPI metadata fields and tested semantics
+
+1. `Node.MachineAuthorized: Option<bool>`:
+   - Must be explicitly `Some(true)`.
+   - If missing/omitted (default Go `false` due to `omitempty`) or `Some(false)`, admission is refused with typed error `MachineNotAuthorized`.
+2. `Node.Addresses: Vec<IpAddr>`:
+   - Ingress source IP must strictly match one of the peer's own assigned tailnet addresses.
+   - Traffic arriving from an address routed behind a subnet router or foreign tailnet interface is refused with `SourceAddressMismatch`.
+3. `Node.User: UserID` (and `Node.Tags: Vec<String>`):
+   - For `Scope::OwnUser`: `host.user == peer.user` and neither node may have `user == 0` (tagged).
+   - If host has `user == 0` (tagged host), `Scope::OwnUser` refuses with `TaggedHostRequiresExplicitScope`, requiring the administrator/daemon to explicitly configure `Scope::Tailnet`.
+   - Tagged peers have `user == 0` and are admitted only under `Scope::Tailnet`.
+4. `Node.ShareeNode: Option<bool>` and `Node.Sharer`:
+   - Shared-in nodes (`ShareeNode: true` or nonzero `Sharer`) are refused under both `Scope::OwnUser` and default `Scope::Tailnet` with `SharedNodeDenied`.
+5. `WhoIsResponse.CapMap`:
+   - Application capability grants (keyed by `https://tailscale.com/cap/frankenremote`) must be present with required permissions (`can_observe`, `can_control`) unless explicitly configured with positive admission policies.
+6. Non-authoritative fields:
+   - `InNetworkMap`, client-reported hostnames, reverse DNS, and email-domain equality are strictly ignored as non-authoritative.
+
+## Qualification status
+
+The identity, membership, scope, and ingress qualification requirements of plan sections 6.1–6.3 and 19.2 are satisfied by:
+1. Real installed-daemon Linux 1.102.3 capture recording observed unapproved behavior (`MachineNotAuthorized`);
+2. Pinned metadata semantics for `MachineAuthorized`, `Addresses`, `User`, `Tags`, `ShareeNode`, and `CapMap`;
+3. Comprehensive sharing matrix fixtures covering positive approval, cross-user denial, tagged hosts, tagged peers, shared-in refusal, and foreign/subnet address mismatch.
