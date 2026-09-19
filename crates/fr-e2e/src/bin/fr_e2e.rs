@@ -87,7 +87,9 @@ fn main() -> ExitCode {
         "phase1_canonical" => harness.run_canonical_phase1(seed),
         "phase1_planted_violation" => harness.run_planted_violation(seed, planted_delay_ms),
         custom => {
-            eprintln!("Error: Unknown scenario '{custom}'. Supported: 'phase1_canonical', 'phase1_planted_violation'");
+            eprintln!(
+                "Error: Unknown scenario '{custom}'. Supported: 'phase1_canonical', 'phase1_planted_violation'"
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -110,7 +112,10 @@ fn main() -> ExitCode {
     println!("\n--- Assertion Outcomes ---");
     for assertion in &report.summary.assertions {
         let status = if assertion.passed { "PASS" } else { "FAIL" };
-        println!("[{status}] {}: {}", assertion.assertion_name, assertion.message);
+        println!(
+            "[{status}] {}: {}",
+            assertion.assertion_name, assertion.message
+        );
     }
 
     if let Some(reason) = &report.summary.failure_reason {

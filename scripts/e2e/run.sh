@@ -9,9 +9,43 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 cd "${REPO_ROOT}"
 
-SCENARIO="${1:-phase1_canonical}"
-SEED="${2:-42}"
-ARTIFACTS_DIR="${3:-artifacts}"
+SCENARIO="phase1_canonical"
+SEED="42"
+ARTIFACTS_DIR="artifacts"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --scenario)
+            SCENARIO="$2"
+            shift 2
+            ;;
+        --seed)
+            SEED="$2"
+            shift 2
+            ;;
+        --artifacts-dir)
+            ARTIFACTS_DIR="$2"
+            shift 2
+            ;;
+        -h|--help)
+            echo "Usage: scripts/e2e/run.sh [--scenario <name>] [--seed <num>] [--artifacts-dir <dir>]"
+            exit 0
+            ;;
+        *)
+            if [[ -z "${POSITIONAL_SCENARIO:-}" ]]; then
+                SCENARIO="$1"
+                POSITIONAL_SCENARIO=1
+            elif [[ -z "${POSITIONAL_SEED:-}" ]]; then
+                SEED="$1"
+                POSITIONAL_SEED=1
+            elif [[ -z "${POSITIONAL_ARTIFACTS:-}" ]]; then
+                ARTIFACTS_DIR="$1"
+                POSITIONAL_ARTIFACTS=1
+            fi
+            shift
+            ;;
+    esac
+done
 
 echo "========================================================="
 echo " FrankenRemote E2E Session Harness"

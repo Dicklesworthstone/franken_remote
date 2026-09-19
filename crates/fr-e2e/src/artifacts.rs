@@ -189,7 +189,8 @@ mod tests {
 
     #[test]
     fn artifact_bundle_creation_and_flush() {
-        let temp_dir = std::env::temp_dir().join(format!("fr_test_artifacts_{}", std::process::id()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("fr_test_artifacts_{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp_dir);
 
         let mut bundle = ArtifactBundle::new(&temp_dir, "test_scenario", 42).unwrap();
@@ -206,7 +207,10 @@ mod tests {
         bundle.append_host_stderr(b"host log line 1\n");
         bundle.append_client_stderr(b"client log line 1\n");
 
-        let assertions = vec![AssertionResult::pass("test_assertion".to_string(), "ok".to_string())];
+        let assertions = vec![AssertionResult::pass(
+            "test_assertion".to_string(),
+            "ok".to_string(),
+        )];
         let summary = bundle.flush_to_disk(assertions, 150).unwrap();
 
         assert!(summary.passed);

@@ -15,14 +15,8 @@ use fr_wire::negotiation::ControlBinding;
 /// Error executing a scenario step.
 #[derive(Debug)]
 pub enum DriverError {
-    StepFailed {
-        step_index: usize,
-        reason: String,
-    },
-    Timeout {
-        step_index: usize,
-        timeout_ms: u64,
-    },
+    StepFailed { step_index: usize, reason: String },
+    Timeout { step_index: usize, timeout_ms: u64 },
 }
 
 impl std::fmt::Display for DriverError {
@@ -130,10 +124,12 @@ impl<'a> SessionDriver<'a> {
             ScenarioStep::Connect { timeout_ms } => {
                 self.advance_time(10);
                 let now = self.client_now();
-                self.client.connect(now).map_err(|e| DriverError::StepFailed {
-                    step_index: idx,
-                    reason: format!("connect failed: {e:?}"),
-                })?;
+                self.client
+                    .connect(now)
+                    .map_err(|e| DriverError::StepFailed {
+                        step_index: idx,
+                        reason: format!("connect failed: {e:?}"),
+                    })?;
 
                 self.bundle.record_event(StructuredLogEvent::new(
                     self.now_ns,
@@ -177,7 +173,10 @@ impl<'a> SessionDriver<'a> {
                 }
             }
 
-            ScenarioStep::Authorize { mode: _, timeout_ms: _ } => {
+            ScenarioStep::Authorize {
+                mode: _,
+                timeout_ms: _,
+            } => {
                 self.advance_time(15);
                 let deadline = self.now_ns / 1000 + 10_000_000;
                 self.client
@@ -191,19 +190,19 @@ impl<'a> SessionDriver<'a> {
                 self.advance_time(25);
                 let binding = self.make_binding(1);
                 let now = self.client_now();
-                self.client
-                    .on_session_opened(binding, now)
-                    .map_err(|e| DriverError::StepFailed {
+                self.client.on_session_opened(binding, now).map_err(|e| {
+                    DriverError::StepFailed {
                         step_index: idx,
                         reason: format!("on_session_opened failed: {e:?}"),
-                    })?;
+                    }
+                })?;
 
-                self.client
-                    .update_view_freshness(true, now)
-                    .map_err(|e| DriverError::StepFailed {
+                self.client.update_view_freshness(true, now).map_err(|e| {
+                    DriverError::StepFailed {
                         step_index: idx,
                         reason: format!("update_view_freshness failed: {e:?}"),
-                    })?;
+                    }
+                })?;
 
                 self.bundle.record_event(StructuredLogEvent::new(
                     self.now_ns,
@@ -217,7 +216,10 @@ impl<'a> SessionDriver<'a> {
                 ));
             }
 
-            ScenarioStep::StartObservation { display_id: _, timeout_ms: _ } => {
+            ScenarioStep::StartObservation {
+                display_id: _,
+                timeout_ms: _,
+            } => {
                 self.advance_time(10);
                 self.bundle.record_event(StructuredLogEvent::new(
                     self.now_ns,
@@ -234,10 +236,12 @@ impl<'a> SessionDriver<'a> {
             ScenarioStep::RequestControl { timeout_ms: _ } => {
                 self.advance_time(10);
                 let now = self.client_now();
-                self.client.request_control(now).map_err(|e| DriverError::StepFailed {
-                    step_index: idx,
-                    reason: format!("request_control failed: {e:?}"),
-                })?;
+                self.client
+                    .request_control(now)
+                    .map_err(|e| DriverError::StepFailed {
+                        step_index: idx,
+                        reason: format!("request_control failed: {e:?}"),
+                    })?;
 
                 self.bundle.record_event(StructuredLogEvent::new(
                     self.now_ns,
@@ -385,7 +389,10 @@ impl<'a> SessionDriver<'a> {
                             EventKind::FaultInjected {
                                 fault_type: "resize_display".to_string(),
                                 target_role: Some("host".to_string()),
-                                details: format!("{width}x{height} @ {scale_pct}% gen={}", self.generation),
+                                details: format!(
+                                    "{width}x{height} @ {scale_pct}% gen={}",
+                                    self.generation
+                                ),
                             },
                         ));
                     }
@@ -462,7 +469,8 @@ impl<'a> SessionDriver<'a> {
                 self.ticket_id = None;
 
                 let now = self.client_now();
-                self.client.on_disconnect(ReconnectReason::TransportDrop, now);
+                self.client
+                    .on_disconnect(ReconnectReason::TransportDrop, now);
 
                 self.bundle.record_event(StructuredLogEvent::new(
                     self.now_ns,
@@ -480,12 +488,12 @@ impl<'a> SessionDriver<'a> {
                 let _ = self.client.tick_reconnect(now);
 
                 let binding = self.make_binding(2);
-                self.client
-                    .on_session_opened(binding, now)
-                    .map_err(|e| DriverError::StepFailed {
+                self.client.on_session_opened(binding, now).map_err(|e| {
+                    DriverError::StepFailed {
                         step_index: idx,
                         reason: format!("reconnect viewing failed: {e:?}"),
-                    })?;
+                    }
+                })?;
 
                 self.bundle.record_event(StructuredLogEvent::new(
                     self.now_ns,
