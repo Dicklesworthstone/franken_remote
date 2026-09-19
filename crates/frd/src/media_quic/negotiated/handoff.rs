@@ -1,9 +1,10 @@
 //! Recovery retains the admitted subscription instead of minting a new cache.
 use super::{Error, NegotiatedMedia, QuicEgress, Routes, same_view};
-use crate::media::CaptureSource;
+use crate::media::{CaptureSource, decoder_startup::Setup};
 use asupersync::net::quic_native::StreamRole;
 use fr_transport::quic::{ControlRoutes, QuicRecords, Route};
 use fr_wire::negotiation::{ControlBinding, Role};
+use std::time::Duration;
 
 impl NegotiatedMedia {
     /// Route only the original negotiated control lane to its actual capture
@@ -49,7 +50,9 @@ impl NegotiatedMedia {
     /// All authority/display/configuration fields and media limits must match;
     /// only the recovery generation and retired channel IDs may change. There
     /// is no sender allocation, new recovery allowance, or implicit input grant.
-    pub fn recover_sender(&self, q: &QuicRecords, sender: &mut QuicEgress) -> Result<(), Error> {
+    /// Use the returned setup for native decoder startup: its deadline is capped
+    /// by the ORIGINAL failed-chain budget, including time spent on attachments.
+    pub fn recover_sender(&self, q: &QuicRecords, sender: &mut QuicEgress) -> Result<Setup, Error> {
         self.check(q)?;
         self.check_recovery_capability()?;
         if !self.is_host()
@@ -64,6 +67,11 @@ impl NegotiatedMedia {
         if !same_view(expected, self.binding()) || !subscription.recovery_pending(self.limits) {
             return Err(Error::InvalidRoutes);
         }
+        let until = subscription.recovery_deadline().map_err(Error::Media)?;
+        let setup = self
+            .decoder_setup(q, Duration::from_secs(2))
+            .map_err(|_| Error::InvalidRoutes)?
+            .capped_at(until);
         let routes = Routes::new(
             self.bindings,
             self.video.outbound,
@@ -79,6 +87,6 @@ impl NegotiatedMedia {
             .map_err(Error::Media)?;
         sender.routes = routes;
         sender.view = Some(self.binding());
-        Ok(())
+        Ok(setup)
     }
 }

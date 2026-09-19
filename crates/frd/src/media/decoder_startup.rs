@@ -68,8 +68,11 @@ pub struct Setup {
     limits: ProtocolLimits,
     configuration: StreamRoute,
     replies: StreamRoute,
-    timeout: Duration,
+    timeout_micros: u64,
     required_display: Option<(u32, u32)>,
+    // A recovery transition keeps its original local deadline across attachments
+    // and native setup; computing a new stage timeout must never extend it.
+    absolute_deadline: u64,
 }
 impl Setup {
     pub fn new(
@@ -95,9 +98,14 @@ impl Setup {
             limits: selection.limits,
             configuration,
             replies,
-            timeout,
+            timeout_micros: u64::try_from(timeout.as_micros()).map_err(|_| Error::Expired)?,
             required_display: None,
+            absolute_deadline: u64::MAX,
         })
+    }
+    pub(crate) fn capped_at(mut self, until: u64) -> Self {
+        self.absolute_deadline = self.absolute_deadline.min(until);
+        self
     }
     pub(crate) fn require_display(mut self, width: u32, height: u32) -> Result<Self, Error> {
         self.limits
@@ -123,7 +131,7 @@ struct Bound {
 impl Bound {
     fn new(cx: Cx, transport: &QuicRecords, setup: Setup, role: StreamRole) -> Result<Self, Error> {
         setup.binding.validate()?;
-        let us = u64::try_from(setup.timeout.as_micros()).map_err(|_| Error::Expired)?;
+        let us = setup.timeout_micros;
         if us == 0 || us > MAX_STARTUP_US {
             return Err(Error::Expired);
         }
@@ -146,6 +154,7 @@ impl Bound {
         }
         let last = host_now(&cx)?.as_micros();
         let until = last.checked_add(us).ok_or(Error::Expired)?;
+        let until = until.min(setup.absolute_deadline);
         let mut this = Self {
             cx,
             connection: transport.binding(),

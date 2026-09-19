@@ -13,6 +13,23 @@ impl Subscription {
         self.cache.needs_recovery() && self.limits == limits
     }
 
+    /// Original failed-chain deadline. No tick through normal egress: that path
+    /// deliberately treats `NeedsRecovery` as terminal for callers without recovery.
+    pub(crate) fn recovery_deadline(&self) -> Result<u64, Error> {
+        let now = self.control.check()?.as_micros();
+        let until = self
+            .cache
+            .next_deadline()
+            .filter(|_| self.cache.needs_recovery())
+            .ok_or(Error::InvalidFrame)?;
+        if now >= until {
+            return Err(Error::Send(SendError::Delivery(
+                DeliveryError::RecoveryExpired,
+            )));
+        }
+        Ok(until)
+    }
+
     /// Called by the admitted control route after negotiating reference-recovery.
     /// `binding` is the INSTALLED full view binding, never a peer-proposed tuple.
     /// The subscription must already have consumed this actual source's output;

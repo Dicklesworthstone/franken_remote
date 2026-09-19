@@ -770,3 +770,6 @@ fn dropping_a_started_replacement_keeps_the_original_partial_exchange_fence() {
         assert_eq!(link.h.next_channel_binding().unwrap(), next);
     });
 }
+
+#[path = "recovery_replacement/handoff.rs"]
+mod handoff;
