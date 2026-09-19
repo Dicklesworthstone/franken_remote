@@ -795,9 +795,18 @@ async fn bootstrap(
             .enable_adaptive_capture(maximum)
             .map_err(|e| budget.fail(Error::Media(e)))?;
     }
-    let host = host
+    let mut host = host
         .into_streaming(stream)
         .map_err(|e| budget.fail(Error::Session(e)))?;
+    if !controlled
+        && negotiation.capabilities.iter().any(|c| {
+            c.name == fr_wire::recovery_request::CAPABILITY
+                && c.version == fr_wire::recovery_request::VERSION
+        })
+    {
+        host.enable_reference_recovery(media)
+            .map_err(|e| budget.fail(Error::Session(e)))?;
+    }
     Ok(NativePublisher {
         selected,
         display,

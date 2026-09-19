@@ -50,6 +50,8 @@ pub struct Statistics {
     pub repair_requests: u64,
     /// Raw checks admitted before the ordinary idle deadline after native input.
     pub input_wake_captures: u64,
+    /// Completed replacement and decoder handshakes, not visible-pixel evidence.
+    pub recovered_streams: u64,
 }
 /// Consumes a UNIQUE capture source and the matching subscriber. Only an actual
 /// completed decoder startup can construct it. A share-session encoder feeding
@@ -72,6 +74,9 @@ impl std::fmt::Debug for Stream {
     }
 }
 impl Stream {
+    pub(crate) fn capture_configuration(&self) -> fr_media::worker::Configuration {
+        self.source.configuration
+    }
     /// The bootstrap update must already have passed through this exact sender.
     /// Equal frame/configuration IDs do not match a replacement capture source.
     pub fn new(

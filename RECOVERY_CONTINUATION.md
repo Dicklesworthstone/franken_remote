@@ -59,12 +59,13 @@ These are protocol/ownership/IPC checks, not native HEVC or hardware qualificati
 
 ## Remaining integration
 
-The host peer in these tests uses the production packetizer and replacement
-handshake, but its orchestration is test-owned. The running host must still join
-accepted requests, the original capture owner and `recover_sender` automatically.
-Do not globally advertise complete automatic desktop healing until that host
-join and real-HEVC injected-loss qualification pass. This observation-only change
-does not implement automatic control reacquisition or replay old input.
+The original viewer-only tests retain a manually orchestrated peer. The running
+host is now joined separately in `RECOVERY_HOST.md`, including an integration
+test that runs both canonical peers through loss, fresh attachments, native IPC
+and resumed dependent frames. Real-HEVC injected-loss qualification still remains
+open; these tests do not globally qualify automatic desktop healing. This
+observation-only change does not implement automatic control reacquisition or
+replay old input.
 
 Owning design: plan sections 7, 11, 12, 17 and 19; recovery work tracked under
 `fr-p1-loss-recovery-20s`. No protocol limit, authority lifetime, dependency pin,
