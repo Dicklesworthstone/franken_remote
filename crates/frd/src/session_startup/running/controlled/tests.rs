@@ -219,7 +219,23 @@ async fn fixture_with_clock(
     gate: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
     synchronized: bool,
 ) -> Fixture {
+    Box::pin(fixture_capabilities(c, h, gate, synchronized, false)).await
+}
+fn extended_capabilities(synchronized: bool, files: bool) -> Vec<WireCapability> {
     let mut capabilities = media_capabilities();
+    if files {
+        capabilities.push(WireCapability {
+            name: attachment::FILES_CAPABILITY.into(),
+            version: attachment::FILES_VERSION,
+            required: true,
+        });
+        capabilities.push(WireCapability {
+            name: fr_wire::files::CAPABILITY.into(),
+            version: fr_wire::files::VERSION,
+            required: true,
+        });
+    }
+    capabilities.sort_by(|a, b| a.name.cmp(&b.name));
     if synchronized {
         capabilities.push(WireCapability {
             name: fr_wire::clock::CAPABILITY.into(),
@@ -228,6 +244,16 @@ async fn fixture_with_clock(
         });
         capabilities.sort_by(|a, b| a.name.cmp(&b.name));
     }
+    capabilities
+}
+async fn fixture_capabilities(
+    c: &Cx,
+    h: &Cx,
+    gate: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
+    synchronized: bool,
+    files: bool,
+) -> Fixture {
+    let capabilities = extended_capabilities(synchronized, files);
     let mut initial_until = 0;
     let (mut host, mut viewer) = pair_initialized(c, h, capabilities, |host| {
         let a = host.authority.as_mut().unwrap();
@@ -513,6 +539,7 @@ fn pending_admission_refresh_keeps_control_tickets_and_input_results_progressing
                 let mut other = block;
                 let mut services = InputServices {
                     input: &mut host.input,
+                    files: &mut host.files,
                     clipboard: &mut host.clipboard,
                     clipboard_setup: &mut host.clipboard_setup,
                     cx: host.session.opened.cx.clone(),
@@ -808,6 +835,7 @@ fn buffered_ordered_input_cannot_take_a_due_tickets_fair_turn() {
                 let mut other = block;
                 let mut services = InputServices {
                     input: &mut host.input,
+                    files: &mut host.files,
                     clipboard: &mut host.clipboard,
                     clipboard_setup: &mut host.clipboard_setup,
                     cx: host.session.opened.cx.clone(),
@@ -863,6 +891,7 @@ fn revoke_during_refresh_poll_blocks_shared_udp_before_the_next_service_turn() {
         let mut other = block;
         let mut services = InputServices {
             input: &mut host.input,
+            files: &mut host.files,
             clipboard: &mut host.clipboard,
             clipboard_setup: &mut host.clipboard_setup,
             cx: host.session.opened.cx.clone(),
@@ -967,3 +996,6 @@ fn streaming_codec_stall_does_not_hold_input_results_tickets_or_local_cleanup() 
 }
 
 mod input_wake;
+
+#[path = "tests/files.rs"]
+mod files;

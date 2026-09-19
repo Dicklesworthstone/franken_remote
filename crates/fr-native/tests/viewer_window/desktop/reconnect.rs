@@ -153,7 +153,7 @@ fn pending_original_attempt_is_fenced_and_no_renderer_entry_proves_native_absenc
     assert_eq!(log.borrow().choices, [] as [u8; 0]);
 }
 #[test]
-fn retained_native_window_is_collected_but_incomplete_bootstrap_still_blocks_retry() {
+fn interrupted_bootstrap_collects_its_window_without_inventing_a_decoder() {
     let native = Desktop::start();
     let runtime = support::runtime();
     let c = runtime.request_cx_with_budget(Budget::INFINITE);
@@ -183,19 +183,16 @@ fn retained_native_window_is_collected_but_incomplete_bootstrap_still_blocks_ret
         assert!(session.desktop().unwrap().window().is_some());
         let cleanup = runtime.request_cx_with_budget(Budget::INFINITE);
         let deadline = Deadline::after(&cleanup, Duration::from_secs(1)).unwrap();
-        assert_eq!(
-            session.cleanup(&cleanup, deadline).await,
-            Err(CallbackError)
-        );
-        assert_eq!(
-            session.cleanup_failure(),
-            Some(CleanupFailure::BootstrapUnconfirmed)
-        );
+        assert_eq!(session.cleanup(&cleanup, deadline).await, Ok(()));
+        assert_eq!(session.cleanup_failure(), None);
+        // This peer stopped after display selection, before worker spawn. The
+        // registered Launch was dropped, a positive NotStarted receipt.
+        assert!(matches!(session.last_cleanup().unwrap().media, Ok(None)));
         assert!(matches!(
             session.last_cleanup().unwrap().window,
             WindowCleanup::Complete(_)
         ));
-        assert!(session.desktop().is_some());
+        assert!(session.desktop().is_none());
         assert!(h.checkpoint().is_ok());
     });
 }
@@ -272,6 +269,9 @@ fn caught_callback_panic_fences_even_while_the_failed_run_future_remains_retaine
     assert!(h.checkpoint().is_ok());
 }
 fn image() -> PathBuf {
+    decoder_image("healthy")
+}
+fn decoder_image(mode: &str) -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let path = std::env::temp_dir().join(format!(
         "fr-desktop-reconnect-{}-{}.py",
@@ -287,6 +287,22 @@ fn image() -> PathBuf {
         "elif k == 8:",
         "elif k == 1: reply(h,257,b)\n        elif k == 14: reply(h,272,b)\n        elif k == 8:",
     );
+    let source = match mode {
+        "exit-configure" => source.replace(
+            "elif k == 14: reply(h,272,b)",
+            "elif k == 14: raise SystemExit(7)",
+        ),
+        "stall-configure" => source.replace(
+            "elif k == 14: reply(h,272,b)",
+            "elif k == 14: __import__('time').sleep(60)",
+        ),
+        "exit-decode" => source.replace(
+            "elif k in (4,6): reply(h,261 if k==4 else 264,b[:8])",
+            "elif k in (4,6): raise SystemExit(7)",
+        ),
+        "healthy" => source,
+        _ => panic!("unknown explicit decoder fixture"),
+    };
     std::fs::write(&path, source).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
     path
@@ -356,6 +372,16 @@ async fn attach_media(
         .unwrap()
 }
 async fn media_peer(q: QuicRecords, h: &Cx, cleanup: &Cx, routes: ControlRoutes, image: &Path) {
+    media_peer_until(q, h, cleanup, routes, image, None).await;
+}
+async fn media_peer_until(
+    q: QuicRecords,
+    h: &Cx,
+    cleanup: &Cx,
+    routes: ControlRoutes,
+    image: &Path,
+    stopped: Option<frd::session_startup::StreamingViewerControl>,
+) {
     use fr_core::{
         authority::{AuthorityPolicy, SessionAuthority},
         ids::*,
@@ -404,6 +430,12 @@ async fn media_peer(q: QuicRecords, h: &Cx, cleanup: &Cx, routes: ControlRoutes,
         .unwrap();
     let mut configured = false;
     while !startup.is_complete() {
+        if stopped
+            .as_ref()
+            .is_some_and(frd::session_startup::StreamingViewerControl::is_stopped)
+        {
+            break;
+        }
         if !configured {
             configured = startup.transmit(&mut q).unwrap();
         }
@@ -497,3 +529,85 @@ fn completed_desktop_reconnects_only_after_reap_with_fresh_workers_and_terminal_
 
 #[path = "reconnect/picker.rs"]
 mod picker;
+
+#[test]
+fn failed_decoder_configuration_remains_collectable_from_the_public_desktop() {
+    incomplete_decoder("exit-configure");
+}
+#[test]
+fn timed_out_decoder_configuration_remains_collectable_from_the_public_desktop() {
+    incomplete_decoder("stall-configure");
+}
+#[test]
+fn failed_first_decode_remains_collectable_from_the_public_desktop() {
+    incomplete_decoder("exit-decode");
+}
+fn incomplete_decoder(mode: &str) {
+    let native = Desktop::start();
+    let runtime = support::runtime();
+    let c = runtime.request_cx_with_budget(Budget::INFINITE);
+    let h = runtime.request_cx_with_budget(Budget::INFINITE);
+    let cleanup = runtime.request_cx_with_budget(Budget::INFINITE);
+    let capture = image();
+    let decoder = decoder_image(mode);
+    let (mut session, log) = application(&native.display, &decoder, 901);
+    runtime.block_on(async {
+        let (client, host) = support::native_pair(&c, "localhost", ALPN).await;
+        let viewer = Viewer::new(
+            c.clone(),
+            client.unwrap(),
+            offered(),
+            Policy::default(),
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        let stop = viewer.control();
+        let (q, routes) = QuicRecords::bootstrap(host.unwrap(), &h, Policy::default()).unwrap();
+        let (result, ()) = asupersync::time::timeout(
+            c.timer_driver().unwrap().now(),
+            Duration::from_secs(5),
+            Box::pin(support::both(
+                session.run(1, viewer),
+                media_peer_until(q, &h, &cleanup, routes, &capture, Some(stop.clone())),
+            )),
+        )
+        .await
+        .expect("bounded failed bootstrap");
+        assert!(result.is_err());
+        assert!(stop.is_stopped());
+        assert!(log.borrow().ready.is_empty());
+        assert_eq!(log.borrow().frames, 0);
+        let window = session.desktop().unwrap().window().unwrap();
+        // No NativeObserver was returned, yet its nested decoder child must be
+        // explicitly reaped. Never replace this assertion with absent == safe.
+        assert_eq!(
+            session
+                .cleanup(
+                    &cleanup,
+                    Deadline::after(&cleanup, Duration::from_secs(1)).unwrap()
+                )
+                .await,
+            Ok(())
+        );
+        let report = session.last_cleanup().unwrap();
+        assert!(matches!(report.media, Ok(Some(status)) if !status.success()));
+        assert!(matches!(report.window, WindowCleanup::Complete(_)));
+        assert_eq!(
+            report.input,
+            frd::session_startup::viewer_events::CaptureCleanup::NotStarted
+        );
+        assert_eq!(
+            report.clipboard,
+            Ok(frd::native_clipboard::Cleanup::NotStarted)
+        );
+        assert!(session.desktop().is_none());
+        assert!(matches!(
+            window.status(),
+            fr_native::viewer_window::Status::Stopped(_)
+        ));
+        assert!(cleanup.checkpoint().is_ok());
+        // The scripted host deliberately revoked its own observation after
+        // the viewer stopped; only the independent cleanup context stays live.
+        assert!(h.checkpoint().is_err());
+    });
+}

@@ -102,17 +102,17 @@ fn pending_repair_keeps_original_bytes_deadline_and_attempt() {
     let bytes = repair.bytes;
     let until = repair.until;
     assert!(repair.len > 0);
-    assert_eq!(until, 100_000);
-    for stamp in [30_000, 50_000, 80_000, 99_999] {
+    assert_eq!(until, 250_000);
+    for stamp in [30_000, 50_000, 80_000, 100_000, 170_000, 249_999] {
         repair.prepare(&mut receiver, stamp).unwrap();
         assert_eq!(repair.bytes, bytes);
         assert_eq!(repair.until, until);
         assert_eq!(repair.frame, 1);
     }
     receiver
-        .receive(Channel::Video, &fragments(cfg, d), 99_999)
+        .receive(Channel::Video, &fragments(cfg, d), 249_999)
         .unwrap();
-    repair.prepare(&mut receiver, 99_999).unwrap();
+    repair.prepare(&mut receiver, 249_999).unwrap();
     assert_eq!(repair.len, 0);
     assert!(repair.bytes.iter().all(|&b| b == 0));
 }
@@ -126,7 +126,15 @@ fn expired_pending_repair_is_not_replaced_or_retimed() {
     repair.prepare(&mut receiver, 20_000).unwrap();
     let bytes = repair.bytes;
     let until = repair.until;
-    assert_eq!(repair.prepare(&mut receiver, until), Err(Error::Closed));
+    assert_eq!(
+        repair.prepare(&mut receiver, until),
+        Err(Error::Delivery(DeliveryError::ReferenceExpired))
+    );
+    assert_eq!(
+        receiver.state(),
+        fr_media::delivery::ReceiveState::NeedsRecovery
+    );
+    assert_eq!(receiver.budget_usage().bytes, 0);
     assert_eq!(repair.bytes, bytes);
     assert_eq!(repair.until, until);
 }
@@ -160,8 +168,17 @@ fn block(_: Route, _: &[u8]) -> Result<Disposition, ()> {
     Ok(Disposition::Blocked)
 }
 #[test]
-#[allow(clippy::too_many_lines)]
 fn actual_quic_viewer_service_repairs_an_entirely_lost_final_picture() {
+    lost_final_picture(Duration::ZERO);
+}
+
+#[test]
+fn actual_quic_repair_survives_a_120ms_ack_stall_within_reference_horizon() {
+    lost_final_picture(Duration::from_millis(120));
+}
+
+#[allow(clippy::too_many_lines)]
+fn lost_final_picture(ack_stall: Duration) {
     run(|c, h| async move {
         let (mut host, mut viewer) = pair_initialized(&c, &h, capabilities(), |_| {}).await;
         let (hc, vc) = attach(
@@ -214,6 +231,7 @@ fn actual_quic_viewer_service_repairs_an_entirely_lost_final_picture() {
         let mut n = 7000_u128;
         let mut missing = false;
         let mut sent = false;
+        let mut stalled = false;
         let until = now(&c).unwrap() + 500_000;
         loop {
             assert!(now(&c).unwrap() < until);
@@ -269,6 +287,14 @@ fn actual_quic_viewer_service_repairs_an_entirely_lost_final_picture() {
             .await;
             a.unwrap();
             b.unwrap();
+            if !stalled && stats.repair_requests > 0 {
+                stalled = true;
+                // Withhold both connection drivers after admission, so the
+                // original reliable repair remains charged until its ACK.
+                // 120 ms exceeds the old arbitrary 80 ms send lifetime but
+                // does not extend the missing picture's reference horizon.
+                asupersync::time::sleep(c.now(), ack_stall).await;
+            }
             if missing && !sent {
                 let bytes = fragments(cfg, descriptor);
                 host.io()
@@ -282,7 +308,11 @@ fn actual_quic_viewer_service_repairs_an_entirely_lost_final_picture() {
                 assert_eq!(picture.descriptor().frame, 1);
                 assert_eq!(picture.bytes(), b"next");
                 assert!(sent && missing);
-                assert_eq!(stats.repair_requests, 1);
+                assert!(stalled);
+                assert!((1..=3).contains(&stats.repair_requests));
+                if ack_stall.is_zero() {
+                    assert_eq!(stats.repair_requests, 1);
+                }
                 break;
             }
         }

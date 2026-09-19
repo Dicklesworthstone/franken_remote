@@ -3,7 +3,7 @@ use super::{
     CaptureSource, EncodedAccessUnit, Error, FrameId, MediaOperation, ObservationControl,
     Subscription, worker,
 };
-use asupersync::time::sleep;
+use asupersync::{time::sleep, types::Time};
 use fr_core::ids::CodecConfigurationGeneration;
 use fr_media::worker::{Kind, UnchangedCapture, capture_payload, parse_unit};
 use std::{fmt, sync::Arc, time::Duration};
@@ -88,7 +88,20 @@ impl CaptureSource {
         #[cfg(target_os = "linux")]
         let mut selection = super::discovery::SelectionGuard::capture(self, control)?;
         let issued = control.check()?;
-        let deadline = control.deadline(Duration::from_secs(2))?;
+        // Service requests on the original capture loop, not in a parallel
+        // worker or per-viewer encoder. An expired cohort cannot reset healthy
+        // capture; those failed senders retain their own terminal deadlines.
+        let recovery_until = match self.recovery.take(issued.as_micros()) {
+            Ok(until) => until,
+            Err(fr_media::delivery::DeliveryError::RecoveryExpired) => None,
+            Err(error) => return Err(Error::Receiver(error)),
+        };
+        let force_idr = force_idr || recovery_until.is_some();
+        let mut deadline = control.deadline(Duration::from_secs(2))?;
+        if let Some(until) = recovery_until {
+            let nanos = until.checked_mul(1000).ok_or(worker::Error::Deadline)?;
+            deadline = deadline.capped_at(Time::from_nanos(nanos));
+        }
         let frame = self.next.ok_or(Error::InvalidFrame)?;
         // Retire before possible external work. Failed/cancelled exchanges poison
         // the worker; neither candidate identity nor original timestamp is retried.
@@ -109,12 +122,23 @@ impl CaptureSource {
             .await?;
         let content = loop {
             control.check()?;
+            // Parsing/polling cannot restart the original recovery attempt.
+            if control
+                .cx
+                .timer_driver()
+                .ok_or(worker::Error::MissingRuntime)?
+                .now()
+                >= deadline.time()
+            {
+                return Err(worker::Error::Deadline.into());
+            }
             match reply.header.kind {
                 Kind::Unit => {
                     let unit = parse_unit(reply.into_body(), &self.configuration.limits()?)?;
                     if unit.frame() != frame
                         || unit.config_generation() != self.configuration.generation
                         || unit.capture_micros() != issued.as_micros()
+                        || (force_idr && !unit.is_idr())
                     {
                         return Err(Error::InvalidFrame);
                     }

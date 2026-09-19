@@ -17,3 +17,4 @@ workspace = true
 fr-client.workspace = true
 fr-transport.workspace = true
 fr-tailnet.workspace = true
+fr-files.workspace = true

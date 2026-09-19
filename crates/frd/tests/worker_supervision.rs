@@ -289,3 +289,6 @@ fn spawn_failures_are_sanitized_and_writable_image_recovers_after_reap() {
         ));
     });
 }
+
+#[path = "worker_supervision/retirement.rs"]
+mod retirement;

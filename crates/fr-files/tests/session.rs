@@ -466,3 +466,70 @@ fn idle_service_expires_and_reclaims_without_another_peer_record() {
     scratch.empty();
     assert!(input.monitor().deadline(at(1000)).is_ok());
 }
+
+#[test]
+fn file_authority_handoff_survives_moving_the_live_owner() {
+    let scratch = Scratch::new();
+    let input = owner();
+    let handoff = fr_files::session::Authority::from_input(&input);
+    let (stop, stopped) = std::sync::mpsc::sync_channel::<()>(1);
+    let thread = std::thread::spawn(move || {
+        let _keep_original_owner = input;
+        stopped.recv().unwrap();
+    });
+    let mut session = HostReceiver::with_authority(
+        handoff.clone(),
+        scratch.root(),
+        Permission::new(true),
+        Policy::conservative(),
+        at(0),
+    )
+    .unwrap();
+    staged(&mut session);
+    assert_eq!(session.binding(), handoff.binding());
+    let receipt = session.complete(session.binding(), 1, || at(10)).unwrap();
+    assert_eq!(receipt.publication, Publication::Durable);
+    assert_eq!(fs::read(scratch.0.join("item")).unwrap(), b"abc");
+    stop.send(()).unwrap();
+    thread.join().unwrap();
+    assert!(handoff.deadline(at(11)).is_err());
+}
+
+#[test]
+fn cloned_file_authority_cannot_resurrect_a_dropped_equal_id_owner() {
+    let scratch = Scratch::new();
+    let input = owner();
+    let handoff = fr_files::session::Authority::from_input(&input);
+    let retained = handoff.clone();
+    let mut session = HostReceiver::with_authority(
+        handoff,
+        scratch.root(),
+        Permission::new(true),
+        Policy::conservative(),
+        at(0),
+    )
+    .unwrap();
+    staged(&mut session);
+    drop(input);
+    let replacement = owner();
+    assert_eq!(
+        retained.binding(),
+        fr_files::session::Authority::from_input(&replacement).binding()
+    );
+    assert!(session.complete(session.binding(), 1, || at(10)).is_err());
+    assert!(
+        HostReceiver::with_authority(
+            retained,
+            scratch.root(),
+            Permission::new(true),
+            Policy::conservative(),
+            at(10)
+        )
+        .is_err()
+    );
+    assert!(!scratch.0.join("item").exists());
+    // The original disk worker calls maintenance even after a refused command.
+    assert_eq!(session.service(at(10)), Err(Error::Closed));
+    scratch.empty();
+    assert!(replacement.monitor().deadline(at(10)).is_ok());
+}

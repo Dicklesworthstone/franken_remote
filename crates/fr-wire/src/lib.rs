@@ -20,6 +20,7 @@ pub mod negotiation;
 pub mod presented;
 pub mod receiver_metrics;
 mod record;
+pub mod recovery_request;
 pub mod stream;
 
 pub use media::{

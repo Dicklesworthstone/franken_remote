@@ -12,6 +12,8 @@ use asupersync::{
 };
 use fr_core::limits::ProtocolLimits;
 use fr_media::worker::{self, Configuration, HEADER_BYTES, Header, Identity, Kind, Record, Role};
+mod retirement;
+pub use retirement::Retirement;
 mod selected;
 pub use selected::MonitorDiscovery;
 
@@ -99,6 +101,7 @@ pub struct Launch {
     role: Role,
     epoch: u128,
     target: Option<worker::presentation::X11Target>,
+    retirement: Option<retirement::Registration>,
 }
 impl Launch {
     pub fn new(
@@ -127,7 +130,19 @@ impl Launch {
             role,
             epoch,
             target: None,
+            retirement: None,
         })
+    }
+    /// Keep the exact child collectable if asynchronous startup fails or is
+    /// dropped before returning a Worker. Store the returned owner in the
+    /// attempt BEFORE polling startup; it is single-use and not cloneable.
+    pub fn retain_cleanup(mut self) -> Result<(Self, Retirement), Error> {
+        if self.retirement.is_some() {
+            return Err(Error::InvalidLaunch);
+        }
+        let (registration, owner) = retirement::Registration::new();
+        self.retirement = Some(registration);
+        Ok((self, owner))
     }
     /// Select a locally owned UI window before decoder startup. This is private
     /// launch configuration, never a peer request or a decoder-selected input
@@ -240,7 +255,8 @@ async fn bounded<T>(
 /// cloneable. Canceled/dropped exchanges kill the process group before releasing
 /// their borrow; the owning session must drive `reap` during its drain phase.
 pub struct Worker {
-    child: Child,
+    child: Option<Child>,
+    retirement: Option<retirement::Registration>,
     input: Option<ChildStdin>,
     output: Option<ChildStdout>,
     limits: ProtocolLimits,
@@ -335,6 +351,7 @@ impl Worker {
             role,
             epoch,
             target: _, // Already bound into the immutable private configuration.
+            retirement,
         } = launch;
         let mut command = Command::new(image);
         command
@@ -360,19 +377,29 @@ impl Worker {
         let mut child = command
             .spawn()
             .map_err(|error| Error::SpawnFailed(error.into()))?;
-        let input = child.stdin().ok_or(Error::PipeFailed)?;
-        let output = child.stdout().ok_or(Error::PipeFailed)?;
-        Ok(Self {
-            child,
-            input: Some(input),
-            output: Some(output),
+        let input = child.stdin();
+        let output = child.stdout();
+        if let Some(registration) = &retirement {
+            registration.started();
+        }
+        // Establish custody before any fallible post-spawn check. Even absent
+        // pipes must leave the original child available for confirmed cleanup.
+        let worker = Self {
+            child: Some(child),
+            retirement,
+            input,
+            output,
             limits,
             identity: Identity { epoch, sequence: 0 },
             role,
             state: State::Starting,
             exit: None,
             selected: None,
-        })
+        };
+        if worker.input.is_none() || worker.output.is_none() {
+            return Err(Error::PipeFailed);
+        }
+        Ok(worker)
     }
     /// Enumerate on the capture child without opening a codec or reading pixels.
     /// The returned owner retains that exact child and X connection until selection.
@@ -402,7 +429,7 @@ impl Worker {
         self.state
     }
     pub fn id(&self) -> Option<u32> {
-        self.child.id()
+        self.child.as_ref().and_then(Child::id)
     }
     pub const fn role(&self) -> Role {
         self.role
@@ -412,7 +439,9 @@ impl Worker {
             return;
         }
         self.state = State::Poisoned;
-        let _ = self.child.start_kill();
+        if let Some(child) = &mut self.child {
+            let _ = child.start_kill();
+        }
         self.input = None;
         self.output = None;
     }
@@ -519,8 +548,17 @@ impl Worker {
         }
         let mut previous = now(cx)?;
         loop {
-            if let Some(status) = self.child.try_wait().map_err(|_| Error::PipeFailed)? {
+            if let Some(status) = self
+                .child
+                .as_mut()
+                .ok_or(Error::Unavailable)?
+                .try_wait()
+                .map_err(|_| Error::PipeFailed)?
+            {
                 self.exit = Some(status);
+                if let Some(registration) = &self.retirement {
+                    registration.reaped(status);
+                }
                 self.state = State::Reaped;
                 return Ok(status);
             }
@@ -544,6 +582,9 @@ impl Drop for Worker {
     fn drop(&mut self) {
         if self.state != State::Reaped {
             self.abort();
+        }
+        if let (Some(registration), Some(child)) = (&self.retirement, self.child.take()) {
+            registration.retire(child, self.exit);
         }
     }
 }

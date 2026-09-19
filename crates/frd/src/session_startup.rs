@@ -31,6 +31,7 @@ mod clipboard;
 mod native_control;
 mod opening;
 mod running;
+pub use running::controlled::files::{Cleanup as FileReceiveCleanup, Error as FileReceiveError};
 pub use running::publisher::{
     Error as PublisherError, ManagedControlReport, ManagedHostControlState, ManagedPendingControl,
     NativePublisher, Policy as PublisherPolicy,

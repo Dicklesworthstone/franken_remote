@@ -176,6 +176,16 @@ pub struct QuicInput {
     last_ticket: Option<fr_core::ids::InputTicketId>,
 }
 impl QuicInput {
+    pub(crate) fn file_authority(
+        &self,
+        q: &QuicRecords,
+    ) -> Result<fr_files::session::Authority, Error> {
+        if !q.is_bound_to(&self.connection) {
+            return Err(Error::WrongConnection);
+        }
+        self.agent.file_authority().ok_or(Error::Closed)
+    }
+
     pub(crate) fn clipboard_monitor(
         &self,
         q: &QuicRecords,

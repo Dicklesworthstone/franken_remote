@@ -168,6 +168,142 @@ fn denial_identity_protocol_codec_and_local_stop_never_retry() {
     ))));
 }
 #[test]
+fn only_exhausted_media_horizons_retry_after_streaming_has_started() {
+    use fr_media::delivery::DeliveryError as D;
+    for error in [D::ReferenceExpired, D::RecoveryExpired] {
+        // The network and decoder completion paths wrap the same receiving
+        // failure differently. Both require a new authenticated observation,
+        // never continuation of a broken reference chain.
+        for streaming in [
+            StreamingViewerError::Delivery(error),
+            StreamingViewerError::Media(crate::media::Error::Receiver(error)),
+        ] {
+            assert!(retryable(Failure::Observation(ObserverError::Streaming(
+                streaming
+            ))));
+        }
+        // A startup failure is not evidence that an established observation
+        // lost a reference. Do not turn failed negotiation into a retry loop.
+        assert!(!retryable(Failure::Observation(ObserverError::Streaming(
+            StreamingViewerError::Startup(crate::media::decoder_startup::Error::Media(
+                crate::media::Error::Receiver(error)
+            ))
+        ))));
+    }
+}
+
+#[test]
+fn media_faults_other_than_expired_horizons_remain_terminal() {
+    use fr_media::delivery::DeliveryError as D;
+    for error in [
+        D::InvalidPolicy,
+        D::WrongState,
+        D::ResourceLimit,
+        D::AllocationFailed,
+        D::ConflictingPicture,
+        D::NoncontiguousRecovery,
+        D::ClockRegression,
+        D::ClockOverflow,
+        D::StaleGeneration,
+        D::DecodeFailed,
+        D::DecodeMismatch,
+        D::Wire(fr_wire::WireError::Truncated),
+    ] {
+        for streaming in [
+            StreamingViewerError::Delivery(error),
+            StreamingViewerError::Media(crate::media::Error::Receiver(error)),
+        ] {
+            assert!(!retryable(Failure::Observation(ObserverError::Streaming(
+                streaming
+            ))));
+        }
+    }
+}
+
+#[test]
+fn established_streaming_transport_failures_have_the_same_policy_in_every_owner() {
+    use crate::session_startup::{ControlledViewerError as C, Error as S};
+    use fr_transport::quic::Error as T;
+    for error in [
+        T::Native,
+        T::Expired,
+        T::Unauthorized,
+        T::Closed,
+        T::Cancelled,
+        T::Malformed,
+        T::Handler,
+        T::WrongRoute,
+        T::Backpressure,
+        T::Clock,
+        T::Allocation,
+    ] {
+        let expected = matches!(error, T::Native | T::Expired);
+        // An active controller, decoder route, or advisory report must not
+        // hide actual transport loss from the same fresh-session supervisor.
+        // Conversely, wrapping a denial or local stop must never enable retry.
+        for streaming in [
+            StreamingViewerError::Transport(error),
+            StreamingViewerError::Routes(crate::media_quic::Error::Transport(error)),
+            StreamingViewerError::Session(S::Transport(error)),
+            StreamingViewerError::Control(C::Session(S::Transport(error))),
+            StreamingViewerError::Control(C::Media(crate::media_quic::Error::Transport(error))),
+            StreamingViewerError::Control(C::Input(crate::input_quic::Error::Transport(error))),
+            StreamingViewerError::Feedback(crate::media::ReceiverFeedbackError::Transport(error)),
+            StreamingViewerError::PresentedState(crate::media::PresentedStateError::Transport(
+                error,
+            )),
+        ] {
+            assert_eq!(
+                retryable(Failure::Observation(ObserverError::Streaming(streaming))),
+                expected,
+                "incorrect retry policy for {streaming:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn observation_expiry_reconnects_but_input_expiry_and_revocation_do_not() {
+    use crate::session_startup::{ControlledViewerError as C, Error as S};
+    for error in [
+        S::Expired,
+        S::ClientRenewal(fr_client::authority::Error::Expired),
+    ] {
+        for streaming in [
+            StreamingViewerError::Session(error),
+            StreamingViewerError::Control(C::Session(error)),
+        ] {
+            assert!(retryable(Failure::Observation(ObserverError::Streaming(
+                streaming
+            ))));
+        }
+    }
+    for error in [
+        C::Expired,
+        C::Closed,
+        C::WrongBinding,
+        C::ClockNotReady,
+        C::ControlNotNegotiated,
+        C::Backpressure,
+        C::Session(S::Authority),
+        C::Session(S::Denied),
+        C::Session(S::Closed),
+        C::Session(S::Cancelled),
+        C::Session(S::ClientRenewal(fr_client::authority::Error::Stopped)),
+        C::Input(crate::input_quic::Error::TicketExpired),
+        C::Input(crate::input_quic::Error::WrongConnection),
+        C::Input(crate::input_quic::Error::Closed),
+    ] {
+        assert!(
+            !retryable(Failure::Observation(ObserverError::Streaming(
+                StreamingViewerError::Control(error)
+            ))),
+            "input or authority failure retried: {error:?}"
+        );
+    }
+}
+
+#[test]
 fn public_connector_retries_unavailable_daemon_only_after_cleanup_and_fixed_waits() {
     let rt = network::runtime();
     let cx = rt.request_cx_with_budget(Budget::INFINITE);

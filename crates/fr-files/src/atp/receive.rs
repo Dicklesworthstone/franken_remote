@@ -171,13 +171,31 @@ impl Receiver {
         policy: Policy,
         frame_bytes: usize,
     ) -> Result<(Self, Task), Error> {
+        Self::spawn_with_authority(
+            cx,
+            crate::session::Authority::from_input(input),
+            directory,
+            permission,
+            policy,
+            frame_bytes,
+        )
+    }
+    pub fn spawn_with_authority(
+        cx: Cx,
+        authority: crate::session::Authority,
+        directory: DropDirectory,
+        permission: Permission,
+        policy: Policy,
+        frame_bytes: usize,
+    ) -> Result<(Self, Task), Error> {
         if !(MAX_REPLY_BYTES..=MAX_FRAME_BYTES).contains(&frame_bytes) {
             return Err(Error::Limits);
         }
         // Create the worker here: accepting an arbitrary mailbox could inherit
         // an old content-id-only transfer and mislabel its receipt as graph proof.
         let (mailbox, task) =
-            worker::spawn(cx, input, directory, permission, policy).map_err(Error::Worker)?;
+            worker::spawn_with_authority(cx, authority, directory, permission, policy)
+                .map_err(Error::Worker)?;
         Ok((
             Self {
                 mailbox,

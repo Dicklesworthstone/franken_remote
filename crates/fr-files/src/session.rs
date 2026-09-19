@@ -52,6 +52,38 @@ pub struct Binding {
     pub lease: InputLeaseId,
 }
 
+/// Read-only handoff from the original native input owner to its file worker.
+/// Only a real `InputSession` can create this value. Clones retain the same
+/// opaque native-owner identity; numeric session/lease values are not authority.
+#[derive(Clone)]
+pub struct Authority {
+    monitor: InputMonitor,
+    binding: Binding,
+}
+impl fmt::Debug for Authority {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("FileAuthority([original input owner])")
+    }
+}
+impl Authority {
+    pub fn from_input(input: &InputSession) -> Self {
+        let scope = input.ticket_credentials(InputTicketId::from_raw(0));
+        Self {
+            monitor: input.monitor(),
+            binding: Binding {
+                session: scope.session,
+                lease: scope.lease,
+            },
+        }
+    }
+    pub fn binding(&self) -> Binding {
+        self.binding
+    }
+    pub fn deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
+        self.monitor.deadline(now)
+    }
+}
+
 /// Transfer IDs strictly increase within this original lane, even after cancel.
 /// Names and content identities are intentionally absent from diagnostics.
 pub struct Offer<'a> {
@@ -207,15 +239,28 @@ impl HostReceiver {
         policy: Policy,
         now: HostInstant,
     ) -> Result<Self, Error> {
+        Self::with_authority(
+            Authority::from_input(input),
+            directory,
+            permission,
+            policy,
+            now,
+        )
+    }
+    /// Continue after the input session has moved to the native worker. This
+    /// accepts only its original read-only handoff, never caller-authored IDs.
+    pub fn with_authority(
+        authority: Authority,
+        directory: DropDirectory,
+        permission: Permission,
+        policy: Policy,
+        now: HostInstant,
+    ) -> Result<Self, Error> {
         let policy = policy.validate()?;
-        let scope = input.ticket_credentials(InputTicketId::from_raw(0));
         let mut result = Self {
             directory,
-            authority: input.monitor(),
-            binding: Binding {
-                session: scope.session,
-                lease: scope.lease,
-            },
+            binding: authority.binding,
+            authority: authority.monitor,
             permission,
             policy,
             usage: Usage::default(),

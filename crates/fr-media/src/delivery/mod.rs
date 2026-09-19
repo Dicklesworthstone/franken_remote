@@ -4,9 +4,16 @@
 //! Asupersync-owned task. There is no second runtime, background thread, codec,
 //! or authentication bypass. Bindings must already be admitted by the session.
 mod budget;
+mod idr;
+pub use idr::IdrCoalescer;
 mod receive;
+mod recovery;
+pub use recovery::{RecoveryOffer, RecoveryRequestor};
 mod send;
-pub use send::{DeliveryMode, PacketOffer, SendCache, SendError, SendPolicy};
+pub use send::{
+    DeliveryMode, PacketOffer, RecoveryDemand, RecoveryDisposition, SendCache, SendError,
+    SendPolicy,
+};
 
 pub use budget::{BudgetUsage, MediaBudget};
 pub use receive::{

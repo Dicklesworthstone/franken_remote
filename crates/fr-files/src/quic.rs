@@ -71,8 +71,23 @@ impl HostReceiver {
     pub fn spawn(
         cx: Cx,
         q: &mut QuicRecords,
-        mut lane: FilesChannel,
+        lane: FilesChannel,
         input: &InputSession,
+        config: Configuration,
+    ) -> Result<Self, Error> {
+        Self::spawn_with_authority(
+            cx,
+            q,
+            lane,
+            crate::session::Authority::from_input(input),
+            config,
+        )
+    }
+    pub fn spawn_with_authority(
+        cx: Cx,
+        q: &mut QuicRecords,
+        mut lane: FilesChannel,
+        authority: crate::session::Authority,
         config: Configuration,
     ) -> Result<Self, Error> {
         lane.check(q).map_err(Error::Transport)?;
@@ -93,9 +108,9 @@ impl HostReceiver {
                 .try_reserve_exact(maximum)
                 .map_err(|_| Error::Limits)?;
             reply.resize(maximum, 0);
-            let (receiver, task) = wire::HostReceiver::spawn(
+            let (receiver, task) = wire::HostReceiver::spawn_with_authority(
                 cx.clone(),
-                input,
+                authority,
                 config.directory,
                 config.permission,
                 config.policy,
@@ -128,6 +143,9 @@ impl HostReceiver {
                 Err(error)
             }
         }
+    }
+    pub fn owns_inbound(&self, route: quic::Route) -> bool {
+        self.lane.owns_inbound(route)
     }
     pub fn state(&self) -> State {
         self.state
