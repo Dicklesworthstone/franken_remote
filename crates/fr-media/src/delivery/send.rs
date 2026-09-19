@@ -8,7 +8,10 @@ use fr_wire::{
 use std::sync::Arc;
 
 mod observation;
+mod recovery;
 use observation::PendingObservation;
+use recovery::PendingRecovery;
+pub use recovery::{RecoveryDemand, RecoveryDisposition};
 
 const CACHE_SLOTS: usize = 64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,6 +205,7 @@ pub struct SendCache {
     repair_spent: usize,
     closed: bool,
     needs_recovery: bool,
+    recovery_request: Option<PendingRecovery>,
 }
 impl fmt::Debug for SendCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -240,6 +244,7 @@ impl SendCache {
             repair_spent: 0,
             closed: false,
             needs_recovery: false,
+            recovery_request: None,
         })
     }
     pub const fn cached_bytes(&self) -> usize {
@@ -554,6 +559,7 @@ impl SendCache {
         if self.closed {
             return Err(SendError::Closed);
         }
+        self.check_recovery_deadline(now)?;
         if self.needs_recovery {
             return Err(SendError::NeedsRecovery);
         }
@@ -595,8 +601,11 @@ impl SendCache {
         Ok(())
     }
     pub fn next_deadline(&self) -> Option<u64> {
-        if self.closed || self.needs_recovery {
+        if self.closed {
             return None;
+        }
+        if self.needs_recovery {
+            return self.recovery_request.as_ref().map(|p| p.until);
         }
         self.pictures
             .iter()
@@ -615,6 +624,7 @@ impl SendCache {
         if self.closed {
             return Err(SendError::Closed);
         }
+        self.check_recovery_deadline(now)?;
         if !epoch.replaces(self.epoch) || !bindings.all_newer_than(self.bindings) {
             return Err(DeliveryError::StaleGeneration.into());
         }
@@ -637,6 +647,7 @@ impl SendCache {
         })
     }
     fn clear(&mut self) {
+        self.recovery_request = None;
         self.last_progress = None;
         self.observation = None;
         for p in &mut self.pictures {
