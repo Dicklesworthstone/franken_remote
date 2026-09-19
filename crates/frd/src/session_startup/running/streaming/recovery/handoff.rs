@@ -177,6 +177,7 @@ async fn during<S: Services>(
     native: impl Future<Output = Result<CaptureUpdate, crate::media::Error>>,
 ) -> Result<CaptureUpdate, Error> {
     let mut native = pin!(native);
+    let mut fence = CaptureFence::new(waiting.control.clone());
     let mut result = None;
     loop {
         let wait = waiting.wait(policy.network_turn)?;
@@ -199,6 +200,7 @@ async fn during<S: Services>(
         if let Some(value) = result.take() {
             let value = value.map_err(Error::Media)?;
             driven?;
+            fence.complete = true;
             return Ok(value);
         }
         driven?;
@@ -268,3 +270,6 @@ impl<S: Services> Services for Decoding<'_, '_, S> {
         self.waiting.receive(route, bytes)
     }
 }
+
+#[cfg(test)]
+mod cancellation;

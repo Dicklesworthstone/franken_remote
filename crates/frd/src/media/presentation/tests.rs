@@ -70,6 +70,13 @@ fn runtime() -> asupersync::runtime::Runtime {
         .unwrap()
 }
 async fn fixture(cx: &Cx, mode: &str) -> (Presenter, ReceivePipeline, MediaLimits) {
+    fixture_with_policy(cx, mode, ReceivePolicy::default()).await
+}
+async fn fixture_with_policy(
+    cx: &Cx,
+    mode: &str,
+    policy: ReceivePolicy,
+) -> (Presenter, ReceivePipeline, MediaLimits) {
     let limits = MediaLimits::new(ProtocolLimits::ABSOLUTE, 1150, 16384, 64).unwrap();
     let mut receiver = ReceivePipeline::new(
         ReceiveConfig {
@@ -79,7 +86,7 @@ async fn fixture(cx: &Cx, mode: &str) -> (Presenter, ReceivePipeline, MediaLimit
                 configuration: CodecConfigurationGeneration::INITIAL,
                 recovery: RecoveryGeneration::INITIAL,
             },
-            policy: ReceivePolicy::default(),
+            policy,
         },
         MediaBudget::new(limits.protocol()).unwrap(),
     )
@@ -299,3 +306,5 @@ fn borrowed_present_next_abandonment_immediately_closes_and_drains_receiver() {
         );
     });
 }
+
+mod recovery_drain;

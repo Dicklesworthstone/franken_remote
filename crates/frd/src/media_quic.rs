@@ -222,6 +222,16 @@ impl QuicEgress {
         self.tick()?;
         self.egress.enqueue(frame).map_err(Error::Media)
     }
+    /// Share the original native output; this connection still owns all sends,
+    /// pacing and authority checks, never the shared encoder's lifetime.
+    pub fn enqueue_shared_capture(
+        &mut self,
+        update: &media::SharedCaptureUpdate,
+    ) -> Result<(), Error> {
+        self.egress
+            .enqueue_shared_capture(update)
+            .map_err(Error::Media)
+    }
     pub fn enqueue_capture(&mut self, update: media::CaptureUpdate) -> Result<(), Error> {
         self.tick()?;
         self.egress.enqueue_capture(update).map_err(Error::Media)

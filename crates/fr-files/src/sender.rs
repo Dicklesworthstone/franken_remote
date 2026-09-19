@@ -3,6 +3,7 @@
 //! The parent session owns/drives QUIC and supplies live authorization. No path
 //! from the peer is opened. Each transfer is offered once, and a lost publication
 //! proof is unknown, never an invitation to retry. Service before/after network I/O.
+pub mod batch;
 mod source;
 use crate::{
     atp,
@@ -97,6 +98,8 @@ pub struct Receipt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     Idle,
+    /// A selected batch is waiting to start its next source under live authority.
+    Queued,
     Preparing,
     AwaitingAcceptance,
     Streaming,
@@ -156,6 +159,7 @@ pub struct Sender<'a> {
     clock: TimerDriverHandle,
     policy: Policy,
     next: u64,
+    batch: Option<batch::Batch>,
     transfer: Option<Transfer>,
     closed: bool,
 }
@@ -242,6 +246,7 @@ impl<'a> Sender<'a> {
             clock,
             policy,
             next: 1,
+            batch: None,
             transfer: None,
             closed: false,
         })
@@ -253,8 +258,16 @@ impl<'a> Sender<'a> {
     }
     pub fn stage(&self) -> Stage {
         self.transfer.as_ref().map_or(
-            if self.closed {
+            if self
+                .batch
+                .as_ref()
+                .is_some_and(batch::Batch::report_complete)
+            {
+                Stage::Finished
+            } else if self.closed {
                 Stage::Closed
+            } else if self.batch.is_some() {
+                Stage::Queued
             } else {
                 Stage::Idle
             },
@@ -272,12 +285,19 @@ impl<'a> Sender<'a> {
         self.transfer.as_ref().and_then(|t| t.result)
     }
     pub fn cleanup_finished(&self) -> bool {
-        self.transfer.as_ref().is_none_or(|t| t.source.finished())
+        self.batch
+            .as_ref()
+            .is_none_or(batch::Batch::no_pending_sources)
+            && self.transfer.as_ref().is_none_or(|t| t.source.finished())
     }
     /// Join only an already-finished original source thread. This never blocks
     /// on a kernel read, clears a publication receipt, or needs a live session.
     /// A panic is a retained cleanup failure, not a fabricated successful drain.
     pub fn try_finish_cleanup(&mut self) -> Option<Result<(), Error>> {
+        self.settle_batch();
+        if self.batch.as_ref().is_some_and(|b| !b.no_pending_sources()) {
+            return None;
+        }
         let Some(t) = &mut self.transfer else {
             return Some(Ok(()));
         };
@@ -289,6 +309,19 @@ impl<'a> Sender<'a> {
     /// File is a locally approved descriptor, not a wire path. The name is only
     /// the portable destination basename. Preparation is bounded and asynchronous.
     pub fn begin(&mut self, q: &QuicRecords, file: File, name: &str) -> Result<u64, Error> {
+        self.identity(q)?;
+        if self.batch.is_some() {
+            return Err(Error::Busy);
+        }
+        self.begin_until(q, file, name, None)
+    }
+    fn begin_until(
+        &mut self,
+        q: &QuicRecords,
+        file: File,
+        name: &str,
+        until: Option<u64>,
+    ) -> Result<u64, Error> {
         self.identity(q)?;
         if self.closed {
             return Err(Error::Closed);
@@ -308,6 +341,10 @@ impl<'a> Sender<'a> {
         let deadline = now
             .checked_add(micros(self.policy.transfer_lifetime)?)
             .ok_or(Error::Clock)?;
+        let deadline = until.map_or(deadline, |until| until.min(deadline));
+        if now >= deadline {
+            return Err(Error::Expired);
+        }
         let next = self.next.checked_add(1).ok_or(Error::Limits)?;
         let source = Source::spawn(self.cx.clone(), file, name.into(), self.policy, deadline)?;
         let id = self.next;
@@ -337,6 +374,9 @@ impl<'a> Sender<'a> {
     /// Result collection never waits for cleanup. A completed kernel call is not
     /// cancelled retroactively. Published outcomes remain readable after errors.
     pub fn take_result(&mut self) -> Option<Receipt> {
+        if self.batch.is_some() {
+            return None;
+        }
         let t = self.transfer.as_mut()?;
         let result = t.result?;
         if !t.source.finished() {
@@ -353,6 +393,7 @@ impl<'a> Sender<'a> {
     pub fn cancel(&mut self, q: &mut QuicRecords) -> Result<(), Error> {
         self.identity(q)?;
         self.fail(Error::Cancelled);
+        self.settle_batch();
         self.retire(q)
     }
     pub fn service(
@@ -361,10 +402,20 @@ impl<'a> Sender<'a> {
         mut authorize: impl FnMut() -> bool,
     ) -> Result<Stage, Error> {
         self.identity(q)?;
+        if self.batch.is_some() {
+            return self.service_batch(q, &mut authorize);
+        }
+        self.service_one(q, &mut authorize)
+    }
+    fn service_one(
+        &mut self,
+        q: &mut QuicRecords,
+        authorize: &mut impl FnMut() -> bool,
+    ) -> Result<Stage, Error> {
         if self.closed {
             return Ok(self.stage());
         }
-        let result = self.turn(q, &mut authorize);
+        let result = self.turn(q, authorize);
         if let Err(error) = result {
             self.fail(error);
             let _ = self.retire(q);
@@ -472,6 +523,9 @@ impl<'a> Sender<'a> {
         Ok(())
     }
     fn fail(&mut self, error: Error) {
+        if let Some(batch) = &mut self.batch {
+            batch.stop(batch::Stop::Local(error));
+        }
         self.closed = true;
         if let Some(t) = self.transfer.as_mut() {
             t.source.stop();

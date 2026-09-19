@@ -8,6 +8,30 @@ use fr_media::delivery::RecoveryDemand;
 use fr_transport::quic::ControlRoutes;
 use fr_wire::{decoder::Binding, negotiation::ControlBinding, recovery_request};
 
+/// An inner recovery error must fence authority before its pinned native work
+/// is dropped, not merely after the outer serving future returns Ready(Err).
+/// Declare this guard AFTER the futures it protects; successful handoff disarms
+/// it only after the native/network turn has actually completed.
+struct CaptureFence {
+    control: ObservationControl,
+    complete: bool,
+}
+impl CaptureFence {
+    fn new(control: ObservationControl) -> Self {
+        Self {
+            control,
+            complete: false,
+        }
+    }
+}
+impl Drop for CaptureFence {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.control.revoke();
+        }
+    }
+}
+
 impl StreamingHost {
     /// Enable reference recovery using the actual completed media attachments.
     /// This is observation-only and requires positive capability negotiation.
@@ -107,6 +131,7 @@ async fn round(
     let routes = session.opened.routes;
     let parent = session.opened.binding;
     let stream = &mut host.stream;
+    let control = stream.control.clone();
     let (credit, requests) = mpsc::channel(1);
     let (completed, results) = mpsc::channel(1);
     let last_capture = stream
@@ -167,13 +192,16 @@ async fn round(
     // Return intentionally ONLY after the network turn ended and the previous
     // capture's result was drained. Dropping the producer then abandons only its
     // idle credit wait, never a pending worker operation or an in-flight QUIC I/O.
-    poll_fn(|task| {
+    let mut fence = CaptureFence::new(control);
+    let result = poll_fn(|task| {
         if let Poll::Ready(result) = producer.as_mut().poll(task) {
             return Poll::Ready(Err(result.err().unwrap_or(Error::Closed)));
         }
         network.as_mut().poll(task)
     })
-    .await
+    .await;
+    fence.complete = result.is_ok();
+    result
 }
 
 struct Admission<'a, S> {

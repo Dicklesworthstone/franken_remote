@@ -642,9 +642,15 @@ impl StreamingViewer {
             }
             let ready = !recovering && self.peer.prepare_decode(&self.receiver)?;
             let job = if ready {
-                self.presenter
-                    .take_next(cx, &mut self.receiver)
-                    .map_err(Error::Media)?
+                recovery::admit(
+                    &mut self.peer,
+                    self.recovery.as_mut(),
+                    &mut self.receiver,
+                    &mut self.repair,
+                    cx,
+                    |receiver| self.presenter.take_next(cx, receiver),
+                )?
+                .flatten()
             } else {
                 None
             };
@@ -671,7 +677,9 @@ impl StreamingViewer {
                     .map_err(Error::Feedback)?;
             }
             let job = {
-                let mut decoding = pin!(self.presenter.decode_job(cx, job));
+                let drain_observation = recovery::enabled(&self.peer, self.recovery.as_ref());
+                let mut decoding =
+                    pin!(self.presenter.decode_stream_job(cx, job, drain_observation));
                 loop {
                     let decoded = {
                         let turn = network(
@@ -718,11 +726,24 @@ impl StreamingViewer {
                     )?;
                 }
             };
-            let receipt = job.complete(cx, &mut self.receiver).map_err(Error::Media)?;
+            let receipt = recovery::admit(
+                &mut self.peer,
+                self.recovery.as_mut(),
+                &mut self.receiver,
+                &mut self.repair,
+                cx,
+                |receiver| job.complete(cx, receiver),
+            )?;
             if let Some(f) = &mut self.feedback {
                 f.complete(now(cx).map_err(Error::Session)?)
                     .map_err(Error::Feedback)?;
             }
+            let Some(receipt) = receipt else {
+                // Native borrowing ended, but this generation was fenced during
+                // its network turn. No presentation, first-frame witness or input
+                // authority may be manufactured from the obsolete completion.
+                continue;
+            };
             let stage = receipt.stage;
             let event = Presentation {
                 frame: receipt.frame,

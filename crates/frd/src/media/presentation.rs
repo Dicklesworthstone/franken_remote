@@ -119,6 +119,22 @@ impl Presenter {
         cx: &'a Cx,
         job: DecodeJob,
     ) -> impl Future<Output = Result<DecodeJob, Error>> + 'a {
+        self.decode_stream_job(cx, job, false)
+    }
+    /// Observation-only recovery may drain an already-submitted native request
+    /// after its reference chain is fenced. Keep the original worker, reservation
+    /// and IPC deadline; this does not make a stale picture a decoded receipt.
+    /// The canonical receiver owner must retire the returned job without calling
+    /// `complete` when its recovery reporter has accepted the failed chain.
+    ///
+    /// Native errors, context cancellation and future abandonment still poison
+    /// the worker. Input-owning/requesting callers must keep fail-fast fencing.
+    pub(crate) fn decode_stream_job<'a>(
+        &'a mut self,
+        cx: &'a Cx,
+        job: DecodeJob,
+        drain_observation: bool,
+    ) -> impl Future<Output = Result<DecodeJob, Error>> + 'a {
         let valid = self
             .binding
             .check_picture(job.picture())
@@ -133,6 +149,13 @@ impl Presenter {
             valid?;
             let job = call.job.as_ref().expect("owned decode job");
             let picture = job.picture();
+            // Tolerance begins only once this operation actually starts. An
+            // unpolled job whose scope was fenced must not start native work.
+            if !picture.is_live() {
+                return Err(Error::Receiver(
+                    fr_media::delivery::DeliveryError::DecodeMismatch,
+                ));
+            }
             if picture.epoch().configuration != configuration.generation || job.stage.is_some() {
                 return Err(Error::InvalidFrame);
             }
@@ -175,7 +198,7 @@ impl Presenter {
                     deadline,
                 ));
                 poll_fn(|task| {
-                    if !picture.is_live() {
+                    if !drain_observation && !picture.is_live() {
                         return Poll::Ready(Err(Error::Receiver(
                             fr_media::delivery::DeliveryError::DecodeMismatch,
                         )));
@@ -184,7 +207,7 @@ impl Presenter {
                 })
                 .await?;
             }
-            if !picture.is_live() {
+            if !drain_observation && !picture.is_live() {
                 return Err(Error::Receiver(
                     fr_media::delivery::DeliveryError::DecodeMismatch,
                 ));

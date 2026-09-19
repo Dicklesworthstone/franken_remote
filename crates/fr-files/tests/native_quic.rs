@@ -158,3 +158,6 @@ fn published_receipt_survives_local_retirement_and_completed_cleanup() {
 
 #[path = "native_quic/sender.rs"]
 mod sender;
+
+#[path = "native_quic/batch.rs"]
+mod batch;

@@ -1,5 +1,5 @@
 //! Recovery reports in the canonical observation loop, not UI callbacks.
-use super::{Error, Peer, Repair, now, recovery_control};
+use super::{Error, Peer, Repair, media, now, recovery_control};
 use asupersync::cx::Cx;
 use fr_media::delivery::{DeliveryError, ReceivePipeline};
 
@@ -10,6 +10,12 @@ pub(super) fn recoverable(error: DeliveryError) -> bool {
             | DeliveryError::RecoveryExpired
             | DeliveryError::DecodeFailed
     )
+}
+
+/// Only a positively negotiated, observation-only session can retain its
+/// decoder across a failed chain. Acquiring/viewing peers may own input state.
+pub(super) fn enabled(peer: &Peer, report: Option<&recovery_control::Receiver>) -> bool {
+    report.is_some() && matches!(peer, Peer::Observe { .. })
 }
 
 /// Fences the real receiver before any new decode or transport work. There is
@@ -94,5 +100,39 @@ pub(super) fn prepare(
             Ok(())
         }
         Err(error) => Err(error),
+    }
+}
+
+/// Guard transitions which can discover expiry on their own clock read: taking
+/// a queued picture and accepting a completed native job use the same ORIGINAL
+/// recovery owner. None means no result can be used from this failed chain;
+/// neither selection nor native completion can restart its deadline.
+///
+/// A completion closure owns its native job. Skipping/dropping it retires the
+/// still-charged bytes, never another receiver's reservation or native reply.
+/// Protocol errors, foreign scopes, cancellation and control remain terminal.
+pub(super) fn admit<T>(
+    peer: &mut Peer,
+    mut report: Option<&mut recovery_control::Receiver>,
+    receiver: &mut ReceivePipeline,
+    repair: &mut Repair,
+    cx: &Cx,
+    operation: impl FnOnce(&mut ReceivePipeline) -> Result<T, media::Error>,
+) -> Result<Option<T>, Error> {
+    if service(peer, report.as_deref_mut(), receiver, repair, cx)? {
+        return Ok(None);
+    }
+    match operation(receiver) {
+        Ok(value) => Ok(Some(value)),
+        Err(media::Error::Receiver(error))
+            if enabled(peer, report.as_deref()) && recoverable(error) =>
+        {
+            if service(peer, report, receiver, repair, cx)? {
+                Ok(None)
+            } else {
+                Err(Error::Media(media::Error::Receiver(error)))
+            }
+        }
+        Err(error) => Err(Error::Media(error)),
     }
 }

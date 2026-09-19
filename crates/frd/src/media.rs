@@ -41,7 +41,7 @@ pub use receiver_feedback::Error as ReceiverFeedbackError;
 pub mod renewal;
 #[cfg(target_os = "linux")]
 pub mod streaming;
-pub use capture_update::CaptureUpdate;
+pub use capture_update::{CaptureUpdate, FanoutReport, SharedCaptureUpdate};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
