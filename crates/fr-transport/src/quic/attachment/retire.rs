@@ -1,4 +1,4 @@
-//! Completed optional-channel cleanup, not abandonment of a partial handshake.
+//! Completed auxiliary-channel cleanup, never abandonment of a partial handshake.
 use super::{ACTIVE, MediaChannel, MediaRole, Ordering, Phase, QuicRecords, RETIRED};
 use crate::quic::{Cx, Error};
 use asupersync::bytes::Bytes;
@@ -7,6 +7,17 @@ use asupersync::bytes::Bytes;
 // acknowledgment, authority token, or retry semantics are introduced.
 const CLIPBOARD_RETIRED: u64 = 0x4652_4350;
 const FILES_RETIRED: u64 = 0x4652_4649;
+const MEDIA_RETIRED: u64 = 0x4652_4d44;
+
+fn retirement_code(role: MediaRole) -> Option<u64> {
+    match role {
+        MediaRole::Clipboard => Some(CLIPBOARD_RETIRED),
+        MediaRole::Files => Some(FILES_RETIRED),
+        MediaRole::Configuration | MediaRole::Recovery | MediaRole::Video => Some(MEDIA_RETIRED),
+        // Input has one ordering/authority domain for the connection lifetime.
+        MediaRole::Input => None,
+    }
+}
 
 impl MediaChannel {
     /// Retire only a COMPLETED optional clipboard pair on the original connection.
@@ -20,6 +31,28 @@ impl MediaChannel {
     /// and stream IDs; a second attachment cannot reset cumulative file quotas.
     pub fn retire_files(&mut self, q: &mut QuicRecords, cx: &Cx) -> Result<(), Error> {
         self.retire_optional(q, cx, MediaRole::Files)
+    }
+    /// Retire a COMPLETED configuration, recovery or video attachment on its
+    /// original connection. The session fences view/input authority first, then
+    /// retires all three old media roles and admits fresh, generation-bound
+    /// attachments. This operation does not grant replacement admission.
+    ///
+    /// Reliable native buffers/retransmissions and application-held fragments
+    /// are abandoned. Already admitted datagrams remain bounded native work and
+    /// may be in flight; their old binding is no longer deliverable after local
+    /// retirement. Input/control and other subscriptions are not reset.
+    ///
+    /// Consumed tickets, stream IDs and binding IDs remain tombstones. Repeated
+    /// replacements reach the existing connection limit rather than allocating
+    /// an unbounded history or recycling old stream identities.
+    pub fn retire_media(&mut self, q: &mut QuicRecords, cx: &Cx) -> Result<(), Error> {
+        if !matches!(
+            self.descriptor.role,
+            MediaRole::Configuration | MediaRole::Recovery | MediaRole::Video
+        ) {
+            return Err(Error::WrongRoute);
+        }
+        self.retire_optional(q, cx, self.descriptor.role)
     }
     fn retire_optional(
         &mut self,
@@ -53,12 +86,12 @@ impl MediaChannel {
 }
 impl QuicRecords {
     /// Run before framing/retained-record deadline checks. A peer's reset/FIN
-    /// cancels this optional pair; it is not EOF on the critical input stream.
+    /// cancels this media/optional pair; it is not EOF on the critical input stream.
     /// Retired reservations remain forever to prevent replay-ledger recreation.
     pub(crate) fn service_optional_retirements(&mut self, cx: &Cx) -> Result<(), Error> {
         for index in 0..self.attachments.len() {
             let r = &self.attachments[index];
-            if !matches!(r.role, MediaRole::Clipboard | MediaRole::Files) {
+            if retirement_code(r.role).is_none() {
                 continue;
             }
             if r.state.load(Ordering::Acquire) == ACTIVE {
@@ -87,17 +120,11 @@ impl QuicRecords {
     }
     fn retire_optional_at(&mut self, cx: &Cx, index: usize) -> Result<(), Error> {
         let r = &self.attachments[index];
-        if !matches!(r.role, MediaRole::Clipboard | MediaRole::Files)
-            || r.state.load(Ordering::Acquire) != ACTIVE
-        {
+        let code = retirement_code(r.role).ok_or(Error::WrongRoute)?;
+        if r.state.load(Ordering::Acquire) != ACTIVE {
             return Err(Error::WrongRoute);
         }
         let (outbound, inbound, binding) = (r.outbound, r.inbound, r.binding);
-        let code = if r.role == MediaRole::Files {
-            FILES_RETIRED
-        } else {
-            CLIPBOARD_RETIRED
-        };
         let native = self.native.as_mut().ok_or(Error::Closed)?;
         let outgoing = native
             .connection()
@@ -126,6 +153,17 @@ impl QuicRecords {
             .stop_stream_receiving(cx, inbound, code)
             .map_err(|_| Error::Native)?;
         self.pending_writes.retain(|p| p.route.stream != outbound);
+        // Remove only this binding's routing capability. Do not drain the
+        // native datagram queue: it can also contain another view's media or
+        // critical pointer state. Late arrivals fail the normal route lookup.
+        self.datagrams.retain(|route| route.binding != binding);
+        if self
+            .pending_datagram
+            .as_ref()
+            .is_some_and(|(route, _, _)| route.binding == binding)
+        {
+            self.pending_datagram = None;
+        }
         for sender in &mut self.senders {
             if sender.route.stream == outbound {
                 sender.bytes = 0;
