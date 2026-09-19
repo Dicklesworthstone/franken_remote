@@ -29,31 +29,23 @@ use std::{
     time::Instant,
 };
 
-fn capabilities(enabled: bool) -> Vec<Capability> {
-    let mut caps: Vec<_> = [
-        fr_wire::decoder::CAPABILITY,
-        fr_wire::attachment::CAPABILITY,
-        fr_wire::attachment::DELIVERY_CAPABILITY,
-        fr_wire::receiver_metrics::CAPABILITY,
-    ]
-    .into_iter()
-    .map(|name| Capability {
-        name: name.into(),
-        version: 1,
-        required: true,
-    })
-    .collect();
-    if enabled {
-        caps.push(Capability {
-            name: recovery_request::CAPABILITY.into(),
-            version: 1,
-            required: true,
-        });
-    }
-    caps.sort_by(|a, b| a.name.cmp(&b.name));
+fn capabilities(enabled: bool, metrics: bool) -> Vec<Capability> {
+    // Use the exact production desktop offer, not a test-only feature list.
+    let mut caps = fr_client::native::observation_offer().capabilities;
+    caps.retain(|cap| {
+        (enabled || cap.name != recovery_request::CAPABILITY)
+            && (metrics || cap.name != fr_wire::receiver_metrics::CAPABILITY)
+    });
     caps
 }
-async fn pair(c: &Cx, h: &Cx, role: Role, enabled: bool) -> (HostSession, ViewerSession) {
+
+async fn pair(
+    c: &Cx,
+    h: &Cx,
+    role: Role,
+    enabled: bool,
+    metrics: bool,
+) -> (HostSession, ViewerSession) {
     let cfg = session_startup::Configuration {
         offer: Offer {
             versions: vec![0],
@@ -61,7 +53,7 @@ async fn pair(c: &Cx, h: &Cx, role: Role, enabled: bool) -> (HostSession, Viewer
             profile_version: 0,
             role,
             limits: ProtocolLimits::ABSOLUTE,
-            capabilities: capabilities(enabled),
+            capabilities: capabilities(enabled, metrics),
         },
         binding: ControlBinding {
             id: 7,
@@ -78,10 +70,12 @@ async fn pair(c: &Cx, h: &Cx, role: Role, enabled: bool) -> (HostSession, Viewer
         },
     };
     let (client, server) = support::native_pair(c, "localhost", fr_transport::quic::ALPN).await;
+    let mut offered = fr_client::native::observation_offer();
+    offered.role = role;
     let mut viewer = session_startup::Viewer::new(
         c.clone(),
         client.unwrap(),
-        cfg.offer.clone(),
+        offered,
         cfg.transport,
         Duration::from_secs(2),
     )
@@ -153,7 +147,19 @@ struct Fixture {
 }
 #[allow(clippy::too_many_lines)]
 async fn fixture(c: &Cx, h: &Cx, mode: &str, budget: u64, role: Role, enabled: bool) -> Fixture {
-    let (mut host, mut viewer) = pair(c, h, role, enabled).await;
+    Box::pin(fixture_features(c, h, mode, budget, role, enabled, true)).await
+}
+#[allow(clippy::too_many_lines)]
+async fn fixture_features(
+    c: &Cx,
+    h: &Cx,
+    mode: &str,
+    budget: u64,
+    role: Role,
+    enabled: bool,
+    metrics: bool,
+) -> Fixture {
+    let (mut host, mut viewer) = pair(c, h, role, enabled, metrics).await;
     let (hc, vc) = attach(&mut host, &mut viewer, c, h, MediaRole::Configuration, 18).await;
     let (hr, vr) = attach(&mut host, &mut viewer, c, h, MediaRole::Recovery, 19).await;
     let (hv, vv) = attach(&mut host, &mut viewer, c, h, MediaRole::Video, 20).await;
@@ -290,7 +296,14 @@ async fn fixture(c: &Cx, h: &Cx, mode: &str, budget: u64, role: Role, enabled: b
 
 #[test]
 fn both_running_peers_recover_and_continue_on_the_original_workers_and_connection() {
-    run(|c, h| async move {
+    recover_on_original_owners(true);
+}
+#[test]
+fn shipped_observer_recovers_when_the_host_omits_optional_decoder_metrics() {
+    recover_on_original_owners(false);
+}
+fn recover_on_original_owners(metrics: bool) {
+    run(move |c, h| async move {
         let cleanup = Cx::current().unwrap();
         let Fixture {
             mut host,
@@ -299,7 +312,16 @@ fn both_running_peers_recover_and_continue_on_the_original_workers_and_connectio
             receiver,
             presenter,
             initial,
-        } = Box::pin(fixture(&c, &h, "healthy", 2_000_000, Role::Observe, true)).await;
+        } = Box::pin(fixture_features(
+            &c,
+            &h,
+            "healthy",
+            2_000_000,
+            Role::Observe,
+            true,
+            metrics,
+        ))
+        .await;
         let original_host = host.worker_id();
         let original_viewer = presenter.worker_id();
         let original_connection = host.host.session().unwrap().opened.transport.binding();
@@ -339,6 +361,8 @@ fn both_running_peers_recover_and_continue_on_the_original_workers_and_connectio
         assert!(server.is_err());
         assert!(client.is_err());
         assert_eq!(host.worker_id(), original_host);
+        assert_eq!(host.receiver_feedback_reports() > 0, metrics);
+        assert_eq!(viewer.receiver_feedback_reports() > 0, metrics);
         assert_eq!(viewer.worker_id(), original_viewer);
         assert_eq!(host.statistics().recovered_streams, 1);
         assert_eq!(

@@ -21,3 +21,6 @@ pub use session::{
     ClientSession, CloseReason, DecoderScheduler, QueuedPicture, ReconnectPolicy, ReconnectReason,
     SessionDiagnostics, SessionError, SessionState, SuspendReason,
 };
+
+/// Implemented native observation capability profile, not transport qualification.
+pub mod native;

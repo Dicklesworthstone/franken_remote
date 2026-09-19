@@ -21,10 +21,7 @@ use fr_native::{
     },
     viewer_window::{Status as WindowStatus, StopReason, WindowControl},
 };
-use fr_wire::{
-    display::Catalog,
-    negotiation::{Capability, Offer, Role},
-};
+use fr_wire::{display::Catalog, negotiation::Offer};
 use frd::{
     native_connection::{
         AddressFamily, Client, Configuration, LocalApi, PeerSelector, TailnetError,
@@ -393,29 +390,9 @@ fn read_roots(path: &Path) -> Result<Vec<Certificate>, Failure> {
     Ok(roots)
 }
 fn offer() -> Offer {
-    let mut capabilities = [
-        fr_wire::display::CAPABILITY,
-        fr_wire::decoder::CAPABILITY,
-        fr_wire::attachment::CAPABILITY,
-        fr_wire::attachment::DELIVERY_CAPABILITY,
-    ]
-    .into_iter()
-    .map(|name| Capability {
-        name: name.into(),
-        version: 1,
-        required: true,
-    })
-    .collect::<Vec<_>>();
-    capabilities.sort_by(|a, b| a.name.cmp(&b.name));
-    Offer {
-        versions: vec![0],
-        profile: 1,
-        profile_version: 0,
-        role: Role::Observe,
-        limits: fr_core::limits::ProtocolLimits::ABSOLUTE,
-        capabilities,
-    }
+    fr_client::native::observation_offer()
 }
+
 #[derive(Default)]
 struct Progress {
     attempts: u8,
@@ -518,8 +495,9 @@ mod tests {
     fn native_offer_contains_no_control_clipboard_or_audio_capability() {
         let offer = offer();
         assert!(offer.validate().is_ok());
-        assert_eq!(offer.role, Role::Observe);
-        assert_eq!(offer.capabilities.len(), 4);
+        assert_eq!(offer.role, fr_wire::negotiation::Role::Observe);
+        assert_eq!(offer, fr_client::native::observation_offer());
+        assert_eq!(offer.capabilities.len(), 6);
         assert!(offer.capabilities.iter().all(|c| !c.name.contains("input")
             && !c.name.contains("clipboard")
             && !c.name.contains("audio")));
