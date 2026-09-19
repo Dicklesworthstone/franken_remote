@@ -73,6 +73,49 @@ impl SharedFramePool {
                 total <= ledger.maximum.bytes && ledger.used.pictures < ledger.maximum.pictures
             })
     }
+    /// Reserve physical bytes AND a picture slot before starting native work.
+    /// Cloned pools and concurrent encoders consume the same ledger. Keep this
+    /// non-cloneable reservation until the work has completed or been drained;
+    /// dropping a future does not by itself release a native-owned allocation.
+    pub fn reserve_capacity(
+        &self,
+        maximum_capacity: usize,
+    ) -> Result<SharedFrameReservation, DeliveryError> {
+        if maximum_capacity == 0 {
+            return Err(DeliveryError::ResourceLimit);
+        }
+        let charged = maximum_capacity
+            .checked_add(Allocation::METADATA_BYTES)
+            .ok_or(DeliveryError::ResourceLimit)?;
+        let mut ledger = self.ledger.lock().map_err(|_| DeliveryError::WrongState)?;
+        let total = ledger
+            .used
+            .bytes
+            .checked_add(charged)
+            .ok_or(DeliveryError::ResourceLimit)?;
+        if total > ledger.maximum.bytes || ledger.used.pictures >= ledger.maximum.pictures {
+            return Err(DeliveryError::ResourceLimit);
+        }
+        ledger.used.bytes = total;
+        ledger.used.pictures += 1;
+        drop(ledger);
+        Ok(SharedFrameReservation {
+            permit: SharedPermit {
+                pool: self.clone(),
+                charged,
+            },
+        })
+    }
+    /// Largest output allocation which can ever fit, even when the pool is empty.
+    /// A producer with a larger native output bound must refuse, not wait forever.
+    pub fn maximum_capacity(&self) -> usize {
+        self.ledger
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .maximum
+            .bytes
+            - Allocation::METADATA_BYTES
+    }
     /// Move an already bounded encoder output without copying its Vec. Upstream
     /// production must itself be bounded BEFORE allocating/encoding; this is the
     /// persistent shared-storage admission, not permission for an unlimited input.
@@ -112,6 +155,76 @@ impl SharedFramePool {
                 pool: self.clone(),
                 charged,
             },
+        })))
+    }
+}
+/// Exclusive pre-production credit. Conversion to a frame transfers the SAME
+/// reservation without releasing/reacquiring a slot. Unused capacity is returned
+/// only after inspecting the actual output allocation, never just its length.
+#[must_use = "retain the reservation until the native operation has drained"]
+pub struct SharedFrameReservation {
+    permit: SharedPermit,
+}
+impl core::fmt::Debug for SharedFrameReservation {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SharedFrameReservation")
+            .field("maximum_capacity", &self.maximum_capacity())
+            .finish_non_exhaustive()
+    }
+}
+impl SharedFrameReservation {
+    pub fn maximum_capacity(&self) -> usize {
+        self.permit.charged - Allocation::METADATA_BYTES
+    }
+    /// Full logical retention charge for each recipient, before its own metadata.
+    pub const fn charged_bytes(&self) -> usize {
+        self.permit.charged
+    }
+    /// Transfer a completed output, refusing an encoder that exceeded its actual
+    /// allocation bound, even if the returned picture's LENGTH fits. Failure
+    /// destroys the output before returning the reservation's physical credit.
+    pub fn share(mut self, unit: EncodedAccessUnit) -> Result<SharedFrame, DeliveryError> {
+        if self
+            .permit
+            .pool
+            .limits
+            .validate_access_unit_len(unit.bytes().len())
+            .is_err()
+        {
+            drop(unit);
+            return Err(DeliveryError::ResourceLimit);
+        }
+        let frame = unit.frame();
+        let kind = unit.kind();
+        let configuration = unit.config_generation();
+        let capture_micros = unit.capture_micros();
+        let bytes = unit.into_bytes();
+        if bytes.capacity() > self.maximum_capacity() {
+            drop(bytes);
+            return Err(DeliveryError::ResourceLimit);
+        }
+        // Addition is bounded by the original checked reservation above.
+        let actual = bytes.capacity() + Allocation::METADATA_BYTES;
+        let returned = self.permit.charged - actual;
+        let result = match self.permit.pool.ledger.lock() {
+            Ok(mut ledger) => {
+                ledger.used.bytes -= returned;
+                self.permit.charged = actual;
+                Ok(())
+            }
+            Err(_) => Err(DeliveryError::WrongState),
+        };
+        if let Err(error) = result {
+            drop(bytes);
+            return Err(error);
+        }
+        Ok(SharedFrame(Arc::new(Allocation {
+            frame,
+            kind,
+            configuration,
+            capture_micros,
+            bytes,
+            permit: self.permit,
         })))
     }
 }

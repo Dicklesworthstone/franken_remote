@@ -10,7 +10,7 @@ mod receive;
 mod recovery;
 pub use recovery::{RecoveryOffer, RecoveryRequestor};
 mod shared;
-pub use shared::{SharedFrame, SharedFramePool};
+pub use shared::{SharedFrame, SharedFramePool, SharedFrameReservation};
 mod send;
 pub use send::{
     DeliveryMode, PacketOffer, RecoveryDemand, RecoveryDisposition, SendCache, SendError,
