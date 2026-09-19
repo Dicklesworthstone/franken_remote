@@ -11,7 +11,7 @@ use crate::{
     worker::{self, Completion, Task},
 };
 use asupersync::cx::Cx;
-use fr_core::{ids::InputTicketId, input_submission::InputSession};
+use fr_core::input_submission::InputSession;
 use fr_wire::{
     WireError,
     files::{self, Body, Context, Direction, Disposition, Limits, Message, Reason, Role},
@@ -24,10 +24,10 @@ pub struct Settings {
     pub limits: Limits,
 }
 impl Settings {
-    fn validate(self, input: &InputSession) -> Result<(), Error> {
+    fn validate(self, authority: &session::Authority) -> Result<(), Error> {
         self.incoming.validate().map_err(Error::Wire)?;
         self.outgoing.validate().map_err(Error::Wire)?;
-        let scope = input.ticket_credentials(InputTicketId::from_raw(0));
+        let scope = authority.binding();
         if self.incoming.sender != Role::Controller
             || self.outgoing.sender != Role::Host
             || self.incoming.direction != Direction::ToHost
@@ -89,10 +89,27 @@ impl HostReceiver {
         policy: Policy,
         settings: Settings,
     ) -> Result<(Self, Task), Error> {
-        settings.validate(input)?;
-        let (atp, task) = atp::Receiver::spawn(
+        Self::spawn_with_authority(
             cx,
-            input,
+            session::Authority::from_input(input),
+            directory,
+            permission,
+            policy,
+            settings,
+        )
+    }
+    pub fn spawn_with_authority(
+        cx: Cx,
+        authority: session::Authority,
+        directory: DropDirectory,
+        permission: Permission,
+        policy: Policy,
+        settings: Settings,
+    ) -> Result<(Self, Task), Error> {
+        settings.validate(&authority)?;
+        let (atp, task) = atp::Receiver::spawn_with_authority(
+            cx,
+            authority,
             directory,
             permission,
             policy,

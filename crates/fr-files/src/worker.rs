@@ -310,11 +310,27 @@ pub fn spawn(
     permission: Permission,
     policy: Policy,
 ) -> Result<(Mailbox, Task), Error> {
+    spawn_with_authority(
+        cx,
+        session::Authority::from_input(input),
+        root,
+        permission,
+        policy,
+    )
+}
+/// Spawn with the handoff retained before the input owner moved to its worker.
+pub fn spawn_with_authority(
+    cx: Cx,
+    authority: session::Authority,
+    root: DropDirectory,
+    permission: Permission,
+    policy: Policy,
+) -> Result<(Mailbox, Task), Error> {
     cx.checkpoint().map_err(|_| Error::Cancelled)?;
     let clock = cx.timer_driver().ok_or(Error::Clock)?;
     let now = HostInstant::from_micros(clock.now().as_nanos() / 1000);
-    let receiver =
-        HostReceiver::new(input, root, permission.clone(), policy, now).map_err(Error::Session)?;
+    let receiver = HostReceiver::with_authority(authority, root, permission.clone(), policy, now)
+        .map_err(Error::Session)?;
     let binding = receiver.binding();
     let shared = Arc::new(Shared {
         inbox: Mutex::new(Inbox {
