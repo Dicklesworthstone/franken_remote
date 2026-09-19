@@ -11,5 +11,9 @@ publish = false
 asupersync.workspace = true
 fr-core.workspace = true
 
+[dev-dependencies]
+fr-media.workspace = true
+fr-wire.workspace = true
+
 [lints]
 workspace = true
