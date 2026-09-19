@@ -20,3 +20,10 @@ pub mod atp;
 
 #[cfg(target_os = "linux")]
 pub mod wire;
+
+#[cfg(target_os = "linux")]
+pub mod quic;
+
+/// Bounded native file sender using locally selected descriptors.
+#[cfg(target_os = "linux")]
+pub mod sender;
