@@ -5,6 +5,8 @@
 //! or authentication bypass. Bindings must already be admitted by the session.
 mod budget;
 mod receive;
+mod recovery;
+pub use recovery::{RecoveryOffer, RecoveryRequestor};
 mod send;
 pub use send::{DeliveryMode, PacketOffer, SendCache, SendError, SendPolicy};
 

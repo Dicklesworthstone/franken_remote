@@ -116,6 +116,7 @@ pub enum Kind {
     FirstFrameDecoded = 0x0033,
     Fragment = 0x0034,
     Repair = 0x0035,
+    RecoveryRequest = 0x0036,
     Progress = 0x0037,
     Key = 0x0040,
     Button = 0x0041,
@@ -177,6 +178,7 @@ impl Kind {
             0x0033 => Ok(Self::FirstFrameDecoded),
             0x0034 => Ok(Self::Fragment),
             0x0035 => Ok(Self::Repair),
+            0x0036 => Ok(Self::RecoveryRequest),
             0x0037 => Ok(Self::Progress),
             0x0040 => Ok(Self::Key),
             0x0041 => Ok(Self::Button),
@@ -229,6 +231,7 @@ impl Kind {
             | Self::StreamBinding
             | Self::BindingAccepted
             | Self::DisplayCatalog
+            | Self::RecoveryRequest
             | Self::SelectDisplay
             | Self::Key
             | Self::Button
