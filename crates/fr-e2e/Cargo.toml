@@ -1,0 +1,22 @@
+[package]
+name = "fr-e2e"
+version = "0.1.0"
+description = "Scripted end-to-end session harness with structured logging and artifact capture for FrankenRemote"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+asupersync.workspace = true
+fr-core.workspace = true
+fr-wire.workspace = true
+fr-client.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+frd.workspace = true
+
+[lints]
+workspace = true

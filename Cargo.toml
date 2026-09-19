@@ -37,6 +37,7 @@ fr-transport = { path = "crates/fr-transport" }
 fr-native = { path = "crates/fr-native" }
 frd = { path = "crates/frd" }
 fr-client = { path = "crates/fr-client" }
+fr-e2e = { path = "crates/fr-e2e" }
 
 [workspace.lints.rust]
 # Protocol/policy/authority code is safe Rust (AGENTS.md section 3.2). The
