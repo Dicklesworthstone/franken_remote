@@ -1,6 +1,7 @@
 //! Approved native host bootstrap. Discovery, selected capture and decoder
 //! negotiation use their existing owners while the original session stays driven.
 mod managed;
+mod shared;
 use super::{HostSession, Services, StreamingHost};
 use crate::input_quic::NegotiatedInput;
 use crate::session_startup::native_control;
@@ -40,6 +41,7 @@ pub enum Error {
     Input(crate::input_quic::Error),
     Clock(crate::media::clock::Error),
     Wire(fr_wire::WireError),
+    Shared(media::shared_publisher::Error),
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -93,6 +95,7 @@ struct Budget {
     until: u64,
     turn: Duration,
     failure: std::sync::Mutex<Option<Error>>,
+    source: Option<media::shared_publisher::JoinQueue>,
 }
 impl Budget {
     fn new(control: ObservationControl, policy: Policy) -> Result<Self, Error> {
@@ -109,6 +112,7 @@ impl Budget {
             until,
             turn: policy.network_turn,
             failure: std::sync::Mutex::new(None),
+            source: None,
         })
     }
     fn fail(&self, error: Error) -> Error {
@@ -121,6 +125,11 @@ impl Budget {
         error
     }
     fn remaining(&self) -> Result<Duration, Error> {
+        if let Some(source) = &self.source {
+            source
+                .check_source()
+                .map_err(|e| self.fail(Error::Shared(e)))?;
+        }
         let failure = self
             .failure
             .lock()

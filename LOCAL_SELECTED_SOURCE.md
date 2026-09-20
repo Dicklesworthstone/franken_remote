@@ -24,8 +24,10 @@ mutable worker access retires the selection as well as capture provenance.
 
 This enables a locally selected source to be handed to the existing shared
 publisher rather than tying native monitor configuration to its first viewer.
-Normal listener and shared-session selection/attachment integration are separate
-work; this API is not an installable multi-viewer workstation or an OS consent UI.
+The normal approved-session selection and attachment path is now joined through
+`HostSession::start_shared_display` and `join_shared_display`; see
+[Shared display bootstrap](SHARED_DISPLAY_BOOTSTRAP.md). Listener wiring and the
+OS consent UI remain separate; this is not an installable multi-viewer workstation.
 
 ## Executed validation
 

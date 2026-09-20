@@ -33,6 +33,19 @@ impl Publisher {
     }
 }
 impl JoinQueue {
+    /// Original local selected-display metadata only. Callers must obtain the
+    /// viewer's observation consent before disclosing it. This snapshot grants
+    /// neither consent nor freshness and never exposes neighboring displays.
+    pub fn selected_catalog(&self) -> Result<fr_wire::display::Catalog, Error> {
+        let shared = self.members.upgrade().ok_or(Error::Closed)?;
+        let mut members = shared.lock().map_err(|_| Error::Poisoned)?;
+        members.tick()?;
+        members.selected_catalog.ok_or(Error::WrongSource)
+    }
+    pub(crate) fn check_source(&self) -> Result<(), Error> {
+        let shared = self.members.upgrade().ok_or(Error::Closed)?;
+        shared.lock().map_err(|_| Error::Poisoned)?.tick()
+    }
     /// Reserve one of the same eight subscriber slots. Await a fresh rate-admitted
     /// source IDR, then drive `Subscriber::service` on this original connection.
     /// No media is sent until `DecoderConfigured`; readiness needs `FirstDecoded`.
@@ -58,7 +71,8 @@ impl JoinQueue {
         media
             .check_shared_publication(transport, view)
             .map_err(Error::Transport)?;
-        if control.same_owner(&members.owner)
+        if !members.selected_view(view)
+            || control.same_owner(&members.owner)
             || members.owner.belongs_to_session(view.parent.remote_session)
             || same_task(&control, &members.owner)
             || members.anchor.is_none_or(|a| !same_source_view(a, view))
@@ -363,5 +377,23 @@ impl Subscription {
         // not stall the source or build a GOP replay queue. This extra ceiling
         // never raises the original sender's negotiated byte/count/time limits.
         Ok(self.cache.cached_pictures() < 4 && self.cache.can_push_capacity(charged))
+    }
+}
+
+impl Subscriber {
+    /// Used only during the synchronous handoff from the original display
+    /// bootstrap. Clamp waiting AND decoder setup to that call-time budget;
+    /// elapsed time between stages must never create a later deadline.
+    pub(crate) fn cap_join_deadline(&mut self, q: &QuicRecords, until: u64) -> Result<(), Error> {
+        self.with_entry(q, |entry| {
+            if let Some(join) = &mut entry.join {
+                if join.host.is_some() {
+                    return Err(Error::WrongSource);
+                }
+                join.until = join.until.min(until);
+                join.setup = join.setup.capped_at(join.until);
+            }
+            Ok(())
+        })
     }
 }

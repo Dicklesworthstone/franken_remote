@@ -79,12 +79,22 @@ struct Members {
     owner: ObservationControl,
     anchor: Option<Binding>,
     configuration: fr_media::worker::Configuration,
+    selected_catalog: Option<fr_wire::display::Catalog>,
     started: bool,
     closed: bool,
     until: u64,
     last: u64,
 }
 impl Members {
+    fn selected_view(&self, view: Binding) -> bool {
+        self.selected_catalog.is_none_or(|catalog| {
+            catalog.displays().first().is_some_and(|display| {
+                display.handle == view.display
+                    && display.geometry == view.geometry
+                    && self.configuration.generation == view.configuration
+            })
+        })
+    }
     fn active(&self) -> usize {
         self.entries
             .iter()
@@ -183,6 +193,11 @@ impl Publisher {
         {
             return Err(Error::WrongSource);
         }
+        let selected_catalog = if source.selected_control.is_some() {
+            Some(source.selected_catalog(&owner).map_err(Error::Media)?)
+        } else {
+            None
+        };
         let until = now.checked_add(BOOTSTRAP_US).ok_or(Error::Closed)?;
         let configuration = source.configuration;
         Ok(Self {
@@ -193,12 +208,29 @@ impl Publisher {
                 owner,
                 anchor: None,
                 configuration,
+                selected_catalog,
                 started: false,
                 closed: false,
                 until,
                 last: now,
             })),
         })
+    }
+    pub(crate) fn initial_configuration(
+        &mut self,
+    ) -> Result<fr_media::worker::Configuration, Error> {
+        let mut members = self.members.lock().map_err(|_| Error::Poisoned)?;
+        members.tick()?;
+        if members.started
+            || members.anchor.is_some()
+            || members.entries.iter().any(Option::is_some)
+        {
+            return Err(Error::WrongSource);
+        }
+        if members.selected_catalog.is_none() {
+            return Err(Error::WrongSource);
+        }
+        Ok(members.configuration)
     }
     /// The parent has already authorized this display and completed its native
     /// decoder handshake. Refuse copied routes, another source, shared authority,
@@ -219,7 +251,8 @@ impl Publisher {
             .position(Option::is_none)
             .ok_or(Error::Full)?;
         let (control, view) = startup.finish_stream(transport).map_err(Error::Startup)?;
-        if control.same_owner(&members.owner)
+        if !members.selected_view(view)
+            || control.same_owner(&members.owner)
             || members.owner.belongs_to_session(view.parent.remote_session)
             || same_task(&control, &members.owner)
             || members.entries.iter().flatten().any(|e| {

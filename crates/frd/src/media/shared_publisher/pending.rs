@@ -46,7 +46,8 @@ impl Publisher {
         let (control, view) = startup
             .pending_publication(transport, &self.source, &self.pool)
             .map_err(Error::Startup)?;
-        if control.same_owner(&members.owner)
+        if !members.selected_view(view)
+            || control.same_owner(&members.owner)
             || members.owner.belongs_to_session(view.parent.remote_session)
             || same_task(&control, &members.owner)
             || members.entries.iter().flatten().any(|e| {

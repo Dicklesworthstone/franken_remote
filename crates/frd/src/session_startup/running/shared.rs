@@ -41,6 +41,7 @@ pub struct SharedHost {
     repair: Route,
     statistics: SharedStatistics,
     recovery: Option<recovery::Handoff>,
+    selected_display: Option<crate::display_selection::SelectedDisplay>,
 }
 impl HostSession {
     /// Queue a live source join using THIS session's consent and completed media
@@ -118,10 +119,27 @@ impl HostSession {
             repair,
             statistics: SharedStatistics::default(),
             recovery: None,
+            selected_display: None,
         })
     }
 }
 impl SharedHost {
+    pub(super) fn retain_selected_display(
+        &mut self,
+        selected: crate::display_selection::SelectedDisplay,
+        until: u64,
+    ) -> Result<(), Error> {
+        selected
+            .check(&self.session.opened.transport)
+            .map_err(|_| Error::Order)?;
+        self.subscriber
+            .as_mut()
+            .ok_or(Error::Closed)?
+            .cap_join_deadline(&self.session.opened.transport, until)
+            .map_err(Error::SharedPublication)?;
+        self.selected_display = Some(selected);
+        Ok(())
+    }
     pub const fn statistics(&self) -> SharedStatistics {
         self.statistics
     }
@@ -142,6 +160,7 @@ impl SharedHost {
     pub fn close(&mut self) {
         self.session.close();
         self.subscriber = None;
+        self.selected_display = None;
     }
     /// A bounded original-session turn. Decoder replies and selective repair are
     /// serviced before general renewal dispatch, and again around native waits.
