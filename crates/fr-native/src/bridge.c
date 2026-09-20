@@ -495,3 +495,5 @@ int fr_x11_capture_rectangle(Display *display, Window root, int x, int y,
     for (size_t i=3;i<len;i+=4) out[i]=255;
     XDestroyImage(image); return FR_OK;
 }
+
+#include "decoder_sandbox.c"

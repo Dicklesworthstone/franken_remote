@@ -6,6 +6,7 @@ fn main() {
     build_viewer_input();
     build_viewer_window();
     println!("cargo:rerun-if-changed=src/bridge.c");
+    println!("cargo:rerun-if-changed=src/decoder_sandbox.c");
     if env::var_os("CARGO_FEATURE_LINUX_MEDIA").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux")
     {

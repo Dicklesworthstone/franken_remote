@@ -1,3 +1,7 @@
+#[path = "decoder_sandbox.rs"]
+mod decoder_sandbox;
+pub use decoder_sandbox::DecoderSandboxUnavailable;
+
 #[path = "presentation_fit.rs"]
 mod presentation_fit;
 pub use presentation_fit::FittedFrame;

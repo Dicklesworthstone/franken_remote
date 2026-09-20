@@ -62,6 +62,7 @@ mod linux {
         record: Option<&[u8]>,
         target: Option<worker::presentation::X11Target>,
         fit: bool,
+        input: BorrowedFd<'_>,
     ) -> Result<Media, Error> {
         let limits = configuration.limits()?;
         let config = configuration.codec()?;
@@ -70,8 +71,8 @@ mod linux {
                 let surface = X11Surface::capture(None, limits).map_err(native)?;
                 capture_media(surface, configuration)?
             }
-            Role::Present => Media::Present {
-                surface: match target {
+            Role::Present => {
+                let mut surface = match target {
                     Some(target) => X11Surface::present_in(None, target, limits),
                     None => X11Surface::presenter(
                         None,
@@ -80,24 +81,30 @@ mod linux {
                         limits,
                     ),
                 }
-                .map_err(native)?,
-                codec: HevcDecoder::new(config, limits, record.ok_or(Error::WrongState)?)
-                    .map_err(native)?,
-                display_next: None,
-                fitted: if fit {
-                    Some(
-                        FittedFrame::new(
-                            configuration.width,
-                            configuration.height,
-                            target.ok_or(Error::WrongState)?,
-                            limits,
-                        )
+                .map_err(native)?;
+                surface
+                    .confine_decoder_process(input, io::stdout().as_fd(), io::stderr().as_fd())
+                    .map_err(|_| Error::SandboxUnavailable)?;
+                Media::Present {
+                    surface,
+                    codec: HevcDecoder::new(config, limits, record.ok_or(Error::WrongState)?)
                         .map_err(native)?,
-                    )
-                } else {
-                    None
-                },
-            },
+                    display_next: None,
+                    fitted: if fit {
+                        Some(
+                            FittedFrame::new(
+                                configuration.width,
+                                configuration.height,
+                                target.ok_or(Error::WrongState)?,
+                                limits,
+                            )
+                            .map_err(native)?,
+                        )
+                    } else {
+                        None
+                    },
+                }
+            }
         })
     }
     impl Media {
@@ -233,7 +240,7 @@ mod linux {
         role: Role,
         sequence: &mut Sequence,
         identity: &mut worker::Identity,
-        input: &mut impl io::Read,
+        input: &mut (impl io::Read + AsFd),
         output: &mut impl io::Write,
     ) -> Result<Option<Initialized>, Error> {
         if first.header.kind == Kind::DiscoverCapture {
@@ -251,13 +258,17 @@ mod linux {
         let (configuration, media, ready) = match (role, first.header.kind) {
             (Role::Capture, Kind::Configure) => {
                 let c = Configuration::decode(first.body())?;
-                (c, open(role, c, None, None, false)?, Kind::Ready)
+                (
+                    c,
+                    open(role, c, None, None, false, input.as_fd())?,
+                    Kind::Ready,
+                )
             }
             (Role::Present, Kind::ConfigureDecoder) => {
                 let (c, record) = Configuration::decode_decoder(first.body())?;
                 (
                     c,
-                    open(role, c, Some(record), None, false)?,
+                    open(role, c, Some(record), None, false, input.as_fd())?,
                     Kind::DecoderReady,
                 )
             }
@@ -266,7 +277,7 @@ mod linux {
                     worker::presentation::X11Target::decode_decoder(first.body())?;
                 (
                     c,
-                    open(role, c, Some(record), Some(target), false)?,
+                    open(role, c, Some(record), Some(target), false, input.as_fd())?,
                     Kind::PresentationReady,
                 )
             }
@@ -275,7 +286,7 @@ mod linux {
                     worker::presentation::X11Target::decode_fitted_decoder(first.body())?;
                 (
                     c,
-                    open(role, c, Some(record), Some(target), true)?,
+                    open(role, c, Some(record), Some(target), true, input.as_fd())?,
                     Kind::FittedPresentationReady,
                 )
             }

@@ -167,6 +167,7 @@ pub enum Error {
     GeometryChanged = 9,
     Io = 10,
     Allocation = 11,
+    SandboxUnavailable = 12,
 }
 impl Error {
     pub fn from_code(code: u16) -> Result<Self, Self> {
@@ -182,6 +183,7 @@ impl Error {
             9 => Self::GeometryChanged,
             10 => Self::Io,
             11 => Self::Allocation,
+            12 => Self::SandboxUnavailable,
             _ => return Err(Self::Malformed),
         })
     }
