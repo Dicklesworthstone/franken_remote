@@ -1,0 +1,23 @@
+{
+  "scope": "macOS CoreAudio HAL server plugin virtual microphone probe",
+  "device_name": "BlackHole 2ch",
+  "device_id": 158,
+  "sample_rate_hz": 48000.0,
+  "buffer_frame_size": 512,
+  "buffer_duration_ms": 10.667,
+  "output_latency_frames": 0,
+  "output_safety_offset_frames": 0,
+  "input_latency_frames": 0,
+  "input_safety_offset_frames": 0,
+  "total_driver_latency_frames": 512,
+  "total_driver_latency_ms": 10.667,
+  "io_callbacks_serviced": 113,
+  "playback_frames_submitted": 48000,
+  "record_frames_received": 57856,
+  "max_input_amplitude": 0.000000,
+  "audio_detected_in_noninteractive_session": false,
+  "tcc_microphone_authorization_status": "NotDetermined",
+  "tcc_behavior_verified": "CoreAudio successfully attaches IOProc and outputs audio to virtual driver without TCC; input stream returns silent buffers (0 amplitude) when TCC authorization is NotDetermined in non-interactive session",
+  "signing_path_validated": true,
+  "plugin_bundle_path": "/Library/Audio/Plug-Ins/HAL/BlackHole2ch.driver"
+}

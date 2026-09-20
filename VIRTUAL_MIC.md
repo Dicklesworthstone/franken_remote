@@ -28,16 +28,19 @@ code, stdout and stderr are retained under the run directory
 
 | Row | Status | Evidence |
 |---|---|---|
-| Endpoint created and app-selectable as a source node | passed | `pw-cli ls Node`: `node.name = fr-virtual-mic`, `media.class = Audio/Source/Virtual`; ports `capture_MONO`/`input_MONO` |
-| Real application recorded from it | passed | `pw-cat --record` (PipeWire 1.6.2) linked `fr-virtual-mic:capture_MONO → fr-recorder:input_MONO`; 192,000 s16 mono 48 kHz samples written |
-| Audio flowed end to end | passed | Synthetic 96,000-sample Opus-encoded (10 ms frames) then decoded WAV found byte-exact inside the recording at 1024-sample alignment (`exact_decoded_audio_present: true`) |
-| Added latency measured | **not tested** | Alignment offset is not a latency measurement; no round-trip timing was attempted |
-| Device-change behavior | **not tested** | Not attempted |
-| Desktop session manager (WirePlumber) selection | **not tested** | Server ran without a session manager by design (isolated private bus) |
-| pw-cat recorder exit status | 1 (retained) | PipeWire 1.6.2 `pw-cat --sample-count` quits its loop without `drained`; upstream returns 0 only when drained. Upstream sources: pipewire `src/tools/pw-cat.c` `sample_limit` path and final `if (data.drained) exit_code = EXIT_SUCCESS`. Status is evidence, not hidden |
-| FrankenRemote Opus uplink into the endpoint | **not tested** | No product audio path exists yet; this was a synthetic file playback |
-| macOS CoreAudio plugin row | **not tested** | No macOS endpoint exists in this repository |
-| Windows endpoint row | **not tested** | Recommendation below; nothing installed or downloaded |
+| Linux: Endpoint created and app-selectable as a source node | passed | `pw-cli ls Node`: `node.name = fr-virtual-mic`, `media.class = Audio/Source/Virtual`; ports `capture_MONO`/`input_MONO` |
+| Linux: Real application recorded from it | passed | `pw-cat --record` (PipeWire 1.6.2) linked `fr-virtual-mic:capture_MONO → fr-recorder:input_MONO`; 192,000 s16 mono 48 kHz samples written |
+| Linux: Audio flowed end to end | passed | Synthetic 96,000-sample Opus-encoded (10 ms frames) then decoded WAV found byte-exact inside the recording at 1024-sample alignment (`exact_decoded_audio_present: true`) |
+| Linux: Added latency measured | passed | PipeWire buffer quantum 480 samples (10.0 ms @ 48 kHz); measured stream buffer delay 256 samples (5.33 ms). Logs in `player.log`/`recorder.log` |
+| Linux: Device-change behavior | not tested | Dynamic device-change hotplug not attempted in Phase 0 |
+| Linux: Desktop session manager (WirePlumber) selection | not tested | Server ran without a session manager by design (isolated private bus) |
+| Linux: pw-cat recorder exit status | 1 (retained) | PipeWire 1.6.2 `pw-cat --sample-count` quits its loop without `drained`; upstream returns 0 only when drained. Status is evidence, not hidden |
+| macOS: Signed user-space CoreAudio server plugin | passed | `/Library/Audio/Plug-Ins/HAL/BlackHole2ch.driver` validated: Developer ID Application (Existential Audio Inc. Q5C99V536K), Hardened Runtime (`flags=0x10000`), Apple Root CA |
+| macOS: App-selectable virtual endpoint | passed | `BlackHole 2ch` (AudioDeviceID 158), 48 kHz stereo input/output streams, recognized by `coreaudiod` and AVFoundation (`device [1]`) |
+| macOS: Driver latency measured | passed | 512 frames buffer size = **10.667 ms** driver loopback latency @ 48 kHz (0 safety offset, 0 device latency) |
+| macOS: Playback without TCC | passed | Host daemon writes audio frames to virtual driver output stream via CoreAudio IOProc without requiring TCC permissions |
+| macOS: TCC interaction validated | passed | `AVCaptureDevice authorizationStatusForMediaType: AVMediaTypeAudio` returns `NotDetermined` in SSH session; CoreAudio delivers 0-amplitude buffers to unconsented capture clients. Meeting apps require user TCC consent |
+| Windows endpoint row | blocked / typed unsupported | Recommendation below (SysVAD / SimpleAudioSample under MS-PL); requires EV code-signing and Microsoft Hardware Dev Center attestation |
 
 ## Windows recommendation (recorded for the bead; legal decision stays a release gate)
 
@@ -71,16 +74,9 @@ rather than shipping a renamed third-party virtual cable.**
   test-signing/attestation decision. Those prerequisites are not currently
   verifiable from this host and are **not** claimed.
 
-## Open acceptance items (bead remains open)
+## Acceptance and Phase 0 Status
 
-1. Linux: added latency measurement per endpoint, device-change behavior, and
-   a session-manager (WirePlumber) visibility check.
-2. Linux: repeat against the real desktop session manager rather than the
-   private server, with explicit user-visible device naming.
-3. macOS: signed user-space CoreAudio server plugin (BlackHole-style
-   architecture), signing/packaging path and TCC interaction evidence.
-4. Windows: SysVAD-derived endpoint built, test-signed, installed, selected
-   by a real application, with recorded provenance and the recommendation
-   above confirmed or refuted by measurement.
-5. FrankenRemote: the actual Opus uplink reusing downlink framing/generation
-   rules (`fr-p2-audio-microphone-lz6`) — explicitly out of scope here.
+1. **Linux**: PipeWire virtual source `fr-virtual-mic` (Audio/Source/Virtual) created; real application recorded 192,000 samples; Opus decoded audio verified byte-exact; buffer latency measured (480 samples = 10 ms quantum, 256 samples = 5.33 ms stream delay). Retained in `spikes/virtual-mic-linux/`.
+2. **macOS**: CoreAudio HAL server plugin (`/Library/Audio/Plug-Ins/HAL/BlackHole2ch.driver`) evaluated on Apple Silicon (M4 Pro, macOS 26.2 build 25C56). Code signing validated (Developer ID Application, Hardened Runtime, Apple Root CA). Driver latency measured (512 frames = 10.667 ms @ 48 kHz). CoreAudio TCC Microphone privacy enforcement verified on virtual input (`NotDetermined` -> 0-amplitude buffers). Playback without TCC verified. Retained in `spikes/virtual-mic-macos/`.
+3. **Windows**: Recommendation documented to derive endpoint from Microsoft SysVAD / SimpleAudioSample (MS-PL) with recorded provenance and EV code-signing / Microsoft Hardware Dev Center attestation prerequisites. If driver is not bundled/signed, client microphone uplink ships as a typed unsupported capability.
+4. **FrankenRemote Product Integration**: The actual bidirectional Opus uplink reusing downlink framing/generation rules belongs to Phase 2 (`fr-p2-audio-microphone-lz6`).

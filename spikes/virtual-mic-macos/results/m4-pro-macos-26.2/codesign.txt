@@ -1,0 +1,23 @@
+Executable=/Library/Audio/Plug-Ins/HAL/BlackHole2ch.driver/Contents/MacOS/BlackHole
+Identifier=audio.existential.BlackHole2ch
+Format=bundle with Mach-O universal (x86_64 arm64)
+CodeDirectory v=20500 size=394 flags=0x10000(runtime) hashes=5+3 location=embedded
+Hash type=sha256 size=32
+CandidateCDHash sha1=2fed50972934bd499313dd7ed34d74f8056fdd65
+CandidateCDHashFull sha1=2fed50972934bd499313dd7ed34d74f8056fdd65
+CandidateCDHash sha256=2039d299c18d27abe69ac48d07a3bc7683275459
+CandidateCDHashFull sha256=2039d299c18d27abe69ac48d07a3bc7683275459bff513fb17836b163df9cede
+Hash choices=sha1,sha256
+CMSDigest=228f0e5c750ddcabb5803d3b1069d1d812c5d4c51c2b8144537cca450e3f7d5b
+CMSDigestType=2
+CDHash=2039d299c18d27abe69ac48d07a3bc7683275459
+Signature size=9076
+Authority=Developer ID Application: Existential Audio Inc. (Q5C99V536K)
+Authority=Developer ID Certification Authority
+Authority=Apple Root CA
+Timestamp=Jul 3, 2026 at 2:01:42 PM
+Info.plist entries=22
+TeamIdentifier=Q5C99V536K
+Runtime Version=26.5.0
+Sealed Resources version=2 rules=13 files=5
+Internal requirements count=1 size=192

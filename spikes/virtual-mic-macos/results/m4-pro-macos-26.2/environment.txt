@@ -1,0 +1,5 @@
+ProductName:		macOS
+ProductVersion:		26.2
+BuildVersion:		25C56
+Apple M4 Pro
+Apple clang version 17.0.0 (clang-1700.4.4.1)
