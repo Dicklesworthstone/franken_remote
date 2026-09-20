@@ -193,7 +193,18 @@ int fr_decoder_receive(FrDecoder *d,uint8_t *out,size_t len,int64_t *pts) {
     *pts=f->pts; av_frame_unref(f); d->have_frame=0; return FR_OK;
 }
 
-typedef struct { Display *display; Window window; GC gc; int screen,w,h,presenter,invalid; } FrX11;
+typedef struct {
+    Display *display; Window window; GC gc;
+    int screen,w,h,presenter,invalid,exposed;
+    /* Exactly one owned, tightly packed submitted picture, never a decoder
+       surface. It survives idle periods, not a window lifetime transition. */
+    XImage *front;
+} FrX11;
+static int fr_x11_retire(FrX11 *x) {
+    x->invalid=1; x->exposed=0;
+    if (x->front) { XDestroyImage(x->front); x->front=NULL; }
+    return FR_GEOMETRY;
+}
 /* A catalog owns ONE X connection. Selection transfers that same connection,
    never reopening DISPLAY after the user chose a source. X11 screens are root
    coordinate spaces, not necessarily physical monitors. */
@@ -256,24 +267,29 @@ int fr_x11_screen_select(FrScreens *s,uint32_t index,uint64_t root,uint32_t w,ui
 static int fr_x11_geometry(FrX11 *x) {
     if (x->invalid) return FR_GEOMETRY;
     XWindowAttributes a; XEvent event;
-    if (!XGetWindowAttributes(x->display,x->window,&a)) return FR_DISPLAY;
-    if (x->presenter==2) {
-        /* This connection subscribes only to its selected UI window. Bound
-           event draining; a resize-away-and-back or unmap is still terminal. */
+    if (x->presenter) {
+        /* Consume lifecycle events before addressing the drawable. In
+           particular, do not query an already-destroyed borrowed XID. This is
+           a server barrier, not scanout evidence or cancellation of Xlib. */
+        XSync(x->display,False);
         int count=0;
-        while (XCheckWindowEvent(x->display,x->window,StructureNotifyMask,&event)) {
-            if (++count>32 || event.type==UnmapNotify || event.type==DestroyNotify ||
-                event.type==ReparentNotify || (event.type==ConfigureNotify &&
-                (event.xconfigure.width!=x->w || event.xconfigure.height!=x->h))) {
-                x->invalid=1; return FR_GEOMETRY;
+        while (XCheckWindowEvent(x->display,x->window,
+                                StructureNotifyMask|ExposureMask,&event)) {
+            if (event.type==DestroyNotify) {
+                x->window=0; return fr_x11_retire(x);
             }
+            if (++count>128 || event.type==UnmapNotify ||
+                (x->presenter==2 && event.type==ReparentNotify) ||
+                (event.type==ConfigureNotify &&
+                 (event.xconfigure.width!=x->w || event.xconfigure.height!=x->h)))
+                return fr_x11_retire(x);
+            if (event.type==Expose) x->exposed=1;
         }
-        if (a.map_state!=IsViewable) { x->invalid=1; return FR_GEOMETRY; }
     }
-    if (a.width!=x->w || a.height!=x->h || (!x->presenter &&
-        XCheckTypedWindowEvent(x->display,x->window,ConfigureNotify,&event))) {
-        x->invalid=1; return FR_GEOMETRY;
-    }
+    if (!XGetWindowAttributes(x->display,x->window,&a)) return FR_DISPLAY;
+    if (a.width!=x->w || a.height!=x->h || (x->presenter && a.map_state!=IsViewable) ||
+        (!x->presenter && XCheckTypedWindowEvent(x->display,x->window,ConfigureNotify,&event)))
+        return fr_x11_retire(x);
     return FR_OK;
 }
 /* Used again after encoding before a pending access unit leaves the worker. */
@@ -283,7 +299,12 @@ int fr_x11_validate(FrX11 *x) {
 }
 void fr_x11_free(FrX11 *x) {
     if (!x) return;
-    if (x->display) { if (x->gc) XFreeGC(x->display,x->gc); if (x->presenter==1 && x->window) XDestroyWindow(x->display,x->window); XCloseDisplay(x->display); }
+    if (x->front) XDestroyImage(x->front);
+    /* XCloseDisplay's default DestroyAll releases our own window, even when
+       UnmapNotify retired us before a queued DestroyNotify could be consumed.
+       Do not address a potentially destroyed XID during cleanup. Borrowed UI
+       windows belong to a different client and are never destroyed here. */
+    if (x->display) { if (x->gc) XFreeGC(x->display,x->gc); XCloseDisplay(x->display); }
     free(x);
 }
 int fr_x11_new(const char *display,int presenter,int w,int h,FrX11 **out,int *width,int *height) {
@@ -299,6 +320,7 @@ int fr_x11_new(const char *display,int presenter,int w,int h,FrX11 **out,int *wi
         x->window=XCreateSimpleWindow(x->display,RootWindow(x->display,x->screen),0,0,w,h,0,0,0);
         if (!x->window) { fr_x11_free(x); return FR_DISPLAY; }
         XStoreName(x->display,x->window,"FrankenRemote native media verification");
+        XSelectInput(x->display,x->window,StructureNotifyMask|ExposureMask);
         XMapWindow(x->display,x->window); x->gc=XCreateGC(x->display,x->window,0,NULL); XSync(x->display,False);
     } else {
         x->window=RootWindow(x->display,x->screen);
@@ -327,7 +349,7 @@ int fr_x11_attach(const char *display,uint32_t window,int w,int h,FrX11 **out) {
         fr_x11_free(x); return FR_UNAVAILABLE;
     }
     if (a.width!=w || a.height!=h || a.map_state!=IsViewable) { fr_x11_free(x); return FR_GEOMETRY; }
-    XSelectInput(x->display,x->window,StructureNotifyMask);
+    XSelectInput(x->display,x->window,StructureNotifyMask|ExposureMask);
     x->gc=XCreateGC(x->display,x->window,0,NULL);
     XSync(x->display,False);
     int code=fr_x11_geometry(x);
@@ -357,17 +379,45 @@ int fr_x11_capture(FrX11 *x,uint8_t *out,size_t len) {
     for (size_t i=3;i<len;i+=4) out[i]=255;
     XDestroyImage(image); return FR_OK;
 }
+/* Reuse a single exact-size image. The XImage metadata is fixed-size; no
+   decoder/reference picture or history queue is retained here. */
+static int fr_x11_front(FrX11 *x,size_t len) {
+    if (x->front) return FR_OK;
+    XImage *im=XCreateImage(x->display,DefaultVisual(x->display,x->screen),24,
+                           ZPixmap,0,NULL,x->w,x->h,32,0);
+    if (!im) return FR_MEMORY;
+    if (im->bits_per_pixel!=32 || im->byte_order!=LSBFirst || im->bytes_per_line!=x->w*4) {
+        XDestroyImage(im); return FR_UNAVAILABLE;
+    }
+    im->data=calloc(1,len);
+    if (!im->data) { XDestroyImage(im); return FR_MEMORY; }
+    x->front=im; return FR_OK;
+}
+static int fr_x11_draw_front(FrX11 *x) {
+    /* Clear before submission: later expose events remain pending. Never raise
+       a borrowed window, or an idle window merely because it needs repaint. */
+    x->exposed=0;
+    XPutImage(x->display,x->window,x->gc,x->front,0,0,0,0,x->w,x->h);
+    return fr_x11_geometry(x);
+}
 int fr_x11_present(FrX11 *x,const uint8_t *bgra,size_t len) {
     if (!x || !x->presenter || !bgra || !bgra_buffer(x->w,x->h,len)) return FR_INVALID;
     int code=fr_x11_geometry(x); if (code!=FR_OK) return code;
-    XImage *im=XCreateImage(x->display,DefaultVisual(x->display,x->screen),24,ZPixmap,0,NULL,x->w,x->h,32,0);
-    if (!im) return FR_MEMORY;
-    if (im->bits_per_pixel!=32 || im->byte_order!=LSBFirst || im->bytes_per_line<x->w*4) { XDestroyImage(im); return FR_UNAVAILABLE; }
-    im->data=calloc((size_t)im->bytes_per_line,(size_t)x->h); if (!im->data) { XDestroyImage(im); return FR_MEMORY; }
-    for (int y=0;y<x->h;y++) memcpy(im->data+(size_t)y*im->bytes_per_line,bgra+(size_t)y*x->w*4,(size_t)x->w*4);
+    code=fr_x11_front(x,len); if (code!=FR_OK) return code;
+    memcpy(x->front->data,bgra,len);
     if (x->presenter==1) XRaiseWindow(x->display,x->window);
-    XPutImage(x->display,x->window,x->gc,im,0,0,0,0,x->w,x->h);
-    XSync(x->display,False); XDestroyImage(im); return fr_x11_geometry(x);
+    return fr_x11_draw_front(x);
+}
+int fr_x11_maintain_presentation(FrX11 *x,int *repainted,size_t *retained_bytes) {
+    if (!x || !x->presenter || !repainted || !retained_bytes) return FR_INVALID;
+    *repainted=0; *retained_bytes=0;
+    int code=fr_x11_geometry(x); if (code!=FR_OK) return code;
+    if (!x->front) { x->exposed=0; return FR_OK; }
+    if (x->exposed) {
+        code=fr_x11_draw_front(x); if (code!=FR_OK) return code;
+        *repainted=1;
+    }
+    *retained_bytes=(size_t)x->w*(size_t)x->h*4; return FR_OK;
 }
 
 /* Borrowed X connection, selected whole-monitor rectangle. This never captures

@@ -1,6 +1,9 @@
 #[path = "presentation_fit.rs"]
 mod presentation_fit;
 pub use presentation_fit::FittedFrame;
+#[path = "presentation.rs"]
+mod presentation;
+pub use presentation::PresentationMaintenance;
 
 use core::{
     ffi::{c_char, c_int, c_ulong, c_void},
@@ -818,7 +821,8 @@ impl X11Surface {
         if frame.width != self.width || frame.height != self.height {
             return Err(NativeError::GeometryChanged);
         }
-        // SAFETY: bridge copies immutable pixels to its own XImage before XPutImage; destroys that image once.
+        // SAFETY: the bridge copies immutable pixels into its sole owned image.
+        // It retains no borrowed pixels and releases that image on retirement/drop.
         status(unsafe {
             fr_x11_present(self.raw.as_ptr(), frame.bytes.as_ptr(), frame.bytes.len())
         })
@@ -827,7 +831,8 @@ impl X11Surface {
 impl Drop for X11Surface {
     fn drop(&mut self) {
         drop(self.damage.take());
-        // SAFETY: context is unique, thread-confined, and no XImage survives a call.
+        // SAFETY: context is unique and thread-confined. The bridge owns and
+        // destroys the sole retained presentation image before closing Xlib.
         unsafe { fr_x11_free(self.raw.as_ptr()) };
     }
 }
