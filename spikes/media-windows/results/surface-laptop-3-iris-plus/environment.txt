@@ -1,0 +1,14 @@
+OS: Microsoft Windows 11 Home 10.0.26200.9457 (build 26200)
+Host: Surface Laptop 3 (OldSurface)
+CPU: Intel(R) Core(TM) i7-1065G7 CPU @ 1.30GHz (Ice Lake)
+GPU: Intel(R) Iris(R) Plus Graphics (PCI Vendor 0x8086, Device 0x8A52, SubSys 0x00351414, Rev 7)
+Driver Version: 31.0.101.2125
+Compiler: Microsoft (R) C/C++ Optimizing Compiler Version 19.44.35228 for x64
+Windows SDK: 10.0.26100.0
+Direct3D Feature Level: 0xB100 (Direct3D 11.1)
+Hardware HEVC Encoders: Intel Hardware H265 Encoder MFT (MFVideoFormat_HEVC)
+Hardware HEVC Decoders: D3D11 Video Decoder Profile HEVC_VLD_MAIN10 (56 profiles total)
+Display: \\.\DISPLAY1 (2256 x 1504, 3:2 Aspect Ratio, DXGI_FORMAT_B8G8R8A8_UNORM)
+Session Model:
+  - Session 0: Headless service session (OpenSSH daemon); EnumOutputs returns 0 displays
+  - Session 1: Interactive user console session (explorer.exe); Desktop Duplication available and operational

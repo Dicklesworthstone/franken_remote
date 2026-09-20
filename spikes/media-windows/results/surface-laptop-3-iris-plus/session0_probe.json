@@ -1,0 +1,64 @@
+{
+  "schema": "frankenremote.probe.windows_media.v1",
+  "session": {
+    "process_id": 16292,
+    "session_id": 0,
+    "is_session_zero": true
+  },
+  "dxgi_factory_hr": "0x00000000",
+  "adapters": [
+    {
+      "index": 0,
+      "description": "Intel(R) Iris(R) Plus Graphics",
+      "vendor_id": "0x8086",
+      "device_id": "0x8A52",
+      "subsys_id": "0x00351414",
+      "revision": 7,
+      "dedicated_video_memory_bytes": 134217728,
+      "dedicated_system_memory_bytes": 0,
+      "shared_system_memory_bytes": 8372957184,
+      "is_software": false,
+      "d3d11_create_device_hr": "0x00000000",
+      "d3d11_feature_level": "0xB100",
+      "d3d11_video_decoder_profile_count": 56,
+      "d3d11_hevc_main_decode_supported": false,
+      "d3d11_hevc_main10_decode_supported": true,
+      "outputs": [
+
+      ]
+    },
+    {
+      "index": 1,
+      "description": "Microsoft Basic Render Driver",
+      "vendor_id": "0x1414",
+      "device_id": "0x008C",
+      "subsys_id": "0x00000000",
+      "revision": 0,
+      "dedicated_video_memory_bytes": 0,
+      "dedicated_system_memory_bytes": 0,
+      "shared_system_memory_bytes": 8372957184,
+      "is_software": true,
+      "d3d11_create_device_hr": "0x887A0004",
+      "d3d11_feature_level": "0x0000",
+      "d3d11_video_decoder_profile_count": 0,
+      "d3d11_hevc_main_decode_supported": false,
+      "d3d11_hevc_main10_decode_supported": false,
+      "outputs": [
+
+      ]
+    }
+  ],
+  "media_foundation": {
+    "startup_hr": "0x00000000",
+    "hardware_hevc_encoders_hr": "0x00000000",
+    "hardware_hevc_encoder_count": 2,
+    "hardware_hevc_encoders": [
+      "Intel? Hardware H265 Encoder MFT",
+      "Intel? Hardware H265 Encoder MFT"
+    ],
+    "hardware_hevc_decoders_hr": "0x00000000",
+    "hardware_hevc_decoder_count": 0,
+    "hardware_hevc_decoders": [
+    ]
+  }
+}
