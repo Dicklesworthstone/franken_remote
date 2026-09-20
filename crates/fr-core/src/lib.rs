@@ -14,6 +14,7 @@
 
 pub mod authority;
 pub mod clipboard;
+pub mod dos;
 pub mod held_state;
 pub mod ids;
 pub mod input;

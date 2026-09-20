@@ -850,7 +850,7 @@ async fn bootstrap<F: Future<Output = Result<Launch, ()>>>(
     let prepared = decoder_startup::Viewer::prepare(
         budget.cx.clone(),
         q,
-        setup,
+        &setup,
         &config.bytes[..config.len],
         receive,
     )
@@ -876,7 +876,7 @@ async fn bootstrap<F: Future<Output = Result<Launch, ()>>>(
                 },
             )
             .map_err(|e| failure.map_or(Error::Media(e), Error::Decoder))?;
-        let completion = during(&mut session, budget, decoder.present_first()).await?;
+        let completion = Box::pin(during(&mut session, budget, decoder.present_first())).await?;
         decoder
             .check_transport(session.io().map_err(Error::Session)?.0)
             .map_err(Error::Decoder)?;

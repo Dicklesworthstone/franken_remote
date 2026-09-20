@@ -175,7 +175,7 @@ impl Subscriber {
                     .map_err(Error::Transport)?;
                 entry.view = media.binding();
                 entry.media = Some(media);
-                entry.join = Some(PendingJoin::recovering(setup, cfg, recovery.until));
+                entry.join = Some(PendingJoin::recovering(&setup, cfg, recovery.until));
             }
             Ok(if entry.join.is_some() {
                 RecoveryState::DecoderStartup

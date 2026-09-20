@@ -101,7 +101,7 @@ pub struct ControlledViewer {
     native_capture: Option<Box<dyn events::NativeCapture>>,
     clipboard: Option<crate::clipboard_quic::Bridge>,
     clipboard_setup: crate::session_startup::clipboard::Setup,
-    files: files::Slot,
+    files: Box<files::Slot>,
 }
 impl std::fmt::Debug for ControlledViewer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -195,7 +195,7 @@ impl ViewerSession {
             native_capture: None,
             clipboard: None,
             clipboard_setup: crate::session_startup::clipboard::Setup::default(),
-            files: files::Slot::default(),
+            files: Box::default(),
         })
     }
 }
@@ -646,7 +646,6 @@ mod tests;
 fn inline_viewer_owners_fit_composed_native_service_stacks() {
     // A full native suite on ordinary test-thread stacks exposed aborts while
     // moving the inline session/input owners through nested async completions.
-    // Guard the public owners rather than hiding it with a bigger test stack.
     assert!(std::mem::size_of::<ControlledViewer>() <= 16 * 1024);
     assert!(std::mem::size_of::<super::streaming::StreamingViewer>() <= 20 * 1024);
 }

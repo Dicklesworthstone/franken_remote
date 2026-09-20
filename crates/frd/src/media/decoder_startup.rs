@@ -133,7 +133,12 @@ struct Bound {
     closed: bool,
 }
 impl Bound {
-    fn new(cx: Cx, transport: &QuicRecords, setup: Setup, role: StreamRole) -> Result<Self, Error> {
+    fn new(
+        cx: Cx,
+        transport: &QuicRecords,
+        setup: &Setup,
+        role: StreamRole,
+    ) -> Result<Self, Error> {
         setup.binding.validate()?;
         let us = setup.timeout_micros;
         if us == 0 || us > MAX_STARTUP_US {
@@ -162,7 +167,7 @@ impl Bound {
         let mut this = Self {
             cx,
             connection: transport.binding(),
-            setup,
+            setup: *setup,
             until,
             last,
             closed: false,
@@ -255,7 +260,7 @@ fn declaration<'a>(
 /// Main8 software-decoder profile. Other valid wire profiles refuse rather than
 /// expanding negotiated limits or silently changing color. Parsing is completed
 /// BEFORE creating a process, allocating native surfaces or acknowledging setup.
-fn admit(bytes: &[u8], setup: Setup) -> Result<(Configuration, DecoderRecord), Error> {
+fn admit(bytes: &[u8], setup: &Setup) -> Result<(Configuration, DecoderRecord), Error> {
     let Message::Configuration(c) = decoder::decode(
         bytes,
         setup.binding,
@@ -328,12 +333,12 @@ impl Host {
         cfg: Configuration,
         update: CaptureUpdate,
     ) -> Result<Self, Error> {
-        Self::from_capture(control, transport, setup, cfg, Bootstrap::Unique(update))
+        Self::from_capture(control, transport, &setup, cfg, Bootstrap::Unique(update))
     }
     fn from_capture(
         control: ObservationControl,
         transport: &QuicRecords,
-        setup: Setup,
+        setup: &Setup,
         cfg: Configuration,
         update: Bootstrap,
     ) -> Result<Self, Error> {

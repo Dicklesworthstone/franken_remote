@@ -145,12 +145,12 @@ pub(super) struct PendingJoin {
 }
 impl PendingJoin {
     pub(super) fn recovering(
-        setup: decoder_startup::Setup,
+        setup: &decoder_startup::Setup,
         cfg: Configuration,
         until: u64,
     ) -> Self {
         Self {
-            setup,
+            setup: *setup,
             cfg,
             until,
             bootstrap: None,

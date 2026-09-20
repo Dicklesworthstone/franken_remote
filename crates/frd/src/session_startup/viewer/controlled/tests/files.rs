@@ -8,6 +8,7 @@ use fr_files::{
 };
 use std::{
     fs::{self, File},
+    os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -22,6 +23,7 @@ impl Disk {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         Self(dir)
     }
     fn config(&self) -> fr_files::quic::Configuration {

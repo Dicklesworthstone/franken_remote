@@ -658,12 +658,12 @@ async fn bootstrap(
         drive(&mut host, budget, entropy, &mut block).await?;
     }
     let control = budget.control.clone();
-    let source = during(
+    let source = Box::pin(during(
         &mut host,
         budget,
         entropy,
         DiscoveredSource::start(&control, launch),
-    )
+    ))
     .await?;
     let catalog = source.catalog().map_err(|e| budget.fail(Error::Media(e)))?;
     let mut choice = host

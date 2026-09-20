@@ -35,6 +35,52 @@ pub enum LimitField {
     ReassemblyWindowPictures,
     /// Per-viewer budget for incomplete/held compressed media.
     PerViewerCompressedBytes,
+    /// Maximum concurrent pre-admission/handshake connections.
+    ConcurrentHandshakes,
+    /// Maximum duration of a handshake attempt in milliseconds.
+    HandshakeDurationMs,
+    /// Maximum pre-admission connection rate per second.
+    PreadmissionRatePerSec,
+    /// Maximum concurrent half-attached channels.
+    HalfAttachedChannels,
+    /// Maximum concurrent pending local authorization requests.
+    PendingApprovals,
+    /// Idle session timeout in seconds.
+    IdleSessionTimeoutSecs,
+    /// Maximum rate of ordinary control requests per second.
+    ControlRequestsPerSec,
+    /// Maximum rate of expensive codec probes per minute.
+    CodecProbesPerMin,
+    /// Maximum rate of recovery requests per second.
+    RecoveryRequestsPerSec,
+    /// Maximum rate of cursor shape uploads per second.
+    CursorUploadsPerSec,
+    /// Maximum rate of diagnostic exports per minute.
+    DiagnosticExportsPerMin,
+    /// Maximum decoder reconfigurations per minute.
+    DecoderReconfigurationsPerMin,
+    /// Maximum worker restarts per minute.
+    WorkerRestartsPerMin,
+    /// Maximum cursor dimension per axis in pixels.
+    CursorDimensionPixels,
+    /// Maximum cursor shape upload bytes.
+    CursorShapeBytes,
+    /// Maximum Unicode name byte length.
+    NameBytes,
+    /// Maximum parameter set (VPS/SPS/PPS) byte length.
+    ParameterSetBytes,
+    /// Maximum number of metadata fragments per access unit.
+    FragmentsPerAccessUnit,
+    /// Maximum retained request receipts in sequence ledger.
+    RetainedReceipts,
+    /// Maximum concurrent active encoder sessions.
+    EncoderSessions,
+    /// Maximum concurrent allocated GPU surfaces.
+    GpuSurfaces,
+    /// Maximum outbound bandwidth in bits per second.
+    BandwidthBps,
+    /// Maximum concurrent viewers.
+    Viewers,
 }
 
 impl fmt::Display for LimitField {
@@ -47,6 +93,29 @@ impl fmt::Display for LimitField {
             Self::CodedPixels => "coded pixels",
             Self::ReassemblyWindowPictures => "reassembly-window pictures",
             Self::PerViewerCompressedBytes => "per-viewer compressed bytes",
+            Self::ConcurrentHandshakes => "concurrent handshakes",
+            Self::HandshakeDurationMs => "handshake duration ms",
+            Self::PreadmissionRatePerSec => "preadmission rate per sec",
+            Self::HalfAttachedChannels => "half-attached channels",
+            Self::PendingApprovals => "pending approvals",
+            Self::IdleSessionTimeoutSecs => "idle session timeout seconds",
+            Self::ControlRequestsPerSec => "control requests per sec",
+            Self::CodecProbesPerMin => "codec probes per min",
+            Self::RecoveryRequestsPerSec => "recovery requests per sec",
+            Self::CursorUploadsPerSec => "cursor uploads per sec",
+            Self::DiagnosticExportsPerMin => "diagnostic exports per min",
+            Self::DecoderReconfigurationsPerMin => "decoder reconfigurations per min",
+            Self::WorkerRestartsPerMin => "worker restarts per min",
+            Self::CursorDimensionPixels => "cursor dimension pixels",
+            Self::CursorShapeBytes => "cursor shape bytes",
+            Self::NameBytes => "name bytes",
+            Self::ParameterSetBytes => "parameter-set bytes",
+            Self::FragmentsPerAccessUnit => "fragments per access unit",
+            Self::RetainedReceipts => "retained receipts",
+            Self::EncoderSessions => "encoder sessions",
+            Self::GpuSurfaces => "gpu surfaces",
+            Self::BandwidthBps => "bandwidth bps",
+            Self::Viewers => "viewers",
         };
         f.write_str(name)
     }
@@ -139,6 +208,52 @@ pub struct LimitOverrides {
     pub reassembly_window_pictures: Option<u8>,
     /// Override for the per-viewer compressed budget.
     pub per_viewer_compressed_bytes: Option<u64>,
+    /// Override for maximum concurrent pre-admission/handshake attempts.
+    pub max_concurrent_handshakes: Option<u32>,
+    /// Override for maximum handshake duration in milliseconds.
+    pub max_handshake_duration_ms: Option<u32>,
+    /// Override for maximum pre-admission rate per second.
+    pub max_preadmission_rate_per_sec: Option<u32>,
+    /// Override for maximum concurrent half-attached channels.
+    pub max_half_attached_channels: Option<u32>,
+    /// Override for maximum concurrent pending local approvals.
+    pub max_pending_approvals: Option<u32>,
+    /// Override for idle session timeout in seconds.
+    pub idle_session_timeout_seconds: Option<u32>,
+    /// Override for maximum control requests per second.
+    pub max_control_requests_per_sec: Option<u32>,
+    /// Override for maximum codec probes per minute.
+    pub max_codec_probes_per_min: Option<u32>,
+    /// Override for maximum recovery requests per second.
+    pub max_recovery_requests_per_sec: Option<u32>,
+    /// Override for maximum cursor uploads per second.
+    pub max_cursor_uploads_per_sec: Option<u32>,
+    /// Override for maximum diagnostic exports per minute.
+    pub max_diagnostic_exports_per_min: Option<u32>,
+    /// Override for maximum decoder reconfigurations per minute.
+    pub max_decoder_reconfigurations_per_min: Option<u32>,
+    /// Override for maximum worker restarts per minute.
+    pub max_worker_restarts_per_min: Option<u32>,
+    /// Override for maximum cursor dimension per axis in pixels.
+    pub max_cursor_dimension_pixels: Option<u32>,
+    /// Override for maximum cursor shape bytes.
+    pub max_cursor_shape_bytes: Option<u32>,
+    /// Override for maximum Unicode name bytes.
+    pub max_name_bytes: Option<usize>,
+    /// Override for maximum parameter set bytes.
+    pub max_parameter_set_bytes: Option<u32>,
+    /// Override for maximum metadata fragments per access unit.
+    pub max_fragments_per_access_unit: Option<u32>,
+    /// Override for maximum retained request receipts.
+    pub max_retained_receipts: Option<usize>,
+    /// Override for maximum concurrent encoder sessions.
+    pub max_encoder_sessions: Option<u32>,
+    /// Override for maximum concurrent GPU surfaces.
+    pub max_gpu_surfaces: Option<u32>,
+    /// Override for maximum bandwidth in bits per second.
+    pub max_bandwidth_bps: Option<u64>,
+    /// Override for maximum concurrent viewers.
+    pub max_viewers: Option<u32>,
 }
 
 /// The one limits structure (plan section 17.2). Fields are private so every
@@ -152,6 +267,29 @@ pub struct ProtocolLimits {
     max_coded_pixels: u64,
     reassembly_window_pictures: u8,
     per_viewer_compressed_bytes: u64,
+    max_concurrent_handshakes: u16,
+    max_handshake_duration_ms: u16,
+    max_preadmission_rate_per_sec: u16,
+    max_half_attached_channels: u16,
+    max_pending_approvals: u8,
+    idle_session_timeout_seconds: u16,
+    max_control_requests_per_sec: u16,
+    max_codec_probes_per_min: u16,
+    max_recovery_requests_per_sec: u16,
+    max_cursor_uploads_per_sec: u16,
+    max_diagnostic_exports_per_min: u8,
+    max_decoder_reconfigurations_per_min: u16,
+    max_worker_restarts_per_min: u8,
+    max_cursor_dimension_pixels: u16,
+    max_cursor_shape_bytes: u32,
+    max_name_bytes: u16,
+    max_parameter_set_bytes: u32,
+    max_fragments_per_access_unit: u16,
+    max_retained_receipts: u16,
+    max_encoder_sessions: u8,
+    max_gpu_surfaces: u8,
+    max_bandwidth_bps: u64,
+    max_viewers: u8,
 }
 
 impl ProtocolLimits {
@@ -162,7 +300,7 @@ impl ProtocolLimits {
     /// 17.2).
     pub const REASSEMBLY_WINDOW_CEILING: u8 = 12;
 
-    /// The implementation ceilings from plan section 17.2.
+    /// The implementation ceilings from plan section 17.2 and 19.3.
     pub const ABSOLUTE: Self = Self {
         max_control_message_bytes: 64 * 1024,
         max_clipboard_item_bytes: 1024 * 1024,
@@ -171,124 +309,71 @@ impl ProtocolLimits {
         max_coded_pixels: 16_777_216,
         reassembly_window_pictures: Self::REASSEMBLY_WINDOW_CEILING,
         per_viewer_compressed_bytes: 32 * 1024 * 1024,
+        max_concurrent_handshakes: 64,
+        max_handshake_duration_ms: 10_000,
+        max_preadmission_rate_per_sec: 100,
+        max_half_attached_channels: 16,
+        max_pending_approvals: 8,
+        idle_session_timeout_seconds: 300,
+        max_control_requests_per_sec: 200,
+        max_codec_probes_per_min: 30,
+        max_recovery_requests_per_sec: 120,
+        max_cursor_uploads_per_sec: 60,
+        max_diagnostic_exports_per_min: 10,
+        max_decoder_reconfigurations_per_min: 30,
+        max_worker_restarts_per_min: 10,
+        max_cursor_dimension_pixels: 256,
+        max_cursor_shape_bytes: 262_144,
+        max_name_bytes: 256,
+        max_parameter_set_bytes: 64 * 1024,
+        max_fragments_per_access_unit: 4096,
+        max_retained_receipts: 1024,
+        max_encoder_sessions: 4,
+        max_gpu_surfaces: 32,
+        max_bandwidth_bps: 1_000_000_000,
+        max_viewers: 3,
     };
 
     /// Applies downward-only overrides to the absolute ceilings. Values
     /// above a ceiling or below a floor are typed refusals — administrator
     /// convenience never widens an implementation bound (plan section 17.2).
     pub fn with_overrides(overrides: LimitOverrides) -> Result<Self, LimitsError> {
-        fn take_u32(
-            field: LimitField,
-            ceiling: u32,
-            floor: u32,
-            value: Option<u32>,
-        ) -> Result<u32, LimitsError> {
-            match value {
-                None => Ok(ceiling),
-                Some(v) if v > ceiling => Err(LimitsError::AboveCeiling {
-                    field,
-                    value: u64::from(v),
-                    ceiling: u64::from(ceiling),
-                }),
-                Some(v) if v < floor => Err(LimitsError::BelowFloor {
-                    field,
-                    value: u64::from(v),
-                    floor: u64::from(floor),
-                }),
-                Some(v) => Ok(v),
-            }
-        }
-
         let a = Self::ABSOLUTE;
-        let reassembly = match overrides.reassembly_window_pictures {
-            None => a.reassembly_window_pictures,
-            Some(v) if v > Self::REASSEMBLY_WINDOW_CEILING => {
-                return Err(LimitsError::AboveCeiling {
-                    field: LimitField::ReassemblyWindowPictures,
-                    value: u64::from(v),
-                    ceiling: u64::from(Self::REASSEMBLY_WINDOW_CEILING),
-                });
-            }
-            Some(v) if v < Self::REASSEMBLY_WINDOW_FLOOR => {
-                return Err(LimitsError::BelowFloor {
-                    field: LimitField::ReassemblyWindowPictures,
-                    value: u64::from(v),
-                    floor: u64::from(Self::REASSEMBLY_WINDOW_FLOOR),
-                });
-            }
-            Some(v) => v,
-        };
-
-        // The access-unit ceiling is selected before the per-viewer budget
-        // because the budget's floor is relative to the SELECTED ceiling: a
-        // deployment that negotiates smaller access units may run a
-        // proportionally smaller budget. Flooring against the absolute
-        // 16 MiB would wrongly reject small-AU mobile configurations
-        // (found in independent review by AzureBasin).
-        let max_encoded_access_unit_bytes = take_u32(
-            LimitField::EncodedAccessUnitBytes,
-            a.max_encoded_access_unit_bytes,
-            1,
-            overrides.max_encoded_access_unit_bytes,
-        )?;
-
-        let per_viewer = match overrides.per_viewer_compressed_bytes {
-            None => a.per_viewer_compressed_bytes,
-            Some(v) if v > a.per_viewer_compressed_bytes => {
-                return Err(LimitsError::AboveCeiling {
-                    field: LimitField::PerViewerCompressedBytes,
-                    value: v,
-                    ceiling: a.per_viewer_compressed_bytes,
-                });
-            }
-            // Floor: a viewer that cannot hold even one access unit at the
-            // selected ceiling cannot decode at all.
-            Some(v) if v < u64::from(max_encoded_access_unit_bytes) => {
-                return Err(LimitsError::BelowFloor {
-                    field: LimitField::PerViewerCompressedBytes,
-                    value: v,
-                    floor: u64::from(max_encoded_access_unit_bytes),
-                });
-            }
-            Some(v) => v,
-        };
-
-        let max_coded_pixels = match overrides.max_coded_pixels {
-            None => a.max_coded_pixels,
-            Some(v) if v > a.max_coded_pixels => {
-                return Err(LimitsError::AboveCeiling {
-                    field: LimitField::CodedPixels,
-                    value: v,
-                    ceiling: a.max_coded_pixels,
-                });
-            }
-            Some(0) => return Err(LimitsError::ZeroDimension),
-            Some(v) => v,
-        };
+        let session = resolve_session_overrides(&overrides, &a)?;
+        let rates = resolve_rate_overrides(&overrides, &a)?;
+        let resources = resolve_resource_overrides(&overrides, &a)?;
 
         Ok(Self {
-            max_control_message_bytes: take_u32(
-                LimitField::ControlMessageBytes,
-                a.max_control_message_bytes,
-                1,
-                overrides.max_control_message_bytes,
-            )?,
-            max_clipboard_item_bytes: take_u32(
-                LimitField::ClipboardItemBytes,
-                a.max_clipboard_item_bytes,
-                1,
-                overrides.max_clipboard_item_bytes,
-            )?,
-            max_encoded_access_unit_bytes,
-            max_dimension_pixels: take_u32(
-                LimitField::DimensionPixels,
-                a.max_dimension_pixels,
-                1,
-                overrides.max_dimension_pixels,
-            )?,
-            max_coded_pixels,
-            reassembly_window_pictures: reassembly,
-            per_viewer_compressed_bytes: per_viewer,
+            max_control_message_bytes: session.max_control_message_bytes,
+            max_clipboard_item_bytes: session.max_clipboard_item_bytes,
+            max_encoded_access_unit_bytes: session.max_encoded_access_unit_bytes,
+            max_dimension_pixels: session.max_dimension_pixels,
+            max_coded_pixels: session.max_coded_pixels,
+            reassembly_window_pictures: session.reassembly_window_pictures,
+            per_viewer_compressed_bytes: session.per_viewer_compressed_bytes,
+            max_concurrent_handshakes: rates.max_concurrent_handshakes,
+            max_handshake_duration_ms: rates.max_handshake_duration_ms,
+            max_preadmission_rate_per_sec: rates.max_preadmission_rate_per_sec,
+            max_half_attached_channels: rates.max_half_attached_channels,
+            max_pending_approvals: rates.max_pending_approvals,
+            idle_session_timeout_seconds: rates.idle_session_timeout_seconds,
+            max_control_requests_per_sec: rates.max_control_requests_per_sec,
+            max_codec_probes_per_min: rates.max_codec_probes_per_min,
+            max_recovery_requests_per_sec: rates.max_recovery_requests_per_sec,
+            max_cursor_uploads_per_sec: rates.max_cursor_uploads_per_sec,
+            max_diagnostic_exports_per_min: rates.max_diagnostic_exports_per_min,
+            max_decoder_reconfigurations_per_min: rates.max_decoder_reconfigurations_per_min,
+            max_worker_restarts_per_min: rates.max_worker_restarts_per_min,
+            max_cursor_dimension_pixels: resources.cursor_dimension_pixels,
+            max_cursor_shape_bytes: resources.cursor_shape_bytes,
+            max_name_bytes: resources.name_bytes,
+            max_parameter_set_bytes: resources.parameter_set_bytes,
+            max_fragments_per_access_unit: resources.fragments_per_access_unit,
+            max_retained_receipts: resources.retained_receipts,
+            max_encoder_sessions: resources.encoder_sessions,
+            max_gpu_surfaces: resources.gpu_surfaces,
+            max_bandwidth_bps: resources.bandwidth_bps,
+            max_viewers: resources.viewers,
         })
     }
 
@@ -315,6 +400,59 @@ impl ProtocolLimits {
             per_viewer_compressed_bytes: self
                 .per_viewer_compressed_bytes
                 .min(peer.per_viewer_compressed_bytes),
+            max_concurrent_handshakes: self
+                .max_concurrent_handshakes
+                .min(peer.max_concurrent_handshakes),
+            max_handshake_duration_ms: self
+                .max_handshake_duration_ms
+                .min(peer.max_handshake_duration_ms),
+            max_preadmission_rate_per_sec: self
+                .max_preadmission_rate_per_sec
+                .min(peer.max_preadmission_rate_per_sec),
+            max_half_attached_channels: self
+                .max_half_attached_channels
+                .min(peer.max_half_attached_channels),
+            max_pending_approvals: self.max_pending_approvals.min(peer.max_pending_approvals),
+            idle_session_timeout_seconds: self
+                .idle_session_timeout_seconds
+                .min(peer.idle_session_timeout_seconds),
+            max_control_requests_per_sec: self
+                .max_control_requests_per_sec
+                .min(peer.max_control_requests_per_sec),
+            max_codec_probes_per_min: self
+                .max_codec_probes_per_min
+                .min(peer.max_codec_probes_per_min),
+            max_recovery_requests_per_sec: self
+                .max_recovery_requests_per_sec
+                .min(peer.max_recovery_requests_per_sec),
+            max_cursor_uploads_per_sec: self
+                .max_cursor_uploads_per_sec
+                .min(peer.max_cursor_uploads_per_sec),
+            max_diagnostic_exports_per_min: self
+                .max_diagnostic_exports_per_min
+                .min(peer.max_diagnostic_exports_per_min),
+            max_decoder_reconfigurations_per_min: self
+                .max_decoder_reconfigurations_per_min
+                .min(peer.max_decoder_reconfigurations_per_min),
+            max_worker_restarts_per_min: self
+                .max_worker_restarts_per_min
+                .min(peer.max_worker_restarts_per_min),
+            max_cursor_dimension_pixels: self
+                .max_cursor_dimension_pixels
+                .min(peer.max_cursor_dimension_pixels),
+            max_cursor_shape_bytes: self.max_cursor_shape_bytes.min(peer.max_cursor_shape_bytes),
+            max_name_bytes: self.max_name_bytes.min(peer.max_name_bytes),
+            max_parameter_set_bytes: self
+                .max_parameter_set_bytes
+                .min(peer.max_parameter_set_bytes),
+            max_fragments_per_access_unit: self
+                .max_fragments_per_access_unit
+                .min(peer.max_fragments_per_access_unit),
+            max_retained_receipts: self.max_retained_receipts.min(peer.max_retained_receipts),
+            max_encoder_sessions: self.max_encoder_sessions.min(peer.max_encoder_sessions),
+            max_gpu_surfaces: self.max_gpu_surfaces.min(peer.max_gpu_surfaces),
+            max_bandwidth_bps: self.max_bandwidth_bps.min(peer.max_bandwidth_bps),
+            max_viewers: self.max_viewers.min(peer.max_viewers),
         }
     }
 
@@ -358,6 +496,144 @@ impl ProtocolLimits {
     #[must_use]
     pub const fn per_viewer_compressed_bytes(&self) -> u64 {
         self.per_viewer_compressed_bytes
+    }
+
+    /// Maximum concurrent pre-admission/handshake attempts.
+    #[must_use]
+    pub const fn max_concurrent_handshakes(&self) -> u32 {
+        self.max_concurrent_handshakes as u32
+    }
+
+    /// Maximum handshake duration in milliseconds.
+    #[must_use]
+    pub const fn max_handshake_duration_ms(&self) -> u32 {
+        self.max_handshake_duration_ms as u32
+    }
+
+    /// Maximum pre-admission rate per second.
+    #[must_use]
+    pub const fn max_preadmission_rate_per_sec(&self) -> u32 {
+        self.max_preadmission_rate_per_sec as u32
+    }
+
+    /// Maximum concurrent half-attached channels.
+    #[must_use]
+    pub const fn max_half_attached_channels(&self) -> u32 {
+        self.max_half_attached_channels as u32
+    }
+
+    /// Maximum concurrent pending local approvals.
+    #[must_use]
+    pub const fn max_pending_approvals(&self) -> u32 {
+        self.max_pending_approvals as u32
+    }
+
+    /// Idle session timeout in seconds.
+    #[must_use]
+    pub const fn idle_session_timeout_seconds(&self) -> u32 {
+        self.idle_session_timeout_seconds as u32
+    }
+
+    /// Maximum control requests per second.
+    #[must_use]
+    pub const fn max_control_requests_per_sec(&self) -> u32 {
+        self.max_control_requests_per_sec as u32
+    }
+
+    /// Maximum codec probes per minute.
+    #[must_use]
+    pub const fn max_codec_probes_per_min(&self) -> u32 {
+        self.max_codec_probes_per_min as u32
+    }
+
+    /// Maximum recovery requests per second.
+    #[must_use]
+    pub const fn max_recovery_requests_per_sec(&self) -> u32 {
+        self.max_recovery_requests_per_sec as u32
+    }
+
+    /// Maximum cursor uploads per second.
+    #[must_use]
+    pub const fn max_cursor_uploads_per_sec(&self) -> u32 {
+        self.max_cursor_uploads_per_sec as u32
+    }
+
+    /// Maximum diagnostic exports per minute.
+    #[must_use]
+    pub const fn max_diagnostic_exports_per_min(&self) -> u32 {
+        self.max_diagnostic_exports_per_min as u32
+    }
+
+    /// Maximum decoder reconfigurations per minute.
+    #[must_use]
+    pub const fn max_decoder_reconfigurations_per_min(&self) -> u32 {
+        self.max_decoder_reconfigurations_per_min as u32
+    }
+
+    /// Maximum worker restarts per minute.
+    #[must_use]
+    pub const fn max_worker_restarts_per_min(&self) -> u32 {
+        self.max_worker_restarts_per_min as u32
+    }
+
+    /// Maximum cursor dimension per axis in pixels.
+    #[must_use]
+    pub const fn max_cursor_dimension_pixels(&self) -> u32 {
+        self.max_cursor_dimension_pixels as u32
+    }
+
+    /// Maximum cursor shape bytes.
+    #[must_use]
+    pub const fn max_cursor_shape_bytes(&self) -> u32 {
+        self.max_cursor_shape_bytes
+    }
+
+    /// Maximum Unicode name bytes.
+    #[must_use]
+    pub const fn max_name_bytes(&self) -> usize {
+        self.max_name_bytes as usize
+    }
+
+    /// Maximum parameter set bytes.
+    #[must_use]
+    pub const fn max_parameter_set_bytes(&self) -> u32 {
+        self.max_parameter_set_bytes
+    }
+
+    /// Maximum metadata fragments per access unit.
+    #[must_use]
+    pub const fn max_fragments_per_access_unit(&self) -> u32 {
+        self.max_fragments_per_access_unit as u32
+    }
+
+    /// Maximum retained request receipts.
+    #[must_use]
+    pub const fn max_retained_receipts(&self) -> usize {
+        self.max_retained_receipts as usize
+    }
+
+    /// Maximum concurrent encoder sessions.
+    #[must_use]
+    pub const fn max_encoder_sessions(&self) -> u32 {
+        self.max_encoder_sessions as u32
+    }
+
+    /// Maximum concurrent GPU surfaces.
+    #[must_use]
+    pub const fn max_gpu_surfaces(&self) -> u32 {
+        self.max_gpu_surfaces as u32
+    }
+
+    /// Maximum bandwidth in bits per second.
+    #[must_use]
+    pub const fn max_bandwidth_bps(&self) -> u64 {
+        self.max_bandwidth_bps
+    }
+
+    /// Maximum concurrent viewers.
+    #[must_use]
+    pub const fn max_viewers(&self) -> u32 {
+        self.max_viewers as u32
     }
 
     /// Validates an ordinary control-message length before parsing.
@@ -415,6 +691,142 @@ impl ProtocolLimits {
         Ok(())
     }
 
+    /// Validates cursor dimensions before uploading or decoding a cursor shape.
+    pub fn validate_cursor_dimensions(&self, width: u32, height: u32) -> Result<(), LimitsError> {
+        if width == 0 || height == 0 {
+            return Err(LimitsError::ZeroDimension);
+        }
+        for axis in [width, height] {
+            if axis > u32::from(self.max_cursor_dimension_pixels) {
+                return Err(LimitsError::AboveCeiling {
+                    field: LimitField::CursorDimensionPixels,
+                    value: u64::from(axis),
+                    ceiling: u64::from(self.max_cursor_dimension_pixels),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates cursor shape payload length before allocation or FFI.
+    pub fn validate_cursor_shape_len(&self, len: usize) -> Result<(), LimitsError> {
+        Self::validate_len(
+            LimitField::CursorShapeBytes,
+            len,
+            u64::from(self.max_cursor_shape_bytes),
+        )
+    }
+
+    /// Validates a Unicode name byte length before allocation or display.
+    pub fn validate_name_len(&self, len: usize) -> Result<(), LimitsError> {
+        Self::validate_len(LimitField::NameBytes, len, u64::from(self.max_name_bytes))
+    }
+
+    /// Validates parameter set (VPS/SPS/PPS) byte length before parsing.
+    pub fn validate_parameter_set_len(&self, len: usize) -> Result<(), LimitsError> {
+        Self::validate_len(
+            LimitField::ParameterSetBytes,
+            len,
+            u64::from(self.max_parameter_set_bytes),
+        )
+    }
+
+    /// Validates access-unit metadata fragment count against the fragment ceiling.
+    pub fn validate_fragment_count(&self, count: u32) -> Result<(), LimitsError> {
+        if count > u32::from(self.max_fragments_per_access_unit) {
+            return Err(LimitsError::AboveCeiling {
+                field: LimitField::FragmentsPerAccessUnit,
+                value: u64::from(count),
+                ceiling: u64::from(self.max_fragments_per_access_unit),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validates concurrent handshake count before admitting another.
+    pub fn validate_handshake_concurrency(&self, count: u32) -> Result<(), LimitsError> {
+        if count >= u32::from(self.max_concurrent_handshakes) {
+            return Err(LimitsError::AboveCeiling {
+                field: LimitField::ConcurrentHandshakes,
+                value: u64::from(count),
+                ceiling: u64::from(self.max_concurrent_handshakes),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validates pending approvals count before queuing another.
+    pub fn validate_pending_approvals(&self, count: u32) -> Result<(), LimitsError> {
+        if count >= u32::from(self.max_pending_approvals) {
+            return Err(LimitsError::AboveCeiling {
+                field: LimitField::PendingApprovals,
+                value: u64::from(count),
+                ceiling: u64::from(self.max_pending_approvals),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validates half-attached channels count before admitting another.
+    pub fn validate_half_attached_channels(&self, count: u32) -> Result<(), LimitsError> {
+        if count >= u32::from(self.max_half_attached_channels) {
+            return Err(LimitsError::AboveCeiling {
+                field: LimitField::HalfAttachedChannels,
+                value: u64::from(count),
+                ceiling: u64::from(self.max_half_attached_channels),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validates retained receipts count against the ledger ceiling.
+    pub fn validate_retained_receipts(&self, count: usize) -> Result<(), LimitsError> {
+        if count > usize::from(self.max_retained_receipts) {
+            return Err(LimitsError::AboveCeiling {
+                field: LimitField::RetainedReceipts,
+                value: u64::try_from(count).unwrap_or(u64::MAX),
+                ceiling: u64::from(self.max_retained_receipts),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validates encoder session count before launching a new encoder.
+    pub fn validate_encoder_sessions(&self, count: u32) -> Result<(), LimitsError> {
+        if count >= u32::from(self.max_encoder_sessions) {
+            return Err(LimitsError::AboveCeiling {
+                field: LimitField::EncoderSessions,
+                value: u64::from(count),
+                ceiling: u64::from(self.max_encoder_sessions),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validates GPU surfaces count before allocating additional surfaces.
+    pub fn validate_gpu_surfaces(&self, count: u32) -> Result<(), LimitsError> {
+        if count >= u32::from(self.max_gpu_surfaces) {
+            return Err(LimitsError::AboveCeiling {
+                field: LimitField::GpuSurfaces,
+                value: u64::from(count),
+                ceiling: u64::from(self.max_gpu_surfaces),
+            });
+        }
+        Ok(())
+    }
+
+    /// Validates viewer count before admitting another viewer.
+    pub fn validate_viewers(&self, count: u32) -> Result<(), LimitsError> {
+        if count >= u32::from(self.max_viewers) {
+            return Err(LimitsError::AboveCeiling {
+                field: LimitField::Viewers,
+                value: u64::from(count),
+                ceiling: u64::from(self.max_viewers),
+            });
+        }
+        Ok(())
+    }
+
     /// Checked surface-size arithmetic: validates the dimensions, then
     /// computes `align_up(width * bytes_per_pixel) * height` without ever
     /// wrapping. `row_align` must be a nonzero power of two;
@@ -461,6 +873,392 @@ impl ProtocolLimits {
         }
         Ok(())
     }
+}
+
+struct SessionOverrides {
+    max_control_message_bytes: u32,
+    max_clipboard_item_bytes: u32,
+    max_encoded_access_unit_bytes: u32,
+    max_dimension_pixels: u32,
+    max_coded_pixels: u64,
+    reassembly_window_pictures: u8,
+    per_viewer_compressed_bytes: u64,
+}
+
+struct RateOverrides {
+    max_concurrent_handshakes: u16,
+    max_handshake_duration_ms: u16,
+    max_preadmission_rate_per_sec: u16,
+    max_half_attached_channels: u16,
+    max_pending_approvals: u8,
+    idle_session_timeout_seconds: u16,
+    max_control_requests_per_sec: u16,
+    max_codec_probes_per_min: u16,
+    max_recovery_requests_per_sec: u16,
+    max_cursor_uploads_per_sec: u16,
+    max_diagnostic_exports_per_min: u8,
+    max_decoder_reconfigurations_per_min: u16,
+    max_worker_restarts_per_min: u8,
+}
+
+struct ResourceOverrides {
+    cursor_dimension_pixels: u16,
+    cursor_shape_bytes: u32,
+    name_bytes: u16,
+    parameter_set_bytes: u32,
+    fragments_per_access_unit: u16,
+    retained_receipts: u16,
+    encoder_sessions: u8,
+    gpu_surfaces: u8,
+    bandwidth_bps: u64,
+    viewers: u8,
+}
+
+fn take_u32(
+    field: LimitField,
+    ceiling: u32,
+    floor: u32,
+    value: Option<u32>,
+) -> Result<u32, LimitsError> {
+    match value {
+        None => Ok(ceiling),
+        Some(v) if v > ceiling => Err(LimitsError::AboveCeiling {
+            field,
+            value: u64::from(v),
+            ceiling: u64::from(ceiling),
+        }),
+        Some(v) if v < floor => Err(LimitsError::BelowFloor {
+            field,
+            value: u64::from(v),
+            floor: u64::from(floor),
+        }),
+        Some(v) => Ok(v),
+    }
+}
+
+fn take_u64(
+    field: LimitField,
+    ceiling: u64,
+    floor: u64,
+    value: Option<u64>,
+) -> Result<u64, LimitsError> {
+    match value {
+        None => Ok(ceiling),
+        Some(v) if v > ceiling => Err(LimitsError::AboveCeiling {
+            field,
+            value: v,
+            ceiling,
+        }),
+        Some(v) if v < floor => Err(LimitsError::BelowFloor {
+            field,
+            value: v,
+            floor,
+        }),
+        Some(v) => Ok(v),
+    }
+}
+
+fn take_u16(
+    field: LimitField,
+    ceiling: u16,
+    floor: u16,
+    value: Option<u32>,
+) -> Result<u16, LimitsError> {
+    match value {
+        None => Ok(ceiling),
+        Some(v) if v > u32::from(ceiling) => Err(LimitsError::AboveCeiling {
+            field,
+            value: u64::from(v),
+            ceiling: u64::from(ceiling),
+        }),
+        Some(v) if v < u32::from(floor) => Err(LimitsError::BelowFloor {
+            field,
+            value: u64::from(v),
+            floor: u64::from(floor),
+        }),
+        Some(v) => Ok(u16::try_from(v).unwrap_or(ceiling)),
+    }
+}
+
+fn take_u8(
+    field: LimitField,
+    ceiling: u8,
+    floor: u8,
+    value: Option<u32>,
+) -> Result<u8, LimitsError> {
+    match value {
+        None => Ok(ceiling),
+        Some(v) if v > u32::from(ceiling) => Err(LimitsError::AboveCeiling {
+            field,
+            value: u64::from(v),
+            ceiling: u64::from(ceiling),
+        }),
+        Some(v) if v < u32::from(floor) => Err(LimitsError::BelowFloor {
+            field,
+            value: u64::from(v),
+            floor: u64::from(floor),
+        }),
+        Some(v) => Ok(u8::try_from(v).unwrap_or(ceiling)),
+    }
+}
+
+fn take_usize_u16(
+    field: LimitField,
+    ceiling: u16,
+    floor: u16,
+    value: Option<usize>,
+) -> Result<u16, LimitsError> {
+    match value {
+        None => Ok(ceiling),
+        Some(v) if v > usize::from(ceiling) => Err(LimitsError::AboveCeiling {
+            field,
+            value: u64::try_from(v).unwrap_or(u64::MAX),
+            ceiling: u64::from(ceiling),
+        }),
+        Some(v) if v < usize::from(floor) => Err(LimitsError::BelowFloor {
+            field,
+            value: u64::try_from(v).unwrap_or(u64::MAX),
+            floor: u64::from(floor),
+        }),
+        Some(v) => Ok(u16::try_from(v).unwrap_or(ceiling)),
+    }
+}
+
+fn resolve_session_overrides(
+    overrides: &LimitOverrides,
+    a: &ProtocolLimits,
+) -> Result<SessionOverrides, LimitsError> {
+    let reassembly = match overrides.reassembly_window_pictures {
+        None => a.reassembly_window_pictures,
+        Some(v) if v > ProtocolLimits::REASSEMBLY_WINDOW_CEILING => {
+            return Err(LimitsError::AboveCeiling {
+                field: LimitField::ReassemblyWindowPictures,
+                value: u64::from(v),
+                ceiling: u64::from(ProtocolLimits::REASSEMBLY_WINDOW_CEILING),
+            });
+        }
+        Some(v) if v < ProtocolLimits::REASSEMBLY_WINDOW_FLOOR => {
+            return Err(LimitsError::BelowFloor {
+                field: LimitField::ReassemblyWindowPictures,
+                value: u64::from(v),
+                floor: u64::from(ProtocolLimits::REASSEMBLY_WINDOW_FLOOR),
+            });
+        }
+        Some(v) => v,
+    };
+
+    let max_encoded_access_unit_bytes = take_u32(
+        LimitField::EncodedAccessUnitBytes,
+        a.max_encoded_access_unit_bytes,
+        1,
+        overrides.max_encoded_access_unit_bytes,
+    )?;
+
+    let per_viewer = match overrides.per_viewer_compressed_bytes {
+        None => a.per_viewer_compressed_bytes,
+        Some(v) if v > a.per_viewer_compressed_bytes => {
+            return Err(LimitsError::AboveCeiling {
+                field: LimitField::PerViewerCompressedBytes,
+                value: v,
+                ceiling: a.per_viewer_compressed_bytes,
+            });
+        }
+        Some(v) if v < u64::from(max_encoded_access_unit_bytes) => {
+            return Err(LimitsError::BelowFloor {
+                field: LimitField::PerViewerCompressedBytes,
+                value: v,
+                floor: u64::from(max_encoded_access_unit_bytes),
+            });
+        }
+        Some(v) => v,
+    };
+
+    let max_coded_pixels = match overrides.max_coded_pixels {
+        None => a.max_coded_pixels,
+        Some(v) if v > a.max_coded_pixels => {
+            return Err(LimitsError::AboveCeiling {
+                field: LimitField::CodedPixels,
+                value: v,
+                ceiling: a.max_coded_pixels,
+            });
+        }
+        Some(0) => return Err(LimitsError::ZeroDimension),
+        Some(v) => v,
+    };
+
+    Ok(SessionOverrides {
+        max_control_message_bytes: take_u32(
+            LimitField::ControlMessageBytes,
+            a.max_control_message_bytes,
+            1,
+            overrides.max_control_message_bytes,
+        )?,
+        max_clipboard_item_bytes: take_u32(
+            LimitField::ClipboardItemBytes,
+            a.max_clipboard_item_bytes,
+            1,
+            overrides.max_clipboard_item_bytes,
+        )?,
+        max_encoded_access_unit_bytes,
+        max_dimension_pixels: take_u32(
+            LimitField::DimensionPixels,
+            a.max_dimension_pixels,
+            1,
+            overrides.max_dimension_pixels,
+        )?,
+        max_coded_pixels,
+        reassembly_window_pictures: reassembly,
+        per_viewer_compressed_bytes: per_viewer,
+    })
+}
+
+fn resolve_rate_overrides(
+    overrides: &LimitOverrides,
+    a: &ProtocolLimits,
+) -> Result<RateOverrides, LimitsError> {
+    Ok(RateOverrides {
+        max_concurrent_handshakes: take_u16(
+            LimitField::ConcurrentHandshakes,
+            a.max_concurrent_handshakes,
+            1,
+            overrides.max_concurrent_handshakes,
+        )?,
+        max_handshake_duration_ms: take_u16(
+            LimitField::HandshakeDurationMs,
+            a.max_handshake_duration_ms,
+            1_000,
+            overrides.max_handshake_duration_ms,
+        )?,
+        max_preadmission_rate_per_sec: take_u16(
+            LimitField::PreadmissionRatePerSec,
+            a.max_preadmission_rate_per_sec,
+            1,
+            overrides.max_preadmission_rate_per_sec,
+        )?,
+        max_half_attached_channels: take_u16(
+            LimitField::HalfAttachedChannels,
+            a.max_half_attached_channels,
+            1,
+            overrides.max_half_attached_channels,
+        )?,
+        max_pending_approvals: take_u8(
+            LimitField::PendingApprovals,
+            a.max_pending_approvals,
+            1,
+            overrides.max_pending_approvals,
+        )?,
+        idle_session_timeout_seconds: take_u16(
+            LimitField::IdleSessionTimeoutSecs,
+            a.idle_session_timeout_seconds,
+            10,
+            overrides.idle_session_timeout_seconds,
+        )?,
+        max_control_requests_per_sec: take_u16(
+            LimitField::ControlRequestsPerSec,
+            a.max_control_requests_per_sec,
+            10,
+            overrides.max_control_requests_per_sec,
+        )?,
+        max_codec_probes_per_min: take_u16(
+            LimitField::CodecProbesPerMin,
+            a.max_codec_probes_per_min,
+            1,
+            overrides.max_codec_probes_per_min,
+        )?,
+        max_recovery_requests_per_sec: take_u16(
+            LimitField::RecoveryRequestsPerSec,
+            a.max_recovery_requests_per_sec,
+            10,
+            overrides.max_recovery_requests_per_sec,
+        )?,
+        max_cursor_uploads_per_sec: take_u16(
+            LimitField::CursorUploadsPerSec,
+            a.max_cursor_uploads_per_sec,
+            1,
+            overrides.max_cursor_uploads_per_sec,
+        )?,
+        max_diagnostic_exports_per_min: take_u8(
+            LimitField::DiagnosticExportsPerMin,
+            a.max_diagnostic_exports_per_min,
+            1,
+            overrides.max_diagnostic_exports_per_min,
+        )?,
+        max_decoder_reconfigurations_per_min: take_u16(
+            LimitField::DecoderReconfigurationsPerMin,
+            a.max_decoder_reconfigurations_per_min,
+            1,
+            overrides.max_decoder_reconfigurations_per_min,
+        )?,
+        max_worker_restarts_per_min: take_u8(
+            LimitField::WorkerRestartsPerMin,
+            a.max_worker_restarts_per_min,
+            1,
+            overrides.max_worker_restarts_per_min,
+        )?,
+    })
+}
+
+fn resolve_resource_overrides(
+    overrides: &LimitOverrides,
+    a: &ProtocolLimits,
+) -> Result<ResourceOverrides, LimitsError> {
+    Ok(ResourceOverrides {
+        cursor_dimension_pixels: take_u16(
+            LimitField::CursorDimensionPixels,
+            a.max_cursor_dimension_pixels,
+            16,
+            overrides.max_cursor_dimension_pixels,
+        )?,
+        cursor_shape_bytes: take_u32(
+            LimitField::CursorShapeBytes,
+            a.max_cursor_shape_bytes,
+            1024,
+            overrides.max_cursor_shape_bytes,
+        )?,
+        name_bytes: take_usize_u16(
+            LimitField::NameBytes,
+            a.max_name_bytes,
+            1,
+            overrides.max_name_bytes,
+        )?,
+        parameter_set_bytes: take_u32(
+            LimitField::ParameterSetBytes,
+            a.max_parameter_set_bytes,
+            32,
+            overrides.max_parameter_set_bytes,
+        )?,
+        fragments_per_access_unit: take_u16(
+            LimitField::FragmentsPerAccessUnit,
+            a.max_fragments_per_access_unit,
+            1,
+            overrides.max_fragments_per_access_unit,
+        )?,
+        retained_receipts: take_usize_u16(
+            LimitField::RetainedReceipts,
+            a.max_retained_receipts,
+            16,
+            overrides.max_retained_receipts,
+        )?,
+        encoder_sessions: take_u8(
+            LimitField::EncoderSessions,
+            a.max_encoder_sessions,
+            1,
+            overrides.max_encoder_sessions,
+        )?,
+        gpu_surfaces: take_u8(
+            LimitField::GpuSurfaces,
+            a.max_gpu_surfaces,
+            2,
+            overrides.max_gpu_surfaces,
+        )?,
+        bandwidth_bps: take_u64(
+            LimitField::BandwidthBps,
+            a.max_bandwidth_bps,
+            1_000_000,
+            overrides.max_bandwidth_bps,
+        )?,
+        viewers: take_u8(LimitField::Viewers, a.max_viewers, 1, overrides.max_viewers)?,
+    })
 }
 
 #[cfg(test)]

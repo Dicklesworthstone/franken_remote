@@ -67,7 +67,7 @@ impl Host {
         if !u64::try_from(charge).is_ok_and(|n| n <= setup.limits.per_viewer_compressed_bytes()) {
             return Err(Error::Wire(fr_wire::WireError::ResourceLimit));
         }
-        Self::from_capture(control, transport, setup, cfg, Bootstrap::Shared(update))
+        Self::from_capture(control, transport, &setup, cfg, Bootstrap::Shared(update))
     }
     /// Transfer this viewer's alias only after its exact configured reply. The
     /// receiver-independent allocation and its capture-anchored deadline survive

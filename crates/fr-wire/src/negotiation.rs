@@ -357,6 +357,7 @@ fn read_limits(r: &mut Reader<'_>) -> Result<ProtocolLimits, Error> {
         max_coded_pixels: Some(r.u64()?),
         reassembly_window_pictures: Some(r.u8()?),
         per_viewer_compressed_bytes: Some(r.u64()?),
+        ..Default::default()
     })
     .map_err(|_| Error::Limits)
 }

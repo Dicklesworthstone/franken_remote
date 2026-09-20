@@ -262,7 +262,7 @@ impl Viewer {
         launch: Launch,
         receive: ReceiveConfig,
     ) -> Result<Self, Error> {
-        let prepared = Self::prepare(cx, transport, setup, bytes, receive)?;
+        let prepared = Self::prepare(cx, transport, &setup, bytes, receive)?;
         let mut viewer = prepared.configure(launch).await?;
         viewer.check_transport(transport)?;
         Ok(viewer)
@@ -270,7 +270,7 @@ impl Viewer {
     pub(crate) fn prepare(
         cx: Cx,
         transport: &QuicRecords,
-        setup: Setup,
+        setup: &Setup,
         bytes: &[u8],
         receive: ReceiveConfig,
     ) -> Result<PreparedViewer, Error> {
@@ -402,13 +402,13 @@ impl<'a> ViewerRecovery<'a> {
         let bound = Bound::new(
             cx,
             transport,
-            setup.capped_at(original_until),
+            &setup.capped_at(original_until),
             StreamRole::Client,
         )?;
         let config = media
             .receiver_config(transport, fr_media::delivery::ReceivePolicy::default())
             .map_err(|_| Error::InvalidRoutes)?;
-        let (configuration, record) = admit(bytes, setup)?;
+        let (configuration, record) = admit(bytes, &setup)?;
         let old = presenter.configuration;
         if (
             configuration.width,
