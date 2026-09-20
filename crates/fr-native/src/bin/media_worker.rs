@@ -10,7 +10,11 @@ mod linux {
         bind_worker_parent,
         capture::{CaptureOutput, ChangeAwareCapture},
     };
-    use std::io;
+    use std::{
+        fs::File,
+        io,
+        os::fd::{AsFd, BorrowedFd},
+    };
 
     // Fixed bounded native inventory stays inline in the single worker owner.
     #[allow(clippy::large_enum_variant)]
@@ -97,6 +101,17 @@ mod linux {
         })
     }
     impl Media {
+        fn wait_for_input(&mut self, input: BorrowedFd<'_>) -> Result<(), Error> {
+            if let Self::Present { surface, .. } = self {
+                while !surface.wait_for_presentation_input(input).map_err(native)? {
+                    // Repair only the original submitted drawable. No IPC reply,
+                    // source timestamp, decode receipt, or visibility witness.
+                    surface.maintain_presentation().map_err(native)?;
+                }
+            }
+            Ok(())
+        }
+
         fn poll(&mut self, verify: bool) -> Result<(Kind, Vec<u8>), Error> {
             match self {
                 Self::Capture(capture) => match capture.poll_output() {
@@ -392,7 +407,11 @@ mod linux {
             return Err(Error::Malformed);
         }
         let (stdin, stdout) = (io::stdin(), io::stdout());
-        let (mut input, mut output) = (stdin.lock(), stdout.lock());
+        // StdinLock buffers reads and may hide a queued Stop from fd readiness.
+        // Use one safely duplicated, unbuffered descriptor from the very first
+        // record; never switch readers after bootstrap has prefetched bytes.
+        let mut input = File::from(stdin.as_fd().try_clone_to_owned().map_err(|_| Error::Io)?);
+        let mut output = stdout.lock();
         let absolute = ProtocolLimits::ABSOLUTE;
         let first = Record::read(&mut input, &absolute)?.ok_or(Error::Io)?;
         let mut identity = first.header.identity;
@@ -423,7 +442,11 @@ mod linux {
         };
         let limits = configuration.limits()?;
         Record::new(ready, identity, body, &limits)?.write(&mut output, &limits)?;
-        while let Some(request) = Record::read(&mut input, &limits)? {
+        loop {
+            media.wait_for_input(input.as_fd())?;
+            let Some(request) = Record::read(&mut input, &limits)? else {
+                break;
+            };
             let identity = request.header.identity;
             sequence.accept(request.header)?;
             if request.header.kind == Kind::Stop {

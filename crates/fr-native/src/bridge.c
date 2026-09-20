@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <limits.h>
 #include <errno.h>
+#include <poll.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <libavcodec/avcodec.h>
@@ -273,12 +274,17 @@ static int fr_x11_geometry(FrX11 *x) {
            a server barrier, not scanout evidence or cancellation of Xlib. */
         XSync(x->display,False);
         int count=0;
-        while (XCheckWindowEvent(x->display,x->window,
-                                StructureNotifyMask|ExposureMask,&event)) {
+        /* This presenter exclusively owns the connection. Consume unselected
+           events too (e.g. MappingNotify/ClientMessage), or a queued event that
+           does not match our mask would make the idle waiter spin forever. */
+        while (XEventsQueued(x->display,QueuedAlready)>0) {
+            if (++count>128) return fr_x11_retire(x);
+            XNextEvent(x->display,&event); /* queue is nonempty; cannot wait */
+            if (event.xany.window!=x->window) continue;
             if (event.type==DestroyNotify) {
                 x->window=0; return fr_x11_retire(x);
             }
-            if (++count>128 || event.type==UnmapNotify ||
+            if (event.type==UnmapNotify ||
                 (x->presenter==2 && event.type==ReparentNotify) ||
                 (event.type==ConfigureNotify &&
                  (event.xconfigure.width!=x->w || event.xconfigure.height!=x->h)))
@@ -418,6 +424,28 @@ int fr_x11_maintain_presentation(FrX11 *x,int *repainted,size_t *retained_bytes)
         *repainted=1;
     }
     *retained_bytes=(size_t)x->w*(size_t)x->h*4; return FR_OK;
+}
+
+/* Wait only in the media child. The authority owner independently supervises
+   this entire process. No timer, thread, new X connection, or event FIFO. */
+int fr_x11_wait_presentation_input(FrX11 *x,int input,int *input_ready) {
+    if (!x || !x->display || !x->presenter || input<0 || !input_ready ||
+        input==ConnectionNumber(x->display)) return FR_INVALID;
+    *input_ready=0;
+    struct pollfd fds[2]={{input,POLLIN,0},{ConnectionNumber(x->display),POLLIN,0}};
+    int n;
+    /* Check the parent before touching Xlib, even when local events are queued.
+       HUP is readiness for EOF, not permission to keep painting forever. */
+    do { n=poll(fds,1,0); } while (n<0 && errno==EINTR);
+    if (n<0 || (fds[0].revents&POLLNVAL)) return FR_INVALID;
+    if (fds[0].revents&(POLLIN|POLLHUP|POLLERR)) { *input_ready=1; return FR_OK; }
+    if (x->invalid) return FR_GEOMETRY;
+    if (x->exposed || XEventsQueued(x->display,QueuedAlready)>0) return FR_OK;
+    do { n=poll(fds,2,-1); } while (n<0 && errno==EINTR);
+    if (n<0 || (fds[0].revents&POLLNVAL)) return FR_INVALID;
+    if (fds[0].revents&(POLLIN|POLLHUP|POLLERR)) { *input_ready=1; return FR_OK; }
+    if (fds[1].revents&(POLLERR|POLLHUP|POLLNVAL)) return FR_DISPLAY;
+    return FR_OK; /* the next bounded maintenance turn consumes native events */
 }
 
 /* Borrowed X connection, selected whole-monitor rectangle. This never captures

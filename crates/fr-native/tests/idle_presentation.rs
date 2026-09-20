@@ -167,3 +167,67 @@ fn capture_surface_cannot_be_used_as_a_retained_presentation_owner() {
     );
     assert!(capture.snapshot().is_ok());
 }
+
+#[test]
+fn readable_parent_pipe_has_priority_over_queued_window_retirement() {
+    use std::{
+        io::{Read, Write},
+        os::{fd::AsFd, unix::net::UnixStream},
+    };
+    let server = Server::start();
+    let mut window = server.window();
+    let target = window.presentation_target().unwrap();
+    window.present(&picture(77)).unwrap();
+    let (mut reader, mut writer) = UnixStream::pair().unwrap();
+    writer.write_all(b"s").unwrap();
+    server.resize_roundtrip(target.window());
+    assert!(window.wait_for_presentation_input(reader.as_fd()).unwrap());
+    let mut byte = [0];
+    reader.read_exact(&mut byte).unwrap();
+    assert_eq!(&byte, b"s", "waiter consumed parent command bytes");
+    assert_eq!(
+        window.maintain_presentation(),
+        Err(NativeError::GeometryChanged)
+    );
+}
+
+#[test]
+fn parent_eof_is_readiness_even_with_native_events_pending() {
+    use std::{
+        io::Read,
+        os::{fd::AsFd, unix::net::UnixStream},
+    };
+    let server = Server::start();
+    let mut window = server.window();
+    let target = window.presentation_target().unwrap();
+    let (mut reader, writer) = UnixStream::pair().unwrap();
+    drop(writer);
+    server.clear(target.window(), 8);
+    assert!(window.wait_for_presentation_input(reader.as_fd()).unwrap());
+    assert_eq!(reader.read(&mut [0]).unwrap(), 0);
+}
+
+#[test]
+fn unhandled_local_events_are_consumed_before_blocking_for_parent_input() {
+    use std::{
+        io::Write,
+        os::{fd::AsFd, unix::net::UnixStream},
+        time::Duration,
+    };
+    let server = Server::start();
+    let mut window = server.window();
+    let target = window.presentation_target().unwrap();
+    window.present(&picture(77)).unwrap();
+    server.noise(target.window());
+    assert!(!window.maintain_presentation().unwrap().repainted);
+    let (reader, mut writer) = UnixStream::pair().unwrap();
+    let send = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        writer.write_all(b"s").unwrap();
+    });
+    assert!(
+        window.wait_for_presentation_input(reader.as_fd()).unwrap(),
+        "unhandled X event caused an immediate idle wake"
+    );
+    send.join().unwrap();
+}

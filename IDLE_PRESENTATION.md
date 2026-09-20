@@ -45,7 +45,48 @@ part of this executed scope. Initial testing caught and repaired the redundant
 XDestroyWindow cleanup after destruction; a fitted fixture was corrected to use
 an admitted downscale rather than unsupported upscaling. No assertion weakened.
 
-This advances plan sections 11.2–11.4 and `fr-p1-frame-pipeline-am1`, not closure
-of the frame-pipeline or workstation qualification gates. Automatic idle-worker
-wakeups are the next integration slice; the renderer API itself is exercised
-against the real server here.
+## Worker integration
+
+The presentation worker now waits for either its original X11 connection or its
+original parent command pipe, without a polling timer, extra thread, reopened
+display, replacement runtime, or new protocol message. Exposures repair the last
+submitted image during complete video silence. A decode-only reference picture
+does not replace that image, but remains usable by the next dependent decode.
+An idle lifecycle change terminates the old worker even without another frame;
+it reports the existing bounded diagnostic and closes the pipe, never inventing
+an unsolicited response identity. The parent still owns independent supervision.
+
+Parent readiness (including EOF) takes priority over queued native events before
+any new Xlib work. The command reader is unbuffered from the first bootstrap
+record: `StdinLock` prefetch must not hide an already-received Stop from descriptor
+readiness. The exclusively owned presentation connection drains unrelated local
+events within the same 128-event bound, so a queued ClientMessage cannot turn an
+idle wait into a busy loop. Capture/DAMAGE connection behavior is unchanged.
+
+The final executed group contains **37 distinct passing tests**: twelve
+`idle_presentation`, ten `idle_worker`, one unchanged fitted-presentation, seven
+unchanged DAMAGE-capture, and seven unchanged selected-DAMAGE tests. Thus 22 tests
+were added across these two commits; the other 15 remain unchanged. The new worker
+tests launch a separate production media process, configure admitted hvcC, decode
+real software HEVC, and independently clear/read back the UI window while sending
+no additional frame requests. They also cover fitted bars, reference-only decode,
+pre-first-frame exposure, three commands in one write, EOF, idle topology loss,
+destruction, borrowed-window survival, and unrelated-event CPU spin. The CPU check
+is only a coarse busy-loop regression, not the product's idle-performance gate.
+
+The exact same idle-repair assertion fails against the retained pre-change
+`baab9c628` worker (the cleared image is never restored) and passes against the
+new worker. Both new test targets also pass three additional serial repetitions
+and a default-parallel run. Final production library/worker Clippy and both
+standalone test targets' strict pedantic Clippy pass, as do formatting and
+whitespace checks. The worker fixture's initial configuration assertion was
+corrected to require the protocol's existing PresentationReady variants rather
+than DecoderReady; no production reply, timeout, or assertion was weakened.
+
+Execution uses the same pinned toolchain and native SDK/runtime stated above,
+with source-built first-party libraries from `baab9c628` plus `17f95e7d` and this
+worker integration. No legacy Asupersync library substitutes for the current
+workspace runtime. The broader Asupersync-based integration target, full workspace,
+physical scanout, GPU, compositor and live-tailnet qualification remain outside
+this executed scope. This advances plan sections 11.2–11.4 and
+`fr-p1-frame-pipeline-am1`, not closure of the frame-pipeline or workstation gates.

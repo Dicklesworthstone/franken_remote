@@ -2,8 +2,14 @@
 //! observations, decode completions, or independently observed visibility.
 use super::{NativeError, X11Surface, status};
 use core::ffi::{c_int, c_void};
+use std::os::fd::{AsRawFd, BorrowedFd};
 
 unsafe extern "C" {
+    fn fr_x11_wait_presentation_input(
+        surface: *mut c_void,
+        input: c_int,
+        input_ready: *mut c_int,
+    ) -> c_int;
     fn fr_x11_maintain_presentation(
         surface: *mut c_void,
         repainted: *mut c_int,
@@ -23,6 +29,27 @@ pub struct PresentationMaintenance {
 }
 
 impl X11Surface {
+    /// Block until the original X connection needs maintenance or the parent's
+    /// unbuffered command pipe can be read (including EOF). Parent readiness has
+    /// priority over queued native events. `false` requires one bounded
+    /// `maintain_presentation` turn before waiting again. This does not read,
+    /// duplicate, or own `input`, and must not be paired with a buffered reader
+    /// that may already hold the next command. No timer or helper thread is used.
+    /// Run only in the independently supervised media process, not in its
+    /// authority owner: a stopped X server can still stall foreign work.
+    pub fn wait_for_presentation_input(
+        &mut self,
+        input: BorrowedFd<'_>,
+    ) -> Result<bool, NativeError> {
+        let mut ready = 0;
+        // SAFETY: both the thread-confined X owner and borrowed descriptor remain
+        // live for this call. Poll only borrows descriptors and one scalar output.
+        status(unsafe {
+            fr_x11_wait_presentation_input(self.raw.as_ptr(), input.as_raw_fd(), &raw mut ready)
+        })?;
+        Ok(ready != 0)
+    }
+
     /// Coalesce exposures and repair from the last submitted picture without
     /// decoding, capturing, changing frame identity, or granting input authority.
     /// At most one tightly packed picture is retained. A lifecycle change (even
