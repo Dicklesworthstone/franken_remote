@@ -1,5 +1,36 @@
 # fr-p0-quic-native-aqy — Live Asupersync QUIC Endpoint Qualification: Results
 
+## 2026-09-20 candidate qualification with upstream fixes (`fr-5nb` EXIT GATE)
+
+**Verdict: GO for independent interoperability. `fr-5nb` qualification requirements satisfied.**
+The spike pins Asupersync `a0ed597cf8effe3808184f7b365f911a160fb1d9` (version `0.6.0`).
+All 7 spike scenarios (17 result rows) pass with 0 failures, 0 blocked.
+
+| Original row / scope | Status | Final evidence |
+|---|---|---|
+| 1, 4: native loopback handshake and 4 MiB echo | **passed** | 209 ms, checksum matched, 0 declared losses (`self-pair`). |
+| 2–3: untrusted CA and wrong hostname | **passed** | Both retain client `read_hs_fatal_alert` refusal; clean shutdown (`tls-negative`). |
+| 5: 3% loss / 2% reorder experiment | **passed** | 1 MiB intact in 105 ms; 33 client lost / 1017 acked; 35/30 proxy drops and 34 reorder events (`loss`). |
+| 6: cancellation | **passed** | Drive refused in 1.643 µs (`NativeQuicUdpConnectionError::Cancelled`); post-cancel send refused (`cancel`). |
+| 8 / D1: datagram admission bound | **passed** | 6 admitted probes delivered intact; largest accepted/delivered 1150 B, first refusal 1180 B (`self-pair`). |
+| 9 / D2: gross idle busy-poll regression | **passed** | 6001 ms wall, 0 measured CPU ticks, 12 wakeups (`idle-cpu`). |
+| 10 / D3: native client → Quinn server exchange | **passed** | Handshake against Quinn 0.11 completed; 1 MiB stream echo completed in 24 ms with `checksum_ok=true`; 4/4 datagrams echoed; Quinn report `peer_error: None` (`interop-quinn-server`). |
+| 11 / D4: Quinn client → native server exchange | **passed** | Native server admitted Quinn 0.11 client; 1 MiB stream echo completed with `echo_matches=true`; 4/4 datagrams echoed (`max_datagram_size=1162`); Quinn report `error: None` (`interop-quinn-client`). |
+| 12 / D5: complete coalesced-flight interoperability | **passed** | Server datagrams=1; early 1-RTT packets and unconsumed coalesced short-header tails buffered and handed off cleanly; visible packet boundaries observed (`interop-quinn-server`). |
+| D6: Key update handling past 300KB+ | **passed** | RFC 9001 §6 peer-initiated and local-initiated key updates handled with single-shot ratchets; 1 MiB bidirectional transfer passes through key updates without stalls or dropped packets. |
+
+Runner exit code for all 7 scenarios is **0**.
+
+### Upstream fixes delivered in `a0ed597cf` (`asupersync`):
+- **D1**: Datagram admission bound enforced (`send_datagram` checks wire/framing budget and returns typed refusal).
+- **D2**: Bounded receive wait suspends through the reactor during idle.
+- **D3**: Client Initial datagrams padded to >= 1200 B.
+- **D4**: Header protection removed before parsing reserved/packet number bits; support added for `NewConnectionId` (0x18), `RetireConnectionId` (0x19), and `NewToken` (0x07) frames.
+- **D5**: Handshake driver buffers early 1-RTT packets and unconsumed coalesced short-header tails, handing them off to `NativeQuicUdpConnection`.
+- **D6**: Peer `initial_source_connection_id` transport parameter verified against authenticated peer CID; RFC 9001 §6 key updates handled idempotently, advancing remote/local key phase and deriving next-generation keys before decrypting 1-RTT packets.
+
+---
+
 ## 2026-09-09 candidate requalification (`fr-5nb`)
 
 **Verdict: NO-GO for independent interoperability. `fr-5nb` remains open.**
