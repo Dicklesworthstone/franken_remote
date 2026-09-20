@@ -48,7 +48,9 @@ mod linux {
             configuration.bitrate,
         )
         .map_err(native)?;
-        Ok(Media::Capture(ChangeAwareCapture::new(surface, codec)))
+        let mut capture = ChangeAwareCapture::new(surface, codec);
+        capture.enable_damage_tracking().map_err(native)?;
+        Ok(Media::Capture(capture))
     }
     fn open(
         role: Role,

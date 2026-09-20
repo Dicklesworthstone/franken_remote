@@ -38,7 +38,7 @@ hardware qualification or an authenticated network session.
 ## Build and reproduce
 
 Install a C compiler, pkg-config, FFmpeg development packages (`libavcodec-dev`,
-`libavutil-dev`, `libswscale-dev`) and `libx11-dev`. The x265 test requires an FFmpeg
+`libavutil-dev`, `libswscale-dev`), `libx11-dev`, and the system `libxdamage1` runtime. The x265 test requires an FFmpeg
 build with that explicit software encoder. For a controlled matching SDK, set both
 `FR_NATIVE_INCLUDE_DIR` and `FR_NATIVE_LIBRARY_DIR`; neither directory is downloaded
 by the build. Cross builds without a qualified sysroot refuse.
@@ -118,3 +118,41 @@ into a pass. See the [evidence record](native/ffmpeg-7.1.5-linux-x86_64.evidence
 for hashes and scope. Cross-builder reproducibility, protected-path loading,
 hardware encoding/decoding, presentation, signing and distribution review remain
 unqualified. Test-time `LD_LIBRARY_PATH` binding is not a protected installation.
+
+
+## Damage-aware CPU capture
+
+The capture worker now enables DAMAGE 1.x on its **original X11 root capture
+connection**. A synchronized, empty damage state can reuse the last successfully
+encoded snapshot instead of allocating and reading another full BGRA image.
+This is evidence about the X drawable in this explicit CPU-staged profile, not
+optical presentation, GPU overlays, another compositor, or client visibility.
+No input grant or presentation acknowledgement is derived from it.
+
+The observer requests coalesced nonempty notifications, retains one dirty bit,
+and bounds event draining at 128 events. It clears damage **before** the next
+readback, never after capture/encode: changes during a pending encode remain
+pending for the next capture. Only a completed, validated encoded frame becomes
+the reference. Repainted identical pixels still compare exactly and emit no HEVC.
+An absent server extension returns `false` from `enable_damage_tracking()` and
+retains full pixel readbacks; failed observations do not become idle evidence.
+The explicit system ABI is `libXdamage.so.1`, with no downloaded native library,
+extra runtime, or reopened display connection.
+
+Full pixel verification is mandatory at least once per 250 ms of requested
+capture activity, independently bounded by the parent's monotonic timestamps
+and the worker's real elapsed time. Force-IDR and unconditional captures always
+read back and encode; damage never suppresses recovery. Capture cadence remains
+owned by the existing host scheduler. `CaptureStats` reports actual readbacks,
+damage observations, and encoded submissions without retaining screen content.
+Selected RandR-monitor capture still uses its full-readback path in this slice.
+
+`cargo test -p fr-native --features linux-media --test damage_capture` exercises
+real Xvfb servers and the explicit software HEVC encoder, including a distinct
+media-worker process. Seven tests passed locally with nightly-2026-08-31 and the
+Debian FFmpeg 7.1.5 SDK/runtime. The focused harness was compiled from the exact
+production libraries using rustc because compiling the workspace's test-only
+Asupersync 0.5 dependency was killed by the container memory limit. Native library
+and worker builds and strict Clippy passed; this is not a full-workspace, live
+tailnet, GPU, physical-display, or compositor qualification result. This advances
+plan sections 11.3/11.4 and `fr-p1-frame-pipeline-am1`; it does not close that gate.

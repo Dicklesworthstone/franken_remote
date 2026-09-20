@@ -3,7 +3,7 @@ mod presentation_fit;
 pub use presentation_fit::FittedFrame;
 
 use core::{
-    ffi::{c_char, c_int, c_void},
+    ffi::{c_char, c_int, c_ulong, c_void},
     fmt,
     marker::PhantomData,
     ptr::NonNull,
@@ -81,6 +81,11 @@ unsafe extern "C" {
         out: *mut *mut c_void,
     ) -> c_int;
     fn fr_x11_target(p: *mut c_void, window: *mut u32) -> c_int;
+    fn fr_x11_damage_source(
+        p: *mut c_void,
+        display: *mut *mut c_void,
+        drawable: *mut c_ulong,
+    ) -> c_int;
     fn fr_x11_free(p: *mut c_void);
     fn fr_x11_validate(x: *mut c_void) -> c_int;
     fn fr_x11_capture(p: *mut c_void, bytes: *mut u8, len: usize) -> c_int;
@@ -635,6 +640,7 @@ impl X11Screens {
             )
         })?;
         Ok(X11Surface {
+            damage: None,
             raw: NonNull::new(ptr).ok_or(NativeError::Allocation)?,
             width: screen.width,
             height: screen.height,
@@ -654,12 +660,38 @@ impl Drop for X11Screens {
 /// Xlib can terminate on display-server failure: keep this in the media worker.
 pub struct X11Surface {
     raw: NonNull<c_void>,
+    damage: Option<crate::damage::Damage>,
     width: u32,
     height: u32,
     limits: ProtocolLimits,
     _thread: PhantomData<Rc<()>>,
 }
 impl X11Surface {
+    pub(crate) fn enable_damage(&mut self) -> Result<bool, NativeError> {
+        if self.damage.is_none() {
+            let mut display = core::ptr::null_mut();
+            let mut drawable = 0;
+            // SAFETY: accessor borrows our live C owner and returns its original
+            // capture connection. No pointer escapes this named native boundary.
+            status(unsafe {
+                fr_x11_damage_source(self.raw.as_ptr(), &raw mut display, &raw mut drawable)
+            })?;
+            let display = NonNull::new(display).ok_or(NativeError::DisplayUnavailable)?;
+            // SAFETY: Drop destroys damage before closing this exact connection.
+            self.damage = unsafe { crate::damage::Damage::new(display, drawable) };
+        }
+        Ok(self.damage.is_some())
+    }
+    pub(crate) fn damage_unchanged(&mut self) -> Result<bool, NativeError> {
+        self.revalidate()?;
+        let unchanged = match &mut self.damage {
+            Some(damage) => damage.unchanged()?,
+            None => false,
+        };
+        self.revalidate()?;
+        Ok(unchanged)
+    }
+
     pub(crate) fn revalidate(&mut self) -> Result<(), NativeError> {
         // SAFETY: live thread-confined context; validation borrows it and retains
         // any geometry failure so restoring dimensions cannot revive the owner.
@@ -707,6 +739,7 @@ impl X11Surface {
         })?;
         Ok(Self {
             raw: NonNull::new(ptr).ok_or(NativeError::DisplayUnavailable)?,
+            damage: None,
             width: target.width(),
             height: target.height(),
             limits,
@@ -753,6 +786,7 @@ impl X11Surface {
         let raw = NonNull::new(ptr).ok_or(NativeError::DisplayUnavailable)?;
         let surface = Self {
             raw,
+            damage: None,
             width: w.cast_unsigned(),
             height: h.cast_unsigned(),
             limits,
@@ -768,6 +802,9 @@ impl X11Surface {
         self.height
     }
     pub fn snapshot(&mut self) -> Result<BgraFrame, NativeError> {
+        if let Some(damage) = &mut self.damage {
+            damage.before_snapshot()?;
+        }
         let mut bytes = zeroed(frame_len(self.width, self.height, &self.limits)?)?;
         // SAFETY: bridge owns the XImage and copies only into this exact-size output; no borrowed pixels escape.
         status(unsafe { fr_x11_capture(self.raw.as_ptr(), bytes.as_mut_ptr(), bytes.len()) })?;
@@ -789,6 +826,7 @@ impl X11Surface {
 }
 impl Drop for X11Surface {
     fn drop(&mut self) {
+        drop(self.damage.take());
         // SAFETY: context is unique, thread-confined, and no XImage survives a call.
         unsafe { fr_x11_free(self.raw.as_ptr()) };
     }

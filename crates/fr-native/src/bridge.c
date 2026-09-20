@@ -339,6 +339,13 @@ int fr_x11_target(FrX11 *x,uint32_t *window) {
     int code=fr_x11_geometry(x); if (code!=FR_OK) return code;
     *window=(uint32_t)x->window; return FR_OK;
 }
+/* Borrow only the original capture connection/drawable for DAMAGE tracking.
+   Presentation destinations never become capture-source witnesses. */
+int fr_x11_damage_source(FrX11 *x,Display **display,unsigned long *drawable) {
+    if (!x || !display || !drawable || x->presenter) return FR_UNAVAILABLE;
+    int result=fr_x11_geometry(x); if (result!=FR_OK) return result;
+    *display=x->display; *drawable=x->window; return FR_OK;
+}
 int fr_x11_capture(FrX11 *x,uint8_t *out,size_t len) {
     if (!x || !out || !bgra_buffer(x->w,x->h,len)) return FR_INVALID;
     int code=fr_x11_geometry(x); if (code!=FR_OK) return code;
