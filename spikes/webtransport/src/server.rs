@@ -292,15 +292,17 @@ pub async fn serve_one_session(
                     if sid % 4 == 0 {
                         // In draft-02, Chrome sends WEBTRANSPORT_STREAM frame (0x41) + session_id (0x00)
                         // as a preamble on client-initiated bidi streams.
-                        // Strip the preamble if present before echoing the application payload.
-                        let payload = if data.starts_with(&[0x41, 0x00]) {
+                        // 0x41 is encoded as 2-byte varint [0x40, 0x41] followed by session_id [0x00].
+                        let payload = if data.starts_with(&[0x40, 0x41, 0x00]) {
+                            &data[3..]
+                        } else if data.starts_with(&[0x41, 0x00]) {
                             &data[2..]
                         } else {
                             &data[..]
                         };
                         if !payload.is_empty() {
                             bidi_streams_echoed += 1;
-                            println!("Echoing {} bytes on WT bidi stream {}", payload.len(), sid);
+                            println!("Echoing {} bytes on WT bidi stream {}: {:02x?}", payload.len(), sid, payload);
                             let _ = conn.connection_mut().write_stream(
                                 cx,
                                 readiness.stream_id,
