@@ -670,4 +670,5 @@ impl Subscription {
 mod join;
 mod pending;
 mod service;
+mod session;
 pub use join::JoinQueue;

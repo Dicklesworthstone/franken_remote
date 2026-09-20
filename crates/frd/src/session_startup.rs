@@ -38,7 +38,7 @@ pub use running::publisher::{
 };
 pub use running::{
     ControlledHost, HostSession, LocalControl as HostControlState,
-    PendingControl as PendingHostControl, StreamingHost,
+    PendingControl as PendingHostControl, SharedHost, SharedStatistics, StreamingHost,
 };
 
 mod viewer;
@@ -64,6 +64,7 @@ const CONSUMED: u8 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
+    SharedPublication(crate::media::shared_publisher::Error),
     ReferenceRecovery(crate::media_quic::replacement::Error),
     DecoderStartup(crate::media::decoder_startup::Error),
     Clipboard(crate::clipboard_quic::Error),
