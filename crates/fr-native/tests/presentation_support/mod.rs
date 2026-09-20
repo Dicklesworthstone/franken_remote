@@ -51,6 +51,15 @@ unsafe extern "C" {
     fn XUnmapWindow(d: *mut c_void, w: c_ulong) -> c_int;
     fn XMapWindow(d: *mut c_void, w: c_ulong) -> c_int;
     fn XDestroyWindow(d: *mut c_void, w: c_ulong) -> c_int;
+    fn XQueryTree(
+        d: *mut c_void,
+        w: c_ulong,
+        root: *mut c_ulong,
+        parent: *mut c_ulong,
+        children: *mut *mut c_ulong,
+        count: *mut c_uint,
+    ) -> c_int;
+    fn XFree(data: *mut c_void) -> c_int;
 }
 
 pub struct Server {
@@ -118,11 +127,45 @@ impl Server {
             XSync(self.connection, 0);
         }
     }
+    fn presentation_drawable(&self, window: u32) -> c_ulong {
+        let (mut root, mut parent, mut children, mut count) = (0, 0, core::ptr::null_mut(), 0);
+        // SAFETY: the fixture owns this live parent. XQueryTree initializes the
+        // outputs and allocates the returned array, which we copy then free.
+        let result = unsafe {
+            XQueryTree(
+                self.connection,
+                window.into(),
+                &raw mut root,
+                &raw mut parent,
+                &raw mut children,
+                &raw mut count,
+            )
+        };
+        assert_ne!(result, 0);
+        assert!(count <= 1, "one renderer may own only one content drawable");
+        let drawable = if count == 0 {
+            window.into()
+        } else {
+            assert!(!children.is_null());
+            // SAFETY: count is exactly one initialized Window from XQueryTree.
+            unsafe { *children }
+        };
+        if !children.is_null() {
+            // SAFETY: return Xlib's allocation exactly once, after copying its ID.
+            unsafe { XFree(children.cast()) };
+        }
+        drawable
+    }
     pub fn clear(&self, window: u32, count: usize) {
+        // Damage the actual content drawable, not an obscured parent. Owned
+        // presenters have no child; attached workers own exactly one. This
+        // keeps the tests' pre-repair pixel-destruction assertion meaningful.
+        // Lifecycle helpers below deliberately keep targeting the original UI.
+        let drawable = self.presentation_drawable(window);
         // SAFETY: test-owned window on this server; the client copies scalar args.
         unsafe {
             for _ in 0..count {
-                XClearArea(self.connection, window.into(), 0, 0, 0, 0, 1);
+                XClearArea(self.connection, drawable, 0, 0, 0, 0, 1);
             }
             XSync(self.connection, 0);
         }

@@ -195,7 +195,7 @@ int fr_decoder_receive(FrDecoder *d,uint8_t *out,size_t len,int64_t *pts) {
 }
 
 typedef struct {
-    Display *display; Window window; GC gc;
+    Display *display; Window window,canvas; GC gc;
     int screen,w,h,presenter,invalid,exposed;
     /* Exactly one owned, tightly packed submitted picture, never a decoder
        surface. It survives idle periods, not a window lifetime transition. */
@@ -204,6 +204,15 @@ typedef struct {
 static int fr_x11_retire(FrX11 *x) {
     x->invalid=1; x->exposed=0;
     if (x->front) { XDestroyImage(x->front); x->front=NULL; }
+    /* Retire the private presentation connection, not the UI-owned parent.
+       Default DestroyAll removes the child even after an UnmapNotify preceded
+       destruction. No request is sent to a potentially dead window ID. Capture
+       connections may have borrowed DAMAGE state and are never closed here. */
+    if (x->presenter==2 && x->display) {
+        if (x->gc) XFreeGC(x->display,x->gc);
+        XCloseDisplay(x->display);
+        x->display=NULL; x->gc=NULL; x->canvas=0;
+    }
     return FR_GEOMETRY;
 }
 /* A catalog owns ONE X connection. Selection transfers that same connection,
@@ -269,25 +278,25 @@ static int fr_x11_geometry(FrX11 *x) {
     if (x->invalid) return FR_GEOMETRY;
     XWindowAttributes a; XEvent event;
     if (x->presenter) {
-        /* Consume lifecycle events before addressing the drawable. In
-           particular, do not query an already-destroyed borrowed XID. This is
-           a server barrier, not scanout evidence or cancellation of Xlib. */
+        /* Both UI parent and private canvas share the original 128-event
+           bound. Drain unrelated events too, preserving the idle waiter's
+           no-busy-spin contract. This is not freshness or scanout evidence. */
         XSync(x->display,False);
         int count=0;
-        /* This presenter exclusively owns the connection. Consume unselected
-           events too (e.g. MappingNotify/ClientMessage), or a queued event that
-           does not match our mask would make the idle waiter spin forever. */
         while (XEventsQueued(x->display,QueuedAlready)>0) {
             if (++count>128) return fr_x11_retire(x);
             XNextEvent(x->display,&event); /* queue is nonempty; cannot wait */
-            if (event.xany.window!=x->window) continue;
+            Window window=event.xany.window;
+            if (window!=x->window && (!x->canvas || window!=x->canvas)) continue;
             if (event.type==DestroyNotify) {
-                x->window=0; return fr_x11_retire(x);
+                if (window==x->window) x->window=0; else x->canvas=0;
+                return fr_x11_retire(x);
             }
             if (event.type==UnmapNotify ||
                 (x->presenter==2 && event.type==ReparentNotify) ||
                 (event.type==ConfigureNotify &&
-                 (event.xconfigure.width!=x->w || event.xconfigure.height!=x->h)))
+                 (event.xconfigure.width!=x->w || event.xconfigure.height!=x->h ||
+                  (window==x->canvas && (event.xconfigure.x || event.xconfigure.y)))))
                 return fr_x11_retire(x);
             if (event.type==Expose) x->exposed=1;
         }
@@ -296,11 +305,18 @@ static int fr_x11_geometry(FrX11 *x) {
     if (a.width!=x->w || a.height!=x->h || (x->presenter && a.map_state!=IsViewable) ||
         (!x->presenter && XCheckTypedWindowEvent(x->display,x->window,ConfigureNotify,&event)))
         return fr_x11_retire(x);
+    if (x->canvas) {
+        if (!XGetWindowAttributes(x->display,x->canvas,&a)) return FR_DISPLAY;
+        if (a.x!=0 || a.y!=0 || a.width!=x->w || a.height!=x->h || a.map_state!=IsViewable)
+            return fr_x11_retire(x);
+    }
     return FR_OK;
 }
 /* Used again after encoding before a pending access unit leaves the worker. */
 int fr_x11_validate(FrX11 *x) {
-    if (!x || !x->display) return FR_INVALID;
+    if (!x) return FR_INVALID;
+    if (x->invalid) return FR_GEOMETRY;
+    if (!x->display) return FR_INVALID;
     return fr_x11_geometry(x);
 }
 void fr_x11_free(FrX11 *x) {
@@ -356,7 +372,18 @@ int fr_x11_attach(const char *display,uint32_t window,int w,int h,FrX11 **out) {
     }
     if (a.width!=w || a.height!=h || a.map_state!=IsViewable) { fr_x11_free(x); return FR_GEOMETRY; }
     XSelectInput(x->display,x->window,StructureNotifyMask|ExposureMask);
-    x->gc=XCreateGC(x->display,x->window,0,NULL);
+    /* Only this connection-owned child carries remote pixels. A hard-killed
+       decoder cannot leave them in the UI parent's background/window storage:
+       closing its X connection removes the child without an IPC/codec callback.
+       One fixed-size child, no extra image, pixmap queue, input masks or focus
+       request. The original parent remains the input/viewport target. */
+    x->canvas=XCreateSimpleWindow(x->display,x->window,0,0,w,h,0,0,0);
+    if (!x->canvas) { fr_x11_free(x); return FR_MEMORY; }
+    XSelectInput(x->display,x->canvas,StructureNotifyMask|ExposureMask);
+    XSetWindowBackground(x->display,x->window,0);
+    XClearWindow(x->display,x->window);
+    XMapWindow(x->display,x->canvas);
+    x->gc=XCreateGC(x->display,x->canvas,0,NULL);
     XSync(x->display,False);
     int code=fr_x11_geometry(x);
     if (!x->gc || code!=FR_OK) { fr_x11_free(x); return code==FR_OK?FR_DISPLAY:code; }
@@ -403,7 +430,7 @@ static int fr_x11_draw_front(FrX11 *x) {
     /* Clear before submission: later expose events remain pending. Never raise
        a borrowed window, or an idle window merely because it needs repaint. */
     x->exposed=0;
-    XPutImage(x->display,x->window,x->gc,x->front,0,0,0,0,x->w,x->h);
+    XPutImage(x->display,x->canvas?x->canvas:x->window,x->gc,x->front,0,0,0,0,x->w,x->h);
     return fr_x11_geometry(x);
 }
 int fr_x11_present(FrX11 *x,const uint8_t *bgra,size_t len) {
