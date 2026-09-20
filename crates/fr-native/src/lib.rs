@@ -1,6 +1,8 @@
 //! Native media adapters. `FFmpeg` and X11 stay behind this named FFI boundary.
 #![deny(unsafe_op_in_unsafe_fn)]
 
+pub mod macos;
+
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 pub mod cursor;
 #[cfg(all(target_os = "linux", feature = "linux-media"))]

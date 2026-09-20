@@ -25,6 +25,7 @@ fr-tailnet.workspace = true
 
 [features]
 default = []
+macos-media = []
 linux-media = []
 linux-displays = ["linux-media"]
 linux-input = []

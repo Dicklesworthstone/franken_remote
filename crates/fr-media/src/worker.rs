@@ -320,6 +320,7 @@ pub enum Backend {
     Nvenc = 0,
     Vaapi = 1,
     SoftwareExplicit = 2,
+    VideoToolbox = 3,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -420,6 +421,7 @@ impl Configuration {
                 0 => Backend::Nvenc,
                 1 => Backend::Vaapi,
                 2 => Backend::SoftwareExplicit,
+                3 => Backend::VideoToolbox,
                 _ => return Err(Error::Unsupported),
             },
             bitrate: n(12),

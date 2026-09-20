@@ -16,6 +16,8 @@ mod retirement;
 pub use retirement::Retirement;
 mod selected;
 pub use selected::MonitorDiscovery;
+pub mod lifecycle;
+pub use lifecycle::*;
 
 use std::{
     fmt,
@@ -201,7 +203,7 @@ fn runtime_ready(cx: &Cx) -> Result<(), Error> {
         .map(asupersync::runtime::reactor::IoReactorCapabilitySnapshot::backend);
     if !matches!(
         backend,
-        Some(IoReactorBackend::Epoll | IoReactorBackend::IoUring)
+        Some(IoReactorBackend::Epoll | IoReactorBackend::IoUring | IoReactorBackend::Kqueue)
     ) || Cx::current().is_none_or(|c| c.timer_driver().is_none())
         || cx.timer_driver().is_none()
     {
