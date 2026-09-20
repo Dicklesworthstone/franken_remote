@@ -56,7 +56,7 @@ fn codec() -> Codec {
         generation: CodecConfigurationGeneration::INITIAL,
     }
 }
-async fn source(control: &ObservationControl) -> CaptureSource {
+async fn source(control: &ObservationControl, changing: bool) -> CaptureSource {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let mut payload = String::new();
     for nal in [
@@ -69,6 +69,14 @@ async fn source(control: &ObservationControl) -> CaptureSource {
     }
     let script = include_str!("../../../../tests/support/recovery_worker_fixture.py")
         .replace("@MODE@", "healthy")
+        .replace(
+            "if kind == 7 and not force and last is not None:",
+            if changing {
+                "if False:"
+            } else {
+                "if kind == 7 and not force and last is not None:"
+            },
+        )
         .replace(
             "b\"test-only-unit\"",
             &format!("bytes.fromhex('{payload}')"),
@@ -120,7 +128,12 @@ struct Member {
     frames: Vec<u64>,
     nonce: u128,
 }
-async fn sessions(rt: &Runtime, id: u128, role: Role) -> (Cx, Cx, HostSession, ViewerSession) {
+async fn sessions(
+    rt: &Runtime,
+    id: u128,
+    role: Role,
+    extra: &[&str],
+) -> (Cx, Cx, HostSession, ViewerSession) {
     let c = rt.request_cx_with_budget(Budget::INFINITE);
     let h = rt.request_cx_with_budget(Budget::INFINITE);
     let mut caps: Vec<_> = [
@@ -129,6 +142,7 @@ async fn sessions(rt: &Runtime, id: u128, role: Role) -> (Cx, Cx, HostSession, V
         attachment::DELIVERY_CAPABILITY,
     ]
     .into_iter()
+    .chain(extra.iter().copied())
     .map(|name| Capability {
         name: name.into(),
         version: 1,
@@ -191,7 +205,10 @@ async fn sessions(rt: &Runtime, id: u128, role: Role) -> (Cx, Cx, HostSession, V
     )
 }
 async fn peer(rt: &Runtime, id: u128, role: Role) -> Member {
-    let (c, h, mut session, mut viewer) = Box::pin(sessions(rt, id, role)).await;
+    peer_with_capabilities(rt, id, role, &[]).await
+}
+async fn peer_with_capabilities(rt: &Runtime, id: u128, role: Role, extra: &[&str]) -> Member {
+    let (c, h, mut session, mut viewer) = Box::pin(sessions(rt, id, role, extra)).await;
     let (hc, vc) = Box::pin(attach(
         &mut session,
         &mut viewer,
@@ -255,12 +272,28 @@ struct Group {
     peers: Vec<Member>,
 }
 async fn group(rt: &Runtime, count: usize) -> Box<Group> {
+    group_with_capabilities(rt, count, &[], false).await
+}
+async fn group_with_capabilities(
+    rt: &Runtime,
+    count: usize,
+    extra: &[&str],
+    changing: bool,
+) -> Box<Group> {
     let mut peers = Vec::new();
     for i in 0..count {
-        peers.push(Box::pin(peer(rt, 13 + u128::try_from(i).unwrap(), Role::Observe)).await);
+        peers.push(
+            Box::pin(peer_with_capabilities(
+                rt,
+                13 + u128::try_from(i).unwrap(),
+                Role::Observe,
+                extra,
+            ))
+            .await,
+        );
     }
     let owner = source_control(rt);
-    let mut src = source(&owner).await;
+    let mut src = source(&owner, changing).await;
     let pool = SharedFramePool::new(ProtocolLimits::ABSOLUTE, 32 * 1024 * 1024, 8).unwrap();
     let initial = src
         .prepare_shared_capture(&owner, &pool)
@@ -341,6 +374,9 @@ impl Member {
         }
     }
     async fn turn(&mut self) -> Result<(), Error> {
+        self.turn_with_loss(false).await
+    }
+    async fn turn_with_loss(&mut self, drop_video: bool) -> Result<(), Error> {
         self.prepare_reply();
         let cfg = &mut self.configuration;
         let (a, b) = Box::pin(support::both(
@@ -381,6 +417,9 @@ impl Member {
                 self.viewer.io().unwrap().0,
                 || true,
                 |channel, bytes| {
+                    if drop_video && channel == fr_wire::Channel::Video {
+                        return Ok(Disposition::Consumed);
+                    }
                     self.receiver
                         .receive(channel, bytes, now(&self.c).unwrap())
                         .unwrap();
@@ -605,3 +644,5 @@ fn invalid_turn_budget_and_unpolled_continuous_service_are_terminal() {
         cleanup(&mut g, &cx).await;
     });
 }
+
+mod admission;

@@ -39,6 +39,33 @@ pub struct SharedHost {
     statistics: SharedStatistics,
 }
 impl HostSession {
+    /// Queue a live source join using THIS session's consent and completed media
+    /// attachments. No caller-supplied authority or copied connection can stand
+    /// in for the original admitted owner. The queue retains the same bounded
+    /// startup deadline while this session continues renewal and UDP service.
+    /// Admission failure retires this moved session, not the source or its peers.
+    pub fn join_shared(
+        mut self,
+        queue: &crate::media::shared_publisher::JoinQueue,
+        media: crate::media_quic::NegotiatedMedia,
+        policy: fr_media::delivery::SendPolicy,
+        timeout: Duration,
+    ) -> Result<SharedHost, Error> {
+        self.check()?;
+        if self.opened.selected.role != Role::Observe {
+            return Err(Error::Order);
+        }
+        let subscriber = queue
+            .admit(
+                self.opened.control.clone(),
+                media,
+                &self.opened.transport,
+                policy,
+                timeout,
+            )
+            .map_err(Error::SharedPublication)?;
+        self.into_shared(subscriber)
+    }
     /// Bind a member admitted by the original Publisher (completed or pending)
     /// to the original observation-only session. A source/member mismatch or a
     /// control-requesting session refuses. Both moved owners are retired on
@@ -250,7 +277,15 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> Services for SharedServi
                     .map_err(Error::PresentedState)?;
             }
         }
-        if let Some(feedback) = &mut *self.feedback {
+        // A startup peer has not installed its steady-state feedback responder.
+        // Do not put a solicited query ahead of its configuration/first-decode
+        // handshake or spend its timeout on unsolicited startup telemetry.
+        if self
+            .subscriber
+            .startup_complete(q)
+            .map_err(Error::SharedPublication)?
+            && let Some(feedback) = &mut *self.feedback
+        {
             feedback
                 .service(q, &cx, now(&cx)?)
                 .map_err(Error::ReceiverFeedback)?;
