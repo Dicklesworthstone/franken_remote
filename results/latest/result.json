@@ -1,0 +1,76 @@
+{
+  "timestamp": "2026-09-20T20:19:06Z",
+  "browser": "Google Chrome 153.0.8010.52",
+  "scenarios": {
+    "webtransport_happy_path": {
+      "status": "failed",
+      "browser_result": {
+        "status": "failed",
+        "error": "WebTransportError: Opening handshake failed.",
+        "stack": "WebTransportError: Opening handshake failed."
+      },
+      "server_report": {
+        "client_alpn": "h3",
+        "connect_method": "",
+        "connect_protocol": "",
+        "connect_path": "",
+        "connect_origin": null,
+        "connect_draft": null,
+        "origin_accepted": false,
+        "status_code": 0,
+        "datagrams_received": 0,
+        "datagrams_echoed": 0,
+        "max_datagram_payload_bytes": 0,
+        "uni_streams_received": 0,
+        "bidi_streams_echoed": 0,
+        "duration_ms": 25007
+      }
+    },
+    "webtransport_origin_rejection": {
+      "status": "failed",
+      "browser_result": {
+        "status": "passed",
+        "origin_rejected": true,
+        "error": "WebTransportError: Opening handshake failed."
+      },
+      "server_report": {
+        "client_alpn": "h3",
+        "connect_method": "",
+        "connect_protocol": "",
+        "connect_path": "",
+        "connect_origin": null,
+        "connect_draft": null,
+        "origin_accepted": false,
+        "status_code": 0,
+        "datagrams_received": 0,
+        "datagrams_echoed": 0,
+        "max_datagram_payload_bytes": 0,
+        "uni_streams_received": 0,
+        "bidi_streams_echoed": 0,
+        "duration_ms": 15007
+      }
+    },
+    "wss_fallback": {
+      "status": "passed",
+      "browser_result": {
+        "status": "passed",
+        "credit_backpressure_verified": true,
+        "stale_generation_fenced": true,
+        "records_received": 6
+      },
+      "server_report": {
+        "channels_opened": [
+          "video",
+          "video"
+        ],
+        "initial_credit_granted": 4096,
+        "bytes_sent_before_stall": 4096,
+        "backpressure_observed": true,
+        "bytes_sent_after_topup": 2048,
+        "stale_generation_rejected": true,
+        "active_generation": 2
+      }
+    }
+  },
+  "verdict": "NO-GO"
+}
