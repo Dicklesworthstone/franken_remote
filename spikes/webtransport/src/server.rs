@@ -286,6 +286,7 @@ pub async fn serve_one_session(
                 if !data.is_empty() {
                     let buf = stream_buffers.entry(sid).or_default();
                     buf.extend_from_slice(&data);
+                    println!("Stream {} read {} bytes: {:02x?}", sid, data.len(), data.as_ref());
 
                     // If it's a client bidirectional stream (sid % 4 == 0, sid != 0)
                     if sid % 4 == 0 {

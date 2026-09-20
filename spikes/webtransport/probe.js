@@ -119,19 +119,31 @@ async function testWebTransportHappy(config) {
   await bidiWriter.write(bidiPayload);
   await bidiWriter.close();
 
-  const bidiReadRes = await bidiReader.read();
-  let bidiEchoed = false;
-  if (bidiReadRes.value && bidiReadRes.value.length === 4) {
-    if (
-      bidiReadRes.value[0] === 0xaa &&
-      bidiReadRes.value[1] === 0xbb &&
-      bidiReadRes.value[2] === 0xcc &&
-      bidiReadRes.value[3] === 0xdd
-    ) {
-      bidiEchoed = true;
-    }
+  const chunks = [];
+  let totalBytes = 0;
+  while (totalBytes < 4) {
+    const { value, done } = await bidiReader.read();
+    if (done || !value) break;
+    chunks.push(value);
+    totalBytes += value.length;
   }
-  log(`Bidirectional stream echoed: ${bidiEchoed}`);
+  const combined = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const c of chunks) {
+    combined.set(c, offset);
+    offset += c.length;
+  }
+  let bidiEchoed = false;
+  if (
+    combined.length === 4 &&
+    combined[0] === 0xaa &&
+    combined[1] === 0xbb &&
+    combined[2] === 0xcc &&
+    combined[3] === 0xdd
+  ) {
+    bidiEchoed = true;
+  }
+  log(`Bidirectional stream echoed: ${bidiEchoed} (read ${totalBytes} bytes: ${Array.from(combined).map(b => b.toString(16)).join(' ')})`);
 
   // Test Clean close
   log("Closing WebTransport cleanly...");
