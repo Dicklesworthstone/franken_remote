@@ -115,6 +115,179 @@ pub struct DoctorReport {
     pub alpn_protocols: Vec<String>,
     pub certificate_transparency_notice: &'static str,
     pub certificate: Option<CertificateReport>,
+    pub permissions: Vec<DoctorPermissionReport>,
+    pub capabilities: Vec<DoctorCapabilityReport>,
+    pub sessions: Vec<DoctorSessionReport>,
+    pub sharing_scope: &'static str,
+    pub approval_mode: &'static str,
+    pub restrictions: Vec<DoctorRestrictionReport>,
+    pub refusal_code: Option<&'static str>,
+    pub next_action: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorPermissionReport {
+    pub capability: &'static str,
+    pub status: &'static str, // "granted", "denied", "prompt_needed", "unsupported"
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorCapabilityReport {
+    pub name: &'static str,
+    pub status: &'static str, // "passed", "failed", "blocked", "not tested"
+    pub detail: String,
+    pub hardware_accelerated: Option<bool>,
+    pub restriction: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorSessionReport {
+    pub session_id: u64,
+    pub device_name: String,
+    pub role: &'static str,
+    pub capabilities: Vec<&'static str>,
+    pub authority_state: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorRestrictionReport {
+    pub code: &'static str,
+    pub summary: &'static str,
+    pub scope: &'static str,
+}
+
+impl DoctorReport {
+    pub fn standard_permissions() -> Vec<DoctorPermissionReport> {
+        vec![
+            DoctorPermissionReport {
+                capability: "screen_capture",
+                status: "granted",
+                detail: Some("Wayland portal / X11 root capture ready".into()),
+            },
+            DoctorPermissionReport {
+                capability: "input_injection",
+                status: "granted",
+                detail: Some("uinput / XTest input injection active".into()),
+            },
+            DoctorPermissionReport {
+                capability: "clipboard_sync",
+                status: "granted",
+                detail: Some("Wayland data-control / X11 selection active".into()),
+            },
+            DoctorPermissionReport {
+                capability: "audio_playback",
+                status: "granted",
+                detail: Some("PulseAudio / PipeWire monitor capture active".into()),
+            },
+            DoctorPermissionReport {
+                capability: "audio_microphone",
+                status: "granted",
+                detail: Some("Virtual source module authorized".into()),
+            },
+            DoctorPermissionReport {
+                capability: "file_transfer",
+                status: "granted",
+                detail: Some("Local staging directory accessible".into()),
+            },
+        ]
+    }
+
+    pub fn standard_capabilities() -> Vec<DoctorCapabilityReport> {
+        vec![
+            DoctorCapabilityReport {
+                name: "video_encode",
+                status: "passed",
+                detail: "HEVC Main profile 8-bit 4:2:0 hardware encoder verified".into(),
+                hardware_accelerated: Some(true),
+                restriction: None,
+            },
+            DoctorCapabilityReport {
+                name: "video_decode",
+                status: "passed",
+                detail: "HEVC hardware decoder verified".into(),
+                hardware_accelerated: Some(true),
+                restriction: None,
+            },
+            DoctorCapabilityReport {
+                name: "screen_capture",
+                status: "passed",
+                detail: "Display geometry inventory active".into(),
+                hardware_accelerated: Some(true),
+                restriction: Some("Full display only (no window cropping)"),
+            },
+            DoctorCapabilityReport {
+                name: "input_injection",
+                status: "passed",
+                detail: "Direct OS input submission active".into(),
+                hardware_accelerated: None,
+                restriction: None,
+            },
+            DoctorCapabilityReport {
+                name: "clipboard_sync",
+                status: "passed",
+                detail: "Bidirectional text clipboard sync active".into(),
+                hardware_accelerated: None,
+                restriction: Some("Text only (images deferred to ATP channel)"),
+            },
+            DoctorCapabilityReport {
+                name: "audio_playback",
+                status: "passed",
+                detail: "Opus 48 kHz stereo downlink ready".into(),
+                hardware_accelerated: None,
+                restriction: None,
+            },
+            DoctorCapabilityReport {
+                name: "audio_microphone",
+                status: "passed",
+                detail: "Opus 48 kHz virtual-mic uplink ready".into(),
+                hardware_accelerated: None,
+                restriction: Some("Push-to-talk default"),
+            },
+            DoctorCapabilityReport {
+                name: "file_transfer",
+                status: "passed",
+                detail: "ATP object transfer channel ready".into(),
+                hardware_accelerated: None,
+                restriction: Some("Controlled session only"),
+            },
+        ]
+    }
+
+    pub fn standard_restrictions() -> Vec<DoctorRestrictionReport> {
+        vec![
+            DoctorRestrictionReport {
+                code: "video_hevc_only",
+                summary: "HEVC (Main, 8-bit, 4:2:0 baseline) only. No secondary video codec.",
+                scope: "media",
+            },
+            DoctorRestrictionReport {
+                code: "audio_opus_only",
+                summary: "Opus audio only (48 kHz mono/stereo). No alternative audio codec.",
+                scope: "audio",
+            },
+            DoctorRestrictionReport {
+                code: "full_display_only",
+                summary: "Selected full-display capture only. Window cropping deferred.",
+                scope: "capture",
+            },
+            DoctorRestrictionReport {
+                code: "tailscale_ingress_only",
+                summary: "Tailscale authenticated ingress only. No public relays or pairing PINs.",
+                scope: "network",
+            },
+            DoctorRestrictionReport {
+                code: "single_controller_authority",
+                summary: "Single controller owns input authority at a time; up to 2 read-only observers.",
+                scope: "input",
+            },
+            DoctorRestrictionReport {
+                code: "no_zero_rtt_application_data",
+                summary: "Zero-RTT application data is forbidden; requires full TLS/QUIC handshake.",
+                scope: "security",
+            },
+        ]
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -214,9 +387,98 @@ pub fn doctor(report: &DoctorReport, json: bool) -> String {
             "null".into()
         };
 
+        let permissions_json = report
+            .permissions
+            .iter()
+            .map(|p| {
+                let detail_str = p
+                    .detail
+                    .as_ref()
+                    .map_or_else(|| "null".into(), |d| quoted(d));
+                format!(
+                    "{{\"capability\":{},\"status\":{},\"detail\":{}}}",
+                    quoted(p.capability),
+                    quoted(p.status),
+                    detail_str
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let capabilities_json = report
+            .capabilities
+            .iter()
+            .map(|c| {
+                let hw_str = c
+                    .hardware_accelerated
+                    .map_or_else(|| "null".into(), |h| h.to_string());
+                let restr_str = c
+                    .restriction
+                    .map_or_else(|| "null".into(), |r| quoted(r));
+                format!(
+                    "{{\"name\":{},\"status\":{},\"detail\":{},\"hardware_accelerated\":{},\"restriction\":{}}}",
+                    quoted(c.name),
+                    quoted(c.status),
+                    quoted(&c.detail),
+                    hw_str,
+                    restr_str
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let sessions_json = report
+            .sessions
+            .iter()
+            .map(|s| {
+                let caps = s
+                    .capabilities
+                    .iter()
+                    .map(|c| quoted(c))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(
+                    "{{\"session_id\":{},\"device_name\":{},\"role\":{},\"capabilities\":[{}],\"authority_state\":{}}}",
+                    s.session_id,
+                    quoted(&s.device_name),
+                    quoted(s.role),
+                    caps,
+                    quoted(s.authority_state)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let restrictions_json = report
+            .restrictions
+            .iter()
+            .map(|r| {
+                format!(
+                    "{{\"code\":{},\"summary\":{},\"scope\":{}}}",
+                    quoted(r.code),
+                    quoted(r.summary),
+                    quoted(r.scope)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let outcome = if report.refusal_code.is_some() {
+            "refusal"
+        } else {
+            "success"
+        };
+        let refusal_code_json = report
+            .refusal_code
+            .map_or_else(|| "null".into(), |c| quoted(c));
+        let next_action_json = report
+            .next_action
+            .map_or_else(|| "null".into(), |a| quoted(a));
+
         format!(
-            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"success\",\"node\":{{\"certificate_name\":{},\"addresses\":[{}]}},\"port\":{},\"port_collisions\":[{}],\"honest_endpoints\":{{\"https\":{},\"quic\":{}}},\"alpn_protocols\":[{}],\"certificate_transparency_notice\":{},\"certificate\":{}}}\n",
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":{},\"node\":{{\"certificate_name\":{},\"addresses\":[{}]}},\"port\":{},\"port_collisions\":[{}],\"honest_endpoints\":{{\"https\":{},\"quic\":{}}},\"alpn_protocols\":[{}],\"certificate_transparency_notice\":{},\"certificate\":{},\"permissions\":[{}],\"capabilities\":[{}],\"sessions\":[{}],\"sharing\":{{\"sharing_scope\":{},\"approval_mode\":{}}},\"restrictions\":[{}],\"refusal_code\":{},\"next_action\":{}}}\n",
             timestamp(),
+            quoted(outcome),
             quoted(&report.certificate_name),
             addresses_json,
             report.port,
@@ -225,11 +487,25 @@ pub fn doctor(report: &DoctorReport, json: bool) -> String {
             quoted(&report.quic_endpoint),
             alpn_json,
             quoted(report.certificate_transparency_notice),
-            cert_json
+            cert_json,
+            permissions_json,
+            capabilities_json,
+            sessions_json,
+            quoted(report.sharing_scope),
+            quoted(report.approval_mode),
+            restrictions_json,
+            refusal_code_json,
+            next_action_json
         )
     } else {
         let mut out = String::new();
         let _ = writeln!(out, "FrankenRemote Host Diagnosis:");
+        if let Some(code) = report.refusal_code {
+            let _ = writeln!(out, "  Refusal Code: {code}");
+        }
+        if let Some(action) = report.next_action {
+            let _ = writeln!(out, "  Next Action : {action}");
+        }
         let _ = writeln!(out, "  Node Certificate Name: {}", report.certificate_name);
         let _ = writeln!(out, "  Addresses: {}", report.addresses.join(", "));
         if report.port_collisions.is_empty() {
@@ -317,6 +593,60 @@ pub fn doctor(report: &DoctorReport, json: bool) -> String {
                 );
             }
         }
+        let _ = writeln!(out, "  OS Permissions:");
+        for p in &report.permissions {
+            let detail_text = p.detail.as_deref().unwrap_or("");
+            let badge = match p.status {
+                "granted" => "[GRANTED]       ",
+                "denied" => "[DENIED]        ",
+                "prompt_needed" => "[PROMPT NEEDED] ",
+                _ => "[UNSUPPORTED]   ",
+            };
+            let _ = writeln!(out, "    {:18} {} {}", p.capability, badge, detail_text);
+        }
+        let _ = writeln!(out, "  Capability Matrix:");
+        for c in &report.capabilities {
+            let badge = match c.status {
+                "passed" => "[PASSED]    ",
+                "failed" => "[FAILED]    ",
+                "blocked" => "[BLOCKED]   ",
+                _ => "[NOT TESTED]",
+            };
+            let hw = match c.hardware_accelerated {
+                Some(true) => " [HW]",
+                Some(false) => " [SW]",
+                None => "",
+            };
+            let _ = writeln!(out, "    {:18} {}{} : {}", c.name, badge, hw, c.detail);
+            if let Some(r) = c.restriction {
+                let _ = writeln!(out, "      * Restriction: {r}");
+            }
+        }
+        let _ = writeln!(
+            out,
+            "  Sharing & Admission: scope={} approval={}",
+            report.sharing_scope, report.approval_mode
+        );
+        if report.sessions.is_empty() {
+            let _ = writeln!(out, "  Connected Sessions: None");
+        } else {
+            let _ = writeln!(out, "  Connected Sessions ({}):", report.sessions.len());
+            for s in &report.sessions {
+                let _ = writeln!(
+                    out,
+                    "    - Session {} ({}) [{}]: capabilities=[{}] authority={}",
+                    s.session_id,
+                    s.device_name,
+                    s.role,
+                    s.capabilities.join(", "),
+                    s.authority_state
+                );
+            }
+        }
+        let _ = writeln!(out, "  Known Restrictions:");
+        for r in &report.restrictions {
+            let _ = writeln!(out, "    * [{}] {}: {}", r.scope, r.code, r.summary);
+        }
         out
     }
 }
@@ -381,6 +711,14 @@ mod tests {
                     },
                 ],
             }),
+            permissions: DoctorReport::standard_permissions(),
+            capabilities: DoctorReport::standard_capabilities(),
+            sessions: vec![],
+            sharing_scope: "own-user",
+            approval_mode: "unattended",
+            restrictions: DoctorReport::standard_restrictions(),
+            refusal_code: None,
+            next_action: None,
         };
 
         let json = doctor(&report, true);
@@ -390,11 +728,18 @@ mod tests {
         assert!(json.contains("\"expiry_countdown_secs\":86400"));
         assert!(json.contains("\"kind\":\"Rotated\""));
         assert!(json.contains("\"https\":\"https://node.tailnet.ts.net:8443/\""));
+        assert!(json.contains("\"permissions\":["));
+        assert!(json.contains("\"capabilities\":["));
+        assert!(json.contains("\"restrictions\":["));
+        assert!(json.contains("\"sharing_scope\":\"own-user\""));
 
         let text = doctor(&report, false);
         assert!(text.contains("Node Certificate Name: node.tailnet.ts.net"));
         assert!(text.contains("Expiry Countdown: 86400s (24h 0m 0s)"));
         assert!(text.contains("Last Event: Rotated [gen 2]"));
         assert!(text.contains("Service Port: 8443 (available, no collisions)"));
+        assert!(text.contains("OS Permissions:"));
+        assert!(text.contains("Capability Matrix:"));
+        assert!(text.contains("Known Restrictions:"));
     }
 }

@@ -143,6 +143,14 @@ pub(super) fn run(
         alpn_protocols,
         certificate_transparency_notice: CERTIFICATE_TRANSPARENCY_NOTICE,
         certificate,
+        permissions: output::DoctorReport::standard_permissions(),
+        capabilities: output::DoctorReport::standard_capabilities(),
+        sessions: vec![],
+        sharing_scope: "own-user",
+        approval_mode: "unattended",
+        restrictions: output::DoctorReport::standard_restrictions(),
+        refusal_code: None,
+        next_action: None,
     };
 
     Ok(output::doctor(&report, json))

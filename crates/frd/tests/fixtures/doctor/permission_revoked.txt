@@ -1,0 +1,67 @@
+================================================================================
+                   FRANKENREMOTE HOST DAEMON STATUS (frd)
+================================================================================
+Status: [REFUSAL - ACTION REQUIRED]
+Refusal Code: permission_missing
+Next Action : Grant required permission in OS System Settings under Privacy & Security, then restart service.
+
+1. TAILSCALE NETWORK STATUS:
+--------------------------------------------------------------------------------
+  Installation Variant : standalone
+  Tailnet              : example.ts.net
+  Connectivity         : Connected
+  Node Name / ID       : workstation-alpha (node-101)
+  User ID              : user-101
+  Addresses            : 100.64.0.1, fd7a:115c:a1e0::1
+
+2. TLS 1.3 CERTIFICATE LIFECYCLE:
+--------------------------------------------------------------------------------
+  Certificate Domain   : workstation-alpha.example.ts.net
+  Status               : Valid (Certificate active and trusted by local roots)
+  Expiry Countdown     : 7776000 seconds (90d 0h remaining)
+  Certificate Gen      : 1
+
+3. OS PERMISSION STATES:
+--------------------------------------------------------------------------------
+  screen_capture     [DENIED]         OS permission for screen_capture was denied or revoked by operator
+  input_injection    [GRANTED]        Pointer and keyboard injection authorized
+  clipboard_sync     [GRANTED]        Text clipboard access active
+  audio_playback     [GRANTED]        Desktop audio loopback authorized
+  audio_microphone   [GRANTED]        Virtual microphone input authorized
+  file_transfer      [GRANTED]        ATP drop directory writable
+
+4. HARDWARE & MEDIA CAPABILITY MATRIX:
+--------------------------------------------------------------------------------
+  video_encode       [BLOCKED]      [HW] : Blocked: screen_capture permission denied by host OS
+  video_decode       [PASSED]       [HW] : HEVC hardware decoder verified
+  screen_capture     [BLOCKED]      [HW] : Blocked: screen_capture permission denied by host OS
+    * Restriction: Full display only (no window cropping)
+  input_injection    [PASSED]       : Immediate OS input injection active
+  clipboard_sync     [PASSED]       : Bidirectional text clipboard sync active
+    * Restriction: Text only (images deferred to ATP channel)
+  audio_playback     [PASSED]       : Opus 48 kHz stereo downlink ready
+  audio_microphone   [PASSED]       : Opus 48 kHz virtual-mic uplink ready
+    * Restriction: Push-to-talk default
+  file_transfer      [PASSED]       : ATP object transfer channel ready
+    * Restriction: Controlled session only
+
+5. ACTIVE SESSIONS & AUTHORITY:
+--------------------------------------------------------------------------------
+  Sharing Scope: own-user | Approval Mode: unattended | Viewers: 1/3
+  Active Controller: Session 101
+  Connected Sessions (1):
+    - Session 101 (laptop-controller) [controller]: capabilities=[view, control, audio, clipboard, files] authority=admitted
+
+6. KNOWN RESTRICTIONS & SCOPE LIMITS:
+--------------------------------------------------------------------------------
+  * [media] video_hevc_only: HEVC (Main, 8-bit, 4:2:0 baseline) only. No secondary video codec.
+  * [audio] audio_opus_only: Opus audio only (48 kHz mono/stereo). No alternative audio codec.
+  * [capture] full_display_only: Selected full-display capture only. Window cropping deferred.
+  * [network] tailscale_ingress_only: Tailscale authenticated ingress only. No public relays or pairing PINs.
+  * [input] single_controller_authority: Single controller owns input authority at a time; up to 2 read-only observers.
+  * [security] no_zero_rtt_application_data: Zero-RTT application data is forbidden; requires full TLS/QUIC handshake.
+
+7. STRUCTURED DIAGNOSTIC LOG TRAIL:
+--------------------------------------------------------------------------------
+  [info] status_check: Host daemon operational and healthy
+  [error] permission_missing: Refusal: screen_capture permission is not granted by the host OS

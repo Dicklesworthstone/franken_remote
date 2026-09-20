@@ -44,6 +44,7 @@ pub struct ArtifactBundle {
     events: Vec<StructuredLogEvent>,
     host_stderr: Vec<u8>,
     client_stderr: Vec<u8>,
+    doctor_output: Option<String>,
 }
 
 impl ArtifactBundle {
@@ -81,7 +82,13 @@ impl ArtifactBundle {
             events: Vec::new(),
             host_stderr: Vec::new(),
             client_stderr: Vec::new(),
+            doctor_output: None,
         })
+    }
+
+    /// Record doctor diagnostic status output to be embedded in the bundle.
+    pub fn record_doctor_output(&mut self, doctor_json: impl Into<String>) {
+        self.doctor_output = Some(doctor_json.into());
     }
 
     /// Record a structured log event.
@@ -178,6 +185,12 @@ impl ArtifactBundle {
             fs::set_permissions(&reproduce_path, perms)?;
         }
 
+        // 6. Write doctor.json if recorded
+        if let Some(ref doc) = self.doctor_output {
+            let doc_path = self.dir.join("doctor.json");
+            fs::write(doc_path, doc)?;
+        }
+
         Ok(summary)
     }
 }
@@ -206,6 +219,7 @@ mod tests {
         ));
         bundle.append_host_stderr(b"host log line 1\n");
         bundle.append_client_stderr(b"client log line 1\n");
+        bundle.record_doctor_output("{\"schema_version\":1,\"outcome\":\"success\"}");
 
         let assertions = vec![AssertionResult::pass(
             "test_assertion".to_string(),
@@ -221,6 +235,7 @@ mod tests {
         assert!(bundle.dir.join("host_stderr.log").exists());
         assert!(bundle.dir.join("client_stderr.log").exists());
         assert!(bundle.dir.join("reproduce.sh").exists());
+        assert!(bundle.dir.join("doctor.json").exists());
 
         // Clean up
         let _ = fs::remove_dir_all(&temp_dir);
