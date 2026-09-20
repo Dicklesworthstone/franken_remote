@@ -295,7 +295,6 @@ impl ApprovalManager {
                     return Err(DenialReason::TimedOut);
                 }
                 if !granted.is_clamped_subset_of(&record.requested) {
-                    record.state = ApprovalState::Denied(DenialReason::PolicyForbidden);
                     return Err(DenialReason::PolicyForbidden);
                 }
                 record.state = ApprovalState::Approved(granted.clone());

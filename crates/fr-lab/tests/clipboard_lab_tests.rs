@@ -221,11 +221,18 @@ fn pump_and_deliver_all(
             }
             Ok(Pump::Deferred) => {}
             Ok(Pump::Backpressure) => {
-                assert_ne!(pump_state, Ok(Pump::Backpressure), "unexpected backpressure when sink unblocked");
+                assert_ne!(
+                    pump_state,
+                    Ok(Pump::Backpressure),
+                    "unexpected backpressure when sink unblocked"
+                );
                 break;
             }
             Err(e) => {
-                assert!(pump_state.is_ok(), "unexpected session error during pump: {e:?}");
+                assert!(
+                    pump_state.is_ok(),
+                    "unexpected session error during pump: {e:?}"
+                );
                 break;
             }
         }

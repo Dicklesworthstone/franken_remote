@@ -10,6 +10,9 @@
 //! 7. macOS injection adapter: committed text distinct from physical keys, Accessibility check at submission.
 //! 8. Fault tolerance: agent responsive with dead worker, no authority leak across crash or logout.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use fr_core::{
     ids::RemoteSessionId,
     input::{DesktopPoint, InputBounds, KeyTransition, PhysicalKey, PointerButton},
@@ -21,8 +24,8 @@ use frd::session_agent::{
     ApprovalMode, ApprovalState, AudioScope, DenialReason, Distinguishability, GrantedScope,
     IndicatorDisplayState, InhibitorAction, LocalPriorityOutcome, MacOsInputSink, PeerIdentity,
     PermissionKind, PermissionStatus, PlatformKind, PlatformPermissionError, PostedCgEvent,
-    RecordingPoster, ReleaseCertainty, RequestedScope, SessionAgent, SessionRole,
-    SubmissionRefusal,
+    RecordingPoster, ReleaseCertainty, RequestedScope, SessionAgent, SessionCapabilitiesInUse,
+    SessionRole, SubmissionRefusal,
 };
 
 fn make_bounds() -> InputBounds {
@@ -711,4 +714,326 @@ fn test_fault_agent_alive_with_dead_worker() {
     let remaining = agent.on_session_ended(session_id, t_crash);
     // Tracker synthesized releases for cleanup
     assert_eq!(remaining.len(), 1);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn test_connected_sessions_list_multi_viewer_tracking() {
+    let mut agent = SessionAgent::new(
+        ApprovalMode::Unattended,
+        PlatformKind::LinuxWayland,
+        1000,
+        make_bounds(),
+    );
+
+    let t0 = HostInstant::from_micros(1_000_000);
+
+    // 1. Initially no connected sessions
+    assert_eq!(agent.connected_sessions().len(), 0);
+    assert_eq!(
+        agent.indicator().display_state(),
+        IndicatorDisplayState::Hidden
+    );
+    assert!(!agent.indicator().is_active());
+
+    // 2. Connect Session 101: Controller with full capabilities
+    let session_101 = RemoteSessionId::from_raw(101);
+    let peer_101 = PeerIdentity {
+        node_id: "node-alice".into(),
+        node_name: "alice-macbook".into(),
+        user_id: "user-alice".into(),
+    };
+    let req_101 = RequestedScope {
+        role: SessionRole::Controller,
+        displays: vec![0],
+        audio: AudioScope::Bidirectional,
+        clipboard: true,
+        file_transfer: true,
+    };
+    agent
+        .request_session(session_101, &peer_101, &req_101, t0)
+        .expect("session 101 approved");
+
+    let sessions = agent.connected_sessions();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].session_id, session_101);
+    assert_eq!(sessions[0].device_name, "alice-macbook");
+    assert_eq!(sessions[0].role, SessionRole::Controller);
+    assert_eq!(
+        sessions[0].capabilities,
+        SessionCapabilitiesInUse {
+            view: true,
+            control: true,
+            audio: true,
+            clipboard: true,
+            files: true,
+        }
+    );
+    assert!(agent.indicator().is_active());
+    assert!(matches!(
+        agent.indicator().display_state(),
+        IndicatorDisplayState::Controlling {
+            session_id,
+            has_input_lease: true,
+            ..
+        } if session_id == session_101
+    ));
+
+    // 3. Connect Session 102: Observer with view and playback audio, no control/clipboard/files
+    let t1 = HostInstant::from_micros(2_000_000);
+    let session_102 = RemoteSessionId::from_raw(102);
+    let peer_102 = PeerIdentity {
+        node_id: "node-bob".into(),
+        node_name: "bob-ipad".into(),
+        user_id: "user-bob".into(),
+    };
+    let req_102 = RequestedScope {
+        role: SessionRole::Observer,
+        displays: vec![0],
+        audio: AudioScope::PlaybackOnly,
+        clipboard: false,
+        file_transfer: false,
+    };
+    agent
+        .request_session(session_102, &peer_102, &req_102, t1)
+        .expect("session 102 approved");
+
+    let sessions = agent.connected_sessions();
+    assert_eq!(sessions.len(), 2);
+    // Sorted by session ID
+    assert_eq!(sessions[0].session_id, session_101);
+    assert_eq!(sessions[0].role, SessionRole::Controller);
+    assert_eq!(sessions[1].session_id, session_102);
+    assert_eq!(sessions[1].device_name, "bob-ipad");
+    assert_eq!(sessions[1].role, SessionRole::Observer);
+    assert_eq!(
+        sessions[1].capabilities,
+        SessionCapabilitiesInUse {
+            view: true,
+            control: false,
+            audio: true,
+            clipboard: false,
+            files: false,
+        }
+    );
+
+    // MultiSession state visible in indicator UI
+    let display_state = agent.indicator().display_state();
+    assert!(matches!(
+        display_state,
+        IndicatorDisplayState::ActiveSessions { .. }
+    ));
+    if let IndicatorDisplayState::ActiveSessions {
+        sessions: active_list,
+    } = display_state
+    {
+        assert_eq!(active_list.len(), 2);
+        assert_eq!(active_list[0].session_id, session_101);
+        assert_eq!(active_list[1].session_id, session_102);
+    }
+
+    // 4. Connect Session 103: Observer 2 with view only
+    let t2 = HostInstant::from_micros(3_000_000);
+    let session_103 = RemoteSessionId::from_raw(103);
+    let peer_103 = PeerIdentity {
+        node_id: "node-carol".into(),
+        node_name: "carol-linux".into(),
+        user_id: "user-carol".into(),
+    };
+    let req_103 = RequestedScope {
+        role: SessionRole::Observer,
+        displays: vec![0],
+        audio: AudioScope::None,
+        clipboard: false,
+        file_transfer: false,
+    };
+    agent
+        .request_session(session_103, &peer_103, &req_103, t2)
+        .expect("session 103 approved");
+
+    let sessions = agent.connected_sessions();
+    assert_eq!(sessions.len(), 3);
+    assert_eq!(sessions[2].session_id, session_103);
+    assert_eq!(sessions[2].device_name, "carol-linux");
+    assert_eq!(sessions[2].role, SessionRole::Observer);
+    assert_eq!(
+        sessions[2].capabilities,
+        SessionCapabilitiesInUse {
+            view: true,
+            control: false,
+            audio: false,
+            clipboard: false,
+            files: false,
+        }
+    );
+}
+
+#[test]
+fn test_per_session_revoke_leaves_other_sessions_undisturbed() {
+    let mut agent = SessionAgent::new(
+        ApprovalMode::Unattended,
+        PlatformKind::LinuxWayland,
+        1000,
+        make_bounds(),
+    );
+
+    let t0 = HostInstant::from_micros(1_000_000);
+    let session_101 = RemoteSessionId::from_raw(101);
+    let session_102 = RemoteSessionId::from_raw(102);
+
+    let peer_101 = make_peer("101");
+    let req_101 = make_request(SessionRole::Controller);
+    agent
+        .request_session(session_101, &peer_101, &req_101, t0)
+        .unwrap();
+
+    let peer_102 = make_peer("102");
+    let req_102 = make_request(SessionRole::Observer);
+    agent
+        .request_session(session_102, &peer_102, &req_102, t0)
+        .unwrap();
+
+    assert_eq!(agent.connected_sessions().len(), 2);
+
+    // Register per-session revokers
+    let s101_revoked = Arc::new(AtomicBool::new(false));
+    let s102_revoked = Arc::new(AtomicBool::new(false));
+
+    let flag_101 = s101_revoked.clone();
+    agent.register_session_custom_revoker(session_101, move || {
+        flag_101.store(true, Ordering::Release);
+    });
+
+    let flag_102 = s102_revoked.clone();
+    agent.register_session_custom_revoker(session_102, move || {
+        flag_102.store(true, Ordering::Release);
+    });
+
+    // 1. Revoke Session 102 (Observer) only
+    let t_revoke_102 = HostInstant::from_micros(2_000_000);
+    let outcome = agent.revoke_session(session_102, t_revoke_102, StopReason::LocalRevoke);
+    assert!(outcome.is_some());
+    let (res, releases) = outcome.unwrap();
+    assert_eq!(releases.len(), 0, "no input cleanup needed for observer");
+    assert!(res.latency_ns < 10_000_000);
+
+    // Session 102 revoker fired
+    assert!(s102_revoked.load(Ordering::Acquire));
+    // Session 101 revoker was NOT fired
+    assert!(!s101_revoked.load(Ordering::Acquire));
+
+    // Session 101 is STILL admitted for control and observation
+    assert!(agent.is_control_admitted(session_101));
+    assert!(agent.is_observation_admitted(session_101));
+
+    // Session 102 is NO LONGER admitted
+    assert!(!agent.is_observation_admitted(session_102));
+
+    // Connected sessions list now has exactly 1 session: Session 101
+    let remaining = agent.connected_sessions();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].session_id, session_101);
+
+    // Indicator display state transitioned cleanly back to Controlling for Session 101
+    assert!(matches!(
+        agent.indicator().display_state(),
+        IndicatorDisplayState::Controlling {
+            session_id,
+            ..
+        } if session_id == session_101
+    ));
+
+    // 2. Now revoke Session 101 (Controller)
+    let t_revoke_101 = HostInstant::from_micros(3_000_000);
+    let outcome_101 = agent.revoke_session(session_101, t_revoke_101, StopReason::LocalRevoke);
+    assert!(outcome_101.is_some());
+    let (revoked_status_101, _) = outcome_101.unwrap();
+    assert!(revoked_status_101.latency_ns < 10_000_000);
+
+    // Session 101 revoker has now fired
+    assert!(s101_revoked.load(Ordering::Acquire));
+
+    // All sessions removed
+    assert_eq!(agent.connected_sessions().len(), 0);
+    assert!(!agent.is_control_admitted(session_101));
+    assert!(matches!(
+        agent.indicator().display_state(),
+        IndicatorDisplayState::Revoked { .. }
+    ));
+}
+
+#[test]
+fn test_immediate_revoke_revokes_all_sessions_simultaneously() {
+    let mut agent = SessionAgent::new(
+        ApprovalMode::Unattended,
+        PlatformKind::LinuxWayland,
+        1000,
+        make_bounds(),
+    );
+
+    let t0 = HostInstant::from_micros(1_000_000);
+    let s1 = RemoteSessionId::from_raw(201);
+    let s2 = RemoteSessionId::from_raw(202);
+    let s3 = RemoteSessionId::from_raw(203);
+
+    agent
+        .request_session(
+            s1,
+            &make_peer("201"),
+            &make_request(SessionRole::Controller),
+            t0,
+        )
+        .unwrap();
+    agent
+        .request_session(
+            s2,
+            &make_peer("202"),
+            &make_request(SessionRole::Observer),
+            t0,
+        )
+        .unwrap();
+    agent
+        .request_session(
+            s3,
+            &make_peer("203"),
+            &make_request(SessionRole::Observer),
+            t0,
+        )
+        .unwrap();
+
+    assert_eq!(agent.connected_sessions().len(), 3);
+
+    let r1 = Arc::new(AtomicBool::new(false));
+    let r2 = Arc::new(AtomicBool::new(false));
+    let r3 = Arc::new(AtomicBool::new(false));
+    let r_global = Arc::new(AtomicBool::new(false));
+
+    let f1 = r1.clone();
+    agent.register_session_custom_revoker(s1, move || f1.store(true, Ordering::Release));
+    let f2 = r2.clone();
+    agent.register_session_custom_revoker(s2, move || f2.store(true, Ordering::Release));
+    let f3 = r3.clone();
+    agent.register_session_custom_revoker(s3, move || f3.store(true, Ordering::Release));
+    let fg = r_global.clone();
+    agent
+        .indicator()
+        .register_custom_revoker(move || fg.store(true, Ordering::Release));
+
+    // Immediate revoke host-wide (e.g. lid close or emergency user revoke)
+    let t_kill = HostInstant::from_micros(5_000_000);
+    let (outcome, _) = agent.immediate_revoke(t_kill, StopReason::LocalRevoke);
+    assert!(outcome.latency_ns < 10_000_000);
+
+    // All revokers fired simultaneously
+    assert!(r1.load(Ordering::Acquire));
+    assert!(r2.load(Ordering::Acquire));
+    assert!(r3.load(Ordering::Acquire));
+    assert!(r_global.load(Ordering::Acquire));
+
+    // All sessions cleared
+    assert_eq!(agent.connected_sessions().len(), 0);
+    assert!(agent.is_revoked());
+    assert!(!agent.is_control_admitted(s1));
+    assert!(!agent.is_observation_admitted(s2));
+    assert!(!agent.is_observation_admitted(s3));
 }

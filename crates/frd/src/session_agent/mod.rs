@@ -25,7 +25,8 @@ pub use approval::{
 };
 pub use held_state::{ReleaseCertainty, RemoteHeldTracker, UncertainReleaseReport};
 pub use indicator::{
-    ImmediateRevokeOutcome, IndicatorDisplayState, OsCleanupTracker, SharingIndicator,
+    ConnectedSession, ImmediateRevokeOutcome, IndicatorDisplayState, OsCleanupTracker,
+    SessionCapabilitiesInUse, SharingIndicator,
 };
 pub use local_priority::{
     Distinguishability, LocalInputPriority, LocalPriorityConfig, LocalPriorityOutcome,
@@ -259,18 +260,84 @@ impl SessionAgent {
         grant: &GrantedScope,
         now: HostInstant,
     ) {
-        let display_count = u32::try_from(grant.displays.len()).unwrap_or(u32::MAX);
-        match grant.role {
-            SessionRole::Observer => {
-                self.indicator
-                    .show_observing(session_id, peer_name, display_count);
-            }
-            SessionRole::Controller => {
-                self.indicator
-                    .show_controlling(session_id, peer_name, display_count, true);
-            }
-        }
+        let capabilities = SessionCapabilitiesInUse::from_granted_scope(grant);
+        let conn = ConnectedSession {
+            session_id,
+            device_name: peer_name.to_string(),
+            role: grant.role,
+            capabilities,
+            connected_at: now,
+        };
+        self.indicator.add_connected_session(conn);
         let _ = self.sleep_inhibitor.acquire(session_id, now);
+    }
+
+    /// Returns the list of all currently connected sessions with roles and capabilities.
+    pub fn connected_sessions(&self) -> Vec<ConnectedSession> {
+        self.indicator.connected_sessions()
+    }
+
+    /// Returns a specific connected session by ID.
+    pub fn connected_session(&self, session_id: RemoteSessionId) -> Option<ConnectedSession> {
+        self.indicator.connected_session(session_id)
+    }
+
+    /// Register an external `InputControl` scoped to a specific session.
+    pub fn register_session_input_control(
+        &self,
+        session_id: RemoteSessionId,
+        control: InputControl,
+    ) {
+        self.indicator
+            .register_session_input_control(session_id, control);
+    }
+
+    /// Register an external `RevokeHandle` scoped to a specific session.
+    pub fn register_session_revoke_handle(
+        &self,
+        session_id: RemoteSessionId,
+        handle: RevokeHandle,
+    ) {
+        self.indicator
+            .register_session_revoke_handle(session_id, handle);
+    }
+
+    /// Register a custom revocation closure scoped to a specific session.
+    pub fn register_session_custom_revoker(
+        &self,
+        session_id: RemoteSessionId,
+        revoker: impl Fn() + Send + Sync + 'static,
+    ) {
+        self.indicator
+            .register_session_custom_revoker(session_id, revoker);
+    }
+
+    /// Synchronously revoke authority for ONE specific connected session.
+    ///
+    /// Other connected sessions remain unaffected.
+    /// If the revoked session had the controller role, synthesizes cleanup releases.
+    pub fn revoke_session(
+        &mut self,
+        session_id: RemoteSessionId,
+        now: HostInstant,
+        reason: StopReason,
+    ) -> Option<(ImmediateRevokeOutcome, Vec<Operation>)> {
+        let was_controller = self
+            .connected_session(session_id)
+            .is_some_and(|s| s.role == SessionRole::Controller);
+
+        self.approval.revoke(session_id);
+        let _ = self.sleep_inhibitor.release(session_id, now);
+
+        let outcome = self.indicator.revoke_session(session_id, now, reason)?;
+
+        let releases = if was_controller {
+            self.held_state.synthesize_cleanup_releases()
+        } else {
+            Vec::new()
+        };
+
+        Some((outcome, releases))
     }
 
     /// Deny a pending session request.
