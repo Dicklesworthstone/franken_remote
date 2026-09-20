@@ -52,7 +52,7 @@ impl Publisher {
             || members.entries.iter().flatten().any(|e| {
                 e.control.same_owner(&control)
                     || same_task(&e.control, &control)
-                    || e.media.binding().parent.remote_session == view.parent.remote_session
+                    || e.view.parent.remote_session == view.parent.remote_session
             })
             || members.anchor.is_some_and(|a| !same_source_view(a, view))
         {
@@ -73,7 +73,9 @@ impl Publisher {
         members.started = true;
         members.entries[slot] = Some(Entry {
             connection: transport.binding(),
-            media,
+            media: Some(media),
+            view,
+            recovery: None,
             control,
             sender,
             failure: None,
@@ -136,7 +138,7 @@ impl Entry {
                 .host
                 .finish_stream(transport)
                 .map_err(Error::Startup)?;
-            if !control.same_owner(&self.control) || view != self.media.binding() {
+            if !control.same_owner(&self.control) || view != self.view {
                 return Err(Error::WrongSource);
             }
         }

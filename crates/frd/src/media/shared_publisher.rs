@@ -38,6 +38,8 @@ pub enum Error {
     InvalidBudget,
     Poisoned,
     JoinExpired,
+    Recovery(crate::media_quic::replacement::Error),
+    RecoveryExpired,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -48,7 +50,9 @@ impl std::error::Error for Error {}
 
 struct Entry {
     connection: ConnectionBinding,
-    media: NegotiatedMedia,
+    media: Option<NegotiatedMedia>,
+    view: Binding,
+    recovery: Option<recovery::Recovering>,
     control: ObservationControl,
     sender: QuicEgress,
     failure: Option<Error>,
@@ -64,6 +68,8 @@ impl Entry {
             starting.host.close();
         }
         self.sender.close();
+        self.recovery = None;
+        self.media = None;
         self.join = None;
         self.failure.get_or_insert(error);
     }
@@ -83,7 +89,7 @@ impl Members {
         self.entries
             .iter()
             .flatten()
-            .filter(|e| e.failure.is_none() && e.join.is_none())
+            .filter(|e| e.failure.is_none() && (e.join.is_none() || e.recovery.is_some()))
             .count()
     }
     fn stop_if_empty(&mut self) {
@@ -219,7 +225,7 @@ impl Publisher {
             || members.entries.iter().flatten().any(|e| {
                 e.control.same_owner(&control)
                     || same_task(&e.control, &control)
-                    || e.media.binding().parent.remote_session == view.parent.remote_session
+                    || e.view.parent.remote_session == view.parent.remote_session
             })
             || members.anchor.is_some_and(|a| !same_source_view(a, view))
         {
@@ -239,7 +245,9 @@ impl Publisher {
         members.started = true;
         members.entries[slot] = Some(Entry {
             connection: transport.binding(),
-            media,
+            media: Some(media),
+            view,
+            recovery: None,
             control,
             sender,
             failure: None,
@@ -481,11 +489,7 @@ impl Subscriber {
         if let Some(error) = entry.failure {
             return Err(error);
         }
-        let result = entry
-            .media
-            .check(transport)
-            .map_err(Error::Transport)
-            .and_then(|()| use_entry(entry));
+        let result = entry.check_media(transport).and_then(|()| use_entry(entry));
         if let Err(error) = result {
             entry.close(error);
         }
@@ -523,7 +527,13 @@ impl Subscriber {
             return Err(error);
         }
         let result = (|| {
-            entry.media.check(transport).map_err(Error::Transport)?;
+            entry.check_media(transport)?;
+            if entry.replacing() {
+                return Ok(SendReport {
+                    accepted: 0,
+                    pending: true,
+                });
+            }
             let mut report = SendReport {
                 accepted: 0,
                 pending: false,
@@ -586,6 +596,9 @@ impl Subscriber {
     ) -> Result<Option<media_quic::RepairAdmission>, Error> {
         self.with_entry(transport, |entry| {
             if route != entry.sender.stream_repair_route() {
+                return Ok(None);
+            }
+            if entry.recovery.is_some() {
                 return Ok(None);
             }
             if entry.starting.is_some() || entry.join.is_some() {
@@ -674,3 +687,6 @@ mod session;
 pub use join::JoinQueue;
 
 pub(crate) mod consent;
+
+mod recovery;
+pub use recovery::RecoveryState;

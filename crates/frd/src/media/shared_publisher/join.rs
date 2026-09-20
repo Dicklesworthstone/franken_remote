@@ -65,7 +65,7 @@ impl JoinQueue {
             || members.entries.iter().flatten().any(|e| {
                 e.control.same_owner(&control)
                     || same_task(&e.control, &control)
-                    || e.media.binding().parent.remote_session == view.parent.remote_session
+                    || e.view.parent.remote_session == view.parent.remote_session
             })
         {
             return Err(Error::WrongSource);
@@ -77,7 +77,10 @@ impl JoinQueue {
             .ok_or(Error::Full)?;
         members.tick()?;
         if !members.entries.iter().flatten().any(|entry| {
-            entry.failure.is_none() && entry.join.is_none() && entry.starting.is_none()
+            entry.failure.is_none()
+                && entry.join.is_none()
+                && entry.starting.is_none()
+                && entry.recovery.is_none()
         }) {
             return Err(Error::NoSubscribers);
         }
@@ -93,7 +96,9 @@ impl JoinQueue {
         let cfg = members.configuration;
         members.entries[slot] = Some(Entry {
             connection: transport.binding(),
-            media,
+            media: Some(media),
+            view,
+            recovery: None,
             control,
             sender,
             failure: None,
@@ -125,6 +130,21 @@ pub(super) struct PendingJoin {
     configured: bool,
 }
 impl PendingJoin {
+    pub(super) fn recovering(
+        setup: decoder_startup::Setup,
+        cfg: Configuration,
+        until: u64,
+    ) -> Self {
+        Self {
+            setup,
+            cfg,
+            until,
+            bootstrap: None,
+            host: None,
+            configuration_sent: false,
+            configured: false,
+        }
+    }
     fn waiting(&self) -> bool {
         self.bootstrap.is_none() && self.host.is_none()
     }
@@ -135,6 +155,14 @@ impl Entry {
     }
     pub(super) fn tick(&mut self, now: u64) -> Result<(), Error> {
         self.control.check().map_err(Error::Media)?;
+        if let Some(recovery) = &self.recovery {
+            if now >= recovery.until {
+                return Err(Error::RecoveryExpired);
+            }
+            if self.replacing() {
+                return Ok(());
+            }
+        }
         if let Some(starting) = &mut self.starting {
             starting.host.tick().map_err(Error::Startup)?;
         }
@@ -149,15 +177,24 @@ impl Entry {
         self.sender.tick().map_err(Error::Transport)
     }
     pub(super) fn deadline(&self) -> Option<u64> {
+        if self.replacing() {
+            return self.recovery.as_ref().map(|r| r.until);
+        }
         self.sender
             .next_deadline()
             .map(fr_core::time::HostInstant::as_micros)
             .into_iter()
             .chain(self.join.as_ref().map(|j| j.until))
+            .chain(self.recovery.as_ref().map(|r| r.until))
             .chain(self.starting.as_ref().map(|s| s.host.deadline_us()))
             .min()
     }
     pub(super) fn publish(&mut self, update: &SharedCaptureUpdate) -> Result<bool, Error> {
+        // An already-issued source capture may complete after this viewer failed.
+        // Healthy subscribers still consume it; a failed sender never does.
+        if self.replacing() {
+            return Ok(false);
+        }
         if self.waiting() {
             if !update.encoded().is_some_and(|frame| frame.kind().is_idr()) {
                 // No reference chain exists yet. Never bootstrap with a P picture
@@ -227,10 +264,11 @@ impl Entry {
                 .expect("completed")
                 .finish_stream(transport)
                 .map_err(Error::Startup)?;
-            if !control.same_owner(&self.control) || view != self.media.binding() {
+            if !control.same_owner(&self.control) || view != self.view {
                 return Err(Error::WrongSource);
             }
             self.join = None;
+            self.recovery = None;
             return Ok(true);
         }
         Ok(join.configured)
@@ -252,7 +290,7 @@ impl Members {
             if let Some(entry) = entry.as_mut().filter(|e| e.failure.is_none()) {
                 // Preserve the initial-pending cohort's original unconfigured
                 // backpressure and single next-reference retention policy.
-                if entry.starting.as_ref().is_some_and(|s| !s.seeded) {
+                if entry.replacing() || entry.starting.as_ref().is_some_and(|s| !s.seeded) {
                     continue;
                 }
                 let credit = if entry.join.is_some() {
@@ -263,7 +301,8 @@ impl Members {
                 match credit {
                     Ok(credit) => {
                         *ready = credit;
-                        healthy_credit |= credit && entry.join.is_none();
+                        healthy_credit |=
+                            credit && (entry.join.is_none() || entry.recovery.is_some());
                         if credit && entry.waiting() {
                             let until = entry.join.as_ref().expect("waiting").until;
                             join_until = Some(join_until.map_or(until, |old| old.min(until)));
@@ -285,6 +324,7 @@ impl Members {
         }
         for (entry, ready) in self.entries.iter_mut().zip(ready) {
             if let Some(entry) = entry.as_mut().filter(|e| e.failure.is_none())
+                && !entry.replacing()
                 && !ready
             {
                 entry.close(Error::SlowSubscriber);
@@ -299,7 +339,7 @@ impl Subscriber {
     /// or an input grant. Service the join before querying this milestone.
     pub fn is_ready(&mut self, transport: &QuicRecords) -> Result<bool, Error> {
         self.with_entry(transport, |entry| {
-            Ok(entry.join.is_none() && entry.starting.is_none())
+            Ok(entry.join.is_none() && entry.starting.is_none() && entry.recovery.is_none())
         })
     }
 }

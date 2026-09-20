@@ -17,7 +17,7 @@ impl Subscriber {
             let shared = self.members.upgrade().ok_or(Error::Closed)?;
             let members = shared.lock().map_err(|_| Error::Poisoned)?;
             let entry = members.entries[self.slot].as_ref().ok_or(Error::Closed)?;
-            let view = entry.media.binding();
+            let view = entry.view;
             if !q.is_bound_to(&entry.connection) {
                 return Err(Error::ForeignConnection);
             }
@@ -29,7 +29,7 @@ impl Subscriber {
                 return Err(Error::WrongSource);
             }
         }
-        self.with_entry(q, |entry| Ok(entry.media.binding()))
+        self.with_entry(q, |entry| Ok(entry.view))
     }
     /// Check both source consent and this viewer between every native network
     /// wait. A dead source must also fence records already retained by QUIC.
@@ -49,6 +49,9 @@ impl Subscriber {
         let entry = members.entries[self.slot].as_ref().ok_or(Error::Closed)?;
         if let Some(error) = entry.failure {
             return Err(error);
+        }
+        if entry.recovery.is_some() {
+            return Ok(None);
         }
         entry.sender.source_progress().map_err(Error::Transport)
     }
@@ -75,7 +78,10 @@ impl Subscriber {
         let mut failure = None;
         let mut consumed = 0;
         let result = (|| {
-            entry.media.check(q).map_err(Error::Transport)?;
+            entry.check_media(q)?;
+            if entry.recovery.is_some() {
+                return Ok(0);
+            }
             let expected = entry.sender.stream_repair_route();
             q.receive_ready(
                 &control.context(),

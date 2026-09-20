@@ -40,10 +40,32 @@ struct Cohort {
     owner: ObservationControl,
 }
 async fn joined(rt: &Runtime, changing: bool, delayed: bool) -> Box<Cohort> {
+    Box::pin(joined_with_recovery(rt, changing, delayed, false)).await
+}
+async fn joined_with_recovery(
+    rt: &Runtime,
+    changing: bool,
+    delayed: bool,
+    recovery: bool,
+) -> Box<Cohort> {
     let cx = Cx::current().unwrap();
     let (owner, a, b) = (gate(rt, 1), gate(rt, 13), gate(rt, 14));
     let mut al = Link::new(&cx, 13).await;
     let mut bl = Link::new(&cx, 14).await;
+    if recovery {
+        for link in [&mut al, &mut bl] {
+            link.selection
+                .capabilities
+                .push(fr_wire::negotiation::Capability {
+                    name: fr_wire::recovery_request::CAPABILITY.into(),
+                    version: 1,
+                    required: true,
+                });
+            link.selection
+                .capabilities
+                .sort_by(|a, b| a.name.cmp(&b.name));
+        }
+    }
     let am = al.media(&cx).await;
     let bm = bl.media(&cx).await;
     let mut source = source_variant(&owner, true, changing, delayed).await;
@@ -578,3 +600,6 @@ mod service;
 
 #[path = "publisher/consent.rs"]
 mod consent;
+
+#[path = "publisher/recovery.rs"]
+mod recovery;

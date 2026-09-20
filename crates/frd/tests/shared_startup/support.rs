@@ -12,7 +12,7 @@ use fr_wire::{
 };
 use frd::media_quic::NegotiatedMedia;
 use std::{cell::Cell, time::Duration};
-fn parent(session: u128) -> ControlBinding {
+pub(super) fn parent(session: u128) -> ControlBinding {
     ControlBinding {
         id: 7,
         host_boot: HostBootId::from_raw(11),
@@ -34,11 +34,11 @@ fn binding(session: u128, id: u32) -> Binding {
     }
 }
 pub(super) struct Link {
-    session: u128,
+    pub(super) session: u128,
     pub(super) c: QuicRecords,
     pub(super) h: QuicRecords,
-    cr: ControlRoutes,
-    hr: ControlRoutes,
+    pub(super) cr: ControlRoutes,
+    pub(super) hr: ControlRoutes,
     pub(super) selection: Selection,
 }
 impl Link {
