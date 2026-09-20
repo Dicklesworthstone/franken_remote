@@ -19,6 +19,7 @@ pub const HEADER_BYTES: usize = 36;
 pub const UNIT_PREFIX_BYTES: usize = 40;
 const CONFIG_BYTES: usize = 28;
 pub mod capture;
+pub mod cursor;
 pub mod presentation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +40,7 @@ pub enum Kind {
     CheckMonitor = 13,
     ConfigurePresentation = 14,
     ConfigureFittedPresentation = 15,
+    ReadCursor = 16,
     Ready = 257,
     Unit = 258,
     NeedInput = 259,
@@ -56,6 +58,7 @@ pub enum Kind {
     MonitorValid = 271,
     PresentationReady = 272,
     FittedPresentationReady = 273,
+    CursorSnapshot = 274,
 }
 impl Kind {
     fn parse(n: u16) -> Result<Self, Error> {
@@ -75,6 +78,7 @@ impl Kind {
             13 => Self::CheckMonitor,
             14 => Self::ConfigurePresentation,
             15 => Self::ConfigureFittedPresentation,
+            16 => Self::ReadCursor,
             257 => Self::Ready,
             258 => Self::Unit,
             259 => Self::NeedInput,
@@ -92,6 +96,7 @@ impl Kind {
             271 => Self::MonitorValid,
             272 => Self::PresentationReady,
             273 => Self::FittedPresentationReady,
+            274 => Self::CursorSnapshot,
             _ => return Err(Error::Malformed),
         })
     }
@@ -106,7 +111,8 @@ impl Kind {
                 (1 + capture::SCREEN_BYTES..=capture::MAX_CATALOG_BYTES).contains(&length)
                     && (length - 1).is_multiple_of(capture::SCREEN_BYTES)
             }
-            Self::DiscoverCapture
+            Self::ReadCursor
+            | Self::DiscoverCapture
             | Self::DiscoverMonitors
             | Self::CheckMonitor
             | Self::MonitorValid => length == 0,
@@ -132,6 +138,7 @@ impl Kind {
                     .contains(&length)
                     && length <= limits.max_control_message_bytes() as usize
             }
+            Self::CursorSnapshot => cursor::accepts_length(length, limits),
             Self::Capture | Self::CaptureIfChanged => length == 17,
             Self::Unchanged => length == 24,
             Self::Poll | Self::Stop | Self::NeedInput | Self::NeedDrain | Self::Stopped => {

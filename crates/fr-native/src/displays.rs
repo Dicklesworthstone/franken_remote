@@ -356,6 +356,30 @@ pub struct X11SelectedCapture {
     selected: Display,
 }
 impl X11SelectedCapture {
+    /// Separate cursor from the original selected monitor. A pointer outside
+    /// this rectangle yields no shape/position data from a neighboring display.
+    pub fn capture_cursor(&mut self) -> Result<Option<crate::cursor::CursorSnapshot>, NativeError> {
+        self.revalidate()?;
+        let d = self.selected;
+        // SAFETY: the original inventory connection remains alive and confined
+        // to this thread. Selection and both topology fences enclose the query.
+        let result = unsafe {
+            crate::cursor::snapshot(
+                self.inventory.display,
+                self.inventory.root,
+                crate::cursor::Area {
+                    x: d.x,
+                    y: d.y,
+                    width: d.pixel_width,
+                    height: d.pixel_height,
+                },
+                &self.inventory.limits,
+            )
+        };
+        self.revalidate()?;
+        result
+    }
+
     pub(crate) fn enable_damage(&mut self) -> Result<bool, NativeError> {
         self.revalidate()?;
         if self.inventory.damage.is_none() {

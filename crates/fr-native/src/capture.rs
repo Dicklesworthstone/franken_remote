@@ -82,6 +82,17 @@ pub struct ChangeAwareCapture {
     stats: CaptureStats,
 }
 impl ChangeAwareCapture {
+    /// Separate cursor observation: no capture freshness, frame ID or encode.
+    pub fn capture_cursor(&mut self) -> Result<Option<crate::cursor::CursorSnapshot>, NativeError> {
+        if self.closed {
+            return Err(NativeError::Closed);
+        }
+        match &mut self.surface {
+            CaptureSurface::Root(surface) => surface.capture_cursor(),
+            #[cfg(feature = "linux-displays")]
+            CaptureSurface::Selected(surface) => surface.capture_cursor(),
+        }
+    }
     pub const fn new(surface: X11Surface, codec: HevcEncoder) -> Self {
         Self {
             surface: CaptureSurface::Root(surface),

@@ -2,6 +2,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
+pub mod cursor;
+#[cfg(all(target_os = "linux", feature = "linux-media"))]
 mod damage;
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 mod linux;

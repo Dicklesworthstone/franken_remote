@@ -1,10 +1,18 @@
 //! Idle drawable repair. This reports native submissions, never new source
 //! observations, decode completions, or independently observed visibility.
 use super::{NativeError, X11Surface, status};
-use core::ffi::{c_int, c_void};
+use crate::cursor::{Area, CursorSnapshot, snapshot};
+use core::ffi::{c_int, c_ulong, c_void};
+use core::ptr::NonNull;
 use std::os::fd::{AsRawFd, BorrowedFd};
 
 unsafe extern "C" {
+    fn fr_x11_damage_source(
+        surface: *mut c_void,
+        display: *mut *mut c_void,
+        drawable: *mut c_ulong,
+    ) -> c_int;
+
     fn fr_x11_wait_presentation_input(
         surface: *mut c_void,
         input: c_int,
@@ -74,5 +82,34 @@ impl X11Surface {
             repainted: repainted != 0,
             retained_bytes,
         })
+    }
+}
+
+impl X11Surface {
+    /// Observe the separately captured cursor without reading or changing desktop
+    /// pixels. Presentation destinations are refused, even when numerically equal
+    /// to a capture window. Missing XFIXES is explicit, not fabricated video.
+    pub fn capture_cursor(&mut self) -> Result<Option<CursorSnapshot>, NativeError> {
+        let (mut display, mut root) = (core::ptr::null_mut(), 0);
+        // SAFETY: this C accessor permits only the original root capture owner.
+        super::status(unsafe {
+            fr_x11_damage_source(self.raw.as_ptr(), &raw mut display, &raw mut root)
+        })?;
+        // SAFETY: same live capture connection; snapshot borrows only for this call.
+        let result = unsafe {
+            snapshot(
+                NonNull::new(display).ok_or(NativeError::DisplayUnavailable)?,
+                root,
+                Area {
+                    x: 0,
+                    y: 0,
+                    width: self.width(),
+                    height: self.height(),
+                },
+                &self.limits,
+            )
+        };
+        self.revalidate()?;
+        result
     }
 }

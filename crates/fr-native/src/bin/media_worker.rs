@@ -156,6 +156,22 @@ mod linux {
             verify: bool,
         ) -> Result<(Kind, Vec<u8>), Error> {
             match request.header.kind {
+                Kind::ReadCursor => {
+                    let Self::Capture(capture) = self else {
+                        return Err(Error::WrongRole);
+                    };
+                    match capture.capture_cursor() {
+                        Ok(snapshot) => Ok((
+                            Kind::CursorSnapshot,
+                            worker::cursor::encode(
+                                snapshot.as_ref().map(|s| s.observation()),
+                                limits,
+                            )?,
+                        )),
+                        Err(NativeError::NeedInput) => Ok((Kind::NeedInput, Vec::new())),
+                        Err(error) => Err(native(error)),
+                    }
+                }
                 Kind::CheckMonitor => {
                     let Self::Capture(capture) = self else {
                         return Err(Error::WrongRole);
