@@ -15,7 +15,9 @@ pub struct WebTransportPki {
 impl WebTransportPki {
     pub fn generate() -> Result<Self, Box<dyn std::error::Error>> {
         let mut params = CertificateParams::new(vec!["localhost".to_string()])?;
-        params.distinguished_name.push(DnType::CommonName, "frankenremote-webtransport-leaf");
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "frankenremote-webtransport-leaf");
         params.subject_alt_names = vec![
             SanType::DnsName("localhost".try_into()?),
             SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),

@@ -4,9 +4,9 @@ mod proxy;
 mod server;
 mod wss;
 
+use asupersync::cx::Cx;
 use std::io::Write;
 use std::time::Duration;
-use asupersync::cx::Cx;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -45,7 +45,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         origin_clone.as_deref(),
                         Duration::from_secs(timeout_secs),
                         Some(ready_tx),
-                    ).await {
+                    )
+                    .await
+                    {
                         Ok((report, client_addr)) => {
                             let _ = report_tx.send(Ok((report, client_addr)));
                         }
@@ -106,7 +108,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("WSS_REPORT:{}", serde_json::to_string(&report)?);
         }
         _ => {
-            println!("Usage: webtransport-spike [pki | serve-wt <expected_origin> <timeout_s> | serve-wss <timeout_s>]");
+            println!(
+                "Usage: webtransport-spike [pki | serve-wt <expected_origin> <timeout_s> | serve-wss <timeout_s>]"
+            );
         }
     }
 

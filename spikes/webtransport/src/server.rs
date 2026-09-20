@@ -5,12 +5,8 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use asupersync::cx::Cx;
-use asupersync::net::quic_core::{
-    ConnectionId, TransportParameters, UnknownTransportParameter,
-};
-use asupersync::net::quic_native::handshake_driver::{
-    QuicHandshakeDriver, server_config,
-};
+use asupersync::net::quic_core::{ConnectionId, TransportParameters, UnknownTransportParameter};
+use asupersync::net::quic_native::handshake_driver::{QuicHandshakeDriver, server_config};
 use asupersync::net::quic_native::{
     NativeQuicConnectionConfig, NativeQuicUdpConnection, QuicUdpEndpoint, QuicUdpEndpointConfig,
     StreamId,
@@ -162,7 +158,12 @@ pub async fn serve_one_session(
 
     let ctrl_bytes = h3::server_control_stream_bytes();
     conn.connection_mut()
-        .write_stream(cx, ctrl_id, asupersync::bytes::Bytes::copy_from_slice(&ctrl_bytes), false)
+        .write_stream(
+            cx,
+            ctrl_id,
+            asupersync::bytes::Bytes::copy_from_slice(&ctrl_bytes),
+            false,
+        )
         .map_err(|e| format!("write control settings: {e}"))?;
 
     conn.flush(cx)
@@ -199,13 +200,14 @@ pub async fn serve_one_session(
                 if payload.len() > max_datagram_payload_bytes {
                     max_datagram_payload_bytes = payload.len();
                 }
-                println!(
-                    "Decoded H3 datagram payload: {} bytes",
-                    payload.len()
-                );
+                println!("Decoded H3 datagram payload: {} bytes", payload.len());
                 // Echo datagram back
                 let echo_raw = h3::encode_h3_datagram(0, &payload);
-                if conn.connection_mut().send_datagram(cx, echo_raw.into()).is_ok() {
+                if conn
+                    .connection_mut()
+                    .send_datagram(cx, echo_raw.into())
+                    .is_ok()
+                {
                     datagrams_echoed += 1;
                 }
             }
@@ -216,7 +218,11 @@ pub async fn serve_one_session(
             match conn.connection_mut().read_stream(cx, StreamId(0), 16384) {
                 Ok(bytes) => {
                     if !bytes.is_empty() {
-                        println!("Read {} bytes from stream 0: {:02x?}", bytes.len(), &bytes[..]);
+                        println!(
+                            "Read {} bytes from stream 0: {:02x?}",
+                            bytes.len(),
+                            &bytes[..]
+                        );
                         stream0_buf.extend_from_slice(&bytes);
                         match h3::parse_connect_request(0, &stream0_buf) {
                             Ok(Some((req, _consumed))) => {
@@ -236,7 +242,11 @@ pub async fn serve_one_session(
                                     h3::encode_connect_response_403()
                                 };
 
-                                println!("Sending CONNECT response (status {}): {:02x?}", status_code, &resp[..]);
+                                println!(
+                                    "Sending CONNECT response (status {}): {:02x?}",
+                                    status_code,
+                                    &resp[..]
+                                );
                                 let _ = conn.connection_mut().write_stream(
                                     cx,
                                     StreamId(0),
@@ -248,14 +258,18 @@ pub async fn serve_one_session(
                                 connect_req = Some(req);
 
                                 if !origin_matches {
-                                    println!("Origin rejected: sending 403 and terminating session");
+                                    println!(
+                                        "Origin rejected: sending 403 and terminating session"
+                                    );
                                     std::thread::sleep(Duration::from_millis(100));
                                     let _ = conn.flush(cx).await;
                                     break;
                                 }
                             }
                             Ok(None) => {
-                                println!("parse_connect_request returned Ok(None) - waiting for more bytes");
+                                println!(
+                                    "parse_connect_request returned Ok(None) - waiting for more bytes"
+                                );
                             }
                             Err(e) => {
                                 println!("parse_connect_request ERROR: {}", e);
@@ -282,42 +296,54 @@ pub async fn serve_one_session(
             if sid == 0 {
                 continue; // Handled above
             }
-            if let Ok(data) = conn.connection_mut().read_stream(cx, readiness.stream_id, 16384) {
-                if !data.is_empty() {
-                    let buf = stream_buffers.entry(sid).or_default();
-                    buf.extend_from_slice(&data);
-                    println!("Stream {} read {} bytes: {:02x?}", sid, data.len(), data.as_ref());
+            if let Ok(data) = conn
+                .connection_mut()
+                .read_stream(cx, readiness.stream_id, 16384)
+                && !data.is_empty()
+            {
+                let buf = stream_buffers.entry(sid).or_default();
+                buf.extend_from_slice(&data);
+                println!(
+                    "Stream {} read {} bytes: {:02x?}",
+                    sid,
+                    data.len(),
+                    data.as_ref()
+                );
 
-                    // If it's a client bidirectional stream (sid % 4 == 0, sid != 0)
-                    if sid % 4 == 0 {
-                        // In draft-02, Chrome sends WEBTRANSPORT_STREAM frame (0x41) + session_id (0x00)
-                        // as a preamble on client-initiated bidi streams.
-                        // 0x41 is encoded as 2-byte varint [0x40, 0x41] followed by session_id [0x00].
-                        let payload = if data.starts_with(&[0x40, 0x41, 0x00]) {
-                            &data[3..]
-                        } else if data.starts_with(&[0x41, 0x00]) {
-                            &data[2..]
-                        } else {
-                            &data[..]
-                        };
-                        if !payload.is_empty() {
-                            bidi_streams_echoed += 1;
-                            println!("Echoing {} bytes on WT bidi stream {}: {:02x?}", payload.len(), sid, payload);
-                            let _ = conn.connection_mut().write_stream(
-                                cx,
-                                readiness.stream_id,
-                                asupersync::bytes::Bytes::copy_from_slice(payload),
-                                false,
-                            );
-                            let _ = conn.flush(cx).await;
-                        }
-                    } else if sid % 4 == 2 {
-                        // Client unidirectional stream (sid % 4 == 2)
-                        // Stream 2 is client control stream; other uni streams are WT streams
-                        if sid > 2 {
-                            uni_streams_received += 1;
-                            println!("Received WT uni stream {} ({} bytes)", sid, data.len());
-                        }
+                // If it's a client bidirectional stream (sid % 4 == 0, sid != 0)
+                if sid % 4 == 0 {
+                    // In draft-02, Chrome sends WEBTRANSPORT_STREAM frame (0x41) + session_id (0x00)
+                    // as a preamble on client-initiated bidi streams.
+                    // 0x41 is encoded as 2-byte varint [0x40, 0x41] followed by session_id [0x00].
+                    let payload = if data.starts_with(&[0x40, 0x41, 0x00]) {
+                        &data[3..]
+                    } else if data.starts_with(&[0x41, 0x00]) {
+                        &data[2..]
+                    } else {
+                        &data[..]
+                    };
+                    if !payload.is_empty() {
+                        bidi_streams_echoed += 1;
+                        println!(
+                            "Echoing {} bytes on WT bidi stream {}: {:02x?}",
+                            payload.len(),
+                            sid,
+                            payload
+                        );
+                        let _ = conn.connection_mut().write_stream(
+                            cx,
+                            readiness.stream_id,
+                            asupersync::bytes::Bytes::copy_from_slice(payload),
+                            false,
+                        );
+                        let _ = conn.flush(cx).await;
+                    }
+                } else if sid % 4 == 2 {
+                    // Client unidirectional stream (sid % 4 == 2)
+                    // Stream 2 is client control stream; other uni streams are WT streams
+                    if sid > 2 {
+                        uni_streams_received += 1;
+                        println!("Received WT uni stream {} ({} bytes)", sid, data.len());
                     }
                 }
             }
@@ -327,7 +353,8 @@ pub async fn serve_one_session(
 
         // Check if connection is closing / closed
         if conn.connection().state() == asupersync::net::quic_native::QuicConnectionState::Closed
-            || conn.connection().state() == asupersync::net::quic_native::QuicConnectionState::Draining
+            || conn.connection().state()
+                == asupersync::net::quic_native::QuicConnectionState::Draining
         {
             println!("Connection entered closed/draining state");
             break;

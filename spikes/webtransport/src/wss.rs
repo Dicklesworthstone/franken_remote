@@ -54,7 +54,7 @@ impl WssServer {
 
             while !thread_stop.load(Ordering::Relaxed) {
                 match listener.accept() {
-                    Ok((mut stream, _)) => {
+                    Ok((stream, _)) => {
                         let rep = Arc::clone(&thread_report);
                         let cur_gen = Arc::clone(&active_gen);
                         let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
@@ -103,18 +103,17 @@ fn handle_client(
     // Parse channel and gen from GET /channel?role=<role>&gen=<gen>
     let mut channel_role = "unknown".to_string();
     let mut requested_gen = 1u32;
-    if let Some(first_line) = request.lines().next() {
-        if let Some(path) = first_line.split_whitespace().nth(1) {
-            if let Some(query) = path.split('?').nth(1) {
-                for pair in query.split('&') {
-                    let mut parts = pair.split('=');
-                    if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
-                        if k == "role" {
-                            channel_role = v.to_string();
-                        } else if k == "gen" {
-                            requested_gen = v.parse().unwrap_or(1);
-                        }
-                    }
+    if let Some(first_line) = request.lines().next()
+        && let Some(path) = first_line.split_whitespace().nth(1)
+        && let Some(query) = path.split('?').nth(1)
+    {
+        for pair in query.split('&') {
+            let mut parts = pair.split('=');
+            if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
+                if k == "role" {
+                    channel_role = v.to_string();
+                } else if k == "gen" {
+                    requested_gen = v.parse().unwrap_or(1);
                 }
             }
         }
@@ -166,54 +165,54 @@ fn handle_client(
             Ok(n) => {
                 frame_reader.feed(&buf[..n]);
                 while let Some(msg) = frame_reader.next_message() {
-                    if let Ok(text) = std::str::from_utf8(&msg) {
-                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
-                            let msg_type = v["type"].as_str().unwrap_or("");
-                            let msg_gen = v["generation"].as_u64().unwrap_or(1) as u32;
+                    if let Ok(text) = std::str::from_utf8(&msg)
+                        && let Ok(v) = serde_json::from_str::<serde_json::Value>(text)
+                    {
+                        let msg_type = v["type"].as_str().unwrap_or("");
+                        let msg_gen = v["generation"].as_u64().unwrap_or(1) as u32;
 
-                            // Stale generation check
-                            let cur_gen = active_gen.load(Ordering::SeqCst);
-                            if msg_gen < cur_gen {
-                                let mut rep = report.lock().unwrap();
-                                rep.stale_generation_rejected = true;
-                                let refusal = serde_json::json!({
-                                    "type": "refused",
-                                    "reason": "stale_generation",
-                                    "expected": cur_gen,
-                                    "received": msg_gen
-                                });
-                                let _ = send_ws_text(&mut stream, &refusal.to_string());
-                                continue;
+                        // Stale generation check
+                        let cur_gen = active_gen.load(Ordering::SeqCst);
+                        if msg_gen < cur_gen {
+                            let mut rep = report.lock().unwrap();
+                            rep.stale_generation_rejected = true;
+                            let refusal = serde_json::json!({
+                                "type": "refused",
+                                "reason": "stale_generation",
+                                "expected": cur_gen,
+                                "received": msg_gen
+                            });
+                            let _ = send_ws_text(&mut stream, &refusal.to_string());
+                            continue;
+                        }
+
+                        if msg_type == "grant_credit" {
+                            let grant = v["bytes"].as_u64().unwrap_or(0) as usize;
+                            available_credit += grant;
+
+                            let mut rep = report.lock().unwrap();
+                            if rep.initial_credit_granted == 0 {
+                                rep.initial_credit_granted = grant;
                             }
 
-                            if msg_type == "grant_credit" {
-                                let grant = v["bytes"].as_u64().unwrap_or(0) as usize;
-                                available_credit += grant;
-
-                                let mut rep = report.lock().unwrap();
-                                if rep.initial_credit_granted == 0 {
-                                    rep.initial_credit_granted = grant;
+                            // Send media records under credit
+                            const RECORD_SIZE: usize = 1024;
+                            while available_credit >= RECORD_SIZE {
+                                let record = vec![0xaa; RECORD_SIZE];
+                                if send_ws_binary(&mut stream, &record).is_err() {
+                                    return;
                                 }
+                                available_credit -= RECORD_SIZE;
 
-                                // Send media records under credit
-                                const RECORD_SIZE: usize = 1024;
-                                while available_credit >= RECORD_SIZE {
-                                    let record = vec![0xaa; RECORD_SIZE];
-                                    if send_ws_binary(&mut stream, &record).is_err() {
-                                        return;
-                                    }
-                                    available_credit -= RECORD_SIZE;
-
-                                    if rep.backpressure_observed {
-                                        rep.bytes_sent_after_topup += RECORD_SIZE;
-                                    } else {
-                                        rep.bytes_sent_before_stall += RECORD_SIZE;
-                                    }
+                                if rep.backpressure_observed {
+                                    rep.bytes_sent_after_topup += RECORD_SIZE;
+                                } else {
+                                    rep.bytes_sent_before_stall += RECORD_SIZE;
                                 }
+                            }
 
-                                if available_credit < RECORD_SIZE {
-                                    rep.backpressure_observed = true;
-                                }
+                            if available_credit < RECORD_SIZE {
+                                rep.backpressure_observed = true;
                             }
                         }
                     }
@@ -271,7 +270,7 @@ fn sha1_hash(data: &[u8]) -> [u8; 20] {
         let mut d = h3;
         let mut e = h4;
 
-        for i in 0..80 {
+        for (i, &w_i) in w.iter().enumerate() {
             let (f, k) = match i {
                 0..=19 => ((b & c) | ((!b) & d), 0x5A827999),
                 20..=39 => (b ^ c ^ d, 0x6ED9EBA1),
@@ -283,7 +282,7 @@ fn sha1_hash(data: &[u8]) -> [u8; 20] {
                 .wrapping_add(f)
                 .wrapping_add(e)
                 .wrapping_add(k)
-                .wrapping_add(w[i]);
+                .wrapping_add(w_i);
             e = d;
             d = c;
             c = b.rotate_left(30);
@@ -401,7 +400,8 @@ impl WsFrameReader {
             return None;
         }
 
-        let mut payload = self.buffer[header_len + mask_len..header_len + mask_len + payload_len].to_vec();
+        let mut payload =
+            self.buffer[header_len + mask_len..header_len + mask_len + payload_len].to_vec();
         if masked {
             let mask = &self.buffer[header_len..header_len + 4];
             for (i, byte) in payload.iter_mut().enumerate() {

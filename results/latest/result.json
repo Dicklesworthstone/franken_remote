@@ -1,33 +1,37 @@
 {
-  "timestamp": "2026-09-20T20:19:06Z",
+  "timestamp": "2026-09-20T20:46:04Z",
   "browser": "Google Chrome 153.0.8010.52",
   "scenarios": {
     "webtransport_happy_path": {
-      "status": "failed",
+      "status": "passed",
       "browser_result": {
-        "status": "failed",
-        "error": "WebTransportError: Opening handshake failed.",
-        "stack": "WebTransportError: Opening handshake failed."
+        "status": "passed",
+        "handshake_completed": true,
+        "datagrams_echoed": 5,
+        "max_datagram_payload_bytes": 1150,
+        "uni_stream_ok": true,
+        "bidi_stream_echoed": true,
+        "clean_close": true
       },
       "server_report": {
         "client_alpn": "h3",
-        "connect_method": "",
-        "connect_protocol": "",
-        "connect_path": "",
-        "connect_origin": null,
-        "connect_draft": null,
-        "origin_accepted": false,
-        "status_code": 0,
-        "datagrams_received": 0,
-        "datagrams_echoed": 0,
-        "max_datagram_payload_bytes": 0,
-        "uni_streams_received": 0,
-        "bidi_streams_echoed": 0,
-        "duration_ms": 25007
+        "connect_method": "CONNECT",
+        "connect_protocol": "webtransport",
+        "connect_path": "/wt",
+        "connect_origin": "http://127.0.0.1:8307",
+        "connect_draft": "1",
+        "origin_accepted": true,
+        "status_code": 200,
+        "datagrams_received": 5,
+        "datagrams_echoed": 5,
+        "max_datagram_payload_bytes": 1150,
+        "uni_streams_received": 3,
+        "bidi_streams_echoed": 1,
+        "duration_ms": 25004
       }
     },
     "webtransport_origin_rejection": {
-      "status": "failed",
+      "status": "passed",
       "browser_result": {
         "status": "passed",
         "origin_rejected": true,
@@ -35,19 +39,19 @@
       },
       "server_report": {
         "client_alpn": "h3",
-        "connect_method": "",
-        "connect_protocol": "",
-        "connect_path": "",
-        "connect_origin": null,
-        "connect_draft": null,
+        "connect_method": "CONNECT",
+        "connect_protocol": "webtransport",
+        "connect_path": "/wt",
+        "connect_origin": "http://127.0.0.1:24211",
+        "connect_draft": "1",
         "origin_accepted": false,
-        "status_code": 0,
+        "status_code": 403,
         "datagrams_received": 0,
         "datagrams_echoed": 0,
         "max_datagram_payload_bytes": 0,
         "uni_streams_received": 0,
         "bidi_streams_echoed": 0,
-        "duration_ms": 15007
+        "duration_ms": 105
       }
     },
     "wss_fallback": {
@@ -72,5 +76,5 @@
       }
     }
   },
-  "verdict": "NO-GO"
+  "verdict": "GO for browser WebTransport and WSS fallback qualification"
 }

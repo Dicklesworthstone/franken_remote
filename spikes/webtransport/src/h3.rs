@@ -1,19 +1,22 @@
 //! HTTP/3 and WebTransport framing helpers over Asupersync QUIC.
 
 use asupersync::http::h3_native::{
-    H3ConnectionConfig, H3Frame, H3QpackMode, H3ResponseHead,
-    H3Settings, qpack_decode_field_section, qpack_plan_to_header_fields,
-    qpack_encode_response_field_section,
+    H3ConnectionConfig, H3Frame, H3QpackMode, H3ResponseHead, H3Settings,
+    qpack_decode_field_section, qpack_encode_response_field_section, qpack_plan_to_header_fields,
 };
 use asupersync::net::quic_core::{decode_varint, encode_varint};
 
+#[allow(dead_code)]
 pub const H3_SETTING_ENABLE_CONNECT_PROTOCOL: u64 = 0x08;
+#[allow(dead_code)]
 pub const H3_SETTING_H3_DATAGRAM: u64 = 0x33;
 pub const H3_SETTING_H3_DATAGRAM_DRAFT04: u64 = 0xffd277;
 pub const H3_SETTING_WEBTRANS_DRAFT00: u64 = 0x2b603742;
 pub const H3_SETTING_WEBTRANS_MAX_SESSIONS_DRAFT07: u64 = 0xc671706a;
 
+#[allow(dead_code)]
 pub const WT_UNI_STREAM_TYPE: u64 = 0x54;
+#[allow(dead_code)]
 pub const WT_BIDI_STREAM_TYPE: u64 = 0x41;
 
 /// Encode the server's control stream prologue: stream type 0x00 + SETTINGS frame.
@@ -30,20 +33,26 @@ pub fn server_control_stream_bytes() -> Vec<u8> {
         ..H3Settings::default()
     };
     // Include WebTransport draft-02 setting (0x2b603742) required by Chrome
-    settings.unknown.push(asupersync::http::h3_native::UnknownSetting {
-        id: H3_SETTING_WEBTRANS_DRAFT00,
-        value: 1,
-    });
+    settings
+        .unknown
+        .push(asupersync::http::h3_native::UnknownSetting {
+            id: H3_SETTING_WEBTRANS_DRAFT00,
+            value: 1,
+        });
     // Include WebTransport draft-07+ max sessions setting (0xc671706a)
-    settings.unknown.push(asupersync::http::h3_native::UnknownSetting {
-        id: H3_SETTING_WEBTRANS_MAX_SESSIONS_DRAFT07,
-        value: 16,
-    });
+    settings
+        .unknown
+        .push(asupersync::http::h3_native::UnknownSetting {
+            id: H3_SETTING_WEBTRANS_MAX_SESSIONS_DRAFT07,
+            value: 16,
+        });
     // Include Datagram draft-04 setting as well for broad compatibility
-    settings.unknown.push(asupersync::http::h3_native::UnknownSetting {
-        id: H3_SETTING_H3_DATAGRAM_DRAFT04,
-        value: 1,
-    });
+    settings
+        .unknown
+        .push(asupersync::http::h3_native::UnknownSetting {
+            id: H3_SETTING_H3_DATAGRAM_DRAFT04,
+            value: 1,
+        });
 
     let frame = H3Frame::Settings(settings);
     frame.encode(&mut bytes).expect("encode settings frame");
@@ -52,6 +61,7 @@ pub fn server_control_stream_bytes() -> Vec<u8> {
 
 /// Parsed extended CONNECT request for WebTransport.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct WebTransportConnectRequest {
     pub stream_id: u64,
     pub path: String,
@@ -69,7 +79,11 @@ pub fn parse_connect_request(
     let (frame, consumed) = match H3Frame::decode(bytes, &config) {
         Ok(res) => res,
         Err(asupersync::http::h3_native::H3NativeError::UnexpectedEof) => return Ok(None),
-        Err(e) => return Err(format!("failed to decode H3 frame on stream {stream_id}: {e}")),
+        Err(e) => {
+            return Err(format!(
+                "failed to decode H3 frame on stream {stream_id}: {e}"
+            ));
+        }
     };
 
     let field_block = match frame {
@@ -106,7 +120,10 @@ pub fn parse_connect_request(
         return Err(format!("expected :method CONNECT, got {:?}", method));
     }
     if protocol.as_deref() != Some("webtransport") {
-        return Err(format!("expected :protocol webtransport, got {:?}", protocol));
+        return Err(format!(
+            "expected :protocol webtransport, got {:?}",
+            protocol
+        ));
     }
 
     let path = path.unwrap_or_else(|| "/".to_string());
@@ -128,9 +145,15 @@ pub fn encode_connect_response_200(draft: Option<&str>) -> Vec<u8> {
     let mut fields = Vec::new();
     if let Some(d) = draft {
         fields.push(("sec-webtransport-http3-draft".to_string(), d.to_string()));
-        fields.push(("sec-webtransport-http3-draft02".to_string(), "1".to_string()));
+        fields.push((
+            "sec-webtransport-http3-draft02".to_string(),
+            "1".to_string(),
+        ));
     } else {
-        fields.push(("sec-webtransport-http3-draft02".to_string(), "1".to_string()));
+        fields.push((
+            "sec-webtransport-http3-draft02".to_string(),
+            "1".to_string(),
+        ));
     }
     let response_head = H3ResponseHead::new(200, fields).expect("valid 200 response");
     let block = qpack_encode_response_field_section(&response_head)
