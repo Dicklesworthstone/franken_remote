@@ -15,3 +15,4 @@ Each record documents:
 | [0001](0001-ffmpeg-binding-family.md) | FFmpeg Binding Family and Native ABI Boundary (`fr-ffi` / `fr-native`) | **Accepted** | 2026-09-19 | §9.1, §9.2, §19.1, §25 |
 | [0002](0002-desktop-windowing-shell.md) | Desktop Client Windowing, Input Capture, and Surface Presentation | **Accepted** | 2026-09-19 | §8.3, §15.1, §16.1, §25 |
 | [0003](0003-mobile-ffi-mechanism.md) | Mobile FFI Boundary and Native App Architecture (`mobile/ios`, `mobile/android`) | **Accepted** | 2026-09-19 | §16.2, §19.1, §25 |
+| [0004](0004-software-encoder-profile.md) | Software HEVC Encoder Evaluation and Opt-In Policy (`x265` / `oxideav-h265`) | **Accepted** | 2026-09-20 | §8.1, §9.3, §9.4, §25 |
