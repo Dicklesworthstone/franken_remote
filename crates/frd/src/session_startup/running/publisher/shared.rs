@@ -1,6 +1,10 @@
 //! Normal display selection and role attachments for an independently owned source.
 //! Reuse the existing canonical host driver; never make a per-viewer capture worker.
-use super::*;
+use super::{
+    Attempt, Budget, CatalogService, Duration, Error, Future, HostSession, MediaRole,
+    NegotiatedMedia, ObservationControl, Policy, SelectedDisplay, SendPolicy, attach, block,
+    decoder_startup, drive, native_control,
+};
 use crate::media::{
     SharedCaptureUpdate,
     shared_publisher::{JoinQueue, Publisher},

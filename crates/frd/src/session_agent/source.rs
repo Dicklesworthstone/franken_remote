@@ -48,8 +48,11 @@ impl SessionAgent {
     /// Attach an ALREADY locally approved source/display to this exact agent.
     /// Invoke only at the original local sharing-policy decision, never upon a
     /// remote heartbeat or decoder report. This grants neither initial observation
-    /// nor input. The source must have independent authority/context and members.
-    /// Unknown/missing capture permission refuses, without changing the publisher.
+    /// nor input. The source must have independent authority/context. A locally
+    /// selected native source can attach BEFORE its first viewer; other sources
+    /// require an existing admitted cohort. Permission renewal never extends the
+    /// unused source's startup budget. Unknown/missing capture permission refuses
+    /// without changing the publisher.
     ///
     /// The same source cannot attach twice or gain another network renewer. Slots
     /// and metadata are bounded; retired publishers are not kept alive. This
@@ -113,3 +116,6 @@ impl SessionAgent {
         self.immediate_revoke(now, StopReason::AuthorityEnded)
     }
 }
+
+mod startup;
+pub use startup::StartError;
