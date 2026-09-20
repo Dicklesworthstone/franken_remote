@@ -79,10 +79,27 @@ impl HostSession {
         queue: JoinQueue,
         timeout: Duration,
         send: SendPolicy,
+        entropy: impl FnMut() -> Result<u128, ()> + 'a,
+    ) -> impl Future<Output = Result<SharedHost, Error>> + 'a {
+        self.join_shared_display_capped(queue, timeout, u64::MAX, send, entropy)
+    }
+    // Incoming Host negotiation and local approval have already spent part of
+    // this absolute budget. Do not turn its remainder into a fresh relative
+    // deadline: even scheduling time between calls must count against it.
+    pub(crate) fn join_shared_display_capped<'a>(
+        self,
+        queue: JoinQueue,
+        timeout: Duration,
+        until: u64,
+        send: SendPolicy,
         mut entropy: impl FnMut() -> Result<u128, ()> + 'a,
     ) -> impl Future<Output = Result<SharedHost, Error>> + 'a {
         let control = self.opened.control.clone();
-        let budget = source_budget(control.clone(), queue.clone(), timeout);
+        let budget = source_budget(control.clone(), queue.clone(), timeout).and_then(|mut b| {
+            b.until = b.until.min(until);
+            b.remaining()?;
+            Ok(b)
+        });
         Attempt {
             control,
             complete: false,

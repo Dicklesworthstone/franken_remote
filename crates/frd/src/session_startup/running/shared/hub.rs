@@ -1,6 +1,9 @@
 //! Bounded service of original shared-viewer sessions; capture stays source-owned.
 //! A slot covers admission, attachment and service, not just a completed viewer.
 use super::{HostSession, SharedHost};
+use asupersync::{cx::Cx, types::CancelKind};
+
+mod incoming;
 use crate::media::{
     ObservationControl,
     shared_publisher::{JoinQueue, MAX_SUBSCRIBERS},
@@ -60,6 +63,8 @@ impl std::error::Error for Error {}
 /// decoder is ready, pixels are visible, or input authority has been granted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
+    /// Original application negotiation or local approval is still pending.
+    Opening,
     Starting,
     Serving,
     Finished(Result<(), Error>),
@@ -71,14 +76,47 @@ pub struct Statistics {
     pub failed: u64,
 }
 
+enum Gate {
+    Opening { cx: Cx, until: u64 },
+    Observing(ObservationControl),
+}
+impl Gate {
+    fn check(&self) -> Result<(), Error> {
+        match self {
+            Self::Opening { cx, until } => {
+                if crate::session_startup::now(cx).map_err(Error::Session)? >= *until {
+                    return Err(Error::Session(crate::session_startup::Error::Expired));
+                }
+                Ok(())
+            }
+            Self::Observing(control) => control.check().map(|_| ()).map_err(|_| Error::Closed),
+        }
+    }
+    fn revoke(&self) {
+        match self {
+            // This is the original dedicated session context, never the hub or
+            // source context. No observation exists before the Host handoff.
+            Self::Opening { cx, .. } => cx.cancel_fast(CancelKind::User),
+            Self::Observing(control) => control.revoke(),
+        }
+    }
+}
 struct Receipt {
     parent: ControlBinding,
-    control: ObservationControl,
+    gate: Mutex<Gate>,
     state: Mutex<State>,
 }
 impl Receipt {
+    fn check(&self) -> Result<(), Error> {
+        self.gate.lock().map_err(|_| Error::Poisoned)?.check()
+    }
     fn finish(&self, result: Result<(), Error>) {
-        self.control.revoke();
+        // Always take gate before state; no caller callback or future poll occurs
+        // under either lock. Cancellation cannot slip between ownership stages.
+        self.gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .revoke();
         let mut state = self
             .state
             .lock()
@@ -86,6 +124,17 @@ impl Receipt {
         if !matches!(*state, State::Finished(_)) {
             *state = State::Finished(result);
         }
+    }
+    fn opened(&self, control: ObservationControl) -> Result<(), Error> {
+        let mut gate = self.gate.lock().map_err(|_| Error::Poisoned)?;
+        let mut state = self.state.lock().map_err(|_| Error::Poisoned)?;
+        if *state != State::Opening || gate.check().is_err() {
+            control.revoke();
+            return Err(Error::Closed);
+        }
+        *gate = Gate::Observing(control);
+        *state = State::Starting;
+        Ok(())
     }
     fn serving(&self) {
         let mut state = self
@@ -152,8 +201,9 @@ fn wake(registry: &Weak<Mutex<Slots>>) {
 }
 
 /// Weak admission access to a running hub. It grants no consent and cannot keep
-/// the source, hub or any connection alive. Only already-approved `HostSession`s
-/// from the same boot/OS scope are accepted. Refusal closes the moved session.
+/// the source, hub or any connection alive. Accepts either an already-approved
+/// `HostSession` or a fresh authenticated `Host` from the same boot/OS scope.
+/// Refusal closes the moved owner; neither entry point supplies identity/ingress.
 #[derive(Clone)]
 pub struct Admission {
     registry: Weak<Mutex<Slots>>,
@@ -167,47 +217,13 @@ impl Admission {
         if session.selection().role != Role::Observe {
             return Err(Error::WrongRole);
         }
-        let parent = session.binding();
-        if parent.host_boot != self.parent.host_boot || parent.os_session != self.parent.os_session
-        {
-            return Err(Error::ForeignScope);
-        }
-        self.source.check_source().map_err(Error::Source)?;
-        let registry = self.registry.upgrade().ok_or(Error::Closed)?;
-        let receipt = Arc::new(Receipt {
-            parent,
-            control: session.original_observation(),
-            state: Mutex::new(State::Starting),
-        });
-        let (slot, policy) = {
-            let mut slots = registry.lock().map_err(|_| Error::Poisoned)?;
-            if slots.closed {
-                return Err(Error::Closed);
-            }
-            if slots
-                .entries
-                .iter()
-                .flatten()
-                .any(|e| e.receipt.parent.remote_session == parent.remote_session)
-            {
-                return Err(Error::DuplicateSession);
-            }
-            let slot = slots.entries[..slots.policy.viewers]
-                .iter()
-                .position(Option::is_none)
-                .ok_or(Error::Full)?;
-            slots.entries[slot] = Some(Entry {
-                receipt: receipt.clone(),
-                task: None,
-            });
-            (slot, slots.policy)
-        };
-        let reservation = Reservation {
-            registry,
-            slot,
-            receipt: receipt.clone(),
-            installed: false,
-        };
+        let reservation = self.reserve(
+            session.binding(),
+            Gate::Observing(session.original_observation()),
+            State::Starting,
+        )?;
+        let receipt = reservation.receipt.clone();
+        let policy = reservation.policy;
         let entropy = self.entropy.clone();
         // Construct NOW: its immutable budget includes time queued in this hub.
         // No registry lock crosses source checks, caller code, or native work.
@@ -232,6 +248,54 @@ impl Admission {
             registry: self.registry.clone(),
         })
     }
+    fn reserve(
+        &self,
+        parent: ControlBinding,
+        gate: Gate,
+        state: State,
+    ) -> Result<Reservation, Error> {
+        if parent.host_boot != self.parent.host_boot || parent.os_session != self.parent.os_session
+        {
+            return Err(Error::ForeignScope);
+        }
+        self.source.check_source().map_err(Error::Source)?;
+        let registry = self.registry.upgrade().ok_or(Error::Closed)?;
+        let receipt = Arc::new(Receipt {
+            parent,
+            gate: Mutex::new(gate),
+            state: Mutex::new(state),
+        });
+        let (slot, policy) = {
+            let mut slots = registry.lock().map_err(|_| Error::Poisoned)?;
+            if slots.closed {
+                return Err(Error::Closed);
+            }
+            if slots
+                .entries
+                .iter()
+                .flatten()
+                .any(|e| e.receipt.parent.remote_session == parent.remote_session)
+            {
+                return Err(Error::DuplicateSession);
+            }
+            let slot = slots.entries[..slots.policy.viewers]
+                .iter()
+                .position(Option::is_none)
+                .ok_or(Error::Full)?;
+            slots.entries[slot] = Some(Entry {
+                receipt: receipt.clone(),
+                task: None,
+            });
+            (slot, slots.policy)
+        };
+        Ok(Reservation {
+            registry,
+            slot,
+            policy,
+            receipt,
+            installed: false,
+        })
+    }
     pub fn statistics(&self) -> Result<Statistics, Error> {
         let registry = self.registry.upgrade().ok_or(Error::Closed)?;
         let slots = registry.lock().map_err(|_| Error::Poisoned)?;
@@ -243,6 +307,7 @@ impl Admission {
 struct Reservation {
     registry: Arc<Mutex<Slots>>,
     slot: usize,
+    policy: Policy,
     receipt: Arc<Receipt>,
     installed: bool,
 }
@@ -315,7 +380,7 @@ impl Hub {
         let parent = first.session.binding();
         let receipt = Arc::new(Receipt {
             parent,
-            control: first.session.original_observation(),
+            gate: Mutex::new(Gate::Observing(first.session.original_observation())),
             state: Mutex::new(State::Serving),
         });
         let first_entropy = entropy.clone();
@@ -407,31 +472,27 @@ impl Hub {
                     .as_mut()
                     .and_then(|entry| entry.task.take().map(|task| (entry.receipt.clone(), task)))
             };
-            let Some((receipt, mut task)) = next else {
+            let Some((receipt, task)) = next else {
                 continue;
             };
-            let result = if receipt.control.check().is_err() {
-                Poll::Ready(Err(Error::Closed))
-            } else {
-                task.as_mut().poll(cx)
+            // A local notification/entropy callback may unwind while this task
+            // is outside the registry. Retire its exact slot even when a caller
+            // catches the panic and retains this service future. Revoke before
+            // task destruction, never silently strand an occupied empty slot.
+            let mut turn = Turn {
+                registry: self.registry.clone(),
+                slot,
+                receipt,
+                task: Some(task),
+                complete: false,
+            };
+            let result = match turn.receipt.check() {
+                Err(error) => Poll::Ready(Err(error)),
+                Ok(()) => turn.task.as_mut().ok_or(Error::Closed)?.as_mut().poll(cx),
             };
             match result {
-                Poll::Pending => {
-                    let mut slots = self.registry.lock().map_err(|_| Error::Poisoned)?;
-                    if let Some(entry) = &mut slots.entries[slot] {
-                        entry.task = Some(task);
-                    }
-                }
-                Poll::Ready(result) => {
-                    receipt.finish(result);
-                    drop(task);
-                    let mut slots = self.registry.lock().map_err(|_| Error::Poisoned)?;
-                    slots.entries[slot] = None;
-                    slots.statistics.finished = slots.statistics.finished.saturating_add(1);
-                    if result.is_err() {
-                        slots.statistics.failed = slots.statistics.failed.saturating_add(1);
-                    }
-                }
+                Poll::Pending => turn.park()?,
+                Poll::Ready(result) => turn.finish(result),
             }
         }
         self.next = (self.next + 1) % MAX_SUBSCRIBERS;
@@ -441,6 +502,67 @@ impl Hub {
             Poll::Ready(Ok(slots.statistics))
         } else {
             Poll::Pending
+        }
+    }
+}
+// Own the taken task until it is safely reinserted or terminally retired.
+// Its Drop body fences before fields (including the original Host) are dropped.
+struct Turn {
+    registry: Arc<Mutex<Slots>>,
+    slot: usize,
+    receipt: Arc<Receipt>,
+    task: Option<Task>,
+    complete: bool,
+}
+impl Turn {
+    fn park(&mut self) -> Result<(), Error> {
+        if let Err(error) = self.receipt.check() {
+            self.finish(Err(error));
+            return Ok(());
+        }
+        let mut slots = self.registry.lock().map_err(|_| Error::Poisoned)?;
+        if slots.closed {
+            return Err(Error::Closed);
+        }
+        let entry = slots.entries[self.slot].as_mut().ok_or(Error::Closed)?;
+        if !Arc::ptr_eq(&entry.receipt, &self.receipt) || entry.task.is_some() {
+            return Err(Error::Closed);
+        }
+        entry.task = self.task.take();
+        self.complete = true;
+        Ok(())
+    }
+    fn finish(&mut self, result: Result<(), Error>) {
+        self.receipt.finish(result);
+        let retired = {
+            let mut slots = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if slots.entries[self.slot]
+                .as_ref()
+                .is_some_and(|e| Arc::ptr_eq(&e.receipt, &self.receipt))
+            {
+                let retired = slots.entries[self.slot].take();
+                slots.statistics.finished = slots.statistics.finished.saturating_add(1);
+                if result.is_err() {
+                    slots.statistics.failed = slots.statistics.failed.saturating_add(1);
+                }
+                retired
+            } else {
+                None
+            }
+        };
+        self.complete = true;
+        drop(retired);
+        // Source/native/transport destruction cannot run under the registry lock.
+        drop(self.task.take());
+    }
+}
+impl Drop for Turn {
+    fn drop(&mut self) {
+        if !self.complete {
+            self.finish(Err(Error::Closed));
         }
     }
 }

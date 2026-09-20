@@ -270,12 +270,16 @@ struct Permit<'a> {
     role: Role,
     until: u64,
     decision: &'a AtomicU8,
+    shared_source: Option<&'a crate::media::shared_publisher::JoinQueue>,
 }
 impl Permit<'_> {
     fn check(&self) -> bool {
         !matches!(self.decision.load(Ordering::Acquire), DENIED | RETIRED)
             && now(self.cx).is_ok_and(|n| n < self.until)
             && self.peer.check(self.cx, self.role).is_ok()
+            && self
+                .shared_source
+                .is_none_or(|source| source.check_source().is_ok())
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -312,6 +316,8 @@ pub struct Host {
     until: u64,
     send_by: u64,
     observation_until: Option<u64>,
+    // Set only by the bounded shared-viewer ingress before ClientHello.
+    shared_source: Option<crate::media::shared_publisher::JoinQueue>,
 }
 impl fmt::Debug for Host {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -367,6 +373,7 @@ impl Host {
             until,
             send_by: until,
             observation_until: None,
+            shared_source: None,
         })
     }
     pub fn approval(&self) -> Option<Approval> {
@@ -396,6 +403,9 @@ impl Host {
             return Err(Error::Expired);
         }
         self.last = current;
+        if let Some(source) = &self.shared_source {
+            source.check_source().map_err(Error::SharedPublication)?;
+        }
         if matches!(self.approval.load(Ordering::Acquire), DENIED | RETIRED) {
             return Err(Error::Denied);
         }
@@ -417,6 +427,7 @@ impl Host {
                 .observation_until
                 .map_or(self.until, |d| d.min(self.until)),
             decision: &self.approval,
+            shared_source: self.shared_source.as_ref(),
         })
     }
     fn stage(&mut self, message: &Message) -> Result<(), Error> {
@@ -474,6 +485,11 @@ impl Host {
             negotiation::decode(bytes, self.maximum, self.routes.inbound.binding)?,
         ) {
             (Phase::Hello, Message::ClientHello(offer)) => {
+                // Observation-only shared service never silently downgrades a
+                // controller or exposes approval/capabilities for that intent.
+                if self.shared_source.is_some() && offer.role != Role::Observe {
+                    return Err(Error::Denied);
+                }
                 self.peer
                     .as_ref()
                     .ok_or(Error::Closed)?
@@ -656,6 +672,7 @@ impl Host {
             role: self.role,
             until,
             decision: &self.approval,
+            shared_source: self.shared_source.as_ref(),
         };
         let wait = wait
             .min(Duration::from_micros(until.saturating_sub(now(&self.cx)?)))

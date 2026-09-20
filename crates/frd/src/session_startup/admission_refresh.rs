@@ -63,6 +63,7 @@ impl Gate {
 pub(super) struct Bound {
     gate: Gate,
     decision: Arc<AtomicU8>,
+    shared_source: Option<crate::media::shared_publisher::JoinQueue>,
     cx: Cx,
     role: Role,
     until: u64,
@@ -89,6 +90,7 @@ impl Bound {
         let bound = Self {
             gate,
             decision: host.approval.clone(),
+            shared_source: host.shared_source.clone(),
             cx: host.cx.clone(),
             role: host.role,
             until: host
@@ -123,6 +125,9 @@ impl Bound {
     fn check_inner(&self) -> Result<u64, Error> {
         if matches!(self.decision.load(Ordering::Acquire), DENIED | RETIRED) {
             return Err(Error::Denied);
+        }
+        if let Some(source) = &self.shared_source {
+            source.check_source().map_err(Error::SharedPublication)?;
         }
         let current = now(&self.cx)?;
         if current < self.last.fetch_max(current, Ordering::AcqRel) {
