@@ -856,3 +856,6 @@ pub(crate) fn connection_test_host(
 
 #[cfg(test)]
 pub(crate) use tests::support as test_network;
+
+/// Service multiple original shared-viewer connections without per-viewer capture.
+pub use running::hub as shared_viewers;

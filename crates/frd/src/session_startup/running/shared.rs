@@ -362,3 +362,6 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> Services for SharedServi
 mod tests;
 
 mod recovery;
+
+/// Bounded original-session registry and fair shared-viewer service.
+pub mod hub;

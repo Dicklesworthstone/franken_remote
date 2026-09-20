@@ -17,7 +17,7 @@ use std::{
 /// Queue only after original session consent and media attachments have completed.
 #[derive(Clone)]
 pub struct JoinQueue {
-    members: Weak<Mutex<Members>>,
+    pub(super) members: Weak<Mutex<Members>>,
 }
 impl std::fmt::Debug for JoinQueue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

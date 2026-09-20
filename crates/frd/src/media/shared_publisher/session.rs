@@ -4,6 +4,12 @@ use fr_transport::quic::{Disposition, QuicRecords, Route};
 use fr_wire::{Progress, decoder::Binding, negotiation::ControlBinding};
 
 impl Subscriber {
+    pub(crate) fn original_source(&self) -> super::JoinQueue {
+        super::JoinQueue {
+            members: self.members.clone(),
+        }
+    }
+
     /// Identity preflight is non-mutating, including on a foreign connection or
     /// another authority with equal numeric identifiers. The returned view is
     /// installed media metadata, not a proposed tuple or a readiness grant.

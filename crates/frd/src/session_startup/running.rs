@@ -13,6 +13,7 @@ pub(super) mod controlled;
 pub use controlled::ControlledHost;
 pub(super) mod publisher;
 mod shared;
+pub use shared::hub;
 mod streaming;
 pub use shared::{SharedHost, SharedStatistics};
 #[cfg(test)]
