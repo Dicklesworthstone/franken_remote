@@ -51,12 +51,16 @@ struct Entry {
     control: ObservationControl,
     sender: QuicEgress,
     failure: Option<Error>,
+    starting: Option<pending::Starting>,
 }
 impl Entry {
     fn close(&mut self, error: Error) {
         // Fence the exact subscriber BEFORE dropping its retained media. This
         // never revokes the OS source or another remote session's authority.
         self.control.revoke();
+        if let Some(mut starting) = self.starting.take() {
+            starting.host.close();
+        }
         self.sender.close();
         self.failure.get_or_insert(error);
     }
@@ -115,6 +119,12 @@ impl Members {
             .flatten()
             .filter(|e| e.failure.is_none())
         {
+            if let Some(starting) = &mut entry.starting
+                && let Err(error) = starting.host.tick()
+            {
+                entry.close(Error::Startup(error));
+                continue;
+            }
             if let Err(error) = entry.sender.tick() {
                 entry.close(Error::Transport(error));
             }
@@ -133,8 +143,8 @@ impl Members {
 /// actual initial shared capture establishes source AND physical-pool identity.
 /// No listener, permission, controller, encoder or new runtime is created here.
 ///
-/// Each successful admission consumes an actual completed decoder handshake.
-/// Network tasks retain their original HostSession/QuicRecords and use their
+/// Admission either consumes a completed decoder handshake or retains an
+/// unstarted shared handshake in the same bounded slot. Network tasks retain their original HostSession/QuicRecords and use their
 /// non-cloneable Subscriber during capture awaits. They must keep servicing
 /// parent renewal/cancellation and close that parent on a subscriber error.
 pub struct Publisher {
@@ -231,6 +241,7 @@ impl Publisher {
             control,
             sender,
             failure: None,
+            starting: None,
         });
         Ok(Subscriber {
             members: Arc::downgrade(&self.members),
@@ -317,6 +328,12 @@ impl Publisher {
             let mut ready = [false; MAX_SUBSCRIBERS];
             for (entry, ready) in members.entries.iter_mut().zip(&mut ready) {
                 if let Some(entry) = entry.as_mut().filter(|e| e.failure.is_none()) {
+                    // An unconfigured decoder owns its bounded startup IDR,
+                    // not an established reference chain. Wait if everyone is
+                    // starting; otherwise refuse this laggard before capture.
+                    if entry.starting.as_ref().is_some_and(|s| !s.seeded) {
+                        continue;
+                    }
                     match entry.sender.shared_publisher_credit(&prepared) {
                         Ok(credit) => *ready = credit,
                         Err(error) => {
@@ -500,7 +517,9 @@ impl Subscriber {
     }
     /// Bounded admission of actual packets on the original transport. A pending
     /// packet is retained unchanged, and another connection can run immediately.
-    /// This does not drive UDP, renew observation or acknowledge native decode.
+    /// Pending viewers also service their original configuration/first-decode
+    /// handshake within this budget. This does not drive UDP, renew observation,
+    /// execute a native decoder, claim visibility, or grant input.
     pub fn service(
         &mut self,
         cx: &Cx,
@@ -533,12 +552,23 @@ impl Subscriber {
                 accepted: 0,
                 pending: false,
             };
-            for _ in 0..maximum_records {
+            entry.service_startup(transport, &owner, &mut report)?;
+            for _ in report.accepted..maximum_records {
+                if entry.starting.as_ref().is_some_and(|s| !s.seeded) {
+                    break;
+                }
                 let original = entry
                     .sender
-                    .transmit_authorized(cx, transport, Lane::Original, || owner.check().is_ok())
+                    .transmit_startup_authorized(
+                        cx,
+                        transport,
+                        entry.starting.as_ref().map(|s| s.first),
+                        || owner.check().is_ok(),
+                    )
                     .map_err(Error::Transport)?;
-                let progress = if original == crate::media_egress::Progress::Idle {
+                let progress = if original == crate::media_egress::Progress::Idle
+                    && entry.starting.is_none()
+                {
                     entry
                         .sender
                         .transmit_authorized(cx, transport, Lane::Repair, || owner.check().is_ok())
@@ -577,6 +607,9 @@ impl Subscriber {
         self.with_entry(transport, |entry| {
             if route != entry.sender.stream_repair_route() {
                 return Ok(None);
+            }
+            if entry.starting.is_some() {
+                return Err(Error::Startup(decoder_startup::Error::WrongState));
             }
             entry
                 .sender
@@ -654,4 +687,5 @@ impl Subscription {
     }
 }
 
+mod pending;
 mod service;

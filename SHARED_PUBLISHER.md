@@ -2,8 +2,8 @@
 
 `media::shared_publisher::Publisher` owns one actual native source and its existing
 physical frame pool. It replaces first-viewer ownership with a bounded cohort of
-independently revocable, already-decoding observation subscribers. It creates no
-new encoder, transport, runtime, permission, or input grant.
+independently revocable observation subscribers, including bounded pending
+decoders. It creates no new encoder, transport, runtime, permission, or input grant.
 
 ## Admission and custody
 
@@ -12,7 +12,7 @@ physical pool. Equal frame/configuration numbers and a newly allocated pool with
 identical limits do not establish ownership. The source has independent consent
 and its own sibling runtime context, not the first viewer's cancellation context.
 
-Admission consumes a completed `decoder_startup::Host`, the original shared
+The original `admit` consumes a completed `decoder_startup::Host`, the original shared
 `QuicEgress`, and its completed `NegotiatedMedia` attachments. It checks the actual
 connection, observation-only role, sender authority, source identity, current
 reference, and common OS-session/display/configuration scope. Each viewer keeps
@@ -79,7 +79,7 @@ workspace qualification; concurrent session-agent/e2e/fitted-presentation change
 are preserved on publication but are outside this executed source baseline.
 
 This owner is the bounded source/subscriber coordination layer, not an automatic
-listener or a second session broker. Initial pending-viewer admission, renewal of
+listener or a second session broker. Automatic listener admission, renewal of
 the independent source scope, rate-admitted late joins, shared recovery policy,
 and attaching the coordinator to the OS session registry remain separate work.
 No new control path, codec profile, dependency pin, or protocol limit was added.
@@ -115,3 +115,50 @@ narrow harness containing the exact production Cadence implementation and its
 unchanged inline tests. Strict daemon-library and shared-startup Clippy, formatting
 and diff checks pass. Source/dependency and synthetic-codec qualification limits
 remain those stated above; no current full-workspace or real-HEVC claim is added.
+
+## Pending decoder admission
+
+`Publisher::admit_pending` accepts an independently authorized observation viewer
+on its completed media attachments BEFORE decoder startup completes. It consumes
+that connection's unstarted `Host::new_shared` handshake and empty `QuicEgress`.
+Actual source, current IDR, physical-pool identity, connection, full view scope and
+original authority must agree. Pending and completed viewers share the same eight
+slots; a failed handle retains its slot until dropped, just as an active handle.
+This is not a permission grant, automatic listener, or implicit late-join IDR.
+
+`Subscriber::service` drives the existing configuration/reply state machine within
+its ordinary bounded turn. Configuration counts against the same send budget as
+media. The shared IDR reaches this viewer's original sender only after its exact
+Configured reply; dependent records are held until its matching FirstDecoded.
+Holding a prepared dependent packet retains its original bytes and deadline.
+`startup_complete` reports only that peer-reported decode gate, never visibility
+or input readiness. The original connection owner still drives UDP, observation
+renewal, and unrelated records during native decoder work.
+
+All unconfigured viewers cause raw-capture backpressure without advancing the
+source. A configured pending viewer can retain one next reference in its existing
+bounded cache while awaiting FirstDecoded. If it cannot drain before another
+healthy viewer advances again, it is explicitly fenced before capture, not given
+an unbounded catch-up queue. Unconfigured laggards likewise cannot hold a healthy
+viewer back. Each original startup deadline is included in continuous source
+maintenance even without packets. Expiry, wrong acknowledgements, cancellation
+and departure affect only that viewer unless it was the last remaining member.
+
+Nine new tests exercise real TLS/UDP and supervised synthetic decoders: separately
+completed gates and resumed dependent frames; unconfigured and first-decode
+laggards; exact cohort exhaustion before configuration sends; idle expiry and late
+replies; wrong first-frame reports; foreign connections/sources; and last-viewer cleanup.
+The final startup runs pass 25 existing and nine pending-startup tests; the
+rebuilt capture, recovery, authority, egress and worker group adds 59 passes.
+Strict daemon-library and complete startup-target Clippy and changed-file
+formatting pass. An earlier full startup run hit a native deadline in the existing completed-viewer
+test; the unchanged subsequent full run passed. That earlier failure is retained,
+not represented as resolved hardware or timing qualification.
+
+All eight first-party libraries were rebuilt from the checksum-verified 4b1c9b9
+source snapshot and this change, with pinned nightly-2026-08-31 and unchanged
+compiler-matched retained external CI libraries. This is not a cold dependency
+build, complete workspace test, live-tailnet, real HEVC or hardware qualification.
+Concurrent source late-join admission work is preserved at publication; automatic
+pending listener integration, independent source-scope renewal and shared recovery
+remain open. Existing `admit` remains the completed-handshake entry point.

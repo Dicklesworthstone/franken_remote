@@ -88,3 +88,29 @@ impl Host {
         Ok(Some(update))
     }
 }
+
+impl Host {
+    /// Inspect an unstarted shared handshake before its bounded publisher slot
+    /// is admitted. This is not completion or a readiness grant. Source and pool
+    /// checks use actual ownership, including the source's current reference.
+    pub(crate) fn pending_publication(
+        &mut self,
+        transport: &QuicRecords,
+        source: &crate::media::CaptureSource,
+        pool: &fr_media::delivery::SharedFramePool,
+    ) -> Result<(ObservationControl, fr_wire::decoder::Binding), Error> {
+        self.check_transport(transport)?;
+        if self.phase != HostPhase::Configuration {
+            return Err(Error::WrongState);
+        }
+        let Some(Bootstrap::Shared(update)) = &self.update else {
+            return Err(Error::WrongState);
+        };
+        update.check_publisher_source(source, pool)?;
+        Ok((self.control.clone(), self.bound.setup.binding))
+    }
+
+    pub(crate) fn configuration_pending(&self) -> bool {
+        self.phase == HostPhase::Configuration
+    }
+}

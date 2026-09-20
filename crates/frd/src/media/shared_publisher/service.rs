@@ -90,10 +90,12 @@ impl Publisher {
                         .iter()
                         .flatten()
                         .filter(|e| e.failure.is_none())
-                        .filter_map(|e| {
+                        .flat_map(|e| {
                             e.sender
                                 .next_deadline()
                                 .map(fr_core::time::HostInstant::as_micros)
+                                .into_iter()
+                                .chain(e.starting.as_ref().map(|s| s.host.deadline_us()))
                         })
                         .min();
                     (members.last, deadline)

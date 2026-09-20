@@ -41,3 +41,33 @@ impl QuicEgress {
             .map_err(Error::Media)
     }
 }
+
+impl QuicEgress {
+    pub(crate) fn join_pending_publisher(
+        &self,
+        q: &QuicRecords,
+        media: &NegotiatedMedia,
+        source: &CaptureSource,
+        owner: &ObservationControl,
+        control: &ObservationControl,
+        view: Binding,
+    ) -> Result<(), Error> {
+        media.check_shared_publication(q, view)?;
+        if self.connection.as_ref().is_none_or(|b| !q.is_bound_to(b)) || self.view != Some(view) {
+            return Err(Error::ForeignConnection);
+        }
+        self.egress
+            .stream_subscription()
+            .map_err(Error::Media)?
+            .join_pending_source(
+                source,
+                owner,
+                control,
+                MediaEpoch {
+                    configuration: view.configuration,
+                    recovery: view.recovery,
+                },
+            )
+            .map_err(Error::Media)
+    }
+}

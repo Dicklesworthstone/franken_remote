@@ -439,6 +439,15 @@ impl Host {
     /// Returns true only after ownership of the exact bytes enters QUIC. False
     /// means backpressure; keep this owner and its original deadline unchanged.
     pub fn transmit(&mut self, transport: &mut QuicRecords) -> Result<bool, Error> {
+        self.transmit_authorized(transport, || true)
+    }
+    /// A shared source has independent permission as well as this viewer's
+    /// authority. Recheck both at the actual configuration-record admission.
+    pub(crate) fn transmit_authorized(
+        &mut self,
+        transport: &mut QuicRecords,
+        mut permitted: impl FnMut() -> bool,
+    ) -> Result<bool, Error> {
         let result = (|| {
             self.tick()?;
             self.bound.check(transport)?;
@@ -450,7 +459,7 @@ impl Host {
                 Route::Stream(self.bound.setup.configuration),
                 &self.bytes,
                 self.bound.until,
-                || self.bound.live() && self.control.check().is_ok(),
+                || permitted() && self.bound.live() && self.control.check().is_ok(),
             ) {
                 Ok(()) => {
                     self.phase = HostPhase::Configuring;

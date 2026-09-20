@@ -277,11 +277,35 @@ impl QuicEgress {
         cx: &Cx,
         transport: &mut QuicRecords,
         lane: Lane,
+        source_live: impl FnMut() -> bool,
+    ) -> Result<Progress, Error> {
+        self.transmit_frame_authorized(cx, transport, lane, None, source_live)
+    }
+    /// A pending decoder may buffer one next reference but must not receive it
+    /// before `FirstDecoded`. Retain any prepared packet unchanged while waiting.
+    pub(crate) fn transmit_startup_authorized(
+        &mut self,
+        cx: &Cx,
+        transport: &mut QuicRecords,
+        first: Option<u64>,
+        source_live: impl FnMut() -> bool,
+    ) -> Result<Progress, Error> {
+        self.transmit_frame_authorized(cx, transport, Lane::Original, first, source_live)
+    }
+    fn transmit_frame_authorized(
+        &mut self,
+        cx: &Cx,
+        transport: &mut QuicRecords,
+        lane: Lane,
+        first: Option<u64>,
         mut source_live: impl FnMut() -> bool,
     ) -> Result<Progress, Error> {
         self.check_connection(transport)?;
         let routes = self.routes;
         let result = self.egress.transmit(lane, |offer, bytes, guard| {
+            if first.is_some_and(|frame| offer.frame() != frame) {
+                return Ok(Admission::Backpressure);
+            }
             let route = routes.outbound(offer.channel())?;
             match transport.send(cx, route, bytes, offer.send_by_micros(), || {
                 source_live() && guard().is_ok()
