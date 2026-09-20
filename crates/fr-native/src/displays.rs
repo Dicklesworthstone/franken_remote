@@ -120,6 +120,7 @@ impl Drop for MonitorAllocation {
 /// Capture is already in the root's orientation, so no second rotation applies.
 pub struct X11Inventory {
     display: NonNull<c_void>,
+    damage: Option<crate::damage::Damage>,
     root: c_ulong,
     event_base: c_int,
     snapshot: Snapshot,
@@ -141,6 +142,7 @@ impl X11Inventory {
         // Establish the owner immediately so every later refusal closes Xlib.
         let mut this = Self {
             display,
+            damage: None,
             root: 0,
             event_base: 0,
             snapshot: Snapshot::default(),
@@ -247,6 +249,12 @@ impl X11Inventory {
             // SAFETY: queued events exist; Event is Xlib's public C union ABI.
             unsafe { XNextEvent(self.display.as_ptr(), &raw mut event) };
             let kind = unsafe { event.kind };
+            // Revalidation must not swallow source-change notifications. In
+            // particular, CheckMonitor and post-encode barriers can run between
+            // two captures; their DAMAGE evidence belongs to the next snapshot.
+            if let Some(damage) = &mut self.damage {
+                damage.event(kind);
+            }
             if !initial && (kind == 22 || kind == self.event_base || kind == self.event_base + 1) {
                 return Err(NativeError::GeometryChanged);
             }
@@ -335,6 +343,7 @@ impl X11Inventory {
 }
 impl Drop for X11Inventory {
     fn drop(&mut self) {
+        drop(self.damage.take());
         // SAFETY: unique display owner; all query allocations were already freed.
         unsafe { XCloseDisplay(self.display.as_ptr()) };
     }
@@ -347,6 +356,36 @@ pub struct X11SelectedCapture {
     selected: Display,
 }
 impl X11SelectedCapture {
+    pub(crate) fn enable_damage(&mut self) -> Result<bool, NativeError> {
+        self.revalidate()?;
+        if self.inventory.damage.is_none() {
+            // SAFETY: this inventory owns the original root/connection. It
+            // destroys DAMAGE before closing Xlib; selection never reopens it.
+            // Root-wide dirty notifications are conservative: capture still
+            // reads ONLY the selected monitor rectangle, never its neighbors.
+            self.inventory.damage =
+                unsafe { crate::damage::Damage::new(self.inventory.display, self.inventory.root) };
+        }
+        self.revalidate()?;
+        Ok(self.inventory.damage.is_some())
+    }
+    pub(crate) fn damage_unchanged(&mut self) -> Result<bool, NativeError> {
+        self.revalidate()?;
+        let unchanged = match &mut self.inventory.damage {
+            Some(damage) => damage.unchanged()?,
+            None => false,
+        };
+        self.revalidate()?;
+        // The final topology barrier may also have consumed new DAMAGE. Its
+        // dirty bit must override the earlier observation, not get discarded.
+        Ok(unchanged
+            && self
+                .inventory
+                .damage
+                .as_ref()
+                .is_some_and(crate::damage::Damage::is_clean))
+    }
+
     pub const fn descriptor(&self) -> Display {
         self.selected
     }
@@ -355,6 +394,9 @@ impl X11SelectedCapture {
     }
     pub fn snapshot(&mut self) -> Result<BgraFrame, NativeError> {
         self.revalidate()?;
+        if let Some(damage) = &mut self.inventory.damage {
+            damage.before_snapshot()?;
+        }
         let d = self.selected;
         let len = super::linux::frame_len(d.pixel_width, d.pixel_height, &self.inventory.limits)?;
         let mut bytes = super::linux::zeroed(len)?;

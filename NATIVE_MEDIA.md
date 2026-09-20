@@ -145,7 +145,14 @@ and the worker's real elapsed time. Force-IDR and unconditional captures always
 read back and encode; damage never suppresses recovery. Capture cadence remains
 owned by the existing host scheduler. `CaptureStats` reports actual readbacks,
 damage observations, and encoded submissions without retaining screen content.
-Selected RandR-monitor capture still uses its full-readback path in this slice.
+Selected RandR-monitor capture also uses the original inventory connection.
+Root-wide damage conservatively triggers a readback of **only the selected
+rectangle**; neighboring pixels never join its encoded reference. Topology
+barriers forward consumed DAMAGE events into the retained dirty state. The
+post-observation barrier cannot discard a newer dirty indication. Monitor
+removal/re-addition remains terminal even with identical final dimensions,
+including while encoding is pending. The worker enables this for both discovery
+and explicit root-capture startup paths.
 
 `cargo test -p fr-native --features linux-media --test damage_capture` exercises
 real Xvfb servers and the explicit software HEVC encoder, including a distinct
@@ -156,3 +163,13 @@ Asupersync 0.5 dependency was killed by the container memory limit. Native libra
 and worker builds and strict Clippy passed; this is not a full-workspace, live
 tailnet, GPU, physical-display, or compositor qualification result. This advances
 plan sections 11.3/11.4 and `fr-p1-frame-pipeline-am1`; it does not close that gate.
+
+The `selected_damage` target adds seven real RandR/Xvfb/software-HEVC tests,
+including monitor discovery/configuration/idle checks/refusal through a distinct
+media-worker process. All 14 new tests passed with the production `linux-displays`
+library and worker; strict pedantic Clippy passed for both new test targets and
+production native library/worker. The existing display-inventory test bodies
+remain byte-identical; only their actual Xvfb fixture is shared with the new
+standalone target. Its Asupersync-based tests remain outside this local executed
+scope because of the compiler memory limit described above. No input freshness,
+visibility, native hardware, or complete host/client release gate is certified.

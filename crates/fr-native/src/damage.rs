@@ -65,6 +65,15 @@ impl Damage {
             dirty: true,
         })
     }
+    /// Preserve notifications consumed by the inventory's topology barrier.
+    #[cfg(feature = "linux-displays")]
+    pub(crate) fn event(&mut self, kind: c_int) {
+        self.dirty |= kind == self.event;
+    }
+    #[cfg(feature = "linux-displays")]
+    pub(crate) const fn is_clean(&self) -> bool {
+        !self.dirty
+    }
     fn drain(&mut self) -> Result<(), NativeError> {
         // SAFETY: owner retains the connection, on its original thread. XSync
         // False preserves topology events. Select only our extension's event.

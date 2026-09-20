@@ -43,14 +43,14 @@ impl CaptureSurface {
         match self {
             Self::Root(surface) => surface.enable_damage(),
             #[cfg(feature = "linux-displays")]
-            Self::Selected(_) => Ok(false),
+            Self::Selected(surface) => surface.enable_damage(),
         }
     }
     fn damage_unchanged(&mut self) -> Result<bool, NativeError> {
         match self {
             Self::Root(surface) => surface.damage_unchanged(),
             #[cfg(feature = "linux-displays")]
-            Self::Selected(_) => Ok(false),
+            Self::Selected(surface) => surface.damage_unchanged(),
         }
     }
 

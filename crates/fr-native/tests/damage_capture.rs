@@ -220,9 +220,6 @@ fn damage_tracking_does_not_revive_stale_capture_generations() {
 #[test]
 fn supervised_worker_keeps_conditional_capture_and_recovery_wire_contracts() {
     use fr_media::worker::{Identity, Kind, Record, UnchangedCapture, capture_payload, parse_unit};
-    let display = Display::start(true);
-    let mut source = display.source();
-    paint(&mut source, 12);
     struct ChildOwner(Child);
     impl Drop for ChildOwner {
         fn drop(&mut self) {
@@ -230,6 +227,9 @@ fn supervised_worker_keeps_conditional_capture_and_recovery_wire_contracts() {
             let _ = self.0.wait();
         }
     }
+    let display = Display::start(true);
+    let mut source = display.source();
+    paint(&mut source, 12);
     let mut child = ChildOwner(
         Command::new(env!("CARGO_BIN_EXE_fr-media-worker"))
             .env_clear()
