@@ -90,10 +90,15 @@ fn target_change_is_terminal_even_after_original_size_or_mapping_returns() {
             Kind::PresentationReady
         );
         mutate(&display, target, operation);
-        let reply = worker.transact(Kind::Present, unit_payload(&unit).unwrap());
-        assert_eq!(reply.header.kind, Kind::Refused);
-        assert_eq!(reply.body(), &(Error::GeometryChanged as u16).to_be_bytes());
-        assert!(!worker.child.wait().unwrap().success());
+        // Current workers service native lifecycle events while idle. Retirement
+        // must not wait for a follow-up frame, nor invent a reply identity for an
+        // unsolicited event. Require EOF and exit code 2 without sending another frame.
+        assert_eq!(worker.child.wait().unwrap().code(), Some(2));
+        assert!(
+            Record::read(&mut worker.output, &ProtocolLimits::ABSOLUTE)
+                .unwrap()
+                .is_none()
+        );
     }
 }
 #[test]

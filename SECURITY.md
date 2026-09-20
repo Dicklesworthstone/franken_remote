@@ -37,3 +37,15 @@ Aligned with the plan's threat model (§19) and security test matrix (§24.3):
 ## Non-claims
 
 No production support window or security SLA exists before an implementation release. Nodes inside the locally selected sharing scope (the host user's own devices by default; the whole tailnet only by explicit local choice) are deliberately trusted with desktop control; a compromised in-scope device has that authority until revoked. The selected desktop user, host OS, installed Tailscale authority, and GPU/media stack are explicit trust limits. Process separation is crash isolation, not a sandbox, unless a specific enforced OS sandbox is documented for that target.
+
+## Media-worker sandboxing and residual trust
+
+Per plan §5.4, §19.1, §19.2, and [`WORKER_SANDBOX.md`](WORKER_SANDBOX.md):
+
+- **Architectural capability isolation**: Media workers (capture/encode, decode/presentation) receive only borrowed frame buffers and encoded NAL streams across private pipes. Workers never receive Tailscale control sockets, TLS certificate private keys, the local approval IPC endpoint, or input lease capabilities. Input authority is verified independently by the broker and input agent immediately prior to OS submission.
+- **Enforced sandbox boundaries**: Where supported by the OS and compatible with the media pipeline role, workers operate under kernel-enforced privilege reduction:
+  - *Linux software decoder*: Strictly confined using kernel seccomp BPF (`SECCOMP_SET_MODE_FILTER` with `PR_SET_NO_NEW_PRIVS`). Network sockets (`connect`/`bind`), filesystem access (`open`/`creat`), process creation (`fork`/`clone`/`execve`), and approval IPC are blocked with `EPERM`, verified by automated escape attempt tests in `crates/fr-native/tests/decoder_sandbox_escape.rs`.
+  - *Windows workers*: Restricted tokens (filtered administrator SIDs, Low Integrity Level SID), Job Object limits (`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), and restricted handle inheritance.
+  - *macOS workers*: Entitlement minimization and sandbox profiles (`sandbox_init`) denying arbitrary filesystem, network, and process execution.
+- **Explicit residual trust disclosure**: Where hardware acceleration (VA-API, NVENC, Direct3D11/DXGI, VideoToolbox) is used, GPU vendor user-mode drivers and kernel DRM/device nodes require ioctls that cannot be fully filtered without breaking hardware acceleration. A compromised same-user unsandboxed or partially sandboxed GPU worker is **never claimed to be harmless**. The host OS, X11/Wayland display server, and GPU driver stack remain explicit trust boundaries.
+
