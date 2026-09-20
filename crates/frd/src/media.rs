@@ -50,6 +50,8 @@ pub enum Error {
     Worker(worker::Error),
     Send(SendError),
     InvalidFrame,
+    /// A shared source must have independent local observation ownership.
+    NotIndependentSource,
     Pacing(fr_media::pacing::Error),
     Backpressure,
     Delivery,
@@ -263,6 +265,7 @@ pub struct CaptureSource {
     last_capture: Option<FrameId>,
     recovery: recovery_source::SourceRecovery,
     selected_control: Option<ObservationControl>,
+    selected_catalog_revision: Option<u64>,
 }
 impl CaptureSource {
     pub async fn start(
@@ -291,6 +294,7 @@ impl CaptureSource {
             last_capture: None,
             recovery: recovery_source::SourceRecovery::new(&source)?,
             selected_control: None,
+            selected_catalog_revision: None,
         })
     }
     pub fn worker_id(&self) -> Option<u32> {
