@@ -37,6 +37,7 @@ pub enum Error {
     ForeignConnection,
     InvalidBudget,
     Poisoned,
+    JoinExpired,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -51,6 +52,7 @@ struct Entry {
     control: ObservationControl,
     sender: QuicEgress,
     failure: Option<Error>,
+    join: Option<join::PendingJoin>,
     starting: Option<pending::Starting>,
 }
 impl Entry {
@@ -62,6 +64,7 @@ impl Entry {
             starting.host.close();
         }
         self.sender.close();
+        self.join = None;
         self.failure.get_or_insert(error);
     }
 }
@@ -69,6 +72,7 @@ struct Members {
     entries: [Option<Entry>; MAX_SUBSCRIBERS],
     owner: ObservationControl,
     anchor: Option<Binding>,
+    configuration: fr_media::worker::Configuration,
     started: bool,
     closed: bool,
     until: u64,
@@ -79,15 +83,16 @@ impl Members {
         self.entries
             .iter()
             .flatten()
-            .filter(|e| e.failure.is_none())
+            .filter(|e| e.failure.is_none() && e.join.is_none())
             .count()
     }
     fn stop_if_empty(&mut self) {
         if self.started && self.active() == 0 {
-            self.closed = true;
-            // Stops capture admission, including an in-flight operation's next
-            // authority check. Child exit still requires Publisher::reap.
-            self.owner.revoke();
+            // Queued late joins never keep a source alive after its original
+            // cohort leaves. Initial admit_pending members retain their existing
+            // startup lifetime. Fence late joins and release bootstrap aliases;
+            // the original child still requires Publisher::reap.
+            self.close(Error::Closed);
         }
     }
     fn close(&mut self, error: Error) {
@@ -119,14 +124,8 @@ impl Members {
             .flatten()
             .filter(|e| e.failure.is_none())
         {
-            if let Some(starting) = &mut entry.starting
-                && let Err(error) = starting.host.tick()
-            {
-                entry.close(Error::Startup(error));
-                continue;
-            }
-            if let Err(error) = entry.sender.tick() {
-                entry.close(Error::Transport(error));
+            if let Err(error) = entry.tick(now) {
+                entry.close(error);
             }
         }
         self.stop_if_empty();
@@ -143,8 +142,9 @@ impl Members {
 /// actual initial shared capture establishes source AND physical-pool identity.
 /// No listener, permission, controller, encoder or new runtime is created here.
 ///
-/// Admission either consumes a completed decoder handshake or retains an
-/// unstarted shared handshake in the same bounded slot. Network tasks retain their original HostSession/QuicRecords and use their
+/// Admission consumes a completed handshake or retains an unstarted shared
+/// handshake in its original bounded slot; late joins wait for a fresh IDR.
+/// Network tasks retain their original HostSession/QuicRecords and use their
 /// non-cloneable Subscriber during capture awaits. They must keep servicing
 /// parent renewal/cancellation and close that parent on a subscriber error.
 pub struct Publisher {
@@ -178,6 +178,7 @@ impl Publisher {
             return Err(Error::WrongSource);
         }
         let until = now.checked_add(BOOTSTRAP_US).ok_or(Error::Closed)?;
+        let configuration = source.configuration;
         Ok(Self {
             source,
             pool,
@@ -185,6 +186,7 @@ impl Publisher {
                 entries: core::array::from_fn(|_| None),
                 owner,
                 anchor: None,
+                configuration,
                 started: false,
                 closed: false,
                 until,
@@ -241,6 +243,7 @@ impl Publisher {
             control,
             sender,
             failure: None,
+            join: None,
             starting: None,
         });
         Ok(Subscriber {
@@ -322,46 +325,19 @@ impl Publisher {
             .source
             .prepare_shared_capture(&owner, &self.pool)
             .map_err(Error::Media)?;
-        let mut refused = 0;
-        {
-            let mut members = self.members.lock().map_err(|_| Error::Poisoned)?;
-            let mut ready = [false; MAX_SUBSCRIBERS];
-            for (entry, ready) in members.entries.iter_mut().zip(&mut ready) {
-                if let Some(entry) = entry.as_mut().filter(|e| e.failure.is_none()) {
-                    // An unconfigured decoder owns its bounded startup IDR,
-                    // not an established reference chain. Wait if everyone is
-                    // starting; otherwise refuse this laggard before capture.
-                    if entry.starting.as_ref().is_some_and(|s| !s.seeded) {
-                        continue;
-                    }
-                    match entry.sender.shared_publisher_credit(&prepared) {
-                        Ok(credit) => *ready = credit,
-                        Err(error) => {
-                            entry.close(Error::Transport(error));
-                            refused += 1;
-                        }
-                    }
-                }
-            }
-            members.stop_if_empty();
-            if members.closed {
-                return Err(Error::Closed);
-            }
-            if !ready.iter().any(|r| *r) {
-                return Err(Error::Media(MediaError::Backpressure));
-            }
-            for (entry, ready) in members.entries.iter_mut().zip(ready) {
-                if let Some(entry) = entry.as_mut().filter(|e| e.failure.is_none())
-                    && !ready
-                {
-                    entry.close(Error::SlowSubscriber);
-                    refused += 1;
-                }
-            }
-        }
+        let (mut refused, join_until) = self
+            .members
+            .lock()
+            .map_err(|_| Error::Poisoned)?
+            .capture_credit(&prepared)?;
         // Declare the fencing guard AFTER the native future: Rust drops it
         // first on cancellation, before the existing IPC future aborts the child.
-        let mut capture = pin!(prepared.capture_if_changed(false));
+        let mut capture = pin!(async move {
+            match join_until {
+                Some(until) => prepared.capture_for_join(until).await,
+                None => prepared.capture_if_changed(false).await,
+            }
+        });
         let mut fence = CaptureGuard {
             members: self.members.clone(),
             complete: false,
@@ -392,10 +368,11 @@ impl Publisher {
             .flatten()
             .filter(|e| e.failure.is_none())
         {
-            match entry.sender.enqueue_shared_capture(&update) {
-                Ok(()) => delivered += 1,
+            match entry.publish(&update) {
+                Ok(true) => delivered += 1,
+                Ok(false) => {}
                 Err(error) => {
-                    entry.close(Error::Transport(error));
+                    entry.close(error);
                     refused += 1;
                 }
             }
@@ -517,9 +494,8 @@ impl Subscriber {
     }
     /// Bounded admission of actual packets on the original transport. A pending
     /// packet is retained unchanged, and another connection can run immediately.
-    /// Pending viewers also service their original configuration/first-decode
-    /// handshake within this budget. This does not drive UDP, renew observation,
-    /// execute a native decoder, claim visibility, or grant input.
+    /// Configuration counts against the same send budget as media. This does
+    /// not drive UDP, renew observation, execute a decoder or grant input.
     pub fn service(
         &mut self,
         cx: &Cx,
@@ -553,6 +529,10 @@ impl Subscriber {
                 pending: false,
             };
             entry.service_startup(transport, &owner, &mut report)?;
+            if !entry.service_join(transport, &owner, &mut report)? {
+                report.pending = true;
+                return Ok(report);
+            }
             for _ in report.accepted..maximum_records {
                 if entry.starting.as_ref().is_some_and(|s| !s.seeded) {
                     break;
@@ -608,7 +588,7 @@ impl Subscriber {
             if route != entry.sender.stream_repair_route() {
                 return Ok(None);
             }
-            if entry.starting.is_some() {
+            if entry.starting.is_some() || entry.join.is_some() {
                 return Err(Error::Startup(decoder_startup::Error::WrongState));
             }
             entry
@@ -687,5 +667,7 @@ impl Subscription {
     }
 }
 
+mod join;
 mod pending;
 mod service;
+pub use join::JoinQueue;

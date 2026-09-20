@@ -77,6 +77,7 @@ impl Publisher {
             control,
             sender,
             failure: None,
+            join: None,
             starting: Some(Starting {
                 host: startup,
                 first,
@@ -146,7 +147,7 @@ impl Subscriber {
     /// Whether this viewer's exact first-decode report completed the host gate.
     /// This is peer-reported decoding, not physical visibility or an input grant.
     pub fn startup_complete(&mut self, transport: &QuicRecords) -> Result<bool, Error> {
-        self.with_entry(transport, |entry| Ok(entry.starting.is_none()))
+        self.is_ready(transport)
     }
 }
 impl Subscription {

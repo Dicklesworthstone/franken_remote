@@ -83,6 +83,11 @@ impl PreparedSharedCapture<'_> {
     pub fn check_recipient(&self, recipient: &mut Egress) -> Result<bool, Error> {
         recipient.shared_capture_credit(self.source, self.reservation.charged_bytes())
     }
+    /// The publisher's bounded startup phase may retain a short unsent chain
+    /// while configuring its decoder, still charged before native production.
+    pub(crate) fn check_join_recipient(&self, recipient: &Subscription) -> Result<bool, Error> {
+        recipient.shared_join_credit(self.source, self.reservation.charged_bytes())
+    }
     pub fn reserved_bytes(&self) -> usize {
         self.reservation.charged_bytes()
     }

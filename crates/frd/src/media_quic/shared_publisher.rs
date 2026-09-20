@@ -32,6 +32,16 @@ impl QuicEgress {
             )
             .map_err(Error::Media)
     }
+    /// Startup retains a strictly bounded compressed chain, not an unbounded
+    /// packet FIFO. Actual source identity and full logical byte credit still apply.
+    pub(crate) fn shared_join_credit(
+        &self,
+        prepared: &PreparedSharedCapture<'_>,
+    ) -> Result<bool, Error> {
+        prepared
+            .check_join_recipient(self.egress.stream_subscription().map_err(Error::Media)?)
+            .map_err(Error::Media)
+    }
     pub(crate) fn shared_publisher_credit(
         &mut self,
         prepared: &PreparedSharedCapture<'_>,
