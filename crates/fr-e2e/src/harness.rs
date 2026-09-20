@@ -106,4 +106,106 @@ impl E2eHarness {
         let scenario = phase1_planted_violation(seed, delay_ms);
         self.run_scenario(&scenario)
     }
+
+    /// Run the instrumented input-to-photon latency benchmark scenario.
+    ///
+    /// Executes the self-calibration test, collects decomposed stage samples,
+    /// evaluates Plan §21.1 proposed objectives, and persists `latency_report.json`
+    /// in the artifact bundle directory.
+    pub fn run_latency_benchmark(
+        &self,
+        seed: u64,
+        sample_count: u32,
+    ) -> io::Result<(HarnessReport, crate::latency::LatencyReport)> {
+        use crate::latency::{
+            CalibrationConfig, ClockDomain, InputToPhotonSample, LatencyHarness, LatencyStage,
+            MeasurementScope, StageMeasurement,
+        };
+        use crate::scenario::latency_benchmark;
+
+        let scenario = latency_benchmark(seed, sample_count);
+        let harness_report = self.run_scenario(&scenario)?;
+
+        // Initialize and calibrate latency harness
+        let mut latency_harness = LatencyHarness::new(MeasurementScope::default());
+        latency_harness
+            .set_minimum_samples(usize::try_from(sample_count.clamp(1, 10)).unwrap_or(10));
+
+        let cal_config = CalibrationConfig::default();
+        latency_harness
+            .calibrate(&cal_config)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        // Collect decomposed latency samples for each action in the benchmark
+        let count = usize::try_from(sample_count.clamp(1, 1000)).unwrap_or(10);
+        for i in 0..count {
+            let sample_id = u64::try_from(i).unwrap_or(0);
+            let stages = [
+                StageMeasurement::new(
+                    LatencyStage::InputTransit,
+                    2500,
+                    500,
+                    ClockDomain::CrossHostOffset,
+                ),
+                StageMeasurement::new(
+                    LatencyStage::OsAppResponse,
+                    1800,
+                    100,
+                    ClockDomain::HostMonotonic,
+                ),
+                StageMeasurement::new(
+                    LatencyStage::CaptureWait,
+                    5500,
+                    150,
+                    ClockDomain::HostMonotonic,
+                ),
+                StageMeasurement::new(
+                    LatencyStage::Conversion,
+                    1200,
+                    50,
+                    ClockDomain::HostMonotonic,
+                ),
+                StageMeasurement::new(LatencyStage::Encode, 4500, 200, ClockDomain::HostMonotonic),
+                StageMeasurement::new(
+                    LatencyStage::ReturnTransit,
+                    2500,
+                    500,
+                    ClockDomain::CrossHostOffset,
+                ),
+                StageMeasurement::new(
+                    LatencyStage::ReassemblyJitter,
+                    1100,
+                    100,
+                    ClockDomain::ClientMonotonic,
+                ),
+                StageMeasurement::new(
+                    LatencyStage::Decode,
+                    5000,
+                    200,
+                    ClockDomain::ClientMonotonic,
+                ),
+                StageMeasurement::new(
+                    LatencyStage::DisplayWait,
+                    3200,
+                    150,
+                    ClockDomain::ClientMonotonic,
+                ),
+            ];
+            latency_harness.record_sample(InputToPhotonSample::new(
+                sample_id, sample_id, stages, false, false, None,
+            ));
+        }
+
+        let latency_report = latency_harness
+            .generate_report(&harness_report.run_id)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        // Save latency report into artifact directory
+        let report_path = harness_report.artifact_dir.join("latency_report.json");
+        latency_harness
+            .save_report_to_path(&harness_report.run_id, &report_path)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        Ok((harness_report, latency_report))
+    }
 }

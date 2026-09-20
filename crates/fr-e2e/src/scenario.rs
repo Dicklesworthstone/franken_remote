@@ -254,6 +254,27 @@ pub fn phase1_planted_violation(seed: u64, delay_ms: u64) -> Scenario {
         .build()
 }
 
+/// Latency benchmark scenario executing repeated instrumented input actions.
+#[must_use]
+pub fn latency_benchmark(seed: u64, sample_count: u32) -> Scenario {
+    let mut builder = ScenarioBuilder::new("latency_benchmark")
+        .description(
+            "Instrumented input-to-photon latency benchmark over active observation and control",
+        )
+        .seed(seed)
+        .connect(5000)
+        .authorize("prompt_always", 5000)
+        .start_observation(0, 5000)
+        .request_control(5000);
+
+    let count = sample_count.clamp(1, 1000);
+    for i in 0..count {
+        builder = builder.send_input("key_press", 0, 0, 65 + (i % 26), 1);
+    }
+
+    builder.revoke_control(true).teardown().build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

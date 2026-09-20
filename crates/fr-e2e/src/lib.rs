@@ -27,6 +27,7 @@ pub mod assertions;
 pub mod event;
 pub mod fault;
 pub mod harness;
+pub mod latency;
 pub mod scenario;
 pub mod session_driver;
 
@@ -39,7 +40,14 @@ pub use assertions::{
 pub use event::{AuthorityState, EventKind, EventSource, InputStage, StructuredLogEvent};
 pub use fault::{FaultAction, FaultInjector, PlantedViolationKind};
 pub use harness::{E2eHarness, HarnessConfig, HarnessReport};
+pub use latency::{
+    CalibrationConfig, CalibrationEvidence, ClockDomain, InputToPhotonSample,
+    InstrumentedVisualTarget, LatencyError, LatencyHarness, LatencyPercentiles, LatencyReport,
+    LatencyStage, MeasurementScope, NetworkMode, OpticalMeasurement, ProposedObjectivesEvaluation,
+    SessionWarmth, StageMeasurement, StageSummary, TargetCompliance,
+};
 pub use scenario::{
-    Scenario, ScenarioBuilder, ScenarioStep, phase1_canonical, phase1_planted_violation,
+    Scenario, ScenarioBuilder, ScenarioStep, latency_benchmark, phase1_canonical,
+    phase1_planted_violation,
 };
 pub use session_driver::SessionDriver;

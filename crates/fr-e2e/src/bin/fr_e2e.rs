@@ -16,7 +16,7 @@ Usage:
     fr_e2e [OPTIONS]
 
 Options:
-    --scenario <NAME>       Scenario name: 'phase1_canonical' (default), 'phase1_planted_violation'
+    --scenario <NAME>       Scenario name: 'phase1_canonical' (default), 'phase1_planted_violation', 'latency_benchmark'
     --seed <NUMBER>         RNG seed for deterministic runs (default: 42)
     --artifacts-dir <PATH>  Output directory for run artifacts (default: artifacts)
     --planted-delay <MS>    Delay in milliseconds for planted violation test (default: 50)
@@ -86,9 +86,10 @@ fn main() -> ExitCode {
     let report = match scenario_name.as_str() {
         "phase1_canonical" => harness.run_canonical_phase1(seed),
         "phase1_planted_violation" => harness.run_planted_violation(seed, planted_delay_ms),
+        "latency_benchmark" => harness.run_latency_benchmark(seed, 20).map(|(hr, _)| hr),
         custom => {
             eprintln!(
-                "Error: Unknown scenario '{custom}'. Supported: 'phase1_canonical', 'phase1_planted_violation'"
+                "Error: Unknown scenario '{custom}'. Supported: 'phase1_canonical', 'phase1_planted_violation', 'latency_benchmark'"
             );
             return ExitCode::FAILURE;
         }
