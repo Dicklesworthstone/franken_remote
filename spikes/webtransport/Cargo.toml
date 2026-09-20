@@ -1,0 +1,21 @@
+[package]
+name = "webtransport-spike"
+version = "0.0.1"
+edition = "2024"
+license-file = "../../LICENSE"
+publish = false
+
+[workspace]
+
+[dependencies]
+asupersync = { version = "=0.6.0", git = "https://github.com/Dicklesworthstone/asupersync.git", rev = "a0ed597cf8effe3808184f7b365f911a160fb1d9", features = ["tls", "test-internals"] }
+futures-lite = "2"
+rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
+rcgen = "0.13"
+bytes = "1"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+debug = true
