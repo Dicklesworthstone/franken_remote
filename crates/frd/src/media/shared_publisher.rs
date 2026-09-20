@@ -672,3 +672,5 @@ mod pending;
 mod service;
 mod session;
 pub use join::JoinQueue;
+
+pub(crate) mod consent;

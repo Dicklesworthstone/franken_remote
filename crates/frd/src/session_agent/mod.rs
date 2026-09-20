@@ -16,6 +16,8 @@ pub mod local_priority;
 pub mod macos_injection;
 pub mod permissions;
 pub mod sleep_inhibitor;
+#[cfg(target_os = "linux")]
+pub mod source;
 
 pub use approval::{
     ApprovalManager, ApprovalMode, ApprovalRecord, ApprovalState, AudioScope, DenialReason,
@@ -101,6 +103,8 @@ pub struct SessionAgent {
     local_priority: LocalInputPriority,
     bounds: InputBounds,
     revoked: Arc<AtomicBool>,
+    #[cfg(target_os = "linux")]
+    sources: Arc<std::sync::Mutex<source::Sources>>,
 }
 
 impl SessionAgent {
@@ -120,7 +124,24 @@ impl SessionAgent {
             revoked_flag.store(true, Ordering::Release);
         });
 
+        #[cfg(target_os = "linux")]
+        let sources = Arc::new(std::sync::Mutex::new(source::Sources::default()));
+        #[cfg(target_os = "linux")]
+        {
+            let weak = Arc::downgrade(&sources);
+            indicator.register_custom_revoker(move || {
+                if let Some(sources) = weak.upgrade() {
+                    sources
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .close();
+                }
+            });
+        }
+
         Self {
+            #[cfg(target_os = "linux")]
+            sources,
             approval: ApprovalManager::new(approval_mode),
             indicator,
             held_state: RemoteHeldTracker::new(),
@@ -306,7 +327,7 @@ impl SessionAgent {
     /// Invariants:
     /// 1. Session must be actively approved for control.
     /// 2. Authority must not be revoked.
-    /// 3. Remote input must not be suspended by local input priority.
+    /// 3. Remote input must not be suspended due to local physical input activity.
     /// 4. Platform must possess required input permissions (Accessibility on macOS, portal on Wayland, session not locked).
     /// 5. Coordinates must fall within admitted bounds.
     ///
