@@ -2,7 +2,8 @@
 
 use asupersync::http::h3_native::{
     H3ConnectionConfig, H3Frame, H3QpackMode, H3ResponseHead,
-    H3Settings, qpack_decode_request_field_section, qpack_encode_response_field_section,
+    H3Settings, qpack_decode_field_section, qpack_plan_to_header_fields,
+    qpack_encode_response_field_section,
 };
 use asupersync::net::quic_core::{decode_varint, encode_varint};
 
@@ -76,34 +77,39 @@ pub fn parse_connect_request(
         other => return Err(format!("expected HEADERS frame, got {other:?}")),
     };
 
-    let request_head =
-        qpack_decode_request_field_section(&field_block, H3QpackMode::StaticOnly, None)
-            .map_err(|e| format!("QPACK decode failed: {e}"))?;
+    let plan = qpack_decode_field_section(&field_block, H3QpackMode::StaticOnly)
+        .map_err(|e| format!("QPACK decode failed: {e}"))?;
+    let headers = qpack_plan_to_header_fields(&plan, None)
+        .map_err(|e| format!("QPACK plan to fields failed: {e}"))?;
 
-    let pseudo = &request_head.pseudo;
-    if pseudo.method.as_deref() != Some("CONNECT") {
-        return Err(format!("expected :method CONNECT, got {:?}", pseudo.method));
-    }
-    if pseudo.protocol.as_deref() != Some("webtransport") {
-        return Err(format!(
-            "expected :protocol webtransport, got {:?}",
-            pseudo.protocol
-        ));
-    }
-
-    let path = pseudo.path.clone().unwrap_or_else(|| "/".to_string());
-    let authority = pseudo.authority.clone();
+    let mut method = None;
+    let mut protocol = None;
+    let mut path = None;
+    let mut authority = None;
     let mut origin = None;
     let mut draft = None;
 
-    for (name, val) in &request_head.headers {
+    for (name, val) in &headers {
         let lower = name.to_ascii_lowercase();
-        if lower == "origin" {
-            origin = Some(val.clone());
-        } else if lower.starts_with("sec-webtransport-http3-draft") {
-            draft = Some(val.clone());
+        match lower.as_str() {
+            ":method" => method = Some(val.clone()),
+            ":protocol" => protocol = Some(val.clone()),
+            ":path" => path = Some(val.clone()),
+            ":authority" => authority = Some(val.clone()),
+            "origin" => origin = Some(val.clone()),
+            k if k.starts_with("sec-webtransport-http3-draft") => draft = Some(val.clone()),
+            _ => {}
         }
     }
+
+    if method.as_deref() != Some("CONNECT") {
+        return Err(format!("expected :method CONNECT, got {:?}", method));
+    }
+    if protocol.as_deref() != Some("webtransport") {
+        return Err(format!("expected :protocol webtransport, got {:?}", protocol));
+    }
+
+    let path = path.unwrap_or_else(|| "/".to_string());
 
     Ok(Some((
         WebTransportConnectRequest {
