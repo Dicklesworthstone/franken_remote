@@ -59,7 +59,10 @@ impl SessionAgent {
             opening.await.map_err(StartError::Publication)
         }
     }
-    fn register_original_source(&mut self, publisher: &Publisher) -> Result<(), Error> {
+    pub(super) fn register_original_source(
+        &mut self,
+        publisher: &Publisher,
+    ) -> Result<std::sync::Arc<super::Renewal>, Error> {
         let original = self
             .sources
             .lock()
@@ -71,9 +74,20 @@ impl SessionAgent {
             .cloned();
         // Never hold the registry lock over permission/scope checks. Reuse is
         // private to this local entry point; attach_shared_source stays strict.
-        match original {
-            Some(original) => original.recheck(self),
-            None => self.attach_shared_source(publisher),
+        if let Some(original) = original {
+            original.recheck(self)?;
+            Ok(original)
+        } else {
+            self.attach_shared_source(publisher)?;
+            self.sources
+                .lock()
+                .map_err(|_| Error::Poisoned)?
+                .entries
+                .iter()
+                .flatten()
+                .find(|entry| entry.owns(publisher))
+                .cloned()
+                .ok_or(Error::Closed)
         }
     }
 }

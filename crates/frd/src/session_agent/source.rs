@@ -119,3 +119,6 @@ impl SessionAgent {
 
 mod startup;
 pub use startup::StartError;
+
+/// Shared capture, local consent and original viewer service in one lifetime.
+pub mod desktop;

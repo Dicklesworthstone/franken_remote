@@ -123,3 +123,21 @@ impl Subscriber {
         result
     }
 }
+
+impl super::JoinQueue {
+    // Numeric boot/display IDs do not authorize joining another capture owner.
+    pub(crate) fn service_owner(
+        &self,
+        publisher: &super::Publisher,
+    ) -> Result<ObservationControl, Error> {
+        if !std::sync::Weak::ptr_eq(
+            &self.members,
+            &std::sync::Arc::downgrade(&publisher.members),
+        ) {
+            return Err(Error::WrongSource);
+        }
+        let mut members = publisher.members.lock().map_err(|_| Error::Poisoned)?;
+        members.tick()?;
+        Ok(members.owner.clone())
+    }
+}

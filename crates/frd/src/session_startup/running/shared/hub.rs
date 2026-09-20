@@ -457,3 +457,39 @@ impl Drop for Hub {
         self.close();
     }
 }
+
+impl Hub {
+    pub(crate) fn service_owner(
+        &self,
+        publisher: &crate::media::shared_publisher::Publisher,
+    ) -> Result<ObservationControl, Error> {
+        if self.registry.lock().map_err(|_| Error::Poisoned)?.closed {
+            return Err(Error::Closed);
+        }
+        self.admission
+            .source
+            .service_owner(publisher)
+            .map_err(Error::Source)
+    }
+}
+impl Admission {
+    // Fence even pending, not-yet-subscribed joins before any sibling service
+    // future is dropped. Does not call user code or drop network/native owners.
+    pub(crate) fn fence(&self) {
+        if let Some(registry) = self.registry.upgrade() {
+            let waker = {
+                let mut slots = registry
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                slots.closed = true;
+                for entry in slots.entries.iter().flatten() {
+                    entry.receipt.finish(Err(Error::Closed));
+                }
+                slots.waker.take()
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
+    }
+}
