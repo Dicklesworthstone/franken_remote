@@ -31,6 +31,9 @@ impl Scratch {
         )
         .unwrap()
     }
+    fn open_with_limits(&self, limits: Limits) -> DropDirectory {
+        DropDirectory::open(&self.0, limits).unwrap()
+    }
     fn entries(&self) -> usize {
         fs::read_dir(&self.0).unwrap().count()
     }
@@ -284,4 +287,227 @@ fn logs_and_errors_do_not_include_private_metadata() {
     assert!(!output.contains("confidential"));
     assert!(!output.contains("secret"));
     assert!(!output.contains(scratch.0.to_str().unwrap()));
+}
+
+#[test]
+#[ignore = "explicit multi-gigabyte disk write: run with -- --ignored"]
+fn streams_real_multigb_object_and_publishes_atomically() {
+    use asupersync::net::atp::transport_common::{
+        StagedEntryReceive, flat_merkle_root_from_digests, hex_encode,
+    };
+    use std::path::PathBuf;
+
+    let scratch = Scratch::new();
+    let limits = Limits {
+        max_file_bytes: 4 * 1024 * 1024 * 1024,
+        max_reserved_bytes: 8 * 1024 * 1024 * 1024,
+        max_transfers: 2,
+    };
+    let root = scratch.open_with_limits(limits);
+
+    // Declared size: 2.15 GiB = 2,308,000,000 bytes (> 2 GiB, multi-GB)
+    let total_bytes: u64 = 2_308_000_000;
+    let chunk = vec![0x6bu8; MAX_CHUNK_BYTES];
+
+    // Pass 1: Compute expected manifest sha256 and merkle root in streaming fashion
+    let mut hasher = StagedEntryReceive::new(PathBuf::new());
+    let mut offset = 0;
+    while offset < total_bytes {
+        let n = usize::try_from((total_bytes - offset).min(MAX_CHUNK_BYTES as u64)).unwrap();
+        hasher.update_with_chunk(&chunk[..n]);
+        offset += n as u64;
+    }
+    let (digest, _, _) = hasher.finalize("big.bin".to_owned());
+    let sha256_hex = hex_encode(&digest.content_sha256);
+    let merkle_root_hex = flat_merkle_root_from_digests(std::slice::from_ref(&digest));
+
+    // Over-limit file (> max_file_bytes of 4 GiB) is refused before I/O
+    assert_eq!(
+        root.begin_manifest(
+            "too_big.bin",
+            5 * 1024 * 1024 * 1024,
+            sha256_hex.clone(),
+            merkle_root_hex.clone(),
+        )
+        .unwrap_err(),
+        Error::Quota
+    );
+
+    // Pass 2: Stream the multi-GB file through PendingFile
+    let mut transfer = root
+        .begin_manifest("big.bin", total_bytes, sha256_hex, merkle_root_hex)
+        .unwrap();
+
+    offset = 0;
+    while offset < total_bytes {
+        let n = usize::try_from((total_bytes - offset).min(MAX_CHUNK_BYTES as u64)).unwrap();
+        transfer.write_chunk(offset, &chunk[..n]).unwrap();
+        offset += n as u64;
+    }
+
+    assert_eq!(transfer.received_bytes(), total_bytes);
+    assert!(!scratch.0.join("big.bin").exists());
+
+    transfer.verify().unwrap();
+    assert_eq!(transfer.publish().unwrap(), Publication::Durable);
+
+    assert_eq!(
+        fs::metadata(scratch.0.join("big.bin")).unwrap().len(),
+        total_bytes
+    );
+    assert_eq!(scratch.entries(), 1);
+}
+
+#[test]
+fn streams_multimegabyte_object_across_many_chunks_and_publishes_atomically() {
+    use asupersync::net::atp::transport_common::{
+        StagedEntryReceive, flat_merkle_root_from_digests, hex_encode,
+    };
+    use std::path::PathBuf;
+
+    let scratch = Scratch::new();
+    let limits = Limits {
+        max_file_bytes: 20 * 1024 * 1024,
+        max_reserved_bytes: 40 * 1024 * 1024,
+        max_transfers: 2,
+    };
+    let root = scratch.open_with_limits(limits);
+
+    // 10 MiB = 10,485,760 bytes = 160 chunks of 64KB
+    let total_bytes: u64 = 10 * 1024 * 1024;
+    let chunk = vec![0x47u8; MAX_CHUNK_BYTES];
+
+    let mut hasher = StagedEntryReceive::new(PathBuf::new());
+    let mut offset = 0;
+    while offset < total_bytes {
+        let n = usize::try_from((total_bytes - offset).min(MAX_CHUNK_BYTES as u64)).unwrap();
+        hasher.update_with_chunk(&chunk[..n]);
+        offset += n as u64;
+    }
+    let (digest, _, _) = hasher.finalize("multi_mb.bin".to_owned());
+    let sha256_hex = hex_encode(&digest.content_sha256);
+    let merkle_root_hex = flat_merkle_root_from_digests(std::slice::from_ref(&digest));
+
+    let mut transfer = root
+        .begin_manifest("multi_mb.bin", total_bytes, sha256_hex, merkle_root_hex)
+        .unwrap();
+
+    offset = 0;
+    while offset < total_bytes {
+        let n = usize::try_from((total_bytes - offset).min(MAX_CHUNK_BYTES as u64)).unwrap();
+        transfer.write_chunk(offset, &chunk[..n]).unwrap();
+        offset += n as u64;
+    }
+
+    assert_eq!(transfer.received_bytes(), total_bytes);
+    assert!(!scratch.0.join("multi_mb.bin").exists());
+
+    transfer.verify().unwrap();
+    assert_eq!(transfer.publish().unwrap(), Publication::Durable);
+
+    assert_eq!(
+        fs::metadata(scratch.0.join("multi_mb.bin")).unwrap().len(),
+        total_bytes
+    );
+    assert_eq!(scratch.entries(), 1);
+}
+
+#[test]
+fn exhaustive_path_traversal_and_symlink_attacks_refused_with_typed_errors() {
+    let scratch = Scratch::new();
+    let outside = Scratch::new();
+    let root = scratch.open();
+
+    // 1. Path traversal attacks on begin:
+    let attacks = [
+        "../escape",
+        "../../etc/passwd",
+        "../../../etc/shadow",
+        "/etc/passwd",
+        "/var/log",
+        "subdir/file",
+        "a/b/c",
+        "a/../b",
+        "a\\b",
+        "..\\..\\win",
+        "COM1",
+        "COM2",
+        "LPT1",
+        "NUL",
+        "CON",
+        "PRN",
+        "AUX",
+        ".fr-part-impersonate",
+        "file\0injected",
+        "trailing_dot.",
+        "trailing_space ",
+        "",
+        ".",
+        "..",
+    ];
+
+    for attack in attacks {
+        assert_eq!(
+            root.begin(attack, 10, ContentId::from_bytes(b"attack"))
+                .unwrap_err(),
+            Error::InvalidName,
+            "Attack string {attack:?} must be rejected with Error::InvalidName"
+        );
+    }
+    assert_eq!(scratch.entries(), 0);
+
+    // 2. Symlink root attack: opening a symlinked drop directory is refused
+    let symlinked_drop = scratch.0.join("sym_drop");
+    symlink(&outside.0, &symlinked_drop).unwrap();
+    let limits = Limits {
+        max_file_bytes: 1024,
+        max_reserved_bytes: 2048,
+        max_transfers: 1,
+    };
+    assert!(
+        DropDirectory::open(&symlinked_drop, limits).is_err(),
+        "Opening symlinked drop directory must fail"
+    );
+
+    // 3. Symlink in drop directory pointing to sensitive outside target:
+    // When peer sends a file matching the symlink name, NOFOLLOW prevents following and Conflict is returned.
+    let outside_file = outside.0.join("sensitive.txt");
+    fs::write(&outside_file, b"highly confidential").unwrap();
+    let drop_symlink = scratch.0.join("target_symlink");
+    symlink(&outside_file, &drop_symlink).unwrap();
+
+    let mut transfer = root
+        .begin("target_symlink", 11, ContentId::from_bytes(b"replacement"))
+        .unwrap();
+    transfer.write_chunk(0, b"replacement").unwrap();
+    transfer.verify().unwrap();
+    assert_eq!(
+        transfer.publish().unwrap_err(),
+        Error::Conflict,
+        "Publishing over existing symlink must refuse with Error::Conflict"
+    );
+    // Sensitive outside file MUST be completely untouched!
+    assert_eq!(fs::read(&outside_file).unwrap(), b"highly confidential");
+    // Symlink itself must not be overwritten
+    assert!(
+        fs::symlink_metadata(&drop_symlink)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+
+    // 4. Racing symlink creation: symlink created while transfer is staged
+    let mut race_transfer = root
+        .begin("racing_link", 5, ContentId::from_bytes(b"raced"))
+        .unwrap();
+    race_transfer.write_chunk(0, b"raced").unwrap();
+    race_transfer.verify().unwrap();
+    // Attacker creates symlink at destination before publish is called:
+    symlink(&outside_file, scratch.0.join("racing_link")).unwrap();
+    assert_eq!(
+        race_transfer.publish().unwrap_err(),
+        Error::Conflict,
+        "Racing symlink must refuse with Error::Conflict"
+    );
+    assert_eq!(fs::read(&outside_file).unwrap(), b"highly confidential");
 }

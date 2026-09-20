@@ -13,9 +13,9 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-struct Disk(PathBuf);
+pub(super) struct Disk(pub(super) PathBuf);
 impl Disk {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
             "fr-viewer-files-{}-{}",
@@ -26,7 +26,7 @@ impl Disk {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         Self(dir)
     }
-    fn config(&self) -> fr_files::quic::Configuration {
+    pub(super) fn config(&self) -> fr_files::quic::Configuration {
         fr_files::quic::Configuration {
             directory: DropDirectory::open(
                 &self.0,
@@ -42,13 +42,26 @@ impl Disk {
             reply_lifetime: Duration::from_secs(1),
         }
     }
-    fn source(&self, bytes: &[u8]) -> File {
+    #[allow(dead_code)]
+    pub(super) fn config_with_policy(
+        &self,
+        policy: fr_files::session::Policy,
+        limits: fr_files::receive::Limits,
+    ) -> fr_files::quic::Configuration {
+        fr_files::quic::Configuration {
+            directory: DropDirectory::open(&self.0, limits).unwrap(),
+            permission: Permission::new(true),
+            policy,
+            reply_lifetime: Duration::from_secs(1),
+        }
+    }
+    pub(super) fn source(&self, bytes: &[u8]) -> File {
         let p = self.0.join("source");
         fs::write(&p, bytes).unwrap();
         File::open(p).unwrap()
     }
 }
-async fn setup(c: &Cx, h: &Cx) -> Fixture {
+pub(super) async fn setup(c: &Cx, h: &Cx) -> Fixture {
     Box::pin(fixture_with_clipboard(
         c,
         h,
@@ -60,7 +73,7 @@ async fn setup(c: &Cx, h: &Cx) -> Fixture {
     ))
     .await
 }
-fn join(state: &mut Fixture, dest: &Disk, permission: Permission) {
+pub(super) fn join(state: &mut Fixture, dest: &Disk, permission: Permission) {
     let (hc, vc) = state.file_channels.take().unwrap();
     state.host.attach_files(hc, 77, dest.config()).unwrap();
     state
@@ -68,7 +81,21 @@ fn join(state: &mut Fixture, dest: &Disk, permission: Permission) {
         .attach_files(vc, 77, permission, fr_files::sender::Policy::default())
         .unwrap();
 }
-async fn drive(state: &mut Fixture, c: &Cx, h: &Cx, n: &mut u128, t: &mut u128) {
+#[allow(dead_code)]
+pub(super) fn join_with_config(
+    state: &mut Fixture,
+    config: fr_files::quic::Configuration,
+    permission: Permission,
+    sender_policy: fr_files::sender::Policy,
+) {
+    let (hc, vc) = state.file_channels.take().unwrap();
+    state.host.attach_files(hc, 77, config).unwrap();
+    state
+        .viewer
+        .attach_files(vc, 77, permission, sender_policy)
+        .unwrap();
+}
+pub(super) async fn drive(state: &mut Fixture, c: &Cx, h: &Cx, n: &mut u128, t: &mut u128) {
     let (host, viewer) = turn(state, c, h, n, t).await;
     host.unwrap();
     viewer.unwrap();
@@ -289,6 +316,7 @@ fn closing_unpolled_turn_keeps_original_file_result_and_cleanup_accessible() {
     });
 }
 
+mod acceptance;
 mod negotiation;
 
 #[test]

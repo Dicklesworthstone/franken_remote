@@ -238,3 +238,107 @@ fn zero_session_budgets_are_rejected_before_any_file_exists() {
     }
     scratch.empty();
 }
+
+#[test]
+fn multigb_session_budget_and_token_bucket_scale_without_overflow() {
+    let scratch = Scratch::new();
+    let input = owner();
+    let drop_limits = Limits {
+        max_file_bytes: 10 * 1024 * 1024 * 1024, // 10 GB file limit
+        max_reserved_bytes: 20 * 1024 * 1024 * 1024,
+        max_transfers: 5,
+    };
+    let root = DropDirectory::open(&scratch.0, drop_limits).unwrap();
+
+    let policy = Policy {
+        max_session_bytes: 20 * 1024 * 1024 * 1024, // 20 GB session budget
+        max_session_transfers: 5,
+        bytes_per_second: 1_000_000_000, // 1 GB/s rate
+        burst_bytes: 4 * (65_536 + 128),
+        ..Policy::conservative()
+    };
+    let mut session =
+        HostReceiver::new(&input, root, Permission::new(true), policy, at(0)).unwrap();
+
+    // 1. Declare first multi-GB file: 2.5 GB (2,500,000,000 bytes)
+    let size_1 = 2_500_000_000_u64;
+    let offer_1 = Offer {
+        binding: session.binding(),
+        id: 1,
+        name: "first_2_5gb.bin",
+        size: size_1,
+        content: ContentId::from_bytes(b"first"),
+    };
+    session.begin(offer_1, || at(100)).unwrap();
+    assert_eq!(session.usage().transfers, 1);
+    assert_eq!(session.usage().declared_bytes, size_1);
+
+    // Cancel releases active reservation but retains session declared bytes charge
+    session.cancel(session.binding(), 1).unwrap();
+    assert_eq!(session.usage().transfers, 1);
+    assert_eq!(session.usage().declared_bytes, size_1);
+
+    // 2. Declare second multi-GB file: 3.5 GB (3,500,000,000 bytes)
+    let size_2 = 3_500_000_000_u64;
+    let offer_2 = Offer {
+        binding: session.binding(),
+        id: 2,
+        name: "second_3_5gb.bin",
+        size: size_2,
+        content: ContentId::from_bytes(b"second"),
+    };
+    session.begin(offer_2, || at(200)).unwrap();
+    assert_eq!(session.usage().transfers, 2);
+    assert_eq!(session.usage().declared_bytes, size_1 + size_2); // 6,000,000,000 bytes
+
+    session.cancel(session.binding(), 2).unwrap();
+
+    // 3. Declare an over-budget file: 16 GB (16,000,000,000 bytes)
+    // 6 GB + 16 GB = 22 GB > 20 GB (21,474,836,480 bytes) max_session_bytes
+    // Fails with session Error::Quota before storage layer is touched
+    let size_over = 16_000_000_000_u64;
+    let offer_over = Offer {
+        binding: session.binding(),
+        id: 3,
+        name: "over_budget.bin",
+        size: size_over,
+        content: ContentId::from_bytes(b"huge"),
+    };
+    assert_eq!(session.begin(offer_over, || at(300)), Err(Error::Quota));
+    // Usage remains charged at 6 GB, not refunded or corrupted
+    assert_eq!(session.usage().declared_bytes, size_1 + size_2);
+
+    // 4. Verify storage layer quota refusal: file size fits remaining session budget
+    // (6 GB + 11 GB = 17 GB <= 20 GiB), but exceeds drop_limits.max_file_bytes (10 GiB = 10,737,418,240 bytes):
+    let file_over_storage = Offer {
+        binding: session.binding(),
+        id: 3,
+        name: "over_storage.bin",
+        size: 11_000_000_000, // 11 GB > 10 GiB storage limit
+        content: ContentId::from_bytes(b"too_big"),
+    };
+    assert_eq!(
+        session.begin(file_over_storage, || at(350)),
+        Err(Error::Storage(fr_files::receive::Error::Quota))
+    );
+
+    // 4. Token bucket refills at 1 GB/s over simulated time without overflow
+    // 1 second later (1_000_000 us):
+    let chunk = vec![0x55u8; 65536];
+    let offer_write = Offer {
+        binding: session.binding(),
+        id: 4,
+        name: "write_test.bin",
+        size: 65536,
+        content: ContentId::from_bytes(b"write"),
+    };
+    session.begin(offer_write, || at(1_000_000)).unwrap();
+    // Writing chunk succeeds because tokens refilled
+    let progress = session
+        .write(session.binding(), 4, 0, &chunk, || at(1_000_000))
+        .unwrap();
+    assert_eq!(progress.staged_bytes, 65536);
+    session.cancel(session.binding(), 4).unwrap();
+
+    scratch.empty();
+}

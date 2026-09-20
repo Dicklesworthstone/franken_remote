@@ -140,6 +140,25 @@ impl DropDirectory {
         self.begin_verified(name, size, Expected::Content(expected))
     }
 
+    /// Reserve an object whose expected integrity is defined by an ATP manifest
+    /// SHA-256 and flat Merkle root.
+    pub fn begin_manifest(
+        &self,
+        name: &str,
+        size: u64,
+        sha256_hex: String,
+        merkle_root_hex: String,
+    ) -> Result<PendingFile, Error> {
+        self.begin_verified(
+            name,
+            size,
+            Expected::Manifest {
+                sha256_hex,
+                merkle_root_hex,
+            },
+        )
+    }
+
     pub(crate) fn begin_verified(
         &self,
         name: &str,
