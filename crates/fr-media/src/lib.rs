@@ -40,3 +40,5 @@ pub mod receiver_feedback;
 pub mod presented;
 
 pub mod quality;
+
+pub mod pipeline;

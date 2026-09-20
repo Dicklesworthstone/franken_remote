@@ -9,6 +9,7 @@ pub mod attachment;
 pub mod authority;
 pub mod clipboard;
 pub mod clock;
+pub mod cursor;
 pub mod decoder;
 pub mod display;
 pub mod files;
@@ -23,6 +24,11 @@ mod record;
 pub mod recovery_request;
 pub mod stream;
 
+pub use cursor::{
+    CursorPosition, CursorShape, POSITION_FLAG_LOCKED, POSITION_FLAG_VISIBLE,
+    SHAPE_FLAG_HOST_COMPOSITED, SHAPE_FLAG_VISIBLE, decode_cursor_position, decode_cursor_shape,
+    encode_cursor_position, encode_cursor_shape,
+};
 pub use media::{
     FRAGMENT_OVERHEAD, Fragment, FrameDescriptor, PipelineState, Progress, RECOVERY_OVERHEAD,
     RecoveryChunk, RepairRange, RepairRequest, SourceObservation, decode_fragment, decode_progress,

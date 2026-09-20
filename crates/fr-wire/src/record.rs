@@ -118,6 +118,8 @@ pub enum Kind {
     Repair = 0x0035,
     RecoveryRequest = 0x0036,
     Progress = 0x0037,
+    CursorShape = 0x0038,
+    CursorPosition = 0x0039,
     Key = 0x0040,
     Button = 0x0041,
     Pointer = 0x0042,
@@ -180,6 +182,8 @@ impl Kind {
             0x0035 => Ok(Self::Repair),
             0x0036 => Ok(Self::RecoveryRequest),
             0x0037 => Ok(Self::Progress),
+            0x0038 => Ok(Self::CursorShape),
+            0x0039 => Ok(Self::CursorPosition),
             0x0040 => Ok(Self::Key),
             0x0041 => Ok(Self::Button),
             0x0042 => Ok(Self::Pointer),
@@ -209,12 +213,13 @@ impl Kind {
     const fn channel(self) -> Option<Channel> {
         match self {
             Self::Recovery => Some(Channel::Recovery),
-            Self::Fragment => Some(Channel::Video),
+            Self::Fragment | Self::CursorPosition => Some(Channel::Video),
             Self::Repair => Some(Channel::Control),
             Self::Progress
             | Self::DecoderConfiguration
             | Self::DecoderConfigured
-            | Self::FirstFrameDecoded => Some(Channel::MediaConfig),
+            | Self::FirstFrameDecoded
+            | Self::CursorShape => Some(Channel::MediaConfig),
             Self::ClientHello
             | Self::HostCapabilities
             | Self::SelectedConfiguration

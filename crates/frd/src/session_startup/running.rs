@@ -12,8 +12,8 @@ use std::{future::Future, pin::pin, task::Poll, time::Duration};
 pub(super) mod controlled;
 pub use controlled::ControlledHost;
 pub(super) mod publisher;
-mod streaming;
 mod shared;
+mod streaming;
 pub use shared::{SharedHost, SharedStatistics};
 #[cfg(test)]
 pub(in crate::session_startup) use streaming::tests::feedback_pair;
