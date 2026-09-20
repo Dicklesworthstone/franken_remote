@@ -48,7 +48,50 @@ was killed at Asupersync code generation by the local memory limit. These result
 are not a cold-dependency, full-workspace, GPU, physical-presentation, live-tailnet
 or independent-transport qualification claim.
 
-Automatic SharedHost dispatch and generation-specific feedback/presentation
-handoff are the next integration step. This does not close the broader viewer
-admission or loss-recovery beads. Refs: plan 7, 11, 12.3 and 17;
-`fr-p2-viewer-admission-e62` and `fr-p1-loss-recovery-20s`.
+## Canonical session integration
+
+`SharedHost::drive` and `serve` now admit recovery before ordinary media service,
+advance the original subscriber's replacement, and complete its decoder handshake
+inside the existing observation-renewal and UDP loop. There is no manual host
+handoff or second network owner. The existing fresh nonce supplier supplies three
+one-use tickets, outside publisher locks, with source and viewer authority checks
+before and after each call. Failure retires that viewer; source revocation fences
+all viewers before another write. The same cancellation guard covers an unpolled
+recovery turn.
+
+The failed generation's presentation verifier and pending metrics requester are
+retired immediately. Attachment records stay in their original transport slots;
+renewal dispatch validates duplicate recovery requests against the previous full
+binding and consumes obsolete advisory reports without granting credit, readiness
+or another deadline. After matching FirstDecoded, the host installs fresh
+presentation and metrics scopes, updates the repair route, and preserves cumulative
+report counters. `SharedStatistics` exposes recovery_requests and recovered_streams
+as protocol milestones, not evidence of visibility. A new decode cannot restore an
+old visibility claim or grant input. A bounded immutable selection snapshot is kept
+once per SharedHost, not allocated on every network turn.
+
+Seven further canonical-session tests cover automatic replacement and continuing
+healthy delivery, duplicate and malformed requests during attachment, entropy
+failure, cancellation, revocation inside ticket generation, and actual negotiated
+presentation/metrics exchanges across generations. The latter proves that old
+visibility is withdrawn, old reports during recovery cannot restore it, new scopes
+accept fresh sequence-1 reports, totals survive, and observation remains distinct
+from input authority. These tests use real TLS/UDP and original session owners;
+the loss report, visibility, source payload and decoder acknowledgements are
+explicit protocol fixtures. Native decoder reuse remains exercised by the separate
+shared-startup tests above.
+
+Final canonical validation includes 23 passing original-session/shared-session
+unit tests (seven new, sixteen unchanged), all 46 shared-startup integration tests,
+ten unchanged shared-late-join integration tests, and full daemon test-source
+strict pedantic Clippy. The focused runtime harness
+changes only test registrations in an external source copy; all production code,
+original test bodies, assertions and deadlines are retained. The entire Linux daemon unit-test
+target is type-checked and linted; only the stated subset is executed. Eight relevant first-party
+libraries were rebuilt from the checksum-verified e815b017 archive plus this slice,
+with the same exact external compiler/lockfile inputs described above. This is not
+a full Cargo/workspace or hardware/live-tailnet qualification claim.
+
+This does not close the broader viewer admission or loss-recovery beads. Refs:
+plan 7, 11, 12.3 and 17; `fr-p2-viewer-admission-e62` and
+`fr-p1-loss-recovery-20s`.

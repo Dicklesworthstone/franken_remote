@@ -24,6 +24,8 @@ pub struct SharedStatistics {
     pub repair_requests: u64,
     pub presentation_reports: u64,
     pub feedback_reports: u64,
+    pub recovery_requests: u64,
+    pub recovered_streams: u64,
 }
 
 /// Own one existing observation session plus its non-cloneable shared member.
@@ -32,11 +34,13 @@ pub struct SharedStatistics {
 /// renew source consent, create input authority, or cancel another viewer.
 pub struct SharedHost {
     session: HostSession,
+    selection: fr_wire::negotiation::Selection,
     subscriber: Option<Subscriber>,
     presentation: Option<HostPresentation>,
     feedback: Option<HostFeedback>,
     repair: Route,
     statistics: SharedStatistics,
+    recovery: Option<recovery::Handoff>,
 }
 impl HostSession {
     /// Queue a live source join using THIS session's consent and completed media
@@ -106,12 +110,14 @@ impl HostSession {
             .transpose()
             .map_err(Error::ReceiverFeedback)?;
         Ok(SharedHost {
+            selection: self.opened.selected.clone(),
             session: self,
             subscriber: Some(subscriber),
             presentation,
             feedback,
             repair,
             statistics: SharedStatistics::default(),
+            recovery: None,
         })
     }
 }
@@ -173,7 +179,11 @@ impl SharedHost {
         let mut application = SharedServices {
             subscriber: self.subscriber.as_mut().ok_or(Error::Closed)?,
             control: self.session.opened.control.clone(),
-            repair: self.repair,
+            repair: &mut self.repair,
+            routes: self.session.opened.routes,
+            parent: self.session.opened.binding,
+            selection: &self.selection,
+            recovery: &mut self.recovery,
             presentation: &mut self.presentation,
             feedback: &mut self.feedback,
             statistics: &mut self.statistics,
@@ -227,7 +237,11 @@ impl Drop for SharedOperation<'_> {
 struct SharedServices<'a, F> {
     subscriber: &'a mut Subscriber,
     control: ObservationControl,
-    repair: Route,
+    repair: &'a mut Route,
+    routes: fr_transport::quic::ControlRoutes,
+    parent: fr_wire::negotiation::ControlBinding,
+    selection: &'a fr_wire::negotiation::Selection,
+    recovery: &'a mut Option<recovery::Handoff>,
     presentation: &'a mut Option<HostPresentation>,
     feedback: &'a mut Option<HostFeedback>,
     statistics: &'a mut SharedStatistics,
@@ -240,11 +254,12 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> Services for SharedServi
     fn maintain<N: FnMut() -> Result<u128, ()>>(
         &mut self,
         q: &mut QuicRecords,
-        _nonce: &mut N,
+        nonce: &mut N,
     ) -> Result<(), Error> {
         if !self.permitted() {
             return Err(Error::Authority);
         }
+        self.maintain_recovery(q, nonce)?;
         let repairs = self
             .subscriber
             .dispatch_repairs(q)
@@ -262,6 +277,7 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> Services for SharedServi
             .statistics
             .admitted_records
             .saturating_add(u64::try_from(report.accepted).map_err(|_| Error::Clock)?);
+        self.finish_recovery(q)?;
         if let Some(presentation) = &mut *self.presentation {
             presentation
                 .check_connection(q)
@@ -293,6 +309,9 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> Services for SharedServi
         Ok(())
     }
     fn receive(&mut self, route: Route, bytes: &[u8]) -> Result<Disposition, ()> {
+        if let Some(disposition) = self.recovery_record(route, bytes)? {
+            return Ok(disposition);
+        }
         if presented::is_report(bytes) {
             let presentation = self.presentation.as_mut().ok_or(())?;
             presentation
@@ -312,7 +331,7 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> Services for SharedServi
                 .map_err(|_| ())?;
             self.statistics.feedback_reports = feedback.accepted;
             Ok(Disposition::Consumed)
-        } else if route == self.repair {
+        } else if route == *self.repair {
             Ok(Disposition::Blocked)
         } else {
             (self.other)(route, bytes)
@@ -322,3 +341,5 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> Services for SharedServi
 
 #[cfg(test)]
 mod tests;
+
+mod recovery;

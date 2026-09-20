@@ -646,3 +646,6 @@ fn invalid_turn_budget_and_unpolled_continuous_service_are_terminal() {
 }
 
 mod admission;
+
+#[path = "recovery/tests.rs"]
+mod recovery;
