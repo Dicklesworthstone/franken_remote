@@ -90,6 +90,10 @@ pub(crate) struct Peer {
     pub expiry: Option<Text<40>>,
     #[serde(rename = "InNetworkMap")]
     pub in_map: bool,
+    #[serde(rename = "CurAddr", default)]
+    pub cur_addr: Option<Text<64>>,
+    #[serde(rename = "Relay", default)]
+    pub relay: Option<Text<32>>,
 }
 #[derive(Deserialize, Clone, PartialEq, Eq)]
 pub(crate) struct Tailnet {

@@ -375,3 +375,38 @@ fn malformed_or_over_limit_snapshots_refuse_instead_of_partially_discovering() {
         );
     });
 }
+#[test]
+fn discovery_reports_transport_path_direct_and_derp_relay() {
+    let mut s = status();
+    peer_mut(&mut s)["Relay"] = json!("nyc");
+    peer_mut(&mut s)["CurAddr"] = json!("192.168.1.50:41641");
+    let server = Server::new(vec![response(&s, false)], Duration::ZERO);
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let discovery = server.client.discover(&cx).await.unwrap();
+        assert_eq!(discovery.peers().len(), 1);
+        let peer = &discovery.peers()[0];
+        assert_eq!(
+            peer.transport_path(),
+            &PeerTransportPath::DerpRelayed {
+                relay: "nyc".to_string()
+            }
+        );
+    });
+
+    let mut s2 = status();
+    peer_mut(&mut s2)["CurAddr"] = json!("192.168.1.50:41641");
+    let server2 = Server::new(vec![response(&s2, false)], Duration::ZERO);
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let discovery = server2.client.discover(&cx).await.unwrap();
+        assert_eq!(discovery.peers().len(), 1);
+        let peer = &discovery.peers()[0];
+        assert_eq!(
+            peer.transport_path(),
+            &PeerTransportPath::Direct {
+                cur_addr: "192.168.1.50:41641".to_string()
+            }
+        );
+    });
+}

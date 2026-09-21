@@ -4,6 +4,25 @@ use crate::{Error, PeerSelector, metadata};
 use asupersync::cx::Cx;
 use std::{fmt, net::IpAddr, sync::atomic::Ordering, time::Duration};
 
+/// Active network path to a discovered peer node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeerTransportPath {
+    /// Direct `WireGuard` UDP connection (optimal latency).
+    Direct { cur_addr: String },
+    /// Relayed via Tailscale DERP region (elevated latency and potential jitter).
+    DerpRelayed { relay: String },
+    /// Path not yet resolved or peer offline.
+    Unknown,
+}
+
+impl PeerTransportPath {
+    /// True if connection is actively traversing a DERP relay.
+    #[must_use]
+    pub const fn is_derp_relayed(&self) -> bool {
+        matches!(self, Self::DerpRelayed { .. })
+    }
+}
+
 /// One selectable machine. No desktop capability, online status, observation
 /// permission or input authority is inferred from its name or tailnet address.
 /// Connecting MUST resolve this stable ID again through `LocalApi::peer_target`.
@@ -11,6 +30,7 @@ pub struct DiscoveredPeer {
     id: String,
     name: String,
     addresses: Vec<IpAddr>,
+    transport_path: PeerTransportPath,
 }
 impl DiscoveredPeer {
     pub fn stable_id(&self) -> &str {
@@ -21,6 +41,22 @@ impl DiscoveredPeer {
     }
     pub fn addresses(&self) -> &[IpAddr] {
         &self.addresses
+    }
+    pub fn transport_path(&self) -> &PeerTransportPath {
+        &self.transport_path
+    }
+    pub fn from_parts(
+        id: String,
+        name: String,
+        addresses: Vec<IpAddr>,
+        transport_path: PeerTransportPath,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            addresses,
+            transport_path,
+        }
     }
 }
 impl fmt::Debug for DiscoveredPeer {
@@ -46,6 +82,19 @@ pub struct Discovery {
     completed_us: u64,
 }
 impl Discovery {
+    pub fn from_parts(
+        peers: Vec<DiscoveredPeer>,
+        excluded: DiscoveryExclusions,
+        started_us: u64,
+        completed_us: u64,
+    ) -> Self {
+        Self {
+            peers,
+            excluded,
+            started_us,
+            completed_us,
+        }
+    }
     pub fn peers(&self) -> &[DiscoveredPeer] {
         &self.peers
     }
@@ -94,6 +143,26 @@ impl LocalApi {
                 .map_err(|_| Error::MalformedMetadata)?;
             let mut excluded = DiscoveryExclusions::default();
             for peer in status.peers.values() {
+                let transport_path = if let Some(ref relay) = peer.relay {
+                    if relay.0.is_empty() {
+                        PeerTransportPath::Unknown
+                    } else {
+                        PeerTransportPath::DerpRelayed {
+                            relay: relay.0.clone(),
+                        }
+                    }
+                } else if let Some(ref cur) = peer.cur_addr {
+                    if cur.0.is_empty() {
+                        PeerTransportPath::Unknown
+                    } else {
+                        PeerTransportPath::Direct {
+                            cur_addr: cur.0.clone(),
+                        }
+                    }
+                } else {
+                    PeerTransportPath::Unknown
+                };
+
                 let result =
                     metadata::outbound::resolve(&status, PeerSelector::StableId(&peer.id.0))
                         .and_then(|target| {
@@ -102,6 +171,7 @@ impl LocalApi {
                                 id: target.peer.id.0,
                                 name: target.certificate_name,
                                 addresses: target.peer.ips.0,
+                                transport_path,
                             })
                         });
                 match result {
