@@ -1,7 +1,7 @@
 //! Minimal libpulse 17 stable ABI from pulse/{mainloop,context,stream,operation,
-//! sample,def}.h. Only opaque pointers and these two public C-layout value types
+//! sample,def}.h. Only opaque pointers and small public C-layout value types
 //! cross the boundary. Native structs, callbacks and pointers never escape.
-use std::ffi::{c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, c_long, c_void};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -18,6 +18,25 @@ pub(super) struct BufferAttr {
     pub prebuf: u32,
     pub minreq: u32,
     pub fragsize: u32,
+}
+// Public pa_timing_info layout, including struct timeval (native Linux longs).
+// Copied immediately from the stream; no native-owned pointer escapes.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(super) struct TimingInfo {
+    pub timestamp: [c_long; 2],
+    pub synchronized_clocks: c_int,
+    pub sink_usec: u64,
+    pub source_usec: u64,
+    pub transport_usec: u64,
+    pub playing: c_int,
+    pub write_index_corrupt: c_int,
+    pub write_index: i64,
+    pub read_index_corrupt: c_int,
+    pub read_index: i64,
+    pub configured_sink_usec: u64,
+    pub configured_source_usec: u64,
+    pub since_underrun: i64,
 }
 pub(super) type Success = Option<unsafe extern "C" fn(*mut c_void, c_int, *mut c_void)>;
 #[cfg(target_endian = "little")]
@@ -91,6 +110,7 @@ unsafe extern "C" {
         callback: Success,
         userdata: *mut c_void,
     ) -> *mut c_void;
+    pub(super) fn pa_stream_get_timing_info(stream: *const c_void) -> *const TimingInfo;
     pub(super) fn pa_stream_get_time(stream: *mut c_void, usec: *mut u64) -> c_int;
     pub(super) fn pa_stream_get_latency(
         stream: *mut c_void,

@@ -85,7 +85,11 @@ fn device_latency_must_fit_original_packet_deadline_and_slot() {
 }
 #[test]
 fn microphone_and_overlong_output_profiles_refuse_before_native_connect() {
-    for (direction, duration) in [(AudioDirection::Uplink, 10), (AudioDirection::Downlink, 40)] {
+    for (direction, duration) in [
+        (AudioDirection::Uplink, 10),
+        (AudioDirection::Downlink, 5),
+        (AudioDirection::Downlink, 40),
+    ] {
         let selected = Selection::new(Path::new("/tmp/nonexistent-fr-pulse"), "output").unwrap();
         let config = AudioStreamConfig::new(
             direction,
@@ -100,4 +104,30 @@ fn microphone_and_overlong_output_profiles_refuse_before_native_connect() {
             Err(Error::Configuration)
         ));
     }
+}
+
+#[test]
+fn native_extent_never_outgrows_the_last_observed_server_read_position() {
+    use super::output::validate_native_extent;
+    assert_eq!(validate_native_extent(400, 0, 100, 2020, 2, 7680), Ok(()));
+    assert_eq!(
+        validate_native_extent(400, 0, 100, 2021, 2, 7680),
+        Err(Error::Backpressure)
+    );
+    assert_eq!(
+        validate_native_extent(404, 0, 100, 580, 2, 7680),
+        Err(Error::Clock)
+    );
+    assert_eq!(
+        validate_native_extent(-1, 0, 100, 580, 2, 7680),
+        Err(Error::Clock)
+    );
+    assert_eq!(
+        validate_native_extent(0, 1, 100, 580, 2, 7680),
+        Err(Error::Clock)
+    );
+    assert_eq!(
+        validate_native_extent(0, 0, u64::MAX, u64::MAX, 2, 7680),
+        Err(Error::Clock)
+    );
 }

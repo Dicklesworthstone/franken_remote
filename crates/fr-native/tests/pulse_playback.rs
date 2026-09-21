@@ -80,19 +80,23 @@ fn real_server_negotiates_bounds_and_advances_clock_without_dummy_source_audio()
 #[test]
 fn actual_pcm_reaches_an_independent_native_monitor_and_stop_flushes() {
     let server = Server::start();
+    // Establish the independent monitor BEFORE qualifying the output clock.
+    // Creating another stream can change the server's shared sink scheduling;
+    // observation setup is not permitted to invalidate an already-qualified test
+    // device and then masquerade as a steady-state playback failure.
+    let capture = server.capture(|| {});
     let mut device = device(&server);
-    let capture = server.capture();
-    // Keep the real native timing owner serviced while the independently-created
-    // monitor starts. No fabricated counter or timer-derived output sample clock.
-    device.poll(|| Ok(server.now())).unwrap();
     let first = device.clock(server.now()).unwrap().output_samples;
+    let mut original_lead = None;
     for sequence in 0..24 {
         let due = first + sequence * 480;
         server.service_until(&mut device, due);
         let pcm = frame(device.configuration().generation(), sequence);
         let audio = receipt(&device, sequence, due, server.now());
         let result = device.submit(&pcm, audio, || Ok(server.now())).unwrap();
-        assert_eq!(result.scheduled_output_sample, due + 960);
+        let lead = result.scheduled_output_sample - due;
+        assert!((240..=960).contains(&lead));
+        assert_eq!(*original_lead.get_or_insert(lead), lead);
     }
     device.begin_stop(server.now()).unwrap();
     assert_eq!(device.state(), State::Stopping);
@@ -179,4 +183,35 @@ fn losing_the_actual_server_retires_instead_of_reconnecting() {
     }
     assert_eq!(device.state(), State::Closed);
     assert!(device.error().is_some());
+}
+
+#[test]
+fn cold_large_sink_delay_is_not_reported_as_ready_or_zero_latency() {
+    // The normal null sink can already hold two seconds of device silence when
+    // we connect. Preserve this original failing startup as a real negative
+    // test; configuration acceptance must never turn it into fresh audio time.
+    let server = Server::with_rewinds(true);
+    let config = AudioStreamConfig::new(
+        AudioDirection::Downlink,
+        AudioGeneration::INITIAL,
+        AudioChannels::Stereo,
+        10,
+        20,
+    )
+    .unwrap();
+    let mut device = PlaybackDevice::connect(
+        Selection::new(&server.socket, "fr_test").unwrap(),
+        config,
+        server.now(),
+    )
+    .unwrap();
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(100) {
+        assert_eq!(device.poll(|| Ok(server.now())).unwrap(), State::Connecting);
+        assert_eq!(device.clock(server.now()), Err(Error::Pending));
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    device.begin_stop(server.now()).unwrap();
+    assert_eq!(device.state(), State::Closed);
+    assert_eq!(device.stop_outcome(), Some(StopOutcome::Disconnected));
 }

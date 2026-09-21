@@ -25,6 +25,9 @@ fr-media = { path = "$root/crates/fr-media" }
 [[test]]
 name = "pulse_playback"
 path = "$root/crates/fr-native/tests/pulse_playback.rs"
+[[test]]
+name = "pulse_opus"
+path = "$root/crates/fr-native/tests/pulse_opus.rs"
 [lints.clippy]
 pedantic = { level = "deny", priority = -1 }
 missing_errors_doc = "allow"
@@ -33,5 +36,5 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 MANIFEST
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$root/target/pulse-native}"
-cargo test --manifest-path "$harness/Cargo.toml" --test pulse_playback -- --test-threads=1
+cargo test --manifest-path "$harness/Cargo.toml" --test pulse_playback --test pulse_opus -- --test-threads=1
 cargo clippy --manifest-path "$harness/Cargo.toml" --all-targets -- -D warnings

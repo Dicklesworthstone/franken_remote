@@ -48,10 +48,27 @@ impl PlaybackDevice {
             return Err(Error::Metadata);
         }
         let next_sequence = audio.sequence.checked_add(1).ok_or(Error::Metadata)?;
-        let target = audio
-            .output_samples
-            .checked_add(LEAD_SAMPLES)
-            .ok_or(Error::Clock)?;
+        let stream = self.stream()?;
+        // SAFETY: copy the public timing value while the nonthreaded loop is idle.
+        let timing = unsafe {
+            *ffi::pa_stream_get_timing_info(stream)
+                .as_ref()
+                .ok_or(Error::Clock)?
+        };
+        // The system output delay is negotiated independently of our packet
+        // duration. Choose its lead once, at the first submission, and retain it
+        // for the stream. A monitor/device may alter latency during silent setup;
+        // never shift already submitted audio or assume the requested target won.
+        let lead = match self.lead_samples {
+            Some(lead) => lead,
+            None => timing
+                .configured_sink_usec
+                .checked_mul(48)
+                .and_then(|n| n.div_ceil(1000).checked_add(5 * 48))
+                .filter(|&n| n <= LEAD_SAMPLES)
+                .ok_or(Error::BufferLimit)?,
+        };
+        let target = audio.output_samples.checked_add(lead).ok_or(Error::Clock)?;
         let end = target.checked_add(samples).ok_or(Error::Clock)?;
         validate_submission_clock(clock, audio, end)?;
         let stream = self.stream()?;
@@ -68,9 +85,10 @@ impl PlaybackDevice {
             if available == usize::MAX {
                 return Err(Error::Native);
             }
-            if bytes > available
-                || bytes > usize::try_from(self.queue_bytes).map_err(|_| Error::BufferLimit)?
-            {
+            // writable_size is request credit, NOT capacity. It can be lower
+            // than a complete negotiated frame or grow during freewheel silence.
+            // Our actual server-read/absolute-end bound below controls capacity.
+            if bytes > usize::try_from(self.queue_bytes).map_err(|_| Error::BufferLimit)? {
                 return Err(Error::Backpressure);
             }
             if ffi::pa_stream_is_corked(stream) != 0 {
@@ -87,6 +105,29 @@ impl PlaybackDevice {
         // No polling, lock, allocation, decode or retry may intervene afterwards.
         let fresh = self.clock_inner(checkpoint()?)?;
         validate_submission_clock(fresh, audio, end)?;
+        // Bound the combined server/native/socket sample extent by the capped
+        // server queue plus one frame of in-flight allowance. This is a TOTAL
+        // bound regardless of which native layer currently retains the bytes.
+        // Compare against the last SERVER read position,
+        // not only interpolated wall/device time. A stalled server cannot keep
+        // accepting a growing native/socket backlog during timing's grace period.
+        // SAFETY: public timing value is borrowed only for this immediate copy;
+        // no mainloop turn or callback can mutate it concurrently.
+        let timing = unsafe {
+            *ffi::pa_stream_get_timing_info(stream)
+                .as_ref()
+                .ok_or(Error::Clock)?
+        };
+        validate_native_extent(
+            timing.read_index,
+            timing.read_index_corrupt,
+            target,
+            end,
+            self.config.channels().count(),
+            self.queue_bytes
+                .checked_add(u32::try_from(bytes).map_err(|_| Error::BufferLimit)?)
+                .ok_or(Error::BufferLimit)?,
+        )?;
         // SAFETY: exact admitted interleaved i16 shape and real slice byte length.
         // With free_cb=NULL libpulse copies the data synchronously; no Rust pointer
         // is retained. Absolute sample offsets prevent replay/overlap after gaps.
@@ -103,6 +144,7 @@ impl PlaybackDevice {
         {
             return Err(Error::SubmissionUnknown);
         }
+        self.lead_samples = Some(lead);
         self.next = Some((next_sequence, audio.output_valid_before));
         Ok(Submission {
             audio,
@@ -197,6 +239,31 @@ pub(super) fn validate_submission_clock(
         .is_none_or(|at| at >= audio.valid_until.0)
     {
         return Err(Error::Expired);
+    }
+    Ok(())
+}
+
+// Absolute stream byte indices, not source timestamps or client write counters.
+pub(super) fn validate_native_extent(
+    read_index: i64,
+    corrupt: i32,
+    start_sample: u64,
+    end_sample: u64,
+    channels: u8,
+    queue_bytes: u32,
+) -> Result<(), Error> {
+    if corrupt != 0 {
+        return Err(Error::Clock);
+    }
+    let read = u64::try_from(read_index).map_err(|_| Error::Clock)?;
+    let stride = u64::from(channels) * 2;
+    let start = start_sample.checked_mul(stride).ok_or(Error::Clock)?;
+    let end = end_sample.checked_mul(stride).ok_or(Error::Clock)?;
+    if start < read || end < start {
+        return Err(Error::Clock);
+    }
+    if end - read > u64::from(queue_bytes) {
+        return Err(Error::Backpressure);
     }
     Ok(())
 }

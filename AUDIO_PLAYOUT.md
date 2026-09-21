@@ -114,3 +114,13 @@ physical-device, audible-latency, live-transport or hardware qualification.
 Per-OS capture/playback, supervised audio-worker/session integration, device queue
 retirement, drift correction and cross-host A/V alignment remain open under
 fr-p2-audio-playback-lel and plan 15.4. See [native Opus](NATIVE_OPUS.md).
+
+## Native Linux output integration
+
+The opt-in `linux-pulse-playback` feature now joins this owner to an explicitly
+selected local PulseAudio output, with actual native timing, bound configuration
+acknowledgement and joint decoder/device retirement. Its qualified test slice is
+10/20 ms mono/stereo downlink; 5 ms native scheduling refuses. See
+[Linux audio output](LINUX_AUDIO_OUTPUT.md) for executed normal and sanitizer
+results, retained timing failures, resource limits and remaining session/device
+qualification. This does not complete host capture or the network/audio worker.

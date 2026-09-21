@@ -20,6 +20,9 @@ pub struct Server {
 }
 impl Server {
     pub fn start() -> Self {
+        Self::with_rewinds(false)
+    }
+    pub fn with_rewinds(rewinds: bool) -> Self {
         let directory = std::env::temp_dir().join(format!(
             "fr-pulse-{}-{}",
             std::process::id(),
@@ -31,7 +34,7 @@ impl Server {
         let config = directory.join("daemon.pa");
         // Anonymous auth is confined to this 0700 synthetic fixture directory;
         // production always uses the installed server's normal authentication.
-        fs::write(&config, format!("load-module module-native-protocol-unix socket={} auth-anonymous=1\nload-module module-null-sink sink_name=fr_test format=s16le rate=48000 channels=2\n",socket.display())).unwrap();
+        fs::write(&config, format!("load-module module-native-protocol-unix socket={} auth-anonymous=1\nload-module module-null-sink sink_name=fr_test format=s16le rate=48000 channels=2 norewinds={}\n",socket.display(),u8::from(!rewinds))).unwrap();
         let stdout = File::create(directory.join("daemon.stdout")).unwrap();
         let stderr = File::create(directory.join("daemon.stderr")).unwrap();
         let mut command = Command::new(
@@ -111,7 +114,7 @@ impl Server {
         self.child.kill().unwrap();
         let _ = self.child.wait().unwrap();
     }
-    pub fn capture(&self) -> Capture {
+    pub fn capture(&self, mut service: impl FnMut()) -> Capture {
         let output = self.directory.join("synthetic-monitor.pcm");
         let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         // The verification runner supplies the exact checked-in script path;
@@ -132,6 +135,7 @@ impl Server {
         let mut capture = Capture { child, output };
         let start = Instant::now();
         while !capture.output.with_extension("ready").exists() {
+            service();
             assert!(
                 capture.child.try_wait().unwrap().is_none(),
                 "independent native monitor failed"
@@ -139,6 +143,7 @@ impl Server {
             assert!(start.elapsed() < Duration::from_secs(2));
             std::thread::sleep(Duration::from_millis(1));
         }
+        service();
         capture
     }
 }

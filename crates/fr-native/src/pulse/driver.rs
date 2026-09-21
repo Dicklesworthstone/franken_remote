@@ -87,7 +87,14 @@ impl PlaybackDevice {
                             return Err(Error::Clock);
                         }
                         self.timing_at = Some(requested_at);
-                        self.stage = Stage::Running;
+                        // Configuration acceptance is not device-clock readiness. An
+                        // empty cold sink can have seconds of already queued silence
+                        // while get_latency() misleadingly clamps its result to zero.
+                        // Keep waiting under the original startup deadline until the
+                        // actual sink delay and advancing playback clock qualify.
+                        if self.stage == Stage::Running || self.clock_qualified(now)? {
+                            self.stage = Stage::Running;
+                        }
                     }
                     Stage::Cork => self.start_operation(Stage::Flush, now)?,
                     Stage::Flush => {
@@ -98,13 +105,13 @@ impl PlaybackDevice {
                 }
             }
         }
-        if self.stage == Stage::Running
+        if matches!(self.stage, Stage::Running | Stage::Timing)
             && self.operation.is_none()
             && self
                 .timing_at
                 .is_some_and(|at| now.0.saturating_sub(at) >= TIMING_PERIOD_US)
         {
-            self.start_operation(Stage::Running, now)?;
+            self.start_operation(self.stage, now)?;
         }
         Ok(())
     }
@@ -117,7 +124,10 @@ impl PlaybackDevice {
         let stride = u32::from(spec.channels) * 2;
         let attr = ffi::BufferAttr {
             maxlength: u32::from(MAX_DEVICE_BUFFER_MS) * 48 * stride,
-            tlength: u32::from(OUTPUT_LEAD_MS) * 48 * stride,
+            // Includes sink latency AND stream request credit. A 20 ms total
+            // target only requests 15 ms: less than one complete 20 ms frame.
+            // Keep the same hard 40 ms ceiling; never wait on a partial write.
+            tlength: u32::from(MAX_DEVICE_BUFFER_MS) * 48 * stride,
             prebuf: 0,
             minreq: 5 * 48 * stride,
             fragsize: u32::MAX,
@@ -259,12 +269,7 @@ impl PlaybackDevice {
         {
             return Err(Error::Clock);
         }
-        let mut time = 0_u64;
-        // SAFETY: live stream, valid out-pointer. Failure is never fabricated as zero.
-        if unsafe { ffi::pa_stream_get_time(self.stream()?, &raw mut time) } < 0 {
-            return Err(Error::Clock);
-        }
-        let samples = time.checked_mul(48).ok_or(Error::Clock)? / 1000;
+        let samples = self.native_clock()?.ok_or(Error::Clock)?;
         if samples < self.last_samples {
             return Err(Error::Clock);
         }
@@ -273,5 +278,57 @@ impl PlaybackDevice {
             now,
             output_samples: samples,
         })
+    }
+    // A positive first interpolated timestamp is not proof of stable pacing.
+    // The native smoother can accelerate during startup. Require 40 ms of
+    // observed progression within a 2 ms phase envelope before admitting audio;
+    // resets remain inside the original, never-renewed startup deadline.
+    fn clock_qualified(&mut self, now: ClientInstant) -> Result<bool, Error> {
+        let Some(samples) = self.native_clock()? else {
+            self.clock_probe = None;
+            return Ok(false);
+        };
+        let Some((at, first)) = self.clock_probe else {
+            self.clock_probe = Some((now.0, samples));
+            return Ok(false);
+        };
+        let elapsed = now.0.checked_sub(at).ok_or(Error::Clock)?;
+        let elapsed_samples = elapsed.checked_mul(48).ok_or(Error::Clock)? / 1000;
+        let Some(progress) = samples.checked_sub(first) else {
+            return Err(Error::Clock);
+        };
+        if progress.abs_diff(elapsed_samples) > 96 {
+            self.clock_probe = Some((now.0, samples));
+            return Ok(false);
+        }
+        Ok(elapsed >= 40_000)
+    }
+    fn native_clock(&self) -> Result<Option<u64>, Error> {
+        let stream = self.stream()?;
+        let mut time = 0_u64;
+        // SAFETY: public native value layout; copy before any mainloop turn.
+        // get_time uses the same timing owner. The local library/server is trusted
+        // for this clock estimate, not treated as physical audibility evidence.
+        let timing = unsafe {
+            let timing = *ffi::pa_stream_get_timing_info(stream)
+                .as_ref()
+                .ok_or(Error::Clock)?;
+            if timing.read_index_corrupt != 0 || ffi::pa_stream_get_time(stream, &raw mut time) < 0
+            {
+                return Err(Error::Clock);
+            }
+            timing
+        };
+        if timing.playing == 0
+            || time == 0
+            || timing.configured_sink_usec > u64::from(OUTPUT_LEAD_MS) * 1000
+            || timing
+                .sink_usec
+                .checked_add(timing.transport_usec)
+                .is_none_or(|delay| delay > u64::from(OUTPUT_LEAD_MS) * 1000)
+        {
+            return Ok(None);
+        }
+        Ok(Some(time.checked_mul(48).ok_or(Error::Clock)? / 1000))
     }
 }

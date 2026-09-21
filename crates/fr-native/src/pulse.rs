@@ -11,6 +11,9 @@ mod driver;
 mod ffi;
 mod output;
 
+/// Real wire-to-codec-to-device receive owner.
+pub mod playout;
+
 use fr_client::{
     audio::playout::{AudioSubmission, PlayoutClock},
     input::ClientInstant,
@@ -26,7 +29,7 @@ use std::{
 
 /// Per-stream native queue ceiling, verified against the server's actual reply.
 pub const MAX_DEVICE_BUFFER_MS: u16 = 40;
-/// Fixed output scheduling lead; not a measurement of audible latency.
+/// Maximum output scheduling lead; the actual server-derived lead is fixed on first write.
 pub const OUTPUT_LEAD_MS: u16 = 20;
 const STARTUP_US: u64 = 2_000_000;
 const STOP_US: u64 = 100_000;
@@ -174,10 +177,12 @@ pub struct PlaybackDevice {
     deadline: u64,
     last_now: u64,
     timing_at: Option<u64>,
+    clock_probe: Option<(u64, u64)>,
     last_samples: u64,
     device_index: Option<u32>,
     queue_bytes: u32,
     next: Option<(u64, u64)>,
+    lead_samples: Option<u64>,
     error: Option<Error>,
     stopped: Option<StopOutcome>,
 }
@@ -198,8 +203,11 @@ impl PlaybackDevice {
         config: AudioStreamConfig,
         now: ClientInstant,
     ) -> Result<Self, Error> {
+        // The 5 ms codec profile remains available independently. This native
+        // output path does not qualify its stricter scheduling envelope; refuse
+        // before connecting rather than silently repacketize or widen a slot.
         if config.direction() != AudioDirection::Downlink
-            || !matches!(config.frame_duration_ms(), 5 | 10 | 20)
+            || !matches!(config.frame_duration_ms(), 10 | 20)
         {
             return Err(Error::Configuration);
         }
@@ -215,10 +223,12 @@ impl PlaybackDevice {
             deadline,
             last_now: now.0,
             timing_at: None,
+            clock_probe: None,
             last_samples: 0,
             device_index: None,
             queue_bytes: 0,
             next: None,
+            lead_samples: None,
             error: None,
             stopped: None,
         };
