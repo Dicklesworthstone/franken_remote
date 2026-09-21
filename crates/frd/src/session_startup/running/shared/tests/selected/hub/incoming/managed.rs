@@ -149,3 +149,6 @@ fn incoming_host_managed_local_permission_loss_fences_unpolled_negotiation_befor
         reap(&mut publisher).await;
     });
 }
+
+#[path = "bootstrap.rs"]
+mod bootstrap;

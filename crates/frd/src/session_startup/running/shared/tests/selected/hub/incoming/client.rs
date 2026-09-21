@@ -56,7 +56,7 @@ impl Client {
             self.turn().await;
         }
     }
-    async fn turn(&mut self) {
+    pub(super) async fn turn(&mut self) {
         let message = if self.configuration && !self.configured {
             Some(decoder::Message::Configured)
         } else if !self.acknowledged {

@@ -180,3 +180,24 @@ impl Subscription {
         Ok(())
     }
 }
+
+impl Publisher {
+    // Validate the exact original selected capture BEFORE starting first-viewer
+    // negotiation. The bootstrap driver retains exclusive Publisher access until
+    // the original subscriber is installed; no native capture can race this proof.
+    pub(crate) fn opening_control(
+        &mut self,
+        initial: &super::SharedCaptureUpdate,
+    ) -> Result<ObservationControl, Error> {
+        self.initial_configuration()?;
+        initial
+            .check_publisher_source(&self.source, &self.pool)
+            .map_err(Error::Media)?;
+        Ok(self
+            .members
+            .lock()
+            .map_err(|_| Error::Poisoned)?
+            .owner
+            .clone())
+    }
+}

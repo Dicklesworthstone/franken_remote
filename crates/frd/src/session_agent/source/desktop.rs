@@ -24,6 +24,8 @@ use std::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Consent(ConsentError),
+    Startup(crate::session_startup::Error),
+    Publication(crate::session_startup::PublisherError),
     Viewers(shared_viewers::Error),
     Capture(shared_publisher::Error),
     LocalEvent,
@@ -276,3 +278,5 @@ impl Drop for Wake {
         self.cancel();
     }
 }
+
+mod startup;

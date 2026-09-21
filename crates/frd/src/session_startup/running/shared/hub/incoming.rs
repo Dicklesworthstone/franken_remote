@@ -1,6 +1,6 @@
 //! Carry original application negotiation and local approval into the same slot.
 use super::{Admission, Error, Gate, State, Ticket};
-use crate::session_startup::{Approval, Error as SessionError, Host, Phase, Role};
+use crate::session_startup::{Approval, Host, Role};
 use fr_transport::quic::Disposition;
 use std::time::Duration;
 
@@ -25,14 +25,11 @@ impl Admission {
     where
         F: FnMut(Approval, Role) -> Result<(), ()> + Send + 'static,
     {
-        if host.phase != Phase::Hello || host.len != 0 || host.shared_source.is_some() {
-            return Err(Error::Session(SessionError::Order));
-        }
-        host.check().map_err(Error::Session)?;
-        let until = host.deadline_us();
-        let cx = host.cx.clone();
+        let (cx, parent, until) = host
+            .bind_shared_source(self.source.clone())
+            .map_err(Error::Session)?;
         let reservation = self.reserve(
-            host.config.binding,
+            parent,
             Gate::Opening {
                 cx: cx.clone(),
                 until,
@@ -43,7 +40,6 @@ impl Admission {
         let policy = reservation.policy;
         // Every handshake/native I/O and admission-refresh poll checks this
         // source too. Do not consume/replace the transport's ingress-check slot.
-        host.shared_source = Some(self.source.clone());
         let source = self.source.clone();
         let notify_source = source.clone();
         let opening = host.open(Duration::from_millis(5), move |approval, role| {

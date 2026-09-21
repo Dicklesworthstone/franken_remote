@@ -27,11 +27,28 @@ impl HostSession {
         initial: &'a SharedCaptureUpdate,
         timeout: Duration,
         send: SendPolicy,
+        entropy: impl FnMut() -> Result<u128, ()> + 'a,
+    ) -> impl Future<Output = Result<SharedHost, Error>> + 'a {
+        self.start_shared_display_capped(publisher, initial, timeout, u64::MAX, send, entropy)
+    }
+    // Keep the first Host's original deadline across approval and display startup.
+    // Passing an absolute bound avoids renewing it through scheduling delays.
+    pub(crate) fn start_shared_display_capped<'a>(
+        self,
+        publisher: &'a mut Publisher,
+        initial: &'a SharedCaptureUpdate,
+        timeout: Duration,
+        until: u64,
+        send: SendPolicy,
         mut entropy: impl FnMut() -> Result<u128, ()> + 'a,
     ) -> impl Future<Output = Result<SharedHost, Error>> + 'a {
         let control = self.opened.control.clone();
         let queue = publisher.join_queue();
-        let budget = source_budget(control.clone(), queue.clone(), timeout);
+        let budget = source_budget(control.clone(), queue.clone(), timeout).and_then(|mut b| {
+            b.until = b.until.min(until);
+            b.remaining()?;
+            Ok(b)
+        });
         Attempt {
             control,
             complete: false,

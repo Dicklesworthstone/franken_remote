@@ -39,6 +39,18 @@ impl Default for Policy {
         }
     }
 }
+impl Policy {
+    pub(crate) fn validate(self) -> Result<(), Error> {
+        if self.viewers == 0
+            || self.viewers > MAX_SUBSCRIBERS
+            || self.join_timeout < Duration::from_micros(1)
+            || self.join_timeout > Duration::from_secs(2)
+        {
+            return Err(Error::InvalidPolicy);
+        }
+        Ok(())
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     InvalidPolicy,
@@ -366,13 +378,7 @@ pub struct Hub {
 }
 impl Hub {
     pub fn new(mut first: SharedHost, policy: Policy, entropy: Entropy) -> Result<Self, Error> {
-        if policy.viewers == 0
-            || policy.viewers > MAX_SUBSCRIBERS
-            || policy.join_timeout < Duration::from_micros(1)
-            || policy.join_timeout > Duration::from_secs(2)
-        {
-            return Err(Error::InvalidPolicy);
-        }
+        policy.validate()?;
         first.session.check().map_err(Error::Session)?;
         let subscriber = first.subscriber.as_ref().ok_or(Error::Closed)?;
         subscriber.session_live().map_err(Error::Source)?;

@@ -64,3 +64,20 @@ impl<F> Drop for Opening<F> {
         }
     }
 }
+
+impl Host {
+    // Reuse the same post-TLS owner for both the first and later shared viewers.
+    // This is NOT listener admission. Never restart a partially driven Host.
+    pub(crate) fn bind_shared_source(
+        &mut self,
+        source: crate::media::shared_publisher::JoinQueue,
+    ) -> Result<(super::Cx, super::ControlBinding, u64), Error> {
+        if self.phase != super::Phase::Hello || self.len != 0 || self.shared_source.is_some() {
+            return Err(Error::Order);
+        }
+        self.check()?;
+        source.check_source().map_err(Error::SharedPublication)?;
+        self.shared_source = Some(source);
+        Ok((self.cx.clone(), self.config.binding, self.until))
+    }
+}
