@@ -43,7 +43,7 @@ pub const WINDOWS_ENDPOINT_SCOPE_DISCLOSURE: &str = "Windows endpoint loopback c
 /// Mandatory disclosure for Windows virtual audio endpoint driver per plan §15.4 and Phase 0 spike.
 pub const WINDOWS_VIRTUAL_MIC_DISCLOSURE: &str = "Windows virtual microphone requires a signed driver-class component with verified provenance, not installed silently or bundled as arbitrary binaries.";
 
-/// Mandatory specification for Linux PipeWire virtual microphone source per Phase 0 spike.
+/// Mandatory specification for Linux `PipeWire` virtual microphone source per Phase 0 spike.
 pub const LINUX_PIPEWIRE_SOURCE_SPEC: &str = "PipeWire virtual source node (media.class = Audio/Source/Virtual, adapter factory around null-audio-sink).";
 
 /// Status of host virtual microphone endpoint qualification.

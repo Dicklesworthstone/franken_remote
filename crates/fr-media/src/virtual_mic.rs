@@ -4,8 +4,8 @@
 //! Per plan section 15.4 and PROTOCOL.md:
 //! - Client microphone audio terminates in a per-OS qualified virtual-microphone endpoint
 //!   that ordinary host applications can select as an input device:
-//!   * Linux: PipeWire virtual source (`media.class = Audio/Source/Virtual`).
-//!   * macOS: Signed user-space CoreAudio server plugin (`/Library/Audio/Plug-Ins/HAL/`).
+//!   * Linux: `PipeWire` virtual source (`media.class = Audio/Source/Virtual`).
+//!   * macOS: Signed user-space `CoreAudio` server plugin (`/Library/Audio/Plug-Ins/HAL/`).
 //!   * Windows: Signed virtual audio endpoint driver (native non-Rust component).
 //! - Where the endpoint is not qualified on a host OS, microphone forwarding is a
 //!   TYPED UNSUPPORTED capability there — never a silent fake device, never an
@@ -89,9 +89,9 @@ pub trait VirtualMicEndpoint: Send + Sync {
     fn close(&mut self);
 }
 
-/// Linux PipeWire virtual microphone source adapter.
+/// Linux `PipeWire` virtual microphone source adapter.
 ///
-/// Implements a PipeWire virtual source node (`media.class = Audio/Source/Virtual`)
+/// Implements a `PipeWire` virtual source node (`media.class = Audio/Source/Virtual`)
 /// as validated by the Phase 0 virtual-mic spike.
 #[derive(Debug)]
 pub struct LinuxPipeWireMicEndpoint {
@@ -102,14 +102,13 @@ pub struct LinuxPipeWireMicEndpoint {
 }
 
 impl LinuxPipeWireMicEndpoint {
-    /// Probe the Linux host environment for PipeWire runtime and virtual source support.
+    /// Probe the Linux host environment for `PipeWire` runtime and virtual source support.
     #[must_use]
     pub fn probe() -> Self {
         // Probe for PipeWire runtime directory or socket
         let has_runtime = std::env::var_os("PIPEWIRE_RUNTIME_DIR").is_some()
             || std::env::var_os("XDG_RUNTIME_DIR")
-                .map(|p| std::path::Path::new(&p).join("pipewire-0").exists())
-                .unwrap_or(false);
+                .is_some_and(|p| std::path::Path::new(&p).join("pipewire-0").exists());
 
         let status = if has_runtime {
             MicEndpointStatus::Qualified {
@@ -175,7 +174,7 @@ impl VirtualMicEndpoint for LinuxPipeWireMicEndpoint {
             // Buffer overrun: discard oldest frame to bound memory and prevent latency buildup
             self.buffered_frames.remove(0);
         }
-        self.buffered_frames.push(frame.clone());
+        self.buffered_frames.push(*frame);
         Ok(())
     }
 
@@ -189,9 +188,9 @@ impl VirtualMicEndpoint for LinuxPipeWireMicEndpoint {
     }
 }
 
-/// macOS CoreAudio server plugin virtual microphone endpoint adapter.
+/// macOS `CoreAudio` server plugin virtual microphone endpoint adapter.
 ///
-/// Implements injection into a signed user-space CoreAudio AudioServerPlugin
+/// Implements injection into a signed user-space `CoreAudio` `AudioServerPlugin`
 /// at `/Library/Audio/Plug-Ins/HAL/FrankenRemoteAudioServer.driver`.
 #[derive(Debug)]
 pub struct MacOSCoreAudioMicEndpoint {
@@ -200,7 +199,7 @@ pub struct MacOSCoreAudioMicEndpoint {
 }
 
 impl MacOSCoreAudioMicEndpoint {
-    /// Probe the macOS host environment for the signed CoreAudio HAL driver plugin.
+    /// Probe the macOS host environment for the signed `CoreAudio` HAL driver plugin.
     #[must_use]
     pub fn probe() -> Self {
         let plugin_path =
@@ -277,16 +276,13 @@ impl WindowsVirtualAudioMicEndpoint {
     pub fn probe() -> Self {
         // Driver probe would check device enumeration / registry on Windows.
         // On non-Windows or when driver is missing, return typed refusal.
-        MicEndpointStatus::Unsupported {
+        let status = MicEndpointStatus::Unsupported {
             os: "windows",
             reason: "signed virtual audio endpoint driver not installed (requires driver package)",
         };
 
         Self {
-            status: MicEndpointStatus::Unsupported {
-                os: "windows",
-                reason: "signed virtual audio endpoint driver not installed (requires driver package)",
-            },
+            status,
             is_closed: false,
         }
     }
@@ -430,7 +426,7 @@ impl VirtualMicEndpoint for SyntheticVirtualMicEndpoint {
 
         self.last_rms_energy = frame.rms_energy();
         self.total_samples = self.total_samples.saturating_add(frame.total_samples());
-        self.submitted_frames.push(frame.clone());
+        self.submitted_frames.push(*frame);
         Ok(())
     }
 

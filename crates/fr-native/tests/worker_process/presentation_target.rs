@@ -79,7 +79,7 @@ fn target_change_is_terminal_even_after_original_size_or_mapping_returns() {
         let display = Display::start();
         let mut ui = owner(&display);
         let target = ui.presentation_target().unwrap();
-        let (record, unit, _) = picture();
+        let (record, _unit, _) = picture();
         let mut worker = Worker::start(&display, Role::Present);
         let body = target.encode_decoder(configuration(), &record).unwrap();
         assert_eq!(

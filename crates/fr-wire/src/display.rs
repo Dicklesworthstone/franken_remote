@@ -7,7 +7,17 @@ use crate::{
     record::{Reader, Writer},
 };
 use core::fmt;
-use fr_core::{ids::DisplayGeometryGeneration, limits::ProtocolLimits};
+use fr_core::{
+    ids::DisplayGeometryGeneration,
+    input::{DesktopPoint, InputBounds},
+    limits::ProtocolLimits,
+};
+
+pub mod tracker;
+pub use tracker::{
+    DisplayCatalogTracker, DisplayStreamState, DisplayTargetController, HostMonitorDescriptor,
+    MultiDisplayStreamManager, TopologyUpdate,
+};
 
 pub const CAPABILITY: &str = "display-selection";
 pub const VERSION: u16 = 1;
@@ -82,7 +92,65 @@ impl Display {
         }
         Ok(())
     }
+
+    /// Check if desktop pixel coordinates fall within this display's pixel bounds.
+    pub fn contains_pixel(&self, px: i32, py: i32) -> bool {
+        let x_max = i64::from(self.x) + i64::from(self.pixel_width);
+        let y_max = i64::from(self.y) + i64::from(self.pixel_height);
+        i64::from(px) >= i64::from(self.x)
+            && i64::from(px) < x_max
+            && i64::from(py) >= i64::from(self.y)
+            && i64::from(py) < y_max
+    }
+
+    /// Check if logical desktop coordinates fall within this display's logical bounds.
+    pub fn contains_logical(&self, lx: i32, ly: i32) -> bool {
+        let x_max = i64::from(self.x) + i64::from(self.logical_width);
+        let y_max = i64::from(self.y) + i64::from(self.logical_height);
+        i64::from(lx) >= i64::from(self.x)
+            && i64::from(lx) < x_max
+            && i64::from(ly) >= i64::from(self.y)
+            && i64::from(ly) < y_max
+    }
+
+    /// Convert display rectangle to an `InputBounds` if coordinates and dimensions are valid.
+    pub fn pixel_bounds(&self) -> Option<InputBounds> {
+        InputBounds::new(
+            DesktopPoint {
+                x: self.x,
+                y: self.y,
+            },
+            self.pixel_width,
+            self.pixel_height,
+        )
+    }
 }
+
+/// Typed errors for multi-display coordinate mapping and display targeting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayMappingError {
+    DisplayNotFound,
+    AmbiguousMapping,
+    UnmappedCoordinate,
+    StaleGeometry,
+    DisplaySuspended,
+}
+
+impl fmt::Display for DisplayMappingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DisplayNotFound => f.write_str("display not found in active catalog"),
+            Self::AmbiguousMapping => {
+                f.write_str("coordinate mapping is ambiguous (multiple displays overlap)")
+            }
+            Self::UnmappedCoordinate => f.write_str("coordinate lies outside all active displays"),
+            Self::StaleGeometry => f.write_str("display geometry generation is stale"),
+            Self::DisplaySuspended => f.write_str("target display is suspended / unobserved"),
+        }
+    }
+}
+
+impl std::error::Error for DisplayMappingError {}
 
 /// Fixed metadata storage, including on malicious count fields. An empty
 /// catalog is meaningful: no display in the approved disclosure scope.
@@ -133,6 +201,30 @@ impl Catalog {
     }
     pub fn displays(&self) -> &[Display] {
         &self.displays[..usize::from(self.count)]
+    }
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+    pub fn len(&self) -> usize {
+        usize::from(self.count)
+    }
+    pub fn geometry_generation(&self) -> Option<DisplayGeometryGeneration> {
+        self.displays().first().map(|d| d.geometry)
+    }
+    /// Map a desktop pixel coordinate to an unambiguous display.
+    /// Returns `Err(DisplayMappingError::AmbiguousMapping)` if multiple displays contain the point.
+    /// Returns `Err(DisplayMappingError::UnmappedCoordinate)` if no display contains the point.
+    pub fn map_pixel_coordinate(&self, x: i32, y: i32) -> Result<Display, DisplayMappingError> {
+        let mut matched = None;
+        for d in self.displays() {
+            if d.contains_pixel(x, y) {
+                if matched.is_some() {
+                    return Err(DisplayMappingError::AmbiguousMapping);
+                }
+                matched = Some(*d);
+            }
+        }
+        matched.ok_or(DisplayMappingError::UnmappedCoordinate)
     }
     pub fn find(&self, handle: u128) -> Option<Display> {
         self.displays().iter().copied().find(|d| d.handle == handle)

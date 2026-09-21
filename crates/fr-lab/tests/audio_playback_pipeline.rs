@@ -54,14 +54,14 @@ fn e2e_audio_pipeline_with_induced_loss_and_plc() {
 
     let mut encoded_packets: Vec<AudioAccessUnit> = Vec::new();
 
-    for frame_idx in 0..10 {
+    for frame_idx in 0u64..10 {
         // Generate 10 ms chunk of 44.1 kHz stereo audio (441 frames * 2 channels = 882 floats)
         let simulated_capture = vec![0.25f32; 441 * 2];
         let mut pcm_48k = AudioPcmFrame::empty(generation, AudioChannels::Stereo);
         resampler
             .resample_f32(
                 generation,
-                (frame_idx * 480) as u64,
+                frame_idx * 480,
                 &simulated_capture,
                 &mut pcm_48k,
             )

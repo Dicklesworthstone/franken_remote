@@ -154,7 +154,7 @@ unsafe fn position(display: NonNull<c_void>, root: c_ulong) -> Option<(i32, i32)
 }
 
 /// Borrow only an existing capture connection; never reopen DISPLAY here.
-/// A cursor moving between the image and position queries yields typed NeedInput,
+/// A cursor moving between the image and position queries yields typed `NeedInput`,
 /// not coordinates or pixels asserted to belong to another selected display.
 pub(crate) unsafe fn snapshot(
     display: NonNull<c_void>,
@@ -222,11 +222,7 @@ pub(crate) unsafe fn snapshot(
         let a = ((pixel >> 24) & 255) as u32;
         for shift in [16, 8, 0] {
             let c = ((pixel >> shift) & 255) as u32;
-            let straight = if a == 0 {
-                0
-            } else {
-                ((c * 255 + a / 2) / a).min(255)
-            };
+            let straight = (c * 255 + a / 2).checked_div(a).unwrap_or(0).min(255);
             rgba.push(u8::try_from(straight).expect("bounded channel"));
         }
         rgba.push(u8::try_from(a).expect("8-bit alpha"));

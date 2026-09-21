@@ -55,7 +55,7 @@ pub struct ClientMicController {
     explicit_enabled: bool,
     /// Operating system microphone permission status.
     permission: MicPermission,
-    /// Current talk mode (Muted, PushToTalk, or OpenMic).
+    /// Current talk mode (`Muted`, `PushToTalk`, or `OpenMic`).
     talk_mode: MicTalkMode,
     /// Active audio generation (fences reconnects and device changes).
     generation: AudioGeneration,
@@ -203,7 +203,7 @@ impl ClientMicController {
     /// Transmitting is true ONLY IF:
     /// 1. `explicit_enabled` is true.
     /// 2. OS permission is `Granted`.
-    /// 3. Current talk mode `is_active()` is true (PTT pressed or OpenMic active).
+    /// 3. Current talk mode `is_active()` is true (PTT pressed or `OpenMic` active).
     #[must_use]
     pub fn is_transmitting(&self) -> bool {
         self.explicit_enabled

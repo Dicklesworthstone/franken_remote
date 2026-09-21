@@ -8,7 +8,7 @@
 
 ## 1. Executive Summary
 
-This report evaluates software HEVC encoder candidates for FrankenRemote, fulfilling the requirements of [COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md](../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) §8.1, §9.3, §9.4, and §25.
+This report evaluates software HEVC encoder candidates for FrankenRemote, fulfilling the requirements of [COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md](../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) §8.1, §9.3, §9.4, and §25.
 
 Two primary candidates were examined:
 1. **`oxideav-h265`** (v0.0.10): Pure-Rust ITU-T H.265 encoder/decoder scaffold (MIT license).

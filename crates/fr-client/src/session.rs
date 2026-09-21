@@ -20,7 +20,7 @@ use fr_core::ids::{
     DisplayGeometryGeneration, HostBootId, InputLeaseId, InputTicketId, OsSessionId,
     RemoteSessionId, ViewportMappingGeneration,
 };
-use fr_wire::negotiation::ControlBinding;
+use fr_wire::{display::Catalog, negotiation::ControlBinding};
 use std::fmt;
 
 /// User-visible high-level connection and session lifecycle state.
@@ -362,6 +362,11 @@ pub struct ClientSession {
     window_visible: bool,
     scheduler: DecoderScheduler,
 
+    // Multi-display topology & targeting
+    current_catalog: Option<Catalog>,
+    target_display: Option<u128>,
+    selected_displays: Vec<u128>,
+
     // Metrics counters
     stale_view_suspensions: u64,
     mapping_rejections: u64,
@@ -386,6 +391,9 @@ impl ClientSession {
             view_fresh: false,
             window_visible: true,
             scheduler: DecoderScheduler::new(32, 2 * 1024 * 1024),
+            current_catalog: None,
+            target_display: None,
+            selected_displays: Vec::new(),
             stale_view_suspensions: 0,
             mapping_rejections: 0,
             next_request_seq: 1,
@@ -625,6 +633,103 @@ impl ClientSession {
         self.expected_display_gen = display;
         self.expected_viewport_gen = viewport;
         eprintln!("[StateTrace: MappingUpdated display={display:?} viewport={viewport:?}]");
+    }
+
+    /// Update catalog received from host.
+    /// If geometry changed, advances `expected_display_gen`.
+    /// If an active target display is removed from the catalog or its geometry changed,
+    /// and control is held, input is suspended with `SuspendReason::StaleView`.
+    pub fn on_catalog_received(&mut self, catalog: Catalog) -> Result<(), SessionError> {
+        let new_gen = catalog.geometry_generation();
+        let gen_changed = new_gen.is_some_and(|g| g != self.expected_display_gen);
+
+        if let Some(g) = new_gen {
+            self.expected_display_gen = g;
+        }
+
+        // Retain only selected displays that still exist in the new catalog
+        self.selected_displays
+            .retain(|handle| catalog.find(*handle).is_some());
+
+        // Check target display validity
+        if let Some(target) = self.target_display {
+            let still_valid = catalog.find(target).is_some();
+            if !still_valid || gen_changed {
+                if !still_valid {
+                    self.target_display = self.selected_displays.first().copied();
+                }
+                if let SessionState::Controlling { session, .. } = self.state {
+                    self.stale_view_suspensions = self.stale_view_suspensions.saturating_add(1);
+                    self.state = SessionState::Suspended {
+                        session,
+                        reason: SuspendReason::StaleView,
+                    };
+                    eprintln!(
+                        "[StateTrace: Controlling -> Suspended reason=StaleView (catalog/geometry updated)]"
+                    );
+                }
+            }
+        }
+
+        self.current_catalog = Some(catalog);
+        Ok(())
+    }
+
+    /// Explicitly select a display to observe.
+    pub fn select_display(&mut self, handle: u128) -> Result<(), SessionError> {
+        let catalog = self
+            .current_catalog
+            .as_ref()
+            .ok_or(SessionError::InvalidState)?;
+        if catalog.find(handle).is_none() {
+            return Err(SessionError::InvalidState);
+        }
+        if !self.selected_displays.contains(&handle) {
+            self.selected_displays.push(handle);
+        }
+        if self.target_display.is_none() {
+            self.target_display = Some(handle);
+        }
+        Ok(())
+    }
+
+    /// Unselect an observed display.
+    pub fn unselect_display(&mut self, handle: u128) {
+        self.selected_displays.retain(|h| *h != handle);
+        if self.target_display == Some(handle) {
+            self.target_display = self.selected_displays.first().copied();
+        }
+    }
+
+    /// Set the single controller's explicit target display.
+    pub fn set_target_display(&mut self, handle: u128) -> Result<(), SessionError> {
+        let catalog = self
+            .current_catalog
+            .as_ref()
+            .ok_or(SessionError::InvalidState)?;
+        if catalog.find(handle).is_none() {
+            return Err(SessionError::InvalidState);
+        }
+        self.target_display = Some(handle);
+        if !self.selected_displays.contains(&handle) {
+            self.selected_displays.push(handle);
+        }
+        Ok(())
+    }
+
+    /// Read currently explicit target display handle.
+    pub fn target_display(&self) -> Option<u128> {
+        self.target_display
+    }
+
+    /// Read currently cached display catalog.
+    pub fn current_catalog(&self) -> Option<&Catalog> {
+        self.current_catalog.as_ref()
+    }
+
+    /// Read currently selected display handles.
+    pub fn selected_displays(&self) -> &[u128] {
+        &self.selected_displays
     }
 
     /// Set window visibility (e.g. minimized/occluded).

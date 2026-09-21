@@ -115,12 +115,12 @@ fn private_canvas_preserves_original_focus_input_coordinates_and_visibility_even
             match event.kind {
                 2..=5 => {
                     let input = event.input;
-                    assert_eq!(input.window, target.window().into());
+                    assert_eq!(input.window, u64::from(target.window()));
                     assert_eq!(input.send_event, 0);
                     assert_eq!(input.same_screen, 1);
                     assert_eq!((input.x, input.y), (12, 9));
                     if matches!(input.kind, 4 | 5) {
-                        assert_eq!(input.subwindow, canvas[0].into());
+                        assert_eq!(input.subwindow, u64::from(canvas[0]));
                         assert_eq!(input.detail, 1);
                     }
                     received[usize::try_from(input.kind - 2).unwrap()] += 1;
@@ -128,7 +128,7 @@ fn private_canvas_preserves_original_focus_input_coordinates_and_visibility_even
                 15 => {
                     // A subwindow is not an unrelated occluding top-level
                     // window. No native visibility-loss event may be invented.
-                    assert_eq!(event.visibility.window, target.window().into());
+                    assert_eq!(event.visibility.window, u64::from(target.window()));
                     assert_eq!(event.visibility.state, 0);
                 }
                 _ => {}

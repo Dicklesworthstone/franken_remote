@@ -51,11 +51,12 @@ where
     let runtime = network::runtime();
     let c = runtime.request_cx_with_budget(Budget::INFINITE);
     let h = runtime.request_cx_with_budget(Budget::INFINITE);
-    runtime.block_on(async {
-        asupersync::time::timeout(c.now(), Duration::from_secs(12), f(c, h))
+    runtime.block_on(Box::pin(async move {
+        let fut = Box::pin(f(c.clone(), h));
+        asupersync::time::timeout(c.now(), Duration::from_secs(12), fut)
             .await
             .unwrap();
-    });
+    }));
 }
 async fn pair(c: &Cx, h: &Cx, approval: bool) -> (Host, Viewer) {
     let configuration = config(approval);

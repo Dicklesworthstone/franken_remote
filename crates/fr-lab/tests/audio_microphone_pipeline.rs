@@ -274,7 +274,7 @@ fn e2e_client_to_host_microphone_wire_pipeline() {
 
     // 3. Capture 5 frames of speech (50 ms total)
     for i in 0..5 {
-        let sample_val = ((i + 1) * 1000) as i16;
+        let sample_val = i16::try_from((i + 1) * 1000).unwrap();
         let pcm_samples = vec![sample_val; 480];
         let pcm_in =
             AudioPcmFrame::from_interleaved(generation, AudioChannels::Mono, i * 480, &pcm_samples)

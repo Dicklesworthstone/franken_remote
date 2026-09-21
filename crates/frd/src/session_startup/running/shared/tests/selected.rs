@@ -230,7 +230,7 @@ async fn close(publisher: &mut Publisher, peers: Vec<SelectedPeer>) {
 #[test]
 fn normal_selected_source_bootstrap_and_late_join_retain_one_worker_after_first_viewer_leaves() {
     let rt = support::runtime();
-    rt.block_on(async {
+    rt.block_on(Box::pin(async {
         let (mut publisher, owner, initial) = selected_publisher(&rt).await;
         let pid = publisher.worker_id();
         let mut first_peer = Box::pin(first(&rt, &mut publisher, &initial, 13)).await;
@@ -273,7 +273,7 @@ fn normal_selected_source_bootstrap_and_late_join_retain_one_worker_after_first_
         assert_eq!(publisher.worker_id(), pid);
         close(&mut publisher, vec![first_peer, second_peer]).await;
         assert!(owner.check().is_err());
-    });
+    }));
 }
 #[test]
 fn unpolled_shared_display_join_retires_only_the_new_viewer() {

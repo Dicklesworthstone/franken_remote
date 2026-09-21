@@ -575,11 +575,12 @@ where
         .unwrap();
     let c = runtime.request_cx_with_budget(asupersync::types::Budget::INFINITE);
     let h = runtime.request_cx_with_budget(asupersync::types::Budget::INFINITE);
-    runtime.block_on(async {
-        asupersync::time::timeout(c.now(), Duration::from_secs(12), f(c, h))
+    runtime.block_on(Box::pin(async move {
+        let fut = Box::pin(f(c.clone(), h));
+        asupersync::time::timeout(c.now(), Duration::from_secs(12), fut)
             .await
             .unwrap();
-    });
+    }));
 }
 
 #[test]

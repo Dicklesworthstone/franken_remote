@@ -386,6 +386,7 @@ mod linux {
                         Backend::Nvenc => EncodeBackend::Nvenc,
                         Backend::Vaapi => EncodeBackend::Vaapi,
                         Backend::SoftwareExplicit => EncodeBackend::SoftwareExplicit,
+                        Backend::VideoToolbox => return Err(Error::Unsupported),
                     };
                     let codec = HevcEncoder::new(
                         c.codec()?,

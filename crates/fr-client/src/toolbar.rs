@@ -19,6 +19,10 @@ pub struct ToolbarModel {
     pub host_info: Option<String>,
     /// Handle of the currently observed display (if selected).
     pub selected_display: Option<u128>,
+    /// Handle of the explicit target display for pointer/keyboard input.
+    pub target_display: Option<u128>,
+    /// Number of displays reported in the active catalog.
+    pub display_count: usize,
     /// High-level session lifecycle state label.
     pub session_state_label: &'static str,
     /// Whether connection to host is established (viewing or controlling).
@@ -56,6 +60,8 @@ impl Default for ToolbarModel {
         Self {
             host_info: None,
             selected_display: None,
+            target_display: None,
+            display_count: 0,
             session_state_label: "Disconnected",
             is_connected: false,
             is_controlling: false,
@@ -99,6 +105,11 @@ impl ToolbarModel {
     /// Synchronize toolbar display with current `ClientSession` state.
     pub fn update_from_session(&mut self, session: &ClientSession) {
         self.session_state_label = session.state().display_label();
+        self.selected_display = session.selected_displays().first().copied();
+        self.target_display = session.target_display();
+        self.display_count = session
+            .current_catalog()
+            .map_or(0, fr_wire::display::Catalog::len);
 
         match session.state() {
             SessionState::Disconnected
@@ -213,9 +224,21 @@ impl ToolbarModel {
     #[must_use]
     pub fn status_line(&self) -> String {
         let host = self.host_info.as_deref().unwrap_or("None");
-        let display = self
-            .selected_display
-            .map_or_else(|| "Default".to_string(), |d| format!("{d}"));
+        let display = match (
+            self.selected_display,
+            self.target_display,
+            self.display_count,
+        ) {
+            (Some(s), Some(t), count) if count > 1 => {
+                if s == t {
+                    format!("{s} (Target, 1/{count})")
+                } else {
+                    format!("{s} (Target: {t}, 1/{count})")
+                }
+            }
+            (Some(d), _, _) => format!("{d}"),
+            (None, _, _) => "Default".to_string(),
+        };
         let revoke = if self.revoke_visible {
             "[Revoke: Ready]"
         } else {

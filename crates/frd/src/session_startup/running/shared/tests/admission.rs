@@ -78,60 +78,80 @@ fn running_session_admits_a_late_viewer_while_original_source_and_renewal_contin
     });
 }
 
+async fn control_cannot_join(rt: &Runtime, queue: &crate::media::shared_publisher::JoinQueue) {
+    let mut control = Box::pin(peer(rt, 14, Role::RequestControl)).await;
+    assert!(matches!(
+        control.session.take().unwrap().join_shared(
+            queue,
+            control.host_media.take().unwrap(),
+            SendPolicy::default(),
+            Duration::from_secs(2)
+        ),
+        Err(Error::Order)
+    ));
+    assert!(control.control.check().is_err());
+}
+
+async fn foreign_media_cannot_join(
+    rt: &Runtime,
+    queue: &crate::media::shared_publisher::JoinQueue,
+    g: &mut Group,
+) {
+    let mut a = Box::pin(peer(rt, 15, Role::Observe)).await;
+    let mut b = Box::pin(peer(rt, 15, Role::Observe)).await;
+    assert!(
+        a.session
+            .take()
+            .unwrap()
+            .join_shared(
+                queue,
+                b.host_media.take().unwrap(),
+                SendPolicy::default(),
+                Duration::from_secs(2)
+            )
+            .is_err()
+    );
+    assert!(a.control.check().is_err());
+    assert!(b.control.check().is_ok());
+    assert!(g.owner.check().is_ok());
+    assert_eq!(g.publisher.tick().unwrap(), 1);
+}
+
+async fn zero_duration_cannot_join(
+    rt: &Runtime,
+    queue: &crate::media::shared_publisher::JoinQueue,
+    g: &mut Group,
+) {
+    let mut zero = Box::pin(peer(rt, 16, Role::Observe)).await;
+    assert!(
+        zero.session
+            .take()
+            .unwrap()
+            .join_shared(
+                queue,
+                zero.host_media.take().unwrap(),
+                SendPolicy::default(),
+                Duration::ZERO
+            )
+            .is_err()
+    );
+    assert!(zero.control.check().is_err());
+    assert_eq!(g.publisher.tick().unwrap(), 1);
+}
+
 #[test]
 fn control_intent_and_foreign_media_cannot_join_an_observation_source() {
     let rt = support::runtime();
     let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    rt.block_on(Box::pin(async {
         let mut g = Box::pin(group(&rt, 1)).await;
         ready(&mut g).await;
         let queue = g.publisher.join_queue();
-        let mut control = Box::pin(peer(&rt, 14, Role::RequestControl)).await;
-        assert!(matches!(
-            control.session.take().unwrap().join_shared(
-                &queue,
-                control.host_media.take().unwrap(),
-                SendPolicy::default(),
-                Duration::from_secs(2)
-            ),
-            Err(Error::Order)
-        ));
-        assert!(control.control.check().is_err());
-        let mut a = Box::pin(peer(&rt, 15, Role::Observe)).await;
-        let mut b = Box::pin(peer(&rt, 15, Role::Observe)).await;
-        assert!(
-            a.session
-                .take()
-                .unwrap()
-                .join_shared(
-                    &queue,
-                    b.host_media.take().unwrap(),
-                    SendPolicy::default(),
-                    Duration::from_secs(2)
-                )
-                .is_err()
-        );
-        assert!(a.control.check().is_err());
-        assert!(b.control.check().is_ok());
-        assert!(g.owner.check().is_ok());
-        assert_eq!(g.publisher.tick().unwrap(), 1);
-        let mut zero = Box::pin(peer(&rt, 16, Role::Observe)).await;
-        assert!(
-            zero.session
-                .take()
-                .unwrap()
-                .join_shared(
-                    &queue,
-                    zero.host_media.take().unwrap(),
-                    SendPolicy::default(),
-                    Duration::ZERO
-                )
-                .is_err()
-        );
-        assert!(zero.control.check().is_err());
-        assert_eq!(g.publisher.tick().unwrap(), 1);
+        Box::pin(control_cannot_join(&rt, &queue)).await;
+        Box::pin(foreign_media_cannot_join(&rt, &queue, &mut g)).await;
+        Box::pin(zero_duration_cannot_join(&rt, &queue, &mut g)).await;
         cleanup(&mut g, &cx).await;
-    });
+    }));
 }
 
 fn feedback(p: &mut Member) -> ViewerFeedback {
