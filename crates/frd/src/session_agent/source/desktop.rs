@@ -253,12 +253,12 @@ impl<L> Drop for Running<'_, L> {
 }
 // One timer registered with the EXISTING source runtime, no worker/thread/ticker.
 // Update rather than accumulate registrations under network/event wake floods.
-struct Wake {
-    driver: TimerDriverHandle,
-    handle: Option<TimerHandle>,
+pub(super) struct Wake {
+    pub(super) driver: TimerDriverHandle,
+    pub(super) handle: Option<TimerHandle>,
 }
 impl Wake {
-    fn arm(&mut self, deadline: Time, task: &Context<'_>) {
+    pub(super) fn arm(&mut self, deadline: Time, task: &Context<'_>) {
         self.handle = Some(match self.handle.take() {
             Some(handle) => self.driver.update(&handle, deadline, task.waker().clone()),
             None => self.driver.register(deadline, task.waker().clone()),
@@ -267,7 +267,7 @@ impl Wake {
             task.waker().wake_by_ref();
         }
     }
-    fn cancel(&mut self) {
+    pub(super) fn cancel(&mut self) {
         if let Some(handle) = self.handle.take() {
             let _ = self.driver.cancel(&handle);
         }

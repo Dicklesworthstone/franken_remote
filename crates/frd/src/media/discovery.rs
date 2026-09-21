@@ -114,6 +114,24 @@ impl DiscoveredSource {
         guard.complete = true;
         Ok(future)
     }
+    // The original local preparation owns the sticky renewal reservation. Public
+    // configure_local still rejects reserved/network-renewed sources. This path
+    // cannot transfer the discovered child to another authority allocation.
+    pub(crate) fn configure_prepared(
+        self,
+        original: &ObservationControl,
+        choice: Select,
+        configuration: Configuration,
+    ) -> Result<impl Future<Output = Result<CaptureSource, Error>> + use<>, Error> {
+        if !self.control.same_owner(original)
+            || !original
+                .renewal_attached
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(Error::NotIndependentSource);
+        }
+        self.configure_choice(choice, configuration)
+    }
     fn configure_choice(
         self,
         choice: Select,

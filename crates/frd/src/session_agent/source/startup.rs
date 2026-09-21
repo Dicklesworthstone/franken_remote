@@ -70,6 +70,7 @@ impl SessionAgent {
             .entries
             .iter()
             .flatten()
+            .filter_map(super::Entry::published)
             .find(|entry| entry.owns(publisher))
             .cloned();
         // Never hold the registry lock over permission/scope checks. Reuse is
@@ -85,6 +86,7 @@ impl SessionAgent {
                 .entries
                 .iter()
                 .flatten()
+                .filter_map(super::Entry::published)
                 .find(|entry| entry.owns(publisher))
                 .cloned()
                 .ok_or(Error::Closed)

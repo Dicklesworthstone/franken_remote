@@ -15,7 +15,32 @@ pub const MAX_SOURCES: usize = 8;
 
 #[derive(Default)]
 pub(super) struct Sources {
-    entries: [Option<Arc<Renewal>>; MAX_SOURCES],
+    entries: [Option<Entry>; MAX_SOURCES],
+}
+#[derive(Clone)]
+enum Entry {
+    Published(Arc<Renewal>),
+    Preparing(Arc<prepare::Reservation>),
+}
+impl Entry {
+    fn close(&self) {
+        match self {
+            Self::Published(entry) => entry.close(),
+            Self::Preparing(entry) => entry.close(),
+        }
+    }
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Published(entry) => entry.is_closed(),
+            Self::Preparing(entry) => entry.is_closed(),
+        }
+    }
+    fn published(&self) -> Option<&Arc<Renewal>> {
+        match self {
+            Self::Published(entry) => Some(entry),
+            Self::Preparing(_) => None,
+        }
+    }
 }
 impl Sources {
     pub(super) fn close(&mut self) {
@@ -62,10 +87,10 @@ impl SessionAgent {
         let slot = sources
             .entries
             .iter()
-            .position(|entry| entry.as_ref().is_none_or(|entry| entry.is_closed()))
+            .position(|entry| entry.as_ref().is_none_or(Entry::is_closed))
             .ok_or(Error::Full)?;
         let renewal = Renewal::attach(publisher, self)?;
-        sources.entries[slot] = Some(Arc::new(renewal));
+        sources.entries[slot] = Some(Entry::Published(Arc::new(renewal)));
         Ok(())
     }
     /// Bounded maintenance on the LOCAL authority/event loop. Service no later
@@ -94,7 +119,10 @@ impl SessionAgent {
         };
         for (result, entry) in report.outcomes.iter_mut().zip(entries) {
             if let Some(entry) = entry {
-                *result = Some(entry.service(self, &mut fresh_nonce));
+                *result = Some(match entry {
+                    Entry::Published(entry) => entry.service(self, &mut fresh_nonce),
+                    Entry::Preparing(entry) => entry.check(self),
+                });
             }
         }
         Ok(report)
@@ -122,3 +150,6 @@ pub use startup::StartError;
 
 /// Shared capture, local consent and original viewer service in one lifetime.
 pub mod desktop;
+
+/// Supervised discovery/configuration/first capture under local consent.
+pub mod prepare;

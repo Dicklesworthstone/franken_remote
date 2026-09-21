@@ -109,8 +109,47 @@ impl Scope {
         }
     }
 }
+impl crate::media::ObservationControl {
+    /// Claim the original independent local owner before launching native work.
+    /// The claim is sticky across preparation and publication; no competing
+    /// network/local renewer may slip into the transfer between them.
+    pub(crate) fn reserve_local_preparation(&self) -> Result<(), Error> {
+        let now = self.check().map_err(Error::Media)?;
+        if self.admission.is_some()
+            || self.control_grant_attached.load(Ordering::Acquire)
+            || self
+                .authority
+                .lock()
+                .map_err(|_| Error::Poisoned)?
+                .has_live_control(now)
+        {
+            return Err(Error::NotIndependent);
+        }
+        self.renewal_attached
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| Error::AlreadyAttached)?;
+        Ok(())
+    }
+}
 impl Renewal {
     pub(crate) fn attach(publisher: &Publisher, agent: &SessionAgent) -> Result<Self, Error> {
+        Self::attach_inner(publisher, agent, None)
+    }
+    // Transfer a preparation's ALREADY claimed renewer bit. The original local
+    // agent replaces its exact reservation slot; the bit is never cleared in a
+    // handoff window that could admit a competing network/local renewer.
+    pub(crate) fn attach_prepared(
+        publisher: &Publisher,
+        agent: &SessionAgent,
+        original: &crate::media::ObservationControl,
+    ) -> Result<Self, Error> {
+        Self::attach_inner(publisher, agent, Some(original))
+    }
+    fn attach_inner(
+        publisher: &Publisher,
+        agent: &SessionAgent,
+        prepared: Option<&crate::media::ObservationControl>,
+    ) -> Result<Self, Error> {
         let os_session = agent.permissions().os_session_id();
         Self::permission(agent, os_session)?;
         let mut members = publisher.members.lock().map_err(|_| Error::Poisoned)?;
@@ -126,11 +165,19 @@ impl Renewal {
         {
             return Err(Error::NotIndependent);
         }
-        members
-            .owner
-            .renewal_attached
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| Error::AlreadyAttached)?;
+        if let Some(original) = prepared {
+            if !members.owner.same_owner(original)
+                || !original.renewal_attached.load(Ordering::Acquire)
+            {
+                return Err(Error::WrongScope);
+            }
+        } else {
+            members
+                .owner
+                .renewal_attached
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .map_err(|_| Error::AlreadyAttached)?;
+        }
         Ok(Self {
             members: Arc::downgrade(&publisher.members),
             scope,
@@ -159,7 +206,7 @@ impl Renewal {
         operation.finished = true;
         Ok(())
     }
-    fn permission(agent: &SessionAgent, os_session: u32) -> Result<(), Error> {
+    pub(crate) fn permission(agent: &SessionAgent, os_session: u32) -> Result<(), Error> {
         if agent.is_revoked() {
             return Err(Error::Closed);
         }
