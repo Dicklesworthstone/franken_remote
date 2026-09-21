@@ -22,14 +22,18 @@ pub mod input;
 pub mod inspect;
 pub mod observe;
 pub mod session;
+pub mod sha256;
 pub mod status;
 
 pub use envelope::{
     AcknowledgementStage, ROBOT_SCHEMA_VERSION, RobotEnvelope, RobotError, RobotOutcome,
 };
-pub use input::{InputDisposition, RobotInputAction, RobotInputData, RobotInputRequest};
+pub use input::{
+    InputDisposition, ObservedApplicationResult, RobotInputAction, RobotInputData,
+    RobotInputRequest, SemanticEvidenceType, WindowFocusPrecondition,
+};
 pub use inspect::RobotInspectData;
-pub use observe::{DisplayGeometryInfo, RobotObservationData};
+pub use observe::{DisplayGeometryInfo, EvidenceLevel, ObservationArtifact, RobotObservationData};
 pub use session::{
     RobotSessionCloseData, RobotSessionLimits, RobotSessionOpenData, RobotSessionRole,
 };

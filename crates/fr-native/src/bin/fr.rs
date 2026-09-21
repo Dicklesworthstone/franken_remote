@@ -36,8 +36,8 @@ fr connect NODE_ID --view-only --experimental-native --display HANDLE|only|choos
     [--port 8443] [--ipv6] [--attempts 1..32] [--fit WIDTHxHEIGHT] [--json]
 fr robot session open NODE_ID [--role view|control] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
 fr robot session close NODE_ID [--lease LEASE] [--socket /absolute/tailscaled.sock] [--json]
-fr robot observe NODE_ID [--display N] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
-fr robot input NODE_ID --lease LEASE --request-id REQUEST [--batch /path/batch.json] [--precondition-geometry GEN] [--max-observation-age MS] [--json]
+fr robot observe NODE_ID [--display N] [--screenshot /path/screen.png] [--evidence-level decoded|submitted_to_compositor|instrumentally_observed] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
+fr robot input NODE_ID --lease LEASE --request-id REQUEST [--batch /path/batch.json] [--precondition-geometry GEN] [--max-observation-age MS] [--precondition-lease LEASE] [--precondition-focus WINDOW] [--semantic-evidence none|unverified_pixels|adapter|instrumentation] [--json]
 
 Doctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle.
 Discovery lists machines, not installed/ready desktops or access permissions.

@@ -49,6 +49,8 @@ pub struct RobotSessionCloseOptions {
 pub struct RobotObserveOptions {
     pub node: String,
     pub display: Option<u32>,
+    pub screenshot: Option<PathBuf>,
+    pub evidence_level: Option<String>,
     pub port: u16,
 }
 #[allow(dead_code)]
@@ -59,6 +61,9 @@ pub struct RobotInputOptions {
     pub batch: Option<PathBuf>,
     pub precondition_geometry: Option<u64>,
     pub max_observation_age_ms: Option<u64>,
+    pub precondition_lease: Option<String>,
+    pub precondition_focus: Option<String>,
+    pub semantic_evidence: Option<String>,
     pub port: u16,
 }
 pub struct DoctorOptions {
@@ -370,6 +375,8 @@ fn parse_robot(args: &[String]) -> Result<Options, Failure> {
             let mut json = false;
             let mut socket = None;
             let mut display = None;
+            let mut screenshot = None;
+            let mut evidence_level = None;
             let mut port = 8443_u16;
             let mut seen = BTreeSet::new();
             while index < args.len() {
@@ -387,6 +394,28 @@ fn parse_robot(args: &[String]) -> Result<Options, Failure> {
                             .ok_or_else(usage)?;
                         index += 1;
                         display = Some(s.parse::<u32>().map_err(|_| usage())?);
+                    }
+                    "--screenshot" => {
+                        let s = args
+                            .get(index)
+                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                            .ok_or_else(usage)?;
+                        index += 1;
+                        screenshot = Some(path(s.clone())?);
+                    }
+                    "--evidence-level" => {
+                        let s = args
+                            .get(index)
+                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                            .ok_or_else(usage)?;
+                        index += 1;
+                        if s != "decoded"
+                            && s != "submitted_to_compositor"
+                            && s != "instrumentally_observed"
+                        {
+                            return Err(usage());
+                        }
+                        evidence_level = Some(s.clone());
                     }
                     "--port" => {
                         let s = args
@@ -414,6 +443,8 @@ fn parse_robot(args: &[String]) -> Result<Options, Failure> {
                 command: Command::Robot(RobotCommand::Observe(RobotObserveOptions {
                     node: node.clone(),
                     display,
+                    screenshot,
+                    evidence_level,
                     port,
                 })),
                 json,
@@ -431,6 +462,9 @@ fn parse_robot(args: &[String]) -> Result<Options, Failure> {
             let mut batch = None;
             let mut precondition_geometry = None;
             let mut max_observation_age_ms = None;
+            let mut precondition_lease = None;
+            let mut precondition_focus = None;
+            let mut semantic_evidence = None;
             let mut port = 8443_u16;
             let mut seen = BTreeSet::new();
             while index < args.len() {
@@ -481,6 +515,37 @@ fn parse_robot(args: &[String]) -> Result<Options, Failure> {
                         index += 1;
                         max_observation_age_ms = Some(s.parse::<u64>().map_err(|_| usage())?);
                     }
+                    "--precondition-lease" => {
+                        let s = args
+                            .get(index)
+                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                            .ok_or_else(usage)?;
+                        index += 1;
+                        precondition_lease = Some(s.clone());
+                    }
+                    "--precondition-focus" => {
+                        let s = args
+                            .get(index)
+                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                            .ok_or_else(usage)?;
+                        index += 1;
+                        precondition_focus = Some(s.clone());
+                    }
+                    "--semantic-evidence" => {
+                        let s = args
+                            .get(index)
+                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                            .ok_or_else(usage)?;
+                        index += 1;
+                        if s != "none"
+                            && s != "unverified_pixels"
+                            && s != "adapter"
+                            && s != "instrumentation"
+                        {
+                            return Err(usage());
+                        }
+                        semantic_evidence = Some(s.clone());
+                    }
                     "--port" => {
                         let s = args
                             .get(index)
@@ -513,6 +578,9 @@ fn parse_robot(args: &[String]) -> Result<Options, Failure> {
                     batch,
                     precondition_geometry,
                     max_observation_age_ms,
+                    precondition_lease,
+                    precondition_focus,
+                    semantic_evidence,
                     port,
                 })),
                 json,
@@ -1037,16 +1105,18 @@ mod robot_tests {
         assert_eq!(s.node, "host-alpha");
         assert_eq!(s.lease, Some("lease-123".into()));
 
-        let o = parse(&to_args("robot observe host-alpha --display 2 --json")).unwrap();
+        let o = parse(&to_args("robot observe host-alpha --display 2 --screenshot /tmp/screen.png --evidence-level submitted_to_compositor --json")).unwrap();
         let Command::Robot(RobotCommand::Observe(obs)) = o.command else {
             assert!(false, "observe required");
             return;
         };
         assert_eq!(obs.node, "host-alpha");
         assert_eq!(obs.display, Some(2));
+        assert_eq!(obs.screenshot, Some(PathBuf::from("/tmp/screen.png")));
+        assert_eq!(obs.evidence_level, Some("submitted_to_compositor".into()));
 
         let o = parse(&to_args(
-            "robot input host-alpha --lease lease-123 --request-id req-001 --json",
+            "robot input host-alpha --lease lease-123 --request-id req-001 --precondition-lease lease-123 --precondition-focus Terminal --semantic-evidence adapter --json",
         ))
         .unwrap();
         let Command::Robot(RobotCommand::Input(inp)) = o.command else {
@@ -1056,6 +1126,9 @@ mod robot_tests {
         assert_eq!(inp.node, "host-alpha");
         assert_eq!(inp.lease, "lease-123");
         assert_eq!(inp.request_id, "req-001");
+        assert_eq!(inp.precondition_lease, Some("lease-123".into()));
+        assert_eq!(inp.precondition_focus, Some("Terminal".into()));
+        assert_eq!(inp.semantic_evidence, Some("adapter".into()));
     }
 
     #[test]

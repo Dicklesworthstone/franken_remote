@@ -642,3 +642,99 @@ fn robot_cli_subcommands_drive_full_scripted_workflow() {
         "assert x['outcome']=='success'\nassert x['stage']=='observed'\nassert x['data']['closed'] is True\nassert x['data']['cleanup_confirmed'] is True",
     );
 }
+
+#[test]
+fn robot_cli_artifacts_and_advanced_preconditions() {
+    let temp_screen = std::env::temp_dir().join("fr_test_screenshot_art.png");
+    let screen_str = temp_screen.to_string_lossy().to_string();
+
+    // 1. Observe with screenshot artifact capture
+    let output = wait(
+        command(&[
+            "robot",
+            "observe",
+            "workstation-1",
+            "--screenshot",
+            &screen_str,
+            "--evidence-level",
+            "submitted_to_compositor",
+            "--json",
+        ])
+        .spawn()
+        .unwrap(),
+    );
+    assert!(output.status.success());
+    json(
+        &output,
+        "assert x['outcome']=='success'\nassert x['stage']=='observed'\nassert x['data']['artifact'] is not None\nassert x['data']['artifact']['evidence_level']=='submitted_to_compositor'\nassert len(x['data']['artifact']['sha256'])==64",
+    );
+
+    // 2. Precondition lease mismatch refusal
+    let output = wait(
+        command(&[
+            "robot",
+            "input",
+            "workstation-1",
+            "--lease",
+            "lease-local-abc123",
+            "--request-id",
+            "req-mismatch-lease",
+            "--precondition-lease",
+            "lease-different-999",
+            "--json",
+        ])
+        .spawn()
+        .unwrap(),
+    );
+    assert!(output.status.success());
+    json(
+        &output,
+        "assert x['outcome']=='refusal'\nassert x['error']['code']=='lease_mismatch_or_expired'",
+    );
+
+    // 3. Precondition focus mismatch refusal (best-effort)
+    let output = wait(
+        command(&[
+            "robot",
+            "input",
+            "workstation-1",
+            "--lease",
+            "lease-local-abc123",
+            "--request-id",
+            "req-focus-mismatch",
+            "--precondition-focus",
+            "mismatched-window",
+            "--json",
+        ])
+        .spawn()
+        .unwrap(),
+    );
+    assert!(output.status.success());
+    json(
+        &output,
+        "assert x['outcome']=='refusal'\nassert x['error']['code']=='focus_mismatch'",
+    );
+
+    // 4. Semantic evidence confirmed via adapter
+    let output = wait(
+        command(&[
+            "robot",
+            "input",
+            "workstation-1",
+            "--lease",
+            "lease-local-abc123",
+            "--request-id",
+            "req-semantic-verified",
+            "--semantic-evidence",
+            "adapter",
+            "--json",
+        ])
+        .spawn()
+        .unwrap(),
+    );
+    assert!(output.status.success());
+    json(
+        &output,
+        "assert x['outcome']=='success'\nassert x['stage']=='observed'\nassert x['data']['observed_application_result']['confirmed'] is True\nassert x['data']['observed_application_result']['evidence_type']=='semantic_adapter'",
+    );
+}
