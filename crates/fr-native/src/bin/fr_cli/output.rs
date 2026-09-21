@@ -70,20 +70,46 @@ pub fn hosts(snapshot: &frd::native_connection::Discovery, json: bool) -> String
                 .map(|a| quoted(&a.to_string()))
                 .collect::<Vec<_>>()
                 .join(",");
+            let path_info = match peer.transport_path() {
+                fr_tailnet::PeerTransportPath::Direct { cur_addr } => {
+                    format!(
+                        ",\"transport_path\":{{\"kind\":\"direct\",\"addr\":{}}}",
+                        quoted(cur_addr)
+                    )
+                }
+                fr_tailnet::PeerTransportPath::DerpRelayed { relay } => {
+                    format!(
+                        ",\"transport_path\":{{\"kind\":\"derp_relayed\",\"relay\":{}}},\"warning\":\"tailnet_direct_path_unavailable\"",
+                        quoted(relay)
+                    )
+                }
+                fr_tailnet::PeerTransportPath::Unknown => ",\"transport_path\":null".to_string(),
+            };
             let _ = write!(
                 rows,
-                "{{\"node_id\":{},\"certificate_name\":{},\"addresses\":[{}],\"desktop_available\":null,\"access_authorized\":null}}",
+                "{{\"node_id\":{},\"certificate_name\":{},\"addresses\":[{}],\"desktop_available\":null,\"access_authorized\":null{}}}",
                 quoted(peer.stable_id()),
                 quoted(peer.certificate_name()),
-                ips
+                ips,
+                path_info
             );
         } else {
+            let path_badge = match peer.transport_path() {
+                fr_tailnet::PeerTransportPath::Direct { cur_addr } => {
+                    format!(" [direct: {cur_addr}]")
+                }
+                fr_tailnet::PeerTransportPath::DerpRelayed { relay } => {
+                    format!(" [DERP RELAY: {relay} - LATENCY ELEVATED]")
+                }
+                fr_tailnet::PeerTransportPath::Unknown => String::new(),
+            };
             // Escaped text prevents local terminal controls/bidi in opaque IDs.
             let _ = writeln!(
                 rows,
-                "{}  {}  desktop: not probed",
+                "{}  {}  desktop: not probed{}",
                 peer.stable_id().escape_default(),
-                peer.certificate_name().escape_default()
+                peer.certificate_name().escape_default(),
+                path_badge
             );
         }
     }
@@ -315,6 +341,7 @@ pub struct EventReport {
     pub reason: Option<String>,
 }
 
+#[allow(clippy::too_many_lines)]
 pub fn doctor(report: &DoctorReport, json: bool) -> String {
     if json {
         let addresses_json = report
@@ -412,9 +439,7 @@ pub fn doctor(report: &DoctorReport, json: bool) -> String {
                 let hw_str = c
                     .hardware_accelerated
                     .map_or_else(|| "null".into(), |h| h.to_string());
-                let restr_str = c
-                    .restriction
-                    .map_or_else(|| "null".into(), |r| quoted(r));
+                let restr_str = c.restriction.map_or_else(|| "null".into(), quoted);
                 format!(
                     "{{\"name\":{},\"status\":{},\"detail\":{},\"hardware_accelerated\":{},\"restriction\":{}}}",
                     quoted(c.name),
@@ -468,12 +493,8 @@ pub fn doctor(report: &DoctorReport, json: bool) -> String {
         } else {
             "success"
         };
-        let refusal_code_json = report
-            .refusal_code
-            .map_or_else(|| "null".into(), |c| quoted(c));
-        let next_action_json = report
-            .next_action
-            .map_or_else(|| "null".into(), |a| quoted(a));
+        let refusal_code_json = report.refusal_code.map_or_else(|| "null".into(), quoted);
+        let next_action_json = report.next_action.map_or_else(|| "null".into(), quoted);
 
         format!(
             "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":{},\"node\":{{\"certificate_name\":{},\"addresses\":[{}]}},\"port\":{},\"port_collisions\":[{}],\"honest_endpoints\":{{\"https\":{},\"quic\":{}}},\"alpn_protocols\":[{}],\"certificate_transparency_notice\":{},\"certificate\":{},\"permissions\":[{}],\"capabilities\":[{}],\"sessions\":[{}],\"sharing\":{{\"sharing_scope\":{},\"approval_mode\":{}}},\"restrictions\":[{}],\"refusal_code\":{},\"next_action\":{}}}\n",
@@ -499,32 +520,28 @@ pub fn doctor(report: &DoctorReport, json: bool) -> String {
         )
     } else {
         let mut out = String::new();
-        let _ = writeln!(out, "FrankenRemote Host Diagnosis:");
-        if let Some(code) = report.refusal_code {
-            let _ = writeln!(out, "  Refusal Code: {code}");
-        }
-        if let Some(action) = report.next_action {
-            let _ = writeln!(out, "  Next Action : {action}");
-        }
+        let _ = writeln!(out, "FrankenRemote Host Doctor Report");
         let _ = writeln!(out, "  Node Certificate Name: {}", report.certificate_name);
-        let _ = writeln!(out, "  Addresses: {}", report.addresses.join(", "));
-        if report.port_collisions.is_empty() {
+        let _ = writeln!(
+            out,
+            "  Tailnet IP Addresses: {}",
+            report.addresses.join(", ")
+        );
+        let _ = writeln!(
+            out,
+            "  Service Port: {}{}",
+            report.port,
+            if report.port_collisions.is_empty() {
+                " (available, no collisions)"
+            } else {
+                " (PORT COLLISION DETECTED)"
+            }
+        );
+        for col in &report.port_collisions {
             let _ = writeln!(
                 out,
-                "  Service Port: {} (available, no collisions)",
-                report.port
-            );
-        } else {
-            let collisions = report
-                .port_collisions
-                .iter()
-                .map(|c| format!("{}:{} ({})", c.ip, c.port, c.protocol))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let _ = writeln!(
-                out,
-                "  Service Port: {} (COLLISION DETECTED on {})",
-                report.port, collisions
+                "    WARNING: Port collision on {}:{} ({})",
+                col.ip, col.port, col.protocol
             );
         }
         let _ = writeln!(out, "  Honest Endpoints:");
@@ -537,7 +554,7 @@ pub fn doctor(report: &DoctorReport, json: bool) -> String {
         );
         let _ = writeln!(
             out,
-            "  Certificate Transparency Notice: {}",
+            "  Certificate Transparency Notice:\n    {}",
             report.certificate_transparency_notice
         );
         match &report.certificate {
@@ -550,8 +567,7 @@ pub fn doctor(report: &DoctorReport, json: bool) -> String {
                     let secs = countdown % 60;
                     let _ = writeln!(
                         out,
-                        "    Expiry Countdown: {}s ({}h {}m {}s)",
-                        countdown, hours, mins, secs
+                        "    Expiry Countdown: {countdown}s ({hours}h {mins}m {secs}s)"
                     );
                 } else {
                     let _ = writeln!(out, "    Expiry Countdown: unknown");
@@ -741,5 +757,45 @@ mod tests {
         assert!(text.contains("OS Permissions:"));
         assert!(text.contains("Capability Matrix:"));
         assert!(text.contains("Known Restrictions:"));
+    }
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn hosts_formats_direct_and_derp_relay_in_json_and_text() {
+        let peer_direct = fr_tailnet::DiscoveredPeer::from_parts(
+            "node-1".into(),
+            "peer1.ts.net".into(),
+            vec!["100.64.0.2".parse().unwrap()],
+            fr_tailnet::PeerTransportPath::Direct {
+                cur_addr: "192.168.1.100:41641".into(),
+            },
+        );
+        let peer_derp = fr_tailnet::DiscoveredPeer::from_parts(
+            "node-2".into(),
+            "peer2.ts.net".into(),
+            vec!["100.64.0.3".parse().unwrap()],
+            fr_tailnet::PeerTransportPath::DerpRelayed {
+                relay: "sfo".into(),
+            },
+        );
+        let discovery = fr_tailnet::Discovery::from_parts(
+            vec![peer_direct, peer_derp],
+            fr_tailnet::DiscoveryExclusions::default(),
+            1_000,
+            2_000,
+        );
+
+        let json = hosts(&discovery, true);
+        assert!(json.contains("\"schema_version\":1"));
+        assert!(
+            json.contains(
+                "\"transport_path\":{\"kind\":\"direct\",\"addr\":\"192.168.1.100:41641\"}"
+            )
+        );
+        assert!(json.contains("\"transport_path\":{\"kind\":\"derp_relayed\",\"relay\":\"sfo\"}"));
+        assert!(json.contains("\"warning\":\"tailnet_direct_path_unavailable\""));
+
+        let text = hosts(&discovery, false);
+        assert!(text.contains("[direct: 192.168.1.100:41641]"));
+        assert!(text.contains("[DERP RELAY: sfo - LATENCY ELEVATED]"));
     }
 }

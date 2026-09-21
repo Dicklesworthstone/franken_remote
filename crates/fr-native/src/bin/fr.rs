@@ -3,7 +3,6 @@
 #[cfg(target_os = "linux")]
 #[path = "fr_cli/linux.rs"]
 mod linux;
-#[cfg(target_os = "linux")]
 #[path = "fr_cli/options.rs"]
 mod options;
 #[path = "fr_cli/output.rs"]
@@ -21,9 +20,8 @@ impl Failure {
         Self { code, next, exit }
     }
 }
-#[cfg(target_os = "linux")]
 const HELP: &str = "FrankenRemote development client\n\nfr hosts [--json] [--socket /absolute/tailscaled.sock]\nfr doctor [--port 8443] [--socket /absolute/tailscaled.sock] [--trust-roots /absolute/local-ca-roots.pem] [--json]\nfr displays NODE_ID --experimental-native --trust-roots /absolute/local-ca-roots.pem\n    [--by-name] [--socket /absolute/tailscaled.sock] [--port 8443] [--ipv6] [--json]\nfr connect NODE_ID --view-only --experimental-native --display HANDLE|only|choose\n    --worker /absolute/fr-media-worker --trust-roots /absolute/local-ca-roots.pem\n    [--by-name] [--x-display :0] [--socket /absolute/tailscaled.sock]\n    [--port 8443] [--ipv6] [--attempts 1..32] [--fit WIDTHxHEIGHT] [--json]\n\nDoctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle.\nDiscovery lists machines, not installed/ready desktops or access permissions.\nDisplays requires host approval when configured; it starts no decoder or input.\n--display only explicitly selects the sole current display, refusing ambiguity.\n--display choose opens a native chooser in each approved connection.\n--fit bounds the fixed local window and explicitly enables CPU nearest-neighbour\naspect fitting; the remote display is not resized. Omit it for native pixels.\nConnect uses fresh installed-tailnet identity and strict TLS on every attempt.\n--by-name selects an exact canonical tailnet FQDN, never arbitrary DNS or URLs.\nNative transport/media remain unqualified. Control, clipboard, audio and files\nare NOT enabled by this view-only command. Set XAUTHORITY in the local environment\nwhen the window and worker require it. Close the window or use Ctrl-C to stop.\n";
-#[cfg(target_os = "linux")]
+
 fn main() -> ExitCode {
     let mut args = Vec::new();
     let mut json = false;
@@ -60,24 +58,17 @@ fn main() -> ExitCode {
             ExitCode::from(74)
         };
     }
+    #[cfg(target_os = "linux")]
     let result = linux::run(&parsed);
+    #[cfg(not(target_os = "linux"))]
+    let result = Err(Failure::new(
+        "platform_unavailable",
+        "Tailnet local authority integration in fr is currently implemented on Linux.",
+        2,
+    ));
     finish(result, parsed.json)
 }
-#[cfg(not(target_os = "linux"))]
-fn main() -> ExitCode {
-    let json = std::env::args_os()
-        .skip(1)
-        .take(32)
-        .any(|arg| arg == "--json");
-    finish(
-        Err(Failure::new(
-            "platform_unavailable",
-            "This executable currently implements only the Linux installed-tailnet/X11 path.",
-            2,
-        )),
-        json,
-    )
-}
+
 fn finish(result: Result<String, Failure>, json: bool) -> ExitCode {
     let (text, code) = match result {
         Ok(text) => (text, 0),

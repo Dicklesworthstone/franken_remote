@@ -2,9 +2,11 @@
 mod displays;
 #[path = "linux/doctor.rs"]
 mod doctor;
+#[cfg(feature = "linux-desktop")]
+use super::options::DisplayChoice;
 use super::{
     Failure,
-    options::{Command, Connection, DisplayChoice, DoctorOptions, Options, Target},
+    options::{Command, Connection, DoctorOptions, Options, Target},
     output,
 };
 use asupersync::{
@@ -14,6 +16,7 @@ use asupersync::{
     tls::Certificate,
     types::{Budget, CancelKind},
 };
+#[cfg(feature = "linux-desktop")]
 use fr_native::{
     desktop::{
         Configuration as DesktopConfiguration, Desktop,
@@ -21,25 +24,32 @@ use fr_native::{
     },
     viewer_window::{Status as WindowStatus, StopReason, WindowControl},
 };
-use fr_wire::{display::Catalog, negotiation::Offer};
+#[cfg(feature = "linux-desktop")]
+use fr_wire::display::Catalog;
+use fr_wire::negotiation::Offer;
+#[cfg(feature = "linux-desktop")]
+use frd::{
+    native_connection::reconnect::{self, CallbackError, Status},
+    session_startup::Presentation,
+};
 use frd::{
     native_connection::{
         AddressFamily, Client, Configuration, LocalApi, PeerSelector, TailnetError,
-        reconnect::{self, CallbackError, Status},
     },
-    session_startup::{ObserverPolicy, Presentation},
+    session_startup::ObserverPolicy,
 };
 use std::{
-    cell::{Cell, RefCell},
+    cell::Cell,
     fs::File,
     future::{Future, poll_fn},
     io::Read,
     path::Path,
     pin::pin,
-    rc::Rc,
     task::Poll,
     time::Duration,
 };
+#[cfg(feature = "linux-desktop")]
+use std::{cell::RefCell, rc::Rc};
 
 fn failure(code: &'static str, next: &'static str) -> Failure {
     Failure::new(code, next, 1)
@@ -205,6 +215,7 @@ pub fn run(options: &Options) -> Result<String, Failure> {
         ),
     }
 }
+#[cfg(feature = "linux-desktop")]
 fn connect(
     runtime: &Runtime,
     cx: &Cx,
@@ -297,6 +308,7 @@ fn connect(
     let result = runtime.block_on(shutdown.run(cx, stopped, operation));
     completed(&application, result, stopped.get(), &state.borrow(), json)
 }
+#[cfg(feature = "linux-desktop")]
 fn completed(
     application: &Session<Interface>,
     result: Result<(), reconnect::Failure>,
@@ -357,6 +369,23 @@ fn completed(
     Ok(completion(progress, json))
 }
 
+#[cfg(not(feature = "linux-desktop"))]
+fn connect(
+    _runtime: &Runtime,
+    _cx: &Cx,
+    _shutdown: &mut Shutdown,
+    _stopped: &Cell<bool>,
+    _api: LocalApi,
+    _connection: &Connection,
+    _json: bool,
+) -> Result<String, Failure> {
+    Err(Failure::new(
+        "gui_unavailable",
+        "Graphical session presentation requires building with `--features linux-desktop`. Standalone CLI commands (hosts, doctor, displays) are active.",
+        2,
+    ))
+}
+
 fn read_roots(path: &Path) -> Result<Vec<Certificate>, Failure> {
     let refused = || {
         failure(
@@ -393,6 +422,7 @@ fn offer() -> Offer {
     fr_client::native::observation_offer()
 }
 
+#[cfg(feature = "linux-desktop")]
 #[derive(Default)]
 struct Progress {
     attempts: u8,
@@ -403,6 +433,7 @@ struct Progress {
     user_closed: bool,
     window: Option<WindowControl>,
 }
+#[cfg(feature = "linux-desktop")]
 impl Progress {
     fn begin(&mut self, attempt: u8) {
         self.attempts = attempt;
@@ -424,10 +455,12 @@ impl Progress {
         }
     }
 }
+#[cfg(feature = "linux-desktop")]
 struct Interface {
     display: DisplayChoice,
     progress: Rc<RefCell<Progress>>,
 }
+#[cfg(feature = "linux-desktop")]
 impl Ui for Interface {
     fn choose(&mut self, _: u8, catalog: &Catalog) -> Result<Option<u128>, CallbackError> {
         let selected = self.display.select(catalog);
@@ -472,6 +505,7 @@ impl Ui for Interface {
         Ok(())
     }
 }
+#[cfg(feature = "linux-desktop")]
 fn completion(progress: &Progress, json: bool) -> String {
     if json {
         format!(
@@ -531,130 +565,167 @@ mod tests {
         assert_eq!(result, 42);
         assert!(stopped.get() && collected.get());
     }
-    #[test]
-    fn explicit_display_selection_never_falls_back_to_another_display() {
-        let mut ui = Interface {
-            display: DisplayChoice::Handle(99),
-            progress: Rc::new(RefCell::new(Progress::default())),
-        };
-        // Real wire catalog constructor also validates the selected display.
-        let display = fr_wire::display::Display {
-            handle: 9,
-            geometry: fr_core::ids::DisplayGeometryGeneration::INITIAL,
-            x: 0,
-            y: 0,
-            pixel_width: 320,
-            pixel_height: 240,
-            logical_width: 320,
-            logical_height: 240,
-            scale_numerator: 1,
-            scale_denominator: 1,
-            rotation: 0,
-        };
-        let catalog =
-            Catalog::new(1, &[display], &fr_core::limits::ProtocolLimits::ABSOLUTE).unwrap();
-        assert_eq!(ui.choose(1, &catalog), Err(CallbackError));
-        assert!(ui.progress.borrow().missing_display);
-    }
-    fn unused_session() -> Session<Interface> {
-        Session::new(
-            DesktopConfiguration::new(Path::new("/usr/bin/false"), ":0", None, 1).unwrap(),
-            ObserverPolicy::default(),
-            Mode::Observe,
-            Interface {
-                display: DisplayChoice::Handle(9),
+
+    #[cfg(feature = "linux-desktop")]
+    mod desktop_tests {
+        use super::*;
+
+        #[test]
+        fn explicit_display_selection_never_falls_back_to_another_display() {
+            let mut ui = Interface {
+                display: DisplayChoice::Handle(99),
                 progress: Rc::new(RefCell::new(Progress::default())),
-            },
-        )
-    }
-    #[test]
-    fn cleanup_stopping_a_window_is_not_evidence_of_a_user_close() {
-        let mut progress = Progress::default();
-        progress.begin(1);
-        for before in [
-            None,
-            Some(WindowStatus::Mapped),
-            Some(WindowStatus::Stopped(StopReason::SessionEnded)),
-            Some(WindowStatus::Stopped(StopReason::NativeFailure)),
-        ] {
-            assert_eq!(progress.before_cleanup(before), Ok(()));
-            assert!(!progress.user_closed);
-            // Programmatic cleanup may now publish Stopped(User). It is never
-            // sampled here: the failure must retain its original disposition.
+            };
+            // Real wire catalog constructor also validates the selected display.
+            let display = fr_wire::display::Display {
+                handle: 9,
+                geometry: fr_core::ids::DisplayGeometryGeneration::INITIAL,
+                x: 0,
+                y: 0,
+                pixel_width: 320,
+                pixel_height: 240,
+                logical_width: 320,
+                logical_height: 240,
+                scale_numerator: 1,
+                scale_denominator: 1,
+                rotation: 0,
+            };
+            let catalog =
+                Catalog::new(1, &[display], &fr_core::limits::ProtocolLimits::ABSOLUTE).unwrap();
+            assert_eq!(ui.choose(1, &catalog), Err(CallbackError));
+            assert!(ui.progress.borrow().missing_display);
+        }
+        fn unused_session() -> Session<Interface> {
+            Session::new(
+                DesktopConfiguration::new(Path::new("/usr/bin/false"), ":0", None, 1).unwrap(),
+                ObserverPolicy::default(),
+                Mode::Observe,
+                Interface {
+                    display: DisplayChoice::Handle(9),
+                    progress: Rc::new(RefCell::new(Progress::default())),
+                },
+            )
+        }
+        #[test]
+        fn cleanup_stopping_a_window_is_not_evidence_of_a_user_close() {
+            let mut progress = Progress::default();
+            progress.begin(1);
+            for before in [
+                None,
+                Some(WindowStatus::Mapped),
+                Some(WindowStatus::Stopped(StopReason::SessionEnded)),
+                Some(WindowStatus::Stopped(StopReason::NativeFailure)),
+            ] {
+                assert_eq!(progress.before_cleanup(before), Ok(()));
+                assert!(!progress.user_closed);
+                // Programmatic cleanup may now publish Stopped(User). It is never
+                // sampled here: the failure must retain its original disposition.
+                assert_eq!(
+                    completed(
+                        &unused_session(),
+                        Err(reconnect::Failure::Connection(
+                            frd::native_connection::Error::Tailnet(
+                                TailnetError::LocalApiUnavailable
+                            )
+                        )),
+                        false,
+                        &progress,
+                        true
+                    )
+                    .unwrap_err()
+                    .code,
+                    "tailscale_unavailable"
+                );
+            }
+        }
+        #[test]
+        fn recorded_user_close_requests_a_terminal_notice_and_keeps_its_disposition() {
+            let mut progress = Progress::default();
+            progress.begin(1);
             assert_eq!(
+                progress.before_cleanup(Some(WindowStatus::Stopped(StopReason::User))),
+                Err(CallbackError)
+            );
+            assert!(progress.user_closed);
+            assert!(
                 completed(
                     &unused_session(),
-                    Err(reconnect::Failure::Connection(
-                        frd::native_connection::Error::Tailnet(TailnetError::LocalApiUnavailable)
+                    Err(reconnect::Failure::Notification),
+                    false,
+                    &progress,
+                    true
+                )
+                .unwrap()
+                .contains("\"outcome\":\"stopped\"")
+            );
+        }
+        #[test]
+        fn a_new_attempt_cannot_inherit_the_old_windows_close_intent() {
+            let mut progress = Progress::default();
+            progress.begin(1);
+            let _ = progress.before_cleanup(Some(WindowStatus::Stopped(StopReason::User)));
+            progress.begin(2);
+            assert!(!progress.user_closed && progress.window.is_none());
+            assert_eq!(progress.before_cleanup(None), Ok(()));
+            assert!(
+                completed(
+                    &unused_session(),
+                    Err(reconnect::Failure::Observation(
+                        frd::session_startup::ObserverError::Order
                     )),
                     false,
                     &progress,
                     true
                 )
-                .unwrap_err()
-                .code,
-                "tailscale_unavailable"
+                .is_err()
             );
         }
-    }
-    #[test]
-    fn recorded_user_close_requests_a_terminal_notice_and_keeps_its_disposition() {
-        let mut progress = Progress::default();
-        progress.begin(1);
-        assert_eq!(
-            progress.before_cleanup(Some(WindowStatus::Stopped(StopReason::User))),
-            Err(CallbackError)
-        );
-        assert!(progress.user_closed);
-        assert!(
-            completed(
-                &unused_session(),
-                Err(reconnect::Failure::Notification),
-                false,
-                &progress,
-                true
-            )
-            .unwrap()
-            .contains("\"outcome\":\"stopped\"")
-        );
-    }
-    #[test]
-    fn a_new_attempt_cannot_inherit_the_old_windows_close_intent() {
-        let mut progress = Progress::default();
-        progress.begin(1);
-        let _ = progress.before_cleanup(Some(WindowStatus::Stopped(StopReason::User)));
-        progress.begin(2);
-        assert!(!progress.user_closed && progress.window.is_none());
-        assert_eq!(progress.before_cleanup(None), Ok(()));
-        assert!(
-            completed(
-                &unused_session(),
-                Err(reconnect::Failure::Observation(
-                    frd::session_startup::ObserverError::Order
-                )),
-                false,
-                &progress,
-                true
-            )
-            .is_err()
-        );
-    }
-    #[test]
-    fn supervisor_cleanup_failure_cannot_be_masked_by_a_user_close_or_signal() {
-        let mut progress = Progress::default();
-        let _ = progress.before_cleanup(Some(WindowStatus::Stopped(StopReason::User)));
-        for error in [
-            reconnect::Failure::Cleanup,
-            reconnect::Failure::CleanupExpired,
-        ] {
-            for signal in [false, true] {
-                assert_eq!(
-                    completed(&unused_session(), Err(error), signal, &progress, true)
-                        .unwrap_err()
-                        .code,
-                    "native_cleanup_incomplete"
-                );
+        #[test]
+        fn supervisor_cleanup_failure_cannot_be_masked_by_a_user_close_or_signal() {
+            let mut progress = Progress::default();
+            let _ = progress.before_cleanup(Some(WindowStatus::Stopped(StopReason::User)));
+            for error in [
+                reconnect::Failure::Cleanup,
+                reconnect::Failure::CleanupExpired,
+            ] {
+                for signal in [false, true] {
+                    assert_eq!(
+                        completed(&unused_session(), Err(error), signal, &progress, true)
+                            .unwrap_err()
+                            .code,
+                        "native_cleanup_incomplete"
+                    );
+                }
             }
         }
+    }
+
+    #[test]
+    #[cfg(not(feature = "linux-desktop"))]
+    fn connect_without_desktop_feature_returns_gui_unavailable() {
+        let options = crate::options::Connection {
+            target: crate::options::Target {
+                node: "node-1".into(),
+                by_name: false,
+                roots: std::path::PathBuf::from("/dev/null"),
+                port: 8443,
+                ipv6: false,
+            },
+            display: crate::options::DisplayChoice::Only,
+            worker: std::path::PathBuf::from("/dev/null"),
+            x_display: None,
+            attempts: 1,
+            fit_window: None,
+        };
+        let runtime = RuntimeBuilder::current_thread()
+            .enable_platform_reactor(true)
+            .build()
+            .unwrap();
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let mut shutdown = Shutdown::new().unwrap();
+        let stopped = Cell::new(false);
+        let api = LocalApi::new(std::path::Path::new("/dev/null")).unwrap();
+        let result = connect(&runtime, &cx, &mut shutdown, &stopped, api, &options, true);
+        assert_eq!(result.unwrap_err().code, "gui_unavailable");
     }
 }

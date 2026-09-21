@@ -24,6 +24,7 @@ pub struct Target {
     pub port: u16,
     pub ipv6: bool,
 }
+#[allow(dead_code)]
 pub struct Connection {
     pub target: Target,
     pub display: DisplayChoice,
@@ -41,6 +42,7 @@ pub enum DisplayChoice {
     Choose,
 }
 impl DisplayChoice {
+    #[allow(dead_code)]
     pub fn select(self, catalog: &fr_wire::display::Catalog) -> Option<u128> {
         match self {
             Self::Handle(handle) => catalog.find(handle).map(|d| d.handle),
@@ -129,6 +131,7 @@ fn fitted_size(dimensions: &str) -> Result<(u32, u32), Failure> {
     fr_media::worker::presentation::X11Target::new(1, width, height).map_err(|_| usage())?;
     Ok((width, height))
 }
+#[allow(clippy::too_many_lines)]
 fn parse_command(
     args: &[String],
     mut index: usize,
@@ -185,7 +188,7 @@ fn parse_command(
             "--trust-roots" if remote || doctor => roots = Some(path(value(&mut index)?)?),
             "--x-display" if connect => x_display = Some(value(&mut index)?),
             "--port" if remote || doctor => {
-                port = value(&mut index)?.parse().map_err(|_| usage())?
+                port = value(&mut index)?.parse().map_err(|_| usage())?;
             }
             "--attempts" if connect => {
                 attempts = value(&mut index)?.parse().map_err(|_| usage())?;
@@ -491,9 +494,8 @@ mod doctor_tests {
     #[test]
     fn parses_doctor_defaults_and_explicit_port() {
         let o = parse(&["doctor".into()]).unwrap();
-        let doc = match o.command {
-            Command::Doctor(doc) => doc,
-            _ => return assert!(false, "doctor required"),
+        let Command::Doctor(doc) = o.command else {
+            panic!("doctor required");
         };
         assert_eq!(doc.port, 8443);
         assert!(doc.roots.is_none());
@@ -511,9 +513,8 @@ mod doctor_tests {
             "--json".into(),
         ])
         .unwrap();
-        let doc = match o.command {
-            Command::Doctor(doc) => doc,
-            _ => return assert!(false, "doctor required"),
+        let Command::Doctor(doc) = o.command else {
+            panic!("doctor required");
         };
         assert_eq!(doc.port, 9443);
         assert_eq!(doc.roots, Some(PathBuf::from("/etc/ssl/roots.pem")));
