@@ -9,14 +9,11 @@
 //!
 //! Audio packets and parameters are strictly validated before any buffer allocation.
 
-use crate::{
-    HEADER_BYTES, Kind, Record, WireError,
-    record::Writer,
-};
+use crate::{HEADER_BYTES, Kind, Record, WireError, record::Writer};
 use fr_core::{
     audio::{
-        AudioChannels, AudioDirection, AudioStopReason, MAX_DECODED_SAMPLES,
-        MAX_JITTER_CEILING_MS, MAX_OPUS_PAYLOAD_BYTES, MAX_PACKET_DURATION_MS, OPUS_SAMPLE_RATE,
+        AudioChannels, AudioDirection, AudioStopReason, MAX_DECODED_SAMPLES, MAX_JITTER_CEILING_MS,
+        MAX_OPUS_PAYLOAD_BYTES, MAX_PACKET_DURATION_MS, OPUS_SAMPLE_RATE,
     },
     ids::AudioGeneration,
 };
@@ -55,9 +52,7 @@ impl AudioConfiguration {
         if self.frame_duration_ms == 0 || self.frame_duration_ms > MAX_PACKET_DURATION_MS {
             return Err(WireError::InvalidValue);
         }
-        if self.max_packet_bytes == 0
-            || (self.max_packet_bytes as usize) > MAX_OPUS_PAYLOAD_BYTES
-        {
+        if self.max_packet_bytes == 0 || (self.max_packet_bytes as usize) > MAX_OPUS_PAYLOAD_BYTES {
             return Err(WireError::ResourceLimit);
         }
         if self.max_decoded_samples == 0 || self.max_decoded_samples > MAX_DECODED_SAMPLES {
@@ -157,12 +152,7 @@ pub fn encode_configuration(
 }
 
 pub fn decode_configuration(bytes: &[u8], binding: u32) -> Result<AudioConfiguration, WireError> {
-    let rec = Record::decode_bounded(
-        bytes,
-        AUDIO_CONFIGURATION_RECORD_BYTES,
-        binding,
-        None,
-    )?;
+    let rec = Record::decode_bounded(bytes, AUDIO_CONFIGURATION_RECORD_BYTES, binding, None)?;
     if rec.kind() != Kind::AudioConfiguration {
         return Err(WireError::UnsupportedKind);
     }
@@ -219,12 +209,7 @@ pub fn encode_configured(
 }
 
 pub fn decode_configured(bytes: &[u8], binding: u32) -> Result<AudioConfigured, WireError> {
-    let rec = Record::decode_bounded(
-        bytes,
-        AUDIO_CONFIGURED_RECORD_BYTES,
-        binding,
-        None,
-    )?;
+    let rec = Record::decode_bounded(bytes, AUDIO_CONFIGURED_RECORD_BYTES, binding, None)?;
     if rec.kind() != Kind::AudioConfigured {
         return Err(WireError::UnsupportedKind);
     }
@@ -272,13 +257,7 @@ pub fn encode_packet(
         .checked_add(payload_len)
         .ok_or(WireError::ArithmeticOverflow)?;
 
-    let mut w = Writer::record_bounded(
-        out,
-        max_record,
-        binding,
-        Kind::AudioPacket,
-        total_payload,
-    )?;
+    let mut w = Writer::record_bounded(out, max_record, binding, Kind::AudioPacket, total_payload)?;
     w.u8(packet.direction as u8)?;
     w.u8(0)?; // reserved
     w.u16(packet.duration_samples)?;
@@ -341,12 +320,7 @@ pub fn encode_stop(stop: &AudioStop, binding: u32, out: &mut [u8]) -> Result<usi
 }
 
 pub fn decode_stop(bytes: &[u8], binding: u32) -> Result<AudioStop, WireError> {
-    let rec = Record::decode_bounded(
-        bytes,
-        AUDIO_STOP_RECORD_BYTES,
-        binding,
-        None,
-    )?;
+    let rec = Record::decode_bounded(bytes, AUDIO_STOP_RECORD_BYTES, binding, None)?;
     if rec.kind() != Kind::AudioStop {
         return Err(WireError::UnsupportedKind);
     }

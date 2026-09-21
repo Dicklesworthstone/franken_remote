@@ -93,7 +93,10 @@ impl AudioVideoSyncController {
         if skew_ms < -self.max_lag_ms {
             let lag_ms = (-skew_ms) as u32;
             let drop_samples = (lag_ms * (OPUS_SAMPLE_RATE / 1000)) as u32;
-            AvAlignment::AudioLagging { lag_ms, drop_samples }
+            AvAlignment::AudioLagging {
+                lag_ms,
+                drop_samples,
+            }
         } else if skew_ms > self.max_lead_ms {
             let lead_ms = skew_ms as u32;
             AvAlignment::AudioLeading { lead_ms }
@@ -114,7 +117,10 @@ mod tests {
 
         sync.update_video_presentation(1000);
         // 48,000 samples at 48 kHz = 1000 ms -> perfectly aligned (skew 0)
-        assert_eq!(sync.check_alignment(48_000), AvAlignment::Synchronized { skew_ms: 0 });
+        assert_eq!(
+            sync.check_alignment(48_000),
+            AvAlignment::Synchronized { skew_ms: 0 }
+        );
     }
 
     #[test]
@@ -125,7 +131,10 @@ mod tests {
         // Audio at 800 ms (lag of 200 ms > 100 ms max lag)
         let audio_samples = 800 * 48; // 38,400 samples
         match sync.check_alignment(audio_samples) {
-            AvAlignment::AudioLagging { lag_ms, drop_samples } => {
+            AvAlignment::AudioLagging {
+                lag_ms,
+                drop_samples,
+            } => {
                 assert_eq!(lag_ms, 200);
                 assert_eq!(drop_samples, 200 * 48);
             }
@@ -155,10 +164,16 @@ mod tests {
 
         // Audio at 1020 ms (+20 ms lead, within 120 ms)
         let audio_samples = 1020 * 48;
-        assert_eq!(sync.check_alignment(audio_samples), AvAlignment::Synchronized { skew_ms: 20 });
+        assert_eq!(
+            sync.check_alignment(audio_samples),
+            AvAlignment::Synchronized { skew_ms: 20 }
+        );
 
         // Audio at 960 ms (-40 ms lag, within 100 ms)
         let audio_samples = 960 * 48;
-        assert_eq!(sync.check_alignment(audio_samples), AvAlignment::Synchronized { skew_ms: -40 });
+        assert_eq!(
+            sync.check_alignment(audio_samples),
+            AvAlignment::Synchronized { skew_ms: -40 }
+        );
     }
 }

@@ -16,9 +16,7 @@ use fr_media::audio::{
     AudioAccessUnit, AudioDecoder, AudioEncoder, AudioPcmFrame, AudioResampler,
     SyntheticAudioDecoder, SyntheticAudioEncoder,
 };
-use fr_wire::audio::{
-    decode_packet, encode_packet, AUDIO_PACKET_OVERHEAD,
-};
+use fr_wire::audio::{AUDIO_PACKET_OVERHEAD, decode_packet, encode_packet};
 
 #[test]
 fn windows_loopback_scope_disclosure_verification() {
@@ -139,7 +137,9 @@ fn e2e_audio_pipeline_with_induced_loss_and_plc() {
                 assert_eq!(pcm.samples_per_channel(), 480);
                 played_count += 1;
             }
-            JitterDrainResult::Plc { duration_samples, .. } => {
+            JitterDrainResult::Plc {
+                duration_samples, ..
+            } => {
                 let pcm = decoder.decode_plc(duration_samples).unwrap();
                 assert_eq!(pcm.samples_per_channel(), duration_samples as usize);
                 plc_count += 1;
@@ -163,26 +163,10 @@ fn device_switch_generation_reset_prevents_stale_buffered_audio() {
     let mut jb = AudioJitterBuffer::new(gen1, 20);
 
     let payload = [0xAA; 16];
-    let p0 = AudioAccessUnit::new(
-        AudioDirection::Downlink,
-        gen1,
-        0,
-        0,
-        480,
-        false,
-        &payload,
-    )
-    .unwrap();
-    let p1 = AudioAccessUnit::new(
-        AudioDirection::Downlink,
-        gen1,
-        1,
-        480,
-        480,
-        false,
-        &payload,
-    )
-    .unwrap();
+    let p0 =
+        AudioAccessUnit::new(AudioDirection::Downlink, gen1, 0, 0, 480, false, &payload).unwrap();
+    let p1 =
+        AudioAccessUnit::new(AudioDirection::Downlink, gen1, 1, 480, 480, false, &payload).unwrap();
 
     assert!(jb.push_packet(p0));
     assert!(jb.push_packet(p1));
@@ -197,29 +181,13 @@ fn device_switch_generation_reset_prevents_stale_buffered_audio() {
     assert_eq!(jb.drain(), JitterDrainResult::Underrun);
 
     // Late packet from old generation is rejected
-    let late_p2 = AudioAccessUnit::new(
-        AudioDirection::Downlink,
-        gen1,
-        2,
-        960,
-        480,
-        false,
-        &payload,
-    )
-    .unwrap();
+    let late_p2 =
+        AudioAccessUnit::new(AudioDirection::Downlink, gen1, 2, 960, 480, false, &payload).unwrap();
     assert!(!jb.push_packet(late_p2));
 
     // Fresh packet from new generation is accepted
-    let fresh_p0 = AudioAccessUnit::new(
-        AudioDirection::Downlink,
-        gen2,
-        0,
-        0,
-        480,
-        false,
-        &payload,
-    )
-    .unwrap();
+    let fresh_p0 =
+        AudioAccessUnit::new(AudioDirection::Downlink, gen2, 0, 0, 480, false, &payload).unwrap();
     assert!(jb.push_packet(fresh_p0));
     assert_eq!(jb.queued_packet_count(), 1);
 }
@@ -234,7 +202,10 @@ fn bounded_av_offset_video_never_held_for_delayed_audio() {
     // Audio is lagging behind video by 150 ms (at t = 1850 ms -> 1850 * 48 = 88,800 samples)
     let audio_lag_samples = 1850 * 48;
     match sync.check_alignment(audio_lag_samples) {
-        AvAlignment::AudioLagging { lag_ms, drop_samples } => {
+        AvAlignment::AudioLagging {
+            lag_ms,
+            drop_samples,
+        } => {
             assert_eq!(lag_ms, 150);
             assert_eq!(drop_samples, 150 * 48);
         }
@@ -269,7 +240,8 @@ fn client_volume_control_instant_mute_and_persistence() {
     // Software attenuation applied to PCM frame
     let generation = AudioGeneration::INITIAL;
     let samples = [1000i16, 2000i16, -1000i16, -2000i16];
-    let mut frame = AudioPcmFrame::from_interleaved(generation, AudioChannels::Stereo, 0, &samples).unwrap();
+    let mut frame =
+        AudioPcmFrame::from_interleaved(generation, AudioChannels::Stereo, 0, &samples).unwrap();
 
     volume_ctrl.apply_to_pcm(&mut frame);
     assert_eq!(frame.samples(), &[0, 0, 0, 0]);
@@ -279,7 +251,8 @@ fn client_volume_control_instant_mute_and_persistence() {
     volume_ctrl.set_volume(0.5);
     assert_eq!(volume_ctrl.effective_gain(), 0.5);
 
-    let mut frame2 = AudioPcmFrame::from_interleaved(generation, AudioChannels::Stereo, 0, &samples).unwrap();
+    let mut frame2 =
+        AudioPcmFrame::from_interleaved(generation, AudioChannels::Stereo, 0, &samples).unwrap();
     volume_ctrl.apply_to_pcm(&mut frame2);
     assert_eq!(frame2.samples(), &[500, 1000, -500, -1000]);
 

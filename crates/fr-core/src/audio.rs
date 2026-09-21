@@ -38,8 +38,7 @@ pub const MAX_JITTER_CEILING_MS: u16 = 100;
 pub const DEFAULT_JITTER_TARGET_MS: u16 = 20;
 
 /// Mandatory disclosure for Windows audio capture per plan section 15.4.
-pub const WINDOWS_ENDPOINT_SCOPE_DISCLOSURE: &str =
-    "Windows endpoint loopback captures system-wide audio across all terminal sessions, not isolated to the selected desktop user or application.";
+pub const WINDOWS_ENDPOINT_SCOPE_DISCLOSURE: &str = "Windows endpoint loopback captures system-wide audio across all terminal sessions, not isolated to the selected desktop user or application.";
 
 /// Audio transmission direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -132,8 +131,14 @@ pub enum AudioConfigError {
 impl fmt::Display for AudioConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidDuration => write!(f, "invalid packet duration; max is {MAX_PACKET_DURATION_MS} ms"),
-            Self::InvalidJitterTarget => write!(f, "jitter target exceeds ceiling of {MAX_JITTER_CEILING_MS} ms"),
+            Self::InvalidDuration => write!(
+                f,
+                "invalid packet duration; max is {MAX_PACKET_DURATION_MS} ms"
+            ),
+            Self::InvalidJitterTarget => write!(
+                f,
+                "jitter target exceeds ceiling of {MAX_JITTER_CEILING_MS} ms"
+            ),
             Self::ZeroChannels => write!(f, "channels must be 1 (mono) or 2 (stereo)"),
         }
     }
@@ -265,25 +270,49 @@ mod tests {
 
         // Zero duration rejected
         assert_eq!(
-            AudioStreamConfig::new(AudioDirection::Downlink, generation, AudioChannels::Stereo, 0, 20),
+            AudioStreamConfig::new(
+                AudioDirection::Downlink,
+                generation,
+                AudioChannels::Stereo,
+                0,
+                20
+            ),
             Err(AudioConfigError::InvalidDuration)
         );
 
         // Excessive duration rejected
         assert_eq!(
-            AudioStreamConfig::new(AudioDirection::Downlink, generation, AudioChannels::Stereo, 121, 20),
+            AudioStreamConfig::new(
+                AudioDirection::Downlink,
+                generation,
+                AudioChannels::Stereo,
+                121,
+                20
+            ),
             Err(AudioConfigError::InvalidDuration)
         );
 
         // Zero jitter target rejected
         assert_eq!(
-            AudioStreamConfig::new(AudioDirection::Downlink, generation, AudioChannels::Stereo, 10, 0),
+            AudioStreamConfig::new(
+                AudioDirection::Downlink,
+                generation,
+                AudioChannels::Stereo,
+                10,
+                0
+            ),
             Err(AudioConfigError::InvalidJitterTarget)
         );
 
         // Jitter exceeding ceiling rejected
         assert_eq!(
-            AudioStreamConfig::new(AudioDirection::Downlink, generation, AudioChannels::Stereo, 10, 101),
+            AudioStreamConfig::new(
+                AudioDirection::Downlink,
+                generation,
+                AudioChannels::Stereo,
+                10,
+                101
+            ),
             Err(AudioConfigError::InvalidJitterTarget)
         );
     }

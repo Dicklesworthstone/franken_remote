@@ -220,7 +220,8 @@ impl AudioJitterBuffer {
                 // First packet drained: anchor expected sequence
                 let packet = self.pop_first_packet();
                 self.next_expected_sequence = Some(packet.sequence() + 1);
-                self.playout_sample_timestamp = packet.timestamp_samples() + (packet.duration_samples() as u64);
+                self.playout_sample_timestamp =
+                    packet.timestamp_samples() + (packet.duration_samples() as u64);
                 self.metrics.packets_played += 1;
                 self.metrics.current_depth_ms = self.current_depth_ms();
                 JitterDrainResult::Packet(packet)
@@ -229,7 +230,8 @@ impl AudioJitterBuffer {
                 if first.sequence() == expected_seq {
                     let packet = self.pop_first_packet();
                     self.next_expected_sequence = Some(expected_seq + 1);
-                    self.playout_sample_timestamp = packet.timestamp_samples() + (packet.duration_samples() as u64);
+                    self.playout_sample_timestamp =
+                        packet.timestamp_samples() + (packet.duration_samples() as u64);
                     self.metrics.packets_played += 1;
                     self.metrics.current_depth_ms = self.current_depth_ms();
                     JitterDrainResult::Packet(packet)
@@ -274,7 +276,11 @@ mod tests {
     use super::*;
     use fr_core::audio::AudioDirection;
 
-    fn make_test_packet(generation: AudioGeneration, sequence: u64, timestamp: u64) -> AudioAccessUnit {
+    fn make_test_packet(
+        generation: AudioGeneration,
+        sequence: u64,
+        timestamp: u64,
+    ) -> AudioAccessUnit {
         let payload = [0x42u8; 16];
         AudioAccessUnit::new(
             AudioDirection::Downlink,
@@ -357,7 +363,10 @@ mod tests {
 
         // Drain next: 1 is missing, should trigger PLC
         match jb.drain() {
-            JitterDrainResult::Plc { missing_sequence, duration_samples } => {
+            JitterDrainResult::Plc {
+                missing_sequence,
+                duration_samples,
+            } => {
                 assert_eq!(missing_sequence, 1);
                 assert_eq!(duration_samples, 480);
             }

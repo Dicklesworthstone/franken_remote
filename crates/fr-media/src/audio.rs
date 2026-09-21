@@ -22,11 +22,11 @@
 //! - [`AudioEncoder`] and [`AudioDecoder`] contracts with typed backpressure and error states.
 //! - [`SyntheticAudioEncoder`] and [`SyntheticAudioDecoder`] test doubles for deterministic testing and qualification.
 
+use core::fmt;
 use fr_core::audio::{
     AudioChannels, AudioConfigError, AudioDirection, AudioGeneration, AudioStreamConfig,
     MAX_DECODED_SAMPLES, MAX_OPUS_PAYLOAD_BYTES, OPUS_SAMPLE_RATE,
 };
-use core::fmt;
 
 /// Maximum number of interleaved samples stored in an [`AudioPcmFrame`] (stereo at max duration).
 pub const MAX_PCM_BUFFER_SAMPLES: usize = (MAX_DECODED_SAMPLES as usize) * 2;
@@ -505,7 +505,9 @@ impl AudioResampler {
         }
 
         // Adjust phase accumulator relative to current chunk end
-        self.phase_num = self.phase_num.saturating_sub((in_frames as u64) * self.step_den);
+        self.phase_num = self
+            .phase_num
+            .saturating_sub((in_frames as u64) * self.step_den);
 
         output_frame.generation = generation;
         output_frame.channels = self.output_channels;
@@ -818,11 +820,15 @@ mod tests {
         assert_eq!(AudioSampleFormat::F32Le.bytes_per_sample(), 4);
 
         let i16_bytes = 16384i16.to_le_bytes();
-        let f = AudioSampleFormat::I16Le.decode_sample_f32(&i16_bytes).unwrap();
+        let f = AudioSampleFormat::I16Le
+            .decode_sample_f32(&i16_bytes)
+            .unwrap();
         assert!((f - 0.5).abs() < 0.001);
 
         let f32_bytes = 0.5f32.to_le_bytes();
-        let s = AudioSampleFormat::F32Le.decode_sample_i16(&f32_bytes).unwrap();
+        let s = AudioSampleFormat::F32Le
+            .decode_sample_i16(&f32_bytes)
+            .unwrap();
         assert!((s - 16383).abs() <= 1);
     }
 
@@ -834,7 +840,9 @@ mod tests {
         assert_eq!(frame.rms_energy(), 0.0);
 
         let samples = [1000i16, -1000i16, 2000i16, -2000i16];
-        let frame2 = AudioPcmFrame::from_interleaved(generation, AudioChannels::Stereo, 100, &samples).unwrap();
+        let frame2 =
+            AudioPcmFrame::from_interleaved(generation, AudioChannels::Stereo, 100, &samples)
+                .unwrap();
         assert_eq!(frame2.samples_per_channel(), 2);
         assert_eq!(frame2.total_samples(), 4);
         assert!(frame2.rms_energy() > 0.0);
@@ -871,7 +879,9 @@ mod tests {
         encoder.configure(config).unwrap();
 
         let samples = vec![1234i16; 480 * 2];
-        let pcm_in = AudioPcmFrame::from_interleaved(generation, AudioChannels::Stereo, 0, &samples).unwrap();
+        let pcm_in =
+            AudioPcmFrame::from_interleaved(generation, AudioChannels::Stereo, 0, &samples)
+                .unwrap();
         encoder.submit_pcm(&pcm_in).unwrap();
 
         let packet = encoder.poll_packet().unwrap().expect("packet ready");

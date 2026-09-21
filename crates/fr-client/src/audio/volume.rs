@@ -1,8 +1,5 @@
 #![forbid(unsafe_code)]
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::float_cmp
-)]
+#![allow(clippy::cast_possible_truncation, clippy::float_cmp)]
 //! Client-side volume control and instant mute for remote playback audio (Plan §15.4).
 //!
 //! # Invariants:
@@ -82,11 +79,7 @@ impl AudioVolumeControl {
     /// If muted, returns `0.0`. Otherwise returns `self.volume`.
     #[must_use]
     pub fn effective_gain(&self) -> f32 {
-        if self.muted {
-            0.0
-        } else {
-            self.volume
-        }
+        if self.muted { 0.0 } else { self.volume }
     }
 
     /// Applies volume gain or mute in-place to an [`AudioPcmFrame`] using saturating arithmetic.
@@ -130,7 +123,12 @@ impl HostAudioSettings {
     /// Formats settings as a simple single-line string: `host_id=volume,muted`.
     #[must_use]
     pub fn serialize_line(&self) -> String {
-        format!("{}={:.4},{}", self.host_id, self.volume, i32::from(self.muted))
+        format!(
+            "{}={:.4},{}",
+            self.host_id,
+            self.volume,
+            i32::from(self.muted)
+        )
     }
 
     /// Parses a single-line string into [`HostAudioSettings`].
@@ -157,7 +155,9 @@ pub struct HostAudioStore {
 impl HostAudioStore {
     #[must_use]
     pub const fn new() -> Self {
-        Self { records: Vec::new() }
+        Self {
+            records: Vec::new(),
+        }
     }
 
     /// Retrieves volume and mute controller for a given host, or default if unset.
@@ -247,7 +247,9 @@ mod tests {
 
         let generation = AudioGeneration::INITIAL;
         let samples = [1000i16, -2000i16, 3000i16, -4000i16];
-        let mut frame = AudioPcmFrame::from_interleaved(generation, AudioChannels::Stereo, 0, &samples).unwrap();
+        let mut frame =
+            AudioPcmFrame::from_interleaved(generation, AudioChannels::Stereo, 0, &samples)
+                .unwrap();
 
         ctrl.apply_to_pcm(&mut frame);
         assert_eq!(frame.samples(), &[500i16, -1000i16, 1500i16, -2000i16]);

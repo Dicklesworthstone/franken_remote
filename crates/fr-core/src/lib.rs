@@ -23,4 +23,3 @@ pub mod input_sequence;
 pub mod input_submission;
 pub mod limits;
 pub mod time;
-
