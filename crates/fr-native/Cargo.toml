@@ -31,6 +31,8 @@ linux-media = []
 linux-opus = []
 # Wire-to-codec worker boundary; still no native audio-device or CLI dependency.
 linux-audio-playout = ["linux-opus", "dep:fr-client"]
+# Native local PulseAudio output, no alternate Rust runtime or default device.
+linux-pulse-playback = ["linux-audio-playout"]
 linux-displays = ["linux-media"]
 linux-input = []
 linux-clipboard = []

@@ -1,0 +1,58 @@
+name: Verify native audio output
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fr-native/src/pulse*'
+      - 'crates/fr-native/src/pulse/**'
+      - 'crates/fr-native/tests/pulse*'
+      - 'crates/fr-native/tests/pulse_support/**'
+      - 'scripts/verify-pulse-playback.sh'
+      - '.github/workflows/verify-pulse-playback.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Install native test server and pinned Rust
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+      - name: Retain matching Debian native inputs for offline device verification
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pulse-inputs"
+          docker run --rm -v "$RUNNER_TEMP/pulse-inputs:/out" debian:trixie-slim sh -ec '
+            apt-get update
+            apt-get -y --download-only --no-install-recommends install pulseaudio pulseaudio-utils libpulse-dev
+            cp /var/cache/apt/archives/*.deb /out/
+            cd /out && sha256sum *.deb > SHA256SUMS
+          '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: pulse-native-build-inputs
+          path: ${{ runner.temp }}/pulse-inputs/
+          retention-days: 7
+          if-no-files-found: error
+      - name: Exercise actual local server, output monitor and bounded retirement
+        run: |
+          set -euo pipefail
+          compiler="$(dirname "$(dirname "$(rustup which rustc)")")"
+          docker run --rm -v "$PWD:/repo:ro" -v "$compiler:/toolchain:ro" debian:trixie-slim sh -ec '
+            apt-get update
+            apt-get install -y --no-install-recommends build-essential ca-certificates pulseaudio pulseaudio-utils python3 libopus0
+            useradd --create-home --uid 1000 frtest
+            su frtest -s /bin/sh -c "cd /repo && PATH=/toolchain/bin:\$PATH CARGO_TARGET_DIR=/tmp/fr-pulse-target ./scripts/verify-pulse-playback.sh"
+          '
+
