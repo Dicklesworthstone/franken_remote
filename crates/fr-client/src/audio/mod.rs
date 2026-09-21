@@ -9,6 +9,7 @@
 //! - Strict A/V sync bounds: fresh video is never held behind delayed audio.
 
 pub mod jitter;
+pub mod playout;
 pub mod sync;
 pub mod volume;
 

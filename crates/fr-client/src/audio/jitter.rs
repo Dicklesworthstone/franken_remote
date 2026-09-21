@@ -143,6 +143,12 @@ impl AudioJitterBuffer {
     pub const fn metrics(&self) -> JitterBufferMetrics {
         self.metrics
     }
+    pub(super) fn contains_sequence(&self, sequence: u64) -> bool {
+        self.slots[..self.slot_count]
+            .iter()
+            .flatten()
+            .any(|packet| packet.sequence() == sequence)
+    }
     pub const fn queued_packet_count(&self) -> usize {
         self.slot_count
     }
