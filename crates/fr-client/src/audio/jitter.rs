@@ -1,51 +1,54 @@
 #![forbid(unsafe_code)]
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_lossless,
-    clippy::cast_sign_loss,
-    clippy::large_enum_variant,
-    clippy::large_stack_arrays,
-    clippy::collapsible_if,
-    clippy::needless_range_loop,
-    clippy::manual_let_else,
-    clippy::single_match_else,
-    clippy::comparison_chain
-)]
-//! Bounded client audio jitter buffer with packet loss concealment (PLC) and strict ceiling.
+//! Bounded, negotiated audio reordering and sample-timed concealment.
 //!
-//! Conforms to plan section 15.4:
-//! - Small bounded adaptive jitter buffer.
-//! - Strict ceiling of [`MAX_JITTER_CEILING_MS`] (100 ms).
-//! - Late packets arriving behind playout position are discarded immediately.
-//! - Out-of-order packets are reordered by sequence number.
-//! - Packet loss triggers PLC without blocking video or advancing fake clocks.
-//! - Device switch or reconnect immediately resets the generation and clears old samples,
-//!   preventing stale buffered audio from ever playing after resume.
+//! The queue is not an audio clock or an authority grant. A playout owner must
+//! pace drains, enforce original deadlines and recheck audio permission. Before
+//! the first decode, obsolete startup packets may be evicted. Afterwards a
+//! discontinuity fences the generation instead of skipping decoder history or
+//! generating an unbounded train of concealment frames.
 
 use fr_core::audio::{
-    AudioGeneration, MAX_JITTER_CEILING_MS, NOMINAL_SAMPLES_PER_FRAME, OPUS_SAMPLE_RATE,
+    AudioDirection, AudioGeneration, AudioStreamConfig, MAX_JITTER_CEILING_MS,
+    NOMINAL_SAMPLES_PER_FRAME, OPUS_SAMPLE_RATE,
 };
 use fr_media::audio::AudioAccessUnit;
 
-/// Maximum number of queued packets in the jitter buffer.
-/// At 10 ms per packet, 16 packets represents 160 ms capacity, clamped by the 100 ms ceiling.
 pub const JITTER_BUFFER_CAPACITY: usize = 16;
+const CEILING_SAMPLES: u64 = OPUS_SAMPLE_RATE as u64 * MAX_JITTER_CEILING_MS as u64 / 1000;
 
-/// Playout outcome when draining the jitter buffer.
 #[derive(Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum JitterDrainResult {
-    /// Playout packet is ready.
     Packet(AudioAccessUnit),
-    /// A packet was lost; the decoder should synthesize concealment waveform (PLC).
+    /// Concealment is an explicit missing sequence, never observed source audio.
     Plc {
         missing_sequence: u64,
         duration_samples: u16,
     },
-    /// Jitter buffer underrun or waiting for initial prebuffer depth.
     Underrun,
 }
 
-/// Jitter buffer performance and loss diagnostic counters.
+/// Sanitized metadata errors. A terminal error remains visible until a strictly
+/// newer generation is configured; rejected packets never repair that state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JitterError {
+    InvalidConfiguration,
+    WrongDirection,
+    WrongDuration,
+    Timeline,
+    CounterOverflow,
+    WindowExceeded,
+    ConcealmentExhausted,
+    GenerationNotAdvanced,
+    Stopped,
+}
+impl core::fmt::Display for JitterError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "audio-jitter: {self:?}")
+    }
+}
+impl std::error::Error for JitterError {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct JitterBufferMetrics {
     pub packets_received: u64,
@@ -55,219 +58,316 @@ pub struct JitterBufferMetrics {
     pub plc_concealment_events: u64,
     pub underrun_count: u64,
     pub current_depth_ms: u16,
+    pub packets_refused: u64,
+    pub discontinuities: u64,
 }
 
-/// Small bounded adaptive jitter buffer.
 pub struct AudioJitterBuffer {
     generation: AudioGeneration,
+    direction: AudioDirection,
+    duration_samples: u16,
     target_depth_ms: u16,
-    ceiling_ms: u16,
     slots: [Option<AudioAccessUnit>; JITTER_BUFFER_CAPACITY],
     slot_count: usize,
-    next_expected_sequence: Option<u64>,
-    playout_sample_timestamp: u64,
+    next: Option<(u64, u64)>, // Next sequence and sample position, not wall time.
+    concealed_samples: u64,
+    error: Option<JitterError>,
     is_prebuffering: bool,
     metrics: JitterBufferMetrics,
 }
 
 impl AudioJitterBuffer {
-    /// Creates a new jitter buffer bound to an initial audio generation and target delay.
-    #[must_use]
+    /// Compatibility constructor for nominal 10 ms downlink packets. Other
+    /// admitted formats must use `with_config`, not guessed PLC durations.
+    // Fixed 16-packet storage; constructed outside the audio callback, no hot-path allocation.
+    #[allow(clippy::large_stack_arrays)]
     pub fn new(generation: AudioGeneration, target_depth_ms: u16) -> Self {
-        let clamped_target = target_depth_ms.clamp(10, MAX_JITTER_CEILING_MS);
         Self {
             generation,
-            target_depth_ms: clamped_target,
-            ceiling_ms: MAX_JITTER_CEILING_MS,
+            direction: AudioDirection::Downlink,
+            duration_samples: NOMINAL_SAMPLES_PER_FRAME,
+            target_depth_ms: target_depth_ms.clamp(10, MAX_JITTER_CEILING_MS),
             slots: [None; JITTER_BUFFER_CAPACITY],
             slot_count: 0,
-            next_expected_sequence: None,
-            playout_sample_timestamp: 0,
+            next: None,
+            concealed_samples: 0,
+            error: None,
             is_prebuffering: true,
             metrics: JitterBufferMetrics::default(),
         }
     }
 
-    /// Resets the jitter buffer on device change, reconnect, or generation switch.
-    ///
-    /// Drops all buffered packets so obsolete audio cannot play after resume (Plan §15.4).
-    pub fn reset_generation(&mut self, new_generation: AudioGeneration) {
-        self.generation = new_generation;
-        self.slots.fill(None);
-        self.slot_count = 0;
-        self.next_expected_sequence = None;
-        self.playout_sample_timestamp = 0;
-        self.is_prebuffering = true;
-        self.metrics.current_depth_ms = 0;
+    /// Retain the negotiated direction and packet duration. A 120 ms packet
+    /// cannot fit the 100 ms playout ceiling; reject rather than weaken either
+    /// the queue bound or negotiation. Small packets also obey the 16-slot cap.
+    pub fn with_config(config: AudioStreamConfig) -> Result<Self, JitterError> {
+        if !matches!(config.frame_duration_ms(), 5 | 10 | 20 | 40 | 60 | 80 | 100) {
+            return Err(JitterError::InvalidConfiguration);
+        }
+        let packets = config
+            .jitter_target_ms()
+            .div_ceil(config.frame_duration_ms());
+        if usize::from(packets) > JITTER_BUFFER_CAPACITY
+            || u32::from(packets) * u32::from(config.frame_duration_ms())
+                > u32::from(MAX_JITTER_CEILING_MS)
+        {
+            return Err(JitterError::InvalidConfiguration);
+        }
+        let mut buffer = Self::new(config.generation(), config.jitter_target_ms());
+        buffer.direction = config.direction();
+        buffer.duration_samples = u16::try_from(config.expected_samples_per_frame())
+            .map_err(|_| JitterError::InvalidConfiguration)?;
+        buffer.target_depth_ms = config.jitter_target_ms();
+        Ok(buffer)
     }
 
-    #[must_use]
+    /// Invalid resets clear sound but do not lower the retired-generation floor.
+    pub fn reset_generation(&mut self, new_generation: AudioGeneration) {
+        if !new_generation.supersedes(self.generation) {
+            self.fail(JitterError::GenerationNotAdvanced);
+            return;
+        }
+        self.clear();
+        self.generation = new_generation;
+        self.error = None;
+    }
+    pub fn stop(&mut self) {
+        self.fail(JitterError::Stopped);
+    }
     pub const fn generation(&self) -> AudioGeneration {
         self.generation
     }
-
-    #[must_use]
     pub const fn target_depth_ms(&self) -> u16 {
         self.target_depth_ms
     }
-
-    #[must_use]
     pub const fn metrics(&self) -> JitterBufferMetrics {
         self.metrics
     }
-
-    #[must_use]
     pub const fn queued_packet_count(&self) -> usize {
         self.slot_count
     }
-
-    /// Computes current buffered depth in milliseconds.
-    #[must_use]
-    pub fn current_depth_ms(&self) -> u16 {
-        let mut total_samples: u32 = 0;
-        for slot in self.slots.iter().flatten() {
-            total_samples += slot.duration_samples() as u32;
+    pub const fn error(&self) -> Option<JitterError> {
+        self.error
+    }
+    /// The next audio sample position, only after a real packet was drained.
+    pub const fn next_sample_timestamp(&self) -> Option<u64> {
+        match self.next {
+            Some((_, at)) => Some(at),
+            None => None,
         }
-        let ms = (total_samples * 1000) / OPUS_SAMPLE_RATE;
-        ms.min(u32::from(u16::MAX)) as u16
+    }
+    pub fn current_depth_ms(&self) -> u16 {
+        // At most 16 admitted packets of at most 100 ms; no untrusted arithmetic.
+        let samples = u32::try_from(self.slot_count).expect("bounded jitter capacity")
+            * u32::from(self.duration_samples);
+        u16::try_from(samples * 1000 / OPUS_SAMPLE_RATE).unwrap_or(u16::MAX)
     }
 
-    /// Submits a packet to the jitter buffer.
-    ///
-    /// Validates generation, discards duplicates, drops late packets, and orders out-of-order arrivals.
+    /// Legacy boolean admission; `try_push_packet` preserves refusal causes.
     pub fn push_packet(&mut self, packet: AudioAccessUnit) -> bool {
-        // Enforce audio generation fencing
+        self.try_push_packet(packet).unwrap_or(false)
+    }
+    pub fn try_push_packet(&mut self, packet: AudioAccessUnit) -> Result<bool, JitterError> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
         if packet.generation() != self.generation {
-            return false;
+            return Ok(false);
         }
-
-        self.metrics.packets_received += 1;
-
-        // Late packet check: if we already played past this sequence, discard immediately
-        if let Some(expected_seq) = self.next_expected_sequence {
-            if packet.sequence() < expected_seq {
-                self.metrics.packets_late_discarded += 1;
-                return false;
-            }
+        self.metrics.packets_received = self.metrics.packets_received.saturating_add(1);
+        let result = self.insert(&packet);
+        if result.is_err() {
+            self.metrics.packets_refused = self.metrics.packets_refused.saturating_add(1);
         }
+        result
+    }
 
-        // Duplicate check
-        for slot in self.slots.iter().flatten() {
-            if slot.sequence() == packet.sequence() {
-                self.metrics.packets_duplicate_discarded += 1;
-                return false;
-            }
+    fn insert(&mut self, packet: &AudioAccessUnit) -> Result<bool, JitterError> {
+        if packet.direction() != self.direction {
+            return Err(JitterError::WrongDirection);
         }
-
-        // Check if buffer is full or would exceed strict ceiling
-        let incoming_duration_ms = (packet.duration_samples() as u32 * 1000) / OPUS_SAMPLE_RATE;
-        if self.slot_count >= JITTER_BUFFER_CAPACITY
-            || self.current_depth_ms() + (incoming_duration_ms as u16) > self.ceiling_ms
+        if packet.duration_samples() != self.duration_samples {
+            return Err(JitterError::WrongDuration);
+        }
+        let end = packet
+            .timestamp_samples()
+            .checked_add(u64::from(self.duration_samples))
+            .ok_or(JitterError::CounterOverflow)?;
+        packet
+            .sequence()
+            .checked_add(1)
+            .ok_or(JitterError::CounterOverflow)?;
+        if self.next.is_some_and(|(seq, _)| packet.sequence() < seq) {
+            self.discard_late();
+            return Ok(false);
+        }
+        if self.slots[..self.slot_count]
+            .iter()
+            .flatten()
+            .any(|p| p.sequence() == packet.sequence())
         {
-            // Drop oldest packet if needed to protect latency ceiling
-            self.drop_oldest_packet();
+            self.metrics.packets_duplicate_discarded =
+                self.metrics.packets_duplicate_discarded.saturating_add(1);
+            return Ok(false);
         }
-
-        // Insert in ascending sequence order
-        let mut insert_pos = self.slot_count;
-        for i in 0..self.slot_count {
-            if let Some(slot) = &self.slots[i] {
-                if packet.sequence() < slot.sequence() {
-                    insert_pos = i;
-                    break;
-                }
+        // Every accepted packet lies on one fixed negotiated sequence/sample
+        // timeline. Capture gaps or duration changes require a new configuration;
+        // they are not permission to fabricate an inferred packet history.
+        if let Some(anchor) = self
+            .next
+            .or_else(|| self.slots[0].map(|p| (p.sequence(), p.timestamp_samples())))
+        {
+            let distance = packet
+                .sequence()
+                .abs_diff(anchor.0)
+                .checked_mul(u64::from(self.duration_samples))
+                .ok_or(JitterError::CounterOverflow)?;
+            let expected = if packet.sequence() >= anchor.0 {
+                anchor.1.checked_add(distance)
+            } else {
+                anchor.1.checked_sub(distance)
+            };
+            if expected != Some(packet.timestamp_samples()) {
+                return Err(JitterError::Timeline);
             }
         }
-
-        for i in (insert_pos..self.slot_count).rev() {
+        // Sample span includes holes, not just payload duration. After decode
+        // starts, evicting an expected packet cannot silently skip codec state.
+        while self.slot_count > 0 || self.next.is_some() {
+            let first = self
+                .next
+                .map(|(_, at)| at)
+                .or_else(|| self.slots[0].map(|p| p.timestamp_samples()))
+                .unwrap_or(packet.timestamp_samples())
+                .min(packet.timestamp_samples());
+            let last = self.slots[..self.slot_count]
+                .last()
+                .and_then(Option::as_ref)
+                .map_or(end, |p| {
+                    p.timestamp_samples() + u64::from(self.duration_samples)
+                })
+                .max(end);
+            if self.slot_count < JITTER_BUFFER_CAPACITY && last - first <= CEILING_SAMPLES {
+                break;
+            }
+            if self.next.is_some() {
+                self.fail(JitterError::WindowExceeded);
+                return Err(JitterError::WindowExceeded);
+            }
+            if self.slots[0].is_some_and(|p| packet.sequence() < p.sequence()) {
+                self.discard_late();
+                return Ok(false);
+            }
+            let _ = self.pop_first_packet();
+            self.discard_late();
+        }
+        let pos = self.slots[..self.slot_count]
+            .iter()
+            .position(|p| p.is_some_and(|p| p.sequence() > packet.sequence()))
+            .unwrap_or(self.slot_count);
+        for i in (pos..self.slot_count).rev() {
             self.slots[i + 1] = self.slots[i].take();
         }
-        self.slots[insert_pos] = Some(packet);
+        self.slots[pos] = Some(*packet);
         self.slot_count += 1;
-
-        self.metrics.current_depth_ms = self.current_depth_ms();
-
-        // Release prebuffering once target depth is reached
-        if self.is_prebuffering && self.metrics.current_depth_ms >= self.target_depth_ms {
+        self.update_depth();
+        if self.metrics.current_depth_ms >= self.target_depth_ms {
             self.is_prebuffering = false;
         }
-
-        true
+        Ok(true)
     }
 
-    /// Drains the next playable unit from the jitter buffer.
-    ///
-    /// Returns:
-    /// - [`JitterDrainResult::Packet`] if the expected packet is present.
-    /// - [`JitterDrainResult::Plc`] if a sequence hole was encountered.
-    /// - [`JitterDrainResult::Underrun`] if insufficient packets are available.
+    /// Compatibility drain: a fenced stream is silent. Integrations must use
+    /// `drain_checked` (or inspect `error`) to request explicit reconfiguration.
     pub fn drain(&mut self) -> JitterDrainResult {
-        if self.is_prebuffering || self.slot_count == 0 {
-            self.metrics.underrun_count += 1;
-            return JitterDrainResult::Underrun;
+        self.drain_checked().unwrap_or(JitterDrainResult::Underrun)
+    }
+    pub fn drain_checked(&mut self) -> Result<JitterDrainResult, JitterError> {
+        if let Some(error) = self.error {
+            return Err(error);
         }
-
-        let first = match self.slots[0] {
-            Some(pkt) => pkt,
-            None => {
-                self.metrics.underrun_count += 1;
-                return JitterDrainResult::Underrun;
-            }
-        };
-
-        match self.next_expected_sequence {
-            None => {
-                // First packet drained: anchor expected sequence
-                let packet = self.pop_first_packet();
-                self.next_expected_sequence = Some(packet.sequence() + 1);
-                self.playout_sample_timestamp =
-                    packet.timestamp_samples() + (packet.duration_samples() as u64);
-                self.metrics.packets_played += 1;
-                self.metrics.current_depth_ms = self.current_depth_ms();
-                JitterDrainResult::Packet(packet)
-            }
-            Some(expected_seq) => {
-                if first.sequence() == expected_seq {
-                    let packet = self.pop_first_packet();
-                    self.next_expected_sequence = Some(expected_seq + 1);
-                    self.playout_sample_timestamp =
-                        packet.timestamp_samples() + (packet.duration_samples() as u64);
-                    self.metrics.packets_played += 1;
-                    self.metrics.current_depth_ms = self.current_depth_ms();
-                    JitterDrainResult::Packet(packet)
-                } else if first.sequence() > expected_seq {
-                    // Sequence hole: missing packet! Trigger PLC for nominal frame
-                    self.next_expected_sequence = Some(expected_seq + 1);
-                    self.playout_sample_timestamp += NOMINAL_SAMPLES_PER_FRAME as u64;
-                    self.metrics.plc_concealment_events += 1;
-                    JitterDrainResult::Plc {
-                        missing_sequence: expected_seq,
-                        duration_samples: NOMINAL_SAMPLES_PER_FRAME,
-                    }
-                } else {
-                    // Stale / late packet reached the front unexpectedly: drop and retry
-                    let _ = self.pop_first_packet();
-                    self.metrics.packets_late_discarded += 1;
-                    self.drain()
-                }
-            }
+        if self.is_prebuffering || self.slot_count == 0 {
+            return Ok(self.underrun());
+        }
+        let first = self.slots[0].expect("occupied jitter prefix");
+        if self.next.is_some_and(|(seq, _)| seq < first.sequence()) {
+            return self.conceal();
+        }
+        let packet = self.pop_first_packet();
+        // Checked at admission, including the last representable packet.
+        self.next = Some((
+            packet.sequence() + 1,
+            packet.timestamp_samples() + u64::from(self.duration_samples),
+        ));
+        self.concealed_samples = 0;
+        self.metrics.packets_played = self.metrics.packets_played.saturating_add(1);
+        Ok(JitterDrainResult::Packet(packet))
+    }
+    /// Call once per due audio-clock frame, never in a free-running drain loop.
+    /// Trailing loss receives the same finite concealment budget as an interior
+    /// hole. No PLC is produced before the first real packet anchors the codec.
+    pub fn drain_for_playout(&mut self) -> Result<JitterDrainResult, JitterError> {
+        if self.error.is_none() && self.slot_count == 0 && self.next.is_some() {
+            self.conceal()
+        } else {
+            self.drain_checked()
         }
     }
-
+    fn conceal(&mut self) -> Result<JitterDrainResult, JitterError> {
+        let Some((sequence, at)) = self.next else {
+            return Ok(self.underrun());
+        };
+        let samples = u64::from(self.duration_samples);
+        let concealed = self.concealed_samples + samples;
+        if concealed > CEILING_SAMPLES {
+            self.fail(JitterError::ConcealmentExhausted);
+            return Err(JitterError::ConcealmentExhausted);
+        }
+        let Some(next) = sequence.checked_add(1).zip(at.checked_add(samples)) else {
+            self.fail(JitterError::CounterOverflow);
+            return Err(JitterError::CounterOverflow);
+        };
+        self.next = Some(next);
+        self.concealed_samples = concealed;
+        self.metrics.plc_concealment_events = self.metrics.plc_concealment_events.saturating_add(1);
+        Ok(JitterDrainResult::Plc {
+            missing_sequence: sequence,
+            duration_samples: self.duration_samples,
+        })
+    }
+    fn clear(&mut self) {
+        self.slots.fill(None);
+        self.slot_count = 0;
+        self.next = None;
+        self.concealed_samples = 0;
+        self.is_prebuffering = true;
+        self.metrics.current_depth_ms = 0;
+    }
+    fn fail(&mut self, error: JitterError) {
+        self.clear();
+        if self.error.is_none() {
+            self.metrics.discontinuities = self.metrics.discontinuities.saturating_add(1);
+            self.error = Some(error);
+        }
+    }
+    fn underrun(&mut self) -> JitterDrainResult {
+        self.metrics.underrun_count = self.metrics.underrun_count.saturating_add(1);
+        JitterDrainResult::Underrun
+    }
+    fn discard_late(&mut self) {
+        self.metrics.packets_late_discarded = self.metrics.packets_late_discarded.saturating_add(1);
+    }
+    fn update_depth(&mut self) {
+        self.metrics.current_depth_ms = self.current_depth_ms();
+    }
     fn pop_first_packet(&mut self) -> AudioAccessUnit {
-        let pkt = self.slots[0].take().expect("slot 0 must be populated");
+        let packet = self.slots[0].take().expect("occupied jitter prefix");
         for i in 1..self.slot_count {
             self.slots[i - 1] = self.slots[i].take();
         }
         self.slot_count -= 1;
-        pkt
-    }
-
-    fn drop_oldest_packet(&mut self) {
-        if self.slot_count > 0 {
-            let _ = self.pop_first_packet();
-            self.metrics.packets_late_discarded += 1;
-        }
+        self.update_depth();
+        packet
     }
 }
 
