@@ -20,7 +20,38 @@ impl Failure {
         Self { code, next, exit }
     }
 }
-const HELP: &str = "FrankenRemote development client\n\nfr hosts [--json] [--socket /absolute/tailscaled.sock]\nfr doctor [--port 8443] [--socket /absolute/tailscaled.sock] [--trust-roots /absolute/local-ca-roots.pem] [--json]\nfr displays NODE_ID --experimental-native --trust-roots /absolute/local-ca-roots.pem\n    [--by-name] [--socket /absolute/tailscaled.sock] [--port 8443] [--ipv6] [--json]\nfr connect NODE_ID --view-only --experimental-native --display HANDLE|only|choose\n    --worker /absolute/fr-media-worker --trust-roots /absolute/local-ca-roots.pem\n    [--by-name] [--x-display :0] [--socket /absolute/tailscaled.sock]\n    [--port 8443] [--ipv6] [--attempts 1..32] [--fit WIDTHxHEIGHT] [--json]\n\nDoctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle.\nDiscovery lists machines, not installed/ready desktops or access permissions.\nDisplays requires host approval when configured; it starts no decoder or input.\n--display only explicitly selects the sole current display, refusing ambiguity.\n--display choose opens a native chooser in each approved connection.\n--fit bounds the fixed local window and explicitly enables CPU nearest-neighbour\naspect fitting; the remote display is not resized. Omit it for native pixels.\nConnect uses fresh installed-tailnet identity and strict TLS on every attempt.\n--by-name selects an exact canonical tailnet FQDN, never arbitrary DNS or URLs.\nNative transport/media remain unqualified. Control, clipboard, audio and files\nare NOT enabled by this view-only command. Set XAUTHORITY in the local environment\nwhen the window and worker require it. Close the window or use Ctrl-C to stop.\n";
+const HELP: &str = "\
+FrankenRemote development client
+
+fr hosts [--json] [--socket /absolute/tailscaled.sock]
+fr status [--json] [--socket /absolute/tailscaled.sock]
+fr doctor [--port 8443] [--socket /absolute/tailscaled.sock] [--trust-roots /absolute/local-ca-roots.pem] [--json]
+fr inspect NODE_ID [--by-name] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
+fr disconnect NODE_ID [--socket /absolute/tailscaled.sock] [--json]
+fr displays NODE_ID --experimental-native --trust-roots /absolute/local-ca-roots.pem
+    [--by-name] [--socket /absolute/tailscaled.sock] [--port 8443] [--ipv6] [--json]
+fr connect NODE_ID --view-only --experimental-native --display HANDLE|only|choose
+    --worker /absolute/fr-media-worker --trust-roots /absolute/local-ca-roots.pem
+    [--by-name] [--x-display :0] [--socket /absolute/tailscaled.sock]
+    [--port 8443] [--ipv6] [--attempts 1..32] [--fit WIDTHxHEIGHT] [--json]
+fr robot session open NODE_ID [--role view|control] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
+fr robot session close NODE_ID [--lease LEASE] [--socket /absolute/tailscaled.sock] [--json]
+fr robot observe NODE_ID [--display N] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
+fr robot input NODE_ID --lease LEASE --request-id REQUEST [--batch /path/batch.json] [--precondition-geometry GEN] [--max-observation-age MS] [--json]
+
+Doctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle.
+Discovery lists machines, not installed/ready desktops or access permissions.
+Displays requires host approval when configured; it starts no decoder or input.
+--display only explicitly selects the sole current display, refusing ambiguity.
+--display choose opens a native chooser in each approved connection.
+--fit bounds the fixed local window and explicitly enables CPU nearest-neighbour
+aspect fitting; the remote display is not resized. Omit it for native pixels.
+Connect uses fresh installed-tailnet identity and strict TLS on every attempt.
+--by-name selects an exact canonical tailnet FQDN, never arbitrary DNS or URLs.
+Native transport/media remain unqualified. Control, clipboard, audio and files
+are NOT enabled by this view-only command. Set XAUTHORITY in the local environment
+when the window and worker require it. Close the window or use Ctrl-C to stop.
+";
 
 fn main() -> ExitCode {
     let mut args = Vec::new();

@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "timestamp_unix_ms": 1700000007000,
+  "outcome": "success",
+  "stage": "observed",
+  "error": null,
+  "data": {
+    "host": "workstation-alpha",
+    "certificate_name": "workstation-alpha.tailnet-xyz.ts.net",
+    "addresses": [
+      "100.64.0.5"
+    ],
+    "port": 8443,
+    "is_derp_relayed": false,
+    "state": "ready",
+    "displays_count": 2,
+    "requires_approval": true,
+    "transport_path": "direct (192.168.1.50:41641)"
+  }
+}

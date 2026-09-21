@@ -12,6 +12,54 @@ pub enum Command {
     Connect(Connection),
     Displays(Target),
     Doctor(DoctorOptions),
+    Status,
+    Inspect(InspectOptions),
+    Disconnect(DisconnectOptions),
+    Robot(RobotCommand),
+}
+#[allow(dead_code)]
+pub struct InspectOptions {
+    pub node: String,
+    pub by_name: bool,
+    pub port: u16,
+}
+#[allow(dead_code)]
+pub struct DisconnectOptions {
+    pub node: String,
+}
+#[allow(dead_code)]
+pub enum RobotCommand {
+    SessionOpen(RobotSessionOpenOptions),
+    SessionClose(RobotSessionCloseOptions),
+    Observe(RobotObserveOptions),
+    Input(RobotInputOptions),
+}
+#[allow(dead_code)]
+pub struct RobotSessionOpenOptions {
+    pub node: String,
+    pub role: String,
+    pub port: u16,
+}
+#[allow(dead_code)]
+pub struct RobotSessionCloseOptions {
+    pub node: String,
+    pub lease: Option<String>,
+}
+#[allow(dead_code)]
+pub struct RobotObserveOptions {
+    pub node: String,
+    pub display: Option<u32>,
+    pub port: u16,
+}
+#[allow(dead_code)]
+pub struct RobotInputOptions {
+    pub node: String,
+    pub lease: String,
+    pub request_id: String,
+    pub batch: Option<PathBuf>,
+    pub precondition_geometry: Option<u64>,
+    pub max_observation_age_ms: Option<u64>,
+    pub port: u16,
 }
 pub struct DoctorOptions {
     pub port: u16,
@@ -73,6 +121,408 @@ fn path(value: String) -> Result<PathBuf, Failure> {
     }
     Ok(path)
 }
+
+fn validate_node(node: &str) -> Result<(), Failure> {
+    if node.is_empty()
+        || node.len() > 254
+        || node.starts_with('-')
+        || !node.is_ascii()
+        || node
+            .bytes()
+            .any(|b| b.is_ascii_whitespace() || b"/:?#@\\".contains(&b))
+    {
+        return Err(usage());
+    }
+    Ok(())
+}
+
+fn parse_status(args: &[String]) -> Result<Options, Failure> {
+    let mut index = 1;
+    let mut json = false;
+    let mut socket = None;
+    let mut seen = BTreeSet::new();
+    while index < args.len() {
+        let flag = args[index].as_str();
+        index += 1;
+        if !seen.insert(flag) {
+            return Err(usage());
+        }
+        match flag {
+            "--json" => json = true,
+            "--socket" => {
+                let s = args
+                    .get(index)
+                    .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                    .ok_or_else(usage)?;
+                index += 1;
+                socket = Some(path(s.clone())?);
+            }
+            _ => return Err(usage()),
+        }
+    }
+    Ok(Options {
+        command: Command::Status,
+        json,
+        socket,
+    })
+}
+
+fn parse_inspect(args: &[String]) -> Result<Options, Failure> {
+    let node = args.get(1).ok_or_else(usage)?;
+    validate_node(node)?;
+    let mut index = 2;
+    let mut json = false;
+    let mut socket = None;
+    let mut port = 8443_u16;
+    let mut by_name = false;
+    let mut seen = BTreeSet::new();
+    while index < args.len() {
+        let flag = args[index].as_str();
+        index += 1;
+        if !seen.insert(flag) {
+            return Err(usage());
+        }
+        match flag {
+            "--json" => json = true,
+            "--by-name" => by_name = true,
+            "--port" => {
+                let s = args
+                    .get(index)
+                    .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                    .ok_or_else(usage)?;
+                index += 1;
+                port = s.parse().map_err(|_| usage())?;
+                if port == 0 {
+                    return Err(usage());
+                }
+            }
+            "--socket" => {
+                let s = args
+                    .get(index)
+                    .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                    .ok_or_else(usage)?;
+                index += 1;
+                socket = Some(path(s.clone())?);
+            }
+            _ => return Err(usage()),
+        }
+    }
+    Ok(Options {
+        command: Command::Inspect(InspectOptions {
+            node: node.clone(),
+            by_name,
+            port,
+        }),
+        json,
+        socket,
+    })
+}
+
+fn parse_disconnect(args: &[String]) -> Result<Options, Failure> {
+    let node = args.get(1).ok_or_else(usage)?;
+    validate_node(node)?;
+    let mut index = 2;
+    let mut json = false;
+    let mut socket = None;
+    let mut seen = BTreeSet::new();
+    while index < args.len() {
+        let flag = args[index].as_str();
+        index += 1;
+        if !seen.insert(flag) {
+            return Err(usage());
+        }
+        match flag {
+            "--json" => json = true,
+            "--socket" => {
+                let s = args
+                    .get(index)
+                    .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                    .ok_or_else(usage)?;
+                index += 1;
+                socket = Some(path(s.clone())?);
+            }
+            _ => return Err(usage()),
+        }
+    }
+    Ok(Options {
+        command: Command::Disconnect(DisconnectOptions { node: node.clone() }),
+        json,
+        socket,
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_robot(args: &[String]) -> Result<Options, Failure> {
+    let sub = args.get(1).ok_or_else(usage)?;
+    match sub.as_str() {
+        "session" => {
+            let action = args.get(2).ok_or_else(usage)?;
+            let node = args.get(3).ok_or_else(usage)?;
+            validate_node(node)?;
+            let mut index = 4;
+            let mut json = false;
+            let mut socket = None;
+            let mut seen = BTreeSet::new();
+            match action.as_str() {
+                "open" => {
+                    let mut role = "control".to_string();
+                    let mut port = 8443_u16;
+                    while index < args.len() {
+                        let flag = args[index].as_str();
+                        index += 1;
+                        if !seen.insert(flag) {
+                            return Err(usage());
+                        }
+                        match flag {
+                            "--json" => json = true,
+                            "--role" => {
+                                let s = args
+                                    .get(index)
+                                    .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                                    .ok_or_else(usage)?;
+                                index += 1;
+                                if s != "view" && s != "control" {
+                                    return Err(usage());
+                                }
+                                role.clone_from(s);
+                            }
+                            "--port" => {
+                                let s = args
+                                    .get(index)
+                                    .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                                    .ok_or_else(usage)?;
+                                index += 1;
+                                port = s.parse().map_err(|_| usage())?;
+                                if port == 0 {
+                                    return Err(usage());
+                                }
+                            }
+                            "--socket" => {
+                                let s = args
+                                    .get(index)
+                                    .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                                    .ok_or_else(usage)?;
+                                index += 1;
+                                socket = Some(path(s.clone())?);
+                            }
+                            _ => return Err(usage()),
+                        }
+                    }
+                    Ok(Options {
+                        command: Command::Robot(RobotCommand::SessionOpen(
+                            RobotSessionOpenOptions {
+                                node: node.clone(),
+                                role,
+                                port,
+                            },
+                        )),
+                        json,
+                        socket,
+                    })
+                }
+                "close" => {
+                    let mut lease = None;
+                    while index < args.len() {
+                        let flag = args[index].as_str();
+                        index += 1;
+                        if !seen.insert(flag) {
+                            return Err(usage());
+                        }
+                        match flag {
+                            "--json" => json = true,
+                            "--lease" => {
+                                let s = args
+                                    .get(index)
+                                    .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                                    .ok_or_else(usage)?;
+                                index += 1;
+                                lease = Some(s.clone());
+                            }
+                            "--socket" => {
+                                let s = args
+                                    .get(index)
+                                    .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                                    .ok_or_else(usage)?;
+                                index += 1;
+                                socket = Some(path(s.clone())?);
+                            }
+                            _ => return Err(usage()),
+                        }
+                    }
+                    Ok(Options {
+                        command: Command::Robot(RobotCommand::SessionClose(
+                            RobotSessionCloseOptions {
+                                node: node.clone(),
+                                lease,
+                            },
+                        )),
+                        json,
+                        socket,
+                    })
+                }
+                _ => Err(usage()),
+            }
+        }
+        "observe" => {
+            let node = args.get(2).ok_or_else(usage)?;
+            validate_node(node)?;
+            let mut index = 3;
+            let mut json = false;
+            let mut socket = None;
+            let mut display = None;
+            let mut port = 8443_u16;
+            let mut seen = BTreeSet::new();
+            while index < args.len() {
+                let flag = args[index].as_str();
+                index += 1;
+                if !seen.insert(flag) {
+                    return Err(usage());
+                }
+                match flag {
+                    "--json" => json = true,
+                    "--display" => {
+                        let s = args
+                            .get(index)
+                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                            .ok_or_else(usage)?;
+                        index += 1;
+                        display = Some(s.parse::<u32>().map_err(|_| usage())?);
+                    }
+                    "--port" => {
+                        let s = args
+                            .get(index)
+                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                            .ok_or_else(usage)?;
+                        index += 1;
+                        port = s.parse().map_err(|_| usage())?;
+                        if port == 0 {
+                            return Err(usage());
+                        }
+                    }
+                    "--socket" => {
+                        let s = args
+                            .get(index)
+                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                            .ok_or_else(usage)?;
+                        index += 1;
+                        socket = Some(path(s.clone())?);
+                    }
+                    _ => return Err(usage()),
+                }
+            }
+            Ok(Options {
+                command: Command::Robot(RobotCommand::Observe(RobotObserveOptions {
+                    node: node.clone(),
+                    display,
+                    port,
+                })),
+                json,
+                socket,
+            })
+        }
+        "input" => {
+            let node = args.get(2).ok_or_else(usage)?;
+            validate_node(node)?;
+            let mut index = 3;
+            let mut json = false;
+            let mut socket = None;
+            let mut lease = None;
+            let mut request_id = None;
+            let mut batch = None;
+            let mut precondition_geometry = None;
+            let mut max_observation_age_ms = None;
+            let mut port = 8443_u16;
+            let mut seen = BTreeSet::new();
+            while index < args.len() {
+                let flag = args[index].as_str();
+                index += 1;
+                if !seen.insert(flag) {
+                    return Err(usage());
+                }
+                match flag {
+                    "--json" => json = true,
+                    "--lease" => {
+                        let s = args
+                            .get(index)
+                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                            .ok_or_else(usage)?;
+                        index += 1;
+                        lease = Some(s.clone());
+                    }
+                    "--request-id" => {
+                        let s = args
+                            .get(index)
+                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                            .ok_or_else(usage)?;
+                        index += 1;
+                        request_id = Some(s.clone());
+                    }
+                    "--batch" => {
+                        let s = args
+                            .get(index)
+                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                            .ok_or_else(usage)?;
+                        index += 1;
+                        batch = Some(path(s.clone())?);
+                    }
+                    "--precondition-geometry" => {
+                        let s = args
+                            .get(index)
+                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                            .ok_or_else(usage)?;
+                        index += 1;
+                        precondition_geometry = Some(s.parse::<u64>().map_err(|_| usage())?);
+                    }
+                    "--max-observation-age" => {
+                        let s = args
+                            .get(index)
+                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                            .ok_or_else(usage)?;
+                        index += 1;
+                        max_observation_age_ms = Some(s.parse::<u64>().map_err(|_| usage())?);
+                    }
+                    "--port" => {
+                        let s = args
+                            .get(index)
+                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                            .ok_or_else(usage)?;
+                        index += 1;
+                        port = s.parse().map_err(|_| usage())?;
+                        if port == 0 {
+                            return Err(usage());
+                        }
+                    }
+                    "--socket" => {
+                        let s = args
+                            .get(index)
+                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
+                            .ok_or_else(usage)?;
+                        index += 1;
+                        socket = Some(path(s.clone())?);
+                    }
+                    _ => return Err(usage()),
+                }
+            }
+            let lease = lease.ok_or_else(usage)?;
+            let request_id = request_id.ok_or_else(usage)?;
+            Ok(Options {
+                command: Command::Robot(RobotCommand::Input(RobotInputOptions {
+                    node: node.clone(),
+                    lease,
+                    request_id,
+                    batch,
+                    precondition_geometry,
+                    max_observation_age_ms,
+                    port,
+                })),
+                json,
+                socket,
+            })
+        }
+        _ => Err(usage()),
+    }
+}
+
 /// Bounded argument grammar, no shell, URL, credential, arbitrary-command or
 /// remote-policy option. `connect` without explicit view-only refuses; it never
 /// silently substitutes viewing for the product's requested control behavior.
@@ -91,31 +541,20 @@ pub fn parse(args: &[String]) -> Result<Options, Failure> {
             socket: None,
         });
     }
-    let (remote, doctor) = match args[0].as_str() {
-        "hosts" => (false, false),
-        "doctor" => (false, true),
-        "connect" | "displays" => (true, false),
-        _ => return Err(usage()),
-    };
-    let mut index = 1;
-    let node = if remote {
-        let node = args.get(index).ok_or_else(usage)?;
-        if node.is_empty()
-            || node.len() > 254
-            || node.starts_with('-')
-            || !node.is_ascii()
-            || node
-                .bytes()
-                .any(|b| b.is_ascii_whitespace() || b"/:?#@\\".contains(&b))
-        {
-            return Err(usage());
+    match args[0].as_str() {
+        "status" => parse_status(args),
+        "inspect" => parse_inspect(args),
+        "disconnect" => parse_disconnect(args),
+        "robot" => parse_robot(args),
+        "hosts" => parse_command(args, 1, None, false, false),
+        "doctor" => parse_command(args, 1, None, false, true),
+        "connect" | "displays" => {
+            let node = args.get(1).ok_or_else(usage)?;
+            validate_node(node)?;
+            parse_command(args, 2, Some(node.clone()), args[0] == "displays", false)
         }
-        index += 1;
-        Some(node.clone())
-    } else {
-        None
-    };
-    parse_command(args, index, node, args[0] == "displays", doctor)
+        _ => Err(usage()),
+    }
 }
 fn fitted_size(dimensions: &str) -> Result<(u32, u32), Failure> {
     let (w, h) = dimensions.split_once('x').ok_or_else(usage)?;
@@ -538,5 +977,106 @@ mod doctor_tests {
             ])
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod robot_tests {
+    use super::*;
+
+    fn to_args(s: &str) -> Vec<String> {
+        s.split_whitespace().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn parses_status_inspect_disconnect_options() {
+        let o = parse(&to_args("status --json")).unwrap();
+        assert!(matches!(o.command, Command::Status));
+        assert!(o.json);
+
+        let o = parse(&to_args("inspect host-alpha --port 9443 --by-name --json")).unwrap();
+        let Command::Inspect(insp) = o.command else {
+            assert!(false, "inspect required");
+            return;
+        };
+        assert_eq!(insp.node, "host-alpha");
+        assert_eq!(insp.port, 9443);
+        assert!(insp.by_name && o.json);
+
+        let o = parse(&to_args("disconnect host-alpha --json")).unwrap();
+        let Command::Disconnect(disc) = o.command else {
+            assert!(false, "disconnect required");
+            return;
+        };
+        assert_eq!(disc.node, "host-alpha");
+        assert!(o.json);
+    }
+
+    #[test]
+    fn parses_robot_subcommands() {
+        let o = parse(&to_args(
+            "robot session open host-alpha --role control --json",
+        ))
+        .unwrap();
+        let Command::Robot(RobotCommand::SessionOpen(s)) = o.command else {
+            assert!(false, "open required");
+            return;
+        };
+        assert_eq!(s.node, "host-alpha");
+        assert_eq!(s.role, "control");
+        assert!(o.json);
+
+        let o = parse(&to_args(
+            "robot session close host-alpha --lease lease-123 --json",
+        ))
+        .unwrap();
+        let Command::Robot(RobotCommand::SessionClose(s)) = o.command else {
+            assert!(false, "close required");
+            return;
+        };
+        assert_eq!(s.node, "host-alpha");
+        assert_eq!(s.lease, Some("lease-123".into()));
+
+        let o = parse(&to_args("robot observe host-alpha --display 2 --json")).unwrap();
+        let Command::Robot(RobotCommand::Observe(obs)) = o.command else {
+            assert!(false, "observe required");
+            return;
+        };
+        assert_eq!(obs.node, "host-alpha");
+        assert_eq!(obs.display, Some(2));
+
+        let o = parse(&to_args(
+            "robot input host-alpha --lease lease-123 --request-id req-001 --json",
+        ))
+        .unwrap();
+        let Command::Robot(RobotCommand::Input(inp)) = o.command else {
+            assert!(false, "input required");
+            return;
+        };
+        assert_eq!(inp.node, "host-alpha");
+        assert_eq!(inp.lease, "lease-123");
+        assert_eq!(inp.request_id, "req-001");
+    }
+
+    #[test]
+    fn robot_rejects_missing_node_or_invalid_flags() {
+        assert!(parse(&to_args("robot session open")).is_err());
+        assert!(
+            parse(&to_args(
+                "robot session open host-alpha --role invalid_role"
+            ))
+            .is_err()
+        );
+        assert!(parse(&to_args("robot input host-alpha --lease lease-123")).is_err()); // missing request-id
+        assert!(parse(&to_args("robot input host-alpha --request-id req-1")).is_err()); // missing lease
+        assert!(
+            parse(&to_args(
+                "robot input host-alpha --lease lease-1 --request-id req-1 --port 0"
+            ))
+            .is_err()
+        );
+        assert!(parse(&to_args("inspect")).is_err());
+        assert!(parse(&to_args("disconnect")).is_err());
+        assert!(parse(&to_args("status extra_positional")).is_err());
     }
 }

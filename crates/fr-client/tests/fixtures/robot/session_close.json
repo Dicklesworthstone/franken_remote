@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "timestamp_unix_ms": 1700000004000,
+  "outcome": "success",
+  "stage": "observed",
+  "error": null,
+  "data": {
+    "session_id": "session-101",
+    "host": "workstation-alpha",
+    "closed": true,
+    "cleanup_confirmed": true,
+    "held_keys_released": 2
+  }
+}

@@ -2,6 +2,8 @@
 mod displays;
 #[path = "linux/doctor.rs"]
 mod doctor;
+#[path = "linux/robot.rs"]
+mod robot;
 #[cfg(feature = "linux-desktop")]
 use super::options::DisplayChoice;
 use super::{
@@ -211,6 +213,34 @@ pub fn run(options: &Options) -> Result<String, Failure> {
             &stopped,
             api,
             connection,
+            options.json,
+        ),
+        Command::Status => {
+            robot::run_status(&runtime, &cx, &mut shutdown, &stopped, &api, options.json)
+        }
+        Command::Inspect(inspect_opts) => robot::run_inspect(
+            &runtime,
+            &cx,
+            &mut shutdown,
+            &stopped,
+            &api,
+            inspect_opts,
+            options.json,
+        ),
+        Command::Disconnect(disconnect_opts) => robot::run_disconnect(
+            &runtime,
+            &cx,
+            &mut shutdown,
+            &stopped,
+            disconnect_opts,
+            options.json,
+        ),
+        Command::Robot(robot_cmd) => robot::run_robot(
+            &runtime,
+            &cx,
+            &mut shutdown,
+            &stopped,
+            robot_cmd,
             options.json,
         ),
     }

@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "timestamp_unix_ms": 1700000000000,
+  "outcome": "success",
+  "stage": "admitted",
+  "error": null,
+  "data": {
+    "host": "workstation-alpha",
+    "session_id": "session-101",
+    "lease_handle": "lease-local-a1b2c3d4",
+    "role": "control",
+    "status": "active",
+    "limits": {
+      "max_record_bytes": 65536,
+      "lease_duration_ms": 3000,
+      "max_observation_age_ms": 1500,
+      "input_rate_limit_hz": 120
+    }
+  }
+}

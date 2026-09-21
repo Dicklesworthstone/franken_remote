@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "timestamp_unix_ms": 1700000003000,
+  "outcome": "unknown_external_effect",
+  "error": {
+    "code": "transport_timeout_during_submission",
+    "next_action": "Check target host state or query application logs before retrying potentially non-idempotent actions."
+  },
+  "data": {
+    "request_id": "req-unknown-003",
+    "actions_total": 2,
+    "actions_admitted": 2,
+    "actions_submitted": 1,
+    "stage": "admitted",
+    "disposition": "unknown_effect",
+    "observed_receipt_count": 0
+  }
+}

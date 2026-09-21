@@ -459,3 +459,186 @@ fn doctor_cli_checks_help_and_refuses_invalid_arguments() {
         "assert x['error']['code']=='tailscale_unavailable'",
     );
 }
+
+#[test]
+fn status_and_disconnect_cli_commands_share_staged_envelope() {
+    // Status with missing socket refuses honestly
+    let missing = path("status-absent.sock");
+    let output = wait(
+        command(&["status", "--socket", missing.to_str().unwrap(), "--json"])
+            .spawn()
+            .unwrap(),
+    );
+    assert_eq!(output.status.code(), Some(1));
+    json(
+        &output,
+        "assert x['outcome']=='refused'\nassert x['error']['code']=='tailscale_unavailable'",
+    );
+
+    // Disconnect succeeds with closed confirmed
+    let output = wait(
+        command(&["disconnect", "host-beta", "--json"])
+            .spawn()
+            .unwrap(),
+    );
+    assert!(output.status.success());
+    json(
+        &output,
+        "assert x['outcome']=='success'\nassert x['data']['closed'] is True\nassert x['data']['host']=='host-beta'\nassert x['data']['cleanup_confirmed'] is True",
+    );
+
+    // Human-readable rendering for disconnect
+    let output = wait(command(&["disconnect", "host-beta"]).spawn().unwrap());
+    assert!(output.status.success());
+    let human = String::from_utf8(output.stdout).unwrap();
+    assert!(human.contains("Session Closed: session-host-beta"));
+    assert!(human.contains("Cleanup Confirmed: true"));
+}
+
+#[test]
+fn robot_cli_subcommands_drive_full_scripted_workflow() {
+    // 1. Session Open
+    let output = wait(
+        command(&[
+            "robot",
+            "session",
+            "open",
+            "workstation-1",
+            "--role",
+            "control",
+            "--json",
+        ])
+        .spawn()
+        .unwrap(),
+    );
+    assert!(output.status.success());
+    json(
+        &output,
+        "assert x['outcome']=='success'\nassert x['stage']=='admitted'\nassert x['data']['role']=='control'\nassert x['data']['lease_handle'].startswith('lease-local-')",
+    );
+
+    // Human-readable session open
+    let output = wait(
+        command(&[
+            "robot",
+            "session",
+            "open",
+            "workstation-1",
+            "--role",
+            "control",
+        ])
+        .spawn()
+        .unwrap(),
+    );
+    assert!(output.status.success());
+    let human = String::from_utf8(output.stdout).unwrap();
+    assert!(human.contains("Session Open: session-workstation-1"));
+    assert!(human.contains("Role: control"));
+    assert!(human.contains("Lease Handle: lease-local-"));
+
+    // 2. Observe
+    let output = wait(
+        command(&[
+            "robot",
+            "observe",
+            "workstation-1",
+            "--display",
+            "1",
+            "--json",
+        ])
+        .spawn()
+        .unwrap(),
+    );
+    assert!(output.status.success());
+    json(
+        &output,
+        "assert x['outcome']=='success'\nassert x['stage']=='observed'\nassert x['data']['geometry']['display_index']==1\nassert x['data']['geometry_generation']==1",
+    );
+
+    // 3. Input - normal execution
+    let output = wait(
+        command(&[
+            "robot",
+            "input",
+            "workstation-1",
+            "--lease",
+            "lease-local-abc123",
+            "--request-id",
+            "req-001",
+            "--json",
+        ])
+        .spawn()
+        .unwrap(),
+    );
+    assert!(output.status.success());
+    json(
+        &output,
+        "assert x['outcome']=='success'\nassert x['stage']=='submitted_to_os'\nassert x['data']['request_id']=='req-001'\nassert x['data']['disposition']=='committed'",
+    );
+
+    // 4. Input - stale geometry precondition refusal
+    let output = wait(
+        command(&[
+            "robot",
+            "input",
+            "workstation-1",
+            "--lease",
+            "lease-local-abc123",
+            "--request-id",
+            "req-002",
+            "--precondition-geometry",
+            "99",
+            "--json",
+        ])
+        .spawn()
+        .unwrap(),
+    );
+    assert!(output.status.success());
+    json(
+        &output,
+        "assert x['outcome']=='refusal'\nassert x['error']['code']=='geometry_generation_stale'",
+    );
+
+    // 5. Input - expired observation precondition refusal
+    let output = wait(
+        command(&[
+            "robot",
+            "input",
+            "workstation-1",
+            "--lease",
+            "lease-local-abc123",
+            "--request-id",
+            "req-003",
+            "--max-observation-age",
+            "0",
+            "--json",
+        ])
+        .spawn()
+        .unwrap(),
+    );
+    assert!(output.status.success());
+    json(
+        &output,
+        "assert x['outcome']=='refusal'\nassert x['error']['code']=='observation_expired'",
+    );
+
+    // 6. Session Close
+    let output = wait(
+        command(&[
+            "robot",
+            "session",
+            "close",
+            "workstation-1",
+            "--lease",
+            "lease-local-abc123",
+            "--json",
+        ])
+        .spawn()
+        .unwrap(),
+    );
+    assert!(output.status.success());
+    json(
+        &output,
+        "assert x['outcome']=='success'\nassert x['stage']=='observed'\nassert x['data']['closed'] is True\nassert x['data']['cleanup_confirmed'] is True",
+    );
+}

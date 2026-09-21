@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "timestamp_unix_ms": 1700000006000,
+  "outcome": "success",
+  "stage": "observed",
+  "error": null,
+  "data": {
+    "client_version": "0.1.0",
+    "tailnet_connected": true,
+    "local_node_name": "laptop-controller",
+    "local_ip": "100.64.0.2",
+    "active_sessions_count": 1,
+    "active_host": "workstation-alpha",
+    "active_role": "control",
+    "active_lease_handle": "lease-local-a1b2c3d4"
+  }
+}

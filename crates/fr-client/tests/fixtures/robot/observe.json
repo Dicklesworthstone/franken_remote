@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "timestamp_unix_ms": 1700000001000,
+  "outcome": "success",
+  "stage": "observed",
+  "error": null,
+  "data": {
+    "host": "workstation-alpha",
+    "geometry": {
+      "display_index": 0,
+      "pixel_width": 2560,
+      "pixel_height": 1440,
+      "logical_width": 1920,
+      "logical_height": 1080,
+      "scale_numerator": 4,
+      "scale_denominator": 3,
+      "rotation_degrees": 0
+    },
+    "geometry_generation": 1,
+    "configuration_generation": 2,
+    "frame_serial": 1204,
+    "source_freshness": "fresh",
+    "capture_timestamp_unix_ms": 1700000000995,
+    "uncertainty_ms": 3,
+    "control_authority": "lease-local-a1b2c3d4"
+  }
+}

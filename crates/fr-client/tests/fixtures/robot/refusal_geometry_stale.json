@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "timestamp_unix_ms": 1700000005000,
+  "outcome": "refusal",
+  "error": {
+    "code": "geometry_generation_stale",
+    "next_action": "Display geometry changed on host; run 'fr robot observe' to update desktop coordinate mapping."
+  }
+}

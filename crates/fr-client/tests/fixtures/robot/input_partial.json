@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "timestamp_unix_ms": 1700000002000,
+  "outcome": "partial_submission",
+  "stage": "submitted_to_os",
+  "error": {
+    "code": "input_ticket_expired",
+    "next_action": "Re-observe display geometry and reissue remaining actions with fresh ticket."
+  },
+  "data": {
+    "request_id": "req-partial-002",
+    "actions_total": 10,
+    "actions_admitted": 6,
+    "actions_submitted": 4,
+    "stage": "submitted_to_os",
+    "disposition": "partial",
+    "observed_receipt_count": 4
+  }
+}

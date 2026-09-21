@@ -39,3 +39,6 @@ pub use toolbar::ToolbarModel;
 
 /// Tailnet peer discovery, bounded capability probes, saved hosts, and directory policy (Plan §6.4).
 pub mod discovery;
+
+/// Robot surface, schema-versioned envelopes, and staged acknowledgements (Plan §§18.1, 18.2).
+pub mod robot;

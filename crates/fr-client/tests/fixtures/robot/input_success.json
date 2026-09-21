@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "timestamp_unix_ms": 1700000002000,
+  "outcome": "success",
+  "stage": "submitted_to_os",
+  "error": null,
+  "data": {
+    "request_id": "req-001",
+    "actions_total": 3,
+    "actions_admitted": 3,
+    "actions_submitted": 3,
+    "stage": "submitted_to_os",
+    "disposition": "committed",
+    "observed_receipt_count": 3
+  }
+}
