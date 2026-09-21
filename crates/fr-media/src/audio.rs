@@ -576,6 +576,13 @@ pub trait AudioEncoder {
 
     /// Current stream configuration, if configured.
     fn configuration(&self) -> Option<AudioStreamConfig>;
+
+    /// Resets encoder state and flushes pending packets.
+    fn reset(&mut self) {
+        if let Some(config) = self.configuration() {
+            let _ = self.configure(config);
+        }
+    }
 }
 
 /// Trait modeling an Opus audio decoder.

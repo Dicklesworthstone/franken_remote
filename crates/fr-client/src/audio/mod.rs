@@ -9,10 +9,12 @@
 //! - Strict A/V sync bounds: fresh video is never held behind delayed audio.
 
 pub mod jitter;
+pub mod mic;
 pub mod playout;
 pub mod sync;
 pub mod volume;
 
 pub use jitter::{AudioJitterBuffer, JitterBufferMetrics, JitterDrainResult};
+pub use mic::{ClientMicController, MicControllerError};
 pub use sync::{AudioVideoSyncController, AvAlignment};
 pub use volume::{AudioVolumeControl, HostAudioSettings, HostAudioStore};

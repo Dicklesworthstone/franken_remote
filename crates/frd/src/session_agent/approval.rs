@@ -98,6 +98,15 @@ impl GrantedScope {
         if self.role == SessionRole::Controller && requested.role == SessionRole::Observer {
             return false;
         }
+        // Observer role never receives microphone authority (Plan §15.4)
+        if self.role == SessionRole::Observer
+            && matches!(
+                self.audio,
+                AudioScope::MicrophoneOnly | AudioScope::Bidirectional
+            )
+        {
+            return false;
+        }
         // Audio must be a subset of requested audio
         if !self.audio.is_subset_of(requested.audio) {
             return false;
@@ -217,10 +226,21 @@ impl ApprovalManager {
         let state = match self.mode {
             ApprovalMode::Unattended => {
                 // Auto-approve requested scope in unattended mode
+                // Note: Observer role never receives microphone authority (Plan §15.4)
+                let granted_audio = if requested.role == SessionRole::Observer {
+                    match requested.audio {
+                        AudioScope::Bidirectional | AudioScope::PlaybackOnly => {
+                            AudioScope::PlaybackOnly
+                        }
+                        AudioScope::MicrophoneOnly | AudioScope::None => AudioScope::None,
+                    }
+                } else {
+                    requested.audio
+                };
                 let grant = GrantedScope {
                     role: requested.role,
                     displays: requested.displays.clone(),
-                    audio: requested.audio,
+                    audio: granted_audio,
                     clipboard: requested.clipboard,
                     file_transfer: requested.file_transfer,
                     granted_at: now,
@@ -230,10 +250,20 @@ impl ApprovalManager {
             }
             ApprovalMode::ExplicitLocal => {
                 if self.pre_authorized_nodes.contains(&peer.node_id) {
+                    let granted_audio = if requested.role == SessionRole::Observer {
+                        match requested.audio {
+                            AudioScope::Bidirectional | AudioScope::PlaybackOnly => {
+                                AudioScope::PlaybackOnly
+                            }
+                            AudioScope::MicrophoneOnly | AudioScope::None => AudioScope::None,
+                        }
+                    } else {
+                        requested.audio
+                    };
                     let grant = GrantedScope {
                         role: requested.role,
                         displays: requested.displays.clone(),
-                        audio: requested.audio,
+                        audio: granted_audio,
                         clipboard: requested.clipboard,
                         file_transfer: requested.file_transfer,
                         granted_at: now,
@@ -385,5 +415,123 @@ impl ApprovalManager {
                 record.state = ApprovalState::Denied(DenialReason::TimedOut);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn observer_role_never_gets_microphone_access() {
+        let now = HostInstant::from_micros(1000);
+        let mut mgr = ApprovalManager::new(ApprovalMode::Unattended);
+        let session_id = RemoteSessionId::from_raw(1);
+        let peer = PeerIdentity {
+            node_id: "node-1".into(),
+            node_name: "test-node".into(),
+            user_id: "user-1".into(),
+        };
+
+        // Observer requesting bidirectional audio
+        let req = RequestedScope {
+            role: SessionRole::Observer,
+            displays: vec![0],
+            audio: AudioScope::Bidirectional,
+            clipboard: false,
+            file_transfer: false,
+        };
+
+        let state = mgr
+            .request_approval(session_id, peer, req.clone(), now)
+            .unwrap();
+        if let ApprovalState::Approved(grant) = state {
+            // Clamped to PlaybackOnly, microphone strictly omitted!
+            assert_eq!(grant.audio, AudioScope::PlaybackOnly);
+        } else {
+            panic!("expected approved");
+        }
+
+        // Observer requesting microphone only
+        let session_id_2 = RemoteSessionId::from_raw(2);
+        let peer_2 = PeerIdentity {
+            node_id: "node-2".into(),
+            node_name: "test-node-2".into(),
+            user_id: "user-2".into(),
+        };
+        let req_mic = RequestedScope {
+            role: SessionRole::Observer,
+            displays: vec![0],
+            audio: AudioScope::MicrophoneOnly,
+            clipboard: false,
+            file_transfer: false,
+        };
+        let state_2 = mgr
+            .request_approval(session_id_2, peer_2, req_mic, now)
+            .unwrap();
+        if let ApprovalState::Approved(grant) = state_2 {
+            // Clamped to None!
+            assert_eq!(grant.audio, AudioScope::None);
+        } else {
+            panic!("expected approved");
+        }
+
+        // Controller requesting microphone gets it
+        let session_id_3 = RemoteSessionId::from_raw(3);
+        let peer_3 = PeerIdentity {
+            node_id: "node-3".into(),
+            node_name: "test-node-3".into(),
+            user_id: "user-3".into(),
+        };
+        let req_ctrl = RequestedScope {
+            role: SessionRole::Controller,
+            displays: vec![0],
+            audio: AudioScope::MicrophoneOnly,
+            clipboard: false,
+            file_transfer: false,
+        };
+        let state_3 = mgr
+            .request_approval(session_id_3, peer_3, req_ctrl, now)
+            .unwrap();
+        if let ApprovalState::Approved(grant) = state_3 {
+            assert_eq!(grant.audio, AudioScope::MicrophoneOnly);
+        } else {
+            panic!("expected approved");
+        }
+    }
+
+    #[test]
+    fn manual_approval_rejects_microphone_for_observer() {
+        let now = HostInstant::from_micros(1000);
+        let mut mgr = ApprovalManager::new(ApprovalMode::PromptAlways);
+        let session_id = RemoteSessionId::from_raw(42);
+        let peer = PeerIdentity {
+            node_id: "node-42".into(),
+            node_name: "test-node-42".into(),
+            user_id: "user-42".into(),
+        };
+
+        let req = RequestedScope {
+            role: SessionRole::Observer,
+            displays: vec![0],
+            audio: AudioScope::Bidirectional,
+            clipboard: false,
+            file_transfer: false,
+        };
+        mgr.request_approval(session_id, peer, req.clone(), now)
+            .unwrap();
+
+        // Attempt to grant microphone to observer
+        let invalid_grant = GrantedScope {
+            role: SessionRole::Observer,
+            displays: vec![0],
+            audio: AudioScope::Bidirectional,
+            clipboard: false,
+            file_transfer: false,
+            granted_at: now,
+            expires_at: None,
+        };
+        let err = mgr.approve(session_id, invalid_grant, now).unwrap_err();
+        assert_eq!(err, DenialReason::PolicyForbidden);
     }
 }

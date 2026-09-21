@@ -29,6 +29,7 @@ pub mod freshness;
 pub mod hevc;
 pub mod pacing;
 pub mod surface;
+pub mod virtual_mic;
 
 #[cfg(feature = "testing")]
 pub mod fake;

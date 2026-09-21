@@ -40,6 +40,65 @@ pub const DEFAULT_JITTER_TARGET_MS: u16 = 20;
 /// Mandatory disclosure for Windows audio capture per plan section 15.4.
 pub const WINDOWS_ENDPOINT_SCOPE_DISCLOSURE: &str = "Windows endpoint loopback captures system-wide audio across all terminal sessions, not isolated to the selected desktop user or application.";
 
+/// Mandatory disclosure for Windows virtual audio endpoint driver per plan §15.4 and Phase 0 spike.
+pub const WINDOWS_VIRTUAL_MIC_DISCLOSURE: &str = "Windows virtual microphone requires a signed driver-class component with verified provenance, not installed silently or bundled as arbitrary binaries.";
+
+/// Mandatory specification for Linux PipeWire virtual microphone source per Phase 0 spike.
+pub const LINUX_PIPEWIRE_SOURCE_SPEC: &str = "PipeWire virtual source node (media.class = Audio/Source/Virtual, adapter factory around null-audio-sink).";
+
+/// Status of host virtual microphone endpoint qualification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MicEndpointStatus {
+    /// Qualified and ready for PCM injection.
+    Qualified {
+        endpoint_name: &'static str,
+        description: &'static str,
+    },
+    /// Host OS or environment cannot qualify the virtual microphone endpoint.
+    Unsupported {
+        os: &'static str,
+        reason: &'static str,
+    },
+    /// Microphone forwarding is disabled in configuration.
+    Disabled,
+}
+
+/// Client microphone talk mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MicTalkMode {
+    /// Microphone is muted locally.
+    #[default]
+    Muted,
+    /// Push-to-talk mode: transmits only while active (key held / button pressed).
+    PushToTalk { active: bool },
+    /// Open microphone mode: transmits continuously while active.
+    OpenMic { active: bool },
+}
+
+impl MicTalkMode {
+    #[must_use]
+    pub const fn is_active(&self) -> bool {
+        match *self {
+            Self::Muted => false,
+            Self::PushToTalk { active } | Self::OpenMic { active } => active,
+        }
+    }
+}
+
+/// Operating system microphone permission state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MicPermission {
+    /// Permission has not yet been requested from the OS.
+    #[default]
+    NotRequested,
+    /// Permission was granted by the user.
+    Granted,
+    /// Permission was denied by the user.
+    Denied,
+    /// Permission is restricted by system/device policy.
+    Restricted,
+}
+
 /// Audio transmission direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -315,5 +374,25 @@ mod tests {
             ),
             Err(AudioConfigError::InvalidJitterTarget)
         );
+    }
+
+    #[test]
+    fn test_mic_modes_and_permissions() {
+        assert_eq!(MicTalkMode::default(), MicTalkMode::Muted);
+        assert!(!MicTalkMode::Muted.is_active());
+
+        let ptt_inactive = MicTalkMode::PushToTalk { active: false };
+        assert!(!ptt_inactive.is_active());
+        let ptt_active = MicTalkMode::PushToTalk { active: true };
+        assert!(ptt_active.is_active());
+
+        let open_inactive = MicTalkMode::OpenMic { active: false };
+        assert!(!open_inactive.is_active());
+        let open_active = MicTalkMode::OpenMic { active: true };
+        assert!(open_active.is_active());
+
+        assert_eq!(MicPermission::default(), MicPermission::NotRequested);
+        assert!(WINDOWS_VIRTUAL_MIC_DISCLOSURE.contains("signed driver-class"));
+        assert!(LINUX_PIPEWIRE_SOURCE_SPEC.contains("Audio/Source/Virtual"));
     }
 }

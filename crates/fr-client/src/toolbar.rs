@@ -41,6 +41,12 @@ pub struct ToolbarModel {
     pub audio_active: bool,
     /// Status description of audio playback state.
     pub audio_status_text: &'static str,
+    /// Whether client microphone is explicitly enabled for this session.
+    pub mic_explicit_enabled: bool,
+    /// Whether client microphone is currently transmitting audio to host.
+    pub mic_transmitting: bool,
+    /// Status description of client microphone uplink state.
+    pub mic_status_text: &'static str,
     /// Estimated round-trip latency in milliseconds, if available.
     pub latency_ms: Option<u32>,
 }
@@ -61,6 +67,9 @@ impl Default for ToolbarModel {
             audio_muted: false,
             audio_active: false,
             audio_status_text: "Off",
+            mic_explicit_enabled: false,
+            mic_transmitting: false,
+            mic_status_text: "Disabled",
             latency_ms: None,
         }
     }
@@ -187,6 +196,19 @@ impl ToolbarModel {
         self.update_from_audio(self.audio_active, volume_control);
     }
 
+    /// Synchronize toolbar display with client microphone controller.
+    pub fn update_from_mic(&mut self, ctrl: &crate::audio::ClientMicController) {
+        self.mic_explicit_enabled = ctrl.is_explicitly_enabled();
+        self.mic_transmitting = ctrl.is_transmitting();
+        self.mic_status_text = if !ctrl.is_explicitly_enabled() {
+            "Disabled"
+        } else if ctrl.is_transmitting() {
+            "Transmitting"
+        } else {
+            "Muted"
+        };
+    }
+
     /// Format a single-line text summary of the toolbar for CLI output or TUI status bars.
     #[must_use]
     pub fn status_line(&self) -> String {
@@ -207,9 +229,10 @@ impl ToolbarModel {
         } else {
             "[Audio: Off]".to_string()
         };
+        let mic = format!("[Mic: {}]", self.mic_status_text);
 
         format!(
-            "Host: {host} | Disp: {display} | State: {} | {revoke} | {shortcuts} | {audio}",
+            "Host: {host} | Disp: {display} | State: {} | {revoke} | {shortcuts} | {audio} | {mic}",
             self.session_state_label
         )
     }
@@ -328,5 +351,34 @@ mod tests {
         toolbar.toggle_audio_mute(&mut volume_ctrl);
         assert!(!toolbar.audio_muted);
         assert!(toolbar.status_line().contains("[Audio: 65%]"));
+    }
+
+    #[test]
+    fn toolbar_updates_from_mic() {
+        let mut toolbar = ToolbarModel::new();
+        assert!(!toolbar.mic_explicit_enabled);
+        assert!(!toolbar.mic_transmitting);
+        assert_eq!(toolbar.mic_status_text, "Disabled");
+        assert!(toolbar.status_line().contains("[Mic: Disabled]"));
+
+        let generation = fr_core::ids::AudioGeneration::INITIAL;
+        let mut mic_ctrl =
+            crate::audio::ClientMicController::new(generation, fr_core::audio::AudioChannels::Mono)
+                .unwrap();
+
+        toolbar.update_from_mic(&mic_ctrl);
+        assert_eq!(toolbar.mic_status_text, "Disabled");
+
+        mic_ctrl.set_permission(fr_core::audio::MicPermission::Granted);
+        mic_ctrl.set_explicit_enabled(true).unwrap();
+        toolbar.update_from_mic(&mic_ctrl);
+        assert_eq!(toolbar.mic_status_text, "Muted");
+        assert!(toolbar.status_line().contains("[Mic: Muted]"));
+
+        mic_ctrl.set_talk_mode(fr_core::audio::MicTalkMode::PushToTalk { active: true });
+        toolbar.update_from_mic(&mic_ctrl);
+        assert!(toolbar.mic_transmitting);
+        assert_eq!(toolbar.mic_status_text, "Transmitting");
+        assert!(toolbar.status_line().contains("[Mic: Transmitting]"));
     }
 }
