@@ -12,6 +12,7 @@
 //! evicting a receipt never makes its already-consumed input sequence new.
 //! These are core policy guarantees, not end-to-end hardware qualification.
 
+pub mod audio;
 pub mod authority;
 pub mod clipboard;
 pub mod dos;
@@ -22,3 +23,4 @@ pub mod input_sequence;
 pub mod input_submission;
 pub mod limits;
 pub mod time;
+

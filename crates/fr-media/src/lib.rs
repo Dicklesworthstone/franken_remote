@@ -20,6 +20,7 @@
 //! double is feature-gated and is never evidence of hardware support.
 
 pub mod access_unit;
+pub mod audio;
 pub mod capabilities;
 pub mod codec;
 pub mod config;

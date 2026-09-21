@@ -33,6 +33,14 @@ pub struct ToolbarModel {
     pub shortcut_supported: bool,
     /// Status description of the shortcut capture state.
     pub shortcut_status_text: &'static str,
+    /// Remote playback audio volume level (0-100).
+    pub audio_volume: u8,
+    /// Whether remote playback audio is currently muted locally.
+    pub audio_muted: bool,
+    /// Whether remote audio downlink is currently active.
+    pub audio_active: bool,
+    /// Status description of audio playback state.
+    pub audio_status_text: &'static str,
     /// Estimated round-trip latency in milliseconds, if available.
     pub latency_ms: Option<u32>,
 }
@@ -49,6 +57,10 @@ impl Default for ToolbarModel {
             shortcut_mode: ShortcutCaptureMode::Disabled,
             shortcut_supported: true,
             shortcut_status_text: "Local System",
+            audio_volume: 100,
+            audio_muted: false,
+            audio_active: false,
+            audio_status_text: "Off",
             latency_ms: None,
         }
     }
@@ -135,6 +147,46 @@ impl ToolbarModel {
         Ok(new_mode)
     }
 
+    /// Synchronize toolbar display with client audio playback controller.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub fn update_from_audio(
+        &mut self,
+        is_active: bool,
+        volume_control: &crate::audio::AudioVolumeControl,
+    ) {
+        self.audio_active = is_active;
+        self.audio_muted = volume_control.is_muted();
+        self.audio_volume = (volume_control.volume() * 100.0).round().clamp(0.0, 100.0) as u8;
+
+        self.audio_status_text = if !is_active {
+            "Off"
+        } else if self.audio_muted {
+            "Muted"
+        } else {
+            "48kHz Stereo"
+        };
+    }
+
+    /// Toggles local audio mute instantly (0 host round trips).
+    pub fn toggle_audio_mute(
+        &mut self,
+        volume_control: &mut crate::audio::AudioVolumeControl,
+    ) -> bool {
+        let muted = volume_control.toggle_mute();
+        self.update_from_audio(self.audio_active, volume_control);
+        muted
+    }
+
+    /// Sets local audio volume level (0.0 to 1.0).
+    pub fn set_audio_volume(
+        &mut self,
+        volume_control: &mut crate::audio::AudioVolumeControl,
+        volume: f32,
+    ) {
+        volume_control.set_volume(volume);
+        self.update_from_audio(self.audio_active, volume_control);
+    }
+
     /// Format a single-line text summary of the toolbar for CLI output or TUI status bars.
     #[must_use]
     pub fn status_line(&self) -> String {
@@ -148,9 +200,16 @@ impl ToolbarModel {
             "[Revoke: Off]"
         };
         let shortcuts = format!("[Shortcuts: {}]", self.shortcut_status_text);
+        let audio = if self.audio_muted {
+            "[Audio: Muted]".to_string()
+        } else if self.audio_active {
+            format!("[Audio: {}%]", self.audio_volume)
+        } else {
+            "[Audio: Off]".to_string()
+        };
 
         format!(
-            "Host: {host} | Disp: {display} | State: {} | {revoke} | {shortcuts}",
+            "Host: {host} | Disp: {display} | State: {} | {revoke} | {shortcuts} | {audio}",
             self.session_state_label
         )
     }
@@ -239,5 +298,35 @@ mod tests {
         assert_eq!(new_mode, ShortcutCaptureMode::Enabled);
         assert_eq!(toolbar.shortcut_status_text, "Routing to Remote");
         assert_eq!(toolbar.shortcut_mode, ShortcutCaptureMode::Enabled);
+    }
+
+    #[test]
+    fn toolbar_controls_audio_volume_and_instant_mute() {
+        let mut toolbar = ToolbarModel::new();
+        let mut volume_ctrl = crate::audio::AudioVolumeControl::new();
+
+        toolbar.update_from_audio(true, &volume_ctrl);
+        assert!(toolbar.audio_active);
+        assert_eq!(toolbar.audio_volume, 100);
+        assert!(!toolbar.audio_muted);
+        assert_eq!(toolbar.audio_status_text, "48kHz Stereo");
+        assert!(toolbar.status_line().contains("[Audio: 100%]"));
+
+        // Instant mute
+        let muted = toolbar.toggle_audio_mute(&mut volume_ctrl);
+        assert!(muted);
+        assert!(toolbar.audio_muted);
+        assert_eq!(toolbar.audio_status_text, "Muted");
+        assert!(toolbar.status_line().contains("[Audio: Muted]"));
+
+        // Change volume
+        toolbar.set_audio_volume(&mut volume_ctrl, 0.65);
+        assert_eq!(toolbar.audio_volume, 65);
+        // Still muted until unmuted
+        assert!(toolbar.audio_muted);
+
+        toolbar.toggle_audio_mute(&mut volume_ctrl);
+        assert!(!toolbar.audio_muted);
+        assert!(toolbar.status_line().contains("[Audio: 65%]"));
     }
 }

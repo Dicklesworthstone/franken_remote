@@ -372,7 +372,7 @@ async fn attach_media(
         .unwrap()
 }
 async fn media_peer(q: QuicRecords, h: &Cx, cleanup: &Cx, routes: ControlRoutes, image: &Path) {
-    media_peer_until(q, h, cleanup, routes, image, None).await;
+    Box::pin(media_peer_until(q, h, cleanup, routes, image, None)).await;
 }
 async fn media_peer_until(
     q: QuicRecords,
@@ -575,7 +575,7 @@ fn incomplete_decoder(mode: &str) {
         .expect("bounded failed bootstrap");
         assert!(result.is_err());
         assert!(stop.is_stopped());
-        assert!(log.borrow().ready.is_empty());
+        assert_eq!(log.borrow().ready.len(), 0);
         assert_eq!(log.borrow().frames, 0);
         let window = session.desktop().unwrap().window().unwrap();
         // No NativeObserver was returned, yet its nested decoder child must be

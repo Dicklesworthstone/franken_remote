@@ -134,6 +134,10 @@ pub enum Kind {
     ClipboardCommit = 0x0052,
     ClipboardCancel = 0x0053,
     ClipboardReady = 0x0054,
+    AudioConfiguration = 0x0060,
+    AudioConfigured = 0x0061,
+    AudioPacket = 0x0062,
+    AudioStop = 0x0063,
     FileOffer = 0x0070,
     FileAccept = 0x0071,
     FileChunk = 0x0072,
@@ -198,6 +202,10 @@ impl Kind {
             0x0052 => Ok(Self::ClipboardCommit),
             0x0053 => Ok(Self::ClipboardCancel),
             0x0054 => Ok(Self::ClipboardReady),
+            0x0060 => Ok(Self::AudioConfiguration),
+            0x0061 => Ok(Self::AudioConfigured),
+            0x0062 => Ok(Self::AudioPacket),
+            0x0063 => Ok(Self::AudioStop),
             0x0070 => Ok(Self::FileOffer),
             0x0071 => Ok(Self::FileAccept),
             0x0072 => Ok(Self::FileChunk),
@@ -252,6 +260,10 @@ impl Kind {
             | Self::ClipboardCommit
             | Self::ClipboardCancel
             | Self::ClipboardReady
+            | Self::AudioConfiguration
+            | Self::AudioConfigured
+            | Self::AudioPacket
+            | Self::AudioStop
             | Self::FileOffer
             | Self::FileAccept
             | Self::FileChunk

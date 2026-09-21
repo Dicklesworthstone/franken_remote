@@ -6,6 +6,7 @@
 //! an admitted binding before using them. No runtime or codec is linked here.
 
 pub mod attachment;
+pub mod audio;
 pub mod authority;
 pub mod clipboard;
 pub mod clock;

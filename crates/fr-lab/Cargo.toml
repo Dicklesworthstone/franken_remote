@@ -12,6 +12,7 @@ asupersync.workspace = true
 fr-core.workspace = true
 
 [dev-dependencies]
+fr-client.workspace = true
 fr-media.workspace = true
 fr-wire.workspace = true
 

@@ -173,6 +173,12 @@ monotonic_generation! {
     /// acknowledge the new mapping before coordinates are honored.
     ViewportMappingGeneration
 }
+monotonic_generation! {
+    /// Audio stream epoch/generation version. Device changes, reconnects, or
+    /// buffer overruns advance this; buffered samples from older generations
+    /// are immediately invalidated so obsolete audio is never played.
+    AudioGeneration
+}
 
 #[cfg(test)]
 mod tests {
