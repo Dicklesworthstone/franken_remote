@@ -18,6 +18,8 @@ pub mod session_agent;
 
 pub mod status;
 
+pub mod service_install;
+
 #[cfg(target_os = "linux")]
 pub mod media_egress;
 
