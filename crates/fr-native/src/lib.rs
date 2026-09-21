@@ -3,6 +3,9 @@
 
 pub mod macos;
 
+#[cfg(all(target_os = "linux", feature = "linux-opus"))]
+pub mod opus;
+
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 pub mod cursor;
 #[cfg(all(target_os = "linux", feature = "linux-media"))]

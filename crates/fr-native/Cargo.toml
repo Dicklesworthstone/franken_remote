@@ -27,6 +27,8 @@ fr-tailnet.workspace = true
 default = ["cli"]
 macos-media = []
 linux-media = []
+# Opt-in native libopus ABI; independent of HEVC, GUI and async dependencies.
+linux-opus = []
 linux-displays = ["linux-media"]
 linux-input = []
 linux-clipboard = []
