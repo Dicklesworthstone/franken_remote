@@ -189,17 +189,23 @@ pub fn render_systemd_unit(options: &InstallOptions) -> String {
     }
 
     let is_user = matches!(options.kind, ServiceKind::SystemdUser);
-    let target = if is_user {
-        "default.target"
+    let (target, unit_deps) = if is_user {
+        (
+            "default.target",
+            "After=graphical-session.target network.target tailscaled.service\nPartOf=graphical-session.target",
+        )
     } else {
-        "multi-user.target"
+        (
+            "multi-user.target",
+            "After=network.target tailscaled.service",
+        )
     };
 
     format!(
         r"[Unit]
 Description=FrankenRemote Host Daemon
 Documentation=https://github.com/Dicklesworthstone/franken_remote
-After=network.target tailscaled.service
+{}
 Wants=tailscaled.service
 
 [Service]
@@ -215,6 +221,7 @@ Environment=RUST_BACKTRACE=1
 [Install]
 WantedBy={}
 ",
+        unit_deps,
         options.exec_path.display(),
         args,
         target
