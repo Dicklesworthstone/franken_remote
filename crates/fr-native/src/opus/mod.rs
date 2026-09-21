@@ -11,6 +11,9 @@ mod decoder;
 mod encoder;
 mod ffi;
 
+#[cfg(feature = "linux-audio-playout")]
+pub mod playout;
+
 pub use decoder::{Decoder, MAX_CONCEALED_SAMPLES};
 pub use encoder::Encoder;
 

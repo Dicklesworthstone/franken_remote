@@ -29,6 +29,8 @@ macos-media = []
 linux-media = []
 # Opt-in native libopus ABI; independent of HEVC, GUI and async dependencies.
 linux-opus = []
+# Wire-to-codec worker boundary; still no native audio-device or CLI dependency.
+linux-audio-playout = ["linux-opus", "dep:fr-client"]
 linux-displays = ["linux-media"]
 linux-input = []
 linux-clipboard = []
