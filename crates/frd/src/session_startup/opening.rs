@@ -72,12 +72,18 @@ impl Host {
         &mut self,
         source: crate::media::shared_publisher::JoinQueue,
     ) -> Result<(super::Cx, super::ControlBinding, u64), Error> {
+        let original = self.shared_open_context()?;
+        source.check_source().map_err(Error::SharedPublication)?;
+        self.shared_source = Some(source);
+        Ok(original)
+    }
+    pub(crate) fn shared_open_context(
+        &mut self,
+    ) -> Result<(super::Cx, super::ControlBinding, u64), Error> {
         if self.phase != super::Phase::Hello || self.len != 0 || self.shared_source.is_some() {
             return Err(Error::Order);
         }
         self.check()?;
-        source.check_source().map_err(Error::SharedPublication)?;
-        self.shared_source = Some(source);
         Ok((self.cx.clone(), self.config.binding, self.until))
     }
 }
