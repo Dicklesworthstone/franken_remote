@@ -1,4 +1,4 @@
-use super::{check_generation, ffi, frame_samples, state_bytes};
+use super::{CodecLimits, check_generation, ffi, frame_samples, state_bytes};
 use fr_core::audio::{AudioGeneration, AudioStreamConfig, MAX_OPUS_PAYLOAD_BYTES};
 use fr_media::audio::{AudioAccessUnit, AudioEncoder, AudioMediaError, AudioPcmFrame};
 use std::{ffi::c_void, fmt, ptr::NonNull};
@@ -65,6 +65,7 @@ impl State {
 /// polling output never fabricates or renews capture authority.
 pub struct Encoder {
     state: Option<State>,
+    limits: CodecLimits,
     config: Option<AudioStreamConfig>,
     generation: Option<AudioGeneration>,
     bitrate: i32,
@@ -92,6 +93,7 @@ impl Encoder {
     pub const fn new() -> Self {
         Self {
             state: None,
+            limits: CodecLimits::ABSOLUTE,
             config: None,
             generation: None,
             bitrate: 96_000,
@@ -112,6 +114,18 @@ impl Encoder {
             complexity: i32::from(complexity),
             ..Self::new()
         })
+    }
+
+    /// Use narrower admitted packet/sample limits. The quality target must fit
+    /// the packet ceiling at configuration; it is never silently reduced to fit.
+    pub fn with_limits(
+        limits: CodecLimits,
+        bitrate: u32,
+        complexity: u8,
+    ) -> Result<Self, AudioMediaError> {
+        let mut owner = Self::with_settings(bitrate, complexity)?;
+        owner.limits = limits;
+        Ok(owner)
     }
 
     pub fn native_state_bytes(&self) -> usize {
@@ -140,7 +154,18 @@ impl AudioEncoder for Encoder {
         if self.pending.is_some() {
             return Err(AudioMediaError::Backpressure);
         }
-        frame_samples(config)?;
+        let samples = frame_samples(config)?;
+        if u32::from(samples) > self.limits.max_decoded_samples() {
+            return Err(AudioMediaError::BufferOverflow);
+        }
+        let target = u64::from(self.bitrate.unsigned_abs()) * u64::from(config.frame_duration_ms());
+        if target
+            > u64::try_from(self.limits.packet_bytes)
+                .map_err(|_| AudioMediaError::BufferOverflow)?
+                * 8_000
+        {
+            return Err(AudioMediaError::UnsupportedFormat);
+        }
         check_generation(self.generation, config.generation())?;
         // At most two capped states during a successful reconfiguration. Failure
         // drops the candidate and preserves the previous usable stream.
@@ -183,6 +208,8 @@ impl AudioEncoder for Encoder {
             .checked_add(1)
             .ok_or(AudioMediaError::BufferOverflow)?;
         let state = self.state.as_mut().ok_or(AudioMediaError::NotConfigured)?;
+        let capacity =
+            i32::try_from(self.limits.packet_bytes).map_err(|_| AudioMediaError::BufferOverflow)?;
         let mut payload = [0_u8; MAX_OPUS_PAYLOAD_BYTES];
         // SAFETY: this uniquely owned state is configured for precisely this PCM
         // length (samples * channels). Both slices live for this synchronous call.
@@ -193,12 +220,12 @@ impl AudioEncoder for Encoder {
                 pcm.samples().as_ptr(),
                 i32::from(samples),
                 payload.as_mut_ptr(),
-                1275,
+                capacity,
             )
         };
         let Some(length) = usize::try_from(length)
             .ok()
-            .filter(|&n| n > 0 && n <= payload.len())
+            .filter(|&n| n > 0 && n <= self.limits.max_packet_bytes())
         else {
             self.close();
             return Err(AudioMediaError::Fatal);

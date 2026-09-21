@@ -91,3 +91,38 @@ pub fn tone(config: AudioStreamConfig, timestamp: u64) -> AudioPcmFrame {
     AudioPcmFrame::from_interleaved(config.generation(), config.channels(), timestamp, &samples)
         .unwrap()
 }
+
+#[link(name = "libopus.so.0", kind = "dylib", modifiers = "+verbatim")]
+unsafe extern "C" {
+    fn opus_repacketizer_create() -> *mut c_void;
+    fn opus_repacketizer_destroy(state: *mut c_void);
+    fn opus_repacketizer_cat(state: *mut c_void, data: *const u8, len: i32) -> c_int;
+    fn opus_repacketizer_out(state: *mut c_void, data: *mut u8, len: i32) -> i32;
+}
+/// Aggregate actual 20 ms encoder packets using the independent native framing API.
+#[allow(dead_code)] // Shared helper also compiled by the encoder-only target.
+pub fn aggregate(packets: &[fr_media::audio::AudioAccessUnit]) -> Vec<u8> {
+    struct Repacketizer(NonNull<c_void>);
+    impl Drop for Repacketizer {
+        fn drop(&mut self) {
+            // SAFETY: sole create-returned owner, all referenced packets still live.
+            unsafe { opus_repacketizer_destroy(self.0.as_ptr()) };
+        }
+    }
+    // SAFETY: constructor takes no inputs; its allocation is checked and owned.
+    let state = Repacketizer(NonNull::new(unsafe { opus_repacketizer_create() }).unwrap());
+    for packet in packets {
+        let len = i32::try_from(packet.payload().len()).unwrap();
+        // SAFETY: real complete packets remain immutably borrowed until out/drop;
+        // no buffer is moved or freed while the repacketizer retains its pointer.
+        assert_eq!(
+            unsafe { opus_repacketizer_cat(state.0.as_ptr(), packet.payload().as_ptr(), len) },
+            0
+        );
+    }
+    let mut output = vec![0_u8; 1275];
+    // SAFETY: live state/borrowed packets and writable actual output capacity.
+    let len = unsafe { opus_repacketizer_out(state.0.as_ptr(), output.as_mut_ptr(), 1275) };
+    output.truncate(usize::try_from(len).unwrap());
+    output
+}

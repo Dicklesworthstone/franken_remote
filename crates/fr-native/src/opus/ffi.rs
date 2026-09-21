@@ -28,3 +28,31 @@ unsafe extern "C" {
         max_bytes: i32,
     ) -> i32;
 }
+
+pub(super) const RESET_STATE: c_int = 4028;
+
+#[link(name = "libopus.so.0", kind = "dylib", modifiers = "+verbatim")]
+unsafe extern "C" {
+    pub(super) fn opus_decoder_get_size(channels: c_int) -> c_int;
+    pub(super) fn opus_decoder_create(rate: i32, channels: c_int, error: *mut c_int)
+    -> *mut c_void;
+    pub(super) fn opus_decoder_destroy(state: *mut c_void);
+    pub(super) fn opus_decoder_ctl(state: *mut c_void, request: c_int, ...) -> c_int;
+    pub(super) fn opus_decode(
+        state: *mut c_void,
+        packet: *const u8,
+        len: i32,
+        pcm: *mut i16,
+        frame_size: c_int,
+        decode_fec: c_int,
+    ) -> c_int;
+    pub(super) fn opus_packet_get_nb_samples(packet: *const u8, len: i32, rate: i32) -> c_int;
+    pub(super) fn opus_packet_parse(
+        packet: *const u8,
+        len: i32,
+        toc: *mut u8,
+        frames: *mut *const u8,
+        sizes: *mut i16,
+        payload_offset: *mut c_int,
+    ) -> c_int;
+}
