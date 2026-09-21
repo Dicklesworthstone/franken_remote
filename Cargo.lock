@@ -572,6 +572,8 @@ dependencies = [
  "fr-core",
  "fr-media",
  "fr-wire",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

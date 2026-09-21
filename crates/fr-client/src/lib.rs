@@ -36,3 +36,6 @@ pub use shortcut::{
 /// Minimal desktop client toolbar model (Plan §16.1).
 pub mod toolbar;
 pub use toolbar::ToolbarModel;
+
+/// Tailnet peer discovery, bounded capability probes, saved hosts, and directory policy (Plan §6.4).
+pub mod discovery;
