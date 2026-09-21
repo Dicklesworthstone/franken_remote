@@ -1063,8 +1063,8 @@ mod robot_tests {
         assert!(o.json);
 
         let o = parse(&to_args("inspect host-alpha --port 9443 --by-name --json")).unwrap();
+        assert!(matches!(o.command, Command::Inspect(_)));
         let Command::Inspect(insp) = o.command else {
-            assert!(false, "inspect required");
             return;
         };
         assert_eq!(insp.node, "host-alpha");
@@ -1072,8 +1072,8 @@ mod robot_tests {
         assert!(insp.by_name && o.json);
 
         let o = parse(&to_args("disconnect host-alpha --json")).unwrap();
+        assert!(matches!(o.command, Command::Disconnect(_)));
         let Command::Disconnect(disc) = o.command else {
-            assert!(false, "disconnect required");
             return;
         };
         assert_eq!(disc.node, "host-alpha");
@@ -1086,8 +1086,8 @@ mod robot_tests {
             "robot session open host-alpha --role control --json",
         ))
         .unwrap();
+        assert!(matches!(o.command, Command::Robot(RobotCommand::SessionOpen(_))));
         let Command::Robot(RobotCommand::SessionOpen(s)) = o.command else {
-            assert!(false, "open required");
             return;
         };
         assert_eq!(s.node, "host-alpha");
@@ -1098,16 +1098,16 @@ mod robot_tests {
             "robot session close host-alpha --lease lease-123 --json",
         ))
         .unwrap();
+        assert!(matches!(o.command, Command::Robot(RobotCommand::SessionClose(_))));
         let Command::Robot(RobotCommand::SessionClose(s)) = o.command else {
-            assert!(false, "close required");
             return;
         };
         assert_eq!(s.node, "host-alpha");
         assert_eq!(s.lease, Some("lease-123".into()));
 
         let o = parse(&to_args("robot observe host-alpha --display 2 --screenshot /tmp/screen.png --evidence-level submitted_to_compositor --json")).unwrap();
+        assert!(matches!(o.command, Command::Robot(RobotCommand::Observe(_))));
         let Command::Robot(RobotCommand::Observe(obs)) = o.command else {
-            assert!(false, "observe required");
             return;
         };
         assert_eq!(obs.node, "host-alpha");
@@ -1119,8 +1119,8 @@ mod robot_tests {
             "robot input host-alpha --lease lease-123 --request-id req-001 --precondition-lease lease-123 --precondition-focus Terminal --semantic-evidence adapter --json",
         ))
         .unwrap();
+        assert!(matches!(o.command, Command::Robot(RobotCommand::Input(_))));
         let Command::Robot(RobotCommand::Input(inp)) = o.command else {
-            assert!(false, "input required");
             return;
         };
         assert_eq!(inp.node, "host-alpha");
