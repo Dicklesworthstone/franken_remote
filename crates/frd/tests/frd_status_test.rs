@@ -581,3 +581,19 @@ fn frd_approval_and_sharing_cli_commands() {
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("Sharing Scope updated to 'own-user'"));
 }
+
+#[test]
+fn probe_host_generates_valid_report_envelope() {
+    let report = DaemonStatusReport::probe_host(None);
+    assert_eq!(report.schema_version, "fr.status.v1");
+    assert!(report.timestamp_unix_ms > 0);
+    assert!(report.outcome == "success" || report.outcome == "refusal");
+    assert!(report.permissions.iter().any(|p| p.capability == "screen_capture"));
+    assert!(report.capabilities.iter().any(|c| c.name == "video_encode"));
+    let json = report.render_json();
+    assert!(json.contains("\"schema_version\":\"fr.status.v1\""));
+    assert!(json.contains("\"outcome\":"));
+    let human = report.render_human();
+    assert!(human.contains("Host Daemon Status"));
+}
+

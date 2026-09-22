@@ -79,7 +79,7 @@ fn main() -> ExitCode {
     let cmd = non_flags[0];
 
     match cmd {
-        "status" => execute_status(json),
+        "status" => execute_status(&args, json),
         "approval" => execute_approval(&non_flags, json),
         "sharing" => execute_sharing(&non_flags, json),
         "run" => execute_run(&args, json),
@@ -93,8 +93,18 @@ fn main() -> ExitCode {
     }
 }
 
-fn execute_status(json: bool) -> ExitCode {
-    let report = DaemonStatusReport::nominal_operational();
+fn execute_status(args: &[String], json: bool) -> ExitCode {
+    let mut socket = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--socket" && i + 1 < args.len() {
+            socket = Some(std::path::PathBuf::from(&args[i + 1]));
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    let report = DaemonStatusReport::probe_host(socket.as_deref());
     if json {
         print!("{}", report.render_json());
     } else {

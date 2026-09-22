@@ -181,36 +181,43 @@ fn hub_drives_late_joins_and_reuses_slots_without_reusing_cancellation_authority
 
 #[test]
 fn hub_capacity_includes_unpolled_joins_and_duplicate_ids_cannot_alias_an_owner() {
-    let rt = support::runtime();
-    rt.block_on(async {
-        let (mut publisher, owner, _first, mut hub, admission, _) = fixture(
-            &rt,
-            service::Policy {
-                viewers: 2,
-                ..service::Policy::default()
-            },
-            entropy(),
-        )
-        .await;
-        let (_, _, host, _viewer) =
-            sessions(&rt, 14, Role::Observe, &[fr_wire::display::CAPABILITY]).await;
-        let pending = admission.admit(host).unwrap();
-        let (_, _, host, _viewer2) =
-            sessions(&rt, 15, Role::Observe, &[fr_wire::display::CAPABILITY]).await;
-        let refused = host.original_observation();
-        assert!(matches!(admission.admit(host), Err(service::Error::Full)));
-        assert!(refused.check().is_err());
-        let (_, _, host, _viewer3) =
-            sessions(&rt, 13, Role::Observe, &[fr_wire::display::CAPABILITY]).await;
-        assert!(matches!(
-            admission.admit(host),
-            Err(service::Error::DuplicateSession)
-        ));
-        assert_eq!(pending.state(), State::Starting);
-        assert!(owner.check().is_ok());
-        hub.close();
-        reap(&mut publisher).await;
-    });
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let rt = support::runtime();
+            rt.block_on(Box::pin(async {
+                let (mut publisher, owner, _first, mut hub, admission, _) = fixture(
+                    &rt,
+                    service::Policy {
+                        viewers: 2,
+                        ..service::Policy::default()
+                    },
+                    entropy(),
+                )
+                .await;
+                let (_, _, host, _viewer) =
+                    sessions(&rt, 14, Role::Observe, &[fr_wire::display::CAPABILITY]).await;
+                let pending = admission.admit(host).unwrap();
+                let (_, _, host, _viewer2) =
+                    sessions(&rt, 15, Role::Observe, &[fr_wire::display::CAPABILITY]).await;
+                let refused = host.original_observation();
+                assert!(matches!(admission.admit(host), Err(service::Error::Full)));
+                assert!(refused.check().is_err());
+                let (_, _, host, _viewer3) =
+                    sessions(&rt, 13, Role::Observe, &[fr_wire::display::CAPABILITY]).await;
+                assert!(matches!(
+                    admission.admit(host),
+                    Err(service::Error::DuplicateSession)
+                ));
+                assert_eq!(pending.state(), State::Starting);
+                assert!(owner.check().is_ok());
+                hub.close();
+                reap(&mut publisher).await;
+            }));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
