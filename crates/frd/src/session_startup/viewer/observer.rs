@@ -180,6 +180,13 @@ impl NativeObserver {
     pub fn take_file_result(&mut self) -> Option<super::super::FileSendReceipt> {
         self.viewer.take_file_result()
     }
+    /// Ordered, content-free batch results also survive native observer shutdown.
+    pub fn file_batch_report(&mut self) -> Option<fr_files::sender::batch::Report> {
+        self.viewer.file_batch_report()
+    }
+    pub fn take_file_batch_report(&mut self) -> Option<fr_files::sender::batch::Report> {
+        self.viewer.take_file_batch_report()
+    }
     /// Fence at call time and join the original file source under the existing
     /// closing budget. This observer must be retained until cleanup completes.
     pub fn reap_files<'a>(

@@ -471,6 +471,18 @@ impl StreamingViewer {
             .controlled()
             .and_then(ControlledViewer::take_file_result)
     }
+    /// Preserve every started file's receipt when a batch outlives the serving
+    /// future. Reading or collecting these results never requires fresh authority.
+    pub fn file_batch_report(&mut self) -> Option<fr_files::sender::batch::Report> {
+        self.peer
+            .controlled()
+            .and_then(|viewer| viewer.file_batch_report())
+    }
+    pub fn take_file_batch_report(&mut self) -> Option<fr_files::sender::batch::Report> {
+        self.peer
+            .controlled()
+            .and_then(ControlledViewer::take_file_batch_report)
+    }
     /// Fence the parent at CALL time, then collect the original file source.
     /// Success proves either that no source remains or that its thread was
     /// joined. Expired/cancelled/abandoned waits keep its owner and receipt here.

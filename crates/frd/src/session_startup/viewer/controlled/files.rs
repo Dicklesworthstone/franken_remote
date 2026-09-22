@@ -3,7 +3,10 @@ mod negotiation;
 use super::{ControlledViewer, permitted};
 use asupersync::cx::Cx;
 use fr_files::{
-    sender::{Error, Policy, Progress, Receipt, Sender, Stage},
+    sender::{
+        Error, Policy, Progress, Receipt, Sender, Stage,
+        batch::{Report, Selection},
+    },
     session::Permission,
 };
 use fr_transport::quic::{MediaChannel, QuicRecords, Route, files::FilesChannel};
@@ -13,7 +16,7 @@ use fr_wire::{
     negotiation::{ControlBinding, Role},
 };
 use negotiation::Pending;
-use std::fs::File;
+use std::{fs::File, time::Duration};
 
 #[derive(Default)]
 pub(super) struct Slot {
@@ -178,6 +181,31 @@ impl ControlledViewer {
     /// diagnostics; preparation uses the existing bounded disk worker. Results and
     /// source cleanup must be collected before a subsequent file can be started.
     pub fn send_file(&mut self, file: File, name: &str) -> Result<u64, Error> {
+        self.admit_file_send()?;
+        self.files
+            .sender
+            .as_mut()
+            .ok_or(Error::Closed)?
+            .begin(&self.session.transport, file, name)
+    }
+    /// Queue a finite local multi-selection on this same authenticated file lane.
+    /// No source is read until an ordinary controller turn rechecks permission,
+    /// input authority and view freshness. The absolute lifetime includes waiting,
+    /// hashing, sending, remote proof and source cleanup; it is never renewed by
+    /// input lease renewal. Sources are processed one at a time in selection order.
+    ///
+    /// The caller must collect the final batch report before submitting another
+    /// selection or single file. A failure stops the remaining sources, preserving
+    /// prior publication receipts. This is not an automatically replayed sync job.
+    pub fn send_files(&mut self, selection: Selection, lifetime: Duration) -> Result<(), Error> {
+        self.admit_file_send()?;
+        self.files
+            .sender
+            .as_mut()
+            .ok_or(Error::Closed)?
+            .begin_batch(&self.session.transport, selection, lifetime)
+    }
+    fn admit_file_send(&mut self) -> Result<(), Error> {
         self.check().map_err(|_| Error::Closed)?;
         if self.files.pending.is_some() {
             return Err(Error::Busy);
@@ -189,11 +217,21 @@ impl ControlledViewer {
         if !permitted(&mut self.input, &self.control, &self.session.cx) {
             return Err(Error::Closed);
         }
+        Ok(())
+    }
+    /// Content-free, ordered results, including after permission or parent loss.
+    /// Queued sources are not counted as started, and publication uncertainty is
+    /// never reported as a rollback or used as a reason to resubmit a selection.
+    pub fn file_batch_report(&self) -> Option<Report> {
+        self.files.sender.as_ref().and_then(Sender::batch_report)
+    }
+    /// Collect only a complete report after the original source has been joined.
+    /// This remains usable after close and cannot reopen a retired file lane.
+    pub fn take_file_batch_report(&mut self) -> Option<Report> {
         self.files
             .sender
             .as_mut()
-            .ok_or(Error::Closed)?
-            .begin(&self.session.transport, file, name)
+            .and_then(Sender::take_batch_report)
     }
     pub fn file_stage(&self) -> Option<Stage> {
         self.files.sender.as_ref().map(Sender::stage)
