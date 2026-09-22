@@ -6,7 +6,8 @@
 //! Application session negotiation remains a separate boundary. See `QUIC_RECORDS.md` for exact guarantees and qualification scope.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod quic;
-
 #[cfg(not(target_arch = "wasm32"))]
 #[path = "quic/accept.rs"]
 pub mod native_accept;
+
+pub mod wss;

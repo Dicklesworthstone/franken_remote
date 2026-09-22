@@ -1543,19 +1543,33 @@ fn discovered_native_view_failure_revokes_original_observation_on_idle_check() {
     });
 }
 #[cfg(feature = "linux-displays")]
+async fn start_discovered(
+    cx: &Cx,
+    display: &Display,
+    epoch: u128,
+) -> (
+    ObservationControl,
+    frd::media::discovery::DiscoveredSource,
+    fr_wire::display::Catalog,
+) {
+    let control = new_observation(cx);
+    let discovery = frd::media::discovery::DiscoveredSource::start(
+        &control,
+        launch(display, epoch, Role::Capture),
+    )
+    .await
+    .unwrap();
+    let catalog = discovery.catalog().unwrap();
+    (control, discovery, catalog)
+}
+
+#[cfg(feature = "linux-displays")]
 #[test]
 fn discovery_cannot_use_an_independent_same_id_approved_authority() {
     run(|cx| async move {
         let display = Display::start();
-        let control = new_observation(&cx);
+        let (control, discovery, catalog) = start_discovered(&cx, &display, 192).await;
         let other = new_observation(&cx);
-        let discovery = frd::media::discovery::DiscoveredSource::start(
-            &control,
-            launch(&display, 192, Role::Capture),
-        )
-        .await
-        .unwrap();
-        let catalog = discovery.catalog().unwrap();
         let link = Link::with_choice(
             &cx,
             Some((other.clone(), catalog, catalog.displays()[0].handle)),
@@ -1580,14 +1594,7 @@ fn discovery_cannot_use_an_independent_same_id_approved_authority() {
 fn new_discovery_cannot_rebind_the_old_network_selected_handle() {
     run(|cx| async move {
         let display = Display::start();
-        let control = new_observation(&cx);
-        let original = frd::media::discovery::DiscoveredSource::start(
-            &control,
-            launch(&display, 193, Role::Capture),
-        )
-        .await
-        .unwrap();
-        let catalog = original.catalog().unwrap();
+        let (control, original, catalog) = start_discovered(&cx, &display, 193).await;
         let link = Link::with_choice(
             &cx,
             Some((control.clone(), catalog, catalog.displays()[0].handle)),
@@ -1628,14 +1635,7 @@ fn new_discovery_cannot_rebind_the_old_network_selected_handle() {
 fn dropping_unpolled_discovered_configuration_revokes_before_encoder_setup() {
     run(|cx| async move {
         let display = Display::start();
-        let control = new_observation(&cx);
-        let discovery = frd::media::discovery::DiscoveredSource::start(
-            &control,
-            launch(&display, 194, Role::Capture),
-        )
-        .await
-        .unwrap();
-        let catalog = discovery.catalog().unwrap();
+        let (control, discovery, catalog) = start_discovered(&cx, &display, 194).await;
         let link = Link::with_choice(
             &cx,
             Some((control.clone(), catalog, catalog.displays()[0].handle)),

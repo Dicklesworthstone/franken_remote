@@ -72,8 +72,7 @@ fn can_restart(error: ReportError) -> bool {
 }
 #[test]
 fn failed_reference_with_exhausted_roles_retains_cause_without_sending_a_doomed_request() {
-    net::runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let (mut link, media, mut receiver) = exhausted(&cx).await;
         let mut report = media
             .recovery_receiver(&link.c, link.cr, parent(), &receiver)
@@ -117,8 +116,7 @@ fn failed_reference_with_exhausted_roles_retains_cause_without_sending_a_doomed_
 }
 #[test]
 fn exhausted_roles_do_not_turn_an_actual_decode_failure_into_reconnect_permission() {
-    net::runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let (mut link, media, mut receiver) = exhausted(&cx).await;
         let mut report = media
             .recovery_receiver(&link.c, link.cr, parent(), &receiver)
@@ -142,8 +140,7 @@ fn exhausted_roles_do_not_turn_an_actual_decode_failure_into_reconnect_permissio
 }
 #[test]
 fn permission_refusal_wins_over_namespace_exhaustion_and_never_grants_retry() {
-    net::runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let (mut link, media, mut receiver) = exhausted(&cx).await;
         let mut report = media
             .recovery_receiver(&link.c, link.cr, parent(), &receiver)

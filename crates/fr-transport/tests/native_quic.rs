@@ -24,19 +24,8 @@ fn recovery_packet(binding: u32, count: usize) -> Vec<u8> {
     let mut out = vec![0; 65536];
     let data = vec![81; count];
     let l = MediaLimits::new(ProtocolLimits::ABSOLUTE, 65536, 16384, 64).unwrap();
-    let size = encode_recovery(
-        RecoveryChunk {
-            frame: 0,
-            total_bytes: u32::try_from(count).unwrap(),
-            offset: 0,
-            capture_micros: 17,
-            bytes: &data,
-        },
-        binding,
-        &l,
-        &mut out,
-    )
-    .unwrap();
+    #[rustfmt::skip]
+    let size = encode_recovery(RecoveryChunk { frame: 0, total_bytes: u32::try_from(count).unwrap(), offset: 0, capture_micros: 17, bytes: &data }, binding, &l, &mut out).unwrap();
     out.truncate(size);
     out
 }
@@ -498,79 +487,25 @@ struct InputPair {
     bulk: StreamRoute,
 }
 async fn input_pair(cx: &Cx, policy: Policy) -> InputPair {
-    let (client, server) = support::native_pair_with_windows(
-        cx,
-        "localhost",
-        ALPN,
-        policy.stream_window,
-        policy.connection_window,
-    )
-    .await;
+    let (client, server) = support::native_pair_with_windows(cx, "localhost", ALPN, policy.stream_window, policy.connection_window).await;
     let (mut client, mut server) = (client.unwrap(), server.unwrap());
     let input = client.connection_mut().open_uni_stream(cx).unwrap();
     let result = server.connection_mut().open_uni_stream(cx).unwrap();
     let bulk = server.connection_mut().open_uni_stream(cx).unwrap();
-    let actions = StreamRoute {
-        stream: input,
-        binding: 7,
-        messages: Messages::InputActions,
-        priority: Priority::Critical,
-        outbound: true,
-        maximum: 512,
-    };
-    let results = StreamRoute {
-        stream: result,
-        binding: 7,
-        messages: Messages::Exact(0x0048),
-        priority: Priority::Critical,
-        outbound: true,
-        maximum: 512,
-    };
-    let bulk = StreamRoute {
-        stream: bulk,
-        binding: 2,
-        messages: Messages::Exact(0x0032),
-        priority: Priority::Bulk,
-        outbound: true,
-        maximum: usize::try_from(policy.stream_window).unwrap(),
-    };
-    let pointer = DatagramRoute {
-        binding: 7,
-        kind: 0x0042,
-        outbound: true,
-    };
-    let client_routes = [
-        actions,
-        StreamRoute {
-            outbound: false,
-            ..results
-        },
-        StreamRoute {
-            outbound: false,
-            ..bulk
-        },
-    ];
-    let server_routes = client_routes.map(|r| StreamRoute {
-        outbound: !r.outbound,
-        ..r
-    });
+    #[rustfmt::skip]
+    let actions = StreamRoute { stream: input, binding: 7, messages: Messages::InputActions, priority: Priority::Critical, outbound: true, maximum: 512 };
+    #[rustfmt::skip]
+    let results = StreamRoute { stream: result, binding: 7, messages: Messages::Exact(0x0048), priority: Priority::Critical, outbound: true, maximum: 512 };
+    #[rustfmt::skip]
+    let bulk = StreamRoute { stream: bulk, binding: 2, messages: Messages::Exact(0x0032), priority: Priority::Bulk, outbound: true, maximum: usize::try_from(policy.stream_window).unwrap() };
+    let pointer = DatagramRoute { binding: 7, kind: 0x0042, outbound: true };
+    #[rustfmt::skip]
+    let client_routes = [actions, StreamRoute { outbound: false, ..results }, StreamRoute { outbound: false, ..bulk }];
+    let server_routes = client_routes.map(|r| StreamRoute { outbound: !r.outbound, ..r });
     InputPair {
         client: QuicRecords::new(client, cx, &client_routes, &[pointer], policy).unwrap(),
-        server: QuicRecords::new(
-            server,
-            cx,
-            &server_routes,
-            &[DatagramRoute {
-                outbound: false,
-                ..pointer
-            }],
-            policy,
-        )
-        .unwrap(),
-        actions,
-        results,
-        pointer,
-        bulk,
+        server: QuicRecords::new(server, cx, &server_routes, &[DatagramRoute { outbound: false, ..pointer }], policy).unwrap(),
+        actions, results, pointer, bulk,
     }
 }
 fn input_drive<'a>(

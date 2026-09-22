@@ -167,6 +167,9 @@ impl Server {
             Duration::ZERO,
         )
     }
+    fn responses(vals: &[&Value], pause: Duration) -> Self {
+        Self::new(vals.iter().map(|v| response(v, false)).collect(), pause)
+    }
 }
 impl Drop for Server {
     fn drop(&mut self) {
@@ -558,15 +561,8 @@ fn installed_linux_1_102_3_projection_preserves_the_live_refusal() {
 fn membership_profile_survives_real_localapi_lookup_and_revalidation_without_capmap() {
     let (status, mut who) = fixtures();
     who["CapMap"] = json!(null);
-    let server = Server::new(
-        vec![
-            response(&status, false),
-            response(&who, false),
-            response(&status, false),
-            response(&status, false),
-            response(&who, false),
-            response(&status, false),
-        ],
+    let server = Server::responses(
+        &[&status, &who, &status, &status, &who, &status],
         Duration::ZERO,
     );
     run_async!(cx, {
@@ -687,17 +683,7 @@ fn inconsistent_snapshots_retry_once_without_unbounded_work() {
     let (s, w) = fixtures();
     let mut changed = s.clone();
     changed["Version"] = json!("fixture-restarted");
-    let server = Server::new(
-        vec![
-            response(&s, false),
-            response(&w, false),
-            response(&changed, false),
-            response(&changed, false),
-            response(&w, false),
-            response(&changed, false),
-        ],
-        Duration::ZERO,
-    );
+    let server = Server::responses(&[&s, &w, &changed, &changed, &w, &changed], Duration::ZERO);
     run_async!(cx, {
         let proof = server
             .client
@@ -707,17 +693,7 @@ fn inconsistent_snapshots_retry_once_without_unbounded_work() {
         assert!(proof.permissions().observe());
     });
     assert_eq!(server.calls.load(Ordering::SeqCst), 6);
-    let server = Server::new(
-        vec![
-            response(&s, false),
-            response(&w, false),
-            response(&changed, false),
-            response(&s, false),
-            response(&w, false),
-            response(&changed, false),
-        ],
-        Duration::ZERO,
-    );
+    let server = Server::responses(&[&s, &w, &changed, &s, &w, &changed], Duration::ZERO);
     run_async!(cx, {
         assert_eq!(
             server
@@ -733,14 +709,7 @@ fn inconsistent_snapshots_retry_once_without_unbounded_work() {
 #[test]
 fn delayed_snapshot_cannot_slide_issued_deadline_and_expired_proof_cannot_renew() {
     let (s, w) = fixtures();
-    let server = Server::new(
-        vec![
-            response(&s, false),
-            response(&w, false),
-            response(&s, false),
-        ],
-        Duration::from_millis(25),
-    );
+    let server = Server::responses(&[&s, &w, &s], Duration::from_millis(25));
     run_async!(cx, {
         let p = GrantPolicy {
             validity: Duration::from_millis(30),
@@ -931,16 +900,7 @@ fn admission_proof_cannot_be_moved_to_a_different_local_authority_instance() {
 #[test]
 fn unchanged_revalidation_extends_only_an_unexpired_owned_admission() {
     let (s, w) = fixtures();
-    let replies = (0..3)
-        .flat_map(|_| {
-            [
-                response(&s, false),
-                response(&w, false),
-                response(&s, false),
-            ]
-        })
-        .collect();
-    let server = Server::new(replies, Duration::ZERO);
+    let server = Server::responses(&[&s, &w, &s, &s, &w, &s, &s, &w, &s], Duration::ZERO);
     run_async!(cx, {
         let proof = server
             .client
@@ -972,17 +932,7 @@ fn capability_removal_permission_changes_and_identity_switch_close_old_admission
             2 => next["Self"]["ID"] = json!("different-host"),
             _ => next["Version"] = json!("different-daemon-version"),
         }
-        let server = Server::new(
-            vec![
-                response(&s, false),
-                response(&w, false),
-                response(&s, false),
-                response(&next, false),
-                response(&who, false),
-                response(&next, false),
-            ],
-            Duration::ZERO,
-        );
+        let server = Server::responses(&[&s, &w, &s, &next, &who, &next], Duration::ZERO);
         run_async!(cx, {
             let proof = server
                 .client
@@ -1042,14 +992,7 @@ fn expired_shared_admission_is_terminal_without_additional_network_traffic() {
 #[test]
 fn dropped_started_refresh_cannot_leave_an_admission_active() {
     let (s, w) = fixtures();
-    let server = Server::new(
-        vec![
-            response(&s, false),
-            response(&w, false),
-            response(&s, false),
-        ],
-        Duration::ZERO,
-    );
+    let server = Server::fixture(&s, &w, false);
     run_async!(cx, {
         let proof = server
             .client
@@ -1072,16 +1015,7 @@ fn dropped_started_refresh_cannot_leave_an_admission_active() {
 #[test]
 fn revocation_during_refresh_cannot_be_overwritten_by_a_successful_response() {
     let (s, w) = fixtures();
-    let replies = (0..2)
-        .flat_map(|_| {
-            [
-                response(&s, false),
-                response(&w, false),
-                response(&s, false),
-            ]
-        })
-        .collect();
-    let server = Server::new(replies, Duration::ZERO);
+    let server = Server::responses(&[&s, &w, &s, &s, &w, &s], Duration::ZERO);
     run_async!(cx, {
         let proof = server
             .client
@@ -1319,10 +1253,7 @@ fn node_address_name_identity_and_backend_changes_refuse() {
     }
     let mut changed = original.clone();
     changed["Self"]["DNSName"] = json!("other.fixture.ts.net.");
-    let server = Server::new(
-        vec![response(&original, false), response(&changed, false)],
-        Duration::ZERO,
-    );
+    let server = Server::responses(&[&original, &changed], Duration::ZERO);
     run_async!(cx, {
         assert!(matches!(
             server.client.node_identity(&cx).await,
@@ -1336,14 +1267,7 @@ fn node_refresh_cannot_replace_key_or_extend_a_dead_snapshot() {
     original["Self"]["DNSName"] = json!("host.fixture.ts.net.");
     let mut changed = original.clone();
     changed["Self"]["PublicKey"] = json!(format!("nodekey:{}", "3".repeat(64)));
-    let server = Server::new(
-        vec![
-            response(&original, false),
-            response(&original, false),
-            response(&changed, false),
-        ],
-        Duration::ZERO,
-    );
+    let server = Server::responses(&[&original, &original, &changed], Duration::ZERO);
     run_async!(cx, {
         let node = server.client.node_identity(&cx).await.unwrap();
         assert!(matches!(

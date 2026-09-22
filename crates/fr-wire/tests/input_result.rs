@@ -22,69 +22,20 @@ fn hex(s: &str) -> Vec<u8> {
         .map(|p| u8::from_str_radix(core::str::from_utf8(p).unwrap(), 16).unwrap())
         .collect()
 }
+#[rustfmt::skip]
 fn fixtures() -> Vec<(Vec<u8>, InputOutcome, u32, Option<Reason>)> {
     use InputOutcome as O;
     vec![
-        (
-            hex(include_str!("fixtures/input/result-submitted.hex")),
-            O::SubmittedToOs,
-            2,
-            None,
-        ),
-        (
-            hex(include_str!("fixtures/input/result-local.hex")),
-            O::AppliedLocally,
-            0,
-            None,
-        ),
-        (
-            hex(include_str!("fixtures/input/result-refused.hex")),
-            O::RejectedBeforeSubmission,
-            0,
-            Some(Reason::Unsupported),
-        ),
-        (
-            hex(include_str!("fixtures/input/result-expired.hex")),
-            O::ExpiredBeforeSubmission,
-            0,
-            Some(Reason::TicketExpired),
-        ),
-        (
-            hex(include_str!("fixtures/input/result-cancelled.hex")),
-            O::CancelledBeforeSubmission,
-            0,
-            Some(Reason::Revoked),
-        ),
-        (
-            hex(include_str!("fixtures/input/result-partial.hex")),
-            O::PartiallySubmittedToOs,
-            1,
-            Some(Reason::TicketExpired),
-        ),
-        (
-            hex(include_str!("fixtures/input/result-unknown.hex")),
-            O::EffectUnknown,
-            2,
-            Some(Reason::UnknownEffect),
-        ),
-        (
-            hex(include_str!("fixtures/input/result-unknown-first.hex")),
-            O::EffectUnknown,
-            0,
-            Some(Reason::UnknownEffect),
-        ),
-        (
-            hex(include_str!("fixtures/input/result-pointer.hex")),
-            O::SubmittedToOs,
-            1,
-            None,
-        ),
-        (
-            hex(include_str!("fixtures/input/result-observed.hex")),
-            O::SubmittedToOs,
-            2,
-            None,
-        ),
+        (hex(include_str!("fixtures/input/result-submitted.hex")), O::SubmittedToOs, 2, None),
+        (hex(include_str!("fixtures/input/result-local.hex")), O::AppliedLocally, 0, None),
+        (hex(include_str!("fixtures/input/result-refused.hex")), O::RejectedBeforeSubmission, 0, Some(Reason::Unsupported)),
+        (hex(include_str!("fixtures/input/result-expired.hex")), O::ExpiredBeforeSubmission, 0, Some(Reason::TicketExpired)),
+        (hex(include_str!("fixtures/input/result-cancelled.hex")), O::CancelledBeforeSubmission, 0, Some(Reason::Revoked)),
+        (hex(include_str!("fixtures/input/result-partial.hex")), O::PartiallySubmittedToOs, 1, Some(Reason::TicketExpired)),
+        (hex(include_str!("fixtures/input/result-unknown.hex")), O::EffectUnknown, 2, Some(Reason::UnknownEffect)),
+        (hex(include_str!("fixtures/input/result-unknown-first.hex")), O::EffectUnknown, 0, Some(Reason::UnknownEffect)),
+        (hex(include_str!("fixtures/input/result-pointer.hex")), O::SubmittedToOs, 1, None),
+        (hex(include_str!("fixtures/input/result-observed.hex")), O::SubmittedToOs, 2, None),
     ]
 }
 fn decode(bytes: &[u8]) -> Result<InputResult, WireError> {
@@ -157,18 +108,12 @@ fn rejects_every_truncation_and_trailing_data() {
 fn authenticated_direction_delivery_and_epoch_binding_are_required() {
     let bytes = &fixtures()[0].0;
     let result = decode(bytes).unwrap();
-    for (direction, delivery, expected) in [
-        (
-            InputDirection::ViewerToHost,
-            InputDelivery::Reliable,
-            WireError::WrongRole,
-        ),
-        (
-            InputDirection::HostToViewer,
-            InputDelivery::Datagram,
-            WireError::WrongChannel,
-        ),
-    ] {
+    #[rustfmt::skip]
+    let cases = [
+        (InputDirection::ViewerToHost, InputDelivery::Reliable, WireError::WrongRole),
+        (InputDirection::HostToViewer, InputDelivery::Datagram, WireError::WrongChannel),
+    ];
+    for (direction, delivery, expected) in cases {
         assert_eq!(
             decode_input_result(
                 bytes,
@@ -192,24 +137,14 @@ fn authenticated_direction_delivery_and_epoch_binding_are_required() {
         );
         assert_eq!(out, [0xaa; INPUT_RESULT_BYTES]);
     }
-    for expected in [
-        ResultBinding {
-            channel: 0,
-            ..binding()
-        },
-        ResultBinding {
-            channel: 10,
-            ..binding()
-        },
-        ResultBinding {
-            session: RemoteSessionId::from_raw(3),
-            ..binding()
-        },
-        ResultBinding {
-            lease: InputLeaseId::from_raw(3),
-            ..binding()
-        },
-    ] {
+    #[rustfmt::skip]
+    let bindings = [
+        ResultBinding { channel: 0, ..binding() },
+        ResultBinding { channel: 10, ..binding() },
+        ResultBinding { session: RemoteSessionId::from_raw(3), ..binding() },
+        ResultBinding { lease: InputLeaseId::from_raw(3), ..binding() },
+    ];
+    for expected in bindings {
         assert_eq!(
             decode_input_result(
                 bytes,
@@ -341,56 +276,22 @@ fn inconsistent_receipts_cannot_erase_effects_or_invent_observation() {
     let submitted = decode(&fixtures()[0].0).unwrap();
     let partial = decode(&fixtures()[5].0).unwrap();
     let unknown = decode(&fixtures()[6].0).unwrap();
-    for result in [
-        InputResult {
-            submitted_operations: 0,
-            ..submitted
-        },
-        InputResult {
-            stage: Stage::Admitted,
-            ..submitted
-        },
-        InputResult {
-            reason: Some(Reason::PermissionMissing),
-            ..submitted
-        },
-        InputResult {
-            outcome: InputOutcome::ExpiredBeforeSubmission,
-            ..partial
-        },
-        InputResult {
-            reason: None,
-            ..partial
-        },
-        InputResult {
-            stage: Stage::Observed,
-            ..partial
-        },
-        InputResult {
-            reason: Some(Reason::UnknownEffect),
-            ..partial
-        },
-        InputResult {
-            unknown_next_operation: false,
-            ..unknown
-        },
-        InputResult {
-            stage: Stage::Observed,
-            ..unknown
-        },
-        InputResult {
-            reason: None,
-            ..unknown
-        },
-        InputResult {
-            space: SequenceSpace::Pointer,
-            ..partial
-        },
-        InputResult {
-            space: SequenceSpace::Pointer,
-            ..unknown
-        },
-    ] {
+    #[rustfmt::skip]
+    let invalids = [
+        InputResult { submitted_operations: 0, ..submitted },
+        InputResult { stage: Stage::Admitted, ..submitted },
+        InputResult { reason: Some(Reason::PermissionMissing), ..submitted },
+        InputResult { outcome: InputOutcome::ExpiredBeforeSubmission, ..partial },
+        InputResult { reason: None, ..partial },
+        InputResult { stage: Stage::Observed, ..partial },
+        InputResult { reason: Some(Reason::UnknownEffect), ..partial },
+        InputResult { unknown_next_operation: false, ..unknown },
+        InputResult { stage: Stage::Observed, ..unknown },
+        InputResult { reason: None, ..unknown },
+        InputResult { space: SequenceSpace::Pointer, ..partial },
+        InputResult { space: SequenceSpace::Pointer, ..unknown },
+    ];
+    for result in invalids {
         assert_eq!(encode(result), Err(WireError::InvalidValue));
     }
     for count in [4097, u32::MAX] {
@@ -453,13 +354,9 @@ fn stable_reason_codes_cover_authority_sequence_and_platform_refusals() {
     use AuthorityError as A;
     use InputSequenceError as S;
     use Refusal as R;
+    #[rustfmt::skip]
     let cases = [
-        (
-            R::Authority(A::InvalidState {
-                phase: Phase::Closed,
-            }),
-            1,
-        ),
+        (R::Authority(A::InvalidState { phase: Phase::Closed }), 1),
         (R::Authority(A::ObservationExpired), 2),
         (R::Authority(A::NoLease), 3),
         (R::Authority(A::StaleLease), 4),
@@ -474,24 +371,10 @@ fn stable_reason_codes_cover_authority_sequence_and_platform_refusals() {
         (R::Authority(A::ChallengeExpired), 13),
         (R::Authority(A::ClockRegression), 14),
         (R::Authority(A::DeadlineOverflow), 15),
-        (
-            R::Sequence(S::InvalidCapacity {
-                requested: usize::MAX,
-            }),
-            16,
-        ),
+        (R::Sequence(S::InvalidCapacity { requested: usize::MAX }), 16),
         (R::Sequence(S::Fenced), 17),
-        (
-            R::Sequence(S::PreviousActionPending { sequence: u64::MAX }),
-            18,
-        ),
-        (
-            R::Sequence(S::SequenceGap {
-                expected: 1,
-                received: u64::MAX,
-            }),
-            19,
-        ),
+        (R::Sequence(S::PreviousActionPending { sequence: u64::MAX }), 18),
+        (R::Sequence(S::SequenceGap { expected: 1, received: u64::MAX }), 19),
         (R::Sequence(S::NotPending), 20),
         (R::StaleSession, 21),
         (R::StaleView, 22),

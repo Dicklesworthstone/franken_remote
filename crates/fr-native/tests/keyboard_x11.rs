@@ -343,14 +343,20 @@ fn completed(d: Dispatch) -> Receipt {
         _ => panic!("expected completed receipt"),
     }
 }
+macro_rules! test_env {
+    ($server:ident, $name:ident, $o:ident, $code:ident, $orig:ident, $native:ident, $owner:ident, $c:ident) => {
+        let ($server, $name) = Server::start();
+        let $o = Observer::new(&$name);
+        let $code = $o.code(0x61);
+        let $orig = $o.repeat($code);
+        let mut $native = X11Pointer::open(&$name).unwrap();
+        let (mut $owner, $c) = session(&$native);
+    };
+}
+
 #[test]
 fn wire_to_authority_to_real_keys_repeat_pointer_and_cleanup() {
-    let (_server, name) = Server::start();
-    let o = Observer::new(&name);
-    let code = o.code(0x61);
-    let original = o.repeat(code);
-    let mut native = X11Pointer::open(&name).unwrap();
-    let (mut owner, c) = session(&native);
+    test_env!(_server, name, o, code, original, native, owner, c);
     let r = completed(send(
         &mut owner,
         &mut native,
@@ -447,12 +453,7 @@ fn wire_to_authority_to_real_keys_repeat_pointer_and_cleanup() {
 }
 #[test]
 fn expired_after_xkb_preparation_never_presses_and_restores_repeat() {
-    let (_server, name) = Server::start();
-    let o = Observer::new(&name);
-    let code = o.code(0x61);
-    let original = o.repeat(code);
-    let mut native = X11Pointer::open(&name).unwrap();
-    let (mut owner, c) = session(&native);
+    test_env!(_server, name, o, code, original, native, owner, c);
     let mut checks = 0;
     let r = completed(send(
         &mut owner,
@@ -476,12 +477,7 @@ fn expired_after_xkb_preparation_never_presses_and_restores_repeat() {
 }
 #[test]
 fn native_repeat_expiry_between_release_and_press_is_partial_not_replayed() {
-    let (_server, name) = Server::start();
-    let o = Observer::new(&name);
-    let code = o.code(0x61);
-    let original = o.repeat(code);
-    let mut native = X11Pointer::open(&name).unwrap();
-    let (mut owner, c) = session(&native);
+    test_env!(_server, name, o, code, original, native, owner, c);
     let _ = send(
         &mut owner,
         &mut native,
@@ -622,12 +618,7 @@ fn local_revoke_during_native_preparation_cancels_without_input() {
             self.native.cancel_prepared();
         }
     }
-    let (_server, name) = Server::start();
-    let o = Observer::new(&name);
-    let code = o.code(0x61);
-    let original = o.repeat(code);
-    let mut native = X11Pointer::open(&name).unwrap();
-    let (mut owner, c) = session(&native);
+    test_env!(_server, name, o, code, original, native, owner, c);
     let mut sink = RevokeAfterPrepare {
         native: &mut native,
         revoke: owner.revoke_handle(),
@@ -666,16 +657,9 @@ fn swapped_button_mapping_preserves_logical_clicks_and_all_five_buttons() {
     assert_eq!(unsafe { XSetPointerMapping(o.d, map.as_ptr(), n) }, 0);
     let mut native = X11Pointer::open(&name).unwrap();
     let (mut owner, c) = session(&native);
-    for (i, (button, logical)) in [
-        (PointerButton::Primary, 1),
-        (PointerButton::Secondary, 3),
-        (PointerButton::Middle, 2),
-        (PointerButton::Back, 8),
-        (PointerButton::Forward, 9),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    #[rustfmt::skip]
+    let buttons = [(PointerButton::Primary, 1), (PointerButton::Secondary, 3), (PointerButton::Middle, 2), (PointerButton::Back, 8), (PointerButton::Forward, 9)];
+    for (i, (button, logical)) in buttons.into_iter().enumerate() {
         for (pressed, offset, event_kind) in [(true, 0, 4), (false, 1, 5)] {
             let r = completed(send(
                 &mut owner,
@@ -695,12 +679,7 @@ fn swapped_button_mapping_preserves_logical_clicks_and_all_five_buttons() {
 }
 #[test]
 fn native_owner_drop_releases_a_drag_and_keyboard_without_an_explicit_cleanup_call() {
-    let (_server, name) = Server::start();
-    let o = Observer::new(&name);
-    let code = o.code(0x61);
-    let original = o.repeat(code);
-    let mut native = X11Pointer::open(&name).unwrap();
-    let (mut owner, c) = session(&native);
+    test_env!(_server, name, o, code, original, native, owner, c);
     let r = completed(send(
         &mut owner,
         &mut native,

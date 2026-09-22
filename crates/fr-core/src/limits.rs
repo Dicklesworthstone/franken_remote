@@ -292,6 +292,22 @@ pub struct ProtocolLimits {
     max_viewers: u8,
 }
 
+macro_rules! val_cap {
+    ($field:ident, $val:expr, $cap:expr) => {
+        Self::validate_capacity(LimitField::$field, u64::from($val), u64::from($cap))
+    };
+}
+macro_rules! val_max {
+    ($field:ident, $val:expr, $max:expr) => {
+        Self::validate_max(LimitField::$field, u64::from($val), u64::from($max))
+    };
+}
+macro_rules! val_len {
+    ($field:ident, $len:expr, $max:expr) => {
+        Self::validate_len(LimitField::$field, $len, u64::from($max))
+    };
+}
+
 impl ProtocolLimits {
     /// Floor of the negotiated reassembly window: below two pictures the
     /// repair horizon cannot cover even one in-flight round trip.
@@ -638,29 +654,21 @@ impl ProtocolLimits {
 
     /// Validates an ordinary control-message length before parsing.
     pub fn validate_control_message_len(&self, len: usize) -> Result<(), LimitsError> {
-        Self::validate_len(
-            LimitField::ControlMessageBytes,
-            len,
-            u64::from(self.max_control_message_bytes),
-        )
+        val_len!(ControlMessageBytes, len, self.max_control_message_bytes)
     }
 
     /// Validates a complete clipboard item length before transfer.
     pub fn validate_clipboard_item_len(&self, len: usize) -> Result<(), LimitsError> {
-        Self::validate_len(
-            LimitField::ClipboardItemBytes,
-            len,
-            u64::from(self.max_clipboard_item_bytes),
-        )
+        val_len!(ClipboardItemBytes, len, self.max_clipboard_item_bytes)
     }
 
     /// Validates a complete encoded access-unit length before reassembly
     /// admits it.
     pub fn validate_access_unit_len(&self, len: usize) -> Result<(), LimitsError> {
-        Self::validate_len(
-            LimitField::EncodedAccessUnitBytes,
+        val_len!(
+            EncodedAccessUnitBytes,
             len,
-            u64::from(self.max_encoded_access_unit_bytes),
+            self.max_encoded_access_unit_bytes
         )
     }
 
@@ -710,11 +718,7 @@ impl ProtocolLimits {
 
     /// Validates cursor shape payload length before allocation or FFI.
     pub fn validate_cursor_shape_len(&self, len: usize) -> Result<(), LimitsError> {
-        Self::validate_len(
-            LimitField::CursorShapeBytes,
-            len,
-            u64::from(self.max_cursor_shape_bytes),
-        )
+        val_len!(CursorShapeBytes, len, self.max_cursor_shape_bytes)
     }
 
     /// Validates a Unicode name byte length before allocation or display.
@@ -724,11 +728,7 @@ impl ProtocolLimits {
 
     /// Validates parameter set (VPS/SPS/PPS) byte length before parsing.
     pub fn validate_parameter_set_len(&self, len: usize) -> Result<(), LimitsError> {
-        Self::validate_len(
-            LimitField::ParameterSetBytes,
-            len,
-            u64::from(self.max_parameter_set_bytes),
-        )
+        val_len!(ParameterSetBytes, len, self.max_parameter_set_bytes)
     }
 
     fn validate_max(field: LimitField, count: u64, max: u64) -> Result<(), LimitsError> {
@@ -755,74 +755,50 @@ impl ProtocolLimits {
 
     /// Validates access-unit metadata fragment count against the fragment ceiling.
     pub fn validate_fragment_count(&self, count: u32) -> Result<(), LimitsError> {
-        Self::validate_max(
-            LimitField::FragmentsPerAccessUnit,
-            u64::from(count),
-            u64::from(self.max_fragments_per_access_unit),
+        val_max!(
+            FragmentsPerAccessUnit,
+            count,
+            self.max_fragments_per_access_unit
         )
     }
 
     /// Validates concurrent handshake count before admitting another.
     pub fn validate_handshake_concurrency(&self, count: u32) -> Result<(), LimitsError> {
-        Self::validate_capacity(
-            LimitField::ConcurrentHandshakes,
-            u64::from(count),
-            u64::from(self.max_concurrent_handshakes),
-        )
+        val_cap!(ConcurrentHandshakes, count, self.max_concurrent_handshakes)
     }
 
     /// Validates pending approvals count before queuing another.
     pub fn validate_pending_approvals(&self, count: u32) -> Result<(), LimitsError> {
-        Self::validate_capacity(
-            LimitField::PendingApprovals,
-            u64::from(count),
-            u64::from(self.max_pending_approvals),
-        )
+        val_cap!(PendingApprovals, count, self.max_pending_approvals)
     }
 
     /// Validates half-attached channels count before admitting another.
     pub fn validate_half_attached_channels(&self, count: u32) -> Result<(), LimitsError> {
-        Self::validate_capacity(
-            LimitField::HalfAttachedChannels,
-            u64::from(count),
-            u64::from(self.max_half_attached_channels),
-        )
+        val_cap!(HalfAttachedChannels, count, self.max_half_attached_channels)
     }
 
     /// Validates retained receipts count against the ledger ceiling.
     pub fn validate_retained_receipts(&self, count: usize) -> Result<(), LimitsError> {
-        Self::validate_max(
-            LimitField::RetainedReceipts,
+        val_max!(
+            RetainedReceipts,
             u64::try_from(count).unwrap_or(u64::MAX),
-            u64::from(self.max_retained_receipts),
+            self.max_retained_receipts
         )
     }
 
     /// Validates encoder session count before launching a new encoder.
     pub fn validate_encoder_sessions(&self, count: u32) -> Result<(), LimitsError> {
-        Self::validate_capacity(
-            LimitField::EncoderSessions,
-            u64::from(count),
-            u64::from(self.max_encoder_sessions),
-        )
+        val_cap!(EncoderSessions, count, self.max_encoder_sessions)
     }
 
     /// Validates GPU surfaces count before allocating additional surfaces.
     pub fn validate_gpu_surfaces(&self, count: u32) -> Result<(), LimitsError> {
-        Self::validate_capacity(
-            LimitField::GpuSurfaces,
-            u64::from(count),
-            u64::from(self.max_gpu_surfaces),
-        )
+        val_cap!(GpuSurfaces, count, self.max_gpu_surfaces)
     }
 
     /// Validates viewer count before admitting another viewer.
     pub fn validate_viewers(&self, count: u32) -> Result<(), LimitsError> {
-        Self::validate_capacity(
-            LimitField::Viewers,
-            u64::from(count),
-            u64::from(self.max_viewers),
-        )
+        val_cap!(Viewers, count, self.max_viewers)
     }
 
     /// Checked surface-size arithmetic: validates the dimensions, then

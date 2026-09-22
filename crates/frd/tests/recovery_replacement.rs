@@ -19,6 +19,16 @@ use frd::media_quic::{
     replacement::{Error as ReplacementError, Replacement},
 };
 use std::{cell::Cell, time::Duration};
+
+macro_rules! run_test {
+    ($cx:ident, $body:expr) => {{
+        net::runtime().block_on(async {
+            let $cx = Cx::current().unwrap();
+            $body
+        });
+    }};
+}
+
 fn parent() -> ControlBinding {
     ControlBinding {
         id: 7,
@@ -299,8 +309,7 @@ async fn picture(
 #[test]
 #[allow(clippy::too_many_lines)] // One ordered scenario retains the same live owners throughout.
 fn loss_report_fresh_media_and_resumed_frames_use_the_original_connection_and_receiver() {
-    net::runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut link = Link::new(&cx, true).await;
         let (hm, vm, mut receiver) = link.media(&cx).await;
         let original = (link.h.binding(), link.c.binding());
@@ -476,8 +485,7 @@ fn loss_report_fresh_media_and_resumed_frames_use_the_original_connection_and_re
 }
 #[test]
 fn preflight_refusals_do_not_retire_healthy_media_or_consume_new_bindings() {
-    net::runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         for case in 0..4 {
             let mut link = Link::new(&cx, case != 0).await;
             let (hm, vm, _) = link.media(&cx).await;
@@ -508,8 +516,7 @@ fn preflight_refusals_do_not_retire_healthy_media_or_consume_new_bindings() {
 }
 #[test]
 fn original_deadline_expires_while_waiting_for_first_offer_without_reopening_a_connection() {
-    net::runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut link = Link::new(&cx, true).await;
         let (_, vm, _) = link.media(&cx).await;
         let until = net::clock(&cx) + 50_000;
@@ -535,8 +542,7 @@ fn original_deadline_expires_while_waiting_for_first_offer_without_reopening_a_c
 }
 #[test]
 fn a_foreign_connection_cannot_advance_another_views_replacement() {
-    net::runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut link = Link::new(&cx, true).await;
         let (_, vm, _) = link.media(&cx).await;
         let mut c = vm
@@ -568,8 +574,7 @@ fn a_foreign_connection_cannot_advance_another_views_replacement() {
 }
 #[test]
 fn namespace_exhaustion_refuses_before_discarding_the_working_replacement() {
-    net::runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut link = Link::new(&cx, true).await;
         let (hm, vm, _) = link.media(&cx).await;
         let (hm, vm) = replace(&mut link, &cx, hm, vm).await;
@@ -595,8 +600,7 @@ fn namespace_exhaustion_refuses_before_discarding_the_working_replacement() {
 }
 #[test]
 fn wrong_generation_offer_is_refused_before_new_viewer_route_allocation() {
-    net::runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut link = Link::new(&cx, true).await;
         let (hm, vm, _) = link.media(&cx).await;
         // Leave the host with its first retired set and send a genuinely encoded
@@ -662,8 +666,7 @@ fn wrong_generation_offer_is_refused_before_new_viewer_route_allocation() {
 
 #[test]
 fn queued_control_precedes_replacement_offers_without_being_discarded_or_retimed() {
-    net::runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut link = Link::new(&cx, true).await;
         let (hm, vm, _) = link.media(&cx).await;
         let until = net::clock(&cx) + 1_500_000;
@@ -747,8 +750,7 @@ fn queued_control_precedes_replacement_offers_without_being_discarded_or_retimed
 
 #[test]
 fn dropping_a_started_replacement_keeps_the_original_partial_exchange_fence() {
-    net::runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut link = Link::new(&cx, true).await;
         let (hm, _, _) = link.media(&cx).await;
         let mut h = hm

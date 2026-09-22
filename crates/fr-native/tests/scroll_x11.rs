@@ -295,14 +295,37 @@ fn barrier(sink: &mut X11Pointer) {
         DesktopPoint { x: 20, y: 30 }
     );
 }
-#[test]
-fn actual_four_direction_wheel_events_and_complete_client_receipts() {
+
+fn setup() -> (Server, Observer, X11Pointer, InputSession, InputClient) {
     let server = Server::new();
     let observer = Observer::open(&server.name);
-    let mut sink = X11Pointer::open(&server.name).unwrap();
+    let sink = X11Pointer::open(&server.name).unwrap();
+    let (host, client) = grant(&sink);
+    (server, observer, sink, host, client)
+}
+
+fn setup_view_bound(
+    bound: Option<u64>,
+) -> (Server, Observer, X11Pointer, InputSession, InputClient) {
+    let server = Server::new();
+    let observer = Observer::open(&server.name);
+    let sink = X11Pointer::open(&server.name).unwrap();
+    let (host, client) = grant_with_view_bound(&sink, bound);
+    (server, observer, sink, host, client)
+}
+
+fn setup_native() -> (Server, Observer, X11Pointer) {
+    let server = Server::new();
+    let observer = Observer::open(&server.name);
+    let sink = X11Pointer::open(&server.name).unwrap();
+    (server, observer, sink)
+}
+
+#[test]
+fn actual_four_direction_wheel_events_and_complete_client_receipts() {
+    let (_server, observer, mut sink, mut host, mut client) = setup();
     assert!(sink.capabilities().contains(Capability::LineScroll));
     assert!(!sink.capabilities().contains(Capability::PixelScroll));
-    let (mut host, mut client) = grant(&sink);
     for (i, (x, y, want)) in [
         (0, -LINE, vec![4]),
         (0, LINE, vec![5]),
@@ -337,10 +360,7 @@ fn actual_four_direction_wheel_events_and_complete_client_receipts() {
 }
 #[test]
 fn replay_and_zero_scroll_cannot_generate_more_native_wheel_effects() {
-    let server = Server::new();
-    let observer = Observer::open(&server.name);
-    let mut sink = X11Pointer::open(&server.name).unwrap();
-    let (mut host, mut client) = grant(&sink);
+    let (_server, observer, mut sink, mut host, mut client) = setup();
     let bytes = encode(&mut client, 0, 2 * LINE, 1);
     let r = dispatch(&mut host, &mut sink, &bytes, || at(1));
     assert!(matches!(
@@ -379,10 +399,7 @@ fn discrete_scroll_refuses_fractional_and_oversized_requests_before_moving() {
         (16 * LINE, 17 * LINE),
         (i32::MIN, 0),
     ] {
-        let server = Server::new();
-        let observer = Observer::open(&server.name);
-        let mut sink = X11Pointer::open(&server.name).unwrap();
-        let (mut host, mut client) = grant(&sink);
+        let (_server, observer, mut sink, mut host, mut client) = setup();
         let before = sink.query_pointer().unwrap();
         let bytes = encode(&mut client, x, y, 1);
         let r = dispatch(&mut host, &mut sink, &bytes, || at(1));
@@ -455,10 +472,7 @@ impl<F: FnMut(Operation)> InputSink for Hook<'_, F> {
 }
 #[test]
 fn expiry_after_native_press_stops_the_action_and_cleanup_releases_only_that_press() {
-    let server = Server::new();
-    let observer = Observer::open(&server.name);
-    let mut sink = X11Pointer::open(&server.name).unwrap();
-    let (mut host, mut client) = grant(&sink);
+    let (_server, observer, mut sink, mut host, mut client) = setup();
     let clock = Cell::new(1);
     let bytes = encode(&mut client, 0, 3 * LINE, 1);
     let r = {
@@ -494,10 +508,7 @@ fn expiry_after_native_press_stops_the_action_and_cleanup_releases_only_that_pre
 }
 #[test]
 fn local_revoke_between_wheel_steps_prevents_another_press() {
-    let server = Server::new();
-    let observer = Observer::open(&server.name);
-    let mut sink = X11Pointer::open(&server.name).unwrap();
-    let (mut host, mut client) = grant(&sink);
+    let (_server, observer, mut sink, mut host, mut client) = setup();
     let revoke = host.revoke_handle();
     let bytes = encode(&mut client, 0, 2 * LINE, 1);
     let r = {
@@ -521,10 +532,7 @@ fn local_revoke_between_wheel_steps_prevents_another_press() {
 }
 #[test]
 fn maximum_whole_line_request_stays_bounded_and_receipt_is_accepted() {
-    let server = Server::new();
-    let observer = Observer::open(&server.name);
-    let mut sink = X11Pointer::open(&server.name).unwrap();
-    let (mut host, mut client) = grant(&sink);
+    let (_server, observer, mut sink, mut host, mut client) = setup();
     let bytes = encode(&mut client, 0, 32 * LINE, 1);
     let r = dispatch(&mut host, &mut sink, &bytes, || at(1));
     assert_eq!(r.submitted_operations, 65);
@@ -539,9 +547,7 @@ fn maximum_whole_line_request_stays_bounded_and_receipt_is_accepted() {
 }
 #[test]
 fn dropping_a_prepared_native_wheel_owner_releases_its_recorded_button() {
-    let server = Server::new();
-    let observer = Observer::open(&server.name);
-    let mut sink = X11Pointer::open(&server.name).unwrap();
+    let (_server, observer, mut sink) = setup_native();
     let position = Operation::Absolute(DesktopPoint { x: 20, y: 30 });
     sink.prepare(position).unwrap();
     assert_eq!(sink.submit(position), Submission::Submitted);
@@ -600,10 +606,7 @@ fn existing_vertical_wheel_press_is_not_claimed_or_released_by_remote_cleanup() 
 #[test]
 fn original_source_expiry_stops_native_scroll_even_when_ticket_and_lease_are_live() {
     for stop_after_press in [false, true] {
-        let server = Server::new();
-        let observer = Observer::open(&server.name);
-        let mut sink = X11Pointer::open(&server.name).unwrap();
-        let (mut host, mut client) = grant_with_view_bound(&sink, Some(100));
+        let (_server, observer, mut sink, mut host, mut client) = setup_view_bound(Some(100));
         let clock = Cell::new(1);
         let bytes = encode(&mut client, LINE, LINE, 1);
         let monitor = host.monitor();
@@ -690,10 +693,7 @@ fn readiness_watchdog_revokes_a_prepared_native_wheel_before_submission() {
             true
         }
     }
-    let server = Server::new();
-    let observer = Observer::open(&server.name);
-    let mut sink = X11Pointer::open(&server.name).unwrap();
-    let (mut host, mut client) = grant_with_view_bound(&sink, Some(100));
+    let (_server, observer, mut sink, mut host, mut client) = setup_view_bound(Some(100));
     let clock = Cell::new(1);
     let bytes = encode(&mut client, 0, 3 * LINE, 1);
     let result = {

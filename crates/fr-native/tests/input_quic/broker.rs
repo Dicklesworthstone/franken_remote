@@ -46,6 +46,9 @@ struct Setup {
     display: Display,
 }
 impl Setup {
+    async fn default(cx: Cx) -> Self {
+        Self::new(cx, Seat::default(), AuthorityPolicy::plan_defaults(), true).await
+    }
     async fn new(cx: Cx, seat: Seat, policy: AuthorityPolicy, ready: bool) -> Self {
         let pair = pair_with_feedback(&cx, true).await;
         Self::from_pair(cx, seat, policy, ready, pair, None)
@@ -360,7 +363,7 @@ where
 #[test]
 fn initial_broker_grant_reaches_real_shift_drag_and_preserves_ticket_sequence() {
     run(|cx, _second| async move {
-        let mut s = Setup::new(cx, Seat::default(), AuthorityPolicy::plan_defaults(), true).await;
+        let mut s = Setup::default(cx).await;
         s.request().await;
         assert_eq!(
             s.broker.service(&mut s.pair.server, None).unwrap(),
@@ -413,7 +416,7 @@ fn initial_broker_grant_reaches_real_shift_drag_and_preserves_ticket_sequence() 
 #[test]
 fn request_is_not_consent_and_wrong_local_target_never_calls_native_factory() {
     run(|cx, _second| async move {
-        let mut s = Setup::new(cx, Seat::default(), AuthorityPolicy::plan_defaults(), true).await;
+        let mut s = Setup::default(cx).await;
         s.request().await;
         let mut wrong = s.request.target;
         wrong.display_binding += 1;
@@ -604,13 +607,7 @@ fn watchdog_revokes_blocked_initialization_without_broker_service() {
 fn native_initialization_failure_or_panic_cannot_publish_grant_or_claim_unsafe_handoff() {
     run(|cx, second| async move {
         for (panic, cx) in [false, true].into_iter().zip([cx, second]) {
-            let mut s = Setup::new(
-                cx.clone(),
-                Seat::default(),
-                AuthorityPolicy::plan_defaults(),
-                true,
-            )
-            .await;
+            let mut s = Setup::default(cx).await;
             s.request().await;
             let driver = s
                 .broker
@@ -648,13 +645,7 @@ fn native_initialization_failure_or_panic_cannot_publish_grant_or_claim_unsafe_h
 fn changed_view_and_abandoned_unpolled_io_revoke_without_early_seat_release() {
     run(|cx, second| async move {
         for (abandoned, cx) in [false, true].into_iter().zip([cx, second]) {
-            let mut s = Setup::new(
-                cx.clone(),
-                Seat::default(),
-                AuthorityPolicy::plan_defaults(),
-                true,
-            )
-            .await;
+            let mut s = Setup::default(cx).await;
             s.request().await;
             let (tx, rx) = mpsc::channel();
             let driver = s
@@ -692,7 +683,7 @@ fn changed_view_and_abandoned_unpolled_io_revoke_without_early_seat_release() {
 #[test]
 fn broker_rejects_observe_role_missing_capability_duplicate_owner_and_legacy_feedback() {
     run(|cx, _second| async move {
-        let s = Setup::new(cx, Seat::default(), AuthorityPolicy::plan_defaults(), true).await;
+        let s = Setup::default(cx).await;
         for mode in 0..3 {
             let mut selected = selection();
             if mode == 0 {
@@ -741,7 +732,7 @@ fn broker_rejects_observe_role_missing_capability_duplicate_owner_and_legacy_fee
 #[test]
 fn reentrant_credential_generation_sees_reserved_seat_without_authority_lock() {
     run(|cx, _second| async move {
-        let mut s = Setup::new(cx, Seat::default(), AuthorityPolicy::plan_defaults(), true).await;
+        let mut s = Setup::default(cx).await;
         s.request().await;
         let seat = s.seat.clone();
         let observation = s.observation.clone();
@@ -791,7 +782,7 @@ async fn blocked_grant(s: &mut Setup) {
 #[test]
 fn native_grant_backpressure_preserves_issue_time_expiry_and_single_credential() {
     run(|cx, _second| async move {
-        let mut s = Setup::new(cx, Seat::default(), AuthorityPolicy::plan_defaults(), true).await;
+        let mut s = Setup::default(cx).await;
         s.request().await;
         s.pair
             .server
@@ -895,7 +886,7 @@ fn unsent_grant_expires_in_place_without_any_replacement_or_native_input() {
 #[test]
 fn foreign_connection_with_equal_routes_cannot_receive_grant_or_be_closed() {
     run(|cx, second| async move {
-        let mut s = Setup::new(cx, Seat::default(), AuthorityPolicy::plan_defaults(), true).await;
+        let mut s = Setup::default(cx).await;
         s.request().await;
         let mut foreign = pair_with_feedback(&second, true).await;
         assert_eq!(
@@ -943,7 +934,7 @@ async fn deliver_unapproved(s: &mut Setup, route: Route, bytes: &[u8]) -> GrantE
 #[test]
 fn denied_request_replay_and_early_input_never_create_a_native_owner() {
     run(|cx, second| async move {
-        let mut a = Setup::new(cx, Seat::default(), AuthorityPolicy::plan_defaults(), true).await;
+        let mut a = Setup::default(cx).await;
         a.request().await;
         a.broker.deny();
         let mut bytes = [0; fr_wire::control::REQUEST_BYTES];
@@ -964,13 +955,7 @@ fn denied_request_replay_and_early_input_never_create_a_native_owner() {
             GrantError::Replay
         );
         assert!(!a.seat.is_occupied());
-        let mut b = Setup::new(
-            second,
-            Seat::default(),
-            AuthorityPolicy::plan_defaults(),
-            true,
-        )
-        .await;
+        let mut b = Setup::default(second).await;
         b.request().await;
         let req = InputRequest {
             credentials: credentials(),
@@ -1003,7 +988,7 @@ fn denied_request_replay_and_early_input_never_create_a_native_owner() {
 #[test]
 fn late_local_denial_revokes_a_pending_native_grant() {
     run(|cx, _second| async move {
-        let mut s = Setup::new(cx, Seat::default(), AuthorityPolicy::plan_defaults(), true).await;
+        let mut s = Setup::default(cx).await;
         s.request().await;
         let (tx, rx) = mpsc::channel();
         let driver = s
@@ -1037,7 +1022,7 @@ fn late_local_denial_revokes_a_pending_native_grant() {
 #[test]
 fn publication_rejects_already_buffered_input_without_requiring_another_receive_call() {
     run(|cx, _second| async move {
-        let mut s = Setup::new(cx, Seat::default(), AuthorityPolicy::plan_defaults(), true).await;
+        let mut s = Setup::default(cx).await;
         s.request().await;
         let (tx, rx) = mpsc::channel();
         let driver = s

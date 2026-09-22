@@ -100,8 +100,7 @@ async fn stop(source: &mut CaptureSource, cx: &Cx) {
 #[test]
 #[allow(clippy::too_many_lines)] // One ordered scenario retains the same actual owners.
 fn retained_sender_replaces_real_channels_and_preserves_chronic_failure_history() {
-    net::runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut link = Link::new(&cx, true).await;
         let (hm, vm, mut receiver) = link.media(&cx).await;
         let control = observation(&cx);
@@ -251,8 +250,7 @@ fn retained_sender_replaces_real_channels_and_preserves_chronic_failure_history(
 }
 #[test]
 fn healthy_or_foreign_senders_are_not_rebound_by_a_replacement() {
-    net::runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut link = Link::new(&cx, true).await;
         let (hm, vm, _) = link.media(&cx).await;
         let control = observation(&cx);
