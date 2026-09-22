@@ -28,3 +28,22 @@ Clippy pass for fr-wire; this is not independent wire interoperability.
 
 The native pair uses one logical nonzero binding for both unidirectional streams.
 Both contexts must retain that same binding; role identifies the sender.
+
+Profile 2 (`ATP_PORTABLE_DIRECTORY_FULL`) extends the same pinned ATP full-object
+schema to a portable file tree. `FileOffer` must name profile 2 and contain
+`is_directory = true`; the host echoes profile 2 in `FileAccept` before indexed
+`ObjectData` can be sent. Profile 1 still refuses directories. A profile mismatch
+is terminal for that file attachment, never an implicit downgrade.
+
+The directory root is one portable basename inside the locally approved drop
+root. Entries use contiguous indices and portable relative component paths,
+with at most 64 files, 128 file/implicit-directory nodes, eight components per
+path, 1024 bytes per path, and 16 KiB of combined names. The manifest is at most
+32 KiB and must also fit the negotiated complete-record limit. Existing content,
+rate, concurrency, session-attempt, and original-authority budgets still apply.
+Every file SHA and ATP flat Merkle commitment is verified before one no-replace
+rename publishes the entire tree. `Proof.files` is the actual manifest file
+count, including empty files. Empty roots are supported; empty non-root
+directories, filesystem metadata, links, packed entries, deltas and resumption
+remain outside this content-only profile. This is explicit directory transfer,
+not automatic synchronization or permission to browse remote paths.

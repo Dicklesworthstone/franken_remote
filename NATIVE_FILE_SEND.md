@@ -150,3 +150,31 @@ are explicit fixtures, not hardware or live-tailnet qualification. This removes
 the pre-agreed numeric-scope prerequisite for the drop APIs; graphical selection,
 a complete command-line upload workflow, downloads, resume and folder sync still
 require their separate implementations.
+
+## Explicit portable directories
+
+`fr_files::sender::Sender::begin_directory(connection, selected_directory_fd,
+name)` sends a bounded directory tree using ATP profile 2. The selection is an
+owned, locally approved directory descriptor, not a remote path. The source
+worker scans children with no-follow, descriptor-relative operations, refuses
+links/special files and unsupported empty non-root directories, retains selected
+file/directory descriptors, and checks their identities before and throughout
+streaming. Changed source content or membership is terminal; it is not silently
+retried with a refreshed deadline. Empty roots and empty regular files work.
+
+The receiver publishes all verified entries with one no-overwrite root rename.
+A conflict preserves the existing destination and the local selection; a lost
+proof after completion remains an unknown publication, never an automatic retry.
+The same original attachment can carry a later legacy single-file transfer after
+its actual directory receipt and source cleanup are collected. See profile 2
+bounds in `PROTOCOL_FILES.md`. This does not implement synchronization jobs,
+metadata preservation, remote directory browsing, or ATP resumption.
+
+The running `ControlledViewer::send_directory` API uses that same original
+file attachment while the viewer continues servicing keyboard/pointer input,
+feedback, and input lease renewal. Its admission, cancellation, receipts and
+source-reap requirements are the same as `send_file`; it does not negotiate a
+second controller or authorize a new drop root. The native interactive callback
+can use this owner directly. Running-controller tests exercise tree publication,
+permission refusal and cancellation with real files, ATP, TLS and UDP; local
+consent and the OS input sink remain explicit fixtures.

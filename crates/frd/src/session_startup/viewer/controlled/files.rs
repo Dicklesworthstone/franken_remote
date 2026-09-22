@@ -188,6 +188,18 @@ impl ControlledViewer {
             .ok_or(Error::Closed)?
             .begin(&self.session.transport, file, name)
     }
+    /// Begin an explicit directory selection on the original controller attachment.
+    /// Scanning, hashing and streaming stay on the existing bounded source worker;
+    /// unsupported entries refuse rather than silently disappearing from the tree.
+    /// This is a one-shot transfer, not an automatically replayed sync job.
+    pub fn send_directory(&mut self, directory: File, name: &str) -> Result<u64, Error> {
+        self.admit_file_send()?;
+        self.files
+            .sender
+            .as_mut()
+            .ok_or(Error::Closed)?
+            .begin_directory(&self.session.transport, directory, name)
+    }
     /// Queue a finite local multi-selection on this same authenticated file lane.
     /// No source is read until an ordinary controller turn rechecks permission,
     /// input authority and view freshness. The absolute lifetime includes waiting,
