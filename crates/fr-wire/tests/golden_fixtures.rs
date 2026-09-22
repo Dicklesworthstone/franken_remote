@@ -83,6 +83,7 @@ fn assert_roundtrip_and_negatives<T: PartialEq + std::fmt::Debug, E: std::fmt::D
 // ---------------------------------------------------------------------------
 
 #[test]
+#[rustfmt::skip]
 fn test_negotiation_fixtures_round_trip_and_fail_closed() {
     for (hex_str, binding, name) in [
         (fix!("negotiation/client_hello"), 0, "client_hello"),

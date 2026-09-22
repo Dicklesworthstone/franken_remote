@@ -796,7 +796,6 @@ mod fit_tests {
     }
     #[test]
     fn malformed_oversized_and_non_connection_fit_settings_refuse_before_io() {
-        for value in [
         #[rustfmt::skip]
         for value in [
             "", "0x0", "15x16", "960x539", "959x540", "4294967296x540",
