@@ -2,7 +2,8 @@
 //! Transactional materialization for the desktop session's ATP file lane.
 //!
 //! This crate does not listen, admit peers, or grant file access. The Linux
-//! storage boundary writes regular files only, into a locally selected directory.
+//! storage boundary writes regular files and bounded portable file trees into a
+//! locally selected directory; it never imports links or filesystem metadata.
 //! All filesystem operations belong on an owned disk worker, not a reactor or
 //! an authority task. Network attachment and permission remain with the session.
 

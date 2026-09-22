@@ -4,7 +4,7 @@
 //! local monotonic reads in the original host's domain, never wire timestamps.
 //! There is one active object, bounded shared disk reservations, and no payload
 //! queue. Transport attachment and positive capability negotiation are separate.
-use crate::receive::{self, DropDirectory, MAX_CHUNK_BYTES, PendingFile, Publication};
+use crate::receive::{self, DropDirectory, MAX_CHUNK_BYTES, PendingObject, Publication};
 use asupersync::atp::{object::ContentId, safety::validate_portable_path_component};
 use fr_core::{
     ids::{InputLeaseId, InputTicketId, RemoteSessionId},
@@ -194,7 +194,7 @@ struct Active {
     id: u64,
     size: u64,
     deadline: HostInstant,
-    file: PendingFile,
+    file: PendingObject,
 }
 impl Active {
     fn progress(&self) -> Progress {
@@ -335,7 +335,11 @@ impl HostReceiver {
         {
             return Err(Error::Quota);
         }
-        self.charge(RECORD_COST + offer.name.len() as u64)?;
+        let metadata_bytes = match &offer.expected {
+            receive::Expected::Directory(manifest) => manifest.metadata_bytes(),
+            _ => 0,
+        };
+        self.charge(RECORD_COST + offer.name.len() as u64 + metadata_bytes)?;
         let deadline = now
             .checked_add(self.policy.transfer_lifetime)
             .ok_or(Error::Clock)?;
@@ -346,7 +350,7 @@ impl HostReceiver {
         self.usage.declared_bytes = declared_bytes;
         let file = self
             .directory
-            .begin_verified(offer.name, offer.size, offer.expected)
+            .begin_object(offer.name, offer.size, offer.expected)
             .map_err(Error::Storage)?;
         self.active = Some(Active {
             id: offer.id,
@@ -371,6 +375,17 @@ impl HostReceiver {
         id: u64,
         offset: u64,
         bytes: &[u8],
+        clock: impl FnMut() -> HostInstant,
+    ) -> Result<Progress, Error> {
+        self.write_entry(binding, id, 0, offset, bytes, clock)
+    }
+    pub fn write_entry(
+        &mut self,
+        binding: Binding,
+        id: u64,
+        index: u32,
+        offset: u64,
+        bytes: &[u8],
         mut clock: impl FnMut() -> HostInstant,
     ) -> Result<Progress, Error> {
         self.binding_check(binding)?;
@@ -382,7 +397,7 @@ impl HostReceiver {
         }
         self.charge(RECORD_COST + bytes.len() as u64)?;
         let active = self.active.as_mut().expect("active checked");
-        if let Err(error) = active.file.write_chunk(offset, bytes) {
+        if let Err(error) = active.file.write_entry(index, offset, bytes) {
             self.active.take();
             return Err(Error::Storage(error));
         }

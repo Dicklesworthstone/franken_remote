@@ -20,6 +20,9 @@ pub const VERSION: u16 = 1;
 pub const CHANNEL_SCOPE_CAPABILITY: &str = "file-channel-scope";
 pub const CHANNEL_SCOPE_VERSION: u16 = 1;
 pub const ATP_PORTABLE_FULL: u16 = 1;
+/// Bounded, portable content-only directory tree; same pinned ATP full-object
+/// schema. An explicit matching `FileAccept` is required before any data is sent.
+pub const ATP_PORTABLE_DIRECTORY_FULL: u16 = 2;
 /// Largest extension-free 0.5.0 ATP data header plus entry index/offset.
 pub const ATP_DATA_OVERHEAD: usize = 20;
 pub const COMMON_BYTES: usize = HEADER_BYTES + 16 + 16 + 16 + 8;
@@ -214,7 +217,7 @@ impl Message<'_> {
                 if !source {
                     return Err(WireError::WrongRole);
                 }
-                if profile != ATP_PORTABLE_FULL {
+                if !matches!(profile, ATP_PORTABLE_FULL | ATP_PORTABLE_DIRECTORY_FULL) {
                     return Err(WireError::UnsupportedVersion);
                 }
                 if atp.is_empty() {
@@ -233,7 +236,7 @@ impl Message<'_> {
                 if source {
                     return Err(WireError::WrongRole);
                 }
-                if profile != ATP_PORTABLE_FULL {
+                if !matches!(profile, ATP_PORTABLE_FULL | ATP_PORTABLE_DIRECTORY_FULL) {
                     return Err(WireError::UnsupportedVersion);
                 }
                 if bytes_per_second == 0

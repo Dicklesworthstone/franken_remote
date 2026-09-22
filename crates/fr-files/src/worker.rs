@@ -65,6 +65,7 @@ enum Command {
     },
     Chunk {
         id: u64,
+        index: u32,
         offset: u64,
         bytes: Payload,
     },
@@ -174,6 +175,15 @@ impl Mailbox {
         !self.shared.permission.is_approved()
     }
     pub fn write_chunk(&self, id: u64, offset: u64, bytes: &[u8]) -> Result<u64, Error> {
+        self.write_entry(id, 0, offset, bytes)
+    }
+    pub fn write_entry(
+        &self,
+        id: u64,
+        index: u32,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<u64, Error> {
         if bytes.is_empty() || bytes.len() > MAX_CHUNK_BYTES {
             return Err(Error::InvalidChunk);
         }
@@ -185,6 +195,7 @@ impl Mailbox {
             owned.extend_from_slice(bytes);
             Ok(Command::Chunk {
                 id,
+                index,
                 offset,
                 bytes: Payload(owned),
             })
@@ -391,8 +402,13 @@ fn execute(
                 || shared.sample(),
             )
             .map(Completion::Begun),
-        Command::Chunk { id, offset, bytes } => receiver
-            .write(binding, id, offset, &bytes.0, || shared.sample())
+        Command::Chunk {
+            id,
+            index,
+            offset,
+            bytes,
+        } => receiver
+            .write_entry(binding, id, index, offset, &bytes.0, || shared.sample())
             .map(Completion::Written),
         Command::Atp { id, bytes } => {
             let record = match crate::atp::ObjectRecord::decode(&bytes.0) {

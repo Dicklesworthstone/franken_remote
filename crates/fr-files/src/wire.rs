@@ -163,13 +163,13 @@ impl HostReceiver {
         if self.is_busy() {
             return Err(Error::Busy);
         }
-        let (atp, offer) = match message.body {
-            Body::Offer { atp, .. } => (atp, true),
-            Body::Chunk { atp } => (atp, false),
+        let (atp, offer, profile) = match message.body {
+            Body::Offer { atp, profile } => (atp, true, profile),
+            Body::Chunk { atp } => (atp, false, self.atp.profile()),
             _ => return Err(Error::Wire(WireError::WrongRole)),
         };
         self.atp
-            .push_enveloped(self.atp.binding(), message.id, atp, Some(offer))
+            .push_enveloped(self.atp.binding(), message.id, atp, Some(offer), profile)
             .map(Admission::Queued)
             .map_err(Error::Atp)
     }
@@ -237,7 +237,7 @@ impl HostReceiver {
         }
         Ok(match event.outcome() {
             Ok(Completion::Begun(progress)) => Body::Accept {
-                profile: files::ATP_PORTABLE_FULL,
+                profile: event.profile(),
                 size: progress.total_bytes,
                 bytes_per_second: self.policy.bytes_per_second,
                 chunk_bytes: u32::try_from(

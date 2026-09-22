@@ -4,10 +4,10 @@
 //! not an ATP listener or an alternative identity handshake. The caller must bound
 //! the outer `FileOffer/FileChunk` records and subtract their envelope from F before
 //! constructing this owner. It never accepts paths, jobs or credentials from an
-//! ATP handshake. The selected 0.5.0 portable single-file profile is documented in
-//! `FILE_RECEIVE.md`; directory graphs, metadata, delta/resume and `RaptorQ` refuse.
+//! ATP handshake. The selected 0.5.0 portable full-object profiles is documented in
+//! `FILE_RECEIVE.md`; directory trees use explicit profile 2; metadata, delta/resume and `RaptorQ` refuse.
 use crate::{
-    receive::{DropDirectory, Expected, MAX_CHUNK_BYTES},
+    receive::{DirectoryManifest, DropDirectory, Expected, MAX_CHUNK_BYTES},
     session::{Binding, Permission, Policy, Progress, VerifiedOffer},
     worker::{self, Completion, Mailbox, Task},
 };
@@ -28,7 +28,7 @@ use fr_core::input_submission::InputSession;
 use std::fmt;
 
 pub const MAX_FRAME_BYTES: usize = 65_536;
-pub const MAX_MANIFEST_BYTES: usize = 4096;
+pub const MAX_MANIFEST_BYTES: usize = 32 * 1024;
 /// At most this many bytes are needed for an ATP request or sanitized proof.
 pub const MAX_REPLY_BYTES: usize = 1024;
 
@@ -62,6 +62,8 @@ pub struct Event {
     outcome: Result<Completion, worker::Error>,
     request_root: Option<String>,
     frame_bytes: usize,
+    profile: u16,
+    files: u32,
 }
 impl fmt::Debug for Event {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -72,6 +74,9 @@ impl fmt::Debug for Event {
     }
 }
 impl Event {
+    pub fn profile(&self) -> u16 {
+        self.profile
+    }
     pub fn outcome(&self) -> Result<Completion, worker::Error> {
         self.outcome
     }
@@ -103,7 +108,7 @@ impl Event {
                 let proof = ReceiveReceipt {
                     committed: true,
                     bytes_received: receipt.bytes,
-                    files: 1,
+                    files: self.files,
                     sha_ok: true,
                     merkle_ok: true,
                     symbols_accepted: 0,
@@ -154,6 +159,9 @@ pub struct Receiver {
     frame_bytes: usize,
     active: Option<Progress>,
     pending: Option<Pending>,
+    profile: u16,
+    sizes: Vec<u64>,
+    offsets: Vec<u64>,
 }
 impl fmt::Debug for Receiver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -202,6 +210,9 @@ impl Receiver {
                 frame_bytes,
                 active: None,
                 pending: None,
+                profile: fr_wire::files::ATP_PORTABLE_FULL,
+                sizes: Vec::new(),
+                offsets: Vec::new(),
             },
             task,
         ))
@@ -223,7 +234,21 @@ impl Receiver {
     /// Success names local QUEUE admission only. Poll the actual outcome before
     /// accepting more data; never equate receipt of `ObjectComplete` with commit.
     pub fn push(&mut self, binding: Binding, id: u64, bytes: &[u8]) -> Result<u64, Error> {
-        self.push_enveloped(binding, id, bytes, None)
+        self.push_profile(binding, id, bytes, fr_wire::files::ATP_PORTABLE_FULL)
+    }
+    /// Select a supported full-object profile explicitly. Profile 1 never
+    /// silently accepts a directory, and a profile change mid-object refuses.
+    pub fn push_profile(
+        &mut self,
+        binding: Binding,
+        id: u64,
+        bytes: &[u8],
+        profile: u16,
+    ) -> Result<u64, Error> {
+        self.push_enveloped(binding, id, bytes, None, profile)
+    }
+    pub fn profile(&self) -> u16 {
+        self.profile
     }
     pub(crate) fn push_enveloped(
         &mut self,
@@ -231,6 +256,7 @@ impl Receiver {
         id: u64,
         bytes: &[u8],
         offer: Option<bool>,
+        profile: u16,
     ) -> Result<u64, Error> {
         self.check_binding(binding)?;
         if id == 0 {
@@ -242,7 +268,7 @@ impl Receiver {
         if self.is_closed() {
             return Err(Error::Closed);
         }
-        let result = self.push_inner(id, bytes, offer);
+        let result = self.push_inner(id, bytes, offer, profile);
         if let Err(error) = &result
             && !matches!(
                 error,
@@ -253,45 +279,57 @@ impl Receiver {
         }
         result
     }
-    fn push_inner(&mut self, id: u64, bytes: &[u8], offer: Option<bool>) -> Result<u64, Error> {
+    fn push_inner(
+        &mut self,
+        id: u64,
+        bytes: &[u8],
+        offer: Option<bool>,
+        profile: u16,
+    ) -> Result<u64, Error> {
         let frame = decode_frame(bytes, self.frame_bytes)?;
-        if let Some(offer) = offer {
-            let valid = if offer {
-                frame.frame_type() == FrameType::ObjectManifest
-            } else {
-                matches!(
-                    frame.frame_type(),
-                    FrameType::ObjectData | FrameType::ObjectComplete
-                )
-            };
-            if !valid {
-                return Err(Error::Order);
-            }
+        if frame.frame_type() != FrameType::ObjectManifest && profile != self.profile {
+            return Err(Error::UnsupportedProfile);
         }
+        validate_envelope(frame.frame_type(), offer)?;
         let (sequence, operation, request_root) = match frame.frame_type() {
             FrameType::ObjectManifest => {
                 if self.active.is_some() {
                     return Err(Error::Order);
                 }
-                let manifest = portable_manifest(&frame)?;
-                let entry = &manifest.entries[0]; // exactly one, checked above
+                let manifest = portable_manifest(&frame, profile)?;
+                let expected = if manifest.is_directory {
+                    Expected::Directory(
+                        DirectoryManifest::new(
+                            manifest.root_name.clone(),
+                            manifest.total_bytes,
+                            manifest.entries.clone(),
+                            manifest.merkle_root_hex.clone(),
+                        )
+                        .map_err(|_| Error::Manifest)?,
+                    )
+                } else {
+                    Expected::Manifest {
+                        sha256_hex: manifest.entries[0].sha256_hex.clone(),
+                        merkle_root_hex: manifest.merkle_root_hex.clone(),
+                    }
+                };
                 let sequence = self
                     .mailbox
                     .begin_verified(VerifiedOffer {
                         binding: self.binding(),
                         id,
-                        name: &entry.rel_path,
-                        size: entry.size,
-                        expected: Expected::Manifest {
-                            sha256_hex: entry.sha256_hex.clone(),
-                            merkle_root_hex: manifest.merkle_root_hex.clone(),
-                        },
+                        name: &manifest.root_name,
+                        size: manifest.total_bytes,
+                        expected,
                     })
                     .map_err(Error::Worker)?;
+                self.profile = profile;
+                self.sizes = manifest.entries.iter().map(|e| e.size).collect();
+                self.offsets = vec![0; self.sizes.len()];
                 (sequence, Operation::Begin, Some(manifest.merkle_root_hex))
             }
             FrameType::ObjectData => {
-                let progress = self.active_for(id)?;
+                self.active_for(id)?;
                 // Exact pinned ATP TCP/QUIC full-object data payload: big-endian
                 // u32 entry index, big-endian u64 offset, then raw object bytes.
                 let header = frame.payload.get(..12).ok_or(Error::Frame)?;
@@ -301,19 +339,23 @@ impl Receiver {
                 let end = offset
                     .checked_add(payload.len() as u64)
                     .ok_or(Error::ResourceLimit)?;
-                if index != 0 || offset != progress.staged_bytes {
+                if self.offsets.get(index as usize).copied() != Some(offset) {
                     return Err(Error::Order);
                 }
                 if payload.is_empty()
                     || payload.len() > MAX_CHUNK_BYTES
-                    || end > progress.total_bytes
+                    || self
+                        .sizes
+                        .get(index as usize)
+                        .is_none_or(|size| end > *size)
                 {
                     return Err(Error::ResourceLimit);
                 }
                 let seq = self
                     .mailbox
-                    .write_chunk(id, offset, payload)
+                    .write_entry(id, index, offset, payload)
                     .map_err(Error::Worker)?;
+                self.offsets[index as usize] = end;
                 (seq, Operation::Write, None)
             }
             FrameType::ObjectComplete => {
@@ -395,6 +437,8 @@ impl Receiver {
             outcome,
             request_root: pending.request_root,
             frame_bytes: self.frame_bytes,
+            profile: self.profile,
+            files: u32::try_from(self.sizes.len()).expect("bounded manifest entries"),
         }))
     }
     fn active_for(&self, id: u64) -> Result<Progress, Error> {
@@ -447,19 +491,40 @@ fn lower_hex(value: &str, length: usize) -> bool {
             .bytes()
             .all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
 }
-fn portable_manifest(frame: &Frame) -> Result<TransferManifest, Error> {
+fn portable_manifest(frame: &Frame, profile: u16) -> Result<TransferManifest, Error> {
     if frame.payload.len() > MAX_MANIFEST_BYTES {
         return Err(Error::ResourceLimit);
     }
     let manifest: TransferManifest =
         serde_json::from_slice(&frame.payload).map_err(|_| Error::Manifest)?;
-    if manifest.is_directory
-        || manifest.entries.len() != 1
-        || manifest.metadata_root_hex.is_some()
+    if manifest.metadata_root_hex.is_some()
         || manifest.directory_metadata.is_some()
         || manifest.delta_manifest.is_some()
     {
         return Err(Error::UnsupportedProfile);
+    }
+    if !lower_hex(&manifest.transfer_id, 32) || !lower_hex(&manifest.merkle_root_hex, 64) {
+        return Err(Error::Manifest);
+    }
+    match profile {
+        fr_wire::files::ATP_PORTABLE_DIRECTORY_FULL if manifest.is_directory => {
+            DirectoryManifest::new(
+                manifest.root_name.clone(),
+                manifest.total_bytes,
+                manifest.entries.clone(),
+                manifest.merkle_root_hex.clone(),
+            )
+            .map_err(|_| Error::Manifest)?;
+            return Ok(manifest);
+        }
+        fr_wire::files::ATP_PORTABLE_FULL
+            if !manifest.is_directory && manifest.entries.len() == 1 =>
+        {
+            if frame.payload.len() > 4096 {
+                return Err(Error::ResourceLimit);
+            }
+        }
+        _ => return Err(Error::UnsupportedProfile),
     }
     let entry = &manifest.entries[0];
     if entry.metadata.is_some() || !entry.members.is_empty() {
@@ -478,4 +543,13 @@ fn portable_manifest(frame: &Frame) -> Result<TransferManifest, Error> {
         return Err(Error::Manifest);
     }
     Ok(manifest)
+}
+
+fn validate_envelope(kind: FrameType, offer: Option<bool>) -> Result<(), Error> {
+    let valid = match offer {
+        Some(true) => kind == FrameType::ObjectManifest,
+        Some(false) => matches!(kind, FrameType::ObjectData | FrameType::ObjectComplete),
+        None => true,
+    };
+    if valid { Ok(()) } else { Err(Error::Order) }
 }

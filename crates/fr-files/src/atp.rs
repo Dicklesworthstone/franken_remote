@@ -60,11 +60,16 @@ impl ObjectRecord {
 }
 /// Encode using the upstream ATP codec, not a parallel frame implementation.
 pub fn encode_data(offset: u64, bytes: &[u8]) -> Result<Vec<u8>, Error> {
+    encode_entry_data(0, offset, bytes)
+}
+/// Indexed data for an explicitly accepted directory profile. The receiver
+/// validates this index against its bounded manifest before disk admission.
+pub fn encode_entry_data(index: u32, offset: u64, bytes: &[u8]) -> Result<Vec<u8>, Error> {
     if bytes.is_empty() || bytes.len() > MAX_CHUNK_BYTES {
         return Err(Error::Protocol);
     }
     let mut payload = Vec::with_capacity(bytes.len() + 12);
-    payload.extend_from_slice(&0u32.to_be_bytes());
+    payload.extend_from_slice(&index.to_be_bytes());
     payload.extend_from_slice(&offset.to_be_bytes());
     payload.extend_from_slice(bytes);
     encode(
