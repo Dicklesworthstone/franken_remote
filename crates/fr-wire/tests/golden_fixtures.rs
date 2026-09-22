@@ -34,6 +34,15 @@ use fr_wire::{
 };
 
 const L: ProtocolLimits = ProtocolLimits::ABSOLUTE;
+const H2V: InputDirection = InputDirection::HostToViewer;
+const V2H: InputDirection = InputDirection::ViewerToHost;
+const REL: InputDelivery = InputDelivery::Reliable;
+
+macro_rules! fix {
+    ($p:literal) => {
+        include_str!(concat!("fixtures/", $p, ".hex"))
+    };
+}
 
 fn parse_hex(s: &str) -> Vec<u8> {
     let s = s.trim();
@@ -47,22 +56,26 @@ fn parse_hex(s: &str) -> Vec<u8> {
         .collect()
 }
 
-fn assert_roundtrip_and_negatives<T: PartialEq + std::fmt::Debug>(
+fn check_negatives(bytes: &[u8], name: &str, mut decode_ok: impl FnMut(&[u8]) -> bool) {
+    for cut in 0..bytes.len() {
+        assert!(!decode_ok(&bytes[..cut]), "{name} cut at {cut} accepted");
+    }
+    let mut trailing = bytes.to_vec();
+    trailing.push(0);
+    assert!(!decode_ok(&trailing), "{name} trailing byte accepted");
+}
+
+fn assert_roundtrip_and_negatives<T: PartialEq + std::fmt::Debug, E: std::fmt::Debug>(
     bytes: &[u8],
     name: &str,
-    decode: impl Fn(&[u8]) -> Result<T, WireError>,
-    encode: impl Fn(&T, &mut [u8]) -> Result<usize, WireError>,
+    mut decode: impl FnMut(&[u8]) -> Result<T, E>,
+    mut encode: impl FnMut(&T, &mut [u8]) -> Result<usize, E>,
 ) {
     let msg = decode(bytes).unwrap_or_else(|e| panic!("{name} decode failed: {e:?}"));
     let mut buf = vec![0u8; bytes.len() + 256];
     let n = encode(&msg, &mut buf).unwrap_or_else(|e| panic!("{name} encode failed: {e:?}"));
     assert_eq!(&buf[..n], bytes, "{name} round-trip mismatch");
-    for cut in 0..bytes.len() {
-        assert!(decode(&bytes[..cut]).is_err(), "{name} cut at {cut} accepted");
-    }
-    let mut trailing = bytes.to_vec();
-    trailing.push(0);
-    assert!(decode(&trailing).is_err(), "{name} trailing byte accepted");
+    check_negatives(bytes, name, |b| decode(b).is_ok());
 }
 
 // ---------------------------------------------------------------------------
@@ -72,12 +85,24 @@ fn assert_roundtrip_and_negatives<T: PartialEq + std::fmt::Debug>(
 #[test]
 fn test_negotiation_fixtures_round_trip_and_fail_closed() {
     for (hex_str, binding, name) in [
-        (include_str!("fixtures/negotiation/client_hello.hex"), 0, "client_hello"),
-        (include_str!("fixtures/negotiation/host_capabilities.hex"), 0, "host_capabilities"),
-        (include_str!("fixtures/negotiation/selected_configuration.hex"), 0, "selected_configuration"),
-        (include_str!("fixtures/negotiation/approval_required.hex"), 0, "approval_required"),
-        (include_str!("fixtures/negotiation/session_opened.hex"), 0, "session_opened"),
-        (include_str!("fixtures/negotiation/binding_accepted.hex"), 1, "binding_accepted"),
+        (fix!("negotiation/client_hello"), 0, "client_hello"),
+        (
+            fix!("negotiation/host_capabilities"),
+            0,
+            "host_capabilities",
+        ),
+        (
+            fix!("negotiation/selected_configuration"),
+            0,
+            "selected_configuration",
+        ),
+        (
+            fix!("negotiation/approval_required"),
+            0,
+            "approval_required",
+        ),
+        (fix!("negotiation/session_opened"), 0, "session_opened"),
+        (fix!("negotiation/binding_accepted"), 1, "binding_accepted"),
     ] {
         let bytes = parse_hex(hex_str);
         assert!(bytes.starts_with(b"FRD0"), "{name} bad magic");
@@ -102,24 +127,24 @@ fn test_control_fixtures_round_trip_and_fail_closed() {
         os_session: OsSessionId::from_raw(2),
         remote_session: RemoteSessionId::from_raw(3),
     };
-    let req_bytes = parse_hex(include_str!("fixtures/control/control_request.hex"));
+    let req_bytes = parse_hex(fix!("control/control_request"));
     assert_roundtrip_and_negatives(
         &req_bytes,
         "control_request",
-        |b| decode_request(b, parent, &L, InputDirection::ViewerToHost, InputDelivery::Reliable),
-        |m, out| encode_request(*m, out, &L, InputDirection::ViewerToHost, InputDelivery::Reliable),
+        |b| decode_request(b, parent, &L, V2H, REL),
+        |m, out| encode_request(*m, out, &L, V2H, REL),
     );
     assert_eq!(
-        decode_request(&req_bytes, parent, &L, InputDirection::HostToViewer, InputDelivery::Reliable).unwrap_err(),
+        decode_request(&req_bytes, parent, &L, H2V, REL).unwrap_err(),
         WireError::WrongRole
     );
 
-    let grant_bytes = parse_hex(include_str!("fixtures/control/lease_granted.hex"));
+    let grant_bytes = parse_hex(fix!("control/lease_granted"));
     assert_roundtrip_and_negatives(
         &grant_bytes,
         "lease_granted",
-        |b| decode_granted(b, parent, &L, InputDirection::HostToViewer, InputDelivery::Reliable),
-        |m, out| encode_granted(*m, out, &L, InputDirection::HostToViewer, InputDelivery::Reliable),
+        |b| decode_granted(b, parent, &L, H2V, REL),
+        |m, out| encode_granted(*m, out, &L, H2V, REL),
     );
 }
 
@@ -134,25 +159,33 @@ fn test_authority_fixtures_round_trip_and_fail_closed() {
         session: RemoteSessionId::from_raw(0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00),
     };
     for (hex_str, dir, name) in [
-        (include_str!("fixtures/authority/challenge_observation.hex"), InputDirection::HostToViewer, "challenge_observation"),
-        (include_str!("fixtures/authority/challenge_control.hex"), InputDirection::HostToViewer, "challenge_control"),
-        (include_str!("fixtures/authority/response_observation.hex"), InputDirection::ViewerToHost, "response_observation"),
-        (include_str!("fixtures/authority/response_control.hex"), InputDirection::ViewerToHost, "response_control"),
+        (
+            fix!("authority/challenge_observation"),
+            H2V,
+            "challenge_observation",
+        ),
+        (
+            fix!("authority/challenge_control"),
+            H2V,
+            "challenge_control",
+        ),
+        (
+            fix!("authority/response_observation"),
+            V2H,
+            "response_observation",
+        ),
+        (fix!("authority/response_control"), V2H, "response_control"),
     ] {
         let bytes = parse_hex(hex_str);
         assert_roundtrip_and_negatives(
             &bytes,
             name,
-            |b| fr_wire::authority::decode(b, auth_b, &L, dir, InputDelivery::Reliable),
-            |m, out| fr_wire::authority::encode(*m, auth_b, &L, out, dir, InputDelivery::Reliable),
+            |b| fr_wire::authority::decode(b, auth_b, &L, dir, REL),
+            |m, out| fr_wire::authority::encode(*m, auth_b, &L, out, dir, REL),
         );
-        let opp_dir = if dir == InputDirection::HostToViewer {
-            InputDirection::ViewerToHost
-        } else {
-            InputDirection::HostToViewer
-        };
+        let opp_dir = if dir == H2V { V2H } else { H2V };
         assert_eq!(
-            fr_wire::authority::decode(&bytes, auth_b, &L, opp_dir, InputDelivery::Reliable).unwrap_err(),
+            fr_wire::authority::decode(&bytes, auth_b, &L, opp_dir, REL).unwrap_err(),
             WireError::WrongRole
         );
     }
@@ -164,12 +197,12 @@ fn test_authority_fixtures_round_trip_and_fail_closed() {
 
 #[test]
 fn test_input_ticket_fixture_round_trip_and_fail_closed() {
-    let bytes = parse_hex(include_str!("fixtures/input_ticket/input_ticket.hex"));
+    let bytes = parse_hex(fix!("input_ticket/input_ticket"));
     assert_roundtrip_and_negatives(
         &bytes,
         "input_ticket",
-        |b| decode_input_ticket(b, &L, 7, InputDirection::HostToViewer, InputDelivery::Reliable),
-        |m, out| encode_input_ticket(*m, out, &L, 7, InputDirection::HostToViewer, InputDelivery::Reliable),
+        |b| decode_input_ticket(b, &L, 7, H2V, REL),
+        |m, out| encode_input_ticket(*m, out, &L, 7, H2V, REL),
     );
 }
 
@@ -186,49 +219,30 @@ fn test_attachment_fixtures_round_trip_and_fail_closed() {
         remote_session: RemoteSessionId::from_raw(13),
     };
 
-    let cases = [
+    for (hex_str, channel, dir, name) in [
+        (fix!("attachment/stream_binding"), 7, H2V, "stream_binding"),
         (
-            include_str!("fixtures/attachment/stream_binding.hex"),
+            fix!("attachment/binding_accepted"),
             7,
-            InputDirection::HostToViewer,
-            "stream_binding",
-        ),
-        (
-            include_str!("fixtures/attachment/binding_accepted.hex"),
-            7,
-            InputDirection::ViewerToHost,
+            V2H,
             "binding_accepted",
         ),
+        (fix!("attachment/channel_ticket"), 7, H2V, "channel_ticket"),
+        (fix!("attachment/channel_attach"), 8, V2H, "channel_attach"),
         (
-            include_str!("fixtures/attachment/channel_ticket.hex"),
-            7,
-            InputDirection::HostToViewer,
-            "channel_ticket",
-        ),
-        (
-            include_str!("fixtures/attachment/channel_attach.hex"),
+            fix!("attachment/channel_attached"),
             8,
-            InputDirection::ViewerToHost,
-            "channel_attach",
-        ),
-        (
-            include_str!("fixtures/attachment/channel_attached.hex"),
-            8,
-            InputDirection::HostToViewer,
+            H2V,
             "channel_attached",
         ),
-    ];
-
-    for (hex_str, channel, dir, name) in cases {
+    ] {
         let bytes = parse_hex(hex_str);
-        let msg = decode_attachment(&bytes, parent, channel, &L, dir, InputDelivery::Reliable)
-            .expect("decode valid fixture");
-
-        let mut out = vec![0; fr_wire::attachment::GRANT_RECORD_BYTES];
-        let n = encode_attachment(msg, parent, &L, &mut out, dir, InputDelivery::Reliable)
-            .expect("re-encode attachment");
-        out.truncate(n);
-        assert_eq!(out, bytes, "{name} round-trip drift");
+        assert_roundtrip_and_negatives(
+            &bytes,
+            name,
+            |b| decode_attachment(b, parent, channel, &L, dir, REL),
+            |m, out| encode_attachment(*m, parent, &L, out, dir, REL),
+        );
     }
 }
 
@@ -245,49 +259,21 @@ fn test_display_fixtures_round_trip_and_fail_closed() {
         remote_session: RemoteSessionId::from_raw(u128::from_be_bytes([0x33; 16])),
     };
 
-    let cat_bytes = parse_hex(include_str!("fixtures/display/display_catalog.hex"));
-    let cat_msg = decode_display(
+    let cat_bytes = parse_hex(fix!("display/display_catalog"));
+    assert_roundtrip_and_negatives(
         &cat_bytes,
-        parent,
-        &L,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    )
-    .expect("decode display_catalog");
+        "display_catalog",
+        |b| decode_display(b, parent, &L, H2V, REL),
+        |m, out| encode_display(m, parent, &L, out, H2V, REL),
+    );
 
-    let mut cat_out = [0; fr_wire::display::MAX_CATALOG_BYTES];
-    let n1 = encode_display(
-        &cat_msg,
-        parent,
-        &L,
-        &mut cat_out,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    )
-    .expect("re-encode catalog");
-    assert_eq!(&cat_out[..n1], cat_bytes.as_slice());
-
-    let sel_bytes = parse_hex(include_str!("fixtures/display/select_display.hex"));
-    let sel_msg = decode_display(
+    let sel_bytes = parse_hex(fix!("display/select_display"));
+    assert_roundtrip_and_negatives(
         &sel_bytes,
-        parent,
-        &L,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    )
-    .expect("decode select_display");
-
-    let mut sel_out = [0; fr_wire::display::SELECT_BYTES];
-    let n2 = encode_display(
-        &sel_msg,
-        parent,
-        &L,
-        &mut sel_out,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    )
-    .expect("re-encode select");
-    assert_eq!(&sel_out[..n2], sel_bytes.as_slice());
+        "select_display",
+        |b| decode_display(b, parent, &L, V2H, REL),
+        |m, out| encode_display(m, parent, &L, out, V2H, REL),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -310,34 +296,31 @@ fn test_decoder_fixtures_round_trip_and_fail_closed() {
         viewport: ViewportMappingGeneration::from_raw(18),
     };
 
-    let cases = [
+    for (hex_str, dir, name) in [
         (
-            include_str!("fixtures/decoder/decoder_configuration.hex"),
-            InputDirection::HostToViewer,
+            fix!("decoder/decoder_configuration"),
+            H2V,
             "decoder_configuration",
         ),
         (
-            include_str!("fixtures/decoder/decoder_configured.hex"),
-            InputDirection::ViewerToHost,
+            fix!("decoder/decoder_configured"),
+            V2H,
             "decoder_configured",
         ),
         (
-            include_str!("fixtures/decoder/first_frame_decoded.hex"),
-            InputDirection::ViewerToHost,
+            fix!("decoder/first_frame_decoded"),
+            V2H,
             "first_frame_decoded",
         ),
-    ];
-
-    for (hex_str, dir, name) in cases {
+    ] {
         let bytes = parse_hex(hex_str);
-        let msg = decode_decoder(&bytes, b, &L, dir, InputDelivery::Reliable)
-            .expect("decode valid fixture");
-
+        let msg = decode_decoder(&bytes, b, &L, dir, REL).expect("decode valid");
         let mut out = vec![0; 20000];
-        let len = decode_encode(msg, b, &L, &mut out, dir, InputDelivery::Reliable)
-            .expect("re-encode decoder");
-        out.truncate(len);
-        assert_eq!(out, bytes, "{name} round-trip drift");
+        let len = decode_encode(msg, b, &L, &mut out, dir, REL).expect("encode");
+        assert_eq!(&out[..len], bytes.as_slice(), "{name} round-trip mismatch");
+        check_negatives(&bytes, name, |data| {
+            decode_decoder(data, b, &L, dir, REL).is_ok()
+        });
     }
 }
 
@@ -349,16 +332,14 @@ fn test_decoder_fixtures_round_trip_and_fail_closed() {
 fn test_media_fixtures_round_trip_and_fail_closed() {
     let med_limits = MediaLimits::new(L, 1_150, 16_384, 64).unwrap();
 
-    // Fragment
-    let frag_bytes = parse_hex(include_str!("fixtures/media/access_unit_fragment.hex"));
+    let frag_bytes = parse_hex(fix!("media/access_unit_fragment"));
     let rec = Record::decode(&frag_bytes, &med_limits, 9, Channel::Video).expect("decode record");
     let frag = decode_fragment(rec, &med_limits).expect("decode fragment");
     let mut frag_out = [0; 128];
     let n1 = encode_fragment(frag, 9, &med_limits, &mut frag_out).expect("encode fragment");
     assert_eq!(&frag_out[..n1], frag_bytes.as_slice());
 
-    // Recovery chunk
-    let recovery_bytes = parse_hex(include_str!("fixtures/media/recovery_chunk.hex"));
+    let recovery_bytes = parse_hex(fix!("media/recovery_chunk"));
     let recovery_rec =
         Record::decode(&recovery_bytes, &med_limits, 9, Channel::Recovery).expect("decode record");
     let chunk = decode_recovery(recovery_rec, &med_limits).expect("decode recovery");
@@ -366,8 +347,7 @@ fn test_media_fixtures_round_trip_and_fail_closed() {
     let n2 = encode_recovery(chunk, 9, &med_limits, &mut recovery_out).expect("encode recovery");
     assert_eq!(&recovery_out[..n2], recovery_bytes.as_slice());
 
-    // Repair request
-    let repair_bytes = parse_hex(include_str!("fixtures/media/repair_request.hex"));
+    let repair_bytes = parse_hex(fix!("media/repair_request"));
     let repair_rec =
         Record::decode(&repair_bytes, &med_limits, 9, Channel::Control).expect("decode record");
     let rep = decode_repair(repair_rec, 7, &med_limits).expect("decode repair");
@@ -377,8 +357,7 @@ fn test_media_fixtures_round_trip_and_fail_closed() {
         .expect("encode repair");
     assert_eq!(&repair_out[..n3], repair_bytes.as_slice());
 
-    // Media progress
-    let prog_bytes = parse_hex(include_str!("fixtures/media/media_progress.hex"));
+    let prog_bytes = parse_hex(fix!("media/media_progress"));
     let prog_rec =
         Record::decode(&prog_bytes, &med_limits, 9, Channel::MediaConfig).expect("decode record");
     let prog = decode_progress(prog_rec, &med_limits).expect("decode progress");
@@ -393,27 +372,13 @@ fn test_media_fixtures_round_trip_and_fail_closed() {
 
 #[test]
 fn test_held_state_fixture_round_trip_and_fail_closed() {
-    let bytes = parse_hex(include_str!("fixtures/held_state/held_state.hex"));
-    let req = decode_held(
+    let bytes = parse_hex(fix!("held_state/held_state"));
+    assert_roundtrip_and_negatives(
         &bytes,
-        &L,
-        9,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    )
-    .expect("decode held_state");
-
-    let mut out = [0; fr_wire::held_state::HELD_STATE_BYTES];
-    let n = encode_held(
-        req,
-        &mut out,
-        &L,
-        9,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    )
-    .expect("encode held_state");
-    assert_eq!(&out[..n], bytes.as_slice());
+        "held_state",
+        |data| decode_held(data, &L, 9, V2H, REL),
+        |m, out| encode_held(*m, out, &L, 9, V2H, REL),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -432,33 +397,18 @@ fn test_clipboard_fixtures_round_trip_and_fail_closed() {
         lane: ClipLane::Clipboard,
     };
 
-    let cases = [
-        (
-            include_str!("fixtures/clipboard/clipboard_begin.hex"),
-            "clipboard_begin",
-        ),
-        (
-            include_str!("fixtures/clipboard/clipboard_chunk.hex"),
-            "clipboard_chunk",
-        ),
-        (
-            include_str!("fixtures/clipboard/clipboard_commit.hex"),
-            "clipboard_commit",
-        ),
-        (
-            include_str!("fixtures/clipboard/clipboard_cancel.hex"),
-            "clipboard_cancel",
-        ),
-    ];
-
-    for (hex_str, name) in cases {
+    for (hex_str, name) in [
+        (fix!("clipboard/clipboard_begin"), "clipboard_begin"),
+        (fix!("clipboard/clipboard_chunk"), "clipboard_chunk"),
+        (fix!("clipboard/clipboard_commit"), "clipboard_commit"),
+        (fix!("clipboard/clipboard_cancel"), "clipboard_cancel"),
+    ] {
         let bytes = parse_hex(hex_str);
-        let msg = decode_clipboard(&bytes, ctx, &L).expect("decode valid fixture");
-
+        let msg = decode_clipboard(&bytes, ctx, &L).expect("decode valid");
         let mut out = vec![0; 4096];
-        let len = encode_clipboard(msg, ctx, &L, &mut out).expect("re-encode clipboard");
-        out.truncate(len);
-        assert_eq!(out, bytes, "{name} round-trip drift");
+        let len = encode_clipboard(msg, ctx, &L, &mut out).expect("encode");
+        assert_eq!(&out[..len], bytes.as_slice(), "{name} round-trip mismatch");
+        check_negatives(&bytes, name, |b| decode_clipboard(b, ctx, &L).is_ok());
     }
 }
 
@@ -479,41 +429,25 @@ fn test_files_fixtures_round_trip_and_fail_closed() {
     };
     let file_limits = FileLimits::new(&L, 4096).unwrap();
 
-    let cases = [
+    for (hex_str, role, name) in [
+        (fix!("files/file_offer"), FileRole::Controller, "file_offer"),
+        (fix!("files/file_accept"), FileRole::Host, "file_accept"),
+        (fix!("files/file_chunk"), FileRole::Controller, "file_chunk"),
+        (fix!("files/file_complete"), FileRole::Host, "file_complete"),
         (
-            include_str!("fixtures/files/file_offer.hex"),
-            FileRole::Controller,
-            "file_offer",
-        ),
-        (
-            include_str!("fixtures/files/file_accept.hex"),
-            FileRole::Host,
-            "file_accept",
-        ),
-        (
-            include_str!("fixtures/files/file_chunk.hex"),
-            FileRole::Controller,
-            "file_chunk",
-        ),
-        (
-            include_str!("fixtures/files/file_complete.hex"),
-            FileRole::Host,
-            "file_complete",
-        ),
-        (
-            include_str!("fixtures/files/file_cancel.hex"),
+            fix!("files/file_cancel"),
             FileRole::Controller,
             "file_cancel",
         ),
-    ];
-
-    for (hex_str, role, name) in cases {
+    ] {
         let bytes = parse_hex(hex_str);
-        let msg = decode_files(&bytes, ctx(role), file_limits).expect("decode valid fixture");
-
+        let msg = decode_files(&bytes, ctx(role), file_limits).expect("decode valid");
         let mut out = [0; 4096];
-        let len = encode_files(msg, ctx(role), file_limits, &mut out).expect("re-encode files");
-        assert_eq!(&out[..len], bytes.as_slice(), "{name} round-trip drift");
+        let len = encode_files(msg, ctx(role), file_limits, &mut out).expect("encode");
+        assert_eq!(&out[..len], bytes.as_slice(), "{name} round-trip mismatch");
+        check_negatives(&bytes, name, |b| {
+            decode_files(b, ctx(role), file_limits).is_ok()
+        });
     }
 }
 
@@ -538,36 +472,19 @@ fn test_presented_fixtures_round_trip_and_fail_closed() {
     };
 
     for (hex_str, name) in [
+        (fix!("presented/presented_state_sample"), "presented_sample"),
         (
-            include_str!("fixtures/presented/presented_state_sample.hex"),
-            "presented_sample",
-        ),
-        (
-            include_str!("fixtures/presented/presented_state_unavailable.hex"),
+            fix!("presented/presented_state_unavailable"),
             "presented_unavailable",
         ),
     ] {
         let bytes = parse_hex(hex_str);
-        let report = decode_presented(
+        assert_roundtrip_and_negatives(
             &bytes,
-            b,
-            &L,
-            InputDirection::ViewerToHost,
-            InputDelivery::Reliable,
-        )
-        .expect("decode valid fixture");
-
-        let mut out = vec![0; fr_wire::presented::BYTES];
-        let n = encode_presented(
-            report,
-            b,
-            &L,
-            &mut out,
-            InputDirection::ViewerToHost,
-            InputDelivery::Reliable,
-        )
-        .expect("re-encode presented");
-        assert_eq!(&out[..n], bytes.as_slice(), "{name} round-trip drift");
+            name,
+            |data| decode_presented(data, b, &L, V2H, REL),
+            |m, out| encode_presented(*m, b, &L, out, V2H, REL),
+        );
     }
 }
 
@@ -591,47 +508,18 @@ fn test_receiver_metrics_fixtures_round_trip_and_fail_closed() {
         viewport: ViewportMappingGeneration::INITIAL,
     };
 
-    let q_bytes = parse_hex(include_str!("fixtures/receiver_metrics/metrics_query.hex"));
-    let q_msg = decode_metrics(
-        &q_bytes,
-        b,
-        &L,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    )
-    .expect("decode query");
-    let mut q_out = vec![0; fr_wire::receiver_metrics::REPLY_BYTES];
-    let n1 = encode_metrics(
-        q_msg,
-        b,
-        &L,
-        &mut q_out,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    )
-    .expect("encode query");
-    assert_eq!(&q_out[..n1], q_bytes.as_slice());
-
-    let r_bytes = parse_hex(include_str!("fixtures/receiver_metrics/metrics_reply.hex"));
-    let r_msg = decode_metrics(
-        &r_bytes,
-        b,
-        &L,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    )
-    .expect("decode reply");
-    let mut r_out = vec![0; fr_wire::receiver_metrics::REPLY_BYTES];
-    let n2 = encode_metrics(
-        r_msg,
-        b,
-        &L,
-        &mut r_out,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    )
-    .expect("encode reply");
-    assert_eq!(&r_out[..n2], r_bytes.as_slice());
+    for (hex_str, dir, name) in [
+        (fix!("receiver_metrics/metrics_query"), H2V, "metrics_query"),
+        (fix!("receiver_metrics/metrics_reply"), V2H, "metrics_reply"),
+    ] {
+        let bytes = parse_hex(hex_str);
+        assert_roundtrip_and_negatives(
+            &bytes,
+            name,
+            |data| decode_metrics(data, b, &L, dir, REL),
+            |m, out| encode_metrics(*m, b, &L, out, dir, REL),
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -647,47 +535,18 @@ fn test_clock_fixtures_round_trip_and_fail_closed() {
         remote_session: RemoteSessionId::from_raw(u128::from_be_bytes([0x33; 16])),
     };
 
-    let p_bytes = parse_hex(include_str!("fixtures/clock/clock_probe.hex"));
-    let p_msg = decode_clock(
-        &p_bytes,
-        b,
-        &L,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    )
-    .expect("decode clock probe");
-    let mut p_out = [0; fr_wire::clock::REPLY_BYTES];
-    let n1 = encode_clock(
-        p_msg,
-        b,
-        &L,
-        &mut p_out,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    )
-    .expect("encode probe");
-    assert_eq!(&p_out[..n1], p_bytes.as_slice());
-
-    let r_bytes = parse_hex(include_str!("fixtures/clock/clock_reply.hex"));
-    let r_msg = decode_clock(
-        &r_bytes,
-        b,
-        &L,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    )
-    .expect("decode clock reply");
-    let mut r_out = [0; fr_wire::clock::REPLY_BYTES];
-    let n2 = encode_clock(
-        r_msg,
-        b,
-        &L,
-        &mut r_out,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    )
-    .expect("encode reply");
-    assert_eq!(&r_out[..n2], r_bytes.as_slice());
+    for (hex_str, dir, name) in [
+        (fix!("clock/clock_probe"), V2H, "clock_probe"),
+        (fix!("clock/clock_reply"), H2V, "clock_reply"),
+    ] {
+        let bytes = parse_hex(hex_str);
+        assert_roundtrip_and_negatives(
+            &bytes,
+            name,
+            |data| decode_clock(data, b, &L, dir, REL),
+            |m, out| encode_clock(*m, b, &L, out, dir, REL),
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -696,51 +555,24 @@ fn test_clock_fixtures_round_trip_and_fail_closed() {
 
 #[test]
 fn test_input_fixtures_round_trip_and_fail_closed() {
-    let input_cases = [
-        include_str!("fixtures/input/key_page_usage.hex"),
-        include_str!("fixtures/input/button.hex"),
-        include_str!("fixtures/input/pointer.hex"),
-        include_str!("fixtures/input/relative.hex"),
-        include_str!("fixtures/input/scroll.hex"),
-        include_str!("fixtures/input/text.hex"),
-        include_str!("fixtures/input/mode.hex"),
-    ];
-
-    for hex_str in input_cases {
+    for hex_str in [
+        fix!("input/key_page_usage"),
+        fix!("input/button"),
+        fix!("input/pointer"),
+        fix!("input/relative"),
+        fix!("input/scroll"),
+        fix!("input/text"),
+        fix!("input/mode"),
+    ] {
         let bytes = parse_hex(hex_str);
-        let req = decode_input(
-            &bytes,
-            &L,
-            9,
-            InputDirection::ViewerToHost,
-            InputDelivery::Reliable,
-        )
-        .expect("decode input");
-
+        let req = decode_input(&bytes, &L, 9, V2H, REL).expect("decode input");
         let mut out = [0; 256];
-        let len = encode_input(
-            req,
-            &mut out,
-            &L,
-            9,
-            InputDirection::ViewerToHost,
-            InputDelivery::Reliable,
-        )
-        .expect("encode input");
+        let len = encode_input(req, &mut out, &L, 9, V2H, REL).expect("encode input");
         assert_eq!(&out[..len], bytes.as_slice());
+        check_negatives(&bytes, "input", |b| {
+            decode_input(b, &L, 9, V2H, REL).is_ok()
+        });
     }
-
-    let result_cases = [
-        include_str!("fixtures/input/result-submitted.hex"),
-        include_str!("fixtures/input/result-local.hex"),
-        include_str!("fixtures/input/result-refused.hex"),
-        include_str!("fixtures/input/result-expired.hex"),
-        include_str!("fixtures/input/result-cancelled.hex"),
-        include_str!("fixtures/input/result-partial.hex"),
-        include_str!("fixtures/input/result-unknown.hex"),
-        include_str!("fixtures/input/result-unknown-first.hex"),
-        include_str!("fixtures/input/result-pointer.hex"),
-    ];
 
     let res_b = ResultBinding {
         channel: 9,
@@ -748,16 +580,22 @@ fn test_input_fixtures_round_trip_and_fail_closed() {
         lease: InputLeaseId::from_raw(2),
     };
 
-    for hex_str in result_cases {
+    for hex_str in [
+        fix!("input/result-submitted"),
+        fix!("input/result-local"),
+        fix!("input/result-refused"),
+        fix!("input/result-expired"),
+        fix!("input/result-cancelled"),
+        fix!("input/result-partial"),
+        fix!("input/result-unknown"),
+        fix!("input/result-unknown-first"),
+        fix!("input/result-pointer"),
+    ] {
         let bytes = parse_hex(hex_str);
-        let res = decode_input_result(
-            &bytes,
-            &L,
-            res_b,
-            InputDirection::HostToViewer,
-            InputDelivery::Reliable,
-        )
-        .expect("decode input_result");
+        let res = decode_input_result(&bytes, &L, res_b, H2V, REL).expect("decode input_result");
         assert_eq!(res.binding, res_b);
+        check_negatives(&bytes, "input_result", |b| {
+            decode_input_result(b, &L, res_b, H2V, REL).is_ok()
+        });
     }
 }

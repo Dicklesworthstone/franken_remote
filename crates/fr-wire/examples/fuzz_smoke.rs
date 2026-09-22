@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::similar_names, clippy::too_many_lines)]
+#![rustfmt::skip]
 //! Fuzz smoke target and golden seed corpus harness for `fr-wire`.
 //!
 //! Provides a deterministic, coverage-ready fuzz runner seeded with golden
