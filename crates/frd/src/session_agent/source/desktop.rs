@@ -284,4 +284,4 @@ mod startup;
 mod launch;
 
 mod native;
-pub use native::NativeDesktop;
+pub use native::{NativeDesktop, dispatch};
