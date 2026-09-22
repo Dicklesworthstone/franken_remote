@@ -18,6 +18,8 @@ pub enum ReleaseCertainty {
     Clean,
     /// Confirmed released: all synthetic release operations were confirmed submitted by native sink.
     ConfirmedReleased,
+    /// Release operations were generated but native submission is not confirmed.
+    PendingCleanup,
     /// Uncertain: the input-handling worker process crashed or panicked while keys were held.
     /// It is unknown whether the OS still considers the keys held down.
     UncertainDueToCrash,
@@ -59,7 +61,8 @@ impl RemoteHeldTracker {
         Self::default()
     }
 
-    /// Record an injected operation that was confirmed admitted/submitted.
+    /// Record an operation reported by the original input owner. For releases,
+    /// call only after confirmed OS submission, never merely queued cleanup.
     /// Only remotely injected operations are tracked; local input must never touch this.
     pub fn record_injected_operation(&mut self, op: &Operation) {
         match op {
@@ -80,6 +83,17 @@ impl RemoteHeldTracker {
                 }
             }
             _ => {}
+        }
+        if matches!(
+            op,
+            Operation::Key {
+                transition: KeyTransition::Press,
+                ..
+            } | Operation::Button { pressed: true, .. }
+        ) {
+            self.last_certainty = None;
+        } else if self.last_certainty == Some(ReleaseCertainty::PendingCleanup) && self.is_clean() {
+            self.last_certainty = Some(ReleaseCertainty::ConfirmedReleased);
         }
     }
 
@@ -136,12 +150,14 @@ impl RemoteHeldTracker {
     /// 1. `Operation::Button { pressed: false }` for each held pointer button.
     /// 2. `Operation::Key { transition: KeyTransition::Release }` for each held key.
     ///
-    /// Clears internal state and sets certainty to `ConfirmedReleased`.
+    /// Retains the held obligations and marks them `PendingCleanup`. Generating
+    /// a batch is not an OS submission. Confirm each actual release through
+    /// `record_injected_operation`; unknown/failed releases remain held.
     pub fn synthesize_cleanup_releases(&mut self) -> Vec<Operation> {
         let mut releases = Vec::new();
 
         // 1. Release buttons first
-        for (btn_idx, held) in self.buttons.iter_mut().enumerate() {
+        for (btn_idx, held) in self.buttons.iter().enumerate() {
             if *held {
                 let button = match btn_idx {
                     0 => PointerButton::Primary,
@@ -154,24 +170,24 @@ impl RemoteHeldTracker {
                     button,
                     pressed: false,
                 });
-                *held = false;
             }
         }
 
         // 2. Release keys
-        for (usage, held) in self.keys.iter_mut().enumerate() {
-            if *held {
-                if let Some(key) = u16::try_from(usage).ok().and_then(PhysicalKey::new) {
-                    releases.push(Operation::Key {
-                        key,
-                        transition: KeyTransition::Release,
-                    });
-                }
-                *held = false;
+        for (usage, held) in self.keys.iter().enumerate() {
+            if *held && let Some(key) = u16::try_from(usage).ok().and_then(PhysicalKey::new) {
+                releases.push(Operation::Key {
+                    key,
+                    transition: KeyTransition::Release,
+                });
             }
         }
 
-        self.last_certainty = Some(ReleaseCertainty::ConfirmedReleased);
+        self.last_certainty = Some(if releases.is_empty() {
+            ReleaseCertainty::Clean
+        } else {
+            ReleaseCertainty::PendingCleanup
+        });
         releases
     }
 

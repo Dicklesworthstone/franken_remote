@@ -13,7 +13,14 @@ use std::{
     thread::{self, JoinHandle},
     time::Duration,
 };
+#[cfg(feature = "linux-session-events")]
+pub mod agent;
 mod bus;
+#[cfg(any(
+    feature = "linux-input-agent",
+    all(test, feature = "linux-session-events")
+))]
+pub(crate) mod input;
 
 const START_NS: u64 = 2_000_000_000;
 const VALID_NS: u64 = 500_000_000;
@@ -121,6 +128,7 @@ pub enum Status {
     Stopped(StopReason),
 }
 struct Shared {
+    selection: Selection,
     state: AtomicU8,
     deadline: AtomicU64,
     waker: Mutex<Option<Waker>>,
@@ -187,6 +195,14 @@ impl fmt::Debug for Control {
     }
 }
 impl Control {
+    /// Exact selected local input process/display association, not a permission.
+    /// The X11 native factory must not accidentally gate one desktop with another
+    /// session's evidence. No display address or UID comes from a remote peer.
+    /// Match the explicit local display and the input process effective UID.
+    /// Association alone is not fresh evidence; callers must also check status.
+    pub fn matches_local_x11(&self, display: &str) -> bool {
+        self.0.selection.display == display && self.0.selection.uid == bus::effective_uid()
+    }
     pub fn status(&self) -> Status {
         self.0.status(bus::boottime())
     }
@@ -243,6 +259,7 @@ impl Watch {
             .map_err(|_| Error::Busy)?;
         let permit = Permit;
         let shared = Arc::new(Shared {
+            selection: selection.clone(),
             state: AtomicU8::new(0),
             deadline: AtomicU64::new(until),
             waker: Mutex::new(None),

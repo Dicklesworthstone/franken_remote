@@ -73,6 +73,11 @@ unsafe extern "C" {
     fn sd_bus_message_skip(message: Raw, signature: *const c_char) -> c_int;
     fn strnlen(s: *const c_char, maxlen: usize) -> usize;
     fn clock_gettime(clock: c_int, time: *mut Timespec) -> c_int;
+    fn geteuid() -> u32;
+}
+pub(super) fn effective_uid() -> u32 {
+    // SAFETY: getuid family has no parameters, memory ownership or side effects.
+    unsafe { geteuid() }
 }
 #[repr(C)]
 struct Timespec {

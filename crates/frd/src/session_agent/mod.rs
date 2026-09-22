@@ -11,6 +11,8 @@
 
 pub mod approval;
 pub mod held_state;
+mod lifetime;
+pub use lifetime::AgentIdentity;
 pub mod indicator;
 pub mod local_priority;
 pub mod macos_injection;

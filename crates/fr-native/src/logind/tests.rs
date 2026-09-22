@@ -216,6 +216,7 @@ fn terminal_native_event_wakes_consumer_without_authority_lock() {
 #[test]
 fn boottime_expiry_is_terminal_even_without_native_progress() {
     let shared = Shared {
+        selection: selection(),
         state: AtomicU8::new(1),
         deadline: AtomicU64::new(50),
         waker: Mutex::new(None),
@@ -255,3 +256,12 @@ fn same_uid_unrelated_bus_client_cannot_forge_logind_lock() {
     assert_eq!(w.control.status(), Status::Active);
     finish(&mut w);
 }
+
+#[cfg(feature = "linux-session-events")]
+mod agent;
+
+#[cfg(feature = "linux-session-events")]
+mod input_support;
+
+#[cfg(all(feature = "linux-session-events", feature = "linux-input-agent"))]
+mod native_input;

@@ -31,6 +31,7 @@ macos-media = []
 linux-media = []
 # Opt-in read-only systemd/logind lifecycle evidence; no alternate runtime.
 linux-logind = []
+linux-session-events = ["linux-logind", "dep:frd", "dep:asupersync"]
 # Opt-in native libopus ABI; independent of HEVC, GUI and async dependencies.
 linux-opus = []
 # Wire-to-codec worker boundary; still no native audio-device or CLI dependency.

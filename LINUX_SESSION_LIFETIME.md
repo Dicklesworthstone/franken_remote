@@ -70,3 +70,52 @@ capture/input permissions that startup requires.
 Primary API references: systemd's `org.freedesktop.login1`, `sd_bus_get_name_creds`,
 `sd_bus_get_owner_creds`, and `sd_bus_add_match` documentation, and the v257
 `src/systemd/sd-bus.h` declarations.
+
+## Original local agent and final input integration
+
+The optional `linux-session-events` feature exposes `logind::agent::Events`.
+Construct it with fresh Control evidence, the exact selected `SessionAgent`, and
+that source owner's existing cancellation/clock context. Its borrowing `callback`
+fits the local-event callback of the existing native desktop open/run/serve loops.
+Keep Events outside the running future so `take_cleanup` remains available after
+termination; keep Watch independently until actual native-thread exit is observed.
+
+Positive evidence only returns Continue. It never marks capture/input permission
+granted, approves a viewer, unlocks a session, grants control or replaces an OS
+session. Negative evidence calls the original agent's immediate revocation path,
+including registered source/input revokers, and fences only the supplied source
+context. An opaque weak `AgentIdentity` prevents retargeting even when numeric
+OS-session IDs are reused. Missing evidence is not mislabeled as physical lock.
+
+The adapter retains one release batch and the original pending OS-cleanup receipt;
+repeated polls cannot silently discard or replace them. The existing held-state
+tracker now reports `PendingCleanup` and retains held obligations when it merely
+generates releases. Only confirmed release submissions clear those obligations.
+Input driver shutdown, unresolved/unknown releases, and native thread exit remain
+separate observations. A revoked flag is never proof of cleanup completion.
+
+With `linux-input-agent` and `linux-logind`, `start_x11_guarded` composes the same
+canonical InputSession/Seat/Driver with the selected local-session evidence. It
+requires the watch's explicit display and UID to match the input process. The
+original native factory still independently checks X11 geometry/capabilities.
+The gate checks evidence around preparation and immediately before each native
+submission. The existing InputSession still checks all leases, tickets, sequence
+and geometry requirements; logind is not a substitute for those checks.
+
+When evidence ends, revoke first. Canonical InputSession cleanup may then submit
+only releases for that original owner's held keys/buttons/wheel; normal remote
+input, INCLUDING remote releases, still fails its final authority check. A native
+call already entered keeps its actual Submitted/Unknown result; no automatic
+application retry or retroactive cancellation claim is introduced.
+
+GuardedDriver polls evidence on the original input watchdog's bounded cadence,
+with a native-event wakeup, so idle input cannot retain authority until another
+packet arrives. No second runtime, watchdog queue or input sink is introduced.
+Its Shutdown result comes from the original native cleanup owner. Unpolled Drop
+still requests canonical abandonment; it does not assert synchronous native reap.
+
+Additional tests use a private real Xvfb server and an independent Xlib connection
+to observe held Shift/button state, not only a submission receipt. Synthetic
+logind lock or lost replies cause actual release without another input packet;
+unpolled driver abandonment also releases/reaps the same original native owner.
+This does not qualify an installed desktop locker or enable the `frd run` CLI.

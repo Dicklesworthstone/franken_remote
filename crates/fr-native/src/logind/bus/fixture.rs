@@ -63,6 +63,7 @@ pub(in crate::logind) struct Data {
     pub remote: bool,
     pub suspend: bool,
     pub uid: u32,
+    pub display: String,
     pub stamp: u64,
     pub omit: Option<&'static str>,
     pub initial_signal: bool,
@@ -77,6 +78,7 @@ impl Default for Data {
             remote: false,
             suspend: false,
             uid: 1000,
+            display: ":7".into(),
             stamp: 12345,
             omit: None,
             initial_signal: false,
@@ -269,7 +271,7 @@ fn reply(call: Raw, state: &ServerState) -> Result<(), StopReason> {
             w.open(b'a', c"{sv}");
             for (key, value) in [
                 ("Id", "c1"),
-                ("Display", ":7"),
+                ("Display", data.display.as_str()),
                 ("Type", "x11"),
                 ("Class", "user"),
                 ("State", "active"),

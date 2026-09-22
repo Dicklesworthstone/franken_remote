@@ -299,7 +299,20 @@ fn test_held_state_synthesizes_cleanup_releases_on_normal_revoke() {
         }
     ));
 
-    // Tracker is now clean and confirmed released
+    // Generating a batch does not submit it. Keep every unresolved obligation.
+    assert!(!agent.held_state().is_clean());
+    assert_eq!(
+        agent.held_state().last_certainty(),
+        ReleaseCertainty::PendingCleanup
+    );
+    assert_eq!(
+        agent.held_state_mut().synthesize_cleanup_releases(),
+        releases
+    );
+    // Explicit synthetic native acknowledgements, not an actual OS-effect test.
+    for operation in &releases {
+        agent.held_state_mut().record_injected_operation(operation);
+    }
     assert!(agent.held_state().is_clean());
     assert_eq!(
         agent.held_state().last_certainty(),
