@@ -275,3 +275,6 @@ impl<F> Drop for Scoped<F> {
         self.cx.cancel_fast(CancelKind::User);
     }
 }
+
+mod linux;
+pub use linux::{Error as LinuxError, LinuxServer};
