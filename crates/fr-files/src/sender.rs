@@ -131,6 +131,8 @@ struct Transfer {
     stage: Stage,
     deadline: u64,
     total: Option<u64>,
+    profile: u16,
+    entries: Vec<(u64, u64)>,
     root: String,
     queued: u64,
     rate: u32,
@@ -315,12 +317,36 @@ impl<'a> Sender<'a> {
         }
         self.begin_until(q, file, name, None)
     }
+    /// Send an explicitly selected directory descriptor as one atomic, portable
+    /// ATP tree. No data is sent until the host accepts the directory profile.
+    pub fn begin_directory(
+        &mut self,
+        q: &QuicRecords,
+        directory: File,
+        name: &str,
+    ) -> Result<u64, Error> {
+        self.identity(q)?;
+        if self.batch.is_some() {
+            return Err(Error::Busy);
+        }
+        self.begin_selected(q, directory, name, None, true)
+    }
     fn begin_until(
         &mut self,
         q: &QuicRecords,
         file: File,
         name: &str,
         until: Option<u64>,
+    ) -> Result<u64, Error> {
+        self.begin_selected(q, file, name, until, false)
+    }
+    fn begin_selected(
+        &mut self,
+        q: &QuicRecords,
+        file: File,
+        name: &str,
+        until: Option<u64>,
+        directory: bool,
     ) -> Result<u64, Error> {
         self.identity(q)?;
         if self.closed {
@@ -346,7 +372,11 @@ impl<'a> Sender<'a> {
             return Err(Error::Expired);
         }
         let next = self.next.checked_add(1).ok_or(Error::Limits)?;
-        let source = Source::spawn(self.cx.clone(), file, name.into(), self.policy, deadline)?;
+        let source = if directory {
+            Source::spawn_directory(self.cx.clone(), file, name.into(), self.policy, deadline)?
+        } else {
+            Source::spawn(self.cx.clone(), file, name.into(), self.policy, deadline)?
+        };
         let id = self.next;
         self.next = next;
         self.transfer = Some(Transfer {
@@ -355,6 +385,12 @@ impl<'a> Sender<'a> {
             stage: Stage::Preparing,
             deadline,
             total: None,
+            profile: if directory {
+                files::ATP_PORTABLE_DIRECTORY_FULL
+            } else {
+                files::ATP_PORTABLE_FULL
+            },
+            entries: Vec::new(),
             root: String::new(),
             queued: 0,
             rate: self.policy.bytes_per_second,
@@ -616,6 +652,10 @@ impl Transfer {
             if self.stage != Stage::Preparing {
                 return Err(Error::Protocol);
             }
+            if manifest.is_directory != (self.profile == files::ATP_PORTABLE_DIRECTORY_FULL) {
+                return Err(Error::Protocol);
+            }
+            self.entries = manifest.entries.iter().map(|e| (e.size, 0)).collect();
             self.total = Some(manifest.total_bytes);
             self.root.clone_from(&manifest.merkle_root_hex);
             let payload = serde_json::to_vec(&manifest).map_err(|_| Error::Protocol)?;
@@ -628,7 +668,7 @@ impl Transfer {
             self.packet = Some(packet(
                 self.id,
                 Body::Offer {
-                    profile: files::ATP_PORTABLE_FULL,
+                    profile: self.profile,
                     atp: &frame,
                 },
                 context,
@@ -649,17 +689,32 @@ impl Transfer {
             if cost != 0 && self.tokens >= u128::from(cost) * 1_000_000 {
                 let event = self.ready.take().ok_or(Error::Protocol)?;
                 let (frame, completing) = match event {
-                    Event::Chunk { offset, bytes } => {
-                        if offset != self.queued || bytes.len() > self.chunk {
+                    Event::Chunk {
+                        index,
+                        offset,
+                        bytes,
+                    } => {
+                        let entry = self
+                            .entries
+                            .get_mut(index as usize)
+                            .ok_or(Error::Protocol)?;
+                        let end = offset
+                            .checked_add(bytes.len() as u64)
+                            .ok_or(Error::Limits)?;
+                        if offset != entry.1 || end > entry.0 || bytes.len() > self.chunk {
                             return Err(Error::Protocol);
                         }
+                        entry.1 = end;
                         (
-                            atp::encode_data(offset, &bytes).map_err(|_| Error::Protocol)?,
+                            atp::encode_entry_data(index, offset, &bytes)
+                                .map_err(|_| Error::Protocol)?,
                             false,
                         )
                     }
                     Event::End => {
-                        if self.total != Some(self.queued) {
+                        if self.total != Some(self.queued)
+                            || self.entries.iter().any(|(size, sent)| size != sent)
+                        {
                             return Err(Error::SourceChanged);
                         }
                         (atp::encode_complete().map_err(|_| Error::Protocol)?, true)
@@ -695,13 +750,17 @@ impl Transfer {
         }
         match message.body {
             Body::Accept {
+                profile,
                 size,
                 bytes_per_second,
                 chunk_bytes,
                 atp,
                 ..
             } => {
-                if self.stage != Stage::AwaitingAcceptance || self.total != Some(size) {
+                if self.stage != Stage::AwaitingAcceptance
+                    || self.total != Some(size)
+                    || profile != self.profile
+                {
                     return Err(Error::Protocol);
                 }
                 let frame = frame(atp, FrameType::ObjectRequest)?;
@@ -746,7 +805,7 @@ impl Transfer {
                             || !p.sha_ok
                             || !p.merkle_ok
                             || p.bytes_received != published_bytes
-                            || p.files != 1
+                            || p.files as usize != self.entries.len()
                             || p.reason.is_some()
                             || !p.committed_paths.is_empty()
                             || p.symbols_accepted != 0

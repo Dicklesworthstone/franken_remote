@@ -1,4 +1,5 @@
-//! One selected file descriptor, disk-only hashing/reads, one outstanding result.
+//! Locally selected descriptors, disk-only hashing/reads, one outstanding result.
+mod tree;
 use super::{Error, Policy};
 use crate::receive::MAX_CHUNK_BYTES;
 use asupersync::{
@@ -25,7 +26,11 @@ use std::{
 
 pub(super) enum Event {
     Prepared(Box<TransferManifest>),
-    Chunk { offset: u64, bytes: Vec<u8> },
+    Chunk {
+        index: u32,
+        offset: u64,
+        bytes: Vec<u8>,
+    },
     End,
 }
 struct Gate {
@@ -61,6 +66,25 @@ impl Source {
         policy: Policy,
         deadline: u64,
     ) -> Result<Self, Error> {
+        Self::spawn_selected(cx, file, name, policy, deadline, false)
+    }
+    pub(super) fn spawn_directory(
+        cx: Cx,
+        file: File,
+        name: String,
+        policy: Policy,
+        deadline: u64,
+    ) -> Result<Self, Error> {
+        Self::spawn_selected(cx, file, name, policy, deadline, true)
+    }
+    fn spawn_selected(
+        cx: Cx,
+        file: File,
+        name: String,
+        policy: Policy,
+        deadline: u64,
+        directory: bool,
+    ) -> Result<Self, Error> {
         let clock = cx.timer_driver().ok_or(Error::Clock)?;
         let (send, command) = mpsc::sync_channel(1);
         let (reply, result) = mpsc::sync_channel(1);
@@ -74,7 +98,7 @@ impl Source {
         let thread = thread::Builder::new()
             .name("fr-file-source".into())
             .spawn(move || {
-                if let Err(error) = run(file, name, policy, &gate, &command, &reply) {
+                if let Err(error) = run(file, name, policy, directory, &gate, &command, &reply) {
                     // There cannot be a second unread result: request admission is
                     // exclusive until the previous result is taken. Never block on
                     // the abandoned network owner, including during cancellation.
@@ -166,64 +190,21 @@ fn eof(file: &mut File) -> Result<(), Error> {
     Ok(())
 }
 fn run(
-    mut file: File,
+    file: File,
     name: String,
     policy: Policy,
+    directory: bool,
     gate: &Gate,
     command: &Receiver<usize>,
     reply: &SyncSender<Result<Event, Error>>,
 ) -> Result<(), Error> {
-    gate.check()?;
-    let metadata = file.metadata().map_err(Error::from)?;
-    if !metadata.is_file() || metadata.len() > policy.max_file_bytes {
-        return Err(Error::Source);
-    }
-    let original = identity(&metadata);
-    let size = metadata.len();
-    file.rewind().map_err(Error::from)?;
-    let mut hash = StagedEntryReceive::new(PathBuf::new());
-    let mut buffer = vec![0_u8; MAX_CHUNK_BYTES];
-    let mut offset = 0;
-    while offset < size {
-        gate.check()?;
-        let n = usize::try_from((size - offset).min(MAX_CHUNK_BYTES as u64))
-            .map_err(|_| Error::Limits)?;
-        file.read_exact(&mut buffer[..n]).map_err(Error::from)?;
-        hash.update_with_chunk(&buffer[..n]);
-        offset += n as u64;
-    }
-    buffer.fill(0);
-    eof(&mut file)?;
-    unchanged(&file, &original)?;
-    gate.check()?;
-    let (digest, _, _) = hash.finalize(name.clone());
-    let expected = digest.content_sha256;
-    let root = flat_merkle_root_from_digests(std::slice::from_ref(&digest));
-    let mut random = [0; 16];
-    getrandom::fill(&mut random).map_err(|_| Error::Source)?;
-    let manifest = TransferManifest {
-        transfer_id: hex_encode(&random),
-        root_name: name.clone(),
-        is_directory: false,
-        total_bytes: size,
-        merkle_root_hex: root,
-        metadata_root_hex: None,
-        directory_metadata: None,
-        delta_manifest: None,
-        entries: vec![ManifestEntry {
-            index: 0,
-            rel_path: name.clone(),
-            size,
-            sha256_hex: hex_encode(&expected),
-            metadata: None,
-            members: Vec::new(),
-        }],
-    };
-    file.rewind().map_err(Error::from)?;
+    let mut selected = tree::Selection::new(file, &name, directory, policy.max_file_bytes, gate)?;
+    let (manifest, expected) = prepare(&mut selected, name, directory, gate)?;
     reply
         .try_send(Ok(Event::Prepared(Box::new(manifest))))
         .map_err(|_| Error::Worker)?;
-    offset = 0;
+    let mut index = 0;
+    let mut offset = 0;
     let mut verification = StagedEntryReceive::new(PathBuf::new());
     loop {
         gate.check()?;
@@ -232,27 +213,110 @@ fn run(
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
         };
-        gate.check()?;
-        unchanged(&file, &original)?;
-        if offset == size {
-            eof(&mut file)?;
-            let (actual, _, _) = verification.finalize(name);
-            if actual.content_sha256 != expected {
+        selected.check(gate)?;
+        // Finish zero-byte entries too, without manufacturing empty data frames.
+        while let Some(entry) = selected.files.get_mut(index) {
+            if offset != entry.original.2 {
+                break;
+            }
+            eof(&mut entry.file)?;
+            unchanged(&entry.file, &entry.original)?;
+            let (actual, _, _) = verification.finalize(entry.path.clone());
+            if actual.content_sha256 != expected[index] {
                 return Err(Error::SourceChanged);
             }
-            gate.check()?;
+            verification = StagedEntryReceive::new(PathBuf::new());
+            index += 1;
+            offset = 0;
+        }
+        if index == selected.files.len() {
+            selected.check(gate)?;
             reply.try_send(Ok(Event::End)).map_err(|_| Error::Worker)?;
             return Ok(());
         }
-        let n = usize::try_from((size - offset).min(maximum as u64)).map_err(|_| Error::Limits)?;
+        let entry = &mut selected.files[index];
+        let n = usize::try_from((entry.original.2 - offset).min(maximum as u64))
+            .map_err(|_| Error::Limits)?;
         let mut bytes = vec![0; n];
-        file.read_exact(&mut bytes).map_err(Error::from)?;
+        entry.file.read_exact(&mut bytes)?;
         verification.update_with_chunk(&bytes);
         gate.check()?;
-        unchanged(&file, &original)?;
+        unchanged(&entry.file, &entry.original)?;
         reply
-            .try_send(Ok(Event::Chunk { offset, bytes }))
+            .try_send(Ok(Event::Chunk {
+                index: u32::try_from(index).map_err(|_| Error::Limits)?,
+                offset,
+                bytes,
+            }))
             .map_err(|_| Error::Worker)?;
         offset += n as u64;
     }
+}
+
+fn prepare(
+    selected: &mut tree::Selection,
+    name: String,
+    directory: bool,
+    gate: &Gate,
+) -> Result<(TransferManifest, Vec<[u8; 32]>), Error> {
+    let mut digests = Vec::with_capacity(selected.files.len());
+    let mut entries = Vec::with_capacity(selected.files.len());
+    let mut buffer = vec![0_u8; MAX_CHUNK_BYTES];
+    for (index, entry) in selected.files.iter_mut().enumerate() {
+        entry.file.rewind()?;
+        let size = entry.original.2;
+        let mut hash = StagedEntryReceive::new(PathBuf::new());
+        let mut offset = 0;
+        while offset < size {
+            gate.check()?;
+            let n = usize::try_from((size - offset).min(MAX_CHUNK_BYTES as u64))
+                .map_err(|_| Error::Limits)?;
+            entry.file.read_exact(&mut buffer[..n])?;
+            hash.update_with_chunk(&buffer[..n]);
+            offset += n as u64;
+        }
+        buffer.fill(0);
+        eof(&mut entry.file)?;
+        unchanged(&entry.file, &entry.original)?;
+        gate.check()?;
+        let (digest, _, _) = hash.finalize(entry.path.clone());
+        entries.push(ManifestEntry {
+            index: u32::try_from(index).map_err(|_| Error::Limits)?,
+            rel_path: entry.path.clone(),
+            size,
+            sha256_hex: hex_encode(&digest.content_sha256),
+            metadata: None,
+            members: Vec::new(),
+        });
+        digests.push(digest);
+        entry.file.rewind()?;
+    }
+    selected.check(gate)?;
+    let root = flat_merkle_root_from_digests(&digests);
+    if directory {
+        crate::receive::DirectoryManifest::new(
+            name.clone(),
+            selected.total_bytes(),
+            entries.clone(),
+            root.clone(),
+        )
+        .map_err(|_| Error::Source)?;
+    }
+    let mut random = [0; 16];
+    getrandom::fill(&mut random).map_err(|_| Error::Source)?;
+    let manifest = TransferManifest {
+        transfer_id: hex_encode(&random),
+        root_name: name,
+        is_directory: directory,
+        total_bytes: selected.total_bytes(),
+        merkle_root_hex: root,
+        metadata_root_hex: None,
+        directory_metadata: None,
+        delta_manifest: None,
+        entries,
+    };
+    Ok((
+        manifest,
+        digests.iter().map(|digest| digest.content_sha256).collect(),
+    ))
 }
