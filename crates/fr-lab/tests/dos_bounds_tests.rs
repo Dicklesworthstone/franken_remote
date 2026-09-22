@@ -12,343 +12,132 @@ fn ms(millis: u64) -> HostDuration {
     HostDuration::from_millis_checked(millis).expect("valid duration")
 }
 
+fn assert_above_ceiling(ov: LimitOverrides, expected_field: LimitField) {
+    match ProtocolLimits::with_overrides(ov) {
+        Err(LimitsError::AboveCeiling { field, .. }) => assert_eq!(field, expected_field),
+        other => panic!("expected AboveCeiling({expected_field:?}), got {other:?}"),
+    }
+}
+
+fn assert_below_floor(ov: LimitOverrides, expected_field: LimitField, expected_floor: u64) {
+    match ProtocolLimits::with_overrides(ov) {
+        Err(LimitsError::BelowFloor { field, floor, .. }) => {
+            assert_eq!(field, expected_field);
+            assert_eq!(floor, expected_floor);
+        }
+        other => panic!("expected BelowFloor({expected_field:?}), got {other:?}"),
+    }
+}
+
 #[test]
 fn protocol_limits_rate_overrides_above_ceiling_are_rejected() {
     let a = ProtocolLimits::ABSOLUTE;
-
-    // Handshake duration
-    let ov = LimitOverrides {
-        max_handshake_duration_ms: Some(a.max_handshake_duration_ms() + 1),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::AboveCeiling {
-            field,
-            value,
-            ceiling,
-        }) => {
-            assert_eq!(field, LimitField::HandshakeDurationMs);
-            assert_eq!(value, u64::from(a.max_handshake_duration_ms() + 1));
-            assert_eq!(ceiling, u64::from(a.max_handshake_duration_ms()));
-        }
-        other => panic!("expected AboveCeiling, got {other:?}"),
-    }
-
-    // Preadmission rate
-    let ov = LimitOverrides {
-        max_preadmission_rate_per_sec: Some(a.max_preadmission_rate_per_sec() + 1),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::AboveCeiling { field, .. }) => {
-            assert_eq!(field, LimitField::PreadmissionRatePerSec);
-        }
-        other => panic!("expected AboveCeiling, got {other:?}"),
-    }
-
-    // Half-attached channels
-    let ov = LimitOverrides {
-        max_half_attached_channels: Some(a.max_half_attached_channels() + 1),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::AboveCeiling { field, .. }) => {
-            assert_eq!(field, LimitField::HalfAttachedChannels);
-        }
-        other => panic!("expected AboveCeiling, got {other:?}"),
-    }
-
-    // Pending approvals
-    let ov = LimitOverrides {
-        max_pending_approvals: Some(a.max_pending_approvals() + 1),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::AboveCeiling { field, .. }) => {
-            assert_eq!(field, LimitField::PendingApprovals);
-        }
-        other => panic!("expected AboveCeiling, got {other:?}"),
-    }
+    assert_above_ceiling(
+        LimitOverrides { max_handshake_duration_ms: Some(a.max_handshake_duration_ms() + 1), ..Default::default() },
+        LimitField::HandshakeDurationMs,
+    );
+    assert_above_ceiling(
+        LimitOverrides { max_preadmission_rate_per_sec: Some(a.max_preadmission_rate_per_sec() + 1), ..Default::default() },
+        LimitField::PreadmissionRatePerSec,
+    );
+    assert_above_ceiling(
+        LimitOverrides { max_half_attached_channels: Some(a.max_half_attached_channels() + 1), ..Default::default() },
+        LimitField::HalfAttachedChannels,
+    );
+    assert_above_ceiling(
+        LimitOverrides { max_pending_approvals: Some(a.max_pending_approvals() + 1), ..Default::default() },
+        LimitField::PendingApprovals,
+    );
 }
 
 #[test]
 fn protocol_limits_payload_overrides_above_ceiling_are_rejected() {
     let a = ProtocolLimits::ABSOLUTE;
-
-    // Cursor dimension pixels
-    let ov = LimitOverrides {
-        max_cursor_dimension_pixels: Some(a.max_cursor_dimension_pixels() + 1),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::AboveCeiling { field, .. }) => {
-            assert_eq!(field, LimitField::CursorDimensionPixels);
-        }
-        other => panic!("expected AboveCeiling, got {other:?}"),
-    }
-
-    // Cursor shape bytes
-    let ov = LimitOverrides {
-        max_cursor_shape_bytes: Some(a.max_cursor_shape_bytes() + 1),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::AboveCeiling { field, .. }) => {
-            assert_eq!(field, LimitField::CursorShapeBytes);
-        }
-        other => panic!("expected AboveCeiling, got {other:?}"),
-    }
-
-    // Name bytes
-    let ov = LimitOverrides {
-        max_name_bytes: Some(a.max_name_bytes() + 1),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::AboveCeiling { field, .. }) => {
-            assert_eq!(field, LimitField::NameBytes);
-        }
-        other => panic!("expected AboveCeiling, got {other:?}"),
-    }
-
-    // Parameter set bytes
-    let ov = LimitOverrides {
-        max_parameter_set_bytes: Some(a.max_parameter_set_bytes() + 1),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::AboveCeiling { field, .. }) => {
-            assert_eq!(field, LimitField::ParameterSetBytes);
-        }
-        other => panic!("expected AboveCeiling, got {other:?}"),
-    }
-
-    // Fragments per access unit
-    let ov = LimitOverrides {
-        max_fragments_per_access_unit: Some(a.max_fragments_per_access_unit() + 1),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::AboveCeiling { field, .. }) => {
-            assert_eq!(field, LimitField::FragmentsPerAccessUnit);
-        }
-        other => panic!("expected AboveCeiling, got {other:?}"),
-    }
+    assert_above_ceiling(
+        LimitOverrides { max_cursor_dimension_pixels: Some(a.max_cursor_dimension_pixels() + 1), ..Default::default() },
+        LimitField::CursorDimensionPixels,
+    );
+    assert_above_ceiling(
+        LimitOverrides { max_cursor_shape_bytes: Some(a.max_cursor_shape_bytes() + 1), ..Default::default() },
+        LimitField::CursorShapeBytes,
+    );
+    assert_above_ceiling(
+        LimitOverrides { max_name_bytes: Some(a.max_name_bytes() + 1), ..Default::default() },
+        LimitField::NameBytes,
+    );
+    assert_above_ceiling(
+        LimitOverrides { max_parameter_set_bytes: Some(a.max_parameter_set_bytes() + 1), ..Default::default() },
+        LimitField::ParameterSetBytes,
+    );
+    assert_above_ceiling(
+        LimitOverrides { max_fragments_per_access_unit: Some(a.max_fragments_per_access_unit() + 1), ..Default::default() },
+        LimitField::FragmentsPerAccessUnit,
+    );
 }
 
 #[test]
 fn protocol_limits_resource_overrides_above_ceiling_are_rejected() {
     let a = ProtocolLimits::ABSOLUTE;
-
-    // Retained receipts
-    let ov = LimitOverrides {
-        max_retained_receipts: Some(a.max_retained_receipts() + 1),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::AboveCeiling { field, .. }) => {
-            assert_eq!(field, LimitField::RetainedReceipts);
-        }
-        other => panic!("expected AboveCeiling, got {other:?}"),
-    }
-
-    // Encoder sessions
-    let ov = LimitOverrides {
-        max_encoder_sessions: Some(a.max_encoder_sessions() + 1),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::AboveCeiling { field, .. }) => {
-            assert_eq!(field, LimitField::EncoderSessions);
-        }
-        other => panic!("expected AboveCeiling, got {other:?}"),
-    }
-
-    // GPU surfaces
-    let ov = LimitOverrides {
-        max_gpu_surfaces: Some(a.max_gpu_surfaces() + 1),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::AboveCeiling { field, .. }) => {
-            assert_eq!(field, LimitField::GpuSurfaces);
-        }
-        other => panic!("expected AboveCeiling, got {other:?}"),
-    }
-
-    // Bandwidth bps
-    let ov = LimitOverrides {
-        max_bandwidth_bps: Some(a.max_bandwidth_bps() + 1),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::AboveCeiling { field, .. }) => {
-            assert_eq!(field, LimitField::BandwidthBps);
-        }
-        other => panic!("expected AboveCeiling, got {other:?}"),
-    }
-
-    // Viewers
-    let ov = LimitOverrides {
-        max_viewers: Some(a.max_viewers() + 1),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::AboveCeiling { field, .. }) => {
-            assert_eq!(field, LimitField::Viewers);
-        }
-        other => panic!("expected AboveCeiling, got {other:?}"),
-    }
+    assert_above_ceiling(
+        LimitOverrides { max_retained_receipts: Some(a.max_retained_receipts() + 1), ..Default::default() },
+        LimitField::RetainedReceipts,
+    );
+    assert_above_ceiling(
+        LimitOverrides { max_encoder_sessions: Some(a.max_encoder_sessions() + 1), ..Default::default() },
+        LimitField::EncoderSessions,
+    );
+    assert_above_ceiling(
+        LimitOverrides { max_gpu_surfaces: Some(a.max_gpu_surfaces() + 1), ..Default::default() },
+        LimitField::GpuSurfaces,
+    );
+    assert_above_ceiling(
+        LimitOverrides { max_bandwidth_bps: Some(a.max_bandwidth_bps() + 1), ..Default::default() },
+        LimitField::BandwidthBps,
+    );
+    assert_above_ceiling(
+        LimitOverrides { max_viewers: Some(a.max_viewers() + 1), ..Default::default() },
+        LimitField::Viewers,
+    );
 }
 
 #[test]
 fn protocol_limits_rate_overrides_below_floor_are_rejected() {
-    // Handshake duration floor is 1000ms
-    let ov = LimitOverrides {
-        max_handshake_duration_ms: Some(999),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::BelowFloor {
-            field,
-            value,
-            floor,
-        }) => {
-            assert_eq!(field, LimitField::HandshakeDurationMs);
-            assert_eq!(value, 999);
-            assert_eq!(floor, 1000);
-        }
-        other => panic!("expected BelowFloor, got {other:?}"),
-    }
-
-    // Idle session timeout floor is 10s
-    let ov = LimitOverrides {
-        idle_session_timeout_seconds: Some(9),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::BelowFloor {
-            field,
-            value,
-            floor,
-        }) => {
-            assert_eq!(field, LimitField::IdleSessionTimeoutSecs);
-            assert_eq!(value, 9);
-            assert_eq!(floor, 10);
-        }
-        other => panic!("expected BelowFloor, got {other:?}"),
-    }
+    assert_below_floor(
+        LimitOverrides { max_handshake_duration_ms: Some(999), ..Default::default() },
+        LimitField::HandshakeDurationMs, 1000,
+    );
+    assert_below_floor(
+        LimitOverrides { idle_session_timeout_seconds: Some(9), ..Default::default() },
+        LimitField::IdleSessionTimeoutSecs, 10,
+    );
 }
 
 #[test]
 fn protocol_limits_resource_overrides_below_floor_are_rejected() {
-    // Cursor dimension floor is 16
-    let ov = LimitOverrides {
-        max_cursor_dimension_pixels: Some(15),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::BelowFloor {
-            field,
-            value,
-            floor,
-        }) => {
-            assert_eq!(field, LimitField::CursorDimensionPixels);
-            assert_eq!(value, 15);
-            assert_eq!(floor, 16);
-        }
-        other => panic!("expected BelowFloor, got {other:?}"),
-    }
-
-    // Cursor shape floor is 1024 bytes
-    let ov = LimitOverrides {
-        max_cursor_shape_bytes: Some(1023),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::BelowFloor {
-            field,
-            value,
-            floor,
-        }) => {
-            assert_eq!(field, LimitField::CursorShapeBytes);
-            assert_eq!(value, 1023);
-            assert_eq!(floor, 1024);
-        }
-        other => panic!("expected BelowFloor, got {other:?}"),
-    }
-
-    // Parameter set floor is 32 bytes
-    let ov = LimitOverrides {
-        max_parameter_set_bytes: Some(31),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::BelowFloor {
-            field,
-            value,
-            floor,
-        }) => {
-            assert_eq!(field, LimitField::ParameterSetBytes);
-            assert_eq!(value, 31);
-            assert_eq!(floor, 32);
-        }
-        other => panic!("expected BelowFloor, got {other:?}"),
-    }
-
-    // Retained receipts floor is 16
-    let ov = LimitOverrides {
-        max_retained_receipts: Some(15),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::BelowFloor {
-            field,
-            value,
-            floor,
-        }) => {
-            assert_eq!(field, LimitField::RetainedReceipts);
-            assert_eq!(value, 15);
-            assert_eq!(floor, 16);
-        }
-        other => panic!("expected BelowFloor, got {other:?}"),
-    }
-
-    // GPU surfaces floor is 2
-    let ov = LimitOverrides {
-        max_gpu_surfaces: Some(1),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::BelowFloor {
-            field,
-            value,
-            floor,
-        }) => {
-            assert_eq!(field, LimitField::GpuSurfaces);
-            assert_eq!(value, 1);
-            assert_eq!(floor, 2);
-        }
-        other => panic!("expected BelowFloor, got {other:?}"),
-    }
-
-    // Bandwidth floor is 1 Mbps
-    let ov = LimitOverrides {
-        max_bandwidth_bps: Some(999_999),
-        ..Default::default()
-    };
-    match ProtocolLimits::with_overrides(ov) {
-        Err(LimitsError::BelowFloor {
-            field,
-            value,
-            floor,
-        }) => {
-            assert_eq!(field, LimitField::BandwidthBps);
-            assert_eq!(value, 999_999);
-            assert_eq!(floor, 1_000_000);
-        }
-        other => panic!("expected BelowFloor, got {other:?}"),
-    }
+    assert_below_floor(
+        LimitOverrides { max_cursor_dimension_pixels: Some(15), ..Default::default() },
+        LimitField::CursorDimensionPixels, 16,
+    );
+    assert_below_floor(
+        LimitOverrides { max_cursor_shape_bytes: Some(1023), ..Default::default() },
+        LimitField::CursorShapeBytes, 1024,
+    );
+    assert_below_floor(
+        LimitOverrides { max_parameter_set_bytes: Some(31), ..Default::default() },
+        LimitField::ParameterSetBytes, 32,
+    );
+    assert_below_floor(
+        LimitOverrides { max_retained_receipts: Some(15), ..Default::default() },
+        LimitField::RetainedReceipts, 16,
+    );
+    assert_below_floor(
+        LimitOverrides { max_gpu_surfaces: Some(1), ..Default::default() },
+        LimitField::GpuSurfaces, 2,
+    );
+    assert_below_floor(
+        LimitOverrides { max_bandwidth_bps: Some(999_999), ..Default::default() },
+        LimitField::BandwidthBps, 1_000_000,
+    );
 }
 
 #[test]

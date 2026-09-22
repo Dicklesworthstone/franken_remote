@@ -1388,268 +1388,42 @@ fn node_refresh_cannot_replace_key_or_extend_a_dead_snapshot() {
     });
 }
 
-#[test]
-fn fixture_sharing_matrix_positive_approved() {
-    let endpoints = ConnectionAddresses {
-        local: "100.64.0.1:4710".parse().unwrap(),
-        peer: "100.64.0.2:30001".parse().unwrap(),
-    };
-
-    let s_pos: Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/sharing_matrix/positive_approved/status.json"
-    ))
-    .unwrap();
-    let w_pos: Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/sharing_matrix/positive_approved/whois.json"
-    ))
-    .unwrap();
-    let s_parsed = Status::parse(&serde_json::to_vec(&s_pos).unwrap()).unwrap();
-    let w_parsed = WhoIs::parse(&serde_json::to_vec(&w_pos).unwrap()).unwrap();
-    assert!(
-        evaluate(
-            &s_parsed,
-            &w_parsed,
-            endpoints,
-            GrantPolicy {
-                scope: Scope::OwnUser,
-                ..Default::default()
-            }
-        )
-        .is_ok()
-    );
-    assert!(
-        evaluate(
-            &s_parsed,
-            &w_parsed,
-            endpoints,
-            GrantPolicy {
-                scope: Scope::Tailnet,
-                ..Default::default()
-            }
-        )
-        .is_ok()
-    );
-    assert!(
-        evaluate_membership(
-            &s_parsed,
-            &w_parsed,
-            endpoints,
-            GrantPolicy {
-                scope: Scope::OwnUser,
-                ..Default::default()
-            }
-        )
-        .is_ok()
-    );
+fn fixture_pair(status_str: &str, whois_str: &str) -> (Status, WhoIs) {
+    let s: Value = serde_json::from_str(status_str).unwrap();
+    let w: Value = serde_json::from_str(whois_str).unwrap();
+    let s_p = Status::parse(&serde_json::to_vec(&s).unwrap()).unwrap();
+    let w_p = WhoIs::parse(&serde_json::to_vec(&w).unwrap()).unwrap();
+    (s_p, w_p)
 }
 
 #[test]
-fn fixture_sharing_matrix_different_owner() {
-    let endpoints = ConnectionAddresses {
-        local: "100.64.0.1:4710".parse().unwrap(),
-        peer: "100.64.0.2:30001".parse().unwrap(),
-    };
-
-    let s_diff: Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/sharing_matrix/different_owner/status.json"
-    ))
-    .unwrap();
-    let w_diff: Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/sharing_matrix/different_owner/whois.json"
-    ))
-    .unwrap();
-    let s_parsed = Status::parse(&serde_json::to_vec(&s_diff).unwrap()).unwrap();
-    let w_parsed = WhoIs::parse(&serde_json::to_vec(&w_diff).unwrap()).unwrap();
-    assert_eq!(
-        evaluate(
-            &s_parsed,
-            &w_parsed,
-            endpoints,
-            GrantPolicy {
-                scope: Scope::OwnUser,
-                ..Default::default()
-            }
-        )
-        .err(),
-        Some(Error::ScopeDenied)
+fn fixture_sharing_matrix_matrix() {
+    let (s_app, w_app) = fixture_pair(
+        include_str!("../../tests/fixtures/sharing_matrix/positive_approved/status.json"),
+        include_str!("../../tests/fixtures/sharing_matrix/positive_approved/whois.json"),
     );
-    assert!(
-        evaluate(
-            &s_parsed,
-            &w_parsed,
-            endpoints,
-            GrantPolicy {
-                scope: Scope::Tailnet,
-                ..Default::default()
-            }
-        )
-        .is_ok()
-    );
-}
+    assert!(evaluate(&s_app, &w_app, endpoints(), GrantPolicy { scope: Scope::OwnUser, ..Default::default() }).is_ok());
+    assert!(evaluate(&s_app, &w_app, endpoints(), GrantPolicy { scope: Scope::Tailnet, ..Default::default() }).is_ok());
+    assert!(evaluate_membership(&s_app, &w_app, endpoints(), GrantPolicy { scope: Scope::OwnUser, ..Default::default() }).is_ok());
 
-#[test]
-fn fixture_sharing_matrix_tagged_host() {
-    let endpoints = ConnectionAddresses {
-        local: "100.64.0.1:4710".parse().unwrap(),
-        peer: "100.64.0.2:30001".parse().unwrap(),
-    };
-
-    let s_thost: Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/sharing_matrix/tagged_host/status.json"
-    ))
-    .unwrap();
-    let w_thost: Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/sharing_matrix/tagged_host/whois.json"
-    ))
-    .unwrap();
-    let s_parsed = Status::parse(&serde_json::to_vec(&s_thost).unwrap()).unwrap();
-    let w_parsed = WhoIs::parse(&serde_json::to_vec(&w_thost).unwrap()).unwrap();
-    assert_eq!(
-        evaluate(
-            &s_parsed,
-            &w_parsed,
-            endpoints,
-            GrantPolicy {
-                scope: Scope::OwnUser,
-                ..Default::default()
-            }
-        )
-        .err(),
-        Some(Error::ExplicitScopeRequired)
-    );
-    assert!(
-        evaluate(
-            &s_parsed,
-            &w_parsed,
-            endpoints,
-            GrantPolicy {
-                scope: Scope::Tailnet,
-                ..Default::default()
-            }
-        )
-        .is_ok()
-    );
-}
-
-#[test]
-fn fixture_sharing_matrix_tagged_peer() {
-    let endpoints = ConnectionAddresses {
-        local: "100.64.0.1:4710".parse().unwrap(),
-        peer: "100.64.0.2:30001".parse().unwrap(),
-    };
-
-    let s_tpeer: Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/sharing_matrix/tagged_peer/status.json"
-    ))
-    .unwrap();
-    let w_tpeer: Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/sharing_matrix/tagged_peer/whois.json"
-    ))
-    .unwrap();
-    let s_parsed = Status::parse(&serde_json::to_vec(&s_tpeer).unwrap()).unwrap();
-    let w_parsed = WhoIs::parse(&serde_json::to_vec(&w_tpeer).unwrap()).unwrap();
-    assert_eq!(
-        evaluate(
-            &s_parsed,
-            &w_parsed,
-            endpoints,
-            GrantPolicy {
-                scope: Scope::OwnUser,
-                ..Default::default()
-            }
-        )
-        .err(),
-        Some(Error::ScopeDenied)
-    );
-    assert!(
-        evaluate(
-            &s_parsed,
-            &w_parsed,
-            endpoints,
-            GrantPolicy {
-                scope: Scope::Tailnet,
-                ..Default::default()
-            }
-        )
-        .is_ok()
-    );
-}
-
-#[test]
-fn fixture_sharing_matrix_shared_in() {
-    let endpoints = ConnectionAddresses {
-        local: "100.64.0.1:4710".parse().unwrap(),
-        peer: "100.64.0.2:30001".parse().unwrap(),
-    };
-
-    let s_shared: Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/sharing_matrix/shared_in/status.json"
-    ))
-    .unwrap();
-    let w_shared: Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/sharing_matrix/shared_in/whois.json"
-    ))
-    .unwrap();
-    let s_parsed = Status::parse(&serde_json::to_vec(&s_shared).unwrap()).unwrap();
-    let w_parsed = WhoIs::parse(&serde_json::to_vec(&w_shared).unwrap()).unwrap();
-    assert_eq!(
-        evaluate(
-            &s_parsed,
-            &w_parsed,
-            endpoints,
-            GrantPolicy {
-                scope: Scope::OwnUser,
-                ..Default::default()
-            }
-        )
-        .err(),
-        Some(Error::SharedPeer)
-    );
-    assert_eq!(
-        evaluate(
-            &s_parsed,
-            &w_parsed,
-            endpoints,
-            GrantPolicy {
-                scope: Scope::Tailnet,
-                ..Default::default()
-            }
-        )
-        .err(),
-        Some(Error::SharedPeer)
-    );
-}
-
-#[test]
-fn fixture_sharing_matrix_multi_tailnet() {
-    let endpoints = ConnectionAddresses {
-        local: "100.64.0.1:4710".parse().unwrap(),
-        peer: "100.64.0.2:30001".parse().unwrap(),
-    };
-
-    let s_multi: Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/sharing_matrix/multi_tailnet/status.json"
-    ))
-    .unwrap();
-    let w_multi: Value = serde_json::from_str(include_str!(
-        "../../tests/fixtures/sharing_matrix/multi_tailnet/whois.json"
-    ))
-    .unwrap();
-    let s_parsed = Status::parse(&serde_json::to_vec(&s_multi).unwrap()).unwrap();
-    let w_parsed = WhoIs::parse(&serde_json::to_vec(&w_multi).unwrap()).unwrap();
-    assert_eq!(
-        evaluate(
-            &s_parsed,
-            &w_parsed,
-            endpoints,
-            GrantPolicy {
-                scope: Scope::Tailnet,
-                ..Default::default()
-            }
-        )
-        .err(),
-        Some(Error::IdentityMismatch)
-    );
+    let cases = [
+        (include_str!("../../tests/fixtures/sharing_matrix/different_owner/status.json"), include_str!("../../tests/fixtures/sharing_matrix/different_owner/whois.json"), Some(Error::ScopeDenied), None),
+        (include_str!("../../tests/fixtures/sharing_matrix/tagged_host/status.json"), include_str!("../../tests/fixtures/sharing_matrix/tagged_host/whois.json"), Some(Error::ExplicitScopeRequired), None),
+        (include_str!("../../tests/fixtures/sharing_matrix/tagged_peer/status.json"), include_str!("../../tests/fixtures/sharing_matrix/tagged_peer/whois.json"), Some(Error::ScopeDenied), None),
+        (include_str!("../../tests/fixtures/sharing_matrix/shared_in/status.json"), include_str!("../../tests/fixtures/sharing_matrix/shared_in/whois.json"), Some(Error::SharedPeer), Some(Error::SharedPeer)),
+        (include_str!("../../tests/fixtures/sharing_matrix/multi_tailnet/status.json"), include_str!("../../tests/fixtures/sharing_matrix/multi_tailnet/whois.json"), None, Some(Error::IdentityMismatch)),
+    ];
+    for (s_str, w_str, own_err, tail_err) in cases {
+        let (s, w) = fixture_pair(s_str, w_str);
+        if let Some(e) = own_err {
+            assert_eq!(evaluate(&s, &w, endpoints(), GrantPolicy { scope: Scope::OwnUser, ..Default::default() }).err(), Some(e));
+        }
+        if let Some(e) = tail_err {
+            assert_eq!(evaluate(&s, &w, endpoints(), GrantPolicy { scope: Scope::Tailnet, ..Default::default() }).err(), Some(e));
+        } else {
+            assert!(evaluate(&s, &w, endpoints(), GrantPolicy { scope: Scope::Tailnet, ..Default::default() }).is_ok());
+        }
+    }
 }
 
 mod outbound;
