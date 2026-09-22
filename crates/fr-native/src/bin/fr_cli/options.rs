@@ -635,15 +635,11 @@ mod tests {
     }
     #[test]
     fn unknown_duplicate_credential_and_policy_switches_are_not_ignored() {
+        #[rustfmt::skip]
         for s in [
-            "hosts --json --json",
-            "hosts --socket /a --socket /b",
-            "hosts --port 8443",
-            "hosts --socket ../sock",
-            "connect https://host.invalid",
-            "hosts --token secret",
-            "connect n-peer --approval none",
-            "hosts garbage",
+            "hosts --json --json", "hosts --socket /a --socket /b", "hosts --port 8443",
+            "hosts --socket ../sock", "connect https://host.invalid", "hosts --token secret",
+            "connect n-peer --approval none", "hosts garbage",
         ] {
             assert!(options(s).is_err(), "{s}");
         }
@@ -714,14 +710,10 @@ mod display_tests {
             parse(&args("displays n-peer --json")).err().unwrap().code,
             "native_transport_unqualified"
         );
+        #[rustfmt::skip]
         for extra in [
-            "--worker /bin/false",
-            "--display 9",
-            "--view-only",
-            "--attempts 2",
-            "--x-display :0",
-            "--port 0",
-            "--token secret",
+            "--worker /bin/false", "--display 9", "--view-only",
+            "--attempts 2", "--x-display :0", "--port 0", "--token secret",
         ] {
             assert!(
                 parse(&args(&format!(
@@ -747,13 +739,8 @@ mod display_tests {
                 }
             );
         }
-        for choice in [
-            "0",
-            "first",
-            "primary",
-            "-1",
-            "340282366920938463463374607431768211456",
-        ] {
+        #[rustfmt::skip]
+        for choice in ["0", "first", "primary", "-1", "340282366920938463463374607431768211456"] {
             assert!(parse(&args(&format!("connect n-peer --view-only --experimental-native --worker /opt/fr/worker --trust-roots /opt/fr/ca.pem --display {choice}"))).is_err());
         }
     }
@@ -810,21 +797,11 @@ mod fit_tests {
     #[test]
     fn malformed_oversized_and_non_connection_fit_settings_refuse_before_io() {
         for value in [
-            "",
-            "0x0",
-            "15x16",
-            "960x539",
-            "959x540",
-            "4294967296x540",
-            "16384x16384",
-            "960X540",
-            "960x540x2",
-            "+960x540",
-            "-960x540",
-            "960x",
-            "x540",
-            "960.0x540",
-            "960x540 --fit 320x240",
+        #[rustfmt::skip]
+        for value in [
+            "", "0x0", "15x16", "960x539", "959x540", "4294967296x540",
+            "16384x16384", "960X540", "960x540x2", "+960x540", "-960x540",
+            "960x", "x540", "960.0x540", "960x540 --fit 320x240",
         ] {
             assert_eq!(
                 options(&format!("{CONNECT} --fit {value}"))
@@ -908,25 +885,22 @@ mod robot_tests {
     #[test]
     fn parses_status_inspect_disconnect_options() {
         let o = parse(&to_args("status --json")).unwrap();
-        assert!(matches!(o.command, Command::Status));
-        assert!(o.json);
+        assert!(matches!(o.command, Command::Status) && o.json);
 
         let o = parse(&to_args("inspect host-alpha --port 9443 --by-name --json")).unwrap();
-        assert!(matches!(o.command, Command::Inspect(_)));
         let Command::Inspect(insp) = o.command else {
-            return;
+            panic!()
         };
-        assert_eq!(insp.node, "host-alpha");
-        assert_eq!(insp.port, 9443);
-        assert!(insp.by_name && o.json);
+        assert_eq!(
+            (insp.node.as_str(), insp.port, insp.by_name, o.json),
+            ("host-alpha", 9443, true, true)
+        );
 
         let o = parse(&to_args("disconnect host-alpha --json")).unwrap();
-        assert!(matches!(o.command, Command::Disconnect(_)));
         let Command::Disconnect(disc) = o.command else {
-            return;
+            panic!()
         };
-        assert_eq!(disc.node, "host-alpha");
-        assert!(o.json);
+        assert_eq!((disc.node.as_str(), o.json), ("host-alpha", true));
     }
 
     #[test]
@@ -942,9 +916,10 @@ mod robot_tests {
         let Command::Robot(RobotCommand::SessionOpen(s)) = o.command else {
             return;
         };
-        assert_eq!(s.node, "host-alpha");
-        assert_eq!(s.role, "control");
-        assert!(o.json);
+        assert_eq!(
+            (s.node.as_str(), s.role.as_str(), o.json),
+            ("host-alpha", "control", true)
+        );
 
         let o = parse(&to_args(
             "robot session close host-alpha --lease lease-123 --json",
@@ -957,8 +932,10 @@ mod robot_tests {
         let Command::Robot(RobotCommand::SessionClose(s)) = o.command else {
             return;
         };
-        assert_eq!(s.node, "host-alpha");
-        assert_eq!(s.lease, Some("lease-123".into()));
+        assert_eq!(
+            (s.node.as_str(), s.lease.as_deref()),
+            ("host-alpha", Some("lease-123"))
+        );
 
         let o = parse(&to_args("robot observe host-alpha --display 2 --screenshot /tmp/screen.png --evidence-level submitted_to_compositor --json")).unwrap();
         assert!(matches!(
@@ -968,46 +945,56 @@ mod robot_tests {
         let Command::Robot(RobotCommand::Observe(obs)) = o.command else {
             return;
         };
-        assert_eq!(obs.node, "host-alpha");
-        assert_eq!(obs.display, Some(2));
-        assert_eq!(obs.screenshot, Some(PathBuf::from("/tmp/screen.png")));
-        assert_eq!(obs.evidence_level, Some("submitted_to_compositor".into()));
+        assert_eq!(
+            (
+                obs.node.as_str(),
+                obs.display,
+                obs.screenshot,
+                obs.evidence_level.as_deref()
+            ),
+            (
+                "host-alpha",
+                Some(2),
+                Some(PathBuf::from("/tmp/screen.png")),
+                Some("submitted_to_compositor")
+            )
+        );
 
-        let o = parse(&to_args(
-            "robot input host-alpha --lease lease-123 --request-id req-001 --precondition-lease lease-123 --precondition-focus Terminal --semantic-evidence adapter --json",
-        ))
-        .unwrap();
+        let o = parse(&to_args("robot input host-alpha --lease lease-123 --request-id req-001 --precondition-lease lease-123 --precondition-focus Terminal --semantic-evidence adapter --json")).unwrap();
         assert!(matches!(o.command, Command::Robot(RobotCommand::Input(_))));
         let Command::Robot(RobotCommand::Input(inp)) = o.command else {
             return;
         };
-        assert_eq!(inp.node, "host-alpha");
-        assert_eq!(inp.lease, "lease-123");
-        assert_eq!(inp.request_id, "req-001");
-        assert_eq!(inp.precondition_lease, Some("lease-123".into()));
-        assert_eq!(inp.precondition_focus, Some("Terminal".into()));
-        assert_eq!(inp.semantic_evidence, Some("adapter".into()));
+        assert_eq!(
+            (
+                inp.node.as_str(),
+                inp.lease.as_str(),
+                inp.request_id.as_str(),
+                inp.precondition_lease.as_deref(),
+                inp.precondition_focus.as_deref(),
+                inp.semantic_evidence.as_deref()
+            ),
+            (
+                "host-alpha",
+                "lease-123",
+                "req-001",
+                Some("lease-123"),
+                Some("Terminal"),
+                Some("adapter")
+            )
+        );
     }
 
     #[test]
     fn robot_rejects_missing_node_or_invalid_flags() {
-        assert!(parse(&to_args("robot session open")).is_err());
-        assert!(
-            parse(&to_args(
-                "robot session open host-alpha --role invalid_role"
-            ))
-            .is_err()
-        );
-        assert!(parse(&to_args("robot input host-alpha --lease lease-123")).is_err()); // missing request-id
-        assert!(parse(&to_args("robot input host-alpha --request-id req-1")).is_err()); // missing lease
-        assert!(
-            parse(&to_args(
-                "robot input host-alpha --lease lease-1 --request-id req-1 --port 0"
-            ))
-            .is_err()
-        );
-        assert!(parse(&to_args("inspect")).is_err());
-        assert!(parse(&to_args("disconnect")).is_err());
-        assert!(parse(&to_args("status extra_positional")).is_err());
+        #[rustfmt::skip]
+        for s in [
+            "robot session open", "robot session open host-alpha --role invalid_role",
+            "robot input host-alpha --lease lease-123", "robot input host-alpha --request-id req-1",
+            "robot input host-alpha --lease lease-1 --request-id req-1 --port 0",
+            "inspect", "disconnect", "status extra_positional",
+        ] {
+            assert!(parse(&to_args(s)).is_err(), "{s}");
+        }
     }
 }

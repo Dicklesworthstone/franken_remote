@@ -8,8 +8,7 @@ use fr_native::wayland::{
     WaylandDesktopShell, WaylandDmabufSurface, WaylandWindowConfig, WaylandWindowEvent,
 };
 use fr_native::windows::{
-    DxgiColorSpace, DxgiPresentationSurface, Win32DesktopShell, Win32WindowConfig,
-    Win32WindowEvent,
+    DxgiColorSpace, DxgiPresentationSurface, Win32DesktopShell, Win32WindowConfig, Win32WindowEvent,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -63,7 +62,13 @@ fn windows_desktop_shell_lifecycle_and_presentation() {
 
     // Window resize updates swapchain buffers
     shell
-        .process_event(Win32WindowEvent::Resized { width: 1920, height: 1080 }, || {})
+        .process_event(
+            Win32WindowEvent::Resized {
+                width: 1920,
+                height: 1080,
+            },
+            || {},
+        )
         .expect("resize buffers");
     let s = shell.surface().unwrap();
     assert_eq!(s.width(), 1920);
@@ -128,7 +133,13 @@ fn macos_desktop_shell_lifecycle_and_presentation() {
 
     // Resize drawable
     shell
-        .process_event(AppKitWindowEvent::Resized { width: 1440, height: 900 }, || {})
+        .process_event(
+            AppKitWindowEvent::Resized {
+                width: 1440,
+                height: 900,
+            },
+            || {},
+        )
         .expect("resize");
     assert_eq!(shell.surface().unwrap().width(), 1440);
     assert_eq!(shell.surface().unwrap().height(), 900);
@@ -147,7 +158,8 @@ fn wayland_desktop_shell_lifecycle_and_presentation() {
     assert!(!shell.is_closed());
 
     // Attach dmabuf surface
-    let surface = WaylandDmabufSurface::new(1920, 1080, 0x3231_564e).expect("create dmabuf surface"); // DRM_FORMAT_NV12
+    let surface =
+        WaylandDmabufSurface::new(1920, 1080, 0x3231_564e).expect("create dmabuf surface"); // DRM_FORMAT_NV12
     assert_eq!(surface.width(), 1920);
     assert_eq!(surface.height(), 1080);
     assert_eq!(surface.fourcc_format(), 0x3231_564e);
@@ -155,7 +167,9 @@ fn wayland_desktop_shell_lifecycle_and_presentation() {
 
     // Present hardware-decoded dmabuf directly without readback
     let surface_mut = shell.surface_mut().expect("surface exists");
-    surface_mut.present_dmabuf_buffer(5).expect("present dmabuf");
+    surface_mut
+        .present_dmabuf_buffer(5)
+        .expect("present dmabuf");
     assert_eq!(surface_mut.presented_frames(), 1);
 
     // Focus loss triggers on_focus_loss immediately

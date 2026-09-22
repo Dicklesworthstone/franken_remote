@@ -2,12 +2,12 @@
 //!
 //! Per ADR 0003 and Plan §16.2:
 //! - Lifecycle-safe handle semantics (generation checked).
-//! - Stale handles return FR_ERR_STALE_HANDLE (-2).
+//! - Stale handles return `FR_ERR_STALE_HANDLE` (-2).
 //! - Double-free safely rejected without undefined behavior.
 //! - Callbacks, surface attachments, and input submission validated.
 
 use fr_native::mobile_ffi::*;
-use std::ffi::{c_void, CString};
+use std::ffi::{CString, c_void};
 use std::ptr;
 
 #[test]
@@ -31,7 +31,10 @@ fn test_mobile_session_lifecycle_and_stale_handles() {
     assert_eq!(fr_session_connect(session_handle), FR_OK);
 
     // 3. Input submission on connected session
-    assert_eq!(fr_session_send_pointer(session_handle, 100, 200, 0, 1), FR_OK);
+    assert_eq!(
+        fr_session_send_pointer(session_handle, 100, 200, 0, 1),
+        FR_OK
+    );
     assert_eq!(fr_session_send_key(session_handle, 65, 0), FR_OK);
     assert_eq!(fr_session_send_scroll(session_handle, 0, -10), FR_OK);
 

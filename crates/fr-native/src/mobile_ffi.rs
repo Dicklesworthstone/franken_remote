@@ -15,7 +15,7 @@
     clippy::undocumented_unsafe_blocks
 )]
 
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{CStr, c_char, c_void};
 use std::panic::catch_unwind;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, Ordering};
 use std::sync::{Mutex, OnceLock, RwLock};
@@ -121,14 +121,17 @@ impl SessionTable {
             let mut slot = slot_mutex.lock().ok()?;
             if !slot.active {
                 slot.active = true;
-                slot.state.store(FR_SESSION_STATE_DISCONNECTED, Ordering::Release);
+                slot.state
+                    .store(FR_SESSION_STATE_DISCONNECTED, Ordering::Release);
                 slot.host_addr = host_addr;
                 slot.auth_token = auth_token;
                 slot.mic_enabled.store(false, Ordering::Release);
                 *slot.callbacks.write().ok()? = None;
                 *slot.quality.write().ok()? = FrConnectionQuality::default();
-                slot.metal_layer.store(std::ptr::null_mut(), Ordering::Release);
-                slot.native_window.store(std::ptr::null_mut(), Ordering::Release);
+                slot.metal_layer
+                    .store(std::ptr::null_mut(), Ordering::Release);
+                slot.native_window
+                    .store(std::ptr::null_mut(), Ordering::Release);
 
                 let handle = ((slot.generation as u64) << 32) | (idx as u64);
                 return Some(handle);
@@ -148,7 +151,8 @@ impl SessionTable {
         }
         slot.active = false;
         slot.generation = slot.generation.wrapping_add(1).max(1);
-        slot.state.store(FR_SESSION_STATE_DISCONNECTED, Ordering::Release);
+        slot.state
+            .store(FR_SESSION_STATE_DISCONNECTED, Ordering::Release);
         slot.host_addr.clear();
         slot.auth_token.clear();
         Ok(())
@@ -226,8 +230,10 @@ pub extern "C" fn fr_session_connect(session: u64) -> i32 {
             Ok(s) => s,
             Err(e) => return e,
         };
-        slot.state.store(FR_SESSION_STATE_CONNECTING, Ordering::Release);
-        slot.state.store(FR_SESSION_STATE_CONNECTED, Ordering::Release);
+        slot.state
+            .store(FR_SESSION_STATE_CONNECTING, Ordering::Release);
+        slot.state
+            .store(FR_SESSION_STATE_CONNECTED, Ordering::Release);
         FR_OK
     })
     .unwrap_or(FR_ERR_STALE_HANDLE)
@@ -240,7 +246,8 @@ pub extern "C" fn fr_session_disconnect(session: u64) -> i32 {
             Ok(s) => s,
             Err(e) => return e,
         };
-        slot.state.store(FR_SESSION_STATE_DISCONNECTED, Ordering::Release);
+        slot.state
+            .store(FR_SESSION_STATE_DISCONNECTED, Ordering::Release);
         FR_OK
     })
     .unwrap_or(FR_ERR_STALE_HANDLE)
@@ -585,4 +592,3 @@ pub unsafe extern "system" fn Java_com_frankenremote_client_FrankenClient_native
 ) -> i32 {
     unsafe { fr_session_get_quality(session as u64, out_quality) }
 }
-
