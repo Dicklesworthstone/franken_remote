@@ -3,6 +3,7 @@
 use super::{HostSession, SharedHost};
 use asupersync::{cx::Cx, types::CancelKind};
 
+mod host_service;
 mod incoming;
 use crate::media::{
     ObservationControl,
@@ -11,6 +12,7 @@ use crate::media::{
 use fr_media::delivery::SendPolicy;
 use fr_transport::quic::Disposition;
 use fr_wire::negotiation::{ControlBinding, Role};
+pub use host_service::HostService;
 use std::{
     future::{Future, poll_fn},
     pin::Pin,
