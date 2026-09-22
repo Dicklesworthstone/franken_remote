@@ -56,7 +56,7 @@ while True:
         continue
     assert configured and kind in (2, 7) and len(body) == 17
     frame, observed, force = struct.unpack(">QQB", body)
-    if last is not None and kind == 7 and not force:
+    if last is not None and kind == 7 and not force and MODE != "changing":
         reply(h, 265, struct.pack(">QQQ", frame, last, observed))
         continue
     reply(h, 258, struct.pack(">QQQQB7x", frame, observed, generation, 0, 0) + b"synthetic-monitor-unit")

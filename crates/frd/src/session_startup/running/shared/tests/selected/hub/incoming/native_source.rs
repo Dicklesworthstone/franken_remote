@@ -538,3 +538,6 @@ fn original_host_expiry_ends_stalled_native_work_before_the_native_budget() {
         cleanup(&receipt, true).await;
     });
 }
+
+#[path = "native_run.rs"]
+mod run;

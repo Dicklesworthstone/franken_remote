@@ -69,9 +69,12 @@ impl SessionAgent {
         })?;
         // One fixed metadata cell only, not a queue or a new authority. The outer
         // unwind guard must also fence joins created reentrantly by announce.
-        let cohort = Arc::new(Mutex::new(None));
-        let retained = cohort.clone();
-        let inner = Box::pin(async move {
+        let resources = Arc::new(Mutex::new(Resources {
+            registration: Some(registration),
+            cohort: None,
+        }));
+        let retained = resources.clone();
+        let inner = async move {
             let mut hub = self
                 .open_shared_desktop(
                     first,
@@ -85,46 +88,64 @@ impl SessionAgent {
                 .await?;
             let admission = hub.admissions();
             let ticket = hub.initial();
-            *retained.lock().map_err(|_| Error::Closed)? = Some(admission.clone());
+            retained.lock().map_err(|_| Error::Closed)?.cohort = Some(admission.clone());
             // Create the continuous service's guard BEFORE calling application
             // code. Its first poll rechecks actual local consent before any I/O.
             let running =
                 self.serve_shared_desktop(publisher, &mut hub, capture_interval, entropy, local)?;
             announce(admission, ticket).map_err(|()| Error::LocalEvent)?;
             running.await
-        });
-        Ok(Launch {
-            peer,
-            registration,
-            cohort,
-            inner: Some(inner),
-            finished: false,
-        })
+        };
+        Ok(Launch::new(peer, resources, inner))
     }
 }
 
 type Work<'a> = Pin<Box<dyn Future<Output = Result<Report, Error>> + Send + 'a>>;
-struct Launch<'a> {
+// One fixed ownership cell also supports source creation after first consent.
+// Only local source owners can install these already-existing registrations.
+#[derive(Default)]
+pub(super) struct Resources {
+    pub(super) registration: Option<Arc<Renewal>>,
+    pub(super) cohort: Option<Admission>,
+}
+pub(super) struct Launch<'a> {
     peer: Cx,
-    registration: Arc<Renewal>,
-    cohort: Arc<Mutex<Option<Admission>>>,
+    resources: Arc<Mutex<Resources>>,
     inner: Option<Work<'a>>,
     finished: bool,
 }
-impl Launch<'_> {
+impl<'a> Launch<'a> {
+    pub(super) fn new(
+        peer: Cx,
+        resources: Arc<Mutex<Resources>>,
+        inner: impl Future<Output = Result<Report, Error>> + Send + 'a,
+    ) -> Self {
+        Self {
+            peer,
+            resources,
+            inner: Some(Box::pin(inner)),
+            finished: false,
+        }
+    }
     fn finish(&mut self) {
         if !self.finished {
             self.finished = true;
-            let cohort = self
-                .cohort
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
+            let Resources {
+                registration,
+                cohort,
+            } = std::mem::take(
+                &mut *self
+                    .resources
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
             if let Some(admission) = cohort {
                 admission.fence();
             }
             self.peer.cancel_fast(CancelKind::User);
-            self.registration.close();
+            if let Some(registration) = registration {
+                registration.close();
+            }
             drop(self.inner.take());
         }
     }

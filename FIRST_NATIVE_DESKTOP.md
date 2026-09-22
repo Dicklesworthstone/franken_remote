@@ -44,3 +44,28 @@ The actual `frd run` dispatcher and native platform permission/UI adapters still
 need integration. This API does not bind a listener, assert kernel ingress, or
 make the unfinished command-line daemon a complete workstation. The source-size
 gate is unchanged and remains failing; no release or broad bead closure is claimed.
+
+## Continuous native service
+
+`SessionAgent::run_native_shared_desktop` performs that opening and immediately
+runs the original source/hub through `serve_shared_desktop`. One local-event
+callback and entropy supplier span both phases, so callers need not move owners
+between loops or restart native work. Run it on the independent OS-source task:
+after startup, ending the first peer does not cancel a surviving admitted peer.
+
+The one-shot local `announce(Admission, Ticket)` callback exposes the original hub
+only after first media attachment, before decoder completion. It is not a usable-
+view notification. The shared service's existing guard is installed beforehand;
+callback error, panic, revocation, unpolled abandonment and terminal results fence
+original authority before dependent futures are dropped. Even a reentrant join
+created by announce is fenced. No policy lock is held while invoking callbacks.
+The source Retirement remains the explicit cleanup receipt for observing child
+exit; callers must retain it, including when opening fails.
+
+Five additional continuous-service regressions pass, including changing-frame
+TLS/UDP delivery to a late viewer after the first leaves, source/peer renewal,
+callback-state continuity, preflight cadence refusal, parked expiry, reentrant
+announcement faults and permission loss during streaming. The static-screen IPC
+fixture keeps its original behavior; an explicit test-only changing-screen mode
+lets the new regression require multiple delivered frames rather than merely a
+live connection. All codec and OS facts remain synthetic fixtures.
