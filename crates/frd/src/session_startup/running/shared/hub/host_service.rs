@@ -1,5 +1,5 @@
 //! Keep an incoming connection scope alive while the hub owns its original Host.
-use super::{Admission, Error, State, Ticket, wake};
+use super::{Admission, Error, Gate, State, Ticket, wake};
 use crate::session_startup::{Approval, Host, Role};
 use asupersync::time::{TimerDriverHandle, TimerHandle};
 use asupersync::types::Time;
@@ -20,18 +20,42 @@ impl Admission {
     /// holds only the original receipt and one timer registration, with a 10ms
     /// maximum completion-check interval. A dropped (even unpolled) service fences
     /// only its viewer; keeping a cloned ticket cannot keep that viewer alive.
-    pub fn serve_host<F>(&self, mut host: Host, notify: F) -> Result<HostService, Error>
+    pub fn serve_host<F>(&self, host: Host, notify: F) -> Result<HostService, Error>
     where
         F: FnMut(Approval, Role) -> Result<(), ()> + Send + 'static,
     {
-        let (cx, _, _) = host.shared_open_context().map_err(Error::Session)?;
-        let driver = cx
-            .timer_driver()
-            .ok_or(Error::Session(crate::session_startup::Error::Clock))?;
+        self.admit_host(host, notify)?.into_service()
+    }
+}
+impl Ticket {
+    /// Keep the native scope of an ALREADY hub-owned observer alive. This is
+    /// used by the first viewer after its independently owned source is handed
+    /// off. It follows the exact original receipt; no new admission, authority,
+    /// timer domain or session is accepted from the caller.
+    ///
+    /// Creating multiple service owners never extends a lease: dropping ANY one
+    /// fences this viewer. Finished receipts keep their original outcome. The
+    /// source/hub/local permission loop must still be driven independently.
+    pub fn into_service(self) -> Result<HostService, Error> {
+        let clock = (|| {
+            let gate = self.receipt.gate.lock().map_err(|_| Error::Poisoned)?;
+            let cx = match &*gate {
+                Gate::Opening { cx, .. } => cx.clone(),
+                Gate::Observing(control) => control.context(),
+            };
+            cx.timer_driver()
+                .ok_or(Error::Session(crate::session_startup::Error::Clock))
+        })();
+        let driver = match clock {
+            Ok(driver) => driver,
+            Err(error) => {
+                self.close();
+                return Err(error);
+            }
+        };
         let previous = driver.now();
-        let ticket = self.admit_host(host, notify)?;
         Ok(HostService {
-            ticket,
+            ticket: self,
             driver,
             timer: None,
             previous,

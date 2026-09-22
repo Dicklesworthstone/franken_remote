@@ -155,3 +155,6 @@ mod bootstrap;
 
 #[path = "launch.rs"]
 mod launch;
+
+#[path = "native_handoff.rs"]
+mod handoff;
