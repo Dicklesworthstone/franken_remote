@@ -442,41 +442,15 @@ fn oversized_item_and_chunk_refusal_tests() {
         sequence: 1,
     };
 
-    // Total bytes > 1 MiB
-    let begin_oversized = Begin {
-        binding,
-        stamp,
-        total_bytes: 1_048_577,
-        chunks: 65,
-    };
-    assert_eq!(
-        begin_oversized.validate(&ProtocolLimits::ABSOLUTE),
-        Err(Error::Limit)
-    );
-
-    // Chunks > MAX_CHUNKS (1024)
-    let begin_too_many_chunks = Begin {
-        binding,
-        stamp,
-        total_bytes: 1025,
-        chunks: 1025,
-    };
-    assert_eq!(
-        begin_too_many_chunks.validate(&ProtocolLimits::ABSOLUTE),
-        Err(Error::Limit)
-    );
-
-    // Non-zero total with zero chunks
-    let begin_mismatched_chunks = Begin {
-        binding,
-        stamp,
-        total_bytes: 100,
-        chunks: 0,
-    };
-    assert_eq!(
-        begin_mismatched_chunks.validate(&ProtocolLimits::ABSOLUTE),
-        Err(Error::Limit)
-    );
+    for (total_bytes, chunks) in [(1_048_577, 65), (1025, 1025), (100, 0)] {
+        let b = Begin {
+            binding,
+            stamp,
+            total_bytes,
+            chunks,
+        };
+        assert_eq!(b.validate(&ProtocolLimits::ABSOLUTE), Err(Error::Limit));
+    }
 
     // 3. Lowered limits via LimitOverrides
     let lowered_limits = ProtocolLimits::with_overrides(LimitOverrides {
@@ -521,8 +495,6 @@ fn oversized_item_and_chunk_refusal_tests() {
         Err(Error::ChunkOrder)
     );
     assert_eq!(core_session.reserved_bytes(), 0);
-
-    // Replay of same sequence is rejected
     assert_eq!(core_session.begin(begin_valid, at(0)), Err(Error::Replay));
 
     // 5. Incomplete total bytes committed to platform
@@ -538,13 +510,19 @@ fn oversized_item_and_chunk_refusal_tests() {
         chunks: 1,
     };
     core_session.begin(begin2, at(0)).unwrap();
-    core_session.chunk(stamp2, 0, 0, b"12345", at(0)).unwrap(); // only 5 bytes sent of declared 10
-
-    let commit_res = core_session.commit(stamp2, 10, &mut platform, || at(0));
-    assert_eq!(commit_res, Err(Error::Incomplete));
-    assert_eq!(platform.published_texts.len(), 0);
-    assert_eq!(platform.prepared_texts.len(), 0);
-    assert_eq!(core_session.reserved_bytes(), 0);
+    core_session.chunk(stamp2, 0, 0, b"12345", at(0)).unwrap();
+    assert_eq!(
+        core_session.commit(stamp2, 10, &mut platform, || at(0)),
+        Err(Error::Incomplete)
+    );
+    assert_eq!(
+        (
+            platform.published_texts.len(),
+            platform.prepared_texts.len(),
+            core_session.reserved_bytes()
+        ),
+        (0, 0, 0)
+    );
 }
 
 #[test]
@@ -604,13 +582,30 @@ fn invalid_utf8_encoding_refusal_tests() {
         }
 
         assert_eq!(
-            session.commit(stamp, u32::try_from(total_bytes).unwrap(), &mut platform, || at(0)),
+            session.commit(
+                stamp,
+                u32::try_from(total_bytes).unwrap(),
+                &mut platform,
+                || at(0)
+            ),
             Err(Error::InvalidUtf8),
             "invalid UTF-8 ({desc}) must be refused with InvalidUtf8"
         );
-        assert_eq!(platform.published_texts.len(), 0, "OS publish must NEVER be invoked for {desc}");
-        assert_eq!(platform.prepared_texts.len(), 0, "OS prepare must NEVER be invoked for {desc}");
-        assert_eq!(session.reserved_bytes(), 0, "reserved bytes must be cleared on refusal for {desc}");
+        assert_eq!(
+            platform.published_texts.len(),
+            0,
+            "OS publish must NEVER be invoked for {desc}"
+        );
+        assert_eq!(
+            platform.prepared_texts.len(),
+            0,
+            "OS prepare must NEVER be invoked for {desc}"
+        );
+        assert_eq!(
+            session.reserved_bytes(),
+            0,
+            "reserved bytes must be cleared on refusal for {desc}"
+        );
     }
 }
 
@@ -699,6 +694,7 @@ fn log_scrubbing_proves_clipboard_bytes_never_appear_in_diagnostics() {
         "ClipboardSession::Debug (post-commit)",
     );
 
+    #[rustfmt::skip]
     for err in [
         Error::InvalidUtf8, Error::Limit, Error::ChunkOrder, Error::Expired,
         Error::LocalChanged, Error::Disabled, Error::Closed, Error::Permission,

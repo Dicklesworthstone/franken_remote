@@ -12,6 +12,7 @@ fn ms(millis: u64) -> HostDuration {
     HostDuration::from_millis_checked(millis).expect("valid duration")
 }
 
+#[allow(clippy::large_types_passed_by_value)]
 fn assert_above_ceiling(ov: LimitOverrides, expected_field: LimitField) {
     match ProtocolLimits::with_overrides(ov) {
         Err(LimitsError::AboveCeiling { field, .. }) => assert_eq!(field, expected_field),
@@ -19,6 +20,7 @@ fn assert_above_ceiling(ov: LimitOverrides, expected_field: LimitField) {
     }
 }
 
+#[allow(clippy::large_types_passed_by_value)]
 fn assert_below_floor(ov: LimitOverrides, expected_field: LimitField, expected_floor: u64) {
     match ProtocolLimits::with_overrides(ov) {
         Err(LimitsError::BelowFloor { field, floor, .. }) => {
@@ -29,23 +31,56 @@ fn assert_below_floor(ov: LimitOverrides, expected_field: LimitField, expected_f
     }
 }
 
+fn assert_err_field<T: std::fmt::Debug>(res: Result<T, LimitsError>, expected: LimitField) {
+    match res {
+        Err(LimitsError::AboveCeiling { field, .. }) => assert_eq!(field, expected),
+        other => panic!("expected AboveCeiling({expected:?}), got {other:?}"),
+    }
+}
+
+fn assert_capacity<T: std::fmt::Debug>(res: Result<T, DosRefusal>, expected: LimitField) {
+    match res {
+        Err(DosRefusal::CapacityExceeded { field, .. }) => assert_eq!(field, expected),
+        other => panic!("expected CapacityExceeded({expected:?}), got {other:?}"),
+    }
+}
+
+fn assert_ratelimit<T: std::fmt::Debug>(res: Result<T, DosRefusal>, expected: LimitField) {
+    match res {
+        Err(DosRefusal::RateLimitExceeded { field, .. }) => assert_eq!(field, expected),
+        other => panic!("expected RateLimitExceeded({expected:?}), got {other:?}"),
+    }
+}
+
 #[test]
 fn protocol_limits_rate_overrides_above_ceiling_are_rejected() {
     let a = ProtocolLimits::ABSOLUTE;
     assert_above_ceiling(
-        LimitOverrides { max_handshake_duration_ms: Some(a.max_handshake_duration_ms() + 1), ..Default::default() },
+        LimitOverrides {
+            max_handshake_duration_ms: Some(a.max_handshake_duration_ms() + 1),
+            ..Default::default()
+        },
         LimitField::HandshakeDurationMs,
     );
     assert_above_ceiling(
-        LimitOverrides { max_preadmission_rate_per_sec: Some(a.max_preadmission_rate_per_sec() + 1), ..Default::default() },
+        LimitOverrides {
+            max_preadmission_rate_per_sec: Some(a.max_preadmission_rate_per_sec() + 1),
+            ..Default::default()
+        },
         LimitField::PreadmissionRatePerSec,
     );
     assert_above_ceiling(
-        LimitOverrides { max_half_attached_channels: Some(a.max_half_attached_channels() + 1), ..Default::default() },
+        LimitOverrides {
+            max_half_attached_channels: Some(a.max_half_attached_channels() + 1),
+            ..Default::default()
+        },
         LimitField::HalfAttachedChannels,
     );
     assert_above_ceiling(
-        LimitOverrides { max_pending_approvals: Some(a.max_pending_approvals() + 1), ..Default::default() },
+        LimitOverrides {
+            max_pending_approvals: Some(a.max_pending_approvals() + 1),
+            ..Default::default()
+        },
         LimitField::PendingApprovals,
     );
 }
@@ -54,23 +89,38 @@ fn protocol_limits_rate_overrides_above_ceiling_are_rejected() {
 fn protocol_limits_payload_overrides_above_ceiling_are_rejected() {
     let a = ProtocolLimits::ABSOLUTE;
     assert_above_ceiling(
-        LimitOverrides { max_cursor_dimension_pixels: Some(a.max_cursor_dimension_pixels() + 1), ..Default::default() },
+        LimitOverrides {
+            max_cursor_dimension_pixels: Some(a.max_cursor_dimension_pixels() + 1),
+            ..Default::default()
+        },
         LimitField::CursorDimensionPixels,
     );
     assert_above_ceiling(
-        LimitOverrides { max_cursor_shape_bytes: Some(a.max_cursor_shape_bytes() + 1), ..Default::default() },
+        LimitOverrides {
+            max_cursor_shape_bytes: Some(a.max_cursor_shape_bytes() + 1),
+            ..Default::default()
+        },
         LimitField::CursorShapeBytes,
     );
     assert_above_ceiling(
-        LimitOverrides { max_name_bytes: Some(a.max_name_bytes() + 1), ..Default::default() },
+        LimitOverrides {
+            max_name_bytes: Some(a.max_name_bytes() + 1),
+            ..Default::default()
+        },
         LimitField::NameBytes,
     );
     assert_above_ceiling(
-        LimitOverrides { max_parameter_set_bytes: Some(a.max_parameter_set_bytes() + 1), ..Default::default() },
+        LimitOverrides {
+            max_parameter_set_bytes: Some(a.max_parameter_set_bytes() + 1),
+            ..Default::default()
+        },
         LimitField::ParameterSetBytes,
     );
     assert_above_ceiling(
-        LimitOverrides { max_fragments_per_access_unit: Some(a.max_fragments_per_access_unit() + 1), ..Default::default() },
+        LimitOverrides {
+            max_fragments_per_access_unit: Some(a.max_fragments_per_access_unit() + 1),
+            ..Default::default()
+        },
         LimitField::FragmentsPerAccessUnit,
     );
 }
@@ -79,23 +129,38 @@ fn protocol_limits_payload_overrides_above_ceiling_are_rejected() {
 fn protocol_limits_resource_overrides_above_ceiling_are_rejected() {
     let a = ProtocolLimits::ABSOLUTE;
     assert_above_ceiling(
-        LimitOverrides { max_retained_receipts: Some(a.max_retained_receipts() + 1), ..Default::default() },
+        LimitOverrides {
+            max_retained_receipts: Some(a.max_retained_receipts() + 1),
+            ..Default::default()
+        },
         LimitField::RetainedReceipts,
     );
     assert_above_ceiling(
-        LimitOverrides { max_encoder_sessions: Some(a.max_encoder_sessions() + 1), ..Default::default() },
+        LimitOverrides {
+            max_encoder_sessions: Some(a.max_encoder_sessions() + 1),
+            ..Default::default()
+        },
         LimitField::EncoderSessions,
     );
     assert_above_ceiling(
-        LimitOverrides { max_gpu_surfaces: Some(a.max_gpu_surfaces() + 1), ..Default::default() },
+        LimitOverrides {
+            max_gpu_surfaces: Some(a.max_gpu_surfaces() + 1),
+            ..Default::default()
+        },
         LimitField::GpuSurfaces,
     );
     assert_above_ceiling(
-        LimitOverrides { max_bandwidth_bps: Some(a.max_bandwidth_bps() + 1), ..Default::default() },
+        LimitOverrides {
+            max_bandwidth_bps: Some(a.max_bandwidth_bps() + 1),
+            ..Default::default()
+        },
         LimitField::BandwidthBps,
     );
     assert_above_ceiling(
-        LimitOverrides { max_viewers: Some(a.max_viewers() + 1), ..Default::default() },
+        LimitOverrides {
+            max_viewers: Some(a.max_viewers() + 1),
+            ..Default::default()
+        },
         LimitField::Viewers,
     );
 }
@@ -103,40 +168,72 @@ fn protocol_limits_resource_overrides_above_ceiling_are_rejected() {
 #[test]
 fn protocol_limits_rate_overrides_below_floor_are_rejected() {
     assert_below_floor(
-        LimitOverrides { max_handshake_duration_ms: Some(999), ..Default::default() },
-        LimitField::HandshakeDurationMs, 1000,
+        LimitOverrides {
+            max_handshake_duration_ms: Some(999),
+            ..Default::default()
+        },
+        LimitField::HandshakeDurationMs,
+        1000,
     );
     assert_below_floor(
-        LimitOverrides { idle_session_timeout_seconds: Some(9), ..Default::default() },
-        LimitField::IdleSessionTimeoutSecs, 10,
+        LimitOverrides {
+            idle_session_timeout_seconds: Some(9),
+            ..Default::default()
+        },
+        LimitField::IdleSessionTimeoutSecs,
+        10,
     );
 }
 
 #[test]
 fn protocol_limits_resource_overrides_below_floor_are_rejected() {
     assert_below_floor(
-        LimitOverrides { max_cursor_dimension_pixels: Some(15), ..Default::default() },
-        LimitField::CursorDimensionPixels, 16,
+        LimitOverrides {
+            max_cursor_dimension_pixels: Some(15),
+            ..Default::default()
+        },
+        LimitField::CursorDimensionPixels,
+        16,
     );
     assert_below_floor(
-        LimitOverrides { max_cursor_shape_bytes: Some(1023), ..Default::default() },
-        LimitField::CursorShapeBytes, 1024,
+        LimitOverrides {
+            max_cursor_shape_bytes: Some(1023),
+            ..Default::default()
+        },
+        LimitField::CursorShapeBytes,
+        1024,
     );
     assert_below_floor(
-        LimitOverrides { max_parameter_set_bytes: Some(31), ..Default::default() },
-        LimitField::ParameterSetBytes, 32,
+        LimitOverrides {
+            max_parameter_set_bytes: Some(31),
+            ..Default::default()
+        },
+        LimitField::ParameterSetBytes,
+        32,
     );
     assert_below_floor(
-        LimitOverrides { max_retained_receipts: Some(15), ..Default::default() },
-        LimitField::RetainedReceipts, 16,
+        LimitOverrides {
+            max_retained_receipts: Some(15),
+            ..Default::default()
+        },
+        LimitField::RetainedReceipts,
+        16,
     );
     assert_below_floor(
-        LimitOverrides { max_gpu_surfaces: Some(1), ..Default::default() },
-        LimitField::GpuSurfaces, 2,
+        LimitOverrides {
+            max_gpu_surfaces: Some(1),
+            ..Default::default()
+        },
+        LimitField::GpuSurfaces,
+        2,
     );
     assert_below_floor(
-        LimitOverrides { max_bandwidth_bps: Some(999_999), ..Default::default() },
-        LimitField::BandwidthBps, 1_000_000,
+        LimitOverrides {
+            max_bandwidth_bps: Some(999_999),
+            ..Default::default()
+        },
+        LimitField::BandwidthBps,
+        1_000_000,
     );
 }
 
@@ -154,130 +251,61 @@ fn protocol_limits_payload_validations_reject_violations() {
         Err(LimitsError::ZeroDimension)
     ));
 
-    // Cursor dimension: exceeding ceiling rejected
-    let too_wide = limits.max_cursor_dimension_pixels() + 1;
-    assert!(matches!(
-        limits.validate_cursor_dimensions(too_wide, 64),
-        Err(LimitsError::AboveCeiling {
-            field: LimitField::CursorDimensionPixels,
-            ..
-        })
-    ));
-
-    // Cursor shape length
-    let too_large_cursor = limits.max_cursor_shape_bytes() as usize + 1;
-    assert!(matches!(
-        limits.validate_cursor_shape_len(too_large_cursor),
-        Err(LimitsError::AboveCeiling {
-            field: LimitField::CursorShapeBytes,
-            ..
-        })
-    ));
-
-    // Name length
-    let too_long_name = limits.max_name_bytes() + 1;
-    assert!(matches!(
-        limits.validate_name_len(too_long_name),
-        Err(LimitsError::AboveCeiling {
-            field: LimitField::NameBytes,
-            ..
-        })
-    ));
-
-    // Parameter set length
-    let too_large_ps = limits.max_parameter_set_bytes() as usize + 1;
-    assert!(matches!(
-        limits.validate_parameter_set_len(too_large_ps),
-        Err(LimitsError::AboveCeiling {
-            field: LimitField::ParameterSetBytes,
-            ..
-        })
-    ));
-
-    // Fragment count
-    let too_many_fragments = limits.max_fragments_per_access_unit() + 1;
-    assert!(matches!(
-        limits.validate_fragment_count(too_many_fragments),
-        Err(LimitsError::AboveCeiling {
-            field: LimitField::FragmentsPerAccessUnit,
-            ..
-        })
-    ));
+    // Exceeding ceiling rejected
+    assert_err_field(
+        limits.validate_cursor_dimensions(limits.max_cursor_dimension_pixels() + 1, 64),
+        LimitField::CursorDimensionPixels,
+    );
+    assert_err_field(
+        limits.validate_cursor_shape_len(limits.max_cursor_shape_bytes() as usize + 1),
+        LimitField::CursorShapeBytes,
+    );
+    assert_err_field(
+        limits.validate_name_len(limits.max_name_bytes() + 1),
+        LimitField::NameBytes,
+    );
+    assert_err_field(
+        limits.validate_parameter_set_len(limits.max_parameter_set_bytes() as usize + 1),
+        LimitField::ParameterSetBytes,
+    );
+    assert_err_field(
+        limits.validate_fragment_count(limits.max_fragments_per_access_unit() + 1),
+        LimitField::FragmentsPerAccessUnit,
+    );
 }
 
 #[test]
 fn protocol_limits_concurrency_validations_reject_violations() {
     let limits = ProtocolLimits::ABSOLUTE;
 
-    // Retained receipts
-    let too_many_receipts = limits.max_retained_receipts() + 1;
-    assert!(matches!(
-        limits.validate_retained_receipts(too_many_receipts),
-        Err(LimitsError::AboveCeiling {
-            field: LimitField::RetainedReceipts,
-            ..
-        })
-    ));
-
-    // Handshake concurrency
-    let too_many_handshakes = limits.max_concurrent_handshakes();
-    assert!(matches!(
-        limits.validate_handshake_concurrency(too_many_handshakes),
-        Err(LimitsError::AboveCeiling {
-            field: LimitField::ConcurrentHandshakes,
-            ..
-        })
-    ));
-
-    // Pending approvals
-    let too_many_approvals = limits.max_pending_approvals();
-    assert!(matches!(
-        limits.validate_pending_approvals(too_many_approvals),
-        Err(LimitsError::AboveCeiling {
-            field: LimitField::PendingApprovals,
-            ..
-        })
-    ));
-
-    // Half-attached channels
-    let too_many_channels = limits.max_half_attached_channels();
-    assert!(matches!(
-        limits.validate_half_attached_channels(too_many_channels),
-        Err(LimitsError::AboveCeiling {
-            field: LimitField::HalfAttachedChannels,
-            ..
-        })
-    ));
-
-    // Encoder sessions
-    let too_many_encoders = limits.max_encoder_sessions();
-    assert!(matches!(
-        limits.validate_encoder_sessions(too_many_encoders),
-        Err(LimitsError::AboveCeiling {
-            field: LimitField::EncoderSessions,
-            ..
-        })
-    ));
-
-    // GPU surfaces
-    let too_many_surfaces = limits.max_gpu_surfaces();
-    assert!(matches!(
-        limits.validate_gpu_surfaces(too_many_surfaces),
-        Err(LimitsError::AboveCeiling {
-            field: LimitField::GpuSurfaces,
-            ..
-        })
-    ));
-
-    // Viewers
-    let too_many_viewers = limits.max_viewers();
-    assert!(matches!(
-        limits.validate_viewers(too_many_viewers),
-        Err(LimitsError::AboveCeiling {
-            field: LimitField::Viewers,
-            ..
-        })
-    ));
+    assert_err_field(
+        limits.validate_retained_receipts(limits.max_retained_receipts() + 1),
+        LimitField::RetainedReceipts,
+    );
+    assert_err_field(
+        limits.validate_handshake_concurrency(limits.max_concurrent_handshakes()),
+        LimitField::ConcurrentHandshakes,
+    );
+    assert_err_field(
+        limits.validate_pending_approvals(limits.max_pending_approvals()),
+        LimitField::PendingApprovals,
+    );
+    assert_err_field(
+        limits.validate_half_attached_channels(limits.max_half_attached_channels()),
+        LimitField::HalfAttachedChannels,
+    );
+    assert_err_field(
+        limits.validate_encoder_sessions(limits.max_encoder_sessions()),
+        LimitField::EncoderSessions,
+    );
+    assert_err_field(
+        limits.validate_gpu_surfaces(limits.max_gpu_surfaces()),
+        LimitField::GpuSurfaces,
+    );
+    assert_err_field(
+        limits.validate_viewers(limits.max_viewers()),
+        LimitField::Viewers,
+    );
 }
 
 #[test]
@@ -312,12 +340,10 @@ fn admission_accountant_bounds_global_resources() {
     for _ in 0..limits.max_encoder_sessions() {
         assert!(accountant.acquire_encoder_session(&limits).is_ok());
     }
-    match accountant.acquire_encoder_session(&limits) {
-        Err(DosRefusal::CapacityExceeded { field, .. }) => {
-            assert_eq!(field, LimitField::EncoderSessions);
-        }
-        other => panic!("expected CapacityExceeded, got {other:?}"),
-    }
+    assert_capacity(
+        accountant.acquire_encoder_session(&limits),
+        LimitField::EncoderSessions,
+    );
 
     // GPU surfaces ceiling enforcement
     assert!(
@@ -325,44 +351,36 @@ fn admission_accountant_bounds_global_resources() {
             .acquire_gpu_surfaces(limits.max_gpu_surfaces(), &limits)
             .is_ok()
     );
-    match accountant.acquire_gpu_surfaces(1, &limits) {
-        Err(DosRefusal::CapacityExceeded { field, .. }) => {
-            assert_eq!(field, LimitField::GpuSurfaces);
-        }
-        other => panic!("expected CapacityExceeded, got {other:?}"),
-    }
+    assert_capacity(
+        accountant.acquire_gpu_surfaces(1, &limits),
+        LimitField::GpuSurfaces,
+    );
 
     // Half-attached channels ceiling enforcement
     for _ in 0..limits.max_half_attached_channels() {
         assert!(accountant.acquire_half_attached(&limits).is_ok());
     }
-    match accountant.acquire_half_attached(&limits) {
-        Err(DosRefusal::CapacityExceeded { field, .. }) => {
-            assert_eq!(field, LimitField::HalfAttachedChannels);
-        }
-        other => panic!("expected CapacityExceeded, got {other:?}"),
-    }
+    assert_capacity(
+        accountant.acquire_half_attached(&limits),
+        LimitField::HalfAttachedChannels,
+    );
 
     // Pending approvals ceiling enforcement
     for _ in 0..limits.max_pending_approvals() {
         assert!(accountant.acquire_pending_approval(&limits).is_ok());
     }
-    match accountant.acquire_pending_approval(&limits) {
-        Err(DosRefusal::CapacityExceeded { field, .. }) => {
-            assert_eq!(field, LimitField::PendingApprovals);
-        }
-        other => panic!("expected CapacityExceeded, got {other:?}"),
-    }
+    assert_capacity(
+        accountant.acquire_pending_approval(&limits),
+        LimitField::PendingApprovals,
+    );
 
     // Bandwidth allocation
     let remaining = limits.max_bandwidth_bps();
     assert!(accountant.allocate_bandwidth(remaining, &limits).is_ok());
-    match accountant.allocate_bandwidth(1, &limits) {
-        Err(DosRefusal::CapacityExceeded { field, .. }) => {
-            assert_eq!(field, LimitField::BandwidthBps);
-        }
-        other => panic!("expected CapacityExceeded, got {other:?}"),
-    }
+    assert_capacity(
+        accountant.allocate_bandwidth(1, &limits),
+        LimitField::BandwidthBps,
+    );
 
     // Viewer memory allocation
     let viewer_limit = limits.per_viewer_compressed_bytes();
@@ -371,12 +389,10 @@ fn admission_accountant_bounds_global_resources() {
             .allocate_viewer_memory(session, viewer_limit, &limits)
             .is_ok()
     );
-    match accountant.allocate_viewer_memory(session, 1, &limits) {
-        Err(DosRefusal::CapacityExceeded { field, .. }) => {
-            assert_eq!(field, LimitField::PerViewerCompressedBytes);
-        }
-        other => panic!("expected CapacityExceeded, got {other:?}"),
-    }
+    assert_capacity(
+        accountant.allocate_viewer_memory(session, 1, &limits),
+        LimitField::PerViewerCompressedBytes,
+    );
 }
 
 #[test]
@@ -401,34 +417,28 @@ fn rate_limiter_registry_rejects_floods() {
     for _ in 0..3 {
         assert!(registry.check_diagnostic_export(t0).is_ok());
     }
-    match registry.check_diagnostic_export(t0) {
-        Err(DosRefusal::RateLimitExceeded { field, .. }) => {
-            assert_eq!(field, LimitField::DiagnosticExportsPerMin);
-        }
-        other => panic!("expected RateLimitExceeded, got {other:?}"),
-    }
+    assert_ratelimit(
+        registry.check_diagnostic_export(t0),
+        LimitField::DiagnosticExportsPerMin,
+    );
 
     // Decoder reconfigurations: capped at 5
     for _ in 0..5 {
         assert!(registry.check_decoder_reconfig(t0).is_ok());
     }
-    match registry.check_decoder_reconfig(t0) {
-        Err(DosRefusal::RateLimitExceeded { field, .. }) => {
-            assert_eq!(field, LimitField::DecoderReconfigurationsPerMin);
-        }
-        other => panic!("expected RateLimitExceeded, got {other:?}"),
-    }
+    assert_ratelimit(
+        registry.check_decoder_reconfig(t0),
+        LimitField::DecoderReconfigurationsPerMin,
+    );
 
     // Worker restarts: capped at 3
     for _ in 0..3 {
         assert!(registry.check_worker_restart(t0).is_ok());
     }
-    match registry.check_worker_restart(t0) {
-        Err(DosRefusal::RateLimitExceeded { field, .. }) => {
-            assert_eq!(field, LimitField::WorkerRestartsPerMin);
-        }
-        other => panic!("expected RateLimitExceeded, got {other:?}"),
-    }
+    assert_ratelimit(
+        registry.check_worker_restart(t0),
+        LimitField::WorkerRestartsPerMin,
+    );
 }
 
 #[test]

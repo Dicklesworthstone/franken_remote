@@ -914,114 +914,41 @@ struct ResourceOverrides {
     viewers: u8,
 }
 
-fn take_u32(
+fn take_bounded<T: Copy + Into<u64> + TryFrom<u64>, V: Copy + TryInto<u64>>(
     field: LimitField,
-    ceiling: u32,
-    floor: u32,
-    value: Option<u32>,
-) -> Result<u32, LimitsError> {
+    ceiling: T,
+    floor: T,
+    value: Option<V>,
+) -> Result<T, LimitsError> {
+    let ceil_u64 = ceiling.into();
+    let floor_u64 = floor.into();
     match value {
         None => Ok(ceiling),
-        Some(v) if v > ceiling => Err(LimitsError::AboveCeiling {
-            field,
-            value: u64::from(v),
-            ceiling: u64::from(ceiling),
-        }),
-        Some(v) if v < floor => Err(LimitsError::BelowFloor {
-            field,
-            value: u64::from(v),
-            floor: u64::from(floor),
-        }),
-        Some(v) => Ok(v),
+        Some(v) => {
+            let v_u64 = v.try_into().map_err(|_| LimitsError::ArithmeticOverflow)?;
+            if v_u64 > ceil_u64 {
+                Err(LimitsError::AboveCeiling {
+                    field,
+                    value: v_u64,
+                    ceiling: ceil_u64,
+                })
+            } else if v_u64 < floor_u64 {
+                Err(LimitsError::BelowFloor {
+                    field,
+                    value: v_u64,
+                    floor: floor_u64,
+                })
+            } else {
+                T::try_from(v_u64).map_err(|_| LimitsError::ArithmeticOverflow)
+            }
+        }
     }
 }
 
-fn take_u64(
-    field: LimitField,
-    ceiling: u64,
-    floor: u64,
-    value: Option<u64>,
-) -> Result<u64, LimitsError> {
-    match value {
-        None => Ok(ceiling),
-        Some(v) if v > ceiling => Err(LimitsError::AboveCeiling {
-            field,
-            value: v,
-            ceiling,
-        }),
-        Some(v) if v < floor => Err(LimitsError::BelowFloor {
-            field,
-            value: v,
-            floor,
-        }),
-        Some(v) => Ok(v),
-    }
-}
-
-fn take_u16(
-    field: LimitField,
-    ceiling: u16,
-    floor: u16,
-    value: Option<u32>,
-) -> Result<u16, LimitsError> {
-    match value {
-        None => Ok(ceiling),
-        Some(v) if v > u32::from(ceiling) => Err(LimitsError::AboveCeiling {
-            field,
-            value: u64::from(v),
-            ceiling: u64::from(ceiling),
-        }),
-        Some(v) if v < u32::from(floor) => Err(LimitsError::BelowFloor {
-            field,
-            value: u64::from(v),
-            floor: u64::from(floor),
-        }),
-        Some(v) => Ok(u16::try_from(v).unwrap_or(ceiling)),
-    }
-}
-
-fn take_u8(
-    field: LimitField,
-    ceiling: u8,
-    floor: u8,
-    value: Option<u32>,
-) -> Result<u8, LimitsError> {
-    match value {
-        None => Ok(ceiling),
-        Some(v) if v > u32::from(ceiling) => Err(LimitsError::AboveCeiling {
-            field,
-            value: u64::from(v),
-            ceiling: u64::from(ceiling),
-        }),
-        Some(v) if v < u32::from(floor) => Err(LimitsError::BelowFloor {
-            field,
-            value: u64::from(v),
-            floor: u64::from(floor),
-        }),
-        Some(v) => Ok(u8::try_from(v).unwrap_or(ceiling)),
-    }
-}
-
-fn take_usize_u16(
-    field: LimitField,
-    ceiling: u16,
-    floor: u16,
-    value: Option<usize>,
-) -> Result<u16, LimitsError> {
-    match value {
-        None => Ok(ceiling),
-        Some(v) if v > usize::from(ceiling) => Err(LimitsError::AboveCeiling {
-            field,
-            value: u64::try_from(v).unwrap_or(u64::MAX),
-            ceiling: u64::from(ceiling),
-        }),
-        Some(v) if v < usize::from(floor) => Err(LimitsError::BelowFloor {
-            field,
-            value: u64::try_from(v).unwrap_or(u64::MAX),
-            floor: u64::from(floor),
-        }),
-        Some(v) => Ok(u16::try_from(v).unwrap_or(ceiling)),
-    }
+macro_rules! take_l {
+    ($f:ident, $field:ident, $floor:expr, $a:expr, $o:expr) => {
+        take_bounded(LimitField::$f, $a.$field, $floor, $o.$field)
+    };
 }
 
 fn resolve_session_overrides(
@@ -1047,11 +974,12 @@ fn resolve_session_overrides(
         Some(v) => v,
     };
 
-    let max_encoded_access_unit_bytes = take_u32(
-        LimitField::EncodedAccessUnitBytes,
-        a.max_encoded_access_unit_bytes,
+    let max_encoded_access_unit_bytes = take_l!(
+        EncodedAccessUnitBytes,
+        max_encoded_access_unit_bytes,
         1,
-        overrides.max_encoded_access_unit_bytes,
+        a,
+        overrides
     )?;
 
     let per_viewer = match overrides.per_viewer_compressed_bytes {
@@ -1087,25 +1015,22 @@ fn resolve_session_overrides(
     };
 
     Ok(SessionOverrides {
-        max_control_message_bytes: take_u32(
-            LimitField::ControlMessageBytes,
-            a.max_control_message_bytes,
+        max_control_message_bytes: take_l!(
+            ControlMessageBytes,
+            max_control_message_bytes,
             1,
-            overrides.max_control_message_bytes,
+            a,
+            overrides
         )?,
-        max_clipboard_item_bytes: take_u32(
-            LimitField::ClipboardItemBytes,
-            a.max_clipboard_item_bytes,
+        max_clipboard_item_bytes: take_l!(
+            ClipboardItemBytes,
+            max_clipboard_item_bytes,
             1,
-            overrides.max_clipboard_item_bytes,
+            a,
+            overrides
         )?,
         max_encoded_access_unit_bytes,
-        max_dimension_pixels: take_u32(
-            LimitField::DimensionPixels,
-            a.max_dimension_pixels,
-            1,
-            overrides.max_dimension_pixels,
-        )?,
+        max_dimension_pixels: take_l!(DimensionPixels, max_dimension_pixels, 1, a, overrides)?,
         max_coded_pixels,
         reassembly_window_pictures: reassembly,
         per_viewer_compressed_bytes: per_viewer,
@@ -1113,151 +1038,119 @@ fn resolve_session_overrides(
 }
 
 fn resolve_rate_overrides(
-    overrides: &LimitOverrides,
+    o: &LimitOverrides,
     a: &ProtocolLimits,
 ) -> Result<RateOverrides, LimitsError> {
     Ok(RateOverrides {
-        max_concurrent_handshakes: take_u16(
-            LimitField::ConcurrentHandshakes,
-            a.max_concurrent_handshakes,
+        max_concurrent_handshakes: take_l!(
+            ConcurrentHandshakes,
+            max_concurrent_handshakes,
             1,
-            overrides.max_concurrent_handshakes,
+            a,
+            o
         )?,
-        max_handshake_duration_ms: take_u16(
-            LimitField::HandshakeDurationMs,
-            a.max_handshake_duration_ms,
+        max_handshake_duration_ms: take_l!(
+            HandshakeDurationMs,
+            max_handshake_duration_ms,
             1_000,
-            overrides.max_handshake_duration_ms,
+            a,
+            o
         )?,
-        max_preadmission_rate_per_sec: take_u16(
-            LimitField::PreadmissionRatePerSec,
-            a.max_preadmission_rate_per_sec,
+        max_preadmission_rate_per_sec: take_l!(
+            PreadmissionRatePerSec,
+            max_preadmission_rate_per_sec,
             1,
-            overrides.max_preadmission_rate_per_sec,
+            a,
+            o
         )?,
-        max_half_attached_channels: take_u16(
-            LimitField::HalfAttachedChannels,
-            a.max_half_attached_channels,
+        max_half_attached_channels: take_l!(
+            HalfAttachedChannels,
+            max_half_attached_channels,
             1,
-            overrides.max_half_attached_channels,
+            a,
+            o
         )?,
-        max_pending_approvals: take_u8(
-            LimitField::PendingApprovals,
-            a.max_pending_approvals,
-            1,
-            overrides.max_pending_approvals,
-        )?,
-        idle_session_timeout_seconds: take_u16(
-            LimitField::IdleSessionTimeoutSecs,
-            a.idle_session_timeout_seconds,
+        max_pending_approvals: take_l!(PendingApprovals, max_pending_approvals, 1, a, o)?,
+        idle_session_timeout_seconds: take_l!(
+            IdleSessionTimeoutSecs,
+            idle_session_timeout_seconds,
             10,
-            overrides.idle_session_timeout_seconds,
+            a,
+            o
         )?,
-        max_control_requests_per_sec: take_u16(
-            LimitField::ControlRequestsPerSec,
-            a.max_control_requests_per_sec,
+        max_control_requests_per_sec: take_l!(
+            ControlRequestsPerSec,
+            max_control_requests_per_sec,
             10,
-            overrides.max_control_requests_per_sec,
+            a,
+            o
         )?,
-        max_codec_probes_per_min: take_u16(
-            LimitField::CodecProbesPerMin,
-            a.max_codec_probes_per_min,
-            1,
-            overrides.max_codec_probes_per_min,
-        )?,
-        max_recovery_requests_per_sec: take_u16(
-            LimitField::RecoveryRequestsPerSec,
-            a.max_recovery_requests_per_sec,
+        max_codec_probes_per_min: take_l!(CodecProbesPerMin, max_codec_probes_per_min, 1, a, o)?,
+        max_recovery_requests_per_sec: take_l!(
+            RecoveryRequestsPerSec,
+            max_recovery_requests_per_sec,
             10,
-            overrides.max_recovery_requests_per_sec,
+            a,
+            o
         )?,
-        max_cursor_uploads_per_sec: take_u16(
-            LimitField::CursorUploadsPerSec,
-            a.max_cursor_uploads_per_sec,
+        max_cursor_uploads_per_sec: take_l!(
+            CursorUploadsPerSec,
+            max_cursor_uploads_per_sec,
             1,
-            overrides.max_cursor_uploads_per_sec,
+            a,
+            o
         )?,
-        max_diagnostic_exports_per_min: take_u8(
-            LimitField::DiagnosticExportsPerMin,
-            a.max_diagnostic_exports_per_min,
+        max_diagnostic_exports_per_min: take_l!(
+            DiagnosticExportsPerMin,
+            max_diagnostic_exports_per_min,
             1,
-            overrides.max_diagnostic_exports_per_min,
+            a,
+            o
         )?,
-        max_decoder_reconfigurations_per_min: take_u16(
-            LimitField::DecoderReconfigurationsPerMin,
-            a.max_decoder_reconfigurations_per_min,
+        max_decoder_reconfigurations_per_min: take_l!(
+            DecoderReconfigurationsPerMin,
+            max_decoder_reconfigurations_per_min,
             1,
-            overrides.max_decoder_reconfigurations_per_min,
+            a,
+            o
         )?,
-        max_worker_restarts_per_min: take_u8(
-            LimitField::WorkerRestartsPerMin,
-            a.max_worker_restarts_per_min,
+        max_worker_restarts_per_min: take_l!(
+            WorkerRestartsPerMin,
+            max_worker_restarts_per_min,
             1,
-            overrides.max_worker_restarts_per_min,
+            a,
+            o
         )?,
     })
 }
 
 fn resolve_resource_overrides(
-    overrides: &LimitOverrides,
+    o: &LimitOverrides,
     a: &ProtocolLimits,
 ) -> Result<ResourceOverrides, LimitsError> {
     Ok(ResourceOverrides {
-        cursor_dimension_pixels: take_u16(
-            LimitField::CursorDimensionPixels,
-            a.max_cursor_dimension_pixels,
+        cursor_dimension_pixels: take_l!(
+            CursorDimensionPixels,
+            max_cursor_dimension_pixels,
             16,
-            overrides.max_cursor_dimension_pixels,
+            a,
+            o
         )?,
-        cursor_shape_bytes: take_u32(
-            LimitField::CursorShapeBytes,
-            a.max_cursor_shape_bytes,
-            1024,
-            overrides.max_cursor_shape_bytes,
-        )?,
-        name_bytes: take_usize_u16(
-            LimitField::NameBytes,
-            a.max_name_bytes,
+        cursor_shape_bytes: take_l!(CursorShapeBytes, max_cursor_shape_bytes, 1024, a, o)?,
+        name_bytes: take_l!(NameBytes, max_name_bytes, 1, a, o)?,
+        parameter_set_bytes: take_l!(ParameterSetBytes, max_parameter_set_bytes, 32, a, o)?,
+        fragments_per_access_unit: take_l!(
+            FragmentsPerAccessUnit,
+            max_fragments_per_access_unit,
             1,
-            overrides.max_name_bytes,
+            a,
+            o
         )?,
-        parameter_set_bytes: take_u32(
-            LimitField::ParameterSetBytes,
-            a.max_parameter_set_bytes,
-            32,
-            overrides.max_parameter_set_bytes,
-        )?,
-        fragments_per_access_unit: take_u16(
-            LimitField::FragmentsPerAccessUnit,
-            a.max_fragments_per_access_unit,
-            1,
-            overrides.max_fragments_per_access_unit,
-        )?,
-        retained_receipts: take_usize_u16(
-            LimitField::RetainedReceipts,
-            a.max_retained_receipts,
-            16,
-            overrides.max_retained_receipts,
-        )?,
-        encoder_sessions: take_u8(
-            LimitField::EncoderSessions,
-            a.max_encoder_sessions,
-            1,
-            overrides.max_encoder_sessions,
-        )?,
-        gpu_surfaces: take_u8(
-            LimitField::GpuSurfaces,
-            a.max_gpu_surfaces,
-            2,
-            overrides.max_gpu_surfaces,
-        )?,
-        bandwidth_bps: take_u64(
-            LimitField::BandwidthBps,
-            a.max_bandwidth_bps,
-            1_000_000,
-            overrides.max_bandwidth_bps,
-        )?,
-        viewers: take_u8(LimitField::Viewers, a.max_viewers, 1, overrides.max_viewers)?,
+        retained_receipts: take_l!(RetainedReceipts, max_retained_receipts, 16, a, o)?,
+        encoder_sessions: take_l!(EncoderSessions, max_encoder_sessions, 1, a, o)?,
+        gpu_surfaces: take_l!(GpuSurfaces, max_gpu_surfaces, 2, a, o)?,
+        bandwidth_bps: take_l!(BandwidthBps, max_bandwidth_bps, 1_000_000, a, o)?,
+        viewers: take_l!(Viewers, max_viewers, 1, a, o)?,
     })
 }
 
