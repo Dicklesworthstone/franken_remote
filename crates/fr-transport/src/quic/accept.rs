@@ -26,7 +26,13 @@ use asupersync::{
     time::timeout_at,
     types::Time,
 };
-use std::{fmt, future::Future, net::SocketAddr, time::Duration};
+use std::{
+    fmt,
+    future::{Future, poll_fn},
+    net::SocketAddr,
+    pin::pin,
+    time::Duration,
+};
 
 const MAX_DATAGRAM: usize = 1500;
 const MAX_SCAN: u16 = 256;
@@ -219,6 +225,29 @@ impl Listener {
     where
         F: FnOnce(Vec<u8>) -> Result<QuicHandshakeDriver, Error> + 'a,
     {
+        self.accept_with_identity(cx, local_cid, move |_, parameters| {
+            std::future::ready(identity(parameters))
+        })
+    }
+    /// Refresh installed host identity AFTER a candidate arrives, without blocking
+    /// the reactor or pinning a three-second metadata snapshot across idle time.
+    /// The factory and TLS share ONE absolute handshake deadline. Expired or
+    /// cancelled identity work is dropped; it cannot launch a late handshake.
+    ///
+    /// The peer address is untrusted UDP routing metadata until TLS completes.
+    /// It is not an admission proof. Reauthorize the actual established endpoints
+    /// before any application handoff. The factory is invoked at most once and
+    /// must return a bounded, cancellation-aware future; no task is spawned here.
+    pub fn accept_with_identity<'a, F, I>(
+        self,
+        cx: &'a Cx,
+        local_cid: ConnectionId,
+        identity: F,
+    ) -> Result<impl Future<Output = Result<NativeQuicUdpConnection, Error>> + 'a, Error>
+    where
+        F: FnOnce(SocketAddr, Vec<u8>) -> I + 'a,
+        I: Future<Output = Result<QuicHandshakeDriver, Error>> + 'a,
+    {
         if !(8..=20).contains(&local_cid.len()) {
             return Err(Error::Configuration);
         }
@@ -254,9 +283,10 @@ impl Listener {
                 }
             }
             let (peer, dcid, scid) = candidate.ok_or(Error::InitialBudget)?;
-            // Include identity-factory work in the original handshake budget.
+            // Factory invocation, all identity I/O and TLS consume this deadline.
             let until = deadline(cx, config.handshake_timeout)?;
-            let driver = identity(transport_parameters())?;
+            let driver =
+                bounded_identity(cx, until, identity(peer, transport_parameters())).await?;
             remaining(cx, until, Error::HandshakeTimeout)?;
             let connection = timeout_at(
                 Time::from_nanos(until),
@@ -280,15 +310,38 @@ impl Listener {
                 }
             })?;
             remaining(cx, until, Error::HandshakeTimeout)?;
-            // Upstream accepts the first authenticated source for its DCID. A
-            // second source reusing routing metadata must NOT inherit the
-            // candidate selected by this owner, even after completing TLS.
+            // A second source reusing routing metadata must NOT inherit the
+            // selected candidate, even after completing TLS.
             if connection.peer_addr() != peer || connection.peer_connection_id() != scid {
                 return Err(Error::PeerChanged);
             }
             Ok(connection)
         })
     }
+}
+
+async fn bounded_identity(
+    cx: &Cx,
+    until: u64,
+    identity: impl Future<Output = Result<QuicHandshakeDriver, Error>>,
+) -> Result<QuicHandshakeDriver, Error> {
+    let mut identity = pin!(identity);
+    let mut previous = now(cx)?;
+    let checked = poll_fn(|task| {
+        remaining(cx, until, Error::HandshakeTimeout)?;
+        let current = now(cx)?;
+        if current < previous {
+            return std::task::Poll::Ready(Err(Error::Clock));
+        }
+        previous = current;
+        let result = identity.as_mut().poll(task);
+        // A ready factory may itself revoke its context or consume the budget.
+        remaining(cx, until, Error::HandshakeTimeout)?;
+        result
+    });
+    timeout_at(Time::from_nanos(until), checked)
+        .await
+        .map_err(|_| Error::HandshakeTimeout)?
 }
 
 #[cfg(test)]
