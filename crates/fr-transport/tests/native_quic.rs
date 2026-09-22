@@ -751,15 +751,7 @@ fn critical_credit_is_reserved_in_the_actual_native_connection_window() {
             input_drive(&cx, &mut p).await;
         }
         let result = record(7, 0x48, 74, 42);
-        p.server
-            .send(
-                &cx,
-                Route::Stream(p.results),
-                &result,
-                clock(&cx) + 2_000_000,
-                || true,
-            )
-            .unwrap();
+        p.server.send(&cx, Route::Stream(p.results), &result, clock(&cx) + 2_000_000, || true).unwrap();
         for _ in 0..40 {
             input_drive(&cx, &mut p).await;
         }
@@ -832,14 +824,11 @@ fn startup_bytes(message: &fr_wire::negotiation::Message) -> Vec<u8> {
     bytes.truncate(n);
     bytes
 }
+#[rustfmt::skip]
 fn startup_offer() -> fr_wire::negotiation::Offer {
     fr_wire::negotiation::Offer {
-        versions: vec![0],
-        profile: 1,
-        profile_version: 0,
-        role: fr_wire::negotiation::Role::Observe,
-        limits: ProtocolLimits::ABSOLUTE,
-        capabilities: vec![],
+        versions: vec![0], profile: 1, profile_version: 0, role: fr_wire::negotiation::Role::Observe,
+        limits: ProtocolLimits::ABSOLUTE, capabilities: vec![],
     }
 }
 async fn bootstrap_drive(cx: &Cx, client: &mut QuicRecords, host: &mut QuicRecords) {
@@ -858,15 +847,7 @@ fn bootstrap_hello_and_bound_ack_use_the_same_authenticated_streams() {
         let (mut client, c, mut host, h) = Box::pin(bootstrap_connections(&cx)).await;
         let identity = host.binding();
         let hello = Message::ClientHello(startup_offer());
-        client
-            .send(
-                &cx,
-                Route::Stream(c.outbound),
-                &startup_bytes(&hello),
-                clock(&cx) + 2_000_000,
-                || true,
-            )
-            .unwrap();
+        client.send(&cx, Route::Stream(c.outbound), &startup_bytes(&hello), clock(&cx) + 2_000_000, || true).unwrap();
         assert!(matches!(
             client.bind_control(&cx, c, 1, 4096, || true),
             Err(Error::Backpressure)
@@ -899,15 +880,7 @@ fn bootstrap_hello_and_bound_ack_use_the_same_authenticated_streams() {
             Err(Error::WrongRoute)
         ));
         let ack = Message::BindingAccepted { binding: 7 };
-        client
-            .send(
-                &cx,
-                Route::Stream(c2.outbound),
-                &startup_bytes(&ack),
-                clock(&cx) + 2_000_000,
-                || true,
-            )
-            .unwrap();
+        client.send(&cx, Route::Stream(c2.outbound), &startup_bytes(&ack), clock(&cx) + 2_000_000, || true).unwrap();
         let mut received = None;
         for _ in 0..100 {
             bootstrap_drive(&cx, &mut client, &mut host).await;
@@ -965,15 +938,7 @@ fn bootstrap_transition_cannot_relabel_an_incomplete_record() {
             .collect();
         let bytes = startup_bytes(&Message::ClientHello(offer));
         assert!(bytes.len() > 900);
-        client
-            .send(
-                &cx,
-                Route::Stream(c.outbound),
-                &bytes,
-                clock(&cx) + 2_000_000,
-                || true,
-            )
-            .unwrap();
+        client.send(&cx, Route::Stream(c.outbound), &bytes, clock(&cx) + 2_000_000, || true).unwrap();
         bootstrap_drive(&cx, &mut client, &mut host).await;
         host.receive(
             &cx,
