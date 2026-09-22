@@ -80,3 +80,36 @@ post-authentication service. Broader beads remain open. Refs: plan 7/17/19,
 fr-p1-frame-pipeline-am1 and fr-p2-viewer-admission-e62. See
 [shared desktop service](SHARED_DESKTOP_SERVICE.md) and
 [viewer ownership](SHARED_VIEWER_SERVICE.md).
+
+## Cold native connection handoff
+
+`native_connection::host::Server::serve_shared_observer` now connects the canonical
+cold native accept path to an **already running** shared desktop. It takes the
+original protected `Listener`, dedicated session `Cx`, local `Request`, continuing
+ingress check, `Hub::admissions()` and local approval notifier. The caller must
+continue servicing the original `SessionAgent::serve_shared_desktop` independently.
+The resulting `SharedObserver` stays alive throughout negotiation, approval,
+display/decoder startup and streaming; it does not return immediately on enqueue.
+
+`SharedObserver::ticket()` is `None` before authenticated hub admission, then yields
+the exact original slot's status/cancellation receipt. This is not consent or
+media-readiness evidence. Dropping even an unpolled operation fences only its
+original connection; keeping a cloned ticket cannot keep that connection alive.
+A completed operation eagerly drops pending native work and is safe to retain:
+subsequent polls return the same result. A prior terminal hub result is preserved
+through expected session cancellation, but external cancellation is not relabeled
+as a prior hub completion. Credential and ingress errors retain their own result.
+
+The lower-level `Admission::serve_host` is the scoped alternative to `admit_host`
+for callers already holding the original authenticated `Host`. It observes the
+same terminal receipt and original startup cutoff with one bounded timer pulse.
+It never renews authority, drives a second Host, or takes ownership of capture.
+
+Six scoped handoff tests and ten cold-native integration tests cover approval,
+stream delivery, denial, credential/ingress loss, cancellation, abandonment,
+call-time deadlines, membership, source scope, duplicate IDs and capacity. The
+native cases run explicitly in disposable user/network namespaces using actual
+TLS/UDP and credential-checked Unix HTTP; metadata, ingress lifetime, source
+pictures and decoder acknowledgements are fixtures. This does not qualify a live
+tailnet, firewall, native HEVC or display. Kernel ingress enforcement, multi-client
+UDP demultiplexing, first-source provisioning and `frd run` dispatch remain separate.

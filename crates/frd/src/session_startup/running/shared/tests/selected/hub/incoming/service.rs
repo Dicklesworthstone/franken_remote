@@ -239,3 +239,7 @@ fn parked_service_keeps_the_original_startup_deadline_without_polling_the_hub() 
         reap(&mut publisher).await;
     });
 }
+
+#[cfg(target_os = "linux")]
+#[path = "native.rs"]
+mod native;

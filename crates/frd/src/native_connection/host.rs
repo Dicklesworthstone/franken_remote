@@ -2,6 +2,9 @@
 //! This consumes one ALREADY protected listener, not a multi-client socket loop.
 //! The kernel/interface restriction must be established by the local broker;
 //! neither source prefixes nor the callback below establish that restriction.
+mod shared;
+pub use shared::SharedObserver;
+
 use crate::session_startup::{Configuration, Host};
 use asupersync::{cx::Cx, net::quic_core::ConnectionId, types::CancelKind};
 use fr_tailnet::{
@@ -28,6 +31,7 @@ pub enum Error {
     Tailnet(fr_tailnet::Error),
     Accept(native_accept::Error),
     Session(crate::session_startup::Error),
+    Shared(crate::session_startup::shared_viewers::Error),
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
