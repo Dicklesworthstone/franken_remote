@@ -362,13 +362,13 @@ fn plain_sha_content_id_and_merkle_are_distinct_fail_closed_contracts() {
 }
 
 #[test]
+#[rustfmt::skip]
 fn unsupported_and_malformed_manifest_cannot_create_any_file() {
     let base = serde_json::to_value(manifest("received.bin", b"abc")).unwrap();
     for case in 0..15 {
         let fixture = Fixture::new();
         let (mut receiver, mut task) = fixture.spawn(Policy::conservative(), 4096);
         let mut value = base.clone();
-        #[rustfmt::skip]
         match case {
             0 => value["is_directory"] = true.into(),
             1 => value["entries"] = serde_json::json!([]),
@@ -1039,3 +1039,6 @@ fn observation_or_crossed_attachment_configuration_never_starts_disk_owner() {
     fixture.empty();
     fixture.input_live();
 }
+
+#[path = "atp_receive/directory.rs"]
+mod directory;

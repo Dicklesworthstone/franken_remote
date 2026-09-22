@@ -385,3 +385,5 @@ fn streaming_shutdown_retains_the_file_receipt_and_original_source_through_faile
 }
 
 mod batch;
+
+mod directory;

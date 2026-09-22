@@ -641,3 +641,6 @@ fn incoming_host_original_peer_revocation_cannot_be_overridden_by_a_local_allow(
 }
 
 mod managed;
+
+#[path = "incoming/service.rs"]
+mod scoped_service;

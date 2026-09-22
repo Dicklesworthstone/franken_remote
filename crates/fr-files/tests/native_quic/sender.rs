@@ -328,7 +328,7 @@ fn hostile_acceptance_cannot_change_size_root_or_request_profile_before_source_b
     runtime().block_on(async {
         use fr_wire::files::{self,Body};
         use asupersync::net::atp::protocol::FrameType;
-        for variant in 0..4 {
+        for variant in 0..5 {
             let cx=Cx::current().unwrap();let mut f=Running::new(&cx).await;
             let path=f.path.join("source");fs::write(&path,b"private").unwrap();
             let expected=native_support::manifest("remote",b"private");
@@ -344,7 +344,7 @@ fn hostile_acceptance_cannot_change_size_root_or_request_profile_before_source_b
                 "sender_merkle_root_hex":if variant==2{"0".repeat(64)}else{expected.merkle_root_hex},
                 "missing_bytes":7,"shared_chunks":0,"stale_chunks":0,"missing_chunks":[],"fallback_reason":"portable_full_object"});
             let frame=framed(if variant==3{FrameType::Proof}else{FrameType::ObjectRequest},serde_json::to_vec(&request).unwrap());
-            let bytes=encoded(Body::Accept{profile:files::ATP_PORTABLE_FULL,size:if variant==0{8}else{7},
+            let bytes=encoded(Body::Accept{profile:if variant==4{files::ATP_PORTABLE_DIRECTORY_FULL}else{files::ATP_PORTABLE_FULL},size:if variant==0{8}else{7},
                 bytes_per_second:8_000_000,chunk_bytes:100,concurrent_transfers:1,atp:&frame},ctx,limits);
             f.link.h.send(&cx,fr_transport::quic::Route::Stream(route),&bytes,until,||true).unwrap();
             while sender.result().is_none() {
@@ -448,3 +448,6 @@ fn actual_host_conflict_is_a_refusal_and_cannot_overwrite_or_resubmit() {
         );
     });
 }
+
+#[path = "sender/directory.rs"]
+mod directory;

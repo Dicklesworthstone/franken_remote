@@ -511,3 +511,6 @@ fn exhaustive_path_traversal_and_symlink_attacks_refused_with_typed_errors() {
     );
     assert_eq!(fs::read(&outside_file).unwrap(), b"highly confidential");
 }
+
+#[path = "receive/directory.rs"]
+mod directory;

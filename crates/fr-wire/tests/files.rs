@@ -39,67 +39,73 @@ fn fixture(kind: u8, channel: u8, suffix: &[u8]) -> Vec<u8> {
 }
 #[test]
 fn five_message_kinds_match_independently_constructed_byte_fixtures() {
-    let atp = &[1, 2, 3];
-    let mut accepted = vec![0, 1];
-    accepted.extend_from_slice(&3_u64.to_be_bytes());
-    accepted.extend_from_slice(&1000_u32.to_be_bytes());
-    accepted.extend_from_slice(&500_u32.to_be_bytes());
-    accepted.extend_from_slice(&[0, 1, 0, 0, 0, 3, 1, 2, 3]);
-    let mut completed = vec![1, 0, 0];
-    completed.extend_from_slice(&3_u64.to_be_bytes());
-    completed.extend_from_slice(&[0, 0, 0, 3, 1, 2, 3]);
-    for (body, role, expected) in [
-        (
-            Body::Offer { profile: 1, atp },
-            Role::Controller,
-            fixture(0x70, 9, &[0, 1, 0, 0, 0, 3, 1, 2, 3]),
-        ),
-        (
-            Body::Accept {
-                profile: 1,
-                size: 3,
-                bytes_per_second: 1000,
-                chunk_bytes: 500,
-                concurrent_transfers: 1,
-                atp,
-            },
-            Role::Host,
-            fixture(0x71, 10, &accepted),
-        ),
-        (
-            Body::Chunk { atp },
-            Role::Controller,
-            fixture(0x72, 9, &[0, 0, 0, 3, 1, 2, 3]),
-        ),
-        (
-            Body::Complete {
-                disposition: Disposition::PublishedDurable,
-                reason: Reason::None,
-                published_bytes: 3,
-                atp,
-            },
-            Role::Host,
-            fixture(0x73, 10, &completed),
-        ),
-        (
-            Body::Cancel(Reason::User),
-            Role::Controller,
-            fixture(0x74, 9, &[0, 1]),
-        ),
-    ] {
-        let mut output = [0; 4096];
-        let size = encode(message(body), context(role), limits(), &mut output).unwrap();
-        assert_eq!(&output[..size], expected);
-        assert_eq!(
-            decode(&expected, context(role), limits()),
-            Ok(message(body))
-        );
-        for end in 0..expected.len() {
-            assert!(decode(&expected[..end], context(role), limits()).is_err());
+    assert_eq!((ATP_PORTABLE_FULL, ATP_PORTABLE_DIRECTORY_FULL), (1, 2));
+    for profile in [1_u8, 2] {
+        let atp = &[1, 2, 3];
+        let mut accepted = vec![0, profile];
+        accepted.extend_from_slice(&3_u64.to_be_bytes());
+        accepted.extend_from_slice(&1000_u32.to_be_bytes());
+        accepted.extend_from_slice(&500_u32.to_be_bytes());
+        accepted.extend_from_slice(&[0, 1, 0, 0, 0, 3, 1, 2, 3]);
+        let mut completed = vec![1, 0, 0];
+        completed.extend_from_slice(&3_u64.to_be_bytes());
+        completed.extend_from_slice(&[0, 0, 0, 3, 1, 2, 3]);
+        for (body, role, expected) in [
+            (
+                Body::Offer {
+                    profile: u16::from(profile),
+                    atp,
+                },
+                Role::Controller,
+                fixture(0x70, 9, &[0, profile, 0, 0, 0, 3, 1, 2, 3]),
+            ),
+            (
+                Body::Accept {
+                    profile: u16::from(profile),
+                    size: 3,
+                    bytes_per_second: 1000,
+                    chunk_bytes: 500,
+                    concurrent_transfers: 1,
+                    atp,
+                },
+                Role::Host,
+                fixture(0x71, 10, &accepted),
+            ),
+            (
+                Body::Chunk { atp },
+                Role::Controller,
+                fixture(0x72, 9, &[0, 0, 0, 3, 1, 2, 3]),
+            ),
+            (
+                Body::Complete {
+                    disposition: Disposition::PublishedDurable,
+                    reason: Reason::None,
+                    published_bytes: 3,
+                    atp,
+                },
+                Role::Host,
+                fixture(0x73, 10, &completed),
+            ),
+            (
+                Body::Cancel(Reason::User),
+                Role::Controller,
+                fixture(0x74, 9, &[0, 1]),
+            ),
+        ] {
+            let mut output = [0; 4096];
+            let size = encode(message(body), context(role), limits(), &mut output).unwrap();
+            assert_eq!(&output[..size], expected);
+            assert_eq!(
+                decode(&expected, context(role), limits()),
+                Ok(message(body))
+            );
+            for end in 0..expected.len() {
+                assert!(decode(&expected[..end], context(role), limits()).is_err());
+            }
+            let mut extra = expected;
+            extra.push(0);
+            assert!(decode(&extra, context(role), limits()).is_err());
         }
-        let mut extra = expected;
-        extra.push(0);
-        assert!(decode(&extra, context(role), limits()).is_err());
     }
 }
 #[test]
@@ -317,7 +323,7 @@ fn entire_envelope_is_charged_to_selected_f_and_never_exceeds_c() {
 #[test]
 fn profiles_and_peer_lengths_cannot_bypass_the_payload_limit() {
     let mut body = fixture(0x70, 9, &[0, 1, 0, 0, 0, 1, 7]);
-    body[81] = 2;
+    body[81] = 3; // Profiles 1 and 2 are explicitly implemented; 3 is not.
     assert_eq!(
         decode(&body, context(Role::Controller), limits()),
         Err(WireError::UnsupportedVersion)

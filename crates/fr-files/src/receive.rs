@@ -30,7 +30,20 @@ use std::{
 
 /// A record is rejected before disk I/O when it exceeds this bound.
 pub const MAX_CHUNK_BYTES: usize = 64 * 1024;
+pub mod directory;
+pub use directory::{DirectoryManifest, PendingDirectory};
+
 const STAGING_PREFIX: &str = ".fr-part-";
+
+pub(crate) fn validate_name(name: &str) -> Result<(), Error> {
+    if name.len() > 255
+        || name.starts_with(STAGING_PREFIX)
+        || validate_portable_path_component(name).is_err()
+    {
+        return Err(Error::InvalidName);
+    }
+    Ok(())
+}
 
 /// Aggregate active reservations across every clone of a selected directory.
 /// This is not a quota on completed files; available disk space remains an OS
@@ -221,6 +234,7 @@ impl DropDirectory {
 /// Select one existing ATP integrity contract, never reinterpret a plain hash
 /// as a domain-separated content id. Manifest values are validated by `atp`.
 pub(crate) enum Expected {
+    Directory(DirectoryManifest),
     Content(ContentId),
     Manifest {
         sha256_hex: String,
@@ -358,6 +372,7 @@ impl PendingFile {
             .ok_or(Error::Retired)?
             .finalize(self.destination.clone());
         let valid = match &self.expected {
+            Expected::Directory(_) => false,
             Expected::Content(id) => digest.content_id == ObjectId::content(id.clone()),
             Expected::Manifest {
                 sha256_hex,
@@ -459,5 +474,69 @@ impl PendingFile {
 impl Drop for PendingFile {
     fn drop(&mut self) {
         let _ = self.cleanup();
+    }
+}
+
+/// One quota/authority owner irrespective of the number of content entries.
+pub(crate) enum PendingObject {
+    File(Box<PendingFile>),
+    Directory(PendingDirectory),
+}
+impl DropDirectory {
+    pub(crate) fn begin_object(
+        &self,
+        name: &str,
+        size: u64,
+        expected: Expected,
+    ) -> Result<PendingObject, Error> {
+        match expected {
+            Expected::Directory(manifest) => {
+                if manifest.name != name || manifest.size != size {
+                    return Err(Error::Integrity);
+                }
+                self.begin_directory(manifest).map(PendingObject::Directory)
+            }
+            expected => self
+                .begin_verified(name, size, expected)
+                .map(|file| PendingObject::File(Box::new(file))),
+        }
+    }
+}
+impl PendingObject {
+    pub(crate) fn received_bytes(&self) -> u64 {
+        match self {
+            Self::File(f) => f.received_bytes(),
+            Self::Directory(d) => d.received_bytes(),
+        }
+    }
+    pub(crate) fn write_entry(
+        &mut self,
+        index: u32,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), Error> {
+        match self {
+            Self::File(f) if index == 0 => f.write_chunk(offset, bytes),
+            Self::File(_) => Err(Error::InvalidChunk),
+            Self::Directory(d) => d.write_entry(index, offset, bytes),
+        }
+    }
+    pub(crate) fn verify(&mut self) -> Result<(), Error> {
+        match self {
+            Self::File(f) => f.verify(),
+            Self::Directory(d) => d.verify(),
+        }
+    }
+    pub(crate) fn publish(self) -> Result<Publication, Error> {
+        match self {
+            Self::File(f) => f.publish(),
+            Self::Directory(d) => d.publish(),
+        }
+    }
+    pub(crate) fn cancel(self) -> Result<(), Error> {
+        match self {
+            Self::File(f) => f.cancel(),
+            Self::Directory(d) => d.cancel(),
+        }
     }
 }
