@@ -47,72 +47,45 @@ fn parse_hex(s: &str) -> Vec<u8> {
         .collect()
 }
 
+fn assert_roundtrip_and_negatives<T: PartialEq + std::fmt::Debug>(
+    bytes: &[u8],
+    name: &str,
+    decode: impl Fn(&[u8]) -> Result<T, WireError>,
+    encode: impl Fn(&T, &mut [u8]) -> Result<usize, WireError>,
+) {
+    let msg = decode(bytes).unwrap_or_else(|e| panic!("{name} decode failed: {e:?}"));
+    let mut buf = vec![0u8; bytes.len() + 256];
+    let n = encode(&msg, &mut buf).unwrap_or_else(|e| panic!("{name} encode failed: {e:?}"));
+    assert_eq!(&buf[..n], bytes, "{name} round-trip mismatch");
+    for cut in 0..bytes.len() {
+        assert!(decode(&bytes[..cut]).is_err(), "{name} cut at {cut} accepted");
+    }
+    let mut trailing = bytes.to_vec();
+    trailing.push(0);
+    assert!(decode(&trailing).is_err(), "{name} trailing byte accepted");
+}
+
 // ---------------------------------------------------------------------------
 // Negotiation fixtures
 // ---------------------------------------------------------------------------
 
 #[test]
 fn test_negotiation_fixtures_round_trip_and_fail_closed() {
-    let fixtures = [
-        (
-            include_str!("fixtures/negotiation/client_hello.hex"),
-            0,
-            "client_hello",
-        ),
-        (
-            include_str!("fixtures/negotiation/host_capabilities.hex"),
-            0,
-            "host_capabilities",
-        ),
-        (
-            include_str!("fixtures/negotiation/selected_configuration.hex"),
-            0,
-            "selected_configuration",
-        ),
-        (
-            include_str!("fixtures/negotiation/approval_required.hex"),
-            0,
-            "approval_required",
-        ),
-        (
-            include_str!("fixtures/negotiation/session_opened.hex"),
-            0,
-            "session_opened",
-        ),
-        (
-            include_str!("fixtures/negotiation/binding_accepted.hex"),
-            1,
-            "binding_accepted",
-        ),
-    ];
-
-    for (hex_str, binding, name) in fixtures {
+    for (hex_str, binding, name) in [
+        (include_str!("fixtures/negotiation/client_hello.hex"), 0, "client_hello"),
+        (include_str!("fixtures/negotiation/host_capabilities.hex"), 0, "host_capabilities"),
+        (include_str!("fixtures/negotiation/selected_configuration.hex"), 0, "selected_configuration"),
+        (include_str!("fixtures/negotiation/approval_required.hex"), 0, "approval_required"),
+        (include_str!("fixtures/negotiation/session_opened.hex"), 0, "session_opened"),
+        (include_str!("fixtures/negotiation/binding_accepted.hex"), 1, "binding_accepted"),
+    ] {
         let bytes = parse_hex(hex_str);
         assert!(bytes.starts_with(b"FRD0"), "{name} bad magic");
-
-        // Decode
-        let msg = decode_neg(&bytes, 4096, binding).expect("decode valid fixture");
-
-        // Re-encode
-        let mut re_encoded = vec![0; 4096];
-        let n = encode_neg(&msg, 4096, &mut re_encoded).expect("re-encode");
-        re_encoded.truncate(n);
-        assert_eq!(re_encoded, bytes, "{name} round-trip drift");
-
-        // Negative: truncation
-        for cut in 0..bytes.len() {
-            assert!(
-                decode_neg(&bytes[..cut], 4096, binding).is_err(),
-                "{name} accepted truncation at {cut}"
-            );
-        }
-
-        // Negative: trailing bytes
-        let mut trailing = bytes.clone();
-        trailing.push(0);
-        assert!(
-            decode_neg(&trailing, 4096, binding).is_err(),
-            "{name} accepted trailing byte"
+        assert_roundtrip_and_negatives(
+            &bytes,
+            name,
+            |b| decode_neg(b, 4096, binding),
+            |m, out| encode_neg(m, 4096, out),
         );
     }
 }
@@ -123,82 +96,31 @@ fn test_negotiation_fixtures_round_trip_and_fail_closed() {
 
 #[test]
 fn test_control_fixtures_round_trip_and_fail_closed() {
-    let req_bytes = parse_hex(include_str!("fixtures/control/control_request.hex"));
     let parent = ControlBinding {
         id: 7,
         host_boot: HostBootId::from_raw(1),
         os_session: OsSessionId::from_raw(2),
         remote_session: RemoteSessionId::from_raw(3),
     };
-
-    let req = decode_request(
+    let req_bytes = parse_hex(include_str!("fixtures/control/control_request.hex"));
+    assert_roundtrip_and_negatives(
         &req_bytes,
-        parent,
-        &L,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    )
-    .expect("decode control_request");
-
-    let mut req_out = vec![0; fr_wire::control::REQUEST_BYTES];
-    let n1 = encode_request(
-        req,
-        &mut req_out,
-        &L,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    )
-    .expect("encode control_request");
-    assert_eq!(&req_out[..n1], req_bytes.as_slice());
-
-    // Negative: wrong role
+        "control_request",
+        |b| decode_request(b, parent, &L, InputDirection::ViewerToHost, InputDelivery::Reliable),
+        |m, out| encode_request(*m, out, &L, InputDirection::ViewerToHost, InputDelivery::Reliable),
+    );
     assert_eq!(
-        decode_request(
-            &req_bytes,
-            parent,
-            &L,
-            InputDirection::HostToViewer,
-            InputDelivery::Reliable,
-        )
-        .unwrap_err(),
+        decode_request(&req_bytes, parent, &L, InputDirection::HostToViewer, InputDelivery::Reliable).unwrap_err(),
         WireError::WrongRole
     );
 
     let grant_bytes = parse_hex(include_str!("fixtures/control/lease_granted.hex"));
-    let grant = decode_granted(
+    assert_roundtrip_and_negatives(
         &grant_bytes,
-        parent,
-        &L,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    )
-    .expect("decode lease_granted");
-
-    let mut grant_out = vec![0; fr_wire::control::GRANTED_BYTES];
-    let n2 = encode_granted(
-        grant,
-        &mut grant_out,
-        &L,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    )
-    .expect("encode lease_granted");
-    assert_eq!(&grant_out[..n2], grant_bytes.as_slice());
-
-    // Negative: truncation
-    for cut in 0..grant_bytes.len() {
-        assert!(
-            decode_granted(
-                &grant_bytes[..cut],
-                parent,
-                &L,
-                InputDirection::HostToViewer,
-                InputDelivery::Reliable,
-            )
-            .is_err(),
-            "lease_granted cut at {cut}"
-        );
-    }
+        "lease_granted",
+        |b| decode_granted(b, parent, &L, InputDirection::HostToViewer, InputDelivery::Reliable),
+        |m, out| encode_granted(*m, out, &L, InputDirection::HostToViewer, InputDelivery::Reliable),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -211,49 +133,26 @@ fn test_authority_fixtures_round_trip_and_fail_closed() {
         channel: 0x0102_0304,
         session: RemoteSessionId::from_raw(0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00),
     };
-
-    let cases = [
-        (
-            include_str!("fixtures/authority/challenge_observation.hex"),
-            InputDirection::HostToViewer,
-            "challenge_observation",
-        ),
-        (
-            include_str!("fixtures/authority/challenge_control.hex"),
-            InputDirection::HostToViewer,
-            "challenge_control",
-        ),
-        (
-            include_str!("fixtures/authority/response_observation.hex"),
-            InputDirection::ViewerToHost,
-            "response_observation",
-        ),
-        (
-            include_str!("fixtures/authority/response_control.hex"),
-            InputDirection::ViewerToHost,
-            "response_control",
-        ),
-    ];
-
-    for (hex_str, dir, name) in cases {
+    for (hex_str, dir, name) in [
+        (include_str!("fixtures/authority/challenge_observation.hex"), InputDirection::HostToViewer, "challenge_observation"),
+        (include_str!("fixtures/authority/challenge_control.hex"), InputDirection::HostToViewer, "challenge_control"),
+        (include_str!("fixtures/authority/response_observation.hex"), InputDirection::ViewerToHost, "response_observation"),
+        (include_str!("fixtures/authority/response_control.hex"), InputDirection::ViewerToHost, "response_control"),
+    ] {
         let bytes = parse_hex(hex_str);
-        let msg = fr_wire::authority::decode(&bytes, auth_b, &L, dir, InputDelivery::Reliable)
-            .expect("decode valid fixture");
-
-        let mut out = [0; fr_wire::authority::MAX_AUTHORITY_BYTES];
-        let n = fr_wire::authority::encode(msg, auth_b, &L, &mut out, dir, InputDelivery::Reliable)
-            .expect("re-encode authority");
-        assert_eq!(&out[..n], bytes.as_slice(), "{name} round-trip drift");
-
-        // Negative: wrong role
+        assert_roundtrip_and_negatives(
+            &bytes,
+            name,
+            |b| fr_wire::authority::decode(b, auth_b, &L, dir, InputDelivery::Reliable),
+            |m, out| fr_wire::authority::encode(*m, auth_b, &L, out, dir, InputDelivery::Reliable),
+        );
         let opp_dir = if dir == InputDirection::HostToViewer {
             InputDirection::ViewerToHost
         } else {
             InputDirection::HostToViewer
         };
         assert_eq!(
-            fr_wire::authority::decode(&bytes, auth_b, &L, opp_dir, InputDelivery::Reliable)
-                .unwrap_err(),
+            fr_wire::authority::decode(&bytes, auth_b, &L, opp_dir, InputDelivery::Reliable).unwrap_err(),
             WireError::WrongRole
         );
     }
@@ -266,40 +165,12 @@ fn test_authority_fixtures_round_trip_and_fail_closed() {
 #[test]
 fn test_input_ticket_fixture_round_trip_and_fail_closed() {
     let bytes = parse_hex(include_str!("fixtures/input_ticket/input_ticket.hex"));
-    let ticket = decode_input_ticket(
+    assert_roundtrip_and_negatives(
         &bytes,
-        &L,
-        7,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    )
-    .expect("decode input_ticket");
-
-    let mut out = vec![0; fr_wire::input_ticket::INPUT_TICKET_BYTES];
-    let n = encode_input_ticket(
-        ticket,
-        &mut out,
-        &L,
-        7,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    )
-    .expect("encode input_ticket");
-    assert_eq!(&out[..n], bytes.as_slice());
-
-    // Truncation
-    for cut in 0..bytes.len() {
-        assert!(
-            decode_input_ticket(
-                &bytes[..cut],
-                &L,
-                7,
-                InputDirection::HostToViewer,
-                InputDelivery::Reliable,
-            )
-            .is_err()
-        );
-    }
+        "input_ticket",
+        |b| decode_input_ticket(b, &L, 7, InputDirection::HostToViewer, InputDelivery::Reliable),
+        |m, out| encode_input_ticket(*m, out, &L, 7, InputDirection::HostToViewer, InputDelivery::Reliable),
+    );
 }
 
 // ---------------------------------------------------------------------------
