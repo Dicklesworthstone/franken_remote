@@ -4,6 +4,10 @@
 //! The selected desktop user and the OS remain trusted (SECURITY.md); other
 //! users must not be able to mutate the drop directory. Peer metadata never
 //! supplies an absolute path, an executable mode, or a symlink to materialize.
+mod conflict;
+pub use conflict::{ConflictPolicy, PublishedFile};
+use conflict::{MAX_CONFLICT_ATTEMPTS, conflict_name};
+
 use asupersync::atp::{
     object::{ContentId, ObjectId},
     safety::validate_portable_path_component,
@@ -85,7 +89,7 @@ struct Root {
 /// Renaming/replacing the original path does not redirect writes to another
 /// directory. Clones share both its descriptor and its aggregate reservations.
 #[derive(Clone)]
-pub struct DropDirectory(Arc<Root>);
+pub struct DropDirectory(Arc<Root>, ConflictPolicy);
 impl fmt::Debug for DropDirectory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("DropDirectory([local directory])")
@@ -126,11 +130,23 @@ impl DropDirectory {
         if stat.st_uid != geteuid().as_raw() || stat.st_mode & 0o022 != 0 {
             return Err(Error::UnsafeRoot);
         }
-        Ok(Self(Arc::new(Root {
-            fd,
-            limits,
-            reserved: Mutex::new(Reserved::default()),
-        })))
+        Ok(Self(
+            Arc::new(Root {
+                fd,
+                limits,
+                reserved: Mutex::new(Reserved::default()),
+            }),
+            ConflictPolicy::Reject,
+        ))
+    }
+
+    /// Choose conflict handling locally before attaching this directory to a
+    /// session. Clones still share the same pinned identity and aggregate quota;
+    /// choosing a different policy never creates a fresh reservation budget.
+    #[must_use]
+    pub fn with_conflict_policy(mut self, policy: ConflictPolicy) -> Self {
+        self.1 = policy;
+        self
     }
 
     /// Reserve a declared object before creating any temporary file. The caller
@@ -191,6 +207,8 @@ impl DropDirectory {
             file: fd.into(),
             staging,
             destination: name.to_owned(),
+            conflict_policy: self.1,
+            nonce: suffix,
             size,
             received: 0,
             expected,
@@ -269,6 +287,8 @@ pub struct PendingFile {
     file: File,
     staging: String,
     destination: String,
+    conflict_policy: ConflictPolicy,
+    nonce: u128,
     size: u64,
     received: u64,
     expected: Expected,
@@ -359,27 +379,53 @@ impl PendingFile {
     /// Atomically publish a previously verified object. Never replaces an
     /// existing file, directory, or symlink, even if it appeared after admission.
     /// Call only after a fresh original-controller and file-permission check.
-    pub fn publish(mut self) -> Result<Publication, Error> {
+    pub fn publish(self) -> Result<Publication, Error> {
+        self.publish_named().map(|result| result.publication())
+    }
+
+    /// The same atomic publication with its actual local basename retained for
+    /// the receiving UI. Names are intentionally absent from `Debug` and wire
+    /// diagnostics. A keep-both policy does not weaken the original ATP integrity
+    /// check: verify the advertised manifest BEFORE choosing a conflict name.
+    pub fn publish_named(mut self) -> Result<PublishedFile, Error> {
         if self.state != State::Verified {
             return Err(Error::Retired);
         }
         self.state = State::Failed;
-        match fs::renameat_with(
-            &self.reservation.root.fd,
-            self.staging.as_str(),
-            &self.reservation.root.fd,
-            self.destination.as_str(),
-            RenameFlags::NOREPLACE,
-        ) {
-            Ok(()) => {}
-            Err(rustix::io::Errno::EXIST) => return Err(Error::Conflict),
-            Err(error) => return Err(error.into()),
+        let original = self.destination.clone();
+        let mut attempt = 0;
+        loop {
+            match fs::renameat_with(
+                &self.reservation.root.fd,
+                self.staging.as_str(),
+                &self.reservation.root.fd,
+                self.destination.as_str(),
+                RenameFlags::NOREPLACE,
+            ) {
+                Ok(()) => break,
+                Err(rustix::io::Errno::EXIST)
+                    if self.conflict_policy == ConflictPolicy::KeepBoth
+                        && attempt < MAX_CONFLICT_ATTEMPTS =>
+                {
+                    self.destination = conflict_name(&original, self.nonce, attempt);
+                    attempt += 1;
+                }
+                Err(rustix::io::Errno::EXIST) => return Err(Error::Conflict),
+                Err(error) => return Err(error.into()),
+            }
         }
+        // After rename succeeds, cleanup MUST NOT unlink this destination even
+        // if the directory sync fails. Publication uncertainty is not rollback.
         self.state = State::Published;
-        Ok(if fs::fsync(&self.reservation.root.fd).is_ok() {
+        let publication = if fs::fsync(&self.reservation.root.fd).is_ok() {
             Publication::Durable
         } else {
             Publication::DurabilityUnknown
+        };
+        Ok(PublishedFile {
+            name: std::mem::take(&mut self.destination),
+            publication,
+            renamed: attempt != 0,
         })
     }
 
