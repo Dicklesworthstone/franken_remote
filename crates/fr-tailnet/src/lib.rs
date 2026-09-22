@@ -26,7 +26,7 @@ mod metadata;
 pub use local::{
     CertificateEvent, CertificateEventKind, CertificatePolicy, ConnectedPeer, CredentialStatus,
     DialRoute, DiscoveredPeer, Discovery, DiscoveryExclusions, LocalApi, NativeClient,
-    NativeServerIdentity, NodeIdentity, PeerSelector, PeerTarget, PeerTransportPath,
+    NativeServerIdentity, NodeIdentity, PeerSelector, PeerTarget, PeerTransportPath, ingress,
 };
 
 use std::{fmt, net::SocketAddr, time::Duration};
