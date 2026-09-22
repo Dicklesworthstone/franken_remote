@@ -699,23 +699,11 @@ fn log_scrubbing_proves_clipboard_bytes_never_appear_in_diagnostics() {
         "ClipboardSession::Debug (post-commit)",
     );
 
-    // Errors Display & Debug
     for err in [
-        Error::InvalidUtf8,
-        Error::Limit,
-        Error::ChunkOrder,
-        Error::Expired,
-        Error::LocalChanged,
-        Error::Disabled,
-        Error::Closed,
-        Error::Permission,
-        Error::Binding,
-        Error::Source,
-        Error::Replay,
-        Error::Busy,
-        Error::Allocation,
-        Error::Incomplete,
-        Error::UnknownTransfer,
+        Error::InvalidUtf8, Error::Limit, Error::ChunkOrder, Error::Expired,
+        Error::LocalChanged, Error::Disabled, Error::Closed, Error::Permission,
+        Error::Binding, Error::Source, Error::Replay, Error::Busy,
+        Error::Allocation, Error::Incomplete, Error::UnknownTransfer,
     ] {
         check_no_leak(&format!("{err:?}"), "fr_core::Error::Debug");
         check_no_leak(&format!("{err}"), "fr_core::Error::Display");
