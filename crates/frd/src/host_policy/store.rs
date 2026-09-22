@@ -195,7 +195,7 @@ impl Store {
 fn trusted_ancestor(fd: &OwnedFd) -> Result<(), Error> {
     let stat = fs::fstat(fd)?;
     let trusted_owner = stat.st_uid == 0 || stat.st_uid == geteuid().as_raw();
-    let sticky_root = stat.st_uid == 0 && stat.st_mode & 0o1000 != 0;
+    let sticky_root = trusted_owner && stat.st_mode & 0o1000 != 0;
     if !trusted_owner || (stat.st_mode & 0o022 != 0 && !sticky_root) {
         return Err(Error::UnsafePath);
     }
