@@ -124,3 +124,15 @@ impl Host {
             .map_err(Error::from)
     }
 }
+
+impl HostSession {
+    // Fail before a native factory, monitor discovery or capture is invoked.
+    // Successful observation negotiation alone does not admit a media profile.
+    pub(crate) fn require_shared_profile(&mut self) -> Result<(), Error> {
+        self.check()?;
+        if !super::native_control::profile(self.selection(), false) {
+            return Err(Error::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}

@@ -131,7 +131,7 @@ impl SessionAgent {
                     .map_err(Error::Startup)
             })
             .await?;
-            session.check().map_err(Error::Startup)?;
+            session.require_shared_profile().map_err(Error::Startup)?;
             let setup = factory().map_err(|()| Error::SourceSetup)?;
             let mut prepared = prepare_during_session(
                 self,

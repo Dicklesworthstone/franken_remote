@@ -644,3 +644,5 @@ mod managed;
 
 #[path = "incoming/service.rs"]
 mod scoped_service;
+
+mod native;
