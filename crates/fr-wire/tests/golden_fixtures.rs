@@ -142,6 +142,7 @@ fn test_control_fixtures_round_trip_and_fail_closed() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[rustfmt::skip]
 fn test_authority_fixtures_round_trip_and_fail_closed() {
     let auth_b = AuthBinding {
         channel: 0x0102_0304,
@@ -188,6 +189,7 @@ fn test_input_ticket_fixture_round_trip_and_fail_closed() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[rustfmt::skip]
 fn test_attachment_fixtures_round_trip_and_fail_closed() {
     let parent = ControlBinding {
         id: 7,
@@ -248,6 +250,7 @@ fn test_display_fixtures_round_trip_and_fail_closed() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[rustfmt::skip]
 fn test_decoder_fixtures_round_trip_and_fail_closed() {
     let b = DecBinding {
         parent: ControlBinding {
@@ -372,6 +375,7 @@ fn test_clipboard_fixtures_round_trip_and_fail_closed() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[rustfmt::skip]
 fn test_files_fixtures_round_trip_and_fail_closed() {
     let ctx = |sender: FileRole| FileContext {
         session: RemoteSessionId::from_raw(1),
@@ -407,6 +411,7 @@ fn test_files_fixtures_round_trip_and_fail_closed() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[rustfmt::skip]
 fn test_presented_fixtures_round_trip_and_fail_closed() {
     let b = DecBinding {
         parent: ControlBinding {
@@ -502,6 +507,7 @@ fn test_clock_fixtures_round_trip_and_fail_closed() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[rustfmt::skip]
 fn test_input_fixtures_round_trip_and_fail_closed() {
     for hex_str in [
         fix!("input/key_page_usage"), fix!("input/button"), fix!("input/pointer"),
