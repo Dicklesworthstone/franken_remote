@@ -989,34 +989,16 @@ fn bootstrap_is_not_a_zero_bound_media_or_input_escape() {
             bytes[..4].copy_from_slice(b"FRD0");
             bytes[6..8].copy_from_slice(&kind.to_be_bytes());
             assert!(matches!(
-                client.send(
-                    &cx,
-                    Route::Stream(c.outbound),
-                    &bytes,
-                    clock(&cx) + 1_000_000,
-                    || true
-                ),
+                client.send(&cx, Route::Stream(c.outbound), &bytes, clock(&cx) + 1_000_000, || true),
                 Err(Error::WrongRoute)
             ));
         }
         assert_eq!(client.usage().retained_send_records, 0);
         assert_eq!(client.addresses().unwrap().0, host.addresses().unwrap().1);
-        assert_eq!(
-            client.role().unwrap(),
-            asupersync::net::quic_native::StreamRole::Client
-        );
-        assert!(matches!(
-            client.bind_control(&cx, c, 0, 4096, || true),
-            Err(Error::WrongRoute)
-        ));
-        assert!(matches!(
-            client.bind_control(&cx, c, 1, 4097, || true),
-            Err(Error::WrongRoute)
-        ));
-        assert!(matches!(
-            client.bind_control(&cx, c, 1, 4096, || false),
-            Err(Error::Unauthorized)
-        ));
+        assert_eq!(client.role().unwrap(), asupersync::net::quic_native::StreamRole::Client);
+        assert!(matches!(client.bind_control(&cx, c, 0, 4096, || true), Err(Error::WrongRoute)));
+        assert!(matches!(client.bind_control(&cx, c, 1, 4097, || true), Err(Error::WrongRoute)));
+        assert!(matches!(client.bind_control(&cx, c, 1, 4096, || false), Err(Error::Unauthorized)));
         assert!(client.is_closed());
     });
 }
