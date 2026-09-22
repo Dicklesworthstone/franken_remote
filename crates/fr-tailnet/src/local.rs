@@ -369,3 +369,5 @@ pub use dial::{ConnectedPeer, DialRoute, NativeClient};
 
 mod discovery;
 pub use discovery::{DiscoveredPeer, Discovery, DiscoveryExclusions, PeerTransportPath};
+
+pub mod ingress;
