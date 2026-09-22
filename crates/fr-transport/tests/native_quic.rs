@@ -856,44 +856,15 @@ fn parallel_action_streams_and_wrong_initiators_are_refused_before_admission() {
         let (mut client, mut server) = (client.unwrap(), server.unwrap());
         let first = client.connection_mut().open_uni_stream(&cx).unwrap();
         let second = client.connection_mut().open_uni_stream(&cx).unwrap();
-        let route = StreamRoute {
-            stream: first,
-            binding: 7,
-            messages: Messages::InputActions,
-            priority: Priority::Critical,
-            outbound: true,
-            maximum: 512,
-        };
+        #[rustfmt::skip]
+        let route = StreamRoute { stream: first, binding: 7, messages: Messages::InputActions, priority: Priority::Critical, outbound: true, maximum: 512 };
         assert_eq!(
-            QuicRecords::new(
-                client,
-                &cx,
-                &[
-                    route,
-                    StreamRoute {
-                        stream: second,
-                        ..route
-                    }
-                ],
-                &[],
-                Policy::default()
-            )
-            .unwrap_err(),
+            QuicRecords::new(client, &cx, &[route, StreamRoute { stream: second, ..route }], &[], Policy::default()).unwrap_err(),
             Error::InvalidPolicy
         );
         let wrong = server.connection_mut().open_uni_stream(&cx).unwrap();
         assert_eq!(
-            QuicRecords::new(
-                server,
-                &cx,
-                &[StreamRoute {
-                    stream: wrong,
-                    ..route
-                }],
-                &[],
-                Policy::default()
-            )
-            .unwrap_err(),
+            QuicRecords::new(server, &cx, &[StreamRoute { stream: wrong, ..route }], &[], Policy::default()).unwrap_err(),
             Error::InvalidPolicy
         );
     });
