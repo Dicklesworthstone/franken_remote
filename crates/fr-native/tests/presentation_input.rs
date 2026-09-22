@@ -144,36 +144,19 @@ fn run(scenario: impl std::future::Future<Output = ()>) {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     runtime().block_on(scenario);
 }
+#[rustfmt::skip]
 async fn close_media(cx: &Cx, capture: &mut CaptureSource, presenter: &mut Presenter) {
     let worker = capture.worker_mut();
-    worker
-        .request(
-            cx,
-            Kind::Stop,
-            vec![],
-            Deadline::after(cx, Duration::from_millis(500)).unwrap(),
-        )
-        .await
-        .unwrap();
-    assert!(
-        worker
-            .reap(cx, Deadline::after(cx, Duration::from_millis(500)).unwrap())
-            .await
-            .unwrap()
-            .success()
-    );
-
-    presenter
-        .stop(cx, Deadline::after(cx, Duration::from_millis(500)).unwrap())
-        .await
-        .unwrap();
-    assert!(
-        presenter
-            .reap(cx, Deadline::after(cx, Duration::from_millis(500)).unwrap())
-            .await
-            .unwrap()
-            .success()
-    );
+    worker.request(cx, Kind::Stop, vec![], Deadline::after(cx, Duration::from_millis(500)).unwrap()).await.unwrap();
+    assert!(worker.reap(cx, Deadline::after(cx, Duration::from_millis(500)).unwrap()).await.unwrap().success());
+    presenter.stop(cx, Deadline::after(cx, Duration::from_millis(500)).unwrap()).await.unwrap();
+    assert!(presenter.reap(cx, Deadline::after(cx, Duration::from_millis(500)).unwrap()).await.unwrap().success());
+}
+#[rustfmt::skip]
+async fn abort_capture(cx: &Cx, capture: &mut CaptureSource) {
+    let worker = capture.worker_mut();
+    worker.abort();
+    let _ = worker.reap(cx, Deadline::after(cx, Duration::from_millis(500)).unwrap()).await;
 }
 struct Video {
     source: X11Surface,
@@ -468,45 +451,25 @@ struct RecoveryCounts {
     peak_sender_bytes: usize,
     peak_receiver_bytes: usize,
 }
+#[rustfmt::skip]
 fn check_bounds(video: &Video, counts: &mut RecoveryCounts) {
-    let send = video.subscription.cache_usage();
-    let receive = video.receiver.budget_usage();
-    assert!(send.bytes <= SendPolicy::default().max_cached_bytes);
-    assert!(send.pictures <= SendPolicy::default().max_cached_pictures);
-    assert!(
-        u64::try_from(receive.bytes).unwrap()
-            <= video.wire.protocol().per_viewer_compressed_bytes()
-    );
-    assert!(receive.pictures <= usize::from(video.wire.protocol().reassembly_window_pictures()));
-    counts.peak_sender_bytes = counts.peak_sender_bytes.max(send.bytes);
-    counts.peak_receiver_bytes = counts.peak_receiver_bytes.max(receive.bytes);
+    let (send, receive) = (video.subscription.cache_usage(), video.receiver.budget_usage());
+    assert!(send.bytes <= SendPolicy::default().max_cached_bytes && send.pictures <= SendPolicy::default().max_cached_pictures);
+    assert!(u64::try_from(receive.bytes).unwrap() <= video.wire.protocol().per_viewer_compressed_bytes() && receive.pictures <= usize::from(video.wire.protocol().reassembly_window_pictures()));
+    counts.peak_sender_bytes = counts.peak_sender_bytes.max(send.bytes); counts.peak_receiver_bytes = counts.peak_receiver_bytes.max(receive.bytes);
 }
 fn receive_packet(video: &mut Video, offer: &PacketOffer, packet: &[u8], cx: &Cx) {
     let at = now(cx);
-    video
-        .receiver
-        .receive(offer.channel(), packet, at.0)
-        .unwrap();
-    if offer.channel() == Channel::MediaConfig {
-        video.client.progress(packet, &video.wire, at).unwrap();
-    }
+    video.receiver.receive(offer.channel(), packet, at.0).unwrap();
+    if offer.channel() == Channel::MediaConfig { video.client.progress(packet, &video.wire, at).unwrap(); }
 }
-fn flush_fragments(
-    video: &mut Video,
-    held: &mut [Option<(PacketOffer, [u8; 1150])>; 4],
-    counts: &mut RecoveryCounts,
-    cx: &Cx,
-) {
+fn flush_fragments(video: &mut Video, held: &mut [Option<(PacketOffer, [u8; 1150])>; 4], counts: &mut RecoveryCounts, cx: &Cx) {
     for entry in held.iter_mut().rev() {
         if let Some((offer, packet)) = entry.take() {
             receive_packet(video, &offer, &packet[..offer.byte_len()], cx);
             let before = video.receiver.budget_usage();
             receive_packet(video, &offer, &packet[..offer.byte_len()], cx);
-            assert_eq!(
-                video.receiver.budget_usage(),
-                before,
-                "duplicate allocated again"
-            );
+            assert_eq!(video.receiver.budget_usage(), before, "duplicate allocated again");
             counts.duplicate_fragments += 1;
             check_bounds(video, counts);
         }
@@ -698,73 +661,32 @@ async fn repair_missing(video: &mut Video, counts: &mut RecoveryCounts, cx: &Cx)
     }
     assert!(counts.repair_wire_bytes <= SendPolicy::default().repair_bytes_per_window);
 }
-fn collect_input_result(
-    client: &mut PresentedInput,
-    result: fr_wire::input_result::InputResult,
-    cx: &Cx,
-) {
+#[rustfmt::skip]
+fn collect_input_result(client: &mut PresentedInput, result: fr_wire::input_result::InputResult, cx: &Cx) {
     let mut packet = [0; fr_wire::input_result::INPUT_RESULT_BYTES];
-    let bytes = fr_wire::input_result::encode_input_result(
-        result,
-        &mut packet,
-        &config().limits().unwrap(),
-        fr_wire::input::InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    )
-    .unwrap();
-    assert_eq!(
-        client.result(&packet[..bytes], now(cx)).unwrap(),
-        ResultEvent::Completed(result)
-    );
+    let bytes = fr_wire::input_result::encode_input_result(result, &mut packet, &config().limits().unwrap(), fr_wire::input::InputDirection::HostToViewer, InputDelivery::Reliable).unwrap();
+    assert_eq!(client.result(&packet[..bytes], now(cx)).unwrap(), ResultEvent::Completed(result));
 }
+#[rustfmt::skip]
 async fn press_drag(video: &mut Video, agent: &mut Agent, cx: &Cx) {
     let mut packet = [0; 1150];
-    let press = video
-        .client
-        .action(
-            Action::Button {
-                button: PointerButton::Primary,
-                pressed: true,
-                position: DesktopPoint { x: 30, y: 40 },
-            },
-            &mut packet,
-            now(cx),
-        )
-        .unwrap();
-    agent
-        .submit(&packet[..press.bytes], InputDelivery::Reliable)
-        .unwrap();
-    let frd::input_agent::InputReply::Record(result) =
-        agent.input_response().unwrap().await.unwrap()
-    else {
-        panic!("real native press receipt required")
-    };
+    let press = video.client.action(Action::Button { button: PointerButton::Primary, pressed: true, position: DesktopPoint { x: 30, y: 40 } }, &mut packet, now(cx)).unwrap();
+    agent.submit(&packet[..press.bytes], InputDelivery::Reliable).unwrap();
+    let frd::input_agent::InputReply::Record(result) = agent.input_response().unwrap().await.unwrap() else { panic!("real native press receipt required") };
     assert_eq!(result.outcome, InputOutcome::SubmittedToOs);
     assert_eq!(result.submitted_operations, 2);
     observe_pressed(&mut video.observer, agent, cx).await;
     collect_input_result(&mut video.client, result, cx);
 }
-
+#[rustfmt::skip]
 async fn observe_pressed(observer: &mut X11Pointer, agent: &Agent, cx: &Cx) {
-    // SubmittedToOs certifies XFlush on the native connection. This independent
-    // observer connection may be serviced first. Wait only for observation;
-    // never resubmit an action, renew authority, or extend a source deadline.
     let started = now(cx).0;
     loop {
         let state = observer.query_pointer().unwrap();
         let elapsed = now(cx).0 - started;
-        assert!(
-            !agent.control().is_stopped(),
-            "press observation after {elapsed} us: control stopped {:?}, state {state:?}",
-            agent.control().reason()
-        );
-        assert!(
-            elapsed < 50_000,
-            "press not observed after {elapsed} us: {state:?}"
-        );
-        if state == (DesktopPoint { x: 30, y: 40 }, 256) {
-            return;
-        }
+        assert!(!agent.control().is_stopped(), "press observation after {elapsed} us: control stopped {:?}, state {state:?}", agent.control().reason());
+        assert!(elapsed < 50_000, "press not observed after {elapsed} us: {state:?}");
+        if state == (DesktopPoint { x: 30, y: 40 }, 256) { return; }
         asupersync::time::sleep(cx.timer_driver().unwrap().now(), Duration::from_millis(1)).await;
     }
 }
@@ -1007,75 +929,37 @@ fn actual_hevc_late_repaired_reference_unlocks_a_fresh_dependent_without_present
 
 // Local fixture routing for an already decoded, unchanged native configuration.
 // This is NOT the missing exact-hvcC DecoderConfiguration/Configured handshake.
+#[rustfmt::skip]
 fn replace_recovery(video: &mut Video, cx: &Cx, generation: u64, first_binding: u32) {
-    let epoch = MediaEpoch {
-        configuration: config().generation,
-        recovery: RecoveryGeneration::from_raw(generation),
-    };
-    let bindings = MediaBindings::new(
-        first_binding,
-        first_binding + 1,
-        first_binding + 2,
-        first_binding + 3,
-    )
-    .unwrap();
+    let epoch = MediaEpoch { configuration: config().generation, recovery: RecoveryGeneration::from_raw(generation) };
+    let bindings = MediaBindings::new(first_binding, first_binding + 1, first_binding + 2, first_binding + 3).unwrap();
     video.subscription.recover(epoch, bindings).unwrap();
-    video
-        .presenter
-        .recover(cx, &mut video.receiver, epoch, bindings)
-        .unwrap();
+    video.presenter.recover(cx, &mut video.receiver, epoch, bindings).unwrap();
 }
-async fn recovered_frame(
-    video: &mut Video,
-    output: &mut X11Surface,
-    cx: &Cx,
-    frame: u64,
-    phase: u8,
-) {
-    // Both reliable chunks and datagrams use this fixture's 1150-byte cap.
+#[rustfmt::skip]
+async fn recovered_frame(video: &mut Video, output: &mut X11Surface, cx: &Cx, frame: u64, phase: u8) {
     let mut packet = [0; 1150];
     while let Some(offer) = video.subscription.next_packet(&mut packet).unwrap() {
         video.subscription.authorize_write(&offer).unwrap();
-        video
-            .receiver
-            .receive(offer.channel(), &packet[..offer.byte_len()], now(cx).0)
-            .unwrap();
+        video.receiver.receive(offer.channel(), &packet[..offer.byte_len()], now(cx).0).unwrap();
     }
-    let receipt = video
-        .presenter
-        .present_next(cx, &mut video.receiver)
-        .await
-        .unwrap()
-        .unwrap();
+    let receipt = video.presenter.present_next(cx, &mut video.receiver).await.unwrap().unwrap();
     assert_eq!(receipt.frame.as_raw(), frame);
     assert_eq!(receipt.stage, PresentationStage::SubmittedToCompositor);
-    assert_eq!(
-        receipt.decoded.epoch().recovery,
-        RecoveryGeneration::from_raw(2)
-    );
+    assert_eq!(receipt.decoded.epoch().recovery, RecoveryGeneration::from_raw(2));
     let image = output.snapshot().unwrap();
     for (x, y) in [(144, 108), (160, 120), (176, 132)] {
-        assert!(
-            image.pixels()[4 * (y * 320 + x)..][..3]
-                .iter()
-                .zip(marker(phase))
-                .all(|(&actual, expected)| actual.abs_diff(expected) < 10)
-        );
+        assert!(image.pixels()[4 * (y * 320 + x)..][..3].iter().zip(marker(phase)).all(|(&actual, expected)| actual.abs_diff(expected) < 10));
     }
     assert_eq!(video.receiver.state(), ReceiveState::Streaming);
     assert_eq!(video.receiver.budget_usage(), BudgetUsage::default());
-    assert!(
-        video.client.stopped().is_some(),
-        "new media resurrected old input view"
-    );
+    assert!(video.client.stopped().is_some(), "new media resurrected old input view");
 }
+#[rustfmt::skip]
 fn deliver_next(video: &mut Video, cx: &Cx, packet: &mut [u8]) -> PacketOffer {
     let offer = video.subscription.next_packet(packet).unwrap().unwrap();
     video.subscription.authorize_write(&offer).unwrap();
-    video
-        .receiver
-        .receive(offer.channel(), &packet[..offer.byte_len()], now(cx).0)
-        .unwrap();
+    video.receiver.receive(offer.channel(), &packet[..offer.byte_len()], now(cx).0).unwrap();
     offer
 }
 #[test]
@@ -1277,41 +1161,9 @@ fn dropping_native_decode_fences_receiver_and_forbids_recovery_on_dead_worker() 
         assert_eq!(video.receiver.state(), ReceiveState::Closed);
         assert_eq!(video.receiver.budget_usage(), BudgetUsage::default());
         assert!(video.client.tick(now(&cx)).is_err());
-        assert!(
-            video
-                .presenter
-                .recover(
-                    &cx,
-                    &mut video.receiver,
-                    MediaEpoch {
-                        configuration: config().generation,
-                        recovery: RecoveryGeneration::from_raw(2)
-                    },
-                    MediaBindings::new(5, 6, 7, 8).unwrap()
-                )
-                .is_err()
-        );
-        assert!(
-            !video
-                .presenter
-                .reap(
-                    &cx,
-                    Deadline::after(&cx, Duration::from_millis(500)).unwrap()
-                )
-                .await
-                .unwrap()
-                .success()
-        );
-        video.capture.worker_mut().abort();
-        video
-            .capture
-            .worker_mut()
-            .reap(
-                &cx,
-                Deadline::after(&cx, Duration::from_millis(500)).unwrap(),
-            )
-            .await
-            .unwrap();
+        assert!(video.presenter.recover(&cx, &mut video.receiver, MediaEpoch { configuration: config().generation, recovery: RecoveryGeneration::from_raw(2) }, MediaBindings::new(5, 6, 7, 8).unwrap()).is_err());
+        assert!(!video.presenter.reap(&cx, Deadline::after(&cx, Duration::from_millis(500)).unwrap()).await.unwrap().success());
+        abort_capture(&cx, &mut video.capture).await;
     });
 }
 #[test]
@@ -1323,44 +1175,18 @@ fn failed_native_startup_never_configures_receiver_and_drop_invalidates_view() {
         let mut video = prepare(&source, &viewer, &cx).await;
         let record = bootstrap_record(&mut video.capture, &video.control, config()).await;
         let c = receiver_config(video.wire);
-        let mut receiver =
-            ReceivePipeline::new(c, MediaBudget::new(c.limits.protocol()).unwrap()).unwrap();
-        // A real failed child launch must not leave a configured receiver. The
-        // missing executable is a failure witness, not a mock decoder backend.
-        let missing =
-            std::env::temp_dir().join(format!("fr-missing-decoder-{}", std::process::id()));
+        let mut receiver = ReceivePipeline::new(c, MediaBudget::new(c.limits.protocol()).unwrap()).unwrap();
+        let missing = std::env::temp_dir().join(format!("fr-missing-decoder-{}", std::process::id()));
         assert!(!missing.exists());
         let launch = Launch::new(&missing, &viewer.name, None, Role::Present, 99).unwrap();
-        assert!(matches!(
-            Presenter::start(&cx, launch, config(), &record, &mut receiver).await,
-            Err(frd::media::Error::Worker(frd::worker::Error::SpawnFailed(
-                frd::worker::SpawnFailure::NotFound
-            )))
-        ));
+        assert!(matches!(Presenter::start(&cx, launch, config(), &record, &mut receiver).await, Err(frd::media::Error::Worker(frd::worker::Error::SpawnFailed(frd::worker::SpawnFailure::NotFound)))));
         assert_eq!(receiver.state(), ReceiveState::Closed);
         assert_eq!(receiver.budget_usage(), BudgetUsage::default());
         drop(video.presenter);
-        assert!(matches!(
-            video.client.tick(now(&cx)),
-            Err(fr_client::input::presentation::Error::Media(
-                ViewError::StaleBinding
-            ))
-        ));
+        assert!(matches!(video.client.tick(now(&cx)), Err(fr_client::input::presentation::Error::Media(ViewError::StaleBinding))));
         assert_eq!(video.client.stopped(), Some(StopReason::ViewStale));
-        assert_eq!(
-            video.receiver.tick(now(&cx).0),
-            Err(DeliveryError::WrongState)
-        );
-        video.capture.worker_mut().abort();
-        video
-            .capture
-            .worker_mut()
-            .reap(
-                &cx,
-                Deadline::after(&cx, Duration::from_millis(500)).unwrap(),
-            )
-            .await
-            .unwrap();
+        assert_eq!(video.receiver.tick(now(&cx).0), Err(DeliveryError::WrongState));
+        abort_capture(&cx, &mut video.capture).await;
     });
 }
 
@@ -1371,53 +1197,15 @@ fn canceled_native_stop_cannot_rebind_before_receiver_watchdog_runs() {
         let viewer = Server::start();
         let cx = Cx::current().unwrap();
         let mut video = prepare(&source, &viewer, &cx).await;
-        // This context owns only the stop attempt. The healthy cleanup clock
-        // remains available to prove no new recovery can reauthorize this owner.
         let cancel_runtime = runtime();
         let cancelled = cancel_runtime.request_cx_with_budget(Budget::INFINITE);
         let until = Deadline::after(&cancelled, Duration::from_millis(500)).unwrap();
         cancelled.cancel_fast(asupersync::types::CancelKind::User);
-        assert!(matches!(
-            video.presenter.stop(&cancelled, until).await,
-            Err(frd::media::Error::Worker(frd::worker::Error::Cancelled))
-        ));
-        // Deliberately NO receiver.tick between revocation and rebind attempt.
-        assert!(
-            video
-                .presenter
-                .recover(
-                    &cx,
-                    &mut video.receiver,
-                    MediaEpoch {
-                        configuration: config().generation,
-                        recovery: RecoveryGeneration::from_raw(2)
-                    },
-                    MediaBindings::new(5, 6, 7, 8).unwrap()
-                )
-                .is_err()
-        );
-        assert!(
-            !video
-                .presenter
-                .reap(
-                    &cx,
-                    Deadline::after(&cx, Duration::from_millis(500)).unwrap()
-                )
-                .await
-                .unwrap()
-                .success()
-        );
+        assert!(matches!(video.presenter.stop(&cancelled, until).await, Err(frd::media::Error::Worker(frd::worker::Error::Cancelled))));
+        assert!(video.presenter.recover(&cx, &mut video.receiver, MediaEpoch { configuration: config().generation, recovery: RecoveryGeneration::from_raw(2) }, MediaBindings::new(5, 6, 7, 8).unwrap()).is_err());
+        assert!(!video.presenter.reap(&cx, Deadline::after(&cx, Duration::from_millis(500)).unwrap()).await.unwrap().success());
         assert!(video.client.tick(now(&cx)).is_err());
-        video.capture.worker_mut().abort();
-        video
-            .capture
-            .worker_mut()
-            .reap(
-                &cx,
-                Deadline::after(&cx, Duration::from_millis(500)).unwrap(),
-            )
-            .await
-            .unwrap();
+        abort_capture(&cx, &mut video.capture).await;
     });
 }
 

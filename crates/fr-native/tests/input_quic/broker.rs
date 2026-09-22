@@ -17,21 +17,9 @@ use std::sync::{
     mpsc,
 };
 
+#[rustfmt::skip]
 fn selection() -> Selection {
-    Offer {
-        versions: vec![0],
-        profile: 1,
-        profile_version: 0,
-        role: SessionRole::RequestControl,
-        limits: ProtocolLimits::ABSOLUTE,
-        capabilities: vec![Capability {
-            name: CAPABILITY.into(),
-            version: 1,
-            required: true,
-        }],
-    }
-    .select()
-    .unwrap()
+    Offer { versions: vec![0], profile: 1, profile_version: 0, role: SessionRole::RequestControl, limits: ProtocolLimits::ABSOLUTE, capabilities: vec![Capability { name: CAPABILITY.into(), version: 1, required: true }] }.select().unwrap()
 }
 struct Setup {
     cx: Cx,
@@ -66,99 +54,32 @@ impl Setup {
             .unwrap();
         (setup, viewer)
     }
+    #[rustfmt::skip]
     fn from_pair(
-        cx: Cx,
-        seat: Seat,
-        policy: AuthorityPolicy,
-        ready: bool,
-        pair: Pair,
-        attached: Option<(frd::input_quic::NegotiatedInput, Selection)>,
+        cx: Cx, seat: Seat, policy: AuthorityPolicy, ready: bool, pair: Pair, attached: Option<(frd::input_quic::NegotiatedInput, Selection)>,
     ) -> Self {
         let display = Display::new();
         let observer = X11Pointer::open(&display.name).unwrap();
         let request = Request {
-            parent: if attached.is_some() {
-                super::negotiated::parent()
-            } else {
-                ControlBinding {
-                    id: pair.control_routes.inbound.binding,
-                    host_boot: HostBootId::from_raw(4),
-                    os_session: OsSessionId::from_raw(5),
-                    remote_session: credentials().session,
-                }
-            },
+            parent: if attached.is_some() { super::negotiated::parent() } else { ControlBinding { id: pair.control_routes.inbound.binding, host_boot: HostBootId::from_raw(4), os_session: OsSessionId::from_raw(5), remote_session: credentials().session } },
             sequence: 0,
-            target: Target {
-                display_binding: if attached.is_some() { 6 } else { 12 },
-                view: credentials().view,
-                bounds: observer.bounds(),
-                capabilities: observer.capabilities(),
-            },
+            target: Target { display_binding: if attached.is_some() { 6 } else { 12 }, view: credentials().view, bounds: observer.bounds(), capabilities: observer.capabilities() },
         };
         let now = host_now(&cx).unwrap();
         let mut a = SessionAuthority::new(request.parent.remote_session, policy);
-        a.mark_capabilities_checked().unwrap();
-        a.authorize_observation(now).unwrap();
-        if ready {
-            a.mark_view_ready(now).unwrap();
-        }
+        a.mark_capabilities_checked().unwrap(); a.authorize_observation(now).unwrap();
+        if ready { a.mark_view_ready(now).unwrap(); }
         let observation = frd::media::ObservationControl::new(cx.clone(), a).unwrap();
         let selected = attached.as_ref().map_or_else(selection, |(_, s)| s.clone());
-        let scope = Scope {
-            parent: request.parent,
-            control: pair.control_routes,
-            selection: &selected,
-        };
+        let scope = Scope { parent: request.parent, control: pair.control_routes, selection: &selected };
         let broker = if let Some((proof, _)) = attached {
-            GrantBroker::from_negotiated(
-                observation.clone(),
-                &pair.server,
-                seat.clone(),
-                scope,
-                proof,
-            )
+            GrantBroker::from_negotiated(observation.clone(), &pair.server, seat.clone(), scope, proof)
         } else {
-            GrantBroker::new(
-                observation.clone(),
-                &pair.server,
-                seat.clone(),
-                scope,
-                pair.routes,
-            )
-        }
-        .unwrap();
-        let requester = fr_client::control_grant::RequestControl::new(
-            request,
-            7,
-            ProtocolLimits::ABSOLUTE,
-            ClientInstant(now.as_micros()),
-        )
-        .unwrap();
-        let clock = ClockCorrelation::new(
-            ClockSample {
-                host_boot: request.parent.host_boot,
-                client_sent_us: now.as_micros(),
-                client_received_us: now.as_micros(),
-                host_sample_us: now.as_micros(),
-            },
-            ClockPolicy {
-                drift_ppm: 0,
-                ..ClockPolicy::default()
-            },
-        )
-        .unwrap();
-        Self {
-            cx,
-            pair,
-            observation,
-            broker,
-            seat,
-            request,
-            requester,
-            clock,
-            observer,
-            display,
-        }
+            GrantBroker::new(observation.clone(), &pair.server, seat.clone(), scope, pair.routes)
+        }.unwrap();
+        let requester = fr_client::control_grant::RequestControl::new(request, 7, ProtocolLimits::ABSOLUTE, ClientInstant(now.as_micros())).unwrap();
+        let clock = ClockCorrelation::new(ClockSample { host_boot: request.parent.host_boot, client_sent_us: now.as_micros(), client_received_us: now.as_micros(), host_sample_us: now.as_micros() }, ClockPolicy { drift_ppm: 0, ..ClockPolicy::default() }).unwrap();
+        Self { cx, pair, observation, broker, seat, request, requester, clock, observer, display }
     }
     async fn pump(&mut self) {
         let (c, s) = Box::pin(network::both(
@@ -420,28 +341,11 @@ fn request_is_not_consent_and_wrong_local_target_never_calls_native_factory() {
         s.request().await;
         let mut wrong = s.request.target;
         wrong.display_binding += 1;
-        let result = s.broker.approve::<X11Pointer, _, _>(
-            &s.pair.server,
-            wrong,
-            || panic!("credential before approval"),
-            || panic!("native before approval"),
-            X11Pointer::cleanup_native,
-        );
-        assert!(matches!(result, Err(GrantError::TargetChanged)));
-        assert!(!s.seat.is_occupied());
-        assert!(s.observation.check().is_ok());
+        assert!(matches!(s.broker.approve::<X11Pointer, _, _>(&s.pair.server, wrong, || panic!(), || panic!(), X11Pointer::cleanup_native), Err(GrantError::TargetChanged)));
+        assert!(!s.seat.is_occupied() && s.observation.check().is_ok());
         s.broker.deny();
         assert!(s.broker.request().is_none());
-        assert!(matches!(
-            s.broker.approve::<X11Pointer, _, _>(
-                &s.pair.server,
-                s.request.target,
-                || panic!(),
-                || panic!(),
-                X11Pointer::cleanup_native
-            ),
-            Err(GrantError::NoRequest)
-        ));
+        assert!(matches!(s.broker.approve::<X11Pointer, _, _>(&s.pair.server, s.request.target, || panic!(), || panic!(), X11Pointer::cleanup_native), Err(GrantError::NoRequest)));
         assert!(s.observation.check().is_ok());
     });
 }
@@ -450,156 +354,71 @@ fn approval_cannot_create_readiness_or_hold_the_seat_after_refusal() {
     run(|cx, _second| async move {
         let mut s = Setup::new(cx, Seat::default(), AuthorityPolicy::plan_defaults(), false).await;
         s.request().await;
-        let result = s.broker.approve::<X11Pointer, _, _>(
-            &s.pair.server,
-            s.request.target,
-            || Some((InputLeaseId::from_raw(20), InputTicketId::from_raw(30))),
-            || panic!("factory must not run"),
-            X11Pointer::cleanup_native,
-        );
+        let result = s.broker.approve::<X11Pointer, _, _>(&s.pair.server, s.request.target, || Some((InputLeaseId::from_raw(20), InputTicketId::from_raw(30))), || panic!("factory must not run"), X11Pointer::cleanup_native);
         assert!(matches!(result, Err(GrantError::Media(_))));
-        assert!(!s.seat.is_occupied());
-        assert!(s.observation.check().is_ok());
+        assert!(!s.seat.is_occupied() && s.observation.check().is_ok());
     });
 }
 #[test]
 fn competing_approved_viewers_cannot_both_mint_authority_or_call_factories() {
     run(|cx, second| async move {
         let seat = Seat::default();
-        let mut a = Setup::new(
-            cx.clone(),
-            seat.clone(),
-            AuthorityPolicy::plan_defaults(),
-            true,
-        )
-        .await;
+        let mut a = Setup::new(cx.clone(), seat.clone(), AuthorityPolicy::plan_defaults(), true).await;
         let mut b = Setup::new(second, seat.clone(), AuthorityPolicy::plan_defaults(), true).await;
-        a.request().await;
-        b.request().await;
+        a.request().await; b.request().await;
         let driver = a.approve();
         let (shutdown, ()) = Box::pin(network::both(driver, async {
             assert!(seat.is_occupied());
-            assert!(matches!(
-                b.broker.approve::<X11Pointer, _, _>(
-                    &b.pair.server,
-                    b.request.target,
-                    || panic!("busy must not consume credentials"),
-                    || panic!("losing factory"),
-                    X11Pointer::cleanup_native
-                ),
-                Err(GrantError::Agent(frd::input_agent::Error::SeatBusy))
-            ));
+            assert!(matches!(b.broker.approve::<X11Pointer, _, _>(&b.pair.server, b.request.target, || panic!(), || panic!(), X11Pointer::cleanup_native), Err(GrantError::Agent(frd::input_agent::Error::SeatBusy))));
             assert!(b.observation.check().is_ok());
             a.broker.stop();
-        }))
-        .await;
-        assert!(shutdown.handoff_safe());
-        assert!(!seat.is_occupied());
-        assert!(a.observation.check().is_err());
-        assert!(b.observation.check().is_ok());
+        })).await;
+        assert!(shutdown.handoff_safe() && !seat.is_occupied() && a.observation.check().is_err() && b.observation.check().is_ok());
         let driver = b.approve();
-        let (shutdown, ()) = Box::pin(network::both(driver, async {
-            b.queued().await;
-            b.broker.stop();
-        }))
-        .await;
+        let (shutdown, ()) = Box::pin(network::both(driver, async { b.queued().await; b.broker.stop(); })).await;
         assert!(shutdown.handoff_safe());
     });
 }
 struct EmptySink;
 impl InputSink for EmptySink {
-    fn prepare(&mut self, _: Operation) -> Result<(), PlatformError> {
-        panic!("no grant, no preparation")
-    }
-    fn submit(&mut self, _: Operation) -> Submission {
-        panic!("no grant, no native input")
-    }
+    fn prepare(&mut self, _: Operation) -> Result<(), PlatformError> { panic!("no grant, no preparation") }
+    fn submit(&mut self, _: Operation) -> Submission { panic!("no grant, no native input") }
 }
 #[test]
 fn blocked_initialization_expires_without_grant_and_keeps_seat_until_native_destruction() {
     run(|cx, _second| async move {
-        let policy = AuthorityPolicy {
-            authorization_lifetime: HostDuration::from_millis_checked(200).unwrap(),
-            ticket_lifetime: HostDuration::from_millis_checked(60).unwrap(),
-        };
+        let policy = AuthorityPolicy { authorization_lifetime: HostDuration::from_millis_checked(200).unwrap(), ticket_lifetime: HostDuration::from_millis_checked(60).unwrap() };
         let mut s = Setup::new(cx, Seat::default(), policy, true).await;
         s.request().await;
         let (tx, rx) = mpsc::channel();
         let entered = Arc::new(AtomicBool::new(false));
         let worker = entered.clone();
-        let driver = s
-            .broker
-            .approve(
-                &s.pair.server,
-                s.request.target,
-                || Some((InputLeaseId::from_raw(20), InputTicketId::from_raw(30))),
-                move || {
-                    worker.store(true, Ordering::Release);
-                    let _ = rx.recv();
-                    Ok(EmptySink)
-                },
-                |_| true,
-            )
-            .unwrap();
+        let driver = s.broker.approve(&s.pair.server, s.request.target, || Some((InputLeaseId::from_raw(20), InputTicketId::from_raw(30))), move || { worker.store(true, Ordering::Release); let _ = rx.recv(); Ok(EmptySink) }, |_| true).unwrap();
         let (shutdown, ()) = Box::pin(network::both(driver, async {
-            while !entered.load(Ordering::Acquire) {
-                asupersync::time::sleep(s.cx.now(), Duration::from_millis(1)).await;
-            }
-            assert_eq!(
-                s.broker
-                    .service(&mut s.pair.server, Some(s.request.target))
-                    .unwrap(),
-                Event::NativeStarting
-            );
+            while !entered.load(Ordering::Acquire) { asupersync::time::sleep(s.cx.now(), Duration::from_millis(1)).await; }
+            assert_eq!(s.broker.service(&mut s.pair.server, Some(s.request.target)).unwrap(), Event::NativeStarting);
             asupersync::time::sleep(s.cx.now(), Duration::from_millis(80)).await;
-            assert_eq!(
-                s.broker.service(&mut s.pair.server, Some(s.request.target)),
-                Err(GrantError::Expired)
-            );
-            assert!(s.seat.is_occupied());
-            assert!(s.broker.native_status().unwrap().stopped);
-            assert!(s.broker.native_status().unwrap().exit.is_none());
+            assert_eq!(s.broker.service(&mut s.pair.server, Some(s.request.target)), Err(GrantError::Expired));
+            assert!(s.seat.is_occupied() && s.broker.native_status().unwrap().stopped && s.broker.native_status().unwrap().exit.is_none());
             tx.send(()).unwrap();
-        }))
-        .await;
-        assert!(shutdown.handoff_safe());
-        assert!(!s.seat.is_occupied());
+        })).await;
+        assert!(shutdown.handoff_safe() && !s.seat.is_occupied());
     });
 }
 #[test]
 fn watchdog_revokes_blocked_initialization_without_broker_service() {
     run(|cx, _second| async move {
-        let policy = AuthorityPolicy {
-            authorization_lifetime: HostDuration::from_millis_checked(150).unwrap(),
-            ticket_lifetime: HostDuration::from_millis_checked(100).unwrap(),
-        };
+        let policy = AuthorityPolicy { authorization_lifetime: HostDuration::from_millis_checked(150).unwrap(), ticket_lifetime: HostDuration::from_millis_checked(100).unwrap() };
         let mut s = Setup::new(cx, Seat::default(), policy, true).await;
         s.request().await;
         let (tx, rx) = mpsc::channel();
-        let driver = s
-            .broker
-            .approve(
-                &s.pair.server,
-                s.request.target,
-                || Some((InputLeaseId::from_raw(20), InputTicketId::from_raw(30))),
-                move || {
-                    let _ = rx.recv();
-                    Ok(EmptySink)
-                },
-                |_| true,
-            )
-            .unwrap();
+        let driver = s.broker.approve(&s.pair.server, s.request.target, || Some((InputLeaseId::from_raw(20), InputTicketId::from_raw(30))), move || { let _ = rx.recv(); Ok(EmptySink) }, |_| true).unwrap();
         let (shutdown, ()) = Box::pin(network::both(driver, async {
             let end = Instant::now() + Duration::from_secs(1);
-            while !s.broker.native_status().unwrap().stopped {
-                assert!(Instant::now() < end);
-                asupersync::time::sleep(s.cx.now(), Duration::from_millis(1)).await;
-            }
-            assert!(s.seat.is_occupied());
-            assert!(s.broker.native_status().unwrap().exit.is_none());
+            while !s.broker.native_status().unwrap().stopped { assert!(Instant::now() < end); asupersync::time::sleep(s.cx.now(), Duration::from_millis(1)).await; }
+            assert!(s.seat.is_occupied() && s.broker.native_status().unwrap().exit.is_none());
             tx.send(()).unwrap();
-        }))
-        .await;
+        })).await;
         assert!(shutdown.handoff_safe());
     });
 }

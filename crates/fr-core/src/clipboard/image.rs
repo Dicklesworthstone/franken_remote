@@ -839,41 +839,23 @@ pub fn sha256_digest(data: &[u8]) -> [u8; 32] {
 mod tests {
     use super::*;
 
-    /// Constructs a minimal valid PNG in memory for testing.
+    #[rustfmt::skip]
     fn make_test_png(width: u32, height: u32, color_type: u8, bit_depth: u8) -> Vec<u8> {
-        let mut png = Vec::new();
-        png.extend_from_slice(&PNG_MAGIC);
-        // IHDR chunk: length 13
-        png.extend_from_slice(&13_u32.to_be_bytes());
-        png.extend_from_slice(b"IHDR");
-        png.extend_from_slice(&width.to_be_bytes());
-        png.extend_from_slice(&height.to_be_bytes());
-        png.push(bit_depth);
-        png.push(color_type);
-        png.push(0); // compression
-        png.push(0); // filter
-        png.push(0); // interlace
-        png.extend_from_slice(&[0, 0, 0, 0]); // dummy CRC
-        // IDAT chunk (minimal)
-        png.extend_from_slice(&0_u32.to_be_bytes());
-        png.extend_from_slice(b"IDAT");
-        png.extend_from_slice(&[0, 0, 0, 0]); // dummy CRC
-        // IEND chunk
-        png.extend_from_slice(&0_u32.to_be_bytes());
-        png.extend_from_slice(b"IEND");
-        png.extend_from_slice(&[0, 0, 0, 0]); // dummy CRC
+        let mut png = PNG_MAGIC.to_vec();
+        png.extend_from_slice(&13_u32.to_be_bytes()); png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&width.to_be_bytes()); png.extend_from_slice(&height.to_be_bytes());
+        png.extend_from_slice(&[bit_depth, color_type, 0, 0, 0, 0, 0, 0, 0]);
+        png.extend_from_slice(&0_u32.to_be_bytes()); png.extend_from_slice(b"IDAT"); png.extend_from_slice(&[0; 4]);
+        png.extend_from_slice(&0_u32.to_be_bytes()); png.extend_from_slice(b"IEND"); png.extend_from_slice(&[0; 4]);
         png
     }
 
     #[test]
     fn valid_png_inspection() {
         let limits = ProtocolLimits::ABSOLUTE;
-        let png = make_test_png(640, 480, 6, 8); // RGBA 8-bit
+        let png = make_test_png(640, 480, 6, 8);
         let meta = inspect_png(&png, &limits).expect("valid png");
-        assert_eq!(meta.width, 640);
-        assert_eq!(meta.height, 480);
-        assert_eq!(meta.bit_depth, 8);
-        assert_eq!(meta.color_type, 6);
+        assert_eq!((meta.width, meta.height, meta.bit_depth, meta.color_type), (640, 480, 8, 6));
         assert_eq!(meta.total_bytes, u32::try_from(png.len()).unwrap());
         assert_ne!(meta.content_sha256, [0; 32]);
     }
@@ -881,14 +863,9 @@ mod tests {
     #[test]
     fn refusal_decompression_bomb_fixture() {
         let limits = ProtocolLimits::ABSOLUTE;
-        // 4096 x 4096 has 16,777,216 pixels (within max_coded_pixels), but 16-bit RGBA
-        // requires 128 MiB uncompressed, which exceeds MAX_DECOMPRESSED_SURFACE_BYTES (64 MiB)
         let png = make_test_png(4096, 4096, 6, 16);
         match inspect_png(&png, &limits) {
-            Err(ImageInspectionError::DecompressionBomb {
-                estimated_uncompressed_bytes,
-                ceiling,
-            }) => {
+            Err(ImageInspectionError::DecompressionBomb { estimated_uncompressed_bytes, ceiling }) => {
                 assert_eq!(estimated_uncompressed_bytes, 4096 * 4096 * 8);
                 assert_eq!(ceiling, MAX_DECOMPRESSED_SURFACE_BYTES);
             }
@@ -899,18 +876,10 @@ mod tests {
     #[test]
     fn refusal_zero_dimension_and_invalid_signature() {
         let limits = ProtocolLimits::ABSOLUTE;
-        let png_zero = make_test_png(0, 100, 6, 8);
-        assert_eq!(
-            inspect_png(&png_zero, &limits),
-            Err(ImageInspectionError::ZeroDimension)
-        );
-
+        assert_eq!(inspect_png(&make_test_png(0, 100, 6, 8), &limits), Err(ImageInspectionError::ZeroDimension));
         let mut bad_sig = make_test_png(100, 100, 6, 8);
         bad_sig[0] = 0x00;
-        assert_eq!(
-            inspect_png(&bad_sig, &limits),
-            Err(ImageInspectionError::InvalidSignature)
-        );
+        assert_eq!(inspect_png(&bad_sig, &limits), Err(ImageInspectionError::InvalidSignature));
     }
 
     #[test]
@@ -918,262 +887,98 @@ mod tests {
         let limits = ProtocolLimits::ABSOLUTE;
         let mut large = vec![0u8; MAX_IMAGE_BYTES + 1];
         large[..8].copy_from_slice(&PNG_MAGIC);
-        assert!(matches!(
-            inspect_png(&large, &limits),
-            Err(ImageInspectionError::PayloadTooLarge { .. })
-        ));
+        assert!(matches!(inspect_png(&large, &limits), Err(ImageInspectionError::PayloadTooLarge { .. })));
     }
 
+    #[derive(Default)]
     struct TestImageSink {
         prepared: Option<(ImageMetadata, Stamp)>,
         published: Option<(ImageMetadata, Stamp)>,
     }
 
-    impl TestImageSink {
-        fn new() -> Self {
-            Self {
-                prepared: None,
-                published: None,
-            }
-        }
-    }
-
     impl ImageClipboardSink for TestImageSink {
-        fn prepare_image(
-            &mut self,
-            _png_bytes: &[u8],
-            metadata: &ImageMetadata,
-            stamp: Stamp,
-        ) -> Result<(), PlatformError> {
+        fn prepare_image(&mut self, _: &[u8], metadata: &ImageMetadata, stamp: Stamp) -> Result<(), PlatformError> {
             self.prepared = Some((*metadata, stamp));
             Ok(())
         }
-
         fn publish_image(&mut self, stamp: Stamp) -> Publication {
-            if let Some((meta, s)) = self.prepared.take()
-                && s == stamp
-            {
+            if let Some((meta, s)) = self.prepared.take() && s == stamp {
                 self.published = Some((meta, stamp));
                 return Publication::SubmittedToOs;
             }
             Publication::NotSubmitted(PlatformError::Unavailable)
         }
-
-        fn cancel_prepared(&mut self) {
-            self.prepared = None;
-        }
+        fn cancel_prepared(&mut self) { self.prepared = None; }
     }
 
+    #[rustfmt::skip]
     fn test_owner() -> crate::input_submission::InputSession {
-        use crate::{
-            authority::{AuthorityPolicy, SessionAuthority},
-            ids::*,
-            input::*,
-            input_submission::Capabilities,
-        };
+        use crate::{authority::{AuthorityPolicy, SessionAuthority}, ids::*, input::*, input_submission::Capabilities};
         let c = InputCredentials {
-            session: RemoteSessionId::from_raw(1),
-            lease: InputLeaseId::from_raw(2),
-            ticket: InputTicketId::from_raw(3),
-            view: InputView {
-                geometry: DisplayGeometryGeneration::INITIAL,
-                viewport: ViewportMappingGeneration::INITIAL,
-                configuration: CodecConfigurationGeneration::INITIAL,
-                recovery: RecoveryGeneration::INITIAL,
-            },
+            session: RemoteSessionId::from_raw(1), lease: InputLeaseId::from_raw(2), ticket: InputTicketId::from_raw(3),
+            view: InputView { geometry: DisplayGeometryGeneration::INITIAL, viewport: ViewportMappingGeneration::INITIAL, configuration: CodecConfigurationGeneration::INITIAL, recovery: RecoveryGeneration::INITIAL },
         };
         let mut a = SessionAuthority::new(c.session, AuthorityPolicy::plan_defaults());
-        a.mark_capabilities_checked().unwrap();
-        a.authorize_observation(HostInstant::from_micros(0))
-            .unwrap();
-        a.mark_view_ready(HostInstant::from_micros(0)).unwrap();
-        a.grant_lease(c.lease, HostInstant::from_micros(0)).unwrap();
-        a.issue_input_ticket(c.lease, c.ticket, HostInstant::from_micros(0))
-            .unwrap();
-        crate::input_submission::InputSession::new(
-            a,
-            c,
-            InputBounds::new(DesktopPoint { x: 0, y: 0 }, 320, 240).unwrap(),
-            Capabilities::default(),
-            HostInstant::from_micros(0),
-        )
-        .unwrap()
+        a.mark_capabilities_checked().unwrap(); a.authorize_observation(HostInstant::from_micros(0)).unwrap();
+        a.mark_view_ready(HostInstant::from_micros(0)).unwrap(); a.grant_lease(c.lease, HostInstant::from_micros(0)).unwrap();
+        a.issue_input_ticket(c.lease, c.ticket, HostInstant::from_micros(0)).unwrap();
+        crate::input_submission::InputSession::new(a, c, InputBounds::new(DesktopPoint { x: 0, y: 0 }, 320, 240).unwrap(), Capabilities::default(), HostInstant::from_micros(0)).unwrap()
     }
 
     #[test]
     fn image_session_round_trip_and_echo_suppression() {
         let input = test_owner();
-        let monitor = Monitor::from_input(&input);
         let limits = ProtocolLimits::ABSOLUTE;
-        let mut session = ImageClipboardSession::new(
-            monitor,
-            Endpoint::Host,
-            limits,
-            true,
-            HostInstant::from_micros(0),
-        )
-        .unwrap();
-
+        let mut session = ImageClipboardSession::new(Monitor::from_input(&input), Endpoint::Host, limits, true, HostInstant::from_micros(0)).unwrap();
         let png = make_test_png(320, 240, 6, 8);
         let meta = inspect_png(&png, &limits).unwrap();
-        let stamp = Stamp {
-            id: 101,
-            source: Endpoint::Controller,
-            sequence: 1,
-        };
+        let stamp = Stamp { id: 101, source: Endpoint::Controller, sequence: 1 };
+        session.begin(ImageBegin { binding: session.binding(), stamp, metadata: meta, chunks: 1 }, HostInstant::from_micros(10)).unwrap();
+        session.chunk(stamp, 0, 0, &png, HostInstant::from_micros(20)).unwrap();
 
-        let begin = ImageBegin {
-            binding: session.binding(),
-            stamp,
-            metadata: meta,
-            chunks: 1,
-        };
-
-        session.begin(begin, HostInstant::from_micros(10)).unwrap();
-        session
-            .chunk(stamp, 0, 0, &png, HostInstant::from_micros(20))
-            .unwrap();
-
-        let mut sink = TestImageSink::new();
-        let receipt = session
-            .commit(stamp, meta.total_bytes, &mut sink, || {
-                HostInstant::from_micros(30)
-            })
-            .unwrap();
-
+        let mut sink = TestImageSink::default();
+        let receipt = session.commit(stamp, meta.total_bytes, &mut sink, || HostInstant::from_micros(30)).unwrap();
         assert_eq!(receipt.stamp, stamp);
         assert_eq!(receipt.publication, Publication::SubmittedToOs);
         assert_eq!(sink.published.map(|p| p.1), Some(stamp));
 
-        // Test echo suppression by stamp:
-        let echo_suppressed_by_stamp = session
-            .local_change(Some(stamp), None, HostInstant::from_micros(40))
-            .unwrap();
-        assert!(
-            !echo_suppressed_by_stamp,
-            "echo by stamp should be suppressed"
-        );
-
-        // Test echo suppression by SHA-256 hash:
-        let echo_suppressed_by_hash = session
-            .local_change(
-                None,
-                Some(&meta.content_sha256),
-                HostInstant::from_micros(40),
-            )
-            .unwrap();
-        assert!(
-            !echo_suppressed_by_hash,
-            "echo by hash should be suppressed"
-        );
-
-        // Genuine local change with different hash:
-        let diff_hash = [0x55; 32];
-        let genuine = session
-            .local_change(None, Some(&diff_hash), HostInstant::from_micros(40))
-            .unwrap();
-        assert!(genuine, "genuine local change should be admitted");
+        assert!(!session.local_change(Some(stamp), None, HostInstant::from_micros(40)).unwrap());
+        assert!(!session.local_change(None, Some(&meta.content_sha256), HostInstant::from_micros(40)).unwrap());
+        assert!(session.local_change(None, Some(&[0x55; 32]), HostInstant::from_micros(40)).unwrap());
     }
 
     #[test]
     fn image_session_cancellation_and_replay_rejection() {
         let input = test_owner();
-        let monitor = Monitor::from_input(&input);
         let limits = ProtocolLimits::ABSOLUTE;
-        let mut session = ImageClipboardSession::new(
-            monitor,
-            Endpoint::Host,
-            limits,
-            true,
-            HostInstant::from_micros(0),
-        )
-        .unwrap();
-
+        let mut session = ImageClipboardSession::new(Monitor::from_input(&input), Endpoint::Host, limits, true, HostInstant::from_micros(0)).unwrap();
         let png = make_test_png(100, 100, 6, 8);
         let meta = inspect_png(&png, &limits).unwrap();
-        let stamp = Stamp {
-            id: 201,
-            source: Endpoint::Controller,
-            sequence: 5,
-        };
-
-        let begin = ImageBegin {
-            binding: session.binding(),
-            stamp,
-            metadata: meta,
-            chunks: 2,
-        };
-
+        let stamp = Stamp { id: 201, source: Endpoint::Controller, sequence: 5 };
+        let begin = ImageBegin { binding: session.binding(), stamp, metadata: meta, chunks: 2 };
         session.begin(begin, HostInstant::from_micros(10)).unwrap();
         session.cancel(stamp).unwrap();
-
-        // After cancel, replaying the same sequence is refused by replay protection
-        assert_eq!(
-            session.begin(begin, HostInstant::from_micros(20)),
-            Err(Error::Replay)
-        );
+        assert_eq!(session.begin(begin, HostInstant::from_micros(20)), Err(Error::Replay));
     }
 
     #[test]
     fn copy_image_both_directions_round_trip_three_oses_hash_verification() {
         let input = test_owner();
         let limits = ProtocolLimits::ABSOLUTE;
-
         for cap in &IMAGE_CLIPBOARD_PLATFORM_MATRIX {
-            assert!(
-                cap.supported,
-                "platform {} must be supported",
-                cap.platform_name
-            );
-            assert_eq!(cap.mime_type, "image/png");
-            assert_eq!(cap.size_limit_bytes, MAX_IMAGE_BYTES);
-
+            assert!(cap.supported && cap.mime_type == "image/png" && cap.size_limit_bytes == MAX_IMAGE_BYTES);
             let png_bytes = make_test_png(400, 300, 6, 8);
             let meta = inspect_png(&png_bytes, &limits).unwrap();
-
-            // Bidirectional transfer: test both host-to-controller and controller-to-host
-            for (endpoint, stamp_src, stamp_id) in [
-                (Endpoint::Controller, Endpoint::Host, 301),
-                (Endpoint::Host, Endpoint::Controller, 302),
-            ] {
-                let mut session = ImageClipboardSession::new(
-                    Monitor::from_input(&input),
-                    endpoint,
-                    limits,
-                    true,
-                    HostInstant::from_micros(0),
-                )
-                .unwrap();
-
-                let stamp = Stamp {
-                    id: stamp_id,
-                    source: stamp_src,
-                    sequence: 1,
-                };
-                let begin = ImageBegin {
-                    binding: session.binding(),
-                    stamp,
-                    metadata: meta,
-                    chunks: 1,
-                };
-
-                session.begin(begin, HostInstant::from_micros(10)).unwrap();
-                session
-                    .chunk(stamp, 0, 0, &png_bytes, HostInstant::from_micros(20))
-                    .unwrap();
-
-                let mut sink = TestImageSink::new();
-                let receipt = session
-                    .commit(stamp, meta.total_bytes, &mut sink, || {
-                        HostInstant::from_micros(30)
-                    })
-                    .unwrap();
-
+            for (endpoint, stamp_src, stamp_id) in [(Endpoint::Controller, Endpoint::Host, 301), (Endpoint::Host, Endpoint::Controller, 302)] {
+                let mut session = ImageClipboardSession::new(Monitor::from_input(&input), endpoint, limits, true, HostInstant::from_micros(0)).unwrap();
+                let stamp = Stamp { id: stamp_id, source: stamp_src, sequence: 1 };
+                session.begin(ImageBegin { binding: session.binding(), stamp, metadata: meta, chunks: 1 }, HostInstant::from_micros(10)).unwrap();
+                session.chunk(stamp, 0, 0, &png_bytes, HostInstant::from_micros(20)).unwrap();
+                let mut sink = TestImageSink::default();
+                let receipt = session.commit(stamp, meta.total_bytes, &mut sink, || HostInstant::from_micros(30)).unwrap();
                 assert_eq!(receipt.stamp, stamp);
                 let prepared = sink.published.expect("published image").0;
-                assert_eq!(prepared.content_sha256, meta.content_sha256);
-                assert_eq!(prepared.width, 400);
-                assert_eq!(prepared.height, 300);
+                assert_eq!((prepared.content_sha256, prepared.width, prepared.height), (meta.content_sha256, 400, 300));
             }
         }
     }
@@ -1181,32 +986,13 @@ mod tests {
     #[test]
     fn logs_show_metadata_only_never_pixels() {
         let limits = ProtocolLimits::ABSOLUTE;
-        let png = make_test_png(128, 64, 6, 8);
-        let meta = inspect_png(&png, &limits).unwrap();
-
+        let meta = inspect_png(&make_test_png(128, 64, 6, 8), &limits).unwrap();
         let meta_debug = format!("{meta:?}");
-        assert!(meta_debug.contains("width: 128"), "must contain width");
-        assert!(meta_debug.contains("height: 64"), "must contain height");
-        assert!(
-            meta_debug.contains("sha256_prefix"),
-            "must contain sha256 prefix"
-        );
-        // Ensure no pixel bytes or full PNG payloads are in debug string
-        assert!(!meta_debug.contains("IDAT"), "must never leak chunk data");
-        assert!(!meta_debug.contains("IHDR"), "must never leak raw header");
-
+        assert!(meta_debug.contains("width: 128") && meta_debug.contains("height: 64") && meta_debug.contains("sha256_prefix"));
+        assert!(!meta_debug.contains("IDAT") && !meta_debug.contains("IHDR"));
         let input = test_owner();
-        let session = ImageClipboardSession::new(
-            Monitor::from_input(&input),
-            Endpoint::Host,
-            limits,
-            true,
-            HostInstant::from_micros(0),
-        )
-        .unwrap();
-
+        let session = ImageClipboardSession::new(Monitor::from_input(&input), Endpoint::Host, limits, true, HostInstant::from_micros(0)).unwrap();
         let session_debug = format!("{session:?}");
-        assert!(session_debug.contains("ImageClipboardSession"));
-        assert!(session_debug.contains("buffered_bytes: 0"));
+        assert!(session_debug.contains("ImageClipboardSession") && session_debug.contains("buffered_bytes: 0"));
     }
 }
