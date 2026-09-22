@@ -598,7 +598,7 @@ impl DaemonStatusReport {
     // Factory methods for nominal, probed, and failure states
     // -----------------------------------------------------------------------
 
-    /// Probes the real host environment (Tailscale LocalAPI, OS display, audio, GPU).
+    /// Probes the real host environment (Tailscale `LocalAPI`, OS display, audio, GPU).
     ///
     /// If Tailscale is running and accessible, returns a populated operational report.
     /// If Tailscale is offline or inaccessible, returns an honest typed refusal (`tailnet_disconnected`).
@@ -606,7 +606,7 @@ impl DaemonStatusReport {
     pub fn probe_host(socket_override: Option<&std::path::Path>) -> Self {
         let timestamp_unix_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64);
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
 
         #[cfg(target_os = "linux")]
         {
@@ -625,25 +625,63 @@ impl DaemonStatusReport {
                             let cx = rt.handle().try_request_cx_with_budget(Budget::INFINITE);
                             match cx {
                                 Ok(cx) => {
-                                    let identity_res = rt.block_on(async { local_api.node_identity(&cx).await });
+                                    let identity_res =
+                                        rt.block_on(async { local_api.node_identity(&cx).await });
                                     match identity_res {
                                         Ok(node) => {
                                             let fqdn = node.certificate_name().to_string();
-                                            let ips = node.addresses().iter().map(ToString::to_string).collect::<Vec<_>>();
-                                            let tailnet = fqdn.split('.').skip(1).collect::<Vec<_>>().join(".");
-                                            let node_name = fqdn.split('.').next().unwrap_or("").to_string();
+                                            let ips = node
+                                                .addresses()
+                                                .iter()
+                                                .map(ToString::to_string)
+                                                .collect::<Vec<_>>();
+                                            let tailnet = fqdn
+                                                .split('.')
+                                                .skip(1)
+                                                .collect::<Vec<_>>()
+                                                .join(".");
+                                            let node_name =
+                                                fqdn.split('.').next().unwrap_or("").to_string();
                                             (true, fqdn, ips, node_name, String::new(), tailnet)
                                         }
-                                        Err(_) => (false, String::new(), Vec::new(), String::new(), String::new(), String::new()),
+                                        Err(_) => (
+                                            false,
+                                            String::new(),
+                                            Vec::new(),
+                                            String::new(),
+                                            String::new(),
+                                            String::new(),
+                                        ),
                                     }
                                 }
-                                Err(_) => (false, String::new(), Vec::new(), String::new(), String::new(), String::new()),
+                                Err(_) => (
+                                    false,
+                                    String::new(),
+                                    Vec::new(),
+                                    String::new(),
+                                    String::new(),
+                                    String::new(),
+                                ),
                             }
                         }
-                        Err(_) => (false, String::new(), Vec::new(), String::new(), String::new(), String::new()),
+                        Err(_) => (
+                            false,
+                            String::new(),
+                            Vec::new(),
+                            String::new(),
+                            String::new(),
+                            String::new(),
+                        ),
                     }
                 }
-                Err(_) => (false, String::new(), Vec::new(), String::new(), String::new(), String::new()),
+                Err(_) => (
+                    false,
+                    String::new(),
+                    Vec::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ),
             };
 
             let mut report = Self::nominal_operational();
@@ -657,7 +695,11 @@ impl DaemonStatusReport {
                     variant: "standalone".into(),
                     tailnet: tailnet_name,
                     connected: true,
-                    node_id: if node_id.is_empty() { "local".into() } else { node_id },
+                    node_id: if node_id.is_empty() {
+                        "local".into()
+                    } else {
+                        node_id
+                    },
                     node_name: fqdn.split('.').next().unwrap_or("host").to_string(),
                     user_id,
                     addresses: ips,
@@ -669,7 +711,8 @@ impl DaemonStatusReport {
                     not_after_wall_us: None,
                     expiry_countdown_secs: None,
                     next_refresh_us: 0,
-                    status_message: "Tailscale node identity active and verified via LocalAPI".into(),
+                    status_message: "Tailscale node identity active and verified via LocalAPI"
+                        .into(),
                 };
             } else {
                 let mut ref_report = Self::tailnet_disconnected();
@@ -678,8 +721,8 @@ impl DaemonStatusReport {
             }
 
             // 2. Probe Display & Screen Capture
-            let has_display = std::env::var("WAYLAND_DISPLAY").is_ok()
-                || std::env::var("DISPLAY").is_ok();
+            let has_display =
+                std::env::var("WAYLAND_DISPLAY").is_ok() || std::env::var("DISPLAY").is_ok();
 
             for p in &mut report.permissions {
                 if p.capability == "screen_capture" {
@@ -688,7 +731,9 @@ impl DaemonStatusReport {
                         p.detail = Some("Display server available for capture".into());
                     } else {
                         p.status = "denied";
-                        p.detail = Some("Headless environment: no DISPLAY or WAYLAND_DISPLAY detected".into());
+                        p.detail = Some(
+                            "Headless environment: no DISPLAY or WAYLAND_DISPLAY detected".into(),
+                        );
                     }
                 }
             }

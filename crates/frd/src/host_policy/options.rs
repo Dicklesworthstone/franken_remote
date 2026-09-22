@@ -18,6 +18,7 @@ pub struct RunOptions {
     pub config: Option<PathBuf>,
     pub approval: Option<Approval>,
     pub sharing: Option<Sharing>,
+    pub headless: bool,
 }
 impl RunOptions {
     /// Arguments after `run`. Unknown, duplicate or valueless options refuse
@@ -32,6 +33,13 @@ impl RunOptions {
                     return Err(Error::InvalidArgument);
                 }
                 json = true;
+                continue;
+            }
+            if flag == "--headless" {
+                if options.headless {
+                    return Err(Error::InvalidArgument);
+                }
+                options.headless = true;
                 continue;
             }
             let value = value(&mut iter)?;

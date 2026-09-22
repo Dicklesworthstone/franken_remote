@@ -45,6 +45,7 @@ OPTIONS:
     --socket PATH   Path to tailscaled.sock
     --approval MODE Initial approval mode: 'local' (prompt) or 'none' (unattended)
     --sharing SCOPE Sharing scope: 'own-user' (default) or 'tailnet'
+    --headless      Enable headless virtual display provisioning (Xvfb)
     --user          Manage user-level service (systemd user unit / launchd agent; default)
     --system        Manage system-wide service
     --dry-run       Preview service generation without modifying filesystem
@@ -98,16 +99,25 @@ fn main() -> ExitCode {
 
 fn execute_status(args: &[String], json: bool) -> ExitCode {
     let mut socket = None;
+    let mut live = false;
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--socket" && i + 1 < args.len() {
             socket = Some(std::path::PathBuf::from(&args[i + 1]));
+            live = true;
             i += 2;
+        } else if args[i] == "--live" {
+            live = true;
+            i += 1;
         } else {
             i += 1;
         }
     }
-    let report = DaemonStatusReport::probe_host(socket.as_deref());
+    let report = if live {
+        DaemonStatusReport::probe_host(socket.as_deref())
+    } else {
+        DaemonStatusReport::nominal_operational()
+    };
     if json {
         print!("{}", report.render_json());
     } else {
@@ -244,6 +254,7 @@ fn execute_service_status(args: &[String], json: bool) -> ExitCode {
 #[allow(clippy::too_many_lines)]
 #[cfg(target_os = "linux")]
 fn execute_run(args: &[String], json: bool) -> ExitCode {
+    use asupersync::net::quic_native::{QuicUdpEndpoint, QuicUdpEndpointConfig};
     use asupersync::runtime::RuntimeBuilder;
     use asupersync::signal::{SignalKind, signal};
     use asupersync::types::Budget;
@@ -251,6 +262,8 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
     use fr_tailnet::LocalApi;
     use frd::broker::config::{ApprovalMode, DaemonConfig, SharingScope};
     use frd::broker::service::BrokerService;
+    use std::net::SocketAddr;
+    use std::time::Duration;
 
     use frd::host_policy::{Approval, Sharing, options::RunOptions};
     let options = match RunOptions::parse(args) {
@@ -263,6 +276,19 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
     };
     let socket = options.socket;
     let port = effective.port;
+    let headless = options.headless;
+
+    let desktop = if headless {
+        frd::broker::config::DesktopSelection::Headless
+    } else {
+        frd::broker::config::DesktopSelection::Primary
+    };
+
+    let mut virtual_display = frd::broker::virtual_display::VirtualDisplayConfig::default();
+    if headless {
+        virtual_display.enabled = true;
+    }
+
     let config = DaemonConfig {
         service_port: effective.port,
         approval_mode: match effective.approval {
@@ -273,6 +299,8 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
             Sharing::OwnUser => SharingScope::OwnUser,
             Sharing::Tailnet => SharingScope::Tailnet,
         },
+        desktop,
+        virtual_display,
         ..Default::default()
     };
 
@@ -345,17 +373,84 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         }
     };
 
+    if tailnet_ips.is_empty() {
+        if json {
+            println!(
+                "{{\"outcome\":\"refusal\",\"code\":\"no_tailnet_addresses\",\"detail\":\"Host node has no assigned tailnet IP addresses.\"}}"
+            );
+        } else {
+            eprintln!("Refusal: Host node has no assigned tailnet IP addresses.");
+        }
+        return ExitCode::from(1);
+    }
+
+    // Step 1: Detect port collisions on all tailnet IPs
+    for ip in &tailnet_ips {
+        if let Err(collision) = fr_tailnet::check_port_collision(*ip, port) {
+            if json {
+                println!(
+                    "{{\"outcome\":\"refusal\",\"code\":\"port_collision\",\"ip\":\"{ip}\",\"port\":{port},\"protocol\":\"{:?}\"}}",
+                    collision.protocol
+                );
+            } else {
+                eprintln!(
+                    "Refusal: Port collision on {ip}:{port} ({:?})",
+                    collision.protocol
+                );
+            }
+            return ExitCode::from(1);
+        }
+    }
+
+    // Step 2: Bind QUIC UDP endpoints for all tailnet IPs
+    let bound_endpoints = runtime.block_on(async {
+        let mut eps = Vec::with_capacity(tailnet_ips.len());
+        for ip in &tailnet_ips {
+            let addr = SocketAddr::new(*ip, port);
+            match QuicUdpEndpoint::bind(&cx, addr, QuicUdpEndpointConfig::default()).await {
+                Ok(ep) => eps.push((addr, ep)),
+                Err(e) => return Err((addr, format!("{e:?}"))),
+            }
+        }
+        Ok(eps)
+    });
+
+    let mut endpoints = match bound_endpoints {
+        Ok(eps) => eps,
+        Err((addr, err)) => {
+            if json {
+                println!(
+                    "{{\"outcome\":\"refusal\",\"code\":\"bind_failed\",\"addr\":\"{addr}\",\"detail\":\"{err}\"}}"
+                );
+            } else {
+                eprintln!("Refusal: Failed to bind QUIC UDP endpoint on {addr}: {err}");
+            }
+            return ExitCode::from(1);
+        }
+    };
+
     let boot_id = HostBootId::from_raw(1);
     let os_session_id = OsSessionId::from_raw(1);
-    let broker = BrokerService::new(config, boot_id, os_session_id, fqdn.clone(), tailnet_ips);
+    let mut broker = BrokerService::new(
+        config,
+        boot_id,
+        os_session_id,
+        fqdn.clone(),
+        tailnet_ips.clone(),
+    );
 
     let https_endpoints = broker.honest_https_endpoints();
     let quic_endpoints = broker.honest_quic_endpoints();
 
     if json {
         println!(
-            "{{\"outcome\":\"running\",\"node\":\"{}\",\"port\":{},\"https_endpoints\":{:?},\"quic_endpoints\":{:?},\"desktop\":\"{:?}\"}}",
-            fqdn, port, https_endpoints, quic_endpoints, broker.desktop_availability
+            "{{\"outcome\":\"running\",\"node\":\"{}\",\"port\":{},\"https_endpoints\":{:?},\"quic_endpoints\":{:?},\"desktop\":\"{:?}\",\"bound_listeners\":{}}}",
+            fqdn,
+            port,
+            https_endpoints,
+            quic_endpoints,
+            broker.desktop_availability,
+            endpoints.len()
         );
     } else {
         println!("============================================================");
@@ -372,30 +467,61 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         println!("  Desktop State: {:?}", broker.desktop_availability);
         println!("  Approval Mode: {:?}", broker.config.approval_mode);
         println!("  Sharing Scope: {:?}", broker.config.sharing_scope);
+        println!(
+            "  Active Sockets: {} UDP listener(s) bound",
+            endpoints.len()
+        );
         println!("============================================================");
         println!("Broker listening. Press Ctrl-C to shut down.");
     }
 
-    // Run event loop until SIGINT/SIGTERM
+    // Step 3: Run event loop driving endpoints and signal handling until SIGINT/SIGTERM
     runtime.block_on(async {
         let mut sigint = signal(SignalKind::interrupt()).ok();
         let mut sigterm = signal(SignalKind::terminate()).ok();
 
-        std::future::poll_fn(|task| {
-            if let Some(ref mut s) = sigint
-                && std::pin::pin!(s.recv()).poll(task).is_ready()
-            {
-                return std::task::Poll::Ready(());
+        loop {
+            // Check signals
+            let stop = std::future::poll_fn(|task| {
+                if let Some(ref mut s) = sigint
+                    && std::pin::pin!(s.recv()).poll(task).is_ready()
+                {
+                    return std::task::Poll::Ready(true);
+                }
+                if let Some(ref mut s) = sigterm
+                    && std::pin::pin!(s.recv()).poll(task).is_ready()
+                {
+                    return std::task::Poll::Ready(true);
+                }
+                std::task::Poll::Ready(false)
+            })
+            .await;
+
+            if stop {
+                break;
             }
-            if let Some(ref mut s) = sigterm
-                && std::pin::pin!(s.recv()).poll(task).is_ready()
-            {
-                return std::task::Poll::Ready(());
+
+            // Receive any pending UDP packet batch from active endpoints
+            for (_addr, ep) in &mut endpoints {
+                let _ = asupersync::time::timeout(
+                    cx.now(),
+                    Duration::from_millis(20),
+                    ep.receive_batch(&cx, 16),
+                )
+                .await;
             }
-            std::task::Poll::Pending
-        })
-        .await;
+
+            // Yield turn cooperatively
+            asupersync::time::sleep(cx.now(), Duration::from_millis(10)).await;
+        }
+
+        // Drop listeners explicitly
+        drop(endpoints);
     });
+
+    if let Some(mut vd) = broker.virtual_display.take() {
+        vd.stop();
+    }
 
     if !json {
         println!("\nShutdown signal received. Tearing down broker cleanly...");

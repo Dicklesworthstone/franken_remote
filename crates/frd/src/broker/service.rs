@@ -61,6 +61,8 @@ pub struct BrokerService {
     pub registry: SessionRegistry,
     /// Local desktop availability state.
     pub desktop_availability: DesktopAvailability,
+    /// Supervised virtual display instance if provisioned.
+    pub virtual_display: Option<super::virtual_display::VirtualDisplayInstance>,
     /// Host tailnet FQDN (e.g. "desktop.example.ts.net").
     pub tailnet_fqdn: String,
     /// Host tailnet node addresses.
@@ -80,62 +82,103 @@ impl BrokerService {
         let max_viewers = config.max_viewers;
         let peer_cache = PeerIdentityCache::with_defaults();
         let registry = SessionRegistry::new(host_boot_id, os_session_id, max_viewers);
-        let desktop_availability = Self::detect_desktop_availability(&config);
+        let (desktop_availability, virtual_display) = Self::provision_or_detect_desktop(&config);
 
         Self {
             config,
             peer_cache,
             registry,
             desktop_availability,
+            virtual_display,
             tailnet_fqdn,
             tailnet_ips,
+        }
+    }
+
+    /// Provision a virtual display if configured or detect current graphical session availability honestly.
+    pub fn provision_or_detect_desktop(
+        config: &DaemonConfig,
+    ) -> (
+        DesktopAvailability,
+        Option<super::virtual_display::VirtualDisplayInstance>,
+    ) {
+        #[cfg(target_os = "linux")]
+        {
+            let is_headless_selected =
+                matches!(config.desktop, super::config::DesktopSelection::Headless);
+            let has_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
+            let has_x11 = std::env::var("DISPLAY").is_ok();
+
+            if is_headless_selected || config.virtual_display.enabled {
+                match super::virtual_display::VirtualDisplayManager::start(&config.virtual_display)
+                {
+                    Ok(instance) => {
+                        let availability = DesktopAvailability::Available {
+                            display: instance.display.clone(),
+                            width: instance.width,
+                            height: instance.height,
+                            compositor: "xvfb",
+                        };
+                        return (availability, Some(instance));
+                    }
+                    Err(_) => {
+                        return (
+                            DesktopAvailability::NoShareableDesktop {
+                                reason: DesktopUnavailableReason::HeadlessNoVirtualDisplay,
+                            },
+                            None,
+                        );
+                    }
+                }
+            }
+
+            if has_wayland {
+                let display =
+                    std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".into());
+                (
+                    DesktopAvailability::Available {
+                        display,
+                        width: 1920,
+                        height: 1080,
+                        compositor: "wayland",
+                    },
+                    None,
+                )
+            } else if has_x11 {
+                let display = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into());
+                (
+                    DesktopAvailability::Available {
+                        display,
+                        width: 1920,
+                        height: 1080,
+                        compositor: "x11",
+                    },
+                    None,
+                )
+            } else {
+                (
+                    DesktopAvailability::NoShareableDesktop {
+                        reason: DesktopUnavailableReason::NoDisplayServerDetected,
+                    },
+                    None,
+                )
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            (
+                DesktopAvailability::NoShareableDesktop {
+                    reason: DesktopUnavailableReason::NoDisplayServerDetected,
+                },
+                None,
+            )
         }
     }
 
     /// Detect current graphical session availability honestly.
     #[must_use]
     pub fn detect_desktop_availability(config: &DaemonConfig) -> DesktopAvailability {
-        #[cfg(target_os = "linux")]
-        {
-            if matches!(config.desktop, super::config::DesktopSelection::Headless) {
-                return DesktopAvailability::NoShareableDesktop {
-                    reason: DesktopUnavailableReason::HeadlessNoVirtualDisplay,
-                };
-            }
-            // Check for Wayland or X11 environment variables.
-            let has_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
-            let has_x11 = std::env::var("DISPLAY").is_ok();
-
-            if has_wayland {
-                let display =
-                    std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".into());
-                DesktopAvailability::Available {
-                    display,
-                    width: 1920,
-                    height: 1080,
-                    compositor: "wayland",
-                }
-            } else if has_x11 {
-                let display = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into());
-                DesktopAvailability::Available {
-                    display,
-                    width: 1920,
-                    height: 1080,
-                    compositor: "x11",
-                }
-            } else {
-                // Pre-login or no display server running.
-                DesktopAvailability::NoShareableDesktop {
-                    reason: DesktopUnavailableReason::NoDisplayServerDetected,
-                }
-            }
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            DesktopAvailability::NoShareableDesktop {
-                reason: DesktopUnavailableReason::NoDisplayServerDetected,
-            }
-        }
+        Self::provision_or_detect_desktop(config).0
     }
 
     /// True if the broker is completely idle (0 admitted sessions).

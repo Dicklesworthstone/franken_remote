@@ -109,6 +109,8 @@ pub struct DaemonConfig {
     pub transfers: TransferSettings,
     /// Display to capture and stream.
     pub desktop: DesktopSelection,
+    /// Headless virtual display configuration.
+    pub virtual_display: super::virtual_display::VirtualDisplayConfig,
     /// Inactive session timeout duration before automatic disconnect.
     pub idle_timeout: Duration,
     /// Maximum concurrent viewer sessions allowed.
@@ -127,6 +129,7 @@ impl Default for DaemonConfig {
             audio: AudioSettings::default(),
             transfers: TransferSettings::default(),
             desktop: DesktopSelection::Primary,
+            virtual_display: super::virtual_display::VirtualDisplayConfig::default(),
             idle_timeout: Duration::from_secs(300),
             max_viewers: 4,
             limits: ProtocolLimits::ABSOLUTE,

@@ -103,71 +103,19 @@ struct Fixture {
     observation: ObservationControl,
 }
 async fn fixture(client_cx: &Cx, host_cx: &Cx) -> Fixture {
-    Box::pin(fixture_with_caps(client_cx, host_cx, caps())).await
+    fixture_with_clipboard(client_cx, host_cx, caps(), false, false, false, ClipboardMode::Disabled).await
 }
-#[allow(clippy::too_many_lines)]
 async fn fixture_with_caps(client_cx: &Cx, host_cx: &Cx, capabilities: Capabilities) -> Fixture {
-    Box::pin(fixture_with_decoder(
-        client_cx,
-        host_cx,
-        capabilities,
-        false,
-    ))
-    .await
+    fixture_with_clipboard(client_cx, host_cx, capabilities, false, false, false, ClipboardMode::Disabled).await
 }
-#[allow(clippy::too_many_lines)]
-async fn fixture_with_decoder(
-    client_cx: &Cx,
-    host_cx: &Cx,
-    capabilities: Capabilities,
-    decode: bool,
-) -> Fixture {
-    Box::pin(fixture_with_wire_feedback(
-        client_cx,
-        host_cx,
-        capabilities,
-        decode,
-        false,
-    ))
-    .await
+async fn fixture_with_decoder(client_cx: &Cx, host_cx: &Cx, capabilities: Capabilities, decode: bool) -> Fixture {
+    fixture_with_clipboard(client_cx, host_cx, capabilities, decode, false, false, ClipboardMode::Disabled).await
 }
-#[allow(clippy::too_many_lines)]
-async fn fixture_with_wire_feedback(
-    client_cx: &Cx,
-    host_cx: &Cx,
-    capabilities: Capabilities,
-    decode: bool,
-    feedback: bool,
-) -> Fixture {
-    Box::pin(fixture_with_clock_mode(
-        client_cx,
-        host_cx,
-        capabilities,
-        decode,
-        feedback,
-        false,
-    ))
-    .await
+async fn fixture_with_wire_feedback(client_cx: &Cx, host_cx: &Cx, capabilities: Capabilities, decode: bool, feedback: bool) -> Fixture {
+    fixture_with_clipboard(client_cx, host_cx, capabilities, decode, feedback, false, ClipboardMode::Disabled).await
 }
-#[allow(clippy::too_many_lines)]
-async fn fixture_with_clock_mode(
-    client_cx: &Cx,
-    host_cx: &Cx,
-    capabilities: Capabilities,
-    decode: bool,
-    feedback: bool,
-    managed: bool,
-) -> Fixture {
-    Box::pin(fixture_with_clipboard(
-        client_cx,
-        host_cx,
-        capabilities,
-        decode,
-        feedback,
-        managed,
-        ClipboardMode::Disabled,
-    ))
-    .await
+async fn fixture_with_clock_mode(client_cx: &Cx, host_cx: &Cx, capabilities: Capabilities, decode: bool, feedback: bool, managed: bool) -> Fixture {
+    fixture_with_clipboard(client_cx, host_cx, capabilities, decode, feedback, managed, ClipboardMode::Disabled).await
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ClipboardMode {

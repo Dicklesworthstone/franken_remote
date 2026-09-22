@@ -5,6 +5,7 @@
 //! and the idle envelope measurement harness.
 
 pub mod browser_assets;
+pub mod browser_security;
 pub mod config;
 pub mod idle_harness;
 pub mod ipc;
@@ -12,8 +13,16 @@ pub mod peer_cache;
 pub mod process_role;
 pub mod service;
 pub mod session_registry;
+pub mod virtual_display;
 
 pub use browser_assets::{AssetError, AssetResponse, BrowserAssets, STRICT_CSP};
+pub use browser_security::{
+    AuxiliaryChannelRole, AuxiliaryTicketManager, AuxiliaryTicketRecord, AuxiliaryTicketRefusal,
+    BootstrapNonceManager, BootstrapNonceRecord, BootstrapRequest, BrowserSecurityPolicy,
+    BrowserSessionRole, ExpectedHostOrigin, FetchMetadata, FetchMetadataRefusal,
+    FirstMessageAuthRefusal, HostRefusal, NonceRefusal, OriginRefusal, QuerySafetyRefusal,
+    RedactedSecret, SocketAuthGuard, SocketAuthState,
+};
 pub use config::{
     ApprovalMode, AudioSettings, ConfigError, DaemonConfig, DesktopSelection, SharingScope,
     TransferSettings,
@@ -31,4 +40,8 @@ pub use process_role::{ProcessGeneration, ProcessRole, RoleCapability};
 pub use service::{BrokerService, DesktopAvailability, DesktopUnavailableReason};
 pub use session_registry::{
     MediaReadinessState, RegistryError, SessionRecord, SessionRegistry, TeardownPlan,
+};
+pub use virtual_display::{
+    EdidBlock, EdidSummary, VirtualDisplayConfig, VirtualDisplayError, VirtualDisplayInstance,
+    VirtualDisplayManager,
 };

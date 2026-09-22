@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta http-equiv="X-Content-Type-Options" content="nosniff">
+    <meta name="referrer" content="no-referrer">
+    <title>FrankenRemote Web Workstation</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app-container">
+        <!-- Landing / Connect Screen -->
+        <div id="connect-screen" class="screen-panel">
+            <div class="card">
+                <div class="card-header">
+                    <div class="logo-mark">⚡</div>
+                    <h1>FrankenRemote</h1>
+                    <p class="subtitle">Tailnet-Native Remote Workstation</p>
+                </div>
+                <div class="form-group">
+                    <label for="host-input">Host Address</label>
+                    <input type="text" id="host-input" placeholder="workstation.ts.net:443" autocomplete="off" spellcheck="false">
+                </div>
+                <div class="form-group">
+                    <label for="token-input">Session Bootstrap Token</label>
+                    <input type="password" id="token-input" placeholder="Paste single-use token from frd" autocomplete="off">
+                </div>
+                <button id="connect-btn" class="btn btn-primary">Connect to Workstation</button>
+                <div id="connect-status" class="status-msg"></div>
+
+                <div class="capabilities-note">
+                    <small>Requires browser with HEVC WebCodecs and WebTransport / WSS support.</small>
+                </div>
+            </div>
+        </div>
+
+        <!-- Active Session Viewer Screen -->
+        <div id="session-screen" class="screen-panel hidden">
+            <!-- Canvas presentation -->
+            <canvas id="display-canvas"></canvas>
+
+            <!-- Virtual Cursor Overlay for Trackpad Mode -->
+            <div id="virtual-cursor" class="hidden"></div>
+
+            <!-- Top Status Bar -->
+            <div id="status-bar">
+                <div id="quality-hud" class="hud-pill">
+                    <span class="status-dot"></span>
+                    <span id="stat-rtt">0ms</span> • 
+                    <span id="stat-fps">0 FPS</span> • 
+                    <span id="stat-bitrate">0 Mbps</span>
+                </div>
+                <div id="mode-badge" class="hud-pill">Direct Touch</div>
+            </div>
+
+            <!-- Floating Input Toolbar -->
+            <div id="input-toolbar">
+                <button id="btn-toggle-mode" class="tool-btn" title="Toggle Direct Touch / Trackpad">🖱️ Trackpad</button>
+                <button id="btn-lock-pointer" class="tool-btn" title="Lock Pointer">🎯 Lock Pointer</button>
+                <button id="btn-toggle-fullscreen" class="tool-btn" title="Fullscreen">⛶ Fullscreen</button>
+                <button id="btn-toggle-modifiers" class="tool-btn" title="Modifier Keys">⌨️ Modifiers</button>
+                <button id="btn-toggle-talk" class="tool-btn" title="Push to Talk">🎙️ Talk</button>
+                <button id="btn-disconnect" class="tool-btn btn-danger" title="Disconnect">✕ Exit</button>
+            </div>
+
+            <!-- Modifier Keys Bar -->
+            <div id="modifiers-bar" class="hidden">
+                <button class="mod-key" data-key="Escape">Esc</button>
+                <button class="mod-key" data-key="Tab">Tab</button>
+                <button class="mod-key" data-key="Control">Ctrl</button>
+                <button class="mod-key" data-key="Alt">Alt</button>
+                <button class="mod-key" data-key="Meta">Cmd/Win</button>
+                <button class="mod-key" data-key="Shift">Shift</button>
+                <button class="mod-key" data-key="Enter">Enter</button>
+            </div>
+        </div>
+
+        <!-- Capability Refusal / Skew Modal -->
+        <div id="alert-modal" class="modal-backdrop hidden">
+            <div class="modal-card">
+                <h3 id="modal-title">Notice</h3>
+                <p id="modal-body"></p>
+                <button id="modal-btn-ok" class="btn btn-primary">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

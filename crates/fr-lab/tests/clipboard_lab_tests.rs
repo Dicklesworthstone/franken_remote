@@ -158,6 +158,18 @@ struct LabQueueSink<'a> {
     records_sent: usize,
 }
 
+impl<'a> LabQueueSink<'a> {
+    fn new(scenario: &'a mut Scenario, destination: Destination, fault: Fault) -> Self {
+        Self {
+            scenario,
+            destination,
+            fault,
+            blocked: false,
+            records_sent: 0,
+        }
+    }
+}
+
 impl RecordSink for LabQueueSink<'_> {
     fn try_send(&mut self, record: &[u8]) -> Result<Admission, TransportFailure> {
         assert!(
@@ -173,6 +185,17 @@ impl RecordSink for LabQueueSink<'_> {
         self.records_sent += 1;
         Ok(Admission::Accepted)
     }
+}
+
+fn assert_pump_idle(chan: &mut ClipboardChannel, scenario: &mut Scenario, dest: Destination) {
+    let now = scenario.now();
+    let mut sink = LabQueueSink::new(scenario, dest, Fault::after(ms(1)));
+    let mut scratch = [0u8; 512];
+    assert_eq!(
+        chan.pump(&mut scratch, &mut sink, move || now).unwrap(),
+        Pump::Idle
+    );
+    assert_eq!(sink.records_sent, 0);
 }
 
 struct VecSink<'a>(&'a mut Vec<Vec<u8>>);
@@ -198,13 +221,7 @@ fn pump_and_deliver_all(
 
     for _ in 0..1050 {
         let now = scenario.now();
-        let mut sink = LabQueueSink {
-            scenario,
-            destination,
-            fault,
-            blocked: false,
-            records_sent: 0,
-        };
+        let mut sink = LabQueueSink::new(scenario, destination, fault);
         let pump_state = source.pump(&mut scratch, &mut sink, move || now);
         assert!(scratch.iter().all(|b| *b == 0), "scratch must be cleared");
 
@@ -315,23 +332,7 @@ fn echo_loop_prevention_in_deterministic_lab() {
     );
 
     // Verify pump on client emits ZERO records
-    let now = scenario.now();
-    let mut sink = LabQueueSink {
-        scenario: &mut scenario,
-        destination: Destination::Host,
-        fault: Fault::after(ms(1)),
-        blocked: false,
-        records_sent: 0,
-    };
-    let mut scratch = [0u8; 512];
-    let pump_res = client_chan
-        .pump(&mut scratch, &mut sink, move || now)
-        .expect("pump succeeds");
-    assert_eq!(pump_res, Pump::Idle);
-    assert_eq!(
-        sink.records_sent, 0,
-        "ZERO records sent for suppressed echo"
-    );
+    assert_pump_idle(&mut client_chan, &mut scenario, Destination::Host);
     assert_eq!(
         scenario.metrics().queued_packets,
         0,
@@ -367,20 +368,7 @@ fn echo_loop_prevention_in_deterministic_lab() {
         Offer::EchoSuppressed,
         "host echo of client publication MUST be suppressed"
     );
-
-    let now = scenario.now();
-    let mut host_sink = LabQueueSink {
-        scenario: &mut scenario,
-        destination: Destination::Client,
-        fault: Fault::after(ms(1)),
-        blocked: false,
-        records_sent: 0,
-    };
-    let pump_res = host_chan
-        .pump(&mut scratch, &mut host_sink, move || now)
-        .expect("pump succeeds");
-    assert_eq!(pump_res, Pump::Idle);
-    assert_eq!(host_sink.records_sent, 0, "host emitted 0 echo records");
+    assert_pump_idle(&mut host_chan, &mut scenario, Destination::Client);
 }
 
 #[test]
@@ -416,21 +404,7 @@ fn rapid_echo_burst_and_jitter_settle_cleanly() {
             Ok(Offer::EchoSuppressed),
             "event {i} must be suppressed"
         );
-
-        let now = scenario.now();
-        let mut sink = LabQueueSink {
-            scenario: &mut scenario,
-            destination: Destination::Host,
-            fault: Fault::after(ms(1)),
-            blocked: false,
-            records_sent: 0,
-        };
-        let mut scratch = [0u8; 256];
-        let p = client_chan
-            .pump(&mut scratch, &mut sink, move || now)
-            .unwrap();
-        assert_eq!(p, Pump::Idle);
-        assert_eq!(sink.records_sent, 0);
+        assert_pump_idle(&mut client_chan, &mut scenario, Destination::Host);
     }
     assert_eq!(scenario.metrics().queued_packets, 0);
 }
@@ -575,26 +549,15 @@ fn oversized_item_and_chunk_refusal_tests() {
 
 #[test]
 fn invalid_utf8_encoding_refusal_tests() {
-    let test_cases: Vec<(&str, Vec<Vec<u8>>)> = vec![
-        // Case 1: Single invalid byte 0xff
-        ("single 0xff byte", vec![vec![0xff]]),
-        // Case 2: Truncated 2-byte sequence (0xc3 alone)
-        ("truncated 2-byte", vec![vec![0xc3]]),
-        // Case 3: Truncated 3-byte sequence (0xe2, 0x82 alone)
-        ("truncated 3-byte", vec![vec![0xe2, 0x82]]),
-        // Case 4: Truncated 4-byte sequence (0xf0, 0x90, 0x80 alone)
-        ("truncated 4-byte", vec![vec![0xf0, 0x90, 0x80]]),
-        // Case 5: Invalid continuation byte (0xe0, 0x80, 0x80)
-        ("invalid continuation", vec![vec![0xe0, 0x80, 0x80]]),
-        // Case 6: Overlong ASCII encoding of 'A' (0xc1, 0x81)
-        ("overlong encoding", vec![vec![0xc1, 0x81]]),
-        // Case 7: UTF-16 surrogate codepoint (0xed, 0xa0, 0x80)
-        ("surrogate codepoint", vec![vec![0xed, 0xa0, 0x80]]),
-        // Case 8: Split across 2 chunks where total stream is invalid UTF-8
-        (
-            "split invalid utf8",
-            vec![vec![0x41, 0x42, 0xe2], vec![0x28, 0x43]],
-        ),
+    let test_cases: &[(&str, &[&[u8]])] = &[
+        ("single 0xff byte", &[&[0xff]]),
+        ("truncated 2-byte", &[&[0xc3]]),
+        ("truncated 3-byte", &[&[0xe2, 0x82]]),
+        ("truncated 4-byte", &[&[0xf0, 0x90, 0x80]]),
+        ("invalid continuation", &[&[0xe0, 0x80, 0x80]]),
+        ("overlong encoding", &[&[0xc1, 0x81]]),
+        ("surrogate codepoint", &[&[0xed, 0xa0, 0x80]]),
+        ("split invalid utf8", &[&[0x41, 0x42, 0xe2], &[0x28, 0x43]]),
     ];
 
     for (desc, chunks) in test_cases {
@@ -608,55 +571,46 @@ fn invalid_utf8_encoding_refusal_tests() {
         )
         .unwrap();
         let mut platform = TestPlatform::default();
-
-        let total_bytes: usize = chunks.iter().map(Vec::len).sum();
-        let total_bytes_u32 = u32::try_from(total_bytes).unwrap();
-        let chunks_u32 = u32::try_from(chunks.len()).unwrap();
+        let total_bytes: usize = chunks.iter().map(|c| c.len()).sum();
         let stamp = Stamp {
             id: 999,
             source: Endpoint::Host,
             sequence: 1,
         };
-        let begin = Begin {
-            binding: session.binding(),
-            stamp,
-            total_bytes: total_bytes_u32,
-            chunks: chunks_u32,
-        };
-
-        session.begin(begin, at(0)).expect("begin succeeds");
+        session
+            .begin(
+                Begin {
+                    binding: session.binding(),
+                    stamp,
+                    total_bytes: u32::try_from(total_bytes).unwrap(),
+                    chunks: u32::try_from(chunks.len()).unwrap(),
+                },
+                at(0),
+            )
+            .expect("begin succeeds");
 
         let mut offset = 0;
         for (i, chunk) in chunks.iter().enumerate() {
-            let i_u32 = u32::try_from(i).unwrap();
-            let offset_u32 = u32::try_from(offset).unwrap();
             session
-                .chunk(stamp, i_u32, offset_u32, chunk, at(0))
+                .chunk(
+                    stamp,
+                    u32::try_from(i).unwrap(),
+                    u32::try_from(offset).unwrap(),
+                    chunk,
+                    at(0),
+                )
                 .expect("chunk ingestion succeeds");
             offset += chunk.len();
         }
 
-        let commit_res = session.commit(stamp, total_bytes_u32, &mut platform, || at(0));
         assert_eq!(
-            commit_res,
+            session.commit(stamp, u32::try_from(total_bytes).unwrap(), &mut platform, || at(0)),
             Err(Error::InvalidUtf8),
             "invalid UTF-8 ({desc}) must be refused with InvalidUtf8"
         );
-        assert_eq!(
-            platform.published_texts.len(),
-            0,
-            "OS publish must NEVER be invoked for {desc}"
-        );
-        assert_eq!(
-            platform.prepared_texts.len(),
-            0,
-            "OS prepare must NEVER be invoked for {desc}"
-        );
-        assert_eq!(
-            session.reserved_bytes(),
-            0,
-            "reserved bytes must be cleared on refusal for {desc}"
-        );
+        assert_eq!(platform.published_texts.len(), 0, "OS publish must NEVER be invoked for {desc}");
+        assert_eq!(platform.prepared_texts.len(), 0, "OS prepare must NEVER be invoked for {desc}");
+        assert_eq!(session.reserved_bytes(), 0, "reserved bytes must be cleared on refusal for {desc}");
     }
 }
 
@@ -843,41 +797,19 @@ fn bidirectional_concurrent_copies_under_network_delay_and_reordering() {
     let client_stamp = extract_stamp(client_offer);
 
     // Pump host records into lab with 3ms delay
-    let mut scratch = vec![0xa5; 16_384 + 93];
-    for _ in 0..10 {
-        let now = scenario.now();
-        let mut sink = LabQueueSink {
-            scenario: &mut scenario,
-            destination: Destination::Client,
-            fault: Fault::after(ms(3)),
-            blocked: false,
-            records_sent: 0,
-        };
-        let p = host_chan
-            .pump(&mut scratch, &mut sink, move || now)
-            .unwrap();
-        if matches!(p, Pump::ItemAccepted(_) | Pump::Idle) {
-            break;
+    let mut pump_burst = |chan: &mut ClipboardChannel, dest: Destination, delay_ms: u64| {
+        let mut scratch = vec![0xa5; 16_384 + 93];
+        for _ in 0..10 {
+            let now = scenario.now();
+            let mut sink = LabQueueSink::new(&mut scenario, dest, Fault::after(ms(delay_ms)));
+            let p = chan.pump(&mut scratch, &mut sink, move || now).unwrap();
+            if matches!(p, Pump::ItemAccepted(_) | Pump::Idle) {
+                break;
+            }
         }
-    }
-
-    // Pump client records into lab with 2ms delay
-    for _ in 0..10 {
-        let now = scenario.now();
-        let mut sink = LabQueueSink {
-            scenario: &mut scenario,
-            destination: Destination::Host,
-            fault: Fault::after(ms(2)),
-            blocked: false,
-            records_sent: 0,
-        };
-        let p = client_chan
-            .pump(&mut scratch, &mut sink, move || now)
-            .unwrap();
-        if matches!(p, Pump::ItemAccepted(_) | Pump::Idle) {
-            break;
-        }
-    }
+    };
+    pump_burst(&mut host_chan, Destination::Client, 3);
+    pump_burst(&mut client_chan, Destination::Host, 2);
 
     // Advance virtual time by 5ms so all scheduled packets become due
     scenario.elapse(ms(5)).expect("elapse succeeds");
@@ -921,32 +853,8 @@ fn bidirectional_concurrent_copies_under_network_delay_and_reordering() {
     assert_eq!(client_echo, Offer::EchoSuppressed);
 
     // Sinks emit 0 packets
-    let now = scenario.now();
-    let mut sink = LabQueueSink {
-        scenario: &mut scenario,
-        destination: Destination::Client,
-        fault: Fault::after(ms(1)),
-        blocked: false,
-        records_sent: 0,
-    };
-    let p = host_chan
-        .pump(&mut scratch, &mut sink, move || now)
-        .unwrap();
-    assert_eq!(p, Pump::Idle);
-    assert_eq!(sink.records_sent, 0);
-
-    let mut sink2 = LabQueueSink {
-        scenario: &mut scenario,
-        destination: Destination::Host,
-        fault: Fault::after(ms(1)),
-        blocked: false,
-        records_sent: 0,
-    };
-    let p2 = client_chan
-        .pump(&mut scratch, &mut sink2, move || now)
-        .unwrap();
-    assert_eq!(p2, Pump::Idle);
-    assert_eq!(sink2.records_sent, 0);
+    assert_pump_idle(&mut host_chan, &mut scenario, Destination::Client);
+    assert_pump_idle(&mut client_chan, &mut scenario, Destination::Host);
 
     assert_eq!(
         scenario.metrics().queued_packets,

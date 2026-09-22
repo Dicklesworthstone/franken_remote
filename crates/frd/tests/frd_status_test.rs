@@ -624,5 +624,44 @@ fn probe_host_generates_valid_report_envelope() {
     assert!(json.contains("\"schema_version\":\"fr.status.v1\""));
     assert!(json.contains("\"outcome\":"));
     let human = report.render_human();
-    assert!(human.contains("Host Daemon Status"));
+    assert!(human.contains("FRANKENREMOTE HOST DAEMON STATUS"));
+}
+
+#[test]
+fn frd_run_cli_absent_tailscale_reports_typed_refusal() {
+    let missing = std::env::temp_dir().join(format!("frd-missing-{}.sock", std::process::id()));
+    let output = wait_for_child(
+        frd_command(&["run", "--socket", missing.to_str().unwrap(), "--json"])
+            .spawn()
+            .unwrap(),
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let json_text = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(json_text.contains("\"outcome\":\"refusal\""));
+    assert!(json_text.contains("\"code\":\"tailscale_unavailable\""));
+}
+
+#[test]
+fn frd_headless_cli_option_accepted_in_help_and_run() {
+    let help_out = wait_for_child(frd_command(&["--help"]).spawn().unwrap());
+    assert!(help_out.status.success());
+    let help_text = String::from_utf8_lossy(&help_out.stdout);
+    assert!(help_text.contains("--headless"));
+
+    let missing =
+        std::env::temp_dir().join(format!("frd-missing-headless-{}.sock", std::process::id()));
+    let output = wait_for_child(
+        frd_command(&[
+            "run",
+            "--headless",
+            "--socket",
+            missing.to_str().unwrap(),
+            "--json",
+        ])
+        .spawn()
+        .unwrap(),
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let json_text = String::from_utf8_lossy(&output.stdout);
+    assert!(json_text.contains("\"code\":\"tailscale_unavailable\""));
 }
