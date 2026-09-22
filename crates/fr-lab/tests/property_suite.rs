@@ -195,6 +195,50 @@ fn test_descriptor(frame: u64, reference: Option<u64>, bytes: u32, stride: u32) 
     }
 }
 
+fn send_progress(
+    receiver: &mut ReceivePipeline,
+    c: &ReceiveConfig,
+    d: FrameDescriptor,
+    time: u64,
+    pipeline: PipelineState,
+) {
+    let prog = Progress {
+        descriptor: d,
+        observed_micros: time,
+        observation: SourceObservation::Captured,
+        pipeline,
+    };
+    let mut pkt = vec![0; c.limits.record_bytes()];
+    let np = encode_progress(prog, c.bindings.for_channel(Channel::MediaConfig), &c.limits, &mut pkt).unwrap();
+    receiver.receive(Channel::MediaConfig, &pkt[..np], time).unwrap();
+}
+
+fn send_fragments(
+    receiver: &mut ReceivePipeline,
+    c: &ReceiveConfig,
+    d: FrameDescriptor,
+    full_bytes: &[u8],
+    indices: &[u32],
+    time: u64,
+) {
+    for &idx in indices {
+        let mut pkt = vec![0; c.limits.record_bytes()];
+        let range = d.fragment_range(idx).unwrap();
+        let n = encode_fragment(
+            fr_wire::Fragment {
+                descriptor: d,
+                index: idx,
+                bytes: &full_bytes[range],
+            },
+            c.bindings.for_channel(Channel::Video),
+            &c.limits,
+            &mut pkt,
+        )
+        .unwrap();
+        receiver.receive(Channel::Video, &pkt[..n], time).unwrap();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 1. Duplicate input identifier cannot admit another click
 // ---------------------------------------------------------------------------
@@ -481,23 +525,7 @@ fn prop_missing_references_trigger_repair_or_recovery_never_corrupted_output() {
     // Frame 0 was decoded in bootstrap.
     // Frame 1 progress is announced on MediaConfig channel at 1_000 us.
     let d1 = test_descriptor(1, Some(0), 100, 1077);
-    let prog1 = Progress {
-        descriptor: d1,
-        observed_micros: 1000,
-        observation: SourceObservation::Captured,
-        pipeline: PipelineState::Running,
-    };
-    let mut prog1_pkt = vec![0; c.limits.record_bytes()];
-    let np = encode_progress(
-        prog1,
-        c.bindings.for_channel(Channel::MediaConfig),
-        &c.limits,
-        &mut prog1_pkt,
-    )
-    .unwrap();
-    receiver
-        .receive(Channel::MediaConfig, &prog1_pkt[..np], 1000)
-        .unwrap();
+    send_progress(&mut receiver, &c, d1, 1000, PipelineState::Running);
 
     // Frame 1 video fragment is dropped in transit
     lab.send(Destination::Client, b"frame-1-dropped", Fault::Drop)
@@ -1193,46 +1221,9 @@ fn prop_admitted_vs_irreversibly_submitted_os_injection_in_teardown() {
 fn recovery_row_missing_first_fragment() {
     let c = default_media_config();
     let (mut receiver, _) = bootstrap_receiver(c);
-    let d = test_descriptor(1, Some(0), 3000, 1077); // 3 fragments
-
-    // Announce progress
-    let prog = Progress {
-        descriptor: d,
-        observed_micros: 1000,
-        observation: SourceObservation::Captured,
-        pipeline: PipelineState::Running,
-    };
-    let mut prog_pkt = vec![0; c.limits.record_bytes()];
-    let np = encode_progress(
-        prog,
-        c.bindings.for_channel(Channel::MediaConfig),
-        &c.limits,
-        &mut prog_pkt,
-    )
-    .unwrap();
-    receiver
-        .receive(Channel::MediaConfig, &prog_pkt[..np], 1000)
-        .unwrap();
-
-    let full_bytes = vec![10_u8; 3000];
-    // Drop fragment 0; deliver fragments 1 and 2
-    for idx in [1, 2] {
-        let mut pkt = vec![0; c.limits.record_bytes()];
-        let range = d.fragment_range(idx).unwrap();
-        let n = encode_fragment(
-            fr_wire::Fragment {
-                descriptor: d,
-                index: idx,
-                bytes: &full_bytes[range],
-            },
-            c.bindings.for_channel(Channel::Video),
-            &c.limits,
-            &mut pkt,
-        )
-        .unwrap();
-        receiver.receive(Channel::Video, &pkt[..n], 1000).unwrap();
-    }
-
+    let d = test_descriptor(1, Some(0), 3000, 1077);
+    send_progress(&mut receiver, &c, d, 1000, PipelineState::Running);
+    send_fragments(&mut receiver, &c, d, &[10_u8; 3000], &[1, 2], 1000);
     assert!(receiver.take_decodable(1000).unwrap().is_none());
     assert!(receiver.repair_needed(1));
 }
@@ -1242,45 +1233,8 @@ fn recovery_row_missing_middle_fragment() {
     let c = default_media_config();
     let (mut receiver, _) = bootstrap_receiver(c);
     let d = test_descriptor(1, Some(0), 3000, 1077);
-
-    // Announce progress
-    let prog = Progress {
-        descriptor: d,
-        observed_micros: 1000,
-        observation: SourceObservation::Captured,
-        pipeline: PipelineState::Running,
-    };
-    let mut prog_pkt = vec![0; c.limits.record_bytes()];
-    let np = encode_progress(
-        prog,
-        c.bindings.for_channel(Channel::MediaConfig),
-        &c.limits,
-        &mut prog_pkt,
-    )
-    .unwrap();
-    receiver
-        .receive(Channel::MediaConfig, &prog_pkt[..np], 1000)
-        .unwrap();
-
-    let full_bytes = vec![10_u8; 3000];
-    // Deliver fragments 0 and 2; drop middle fragment 1
-    for idx in [0, 2] {
-        let mut pkt = vec![0; c.limits.record_bytes()];
-        let range = d.fragment_range(idx).unwrap();
-        let n = encode_fragment(
-            fr_wire::Fragment {
-                descriptor: d,
-                index: idx,
-                bytes: &full_bytes[range],
-            },
-            c.bindings.for_channel(Channel::Video),
-            &c.limits,
-            &mut pkt,
-        )
-        .unwrap();
-        receiver.receive(Channel::Video, &pkt[..n], 1000).unwrap();
-    }
-
+    send_progress(&mut receiver, &c, d, 1000, PipelineState::Running);
+    send_fragments(&mut receiver, &c, d, &[10_u8; 3000], &[0, 2], 1000);
     assert!(receiver.take_decodable(1000).unwrap().is_none());
     assert!(receiver.repair_needed(1));
 }
@@ -1290,45 +1244,8 @@ fn recovery_row_missing_final_fragment() {
     let c = default_media_config();
     let (mut receiver, _) = bootstrap_receiver(c);
     let d = test_descriptor(1, Some(0), 3000, 1077);
-
-    // Announce progress
-    let prog = Progress {
-        descriptor: d,
-        observed_micros: 1000,
-        observation: SourceObservation::Captured,
-        pipeline: PipelineState::Running,
-    };
-    let mut prog_pkt = vec![0; c.limits.record_bytes()];
-    let np = encode_progress(
-        prog,
-        c.bindings.for_channel(Channel::MediaConfig),
-        &c.limits,
-        &mut prog_pkt,
-    )
-    .unwrap();
-    receiver
-        .receive(Channel::MediaConfig, &prog_pkt[..np], 1000)
-        .unwrap();
-
-    let full_bytes = vec![10_u8; 3000];
-    // Deliver fragments 0 and 1; drop final fragment 2
-    for idx in [0, 1] {
-        let mut pkt = vec![0; c.limits.record_bytes()];
-        let range = d.fragment_range(idx).unwrap();
-        let n = encode_fragment(
-            fr_wire::Fragment {
-                descriptor: d,
-                index: idx,
-                bytes: &full_bytes[range],
-            },
-            c.bindings.for_channel(Channel::Video),
-            &c.limits,
-            &mut pkt,
-        )
-        .unwrap();
-        receiver.receive(Channel::Video, &pkt[..n], 1000).unwrap();
-    }
-
+    send_progress(&mut receiver, &c, d, 1000, PipelineState::Running);
+    send_fragments(&mut receiver, &c, d, &[10_u8; 3000], &[0, 1], 1000);
     assert!(receiver.take_decodable(1000).unwrap().is_none());
     assert!(receiver.repair_needed(1));
 }
@@ -1338,36 +1255,11 @@ fn recovery_row_loss_immediately_before_idle() {
     let c = default_media_config();
     let (mut receiver, _) = bootstrap_receiver(c);
     let d = test_descriptor(1, Some(0), 1000, 1077);
-
-    // Fragment for frame 1 is lost completely.
-    // Immediately after, progress arrives indicating pipeline is Idle at frame 1.
-    let prog = Progress {
-        descriptor: d,
-        observed_micros: 2000,
-        observation: SourceObservation::Captured,
-        pipeline: PipelineState::Idle,
-    };
-    let mut pkt = vec![0; c.limits.record_bytes()];
-    let n = encode_progress(
-        prog,
-        c.bindings.for_channel(Channel::MediaConfig),
-        &c.limits,
-        &mut pkt,
-    )
-    .unwrap();
-    receiver
-        .receive(Channel::MediaConfig, &pkt[..n], 2000)
-        .unwrap();
-
-    // Even though pipeline is idle, receiver correctly identifies frame 1 is missing
+    send_progress(&mut receiver, &c, d, 2000, PipelineState::Idle);
     assert!(receiver.repair_needed(1));
     let mut offer_buf = [0; 1150];
-    // Repair offer is ready after repair delay (20ms) at 22_000 us
     let offer = receiver.repair_offer(22_000, &mut offer_buf).unwrap();
-    assert!(
-        offer.is_some(),
-        "Repair offer ready after delay even when idle"
-    );
+    assert!(offer.is_some(), "Repair offer ready after delay even when idle");
 }
 
 #[test]
@@ -1375,49 +1267,10 @@ fn recovery_row_reference_repair_after_own_display_deadline() {
     let c = default_media_config();
     let (mut receiver, _) = bootstrap_receiver(c);
     let d = test_descriptor(1, Some(0), 1000, 1077);
-
-    // Announce frame 1 at T=1,000 us. Display deadline is 50ms (T=51,000), Reference deadline is 250ms (T=251,000)
-    let prog = Progress {
-        descriptor: d,
-        observed_micros: 1000,
-        observation: SourceObservation::Captured,
-        pipeline: PipelineState::Running,
-    };
-    let mut pkt = vec![0; c.limits.record_bytes()];
-    let n = encode_progress(
-        prog,
-        c.bindings.for_channel(Channel::MediaConfig),
-        &c.limits,
-        &mut pkt,
-    )
-    .unwrap();
-    receiver
-        .receive(Channel::MediaConfig, &pkt[..n], 1000)
-        .unwrap();
-
-    // Repair packet arrives at T=80,000 us (after display deadline 51ms, before reference deadline 251ms)
-    let mut repair_pkt = vec![0; c.limits.record_bytes()];
-    let nr = encode_fragment(
-        fr_wire::Fragment {
-            descriptor: d,
-            index: 0,
-            bytes: &[55_u8; 1000],
-        },
-        c.bindings.for_channel(Channel::Video),
-        &c.limits,
-        &mut repair_pkt,
-    )
-    .unwrap();
-    receiver
-        .receive(Channel::Video, &repair_pkt[..nr], 80_000)
-        .unwrap();
-
-    // Picture is decodable as a reference picture
+    send_progress(&mut receiver, &c, d, 1000, PipelineState::Running);
+    send_fragments(&mut receiver, &c, d, &[55_u8; 1000], &[0], 80_000);
     let pic = receiver.take_decodable(80_000).unwrap();
-    assert!(
-        pic.is_some(),
-        "Decodable as reference frame after display deadline"
-    );
+    assert!(pic.is_some(), "Decodable as reference frame after display deadline");
 }
 
 #[test]
@@ -1425,11 +1278,8 @@ fn recovery_row_lost_recovery_configuration_or_acknowledgement() {
     let c = default_media_config();
     let budget = MediaBudget::new(c.limits.protocol()).unwrap();
     let mut receiver = ReceivePipeline::new(c, budget).unwrap();
-
-    // Decoder not yet configured: state is AwaitingConfiguration
     assert_eq!(receiver.state(), ReceiveState::AwaitingConfiguration);
 
-    // Receiving recovery data before configuration does not transition state
     let test_bytes = vec![1_u8; 100];
     let mut packet = [0; 1_150];
     let n = encode_recovery(
@@ -1453,39 +1303,16 @@ fn recovery_row_lost_recovery_configuration_or_acknowledgement() {
 #[test]
 fn recovery_row_exhausted_recovery_budget() {
     let mut c = default_media_config();
-    c.policy.max_repair_attempts = 2; // Allow at most 2 attempts
+    c.policy.max_repair_attempts = 2;
     let (mut receiver, _) = bootstrap_receiver(c);
     let d = test_descriptor(1, Some(0), 1000, 1077);
-
-    let prog = Progress {
-        descriptor: d,
-        observed_micros: 1000,
-        observation: SourceObservation::Captured,
-        pipeline: PipelineState::Running,
-    };
-    let mut pkt = vec![0; c.limits.record_bytes()];
-    let n = encode_progress(
-        prog,
-        c.bindings.for_channel(Channel::MediaConfig),
-        &c.limits,
-        &mut pkt,
-    )
-    .unwrap();
-    receiver
-        .receive(Channel::MediaConfig, &pkt[..n], 1000)
-        .unwrap();
-
+    send_progress(&mut receiver, &c, d, 1000, PipelineState::Running);
     let mut out = [0; 1150];
-    // Attempt 1
-    let off1 = receiver.repair_offer(21_000, &mut out).unwrap();
-    assert!(off1.is_some());
-    // Attempt 2
-    let off2 = receiver.repair_offer(81_000, &mut out).unwrap();
-    assert!(off2.is_some());
-    // Attempt 3: exhausted max attempts (2) -> offer returns None
-    let off3 = receiver.repair_offer(141_000, &mut out).unwrap();
+    assert!(receiver.repair_offer(21_000, &mut out).unwrap().is_some());
+    assert!(receiver.repair_offer(81_000, &mut out).unwrap().is_some());
     assert_eq!(
-        off3, None,
+        receiver.repair_offer(141_000, &mut out).unwrap(),
+        None,
         "Exhausted recovery budget refuses further repair attempts"
     );
 }
@@ -1495,30 +1322,10 @@ fn recovery_row_120ms_repair_horizon() {
     let c = default_media_config();
     let (mut receiver, _) = bootstrap_receiver(c);
     let d = test_descriptor(1, Some(0), 1000, 1077);
-
-    let prog = Progress {
-        descriptor: d,
-        observed_micros: 1000,
-        observation: SourceObservation::Captured,
-        pipeline: PipelineState::Running,
-    };
-    let mut pkt = vec![0; c.limits.record_bytes()];
-    let n = encode_progress(
-        prog,
-        c.bindings.for_channel(Channel::MediaConfig),
-        &c.limits,
-        &mut pkt,
-    )
-    .unwrap();
-    receiver
-        .receive(Channel::MediaConfig, &pkt[..n], 1000)
-        .unwrap();
-
+    send_progress(&mut receiver, &c, d, 1000, PipelineState::Running);
     let mut out = [0; 1150];
-    // Within 120ms horizon (e.g. at 60ms), repair offer is produced
-    let offer = receiver.repair_offer(60_000, &mut out).unwrap();
     assert!(
-        offer.is_some(),
+        receiver.repair_offer(60_000, &mut out).unwrap().is_some(),
         "Repair offer produced within repair horizon"
     );
 }

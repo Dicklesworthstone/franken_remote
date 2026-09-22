@@ -195,53 +195,28 @@ struct Fixture {
     effects: Arc<Mutex<Effects>>,
     initial_until: u64,
 }
+#[rustfmt::skip]
 fn media_capabilities() -> Vec<WireCapability> {
-    [
-        fr_wire::decoder::CAPABILITY,
-        attachment::INPUT_CAPABILITY,
-        attachment::CAPABILITY,
-        attachment::DELIVERY_CAPABILITY,
-    ]
-    .into_iter()
-    .map(|name| WireCapability {
-        name: name.into(),
-        version: 1,
-        required: true,
-    })
-    .collect()
+    [fr_wire::decoder::CAPABILITY, attachment::INPUT_CAPABILITY, attachment::CAPABILITY, attachment::DELIVERY_CAPABILITY]
+        .into_iter().map(|name| WireCapability { name: name.into(), version: 1, required: true }).collect()
 }
+#[rustfmt::skip]
 async fn fixture(c: &Cx, h: &Cx, gate: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>) -> Fixture {
     Box::pin(fixture_with_clock(c, h, gate, false)).await
 }
-async fn fixture_with_clock(
-    c: &Cx,
-    h: &Cx,
-    gate: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
-    synchronized: bool,
-) -> Fixture {
+#[rustfmt::skip]
+async fn fixture_with_clock(c: &Cx, h: &Cx, gate: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>, synchronized: bool) -> Fixture {
     Box::pin(fixture_capabilities(c, h, gate, synchronized, false)).await
 }
 fn extended_capabilities(synchronized: bool, files: bool) -> Vec<WireCapability> {
     let mut capabilities = media_capabilities();
     if files {
-        capabilities.push(WireCapability {
-            name: attachment::FILES_CAPABILITY.into(),
-            version: attachment::FILES_VERSION,
-            required: true,
-        });
-        capabilities.push(WireCapability {
-            name: fr_wire::files::CAPABILITY.into(),
-            version: fr_wire::files::VERSION,
-            required: true,
-        });
+        capabilities.push(WireCapability { name: attachment::FILES_CAPABILITY.into(), version: attachment::FILES_VERSION, required: true });
+        capabilities.push(WireCapability { name: fr_wire::files::CAPABILITY.into(), version: fr_wire::files::VERSION, required: true });
     }
     capabilities.sort_by(|a, b| a.name.cmp(&b.name));
     if synchronized {
-        capabilities.push(WireCapability {
-            name: fr_wire::clock::CAPABILITY.into(),
-            version: fr_wire::clock::VERSION,
-            required: true,
-        });
+        capabilities.push(WireCapability { name: fr_wire::clock::CAPABILITY.into(), version: fr_wire::clock::VERSION, required: true });
         capabilities.sort_by(|a, b| a.name.cmp(&b.name));
     }
     capabilities

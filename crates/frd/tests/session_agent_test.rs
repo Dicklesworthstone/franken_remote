@@ -696,105 +696,32 @@ fn test_connected_sessions_list_multi_viewer_tracking() {
 
     // 2. Connect Session 101: Controller with full capabilities
     let session_101 = RemoteSessionId::from_raw(101);
-    let peer_101 = PeerIdentity {
-        node_id: "node-alice".into(),
-        node_name: "alice-macbook".into(),
-        user_id: "user-alice".into(),
-    };
-    let req_101 = RequestedScope {
-        role: SessionRole::Controller,
-        displays: vec![0],
-        audio: AudioScope::Bidirectional,
-        clipboard: true,
-        file_transfer: true,
-    };
-    agent
-        .request_session(session_101, &peer_101, &req_101, t0)
-        .expect("session 101 approved");
+    let peer_101 = PeerIdentity { node_id: "node-alice".into(), node_name: "alice-macbook".into(), user_id: "user-alice".into() };
+    let req_101 = RequestedScope { role: SessionRole::Controller, displays: vec![0], audio: AudioScope::Bidirectional, clipboard: true, file_transfer: true };
+    agent.request_session(session_101, &peer_101, &req_101, t0).expect("session 101 approved");
 
     let sessions = agent.connected_sessions();
-    assert_eq!(
-        (
-            sessions.len(),
-            sessions[0].session_id,
-            sessions[0].device_name.as_str(),
-            sessions[0].role
-        ),
-        (1, session_101, "alice-macbook", SessionRole::Controller)
-    );
-    assert_eq!(
-        sessions[0].capabilities,
-        SessionCapabilitiesInUse {
-            view: true,
-            control: true,
-            audio: true,
-            clipboard: true,
-            files: true,
-        }
-    );
+    assert_eq!((sessions.len(), sessions[0].session_id, sessions[0].device_name.as_str(), sessions[0].role), (1, session_101, "alice-macbook", SessionRole::Controller));
+    assert_eq!(sessions[0].capabilities, SessionCapabilitiesInUse { view: true, control: true, audio: true, clipboard: true, files: true });
     assert!(agent.indicator().is_active());
-    assert!(matches!(
-        agent.indicator().display_state(),
-        IndicatorDisplayState::Controlling {
-            session_id,
-            has_input_lease: true,
-            ..
-        } if session_id == session_101
-    ));
+    assert!(matches!(agent.indicator().display_state(), IndicatorDisplayState::Controlling { session_id, has_input_lease: true, .. } if session_id == session_101));
 
     // 3. Connect Session 102: Observer with view and playback audio, no control/clipboard/files
     let t1 = HostInstant::from_micros(2_000_000);
     let session_102 = RemoteSessionId::from_raw(102);
-    let peer_102 = PeerIdentity {
-        node_id: "node-bob".into(),
-        node_name: "bob-ipad".into(),
-        user_id: "user-bob".into(),
-    };
-    let req_102 = RequestedScope {
-        role: SessionRole::Observer,
-        displays: vec![0],
-        audio: AudioScope::PlaybackOnly,
-        clipboard: false,
-        file_transfer: false,
-    };
-    agent
-        .request_session(session_102, &peer_102, &req_102, t1)
-        .expect("session 102 approved");
+    let peer_102 = PeerIdentity { node_id: "node-bob".into(), node_name: "bob-ipad".into(), user_id: "user-bob".into() };
+    let req_102 = RequestedScope { role: SessionRole::Observer, displays: vec![0], audio: AudioScope::PlaybackOnly, clipboard: false, file_transfer: false };
+    agent.request_session(session_102, &peer_102, &req_102, t1).expect("session 102 approved");
 
     let sessions = agent.connected_sessions();
-    assert_eq!(
-        (sessions.len(), sessions[0].session_id, sessions[0].role),
-        (2, session_101, SessionRole::Controller)
-    );
-    assert_eq!(
-        (
-            sessions[1].session_id,
-            sessions[1].device_name.as_str(),
-            sessions[1].role
-        ),
-        (session_102, "bob-ipad", SessionRole::Observer)
-    );
-    assert_eq!(
-        sessions[1].capabilities,
-        SessionCapabilitiesInUse {
-            view: true,
-            control: false,
-            audio: true,
-            clipboard: false,
-            files: false,
-        }
-    );
+    assert_eq!((sessions.len(), sessions[0].session_id, sessions[0].role), (2, session_101, SessionRole::Controller));
+    assert_eq!((sessions[1].session_id, sessions[1].device_name.as_str(), sessions[1].role), (session_102, "bob-ipad", SessionRole::Observer));
+    assert_eq!(sessions[1].capabilities, SessionCapabilitiesInUse { view: true, control: false, audio: true, clipboard: false, files: false });
 
     // MultiSession state visible in indicator UI
     let display_state = agent.indicator().display_state();
-    assert!(matches!(
-        display_state,
-        IndicatorDisplayState::ActiveSessions { .. }
-    ));
-    if let IndicatorDisplayState::ActiveSessions {
-        sessions: active_list,
-    } = display_state
-    {
+    assert!(matches!(display_state, IndicatorDisplayState::ActiveSessions { .. }));
+    if let IndicatorDisplayState::ActiveSessions { sessions: active_list } = display_state {
         assert_eq!(active_list.len(), 2);
         assert_eq!(active_list[0].session_id, session_101);
         assert_eq!(active_list[1].session_id, session_102);
@@ -803,42 +730,13 @@ fn test_connected_sessions_list_multi_viewer_tracking() {
     // 4. Connect Session 103: Observer 2 with view only
     let t2 = HostInstant::from_micros(3_000_000);
     let session_103 = RemoteSessionId::from_raw(103);
-    let peer_103 = PeerIdentity {
-        node_id: "node-carol".into(),
-        node_name: "carol-linux".into(),
-        user_id: "user-carol".into(),
-    };
-    let req_103 = RequestedScope {
-        role: SessionRole::Observer,
-        displays: vec![0],
-        audio: AudioScope::None,
-        clipboard: false,
-        file_transfer: false,
-    };
-    agent
-        .request_session(session_103, &peer_103, &req_103, t2)
-        .expect("session 103 approved");
+    let peer_103 = PeerIdentity { node_id: "node-carol".into(), node_name: "carol-linux".into(), user_id: "user-carol".into() };
+    let req_103 = RequestedScope { role: SessionRole::Observer, displays: vec![0], audio: AudioScope::None, clipboard: false, file_transfer: false };
+    agent.request_session(session_103, &peer_103, &req_103, t2).expect("session 103 approved");
 
     let sessions = agent.connected_sessions();
-    assert_eq!(
-        (
-            sessions.len(),
-            sessions[2].session_id,
-            sessions[2].device_name.as_str(),
-            sessions[2].role
-        ),
-        (3, session_103, "carol-linux", SessionRole::Observer)
-    );
-    assert_eq!(
-        sessions[2].capabilities,
-        SessionCapabilitiesInUse {
-            view: true,
-            control: false,
-            audio: false,
-            clipboard: false,
-            files: false,
-        }
-    );
+    assert_eq!((sessions.len(), sessions[2].session_id, sessions[2].device_name.as_str(), sessions[2].role), (3, session_103, "carol-linux", SessionRole::Observer));
+    assert_eq!(sessions[2].capabilities, SessionCapabilitiesInUse { view: true, control: false, audio: false, clipboard: false, files: false });
 }
 
 #[test]
