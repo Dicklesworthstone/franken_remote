@@ -19,6 +19,9 @@ pub mod startup;
 
 pub const CAPABILITY: &str = "controller-text-clipboard";
 pub const VERSION: u16 = 1;
+pub const IMAGE_CAPABILITY: &str = "controller-image-clipboard";
+pub const IMAGE_VERSION: u16 = 1;
+pub const MAX_IMAGE_ITEM_BYTES: usize = 16 * 1024 * 1024;
 pub const COMMON_BYTES: usize = HEADER_BYTES + 16 + 16 + 16 + 1 + 8;
 pub const BEGIN_BYTES: usize = COMMON_BYTES + 8;
 pub const CHUNK_OVERHEAD: usize = COMMON_BYTES + 12;

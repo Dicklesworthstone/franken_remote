@@ -3,6 +3,7 @@
 //! No host InputSession is synthesized from wire IDs. The native/transport
 //! integration still supplies the separately approved clipboard capability and
 //! dedicated authenticated lane, and fences already accepted bytes on closure.
+pub mod image;
 mod projection;
 mod synchronize;
 use crate::input::{ClientInstant, InputClient};
@@ -16,6 +17,7 @@ use fr_wire::clipboard::{
     session::{ChannelSession, Offer, Pump, RecordSink, SessionError},
 };
 use fr_wire::negotiation::ControlBinding;
+pub use image::ControllerImageClipboard;
 pub(crate) use projection::Owner;
 use std::{
     cell::Cell,
@@ -68,7 +70,7 @@ impl From<SessionError> for Error {
     }
 }
 #[derive(Clone)]
-struct ProjectedClock {
+pub(crate) struct ProjectedClock {
     state: Weak<projection::State>,
     fallback: HostInstant,
     cursor: std::sync::Arc<std::sync::Mutex<projection::Cursor>>,
@@ -189,6 +191,24 @@ impl InputClient {
         let at = clock.sample(now)?;
         let channel = ChannelSession::with_monitor(monitor, outgoing, limits, true, at)?;
         Ok(ControllerClipboard { channel, clock })
+    }
+    /// Attach the negotiated image clipboard channel to this original input owner.
+    pub fn attach_image_clipboard(
+        &mut self,
+        channel: u32,
+        granted: bool,
+        now: ClientInstant,
+    ) -> Result<ControllerImageClipboard, Error> {
+        if !granted {
+            return Err(Error::Permission);
+        }
+        self.tick(now).map_err(|_| Error::Stopped)?;
+        let projection = self
+            .clipboard_projection
+            .as_mut()
+            .ok_or(Error::NotGranted)?;
+        let (monitor, clock) = projection.attach(channel, now)?;
+        ControllerImageClipboard::new(monitor, self.limits, true, clock, now)
     }
     pub(crate) fn clipboard_readiness(&self) {
         if let Some(owner) = &self.clipboard_projection {

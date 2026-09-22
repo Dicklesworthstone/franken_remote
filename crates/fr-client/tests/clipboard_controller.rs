@@ -557,6 +557,49 @@ fn queued_or_sent_control_response_never_proves_host_lease_extension() {
     }
 }
 
+#[test]
+fn image_clipboard_attachment_and_echo_suppression() {
+    let mut input = accepted();
+    ready(&mut input, 0, 0);
+    assert_eq!(
+        input
+            .attach_image_clipboard(78, false, client(0))
+            .unwrap_err(),
+        Error::Permission
+    );
+    let mut image_lane = input.attach_image_clipboard(78, true, client(0)).unwrap();
+    assert!(!image_lane.is_closed());
+
+    let mut png = Vec::new();
+    png.extend_from_slice(&fr_core::clipboard::image::PNG_MAGIC);
+    png.extend_from_slice(&13_u32.to_be_bytes());
+    png.extend_from_slice(b"IHDR");
+    png.extend_from_slice(&320_u32.to_be_bytes());
+    png.extend_from_slice(&240_u32.to_be_bytes());
+    png.push(8);
+    png.push(6);
+    png.push(0);
+    png.push(0);
+    png.push(0);
+    png.extend_from_slice(&[0, 0, 0, 0]);
+    png.extend_from_slice(&0_u32.to_be_bytes());
+    png.extend_from_slice(b"IEND");
+    png.extend_from_slice(&[0, 0, 0, 0]);
+
+    let (begin, meta) = image_lane.offer(1, &png, None, client(10)).unwrap();
+    assert_eq!(meta.width, 320);
+    assert_eq!(meta.height, 240);
+    assert_eq!(begin.chunks, 1);
+
+    // Echo suppression refuses re-offering the identical image with its stamp
+    assert_eq!(
+        image_lane
+            .offer(2, &png, Some(begin.stamp), client(20))
+            .unwrap_err(),
+        Error::Stopped
+    );
+}
+
 #[path = "clipboard_controller/lane.rs"]
 mod lane;
 

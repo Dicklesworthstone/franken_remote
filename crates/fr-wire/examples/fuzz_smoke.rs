@@ -107,187 +107,65 @@ fn seeds_negotiation() -> Vec<GoldenSeed> {
         profile_version: PROFILE_VERSION,
         role: NegRole::Observe,
         limits: L,
-        capabilities: vec![NegCap {
-            name: "media.hevc.main".into(),
-            version: 1,
-            required: true,
-        }],
+        capabilities: vec![NegCap { name: "media.hevc.main".into(), version: 1, required: true }],
     };
     let selection = offer.select().unwrap();
-    let msgs: Vec<(&'static str, NegMsg)> = vec![
+    let msgs: [(&str, NegMsg); 6] = [
         ("client_hello", NegMsg::ClientHello(offer.clone())),
         ("host_capabilities", NegMsg::HostCapabilities(offer)),
-        (
-            "selected_configuration",
-            NegMsg::SelectedConfiguration(selection.clone()),
-        ),
-        (
-            "approval_required",
-            NegMsg::ApprovalRequired {
-                request: RemoteSessionId::from_raw(9),
-                deadline_us: 33,
-                role: NegRole::Observe,
-            },
-        ),
-        (
-            "session_opened",
-            NegMsg::SessionOpened {
-                binding: ControlBinding {
-                    id: 1,
-                    host_boot: HostBootId::from_raw(1),
-                    os_session: OsSessionId::from_raw(2),
-                    remote_session: RemoteSessionId::from_raw(3),
-                },
-                selection,
-                observation_until_us: 44,
-            },
-        ),
+        ("selected_configuration", NegMsg::SelectedConfiguration(selection.clone())),
+        ("approval_required", NegMsg::ApprovalRequired { request: RemoteSessionId::from_raw(9), deadline_us: 33, role: NegRole::Observe }),
+        ("session_opened", NegMsg::SessionOpened { binding: ControlBinding { id: 1, host_boot: HostBootId::from_raw(1), os_session: OsSessionId::from_raw(2), remote_session: RemoteSessionId::from_raw(3) }, selection, observation_until_us: 44 }),
         ("binding_accepted", NegMsg::BindingAccepted { binding: 1 }),
     ];
-
-    msgs.into_iter()
-        .map(|(name, m)| {
-            let mut out = vec![0; 4096];
-            let len = encode_neg(&m, 4096, &mut out).expect("encode negotiation");
-            out.truncate(len);
-            GoldenSeed {
-                category: "negotiation",
-                name,
-                bytes: out,
-            }
-        })
-        .collect()
+    msgs.into_iter().map(|(name, m)| {
+        let mut out = vec![0; 4096];
+        let len = encode_neg(&m, 4096, &mut out).expect("encode negotiation");
+        out.truncate(len);
+        GoldenSeed { category: "negotiation", name, bytes: out }
+    }).collect()
 }
 
 fn seeds_control() -> Vec<GoldenSeed> {
     let req = ControlRequest {
-        parent: ControlBinding {
-            id: 7,
-            host_boot: HostBootId::from_raw(1),
-            os_session: OsSessionId::from_raw(2),
-            remote_session: RemoteSessionId::from_raw(3),
-        },
+        parent: ControlBinding { id: 7, host_boot: HostBootId::from_raw(1), os_session: OsSessionId::from_raw(2), remote_session: RemoteSessionId::from_raw(3) },
         sequence: 0,
         target: ControlTarget {
             display_binding: 8,
-            view: InputView {
-                geometry: DisplayGeometryGeneration::from_raw(4),
-                viewport: ViewportMappingGeneration::from_raw(5),
-                configuration: CodecConfigurationGeneration::from_raw(6),
-                recovery: RecoveryGeneration::from_raw(7),
-            },
+            view: InputView { geometry: DisplayGeometryGeneration::from_raw(4), viewport: ViewportMappingGeneration::from_raw(5), configuration: CodecConfigurationGeneration::from_raw(6), recovery: RecoveryGeneration::from_raw(7) },
             bounds: InputBounds::new(DesktopPoint { x: -100, y: 20 }, 1920, 1080).unwrap(),
-            capabilities: Capabilities::default()
-                .with(InputCap::Keys)
-                .with(InputCap::Absolute)
-                .with(InputCap::Buttons),
+            capabilities: Capabilities::default().with(InputCap::Keys).with(InputCap::Absolute).with(InputCap::Buttons),
         },
     };
     let grant = ControlGranted {
-        request: req,
-        input_channel: 9,
-        lease: InputLeaseId::from_raw(10),
-        ticket: InputTicketId::from_raw(11),
-        issued_at_us: 0,
-        lease_until_us: 3_000_000,
-        ticket_until_us: 1_000_000,
-        first_action: 0,
-        first_pointer: 0,
+        request: req, input_channel: 9, lease: InputLeaseId::from_raw(10), ticket: InputTicketId::from_raw(11),
+        issued_at_us: 0, lease_until_us: 3_000_000, ticket_until_us: 1_000_000, first_action: 0, first_pointer: 0,
     };
-
     let mut req_bytes = vec![0; fr_wire::control::REQUEST_BYTES];
-    encode_request(
-        req,
-        &mut req_bytes,
-        &L,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    )
-    .expect("encode control_request");
-
+    encode_request(req, &mut req_bytes, &L, InputDirection::ViewerToHost, InputDelivery::Reliable).expect("encode control_request");
     let mut grant_bytes = vec![0; fr_wire::control::GRANTED_BYTES];
-    encode_granted(
-        grant,
-        &mut grant_bytes,
-        &L,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    )
-    .expect("encode lease_granted");
-
+    encode_granted(grant, &mut grant_bytes, &L, InputDirection::HostToViewer, InputDelivery::Reliable).expect("encode lease_granted");
     vec![
-        GoldenSeed {
-            category: "control",
-            name: "control_request",
-            bytes: req_bytes,
-        },
-        GoldenSeed {
-            category: "control",
-            name: "lease_granted",
-            bytes: grant_bytes,
-        },
+        GoldenSeed { category: "control", name: "control_request", bytes: req_bytes },
+        GoldenSeed { category: "control", name: "lease_granted", bytes: grant_bytes },
     ]
 }
 
 fn seeds_authority() -> Vec<GoldenSeed> {
-    let auth_b = AuthBinding {
-        channel: 0x0102_0304,
-        session: RemoteSessionId::from_raw(0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00),
-    };
+    let auth_b = AuthBinding { channel: 0x0102_0304, session: RemoteSessionId::from_raw(0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00) };
     let nonce = u128::from_be_bytes([0x77; 16]);
     let lease = InputLeaseId::from_raw(u128::from_be_bytes([0x55; 16]));
-
     let cases = [
-        (
-            "challenge_observation",
-            AuthMsg::Challenge {
-                scope: AuthScope::Observation,
-                nonce,
-                deadline_micros: 1_000_000,
-            },
-            InputDirection::HostToViewer,
-        ),
-        (
-            "challenge_control",
-            AuthMsg::Challenge {
-                scope: AuthScope::Control(lease),
-                nonce,
-                deadline_micros: 1_000_000,
-            },
-            InputDirection::HostToViewer,
-        ),
-        (
-            "response_observation",
-            AuthMsg::Response {
-                scope: AuthScope::Observation,
-                nonce,
-            },
-            InputDirection::ViewerToHost,
-        ),
-        (
-            "response_control",
-            AuthMsg::Response {
-                scope: AuthScope::Control(lease),
-                nonce,
-            },
-            InputDirection::ViewerToHost,
-        ),
+        ("challenge_observation", AuthMsg::Challenge { scope: AuthScope::Observation, nonce, deadline_micros: 1_000_000 }, InputDirection::HostToViewer),
+        ("challenge_control", AuthMsg::Challenge { scope: AuthScope::Control(lease), nonce, deadline_micros: 1_000_000 }, InputDirection::HostToViewer),
+        ("response_observation", AuthMsg::Response { scope: AuthScope::Observation, nonce }, InputDirection::ViewerToHost),
+        ("response_control", AuthMsg::Response { scope: AuthScope::Control(lease), nonce }, InputDirection::ViewerToHost),
     ];
-
-    cases
-        .into_iter()
-        .map(|(name, m, dir)| {
-            let mut out = [0; fr_wire::authority::MAX_AUTHORITY_BYTES];
-            let len =
-                fr_wire::authority::encode(m, auth_b, &L, &mut out, dir, InputDelivery::Reliable)
-                    .expect("encode authority");
-            GoldenSeed {
-                category: "authority",
-                name,
-                bytes: out[..len].to_vec(),
-            }
-        })
-        .collect()
+    cases.into_iter().map(|(name, m, dir)| {
+        let mut out = [0; fr_wire::authority::MAX_AUTHORITY_BYTES];
+        let len = fr_wire::authority::encode(m, auth_b, &L, &mut out, dir, InputDelivery::Reliable).expect("encode authority");
+        GoldenSeed { category: "authority", name, bytes: out[..len].to_vec() }
+    }).collect()
 }
 
 fn seeds_input_ticket() -> Vec<GoldenSeed> {
@@ -296,315 +174,100 @@ fn seeds_input_ticket() -> Vec<GoldenSeed> {
             session: RemoteSessionId::from_raw(u128::from_be_bytes([0x11; 16])),
             lease: InputLeaseId::from_raw(u128::from_be_bytes([0x22; 16])),
             ticket: InputTicketId::from_raw(u128::from_be_bytes([0x33; 16])),
-            view: InputView {
-                geometry: DisplayGeometryGeneration::from_raw(1),
-                viewport: ViewportMappingGeneration::from_raw(2),
-                configuration: CodecConfigurationGeneration::from_raw(3),
-                recovery: RecoveryGeneration::from_raw(4),
-            },
+            view: InputView { geometry: DisplayGeometryGeneration::from_raw(1), viewport: ViewportMappingGeneration::from_raw(2), configuration: CodecConfigurationGeneration::from_raw(3), recovery: RecoveryGeneration::from_raw(4) },
         },
-        sequence: 5,
-        issued_at_us: 6,
-        expires_at_us: 1_000_006,
+        sequence: 5, issued_at_us: 6, expires_at_us: 1_000_006,
     };
     let mut out = vec![0; fr_wire::input_ticket::INPUT_TICKET_BYTES];
-    encode_input_ticket(
-        ticket,
-        &mut out,
-        &L,
-        7,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    )
-    .expect("encode input_ticket");
-    vec![GoldenSeed {
-        category: "input_ticket",
-        name: "input_ticket",
-        bytes: out,
-    }]
+    encode_input_ticket(ticket, &mut out, &L, 7, InputDirection::HostToViewer, InputDelivery::Reliable).expect("encode input_ticket");
+    vec![GoldenSeed { category: "input_ticket", name: "input_ticket", bytes: out }]
 }
 
 fn seeds_attachment() -> Vec<GoldenSeed> {
-    let parent = ControlBinding {
-        id: 7,
-        host_boot: HostBootId::from_raw(11),
-        os_session: OsSessionId::from_raw(12),
-        remote_session: RemoteSessionId::from_raw(13),
-    };
+    let parent = ControlBinding { id: 7, host_boot: HostBootId::from_raw(11), os_session: OsSessionId::from_raw(12), remote_session: RemoteSessionId::from_raw(13) };
     let desc = Descriptor {
         binding: DecBinding {
-            parent: ControlBinding { id: 8, ..parent },
-            display: 14,
-            geometry: DisplayGeometryGeneration::INITIAL,
-            configuration: CodecConfigurationGeneration::INITIAL,
-            recovery: RecoveryGeneration::INITIAL,
-            viewport: ViewportMappingGeneration::INITIAL,
+            parent: ControlBinding { id: 8, ..parent }, display: 14,
+            geometry: DisplayGeometryGeneration::INITIAL, configuration: CodecConfigurationGeneration::INITIAL,
+            recovery: RecoveryGeneration::INITIAL, viewport: ViewportMappingGeneration::INITIAL,
         },
-        role: MediaRole::Configuration,
-        host_stream: 7,
-        viewer_stream: 6,
+        role: MediaRole::Configuration, host_stream: 7, viewer_stream: 6,
     };
-    let grant = Grant {
-        descriptor: desc,
-        ticket: AttachTicket(0x1234_5678_90ab_cdef),
-        deadline_us: 900,
-        byte_allowance: 4096,
-        picture_allowance: 0,
-        credit_epoch: 8,
-    };
-
+    let grant = Grant { descriptor: desc, ticket: AttachTicket(0x1234_5678_90ab_cdef), deadline_us: 900, byte_allowance: 4096, picture_allowance: 0, credit_epoch: 8 };
     let cases = [
-        (
-            "stream_binding",
-            AttachMsg::Binding(desc),
-            InputDirection::HostToViewer,
-        ),
-        (
-            "binding_accepted",
-            AttachMsg::Accepted(8),
-            InputDirection::ViewerToHost,
-        ),
-        (
-            "channel_ticket",
-            AttachMsg::Ticket(grant),
-            InputDirection::HostToViewer,
-        ),
-        (
-            "channel_attach",
-            AttachMsg::Attach(grant),
-            InputDirection::ViewerToHost,
-        ),
-        (
-            "channel_attached",
-            AttachMsg::Attached(grant),
-            InputDirection::HostToViewer,
-        ),
+        ("stream_binding", AttachMsg::Binding(desc), InputDirection::HostToViewer),
+        ("binding_accepted", AttachMsg::Accepted(8), InputDirection::ViewerToHost),
+        ("channel_ticket", AttachMsg::Ticket(grant), InputDirection::HostToViewer),
+        ("channel_attach", AttachMsg::Attach(grant), InputDirection::ViewerToHost),
+        ("channel_attached", AttachMsg::Attached(grant), InputDirection::HostToViewer),
     ];
-
-    cases
-        .into_iter()
-        .map(|(name, m, dir)| {
-            let mut out = vec![0; fr_wire::attachment::GRANT_RECORD_BYTES];
-            let len = encode_attachment(m, parent, &L, &mut out, dir, InputDelivery::Reliable)
-                .expect("encode attachment");
-            out.truncate(len);
-            GoldenSeed {
-                category: "attachment",
-                name,
-                bytes: out,
-            }
-        })
-        .collect()
+    cases.into_iter().map(|(name, m, dir)| {
+        let mut out = vec![0; fr_wire::attachment::GRANT_RECORD_BYTES];
+        let len = encode_attachment(m, parent, &L, &mut out, dir, InputDelivery::Reliable).expect("encode attachment");
+        out.truncate(len);
+        GoldenSeed { category: "attachment", name, bytes: out }
+    }).collect()
 }
 
 fn seeds_display() -> Vec<GoldenSeed> {
-    let parent = ControlBinding {
-        id: 0x0102_0304,
-        host_boot: HostBootId::from_raw(u128::from_be_bytes([0x11; 16])),
-        os_session: OsSessionId::from_raw(u128::from_be_bytes([0x22; 16])),
-        remote_session: RemoteSessionId::from_raw(u128::from_be_bytes([0x33; 16])),
-    };
+    let parent = ControlBinding { id: 0x0102_0304, host_boot: HostBootId::from_raw(u128::from_be_bytes([0x11; 16])), os_session: OsSessionId::from_raw(u128::from_be_bytes([0x22; 16])), remote_session: RemoteSessionId::from_raw(u128::from_be_bytes([0x33; 16])) };
     let screen = DispDisplay {
-        handle: u128::from_be_bytes([0x44; 16]),
-        geometry: DisplayGeometryGeneration::INITIAL,
-        x: -1920,
-        y: -20,
-        pixel_width: 1920,
-        pixel_height: 1080,
-        logical_width: 1280,
-        logical_height: 720,
-        scale_numerator: 3,
-        scale_denominator: 2,
-        rotation: 1,
+        handle: u128::from_be_bytes([0x44; 16]), geometry: DisplayGeometryGeneration::INITIAL,
+        x: -1920, y: -20, pixel_width: 1920, pixel_height: 1080, logical_width: 1280, logical_height: 720,
+        scale_numerator: 3, scale_denominator: 2, rotation: 1,
     };
     let catalog = DispCatalog::new(7, &[screen], &L).unwrap();
     let sel = catalog.selection(screen.handle).unwrap();
-
     let mut cat_bytes = [0; fr_wire::display::MAX_CATALOG_BYTES];
-    let n = encode_display(
-        &DispMsg::Catalog(catalog),
-        parent,
-        &L,
-        &mut cat_bytes,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    )
-    .expect("encode display_catalog");
-
+    let n = encode_display(&DispMsg::Catalog(catalog), parent, &L, &mut cat_bytes, InputDirection::HostToViewer, InputDelivery::Reliable).expect("encode display_catalog");
     let mut sel_bytes = [0; fr_wire::display::SELECT_BYTES];
-    let m = encode_display(
-        &DispMsg::Select(sel),
-        parent,
-        &L,
-        &mut sel_bytes,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    )
-    .expect("encode select_display");
-
+    let m = encode_display(&DispMsg::Select(sel), parent, &L, &mut sel_bytes, InputDirection::ViewerToHost, InputDelivery::Reliable).expect("encode select_display");
     vec![
-        GoldenSeed {
-            category: "display",
-            name: "display_catalog",
-            bytes: cat_bytes[..n].to_vec(),
-        },
-        GoldenSeed {
-            category: "display",
-            name: "select_display",
-            bytes: sel_bytes[..m].to_vec(),
-        },
+        GoldenSeed { category: "display", name: "display_catalog", bytes: cat_bytes[..n].to_vec() },
+        GoldenSeed { category: "display", name: "select_display", bytes: sel_bytes[..m].to_vec() },
     ]
 }
 
 fn seeds_decoder() -> Vec<GoldenSeed> {
     let b = DecBinding {
-        parent: ControlBinding {
-            id: 7,
-            host_boot: HostBootId::from_raw(11),
-            os_session: OsSessionId::from_raw(12),
-            remote_session: RemoteSessionId::from_raw(13),
-        },
-        display: 14,
-        geometry: DisplayGeometryGeneration::from_raw(15),
-        configuration: CodecConfigurationGeneration::from_raw(16),
-        recovery: RecoveryGeneration::from_raw(17),
-        viewport: ViewportMappingGeneration::from_raw(18),
+        parent: ControlBinding { id: 7, host_boot: HostBootId::from_raw(11), os_session: OsSessionId::from_raw(12), remote_session: RemoteSessionId::from_raw(13) },
+        display: 14, geometry: DisplayGeometryGeneration::from_raw(15), configuration: CodecConfigurationGeneration::from_raw(16),
+        recovery: RecoveryGeneration::from_raw(17), viewport: ViewportMappingGeneration::from_raw(18),
     };
     let config = DecConfig {
-        coded_width: 320,
-        coded_height: 240,
-        crop_width: 318,
-        crop_height: 238,
-        fps: 30,
-        primaries: 1,
-        transfer: 1,
-        matrix: 1,
-        full_range: false,
-        decoded_pictures: 4,
-        codec: "hev1.1.6.L60.90",
-        hvcc: &[1; 23],
+        coded_width: 320, coded_height: 240, crop_width: 318, crop_height: 238, fps: 30,
+        primaries: 1, transfer: 1, matrix: 1, full_range: false, decoded_pictures: 4, codec: "hev1.1.6.L60.90", hvcc: &[1; 23],
     };
-
     let cases = [
-        (
-            "decoder_configuration",
-            DecMsg::Configuration(config),
-            InputDirection::HostToViewer,
-        ),
-        (
-            "decoder_configured",
-            DecMsg::Configured,
-            InputDirection::ViewerToHost,
-        ),
-        (
-            "first_frame_decoded",
-            DecMsg::FirstDecoded {
-                frame: 0,
-                decoder_micros: 99,
-            },
-            InputDirection::ViewerToHost,
-        ),
+        ("decoder_configuration", DecMsg::Configuration(config), InputDirection::HostToViewer),
+        ("decoder_configured", DecMsg::Configured, InputDirection::ViewerToHost),
+        ("first_frame_decoded", DecMsg::FirstDecoded { frame: 0, decoder_micros: 99 }, InputDirection::ViewerToHost),
     ];
-
-    cases
-        .into_iter()
-        .map(|(name, m, dir)| {
-            let mut out = vec![0; 20000];
-            let len = decode_encode(m, b, &L, &mut out, dir, InputDelivery::Reliable)
-                .expect("encode decoder");
-            out.truncate(len);
-            GoldenSeed {
-                category: "decoder",
-                name,
-                bytes: out,
-            }
-        })
-        .collect()
+    cases.into_iter().map(|(name, m, dir)| {
+        let mut out = vec![0; 20000];
+        let len = decode_encode(m, b, &L, &mut out, dir, InputDelivery::Reliable).expect("encode decoder");
+        out.truncate(len);
+        GoldenSeed { category: "decoder", name, bytes: out }
+    }).collect()
 }
 
 fn seeds_media() -> Vec<GoldenSeed> {
     let med_limits = MediaLimits::new(L, 1_150, 16_384, 64).unwrap();
-    let desc = FrameDescriptor {
-        frame: 7,
-        total_bytes: 3,
-        stride: 8,
-        capture_micros: 42,
-        reference: None,
-    };
-
+    let desc = FrameDescriptor { frame: 7, total_bytes: 3, stride: 8, capture_micros: 42, reference: None };
     let mut frag_out = [0; 128];
-    let n1 = encode_fragment(
-        Fragment {
-            descriptor: desc,
-            index: 0,
-            bytes: &[1, 2, 3],
-        },
-        9,
-        &med_limits,
-        &mut frag_out,
-    )
-    .expect("encode fragment");
-
+    let n1 = encode_fragment(Fragment { descriptor: desc, index: 0, bytes: &[1, 2, 3] }, 9, &med_limits, &mut frag_out).expect("encode fragment");
     let mut recovery_out = [0; 128];
-    let n2 = encode_recovery(
-        RecoveryChunk {
-            frame: 7,
-            total_bytes: 10,
-            offset: 6,
-            capture_micros: 42,
-            bytes: &[1, 2, 3, 4],
-        },
-        9,
-        &med_limits,
-        &mut recovery_out,
-    )
-    .expect("encode recovery");
-
+    let n2 = encode_recovery(RecoveryChunk { frame: 7, total_bytes: 10, offset: 6, capture_micros: 42, bytes: &[1, 2, 3, 4] }, 9, &med_limits, &mut recovery_out).expect("encode recovery");
     let mut repair_out = [0; 128];
-    let ranges = [
-        RepairRange { start: 0, end: 2 },
-        RepairRange { start: 4, end: 5 },
-    ];
+    let ranges = [RepairRange { start: 0, end: 2 }, RepairRange { start: 4, end: 5 }];
     let n3 = encode_repair(7, &ranges, 5, 9, &med_limits, &mut repair_out).expect("encode repair");
-
     let mut prog_out = [0; 128];
-    let n4 = encode_progress(
-        Progress {
-            descriptor: FrameDescriptor {
-                reference: Some(6),
-                ..desc
-            },
-            observed_micros: 45,
-            observation: SourceObservation::QualifiedUnchanged,
-            pipeline: PipelineState::Idle,
-        },
-        9,
-        &med_limits,
-        &mut prog_out,
-    )
-    .expect("encode progress");
-
+    let n4 = encode_progress(Progress { descriptor: FrameDescriptor { reference: Some(6), ..desc }, observed_micros: 45, observation: SourceObservation::QualifiedUnchanged, pipeline: PipelineState::Idle }, 9, &med_limits, &mut prog_out).expect("encode progress");
     vec![
-        GoldenSeed {
-            category: "media",
-            name: "access_unit_fragment",
-            bytes: frag_out[..n1].to_vec(),
-        },
-        GoldenSeed {
-            category: "media",
-            name: "recovery_chunk",
-            bytes: recovery_out[..n2].to_vec(),
-        },
-        GoldenSeed {
-            category: "media",
-            name: "repair_request",
-            bytes: repair_out[..n3].to_vec(),
-        },
-        GoldenSeed {
-            category: "media",
-            name: "media_progress",
-            bytes: prog_out[..n4].to_vec(),
-        },
+        GoldenSeed { category: "media", name: "access_unit_fragment", bytes: frag_out[..n1].to_vec() },
+        GoldenSeed { category: "media", name: "recovery_chunk", bytes: recovery_out[..n2].to_vec() },
+        GoldenSeed { category: "media", name: "repair_request", bytes: repair_out[..n3].to_vec() },
+        GoldenSeed { category: "media", name: "media_progress", bytes: prog_out[..n4].to_vec() },
     ]
 }
 
@@ -613,409 +276,122 @@ fn seeds_held_state() -> Vec<GoldenSeed> {
     held.set_key(PhysicalKey::new(4).unwrap(), true);
     held.set_key(PhysicalKey::new(0xe1).unwrap(), true);
     held.set_button(PointerButton::Primary, true);
-    let req = HeldStateRequest {
-        session: RemoteSessionId::from_raw(1),
-        lease: InputLeaseId::from_raw(2),
-        sequence: 3,
-        next_action: 4,
-        held,
-    };
+    let req = HeldStateRequest { session: RemoteSessionId::from_raw(1), lease: InputLeaseId::from_raw(2), sequence: 3, next_action: 4, held };
     let mut out = [0; fr_wire::held_state::HELD_STATE_BYTES];
-    encode_held(
-        req,
-        &mut out,
-        &L,
-        9,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    )
-    .expect("encode held_state");
-    vec![GoldenSeed {
-        category: "held_state",
-        name: "held_state",
-        bytes: out.to_vec(),
-    }]
+    encode_held(req, &mut out, &L, 9, InputDirection::ViewerToHost, InputDelivery::Reliable).expect("encode held_state");
+    vec![GoldenSeed { category: "held_state", name: "held_state", bytes: out.to_vec() }]
 }
 
 fn seeds_clipboard() -> Vec<GoldenSeed> {
-    let ctx = ClipContext {
-        scope: ClipBinding {
-            session: RemoteSessionId::from_raw(1),
-            lease: InputLeaseId::from_raw(2),
-        },
-        channel: 9,
-        sender: ClipRole::Controller,
-        lane: ClipLane::Clipboard,
-    };
-    let stamp = ClipStamp {
-        id: 3,
-        source: ClipEndpoint::Controller,
-        sequence: 4,
-    };
-
+    let ctx = ClipContext { scope: ClipBinding { session: RemoteSessionId::from_raw(1), lease: InputLeaseId::from_raw(2) }, channel: 9, sender: ClipRole::Controller, lane: ClipLane::Clipboard };
+    let stamp = ClipStamp { id: 3, source: ClipEndpoint::Controller, sequence: 4 };
     let cases = [
-        (
-            "clipboard_begin",
-            ClipBody::Begin {
-                total_bytes: 3,
-                chunks: 1,
-            },
-        ),
-        (
-            "clipboard_chunk",
-            ClipBody::Chunk {
-                index: 0,
-                offset: 0,
-                bytes: b"abc",
-            },
-        ),
+        ("clipboard_begin", ClipBody::Begin { total_bytes: 3, chunks: 1 }),
+        ("clipboard_chunk", ClipBody::Chunk { index: 0, offset: 0, bytes: b"abc" }),
         ("clipboard_commit", ClipBody::Commit { total_bytes: 3 }),
         ("clipboard_cancel", ClipBody::Cancel(ClipCancel::User)),
     ];
-
-    cases
-        .into_iter()
-        .map(|(name, body)| {
-            let mut out = vec![0; 4096];
-            let len = encode_clipboard(ClipMsg { stamp, body }, ctx, &L, &mut out)
-                .expect("encode clipboard");
-            out.truncate(len);
-            GoldenSeed {
-                category: "clipboard",
-                name,
-                bytes: out,
-            }
-        })
-        .collect()
+    cases.into_iter().map(|(name, body)| {
+        let mut out = vec![0; 4096];
+        let len = encode_clipboard(ClipMsg { stamp, body }, ctx, &L, &mut out).expect("encode clipboard");
+        out.truncate(len);
+        GoldenSeed { category: "clipboard", name, bytes: out }
+    }).collect()
 }
 
 fn seeds_files() -> Vec<GoldenSeed> {
     let ctx = |sender: FileRole| FileContext {
-        session: RemoteSessionId::from_raw(1),
-        lease: InputLeaseId::from_raw(2),
-        handle: 3,
-        channel: if sender == FileRole::Host { 10 } else { 9 },
-        sender,
-        direction: FileDir::ToHost,
-        lane: FileLane::Files,
+        session: RemoteSessionId::from_raw(1), lease: InputLeaseId::from_raw(2), handle: 3,
+        channel: if sender == FileRole::Host { 10 } else { 9 }, sender, direction: FileDir::ToHost, lane: FileLane::Files,
     };
     let file_limits = FileLimits::new(&L, 4096).unwrap();
     let atp = &[1, 2, 3];
-
     let cases = [
-        (
-            "file_offer",
-            FileBody::Offer { profile: 1, atp },
-            FileRole::Controller,
-        ),
-        (
-            "file_accept",
-            FileBody::Accept {
-                profile: 1,
-                size: 3,
-                bytes_per_second: 1000,
-                chunk_bytes: 500,
-                concurrent_transfers: 1,
-                atp,
-            },
-            FileRole::Host,
-        ),
+        ("file_offer", FileBody::Offer { profile: 1, atp }, FileRole::Controller),
+        ("file_accept", FileBody::Accept { profile: 1, size: 3, bytes_per_second: 1000, chunk_bytes: 500, concurrent_transfers: 1, atp }, FileRole::Host),
         ("file_chunk", FileBody::Chunk { atp }, FileRole::Controller),
-        (
-            "file_complete",
-            FileBody::Complete {
-                disposition: Disposition::PublishedDurable,
-                reason: FileReason::None,
-                published_bytes: 3,
-                atp,
-            },
-            FileRole::Host,
-        ),
-        (
-            "file_cancel",
-            FileBody::Cancel(FileReason::User),
-            FileRole::Controller,
-        ),
+        ("file_complete", FileBody::Complete { disposition: Disposition::PublishedDurable, reason: FileReason::None, published_bytes: 3, atp }, FileRole::Host),
+        ("file_cancel", FileBody::Cancel(FileReason::User), FileRole::Controller),
     ];
-
-    cases
-        .into_iter()
-        .map(|(name, body, role)| {
-            let mut out = [0; 4096];
-            let len = encode_files(FileMsg { id: 4, body }, ctx(role), file_limits, &mut out)
-                .expect("encode files");
-            GoldenSeed {
-                category: "files",
-                name,
-                bytes: out[..len].to_vec(),
-            }
-        })
-        .collect()
+    cases.into_iter().map(|(name, body, role)| {
+        let mut out = [0; 4096];
+        let len = encode_files(FileMsg { id: 4, body }, ctx(role), file_limits, &mut out).expect("encode files");
+        GoldenSeed { category: "files", name, bytes: out[..len].to_vec() }
+    }).collect()
 }
 
 fn seeds_presented() -> Vec<GoldenSeed> {
     let b = DecBinding {
-        parent: ControlBinding {
-            id: 7,
-            host_boot: HostBootId::from_raw(1),
-            os_session: OsSessionId::from_raw(2),
-            remote_session: RemoteSessionId::from_raw(3),
-        },
-        display: 4,
-        geometry: DisplayGeometryGeneration::INITIAL,
-        configuration: CodecConfigurationGeneration::INITIAL,
-        recovery: RecoveryGeneration::INITIAL,
-        viewport: ViewportMappingGeneration::INITIAL,
+        parent: ControlBinding { id: 7, host_boot: HostBootId::from_raw(1), os_session: OsSessionId::from_raw(2), remote_session: RemoteSessionId::from_raw(3) },
+        display: 4, geometry: DisplayGeometryGeneration::INITIAL, configuration: CodecConfigurationGeneration::INITIAL,
+        recovery: RecoveryGeneration::INITIAL, viewport: ViewportMappingGeneration::INITIAL,
     };
-
-    let r_sample = PresReport {
-        sequence: 1,
-        visible: Some(PresSample {
-            stamp: PresStamp {
-                frame: 9,
-                captured_us: 10_000,
-                observed_us: 20_000,
-                source: SourceObservation::QualifiedUnchanged,
-            },
-            age_upper_us: 30_000,
-        }),
-    };
-    let r_unavail = PresReport {
-        sequence: 2,
-        visible: None,
-    };
-
+    let r_sample = PresReport { sequence: 1, visible: Some(PresSample { stamp: PresStamp { frame: 9, captured_us: 10_000, observed_us: 20_000, source: SourceObservation::QualifiedUnchanged }, age_upper_us: 30_000 }) };
+    let r_unavail = PresReport { sequence: 2, visible: None };
     let mut b1 = vec![0; fr_wire::presented::BYTES];
-    encode_presented(
-        r_sample,
-        b,
-        &L,
-        &mut b1,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    )
-    .expect("encode presented_sample");
-
+    encode_presented(r_sample, b, &L, &mut b1, InputDirection::ViewerToHost, InputDelivery::Reliable).expect("encode presented_sample");
     let mut b2 = vec![0; fr_wire::presented::BYTES];
-    encode_presented(
-        r_unavail,
-        b,
-        &L,
-        &mut b2,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    )
-    .expect("encode presented_unavail");
-
+    encode_presented(r_unavail, b, &L, &mut b2, InputDirection::ViewerToHost, InputDelivery::Reliable).expect("encode presented_unavail");
     vec![
-        GoldenSeed {
-            category: "presented",
-            name: "presented_state_sample",
-            bytes: b1,
-        },
-        GoldenSeed {
-            category: "presented",
-            name: "presented_state_unavailable",
-            bytes: b2,
-        },
+        GoldenSeed { category: "presented", name: "presented_state_sample", bytes: b1 },
+        GoldenSeed { category: "presented", name: "presented_state_unavailable", bytes: b2 },
     ]
 }
 
 fn seeds_receiver_metrics() -> Vec<GoldenSeed> {
     let b = DecBinding {
-        parent: ControlBinding {
-            id: 7,
-            host_boot: HostBootId::from_raw(1),
-            os_session: OsSessionId::from_raw(2),
-            remote_session: RemoteSessionId::from_raw(3),
-        },
-        display: 4,
-        geometry: DisplayGeometryGeneration::INITIAL,
-        configuration: CodecConfigurationGeneration::INITIAL,
-        recovery: RecoveryGeneration::INITIAL,
-        viewport: ViewportMappingGeneration::INITIAL,
+        parent: ControlBinding { id: 7, host_boot: HostBootId::from_raw(1), os_session: OsSessionId::from_raw(2), remote_session: RemoteSessionId::from_raw(3) },
+        display: 4, geometry: DisplayGeometryGeneration::INITIAL, configuration: CodecConfigurationGeneration::INITIAL,
+        recovery: RecoveryGeneration::INITIAL, viewport: ViewportMappingGeneration::INITIAL,
     };
-
     let mut q_out = vec![0; fr_wire::receiver_metrics::REPLY_BYTES];
-    let n1 = encode_metrics(
-        RecvMsg::Query { sequence: 1 },
-        b,
-        &L,
-        &mut q_out,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    )
-    .expect("encode query");
+    let n1 = encode_metrics(RecvMsg::Query { sequence: 1 }, b, &L, &mut q_out, InputDirection::HostToViewer, InputDelivery::Reliable).expect("encode query");
     q_out.truncate(n1);
-
     let mut r_out = vec![0; fr_wire::receiver_metrics::REPLY_BYTES];
-    let n2 = encode_metrics(
-        RecvMsg::Reply {
-            sequence: 2,
-            load: RecvLoad {
-                retained_bytes: 1000,
-                retained_pictures: 2,
-                decoding: true,
-                work_us: Some(75_000),
-            },
-        },
-        b,
-        &L,
-        &mut r_out,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    )
-    .expect("encode reply");
+    let n2 = encode_metrics(RecvMsg::Reply { sequence: 2, load: RecvLoad { retained_bytes: 1000, retained_pictures: 2, decoding: true, work_us: Some(75_000) } }, b, &L, &mut r_out, InputDirection::ViewerToHost, InputDelivery::Reliable).expect("encode reply");
     r_out.truncate(n2);
-
     vec![
-        GoldenSeed {
-            category: "receiver_metrics",
-            name: "metrics_query",
-            bytes: q_out,
-        },
-        GoldenSeed {
-            category: "receiver_metrics",
-            name: "metrics_reply",
-            bytes: r_out,
-        },
+        GoldenSeed { category: "receiver_metrics", name: "metrics_query", bytes: q_out },
+        GoldenSeed { category: "receiver_metrics", name: "metrics_reply", bytes: r_out },
     ]
 }
 
 fn seeds_clock() -> Vec<GoldenSeed> {
     let b = ControlBinding {
-        id: 0x0102_0304,
-        host_boot: HostBootId::from_raw(u128::from_be_bytes([0x11; 16])),
-        os_session: OsSessionId::from_raw(u128::from_be_bytes([0x22; 16])),
-        remote_session: RemoteSessionId::from_raw(u128::from_be_bytes([0x33; 16])),
+        id: 0x0102_0304, host_boot: HostBootId::from_raw(u128::from_be_bytes([0x11; 16])),
+        os_session: OsSessionId::from_raw(u128::from_be_bytes([0x22; 16])), remote_session: RemoteSessionId::from_raw(u128::from_be_bytes([0x33; 16])),
     };
-
     let mut p_out = [0; fr_wire::clock::REPLY_BYTES];
-    let n1 = encode_clock(
-        ClockMsg::Probe {
-            sequence: 0x0102_0304_0506_0708,
-        },
-        b,
-        &L,
-        &mut p_out,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    )
-    .expect("encode clock_probe");
-
+    let n1 = encode_clock(ClockMsg::Probe { sequence: 0x0102_0304_0506_0708 }, b, &L, &mut p_out, InputDirection::ViewerToHost, InputDelivery::Reliable).expect("encode clock_probe");
     let mut r_out = [0; fr_wire::clock::REPLY_BYTES];
-    let n2 = encode_clock(
-        ClockMsg::Reply {
-            sequence: 0x0102_0304_0506_0708,
-            host_sample_us: 0xf1f2_f3f4_f5f6_f7f8,
-        },
-        b,
-        &L,
-        &mut r_out,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    )
-    .expect("encode clock_reply");
-
+    let n2 = encode_clock(ClockMsg::Reply { sequence: 0x0102_0304_0506_0708, host_sample_us: 0xf1f2_f3f4_f5f6_f7f8 }, b, &L, &mut r_out, InputDirection::HostToViewer, InputDelivery::Reliable).expect("encode clock_reply");
     vec![
-        GoldenSeed {
-            category: "clock",
-            name: "clock_probe",
-            bytes: p_out[..n1].to_vec(),
-        },
-        GoldenSeed {
-            category: "clock",
-            name: "clock_reply",
-            bytes: r_out[..n2].to_vec(),
-        },
+        GoldenSeed { category: "clock", name: "clock_probe", bytes: p_out[..n1].to_vec() },
+        GoldenSeed { category: "clock", name: "clock_reply", bytes: r_out[..n2].to_vec() },
     ]
 }
 
 fn seeds_input() -> Vec<GoldenSeed> {
     let creds = InputCredentials {
-        session: RemoteSessionId::from_raw(1),
-        lease: InputLeaseId::from_raw(2),
-        ticket: InputTicketId::from_raw(3),
-        view: InputView {
-            geometry: DisplayGeometryGeneration::from_raw(4),
-            viewport: ViewportMappingGeneration::from_raw(5),
-            configuration: CodecConfigurationGeneration::from_raw(6),
-            recovery: RecoveryGeneration::from_raw(7),
-        },
+        session: RemoteSessionId::from_raw(1), lease: InputLeaseId::from_raw(2), ticket: InputTicketId::from_raw(3),
+        view: InputView { geometry: DisplayGeometryGeneration::from_raw(4), viewport: ViewportMappingGeneration::from_raw(5), configuration: CodecConfigurationGeneration::from_raw(6), recovery: RecoveryGeneration::from_raw(7) },
     };
     let pos = DesktopPoint { x: -120, y: 45 };
-
-    let events: Vec<(&'static str, InputEvent<'static>)> = vec![
-        (
-            "key_page_usage",
-            InputEvent::Key {
-                key: PhysicalKey::new(4).unwrap(),
-                transition: KeyTransition::Press,
-            },
-        ),
-        (
-            "button",
-            InputEvent::Button {
-                button: PointerButton::Secondary,
-                pressed: true,
-                position: pos,
-                barrier: 99,
-            },
-        ),
+    let events: [(&str, InputEvent<'static>); 7] = [
+        ("key_page_usage", InputEvent::Key { key: PhysicalKey::new(4).unwrap(), transition: KeyTransition::Press }),
+        ("button", InputEvent::Button { button: PointerButton::Secondary, pressed: true, position: pos, barrier: 99 }),
         ("pointer", InputEvent::Pointer { position: pos }),
-        (
-            "relative",
-            InputEvent::Relative {
-                mode_epoch: 11,
-                cumulative_x: -1000,
-                cumulative_y: 2000,
-            },
-        ),
-        (
-            "scroll",
-            InputEvent::Scroll {
-                position: pos,
-                barrier: 99,
-                x: -1,
-                y: 2,
-                unit: ScrollUnit::Lines,
-            },
-        ),
+        ("relative", InputEvent::Relative { mode_epoch: 11, cumulative_x: -1000, cumulative_y: 2000 }),
+        ("scroll", InputEvent::Scroll { position: pos, barrier: 99, x: -1, y: 2, unit: ScrollUnit::Lines }),
         ("text", InputEvent::Text("hé🙂")),
-        (
-            "mode",
-            InputEvent::Mode {
-                mode: PointerMode::Relative,
-                epoch: 11,
-            },
-        ),
+        ("mode", InputEvent::Mode { mode: PointerMode::Relative, epoch: 11 }),
     ];
-
-    events
-        .into_iter()
-        .map(|(name, event)| {
-            let req = InputRequest {
-                credentials: creds,
-                sequence: 8,
-                event,
-            };
-            let mut out = [0; 256];
-            let len = encode_input(
-                req,
-                &mut out,
-                &L,
-                9,
-                InputDirection::ViewerToHost,
-                InputDelivery::Reliable,
-            )
-            .expect("encode input");
-            GoldenSeed {
-                category: "input",
-                name,
-                bytes: out[..len].to_vec(),
-            }
-        })
-        .collect()
+    events.into_iter().map(|(name, event)| {
+        let req = InputRequest { credentials: creds, sequence: 8, event };
+        let mut out = [0; 256];
+        let len = encode_input(req, &mut out, &L, 9, InputDirection::ViewerToHost, InputDelivery::Reliable).expect("encode input");
+        GoldenSeed { category: "input", name, bytes: out[..len].to_vec() }
+    }).collect()
 }
 
 /// Collects all golden seeds across all protocol message families.
@@ -1174,255 +550,54 @@ fn mutate(corpus: &[GoldenSeed], prng: &mut Prng) -> Vec<u8> {
 /// 2. Returns either Ok(T) or typed Error.
 /// 3. If parsing succeeds, re-encoding the parsed structure must never panic.
 pub fn fuzz_one(input: &[u8]) {
+    let p_rel = InputDelivery::Reliable;
+    let d_h2v = InputDirection::HostToViewer;
+    let d_v2h = InputDirection::ViewerToHost;
+    let parent = ControlBinding { id: 7, host_boot: HostBootId::from_raw(11), os_session: OsSessionId::from_raw(12), remote_session: RemoteSessionId::from_raw(13) };
+    let dec_b = DecBinding {
+        parent, display: 14, geometry: DisplayGeometryGeneration::from_raw(15), configuration: CodecConfigurationGeneration::from_raw(16),
+        recovery: RecoveryGeneration::from_raw(17), viewport: ViewportMappingGeneration::from_raw(18),
+    };
+    let auth_b = AuthBinding { channel: 0x0102_0304, session: RemoteSessionId::from_raw(0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00) };
+    let disp_p = ControlBinding { id: 0x0102_0304, host_boot: HostBootId::from_raw(u128::from_be_bytes([0x11; 16])), os_session: OsSessionId::from_raw(u128::from_be_bytes([0x22; 16])), remote_session: RemoteSessionId::from_raw(u128::from_be_bytes([0x33; 16])) };
+    let clip_ctx = ClipContext { scope: ClipBinding { session: RemoteSessionId::from_raw(1), lease: InputLeaseId::from_raw(2) }, channel: 9, sender: ClipRole::Controller, lane: ClipLane::Clipboard };
+    let file_ctx = FileContext { session: RemoteSessionId::from_raw(1), lease: InputLeaseId::from_raw(2), handle: 3, channel: 9, sender: FileRole::Controller, direction: FileDir::ToHost, lane: FileLane::Files };
+    let pres_b = DecBinding { parent: ControlBinding { id: 7, host_boot: HostBootId::from_raw(1), os_session: OsSessionId::from_raw(2), remote_session: RemoteSessionId::from_raw(3) }, display: 4, geometry: DisplayGeometryGeneration::INITIAL, configuration: CodecConfigurationGeneration::INITIAL, recovery: RecoveryGeneration::INITIAL, viewport: ViewportMappingGeneration::INITIAL };
+
     // 1. Raw record decode with various limits
     if let Ok(med_limits) = MediaLimits::new(L, 1_150, 16_384, 64) {
         for &binding in &[0, 1, 7, 8, 9, 0x0102_0304] {
-            for &channel in &[
-                Channel::Video,
-                Channel::Recovery,
-                Channel::Control,
-                Channel::MediaConfig,
-            ] {
+            for &channel in &[Channel::Video, Channel::Recovery, Channel::Control, Channel::MediaConfig] {
                 let _ = Record::decode(input, &med_limits, binding, channel);
             }
         }
+        if let Ok(rec) = Record::decode(input, &med_limits, 9, Channel::Video) { let _ = decode_fragment(rec, &med_limits); }
+        if let Ok(rec) = Record::decode(input, &med_limits, 9, Channel::Recovery) { let _ = decode_recovery(rec, &med_limits); }
+        if let Ok(rec) = Record::decode(input, &med_limits, 9, Channel::Control) { let _ = decode_repair(rec, 7, &med_limits); }
+        if let Ok(rec) = Record::decode(input, &med_limits, 9, Channel::MediaConfig) { let _ = decode_progress(rec, &med_limits); }
     }
 
-    // 2. Negotiation decoder
-    for &binding in &[0, 1, 7] {
-        let _ = decode_neg(input, 4096, binding);
-    }
-
-    // 3. Authority decoder
-    let auth_b = AuthBinding {
-        channel: 0x0102_0304,
-        session: RemoteSessionId::from_raw(0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00),
-    };
-    let _ = fr_wire::authority::decode(
-        input,
-        auth_b,
-        &L,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    );
-    let _ = fr_wire::authority::decode(
-        input,
-        auth_b,
-        &L,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    );
-
-    // 4. Input ticket decoder
-    let _ = decode_input_ticket(
-        input,
-        &L,
-        7,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    );
-
-    // 5. Attachment decoder
-    let parent = ControlBinding {
-        id: 7,
-        host_boot: HostBootId::from_raw(11),
-        os_session: OsSessionId::from_raw(12),
-        remote_session: RemoteSessionId::from_raw(13),
-    };
-    let _ = decode_attachment(
-        input,
-        parent,
-        7,
-        &L,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    );
-    let _ = decode_attachment(
-        input,
-        parent,
-        8,
-        &L,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    );
-
-    // 6. Display decoder
-    let disp_p = ControlBinding {
-        id: 0x0102_0304,
-        host_boot: HostBootId::from_raw(u128::from_be_bytes([0x11; 16])),
-        os_session: OsSessionId::from_raw(u128::from_be_bytes([0x22; 16])),
-        remote_session: RemoteSessionId::from_raw(u128::from_be_bytes([0x33; 16])),
-    };
-    let _ = decode_display(
-        input,
-        disp_p,
-        &L,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    );
-    let _ = decode_display(
-        input,
-        disp_p,
-        &L,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    );
-
-    // 7. Decoder decoder
-    let dec_b = DecBinding {
-        parent,
-        display: 14,
-        geometry: DisplayGeometryGeneration::from_raw(15),
-        configuration: CodecConfigurationGeneration::from_raw(16),
-        recovery: RecoveryGeneration::from_raw(17),
-        viewport: ViewportMappingGeneration::from_raw(18),
-    };
-    let _ = decode_decoder(
-        input,
-        dec_b,
-        &L,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    );
-    let _ = decode_decoder(
-        input,
-        dec_b,
-        &L,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    );
-
-    // 8. Media decoder
-    if let Ok(med_limits) = MediaLimits::new(L, 1_150, 16_384, 64) {
-        if let Ok(rec) = Record::decode(input, &med_limits, 9, Channel::Video) {
-            let _ = decode_fragment(rec, &med_limits);
-        }
-        if let Ok(rec) = Record::decode(input, &med_limits, 9, Channel::Recovery) {
-            let _ = decode_recovery(rec, &med_limits);
-        }
-        if let Ok(rec) = Record::decode(input, &med_limits, 9, Channel::Control) {
-            let _ = decode_repair(rec, 7, &med_limits);
-        }
-        if let Ok(rec) = Record::decode(input, &med_limits, 9, Channel::MediaConfig) {
-            let _ = decode_progress(rec, &med_limits);
-        }
-    }
-
-    // 9. Input & input result
-    let _ = decode_input(
-        input,
-        &L,
-        9,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    );
-    let res_b = ResultBinding {
-        channel: 9,
-        session: RemoteSessionId::from_raw(1),
-        lease: InputLeaseId::from_raw(2),
-    };
-    let _ = decode_input_result(
-        input,
-        &L,
-        res_b,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    );
-
-    // 10. Held state
-    let _ = decode_held(
-        input,
-        &L,
-        9,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    );
-
-    // 11. Clipboard
-    let clip_ctx = ClipContext {
-        scope: ClipBinding {
-            session: RemoteSessionId::from_raw(1),
-            lease: InputLeaseId::from_raw(2),
-        },
-        channel: 9,
-        sender: ClipRole::Controller,
-        lane: ClipLane::Clipboard,
-    };
+    // 2. Parsers
+    for &b in &[0, 1, 7] { let _ = decode_neg(input, 4096, b); }
+    let _ = fr_wire::authority::decode(input, auth_b, &L, d_h2v, p_rel);
+    let _ = fr_wire::authority::decode(input, auth_b, &L, d_v2h, p_rel);
+    let _ = decode_input_ticket(input, &L, 7, d_h2v, p_rel);
+    let _ = decode_attachment(input, parent, 7, &L, d_h2v, p_rel);
+    let _ = decode_attachment(input, parent, 8, &L, d_v2h, p_rel);
+    let _ = decode_display(input, disp_p, &L, d_h2v, p_rel);
+    let _ = decode_display(input, disp_p, &L, d_v2h, p_rel);
+    let _ = decode_decoder(input, dec_b, &L, d_h2v, p_rel);
+    let _ = decode_decoder(input, dec_b, &L, d_v2h, p_rel);
+    let _ = decode_input(input, &L, 9, d_v2h, p_rel);
+    let _ = decode_input_result(input, &L, ResultBinding { channel: 9, session: RemoteSessionId::from_raw(1), lease: InputLeaseId::from_raw(2) }, d_h2v, p_rel);
+    let _ = decode_held(input, &L, 9, d_v2h, p_rel);
     let _ = decode_clipboard(input, clip_ctx, &L);
-
-    // 12. Files
-    let file_ctx = FileContext {
-        session: RemoteSessionId::from_raw(1),
-        lease: InputLeaseId::from_raw(2),
-        handle: 3,
-        channel: 9,
-        sender: FileRole::Controller,
-        direction: FileDir::ToHost,
-        lane: FileLane::Files,
-    };
-    if let Ok(flim) = FileLimits::new(&L, 4096) {
-        let _ = decode_files(input, file_ctx, flim);
-    }
-
-    // 13. Presented state
-    let pres_b = DecBinding {
-        parent: ControlBinding {
-            id: 7,
-            host_boot: HostBootId::from_raw(1),
-            os_session: OsSessionId::from_raw(2),
-            remote_session: RemoteSessionId::from_raw(3),
-        },
-        display: 4,
-        geometry: DisplayGeometryGeneration::INITIAL,
-        configuration: CodecConfigurationGeneration::INITIAL,
-        recovery: RecoveryGeneration::INITIAL,
-        viewport: ViewportMappingGeneration::INITIAL,
-    };
-    let _ = decode_presented(
-        input,
-        pres_b,
-        &L,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    );
-
-    // 14. Receiver metrics
-    let _ = decode_metrics(
-        input,
-        pres_b,
-        &L,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    );
-    let _ = decode_metrics(
-        input,
-        pres_b,
-        &L,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    );
-
-    // 15. Clock
-    let clock_b = ControlBinding {
-        id: 0x0102_0304,
-        host_boot: HostBootId::from_raw(u128::from_be_bytes([0x11; 16])),
-        os_session: OsSessionId::from_raw(u128::from_be_bytes([0x22; 16])),
-        remote_session: RemoteSessionId::from_raw(u128::from_be_bytes([0x33; 16])),
-    };
-    let _ = decode_clock(
-        input,
-        clock_b,
-        &L,
-        InputDirection::ViewerToHost,
-        InputDelivery::Reliable,
-    );
-    let _ = decode_clock(
-        input,
-        clock_b,
-        &L,
-        InputDirection::HostToViewer,
-        InputDelivery::Reliable,
-    );
+    if let Ok(flim) = FileLimits::new(&L, 4096) { let _ = decode_files(input, file_ctx, flim); }
+    let _ = decode_presented(input, pres_b, &L, d_v2h, p_rel);
+    let _ = decode_metrics(input, pres_b, &L, d_h2v, p_rel);
+    let _ = decode_metrics(input, pres_b, &L, d_v2h, p_rel);
+    let _ = decode_clock(input, disp_p, &L, d_v2h, p_rel);
+    let _ = decode_clock(input, disp_p, &L, d_h2v, p_rel);
 }
 
 /// Runs the fuzz smoke campaign for the requested number of iterations.

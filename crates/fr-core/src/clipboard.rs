@@ -21,6 +21,8 @@ use std::sync::{
 pub mod authority;
 use authority::Monitor;
 
+pub mod image;
+
 mod receive;
 
 /// Fixed metadata ceiling, independent of the payload byte limit.
