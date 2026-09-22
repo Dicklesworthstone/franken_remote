@@ -87,3 +87,28 @@ impl Host {
         Ok((self.cx.clone(), self.config.binding, self.until))
     }
 }
+
+impl super::Configuration {
+    pub(crate) fn check_incoming(&self) -> Result<(), Error> {
+        self.validate()?;
+        self.transport.validate()?;
+        // The native listener advertises these windows before Host exists.
+        // A later adapter cannot retract already-advertised transport credit.
+        if self.transport.stream_window != 65_536 || self.transport.connection_window != 524_288 {
+            return Err(Error::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+impl Host {
+    pub(crate) fn retain_connection_check(
+        &mut self,
+        check: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<(), Error> {
+        self.transport
+            .as_mut()
+            .ok_or(Error::Closed)?
+            .retain_lifetime_check(&self.cx, check)
+            .map_err(Error::from)
+    }
+}

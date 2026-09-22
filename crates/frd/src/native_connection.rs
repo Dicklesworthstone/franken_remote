@@ -1,5 +1,6 @@
 //! Installed-tailnet connection kept under renewal through native viewer service.
 //! Reuses fr-tailnet's canonical TLS dialer, not another connection implementation.
+pub mod host;
 pub mod reconnect;
 
 use crate::session_startup::Viewer;
