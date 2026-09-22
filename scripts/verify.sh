@@ -19,6 +19,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root" || exit 1
 export RCH_CARGO_WRAPPER_BYPASS=1
 export RUST_MIN_STACK="${RUST_MIN_STACK:-16777216}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${repo_root}/target}"
 
 lane="${1:-}"
 
