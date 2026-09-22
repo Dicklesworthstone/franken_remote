@@ -630,44 +630,10 @@ fn exhausted_bulk_pool_cannot_consume_critical_storage_and_critical_runs_first()
         .await;
         let bulk = record(2, 0x32, 32000, 8);
         let result = record(7, 0x48, 74, 9);
-        p.server
-            .send(
-                &cx,
-                Route::Stream(p.bulk),
-                &bulk,
-                clock(&cx) + 2_000_000,
-                || true,
-            )
-            .unwrap();
-        assert_eq!(
-            p.server.send(
-                &cx,
-                Route::Stream(p.bulk),
-                &bulk,
-                clock(&cx) + 2_000_000,
-                || true
-            ),
-            Err(Error::Backpressure)
-        );
-        p.server
-            .send(
-                &cx,
-                Route::Stream(p.results),
-                &result,
-                clock(&cx) + 2_000_000,
-                || true,
-            )
-            .unwrap();
-        assert_eq!(
-            p.server.send(
-                &cx,
-                Route::Stream(p.results),
-                &result,
-                clock(&cx) + 2_000_000,
-                || true
-            ),
-            Err(Error::Backpressure)
-        );
+        p.server.send(&cx, Route::Stream(p.bulk), &bulk, clock(&cx) + 2_000_000, || true).unwrap();
+        assert_eq!(p.server.send(&cx, Route::Stream(p.bulk), &bulk, clock(&cx) + 2_000_000, || true), Err(Error::Backpressure));
+        p.server.send(&cx, Route::Stream(p.results), &result, clock(&cx) + 2_000_000, || true).unwrap();
+        assert_eq!(p.server.send(&cx, Route::Stream(p.results), &result, clock(&cx) + 2_000_000, || true), Err(Error::Backpressure));
         assert_eq!(p.server.usage().critical_send_records, 1);
         assert_eq!(p.server.usage().retained_send_records, 2);
         let mut kinds = vec![];
@@ -705,35 +671,17 @@ fn blocked_bulk_stream_cannot_pin_acknowledged_critical_storage() {
         )
         .await;
         for tag in [11, 12, 13, 14] {
-            p.server
-                .send(
-                    &cx,
-                    Route::Stream(p.bulk),
-                    &record(2, 0x32, 1024, tag),
-                    clock(&cx) + 2_000_000,
-                    || true,
-                )
-                .unwrap();
+            p.server.send(&cx, Route::Stream(p.bulk), &record(2, 0x32, 1024, tag), clock(&cx) + 2_000_000, || true).unwrap();
         }
         // The bulk consumer is unavailable: do not drain its native window.
         // That stream fills, but ACKed control storage must remain reusable.
         for _ in 0..40 {
             input_drive(&cx, &mut p).await;
-            p.client
-                .receive_ready(&cx, || true, |_| false, |_, _| panic!("blocked consumer"))
-                .unwrap();
+            p.client.receive_ready(&cx, || true, |_| false, |_, _| panic!("blocked consumer")).unwrap();
         }
         for tag in 0..8 {
             let result = record(7, 0x48, 74, tag);
-            p.server
-                .send(
-                    &cx,
-                    Route::Stream(p.results),
-                    &result,
-                    clock(&cx) + 2_000_000,
-                    || true,
-                )
-                .unwrap();
+            p.server.send(&cx, Route::Stream(p.results), &result, clock(&cx) + 2_000_000, || true).unwrap();
             let mut received = false;
             for _ in 0..100 {
                 input_drive(&cx, &mut p).await;
