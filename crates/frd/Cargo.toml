@@ -10,6 +10,7 @@ asupersync.workspace = true
 fr-core.workspace = true
 fr-media.workspace = true
 fr-wire.workspace = true
+serde_json.workspace = true
 [lints]
 workspace = true
 
@@ -19,5 +20,4 @@ fr-transport.workspace = true
 fr-tailnet.workspace = true
 fr-files.workspace = true
 serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
 rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }

@@ -48,10 +48,13 @@ OPTIONS:
     --user          Manage user-level service (systemd user unit / launchd agent; default)
     --system        Manage system-wide service
     --dry-run       Preview service generation without modifying filesystem
-    --config PATH   Local policy file for run/approval/sharing (absolute, Linux)
+    --config PATH   Local policy file for run/install/approval/sharing (absolute, Linux)
     --json          Output structured, schema-versioned JSON envelope
     --help, -h      Print this help text
 ";
+
+#[path = "frd/install.rs"]
+mod local_install;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -83,7 +86,7 @@ fn main() -> ExitCode {
         "approval" => execute_policy(&args, true, json),
         "sharing" => execute_policy(&args, false, json),
         "run" => execute_run(&args, json),
-        "install" => execute_install(&args, json),
+        "install" => local_install::execute(&args, json),
         "uninstall" => execute_uninstall(&args, json),
         "service-status" => execute_service_status(&args, json),
         other => {
@@ -134,45 +137,6 @@ fn execute_policy(args: &[String], approval: bool, json: bool) -> ExitCode {
     }
 }
 
-fn parse_port(args: &[String]) -> u16 {
-    for (i, arg) in args.iter().enumerate() {
-        if arg == "--port"
-            && i + 1 < args.len()
-            && let Ok(p) = args[i + 1].parse::<u16>()
-        {
-            return p;
-        }
-    }
-    8443
-}
-
-fn parse_socket(args: &[String]) -> Option<PathBuf> {
-    for (i, arg) in args.iter().enumerate() {
-        if arg == "--socket" && i + 1 < args.len() {
-            return Some(PathBuf::from(&args[i + 1]));
-        }
-    }
-    None
-}
-
-fn parse_approval_flag(args: &[String]) -> String {
-    for (i, arg) in args.iter().enumerate() {
-        if arg == "--approval" && i + 1 < args.len() {
-            return args[i + 1].clone();
-        }
-    }
-    "none".into()
-}
-
-fn parse_sharing_flag(args: &[String]) -> String {
-    for (i, arg) in args.iter().enumerate() {
-        if arg == "--sharing" && i + 1 < args.len() {
-            return args[i + 1].clone();
-        }
-    }
-    "own-user".into()
-}
-
 fn parse_service_kind(args: &[String]) -> ServiceKind {
     if args.iter().any(|a| a == "--system") {
         #[cfg(target_os = "macos")]
@@ -189,62 +153,6 @@ fn parse_service_kind(args: &[String]) -> ServiceKind {
         }
     } else {
         ServiceKind::default_for_platform()
-    }
-}
-
-fn execute_install(args: &[String], json: bool) -> ExitCode {
-    let port = parse_port(args);
-    let socket = parse_socket(args);
-    let approval = parse_approval_flag(args);
-    let sharing = parse_sharing_flag(args);
-    let dry_run = args.iter().any(|a| a == "--dry-run");
-    let kind = parse_service_kind(args);
-
-    let options = InstallOptions {
-        kind,
-        service_port: port,
-        socket_path: socket,
-        approval_mode: approval,
-        sharing_scope: sharing,
-        exec_path: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("frd")),
-        dry_run,
-        custom_unit_dir: None,
-    };
-
-    match service_install::install(&options) {
-        Ok(report) => {
-            if json {
-                println!(
-                    "{{\"outcome\":\"success\",\"kind\":\"{}\",\"unit_path\":\"{}\",\"dry_run\":{}}}",
-                    report.kind.as_str(),
-                    report.unit_path.display(),
-                    report.dry_run
-                );
-            } else {
-                println!(
-                    "Service installation {} for {}:",
-                    if report.dry_run {
-                        "preview"
-                    } else {
-                        "succeeded"
-                    },
-                    report.kind.as_str()
-                );
-                println!("  Unit file: {}", report.unit_path.display());
-                for step in &report.next_steps {
-                    println!("  {step}");
-                }
-            }
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            if json {
-                println!("{{\"outcome\":\"failure\",\"error\":\"{e}\"}}");
-            } else {
-                eprintln!("Error installing service: {e}");
-            }
-            ExitCode::from(1)
-        }
     }
 }
 
@@ -291,7 +199,10 @@ fn execute_uninstall(args: &[String], json: bool) -> ExitCode {
         }
         Err(e) => {
             if json {
-                println!("{{\"outcome\":\"failure\",\"error\":\"{e}\"}}");
+                println!(
+                    "{}",
+                    serde_json::json!({"outcome": "failure", "error": e.to_string()})
+                );
             } else {
                 eprintln!("Error uninstalling service: {e}");
             }

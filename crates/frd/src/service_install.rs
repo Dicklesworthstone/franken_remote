@@ -12,6 +12,9 @@
 //! - Dry-run mode for previewing generated unit/plist specifications without filesystem mutation
 
 use std::fmt::{self, Write as _};
+
+mod options;
+mod quoting;
 use std::fs;
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -75,6 +78,8 @@ pub enum ServiceError {
     TailscaleUnavailable { detail: String },
     /// Platform is unsupported for the requested service kind.
     UnsupportedPlatform { detail: String },
+    /// Invalid or ambiguous local service configuration.
+    InvalidOptions,
     /// General I/O failure.
     IoError { detail: String },
 }
@@ -82,6 +87,9 @@ pub enum ServiceError {
 impl fmt::Display for ServiceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::InvalidOptions => {
+                write!(f, "invalid service options; no service change was applied")
+            }
             Self::PortConflict { port } => {
                 write!(
                     f,
@@ -118,9 +126,11 @@ pub struct InstallOptions {
     pub service_port: u16,
     /// Optional custom Tailscale daemon socket path.
     pub socket_path: Option<PathBuf>,
-    /// Initial local operator approval mode ("local" or "none").
+    /// Optional saved host policy file loaded by the service at startup.
+    pub config_path: Option<PathBuf>,
+    /// Explicit approval override ("local" or "none"); empty inherits saved policy.
     pub approval_mode: String,
-    /// Tailnet sharing scope ("own-user" or "tailnet").
+    /// Explicit sharing override ("own-user" or "tailnet"); empty inherits saved policy.
     pub sharing_scope: String,
     /// Absolute path to the installed `frd` binary.
     pub exec_path: PathBuf,
@@ -137,8 +147,9 @@ impl Default for InstallOptions {
             kind: ServiceKind::default_for_platform(),
             service_port: 8443,
             socket_path: None,
-            approval_mode: "none".into(),
-            sharing_scope: "own-user".into(),
+            config_path: None,
+            approval_mode: String::new(),
+            sharing_scope: String::new(),
             exec_path,
             dry_run: false,
             custom_unit_dir: None,
@@ -179,13 +190,32 @@ pub struct UninstallReport {
 pub fn render_systemd_unit(options: &InstallOptions) -> String {
     let mut args = format!("run --port {}", options.service_port);
     if let Some(sock) = &options.socket_path {
-        let _ = write!(args, " --socket {}", sock.display());
+        let _ = write!(
+            args,
+            " --socket {}",
+            quoting::systemd(&sock.to_string_lossy())
+        );
     }
-    if options.approval_mode != "none" {
-        let _ = write!(args, " --approval {}", options.approval_mode);
+    if let Some(path) = &options.config_path {
+        let _ = write!(
+            args,
+            " --config {}",
+            quoting::systemd(&path.to_string_lossy())
+        );
     }
-    if options.sharing_scope != "own-user" {
-        let _ = write!(args, " --sharing {}", options.sharing_scope);
+    if !options.approval_mode.is_empty() {
+        let _ = write!(
+            args,
+            " --approval {}",
+            quoting::systemd(&options.approval_mode)
+        );
+    }
+    if !options.sharing_scope.is_empty() {
+        let _ = write!(
+            args,
+            " --sharing {}",
+            quoting::systemd(&options.sharing_scope)
+        );
     }
 
     let is_user = matches!(options.kind, ServiceKind::SystemdUser);
@@ -210,7 +240,7 @@ Wants=tailscaled.service
 
 [Service]
 Type=simple
-ExecStart={} {}
+ExecStart=:{} {}
 Restart=always
 RestartSec=3
 StandardOutput=journal
@@ -222,7 +252,7 @@ Environment=RUST_BACKTRACE=1
 WantedBy={}
 ",
         unit_deps,
-        options.exec_path.display(),
+        quoting::systemd(&options.exec_path.to_string_lossy()),
         args,
         target
     )
@@ -233,7 +263,7 @@ WantedBy={}
 pub fn render_launchd_plist(options: &InstallOptions) -> String {
     let mut program_args = format!(
         "        <string>{}</string>\n        <string>run</string>\n        <string>--port</string>\n        <string>{}</string>",
-        options.exec_path.display(),
+        quoting::xml(&options.exec_path.to_string_lossy()),
         options.service_port
     );
 
@@ -241,21 +271,28 @@ pub fn render_launchd_plist(options: &InstallOptions) -> String {
         let _ = write!(
             program_args,
             "\n        <string>--socket</string>\n        <string>{}</string>",
-            sock.display()
+            quoting::xml(&sock.to_string_lossy())
         );
     }
-    if options.approval_mode != "none" {
+    if let Some(path) = &options.config_path {
+        let _ = write!(
+            program_args,
+            "\n        <string>--config</string>\n        <string>{}</string>",
+            quoting::xml(&path.to_string_lossy())
+        );
+    }
+    if !options.approval_mode.is_empty() {
         let _ = write!(
             program_args,
             "\n        <string>--approval</string>\n        <string>{}</string>",
-            options.approval_mode
+            quoting::xml(&options.approval_mode)
         );
     }
-    if options.sharing_scope != "own-user" {
+    if !options.sharing_scope.is_empty() {
         let _ = write!(
             program_args,
             "\n        <string>--sharing</string>\n        <string>{}</string>",
-            options.sharing_scope
+            quoting::xml(&options.sharing_scope)
         );
     }
 
@@ -328,6 +365,7 @@ pub fn resolve_unit_path(options: &InstallOptions) -> PathBuf {
 
 /// Perform preflight verification before installing the service.
 pub fn preflight_check(options: &InstallOptions) -> Result<(), ServiceError> {
+    options.validate()?;
     // 1. Verify executable exists (unless dry-run where binary might be hypothetical).
     if !options.dry_run && !options.exec_path.exists() {
         return Err(ServiceError::ExecutableNotFound {
@@ -470,6 +508,7 @@ mod tests {
             kind: ServiceKind::SystemdUser,
             service_port: 8443,
             socket_path: Some(PathBuf::from("/var/run/tailscale/tailscaled.sock")),
+            config_path: None,
             approval_mode: "local".into(),
             sharing_scope: "tailnet".into(),
             exec_path: PathBuf::from("/usr/local/bin/frd"),
@@ -478,7 +517,7 @@ mod tests {
         };
 
         let unit = render_systemd_unit(&options);
-        assert!(unit.contains("ExecStart=/usr/local/bin/frd run --port 8443 --socket /var/run/tailscale/tailscaled.sock --approval local --sharing tailnet"));
+        assert!(unit.contains("ExecStart=:/usr/local/bin/frd run --port 8443 --socket /var/run/tailscale/tailscaled.sock --approval local --sharing tailnet"));
         assert!(unit.contains("Restart=always"));
         assert!(unit.contains("WantedBy=default.target"));
     }
@@ -489,6 +528,7 @@ mod tests {
             kind: ServiceKind::LaunchdAgent,
             service_port: 9000,
             socket_path: None,
+            config_path: None,
             approval_mode: "none".into(),
             sharing_scope: "own-user".into(),
             exec_path: PathBuf::from("/Applications/frd"),
@@ -512,6 +552,7 @@ mod tests {
             kind: ServiceKind::SystemdUser,
             service_port: 8443,
             socket_path: None,
+            config_path: None,
             approval_mode: "none".into(),
             sharing_scope: "own-user".into(),
             exec_path: PathBuf::from("/bin/sh"),
@@ -545,6 +586,7 @@ mod tests {
             kind: ServiceKind::SystemdUser,
             service_port: 8443,
             socket_path: None,
+            config_path: None,
             approval_mode: "none".into(),
             sharing_scope: "own-user".into(),
             exec_path: PathBuf::from("/nonexistent/path/to/frd_binary_xyz"),

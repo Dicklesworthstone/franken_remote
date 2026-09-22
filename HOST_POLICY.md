@@ -33,3 +33,18 @@ atomic rename prevent partial reads. A stable nonblocking writer lock preserves
 concurrent field updates. A failed directory sync after publication is reported
 as uncertain crash durability, not as an unapplied save. Invalid, unknown,
 duplicate, or missing startup option values refuse before contacting Tailscale.
+
+## Installing a service with these settings
+
+`frd install` leaves omitted `--approval` and `--sharing` flags out of the unit,
+so the daemon loads the saved policy at each start. Explicit values are retained,
+including `--approval none` and `--sharing own-user`; they never disappear merely
+because they match the original plan defaults. `--config /absolute/path.json`
+is preserved in Linux service definitions. The file must be readable by the
+service account, not just the account invoking the installer.
+
+`frd install --dry-run` now prints the actual generated definition. JSON preview
+output includes `unit_content` and `next_steps`, with `started: false`. Writing a
+unit is not evidence that the daemon is running. Invalid/duplicate flags, invalid
+ports and unsafe argument encodings refuse before installation. Service paths
+are encoded for systemd or XML rather than interpolated as commands/markup.
