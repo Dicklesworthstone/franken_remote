@@ -13,6 +13,12 @@ use fr_client::input::{
 use fr_client::session::{
     ClientSession, ReconnectPolicy, SessionError, SessionState, SuspendReason,
 };
+use fr_client::connection_quality::{
+    ConnectionQualityMetrics, QualityTier, QualityWarning, TransportType,
+};
+use fr_client::decoder_admission::{DecodeAdmissionRefusal, DecoderAdmissionController};
+use fr_client::permissions::{PermissionCategory, PermissionExplanation, PermissionState};
+use fr_client::settings::{ClientSettings, ColorRangePreference, DisplayFitMode};
 use fr_client::shortcut::{
     PlatformCapabilityRow, PlatformId, ShortcutCaptureController, ShortcutCaptureError,
     ShortcutCaptureMode, ShortcutRoutingMechanism, ShortcutSupportStatus,
@@ -556,4 +562,154 @@ fn shortcut_capture_permission_refusal_on_unprivileged_macos() {
         .expect("toggle with permission");
     assert_eq!(mode, ShortcutCaptureMode::Enabled);
     assert_eq!(toolbar.shortcut_status_text, "Routing to Remote");
+}
+
+// =========================================================================
+// 4. Desktop Client Telemetry, Settings, Permissions, and Decoder Admission
+// =========================================================================
+
+#[test]
+fn connection_quality_telemetry_and_classification() {
+    let mut metrics = ConnectionQualityMetrics {
+        rtt_ms: 18,
+        jitter_ms: 2,
+        packet_loss_permille: 0,
+        fps: 60,
+        bitrate_kbps: 8000,
+        decode_time_us: 2500,
+        render_time_us: 1200,
+        transport: TransportType::NativeQuic,
+    };
+
+    let (tier, warnings) = metrics.evaluate();
+    assert_eq!(tier, QualityTier::Excellent);
+    assert!(warnings.is_empty());
+    assert_eq!(metrics.badge_text(), "Excellent");
+
+    // Degradation under high jitter and moderate latency
+    metrics.rtt_ms = 75;
+    metrics.jitter_ms = 35;
+    let (tier, warnings) = metrics.evaluate();
+    assert_eq!(tier, QualityTier::Degraded);
+    assert!(warnings.contains(&QualityWarning::HighJitter { jitter_ms: 35 }));
+    assert_eq!(metrics.badge_text(), "Degraded");
+
+    // Severe packet loss and decode overrun -> Poor
+    metrics.packet_loss_permille = 25; // 2.5% loss
+    metrics.decode_time_us = 18_000;
+    let (tier, warnings) = metrics.evaluate();
+    assert_eq!(tier, QualityTier::Poor);
+    assert!(warnings.contains(&QualityWarning::PacketLoss { permille: 25 }));
+    assert!(warnings.contains(&QualityWarning::DecodeOverrun { decode_us: 18_000 }));
+    assert_eq!(metrics.badge_text(), "Poor");
+}
+
+#[test]
+fn desktop_settings_persistence_and_color_mode() {
+    let mut settings = ClientSettings::default();
+    assert_eq!(settings.fit_mode, DisplayFitMode::AspectFit);
+    assert_eq!(settings.color_preference, ColorRangePreference::Accurate);
+    assert!(settings.settle_to_sharp);
+    assert_eq!(settings.audio_volume, 80);
+    assert!(!settings.mic_enabled);
+    assert_eq!(settings.shortcut_mode, ShortcutCaptureMode::Disabled);
+
+    // Sanitize volume clamping
+    settings.audio_volume = 200;
+    settings.sanitize();
+    assert_eq!(settings.audio_volume, 100);
+
+    // Serialization and deserialization roundtrip
+    let serialized = serde_json::to_string(&settings).expect("serialize settings");
+    let deserialized: ClientSettings =
+        serde_json::from_str(&serialized).expect("deserialize settings");
+    assert_eq!(settings, deserialized);
+}
+
+#[test]
+fn platform_permission_guidance_all_platforms() {
+    let mac_tcc = PermissionExplanation::for_category(
+        PlatformId::MacOS,
+        PermissionCategory::SystemShortcuts,
+        PermissionState::Denied,
+    );
+    assert_eq!(mac_tcc.platform, PlatformId::MacOS);
+    assert!(mac_tcc.title.contains("Accessibility"));
+    assert!(mac_tcc.remediation_steps.contains("Privacy & Security"));
+
+    let win_uipi = PermissionExplanation::for_category(
+        PlatformId::Windows,
+        PermissionCategory::SystemShortcuts,
+        PermissionState::NotDetermined,
+    );
+    assert_eq!(win_uipi.platform, PlatformId::Windows);
+    assert!(win_uipi.title.contains("Windows"));
+    assert!(win_uipi.remediation_steps.contains("Administrator"));
+
+    let linux_shortcuts = PermissionExplanation::for_category(
+        PlatformId::LinuxWayland,
+        PermissionCategory::SystemShortcuts,
+        PermissionState::Granted,
+    );
+    assert_eq!(linux_shortcuts.platform, PlatformId::LinuxWayland);
+    assert!(linux_shortcuts.remediation_steps.contains("focus"));
+}
+
+#[test]
+fn untrusted_hevc_decoder_admission_bounds() {
+    let limits = ProtocolLimits::ABSOLUTE;
+    let mut admission = DecoderAdmissionController::new(limits);
+
+    // Valid HEVC Main profile 8-bit 1080p
+    assert!(
+        admission
+            .admit_configuration(1920, 1080, 1, 8, 4)
+            .is_ok()
+    );
+    assert_eq!(admission.active_dimensions(), Some((1920, 1080)));
+
+    // Refusal: dimension exceeding absolute limit (e.g. 16384x8192)
+    let err = admission
+        .admit_configuration(16384, 8192, 1, 8, 4)
+        .unwrap_err();
+    assert!(matches!(err, DecodeAdmissionRefusal::DimensionExceeded { .. }));
+
+    // Refusal: non-Main profile (e.g. profile_idc = 2 Main 10)
+    let err = admission
+        .admit_configuration(1920, 1080, 2, 8, 4)
+        .unwrap_err();
+    assert_eq!(
+        err,
+        DecodeAdmissionRefusal::UnsupportedProfile { profile_idc: 2 }
+    );
+
+    // Refusal: 10-bit depth on baseline
+    let err = admission
+        .admit_configuration(1920, 1080, 1, 10, 4)
+        .unwrap_err();
+    assert_eq!(err, DecodeAdmissionRefusal::BitDepthMismatch { bit_depth: 10 });
+
+    // Refusal: excessive DPB surface allocation (e.g. 32 buffers)
+    let err = admission
+        .admit_configuration(1920, 1080, 1, 8, 32)
+        .unwrap_err();
+    assert_eq!(err, DecodeAdmissionRefusal::InvalidParameterSets);
+
+    // Chunk admission: valid chunk
+    assert!(admission.admit_access_unit(100_000, 4).is_ok());
+
+    // Chunk refusal: slice header flood attack (> 64 slices)
+    let err = admission.admit_access_unit(100_000, 100).unwrap_err();
+    assert_eq!(
+        err,
+        DecodeAdmissionRefusal::SliceCountExceeded {
+            count: 100,
+            max: 64
+        }
+    );
+
+    // Chunk refusal: oversized access unit exceeding protocol limit
+    let max_bytes = limits.max_encoded_access_unit_bytes() as usize;
+    let err = admission.admit_access_unit(max_bytes + 1, 1).unwrap_err();
+    assert!(matches!(err, DecodeAdmissionRefusal::AccessUnitTooLarge { .. }));
 }

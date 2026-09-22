@@ -388,62 +388,39 @@ fn test_scripted_agent_e2e_robot_workflow() {
     assert!(close_env.data.as_ref().unwrap().cleanup_confirmed);
 }
 
+fn load_fixture<T: serde::de::DeserializeOwned>(name: &str) -> RobotEnvelope<T> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/robot").join(name);
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
 #[test]
 fn test_matches_saved_disk_fixtures() {
-    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/robot");
+    let session_open: RobotEnvelope<RobotSessionOpenData> = load_fixture("session_open.json");
+    assert_eq!((session_open.schema_version, session_open.outcome), (1, RobotOutcome::Success));
 
-    let session_open: RobotEnvelope<RobotSessionOpenData> = serde_json::from_str(
-        &std::fs::read_to_string(fixture_dir.join("session_open.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(session_open.schema_version, 1);
-    assert_eq!(session_open.outcome, RobotOutcome::Success);
-
-    let session_close: RobotEnvelope<RobotSessionCloseData> = serde_json::from_str(
-        &std::fs::read_to_string(fixture_dir.join("session_close.json")).unwrap(),
-    )
-    .unwrap();
+    let session_close: RobotEnvelope<RobotSessionCloseData> = load_fixture("session_close.json");
     assert_eq!(session_close.schema_version, 1);
     assert!(session_close.data.unwrap().cleanup_confirmed);
 
-    let observe: RobotEnvelope<RobotObservationData> =
-        serde_json::from_str(&std::fs::read_to_string(fixture_dir.join("observe.json")).unwrap())
-            .unwrap();
-    assert_eq!(observe.schema_version, 1);
-    assert_eq!(observe.data.unwrap().geometry_generation, 1);
+    let observe: RobotEnvelope<RobotObservationData> = load_fixture("observe.json");
+    assert_eq!((observe.schema_version, observe.data.unwrap().geometry_generation), (1, 1));
 
-    let input_success: RobotEnvelope<RobotInputData> = serde_json::from_str(
-        &std::fs::read_to_string(fixture_dir.join("input_success.json")).unwrap(),
-    )
-    .unwrap();
+    let input_success: RobotEnvelope<RobotInputData> = load_fixture("input_success.json");
     assert_eq!(input_success.outcome, RobotOutcome::Success);
 
-    let input_partial: RobotEnvelope<RobotInputData> = serde_json::from_str(
-        &std::fs::read_to_string(fixture_dir.join("input_partial.json")).unwrap(),
-    )
-    .unwrap();
+    let input_partial: RobotEnvelope<RobotInputData> = load_fixture("input_partial.json");
     assert_eq!(input_partial.outcome, RobotOutcome::PartialSubmission);
 
-    let input_unknown: RobotEnvelope<RobotInputData> = serde_json::from_str(
-        &std::fs::read_to_string(fixture_dir.join("input_unknown_effect.json")).unwrap(),
-    )
-    .unwrap();
+    let input_unknown: RobotEnvelope<RobotInputData> = load_fixture("input_unknown_effect.json");
     assert_eq!(input_unknown.outcome, RobotOutcome::UnknownExternalEffect);
 
-    let refusal: RobotEnvelope<()> = serde_json::from_str(
-        &std::fs::read_to_string(fixture_dir.join("refusal_geometry_stale.json")).unwrap(),
-    )
-    .unwrap();
+    let refusal: RobotEnvelope<()> = load_fixture("refusal_geometry_stale.json");
     assert_eq!(refusal.outcome, RobotOutcome::Refusal);
 
-    let status: RobotEnvelope<RobotStatusData> =
-        serde_json::from_str(&std::fs::read_to_string(fixture_dir.join("status.json")).unwrap())
-            .unwrap();
+    let status: RobotEnvelope<RobotStatusData> = load_fixture("status.json");
     assert_eq!(status.schema_version, 1);
 
-    let inspect: RobotEnvelope<RobotInspectData> =
-        serde_json::from_str(&std::fs::read_to_string(fixture_dir.join("inspect.json")).unwrap())
-            .unwrap();
+    let inspect: RobotEnvelope<RobotInspectData> = load_fixture("inspect.json");
     assert_eq!(inspect.schema_version, 1);
 }
 

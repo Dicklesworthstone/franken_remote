@@ -10,10 +10,11 @@
 //! - Toggle state transitions are logged with structured `[StateTrace: ...]` records.
 //! - The toggle state is visible to minimal client toolbars and user chrome.
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Supported target platforms for the `FrankenRemote` client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PlatformId {
     /// Linux X11 desktop environment.
     LinuxX11,
@@ -233,7 +234,7 @@ impl PlatformCapabilityRow {
 }
 
 /// Shortcut capture mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ShortcutCaptureMode {
     /// System-reserved shortcuts are handled locally by the client OS.
     #[default]
