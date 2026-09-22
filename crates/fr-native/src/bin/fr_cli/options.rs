@@ -141,6 +141,31 @@ fn validate_node(node: &str) -> Result<(), Failure> {
     Ok(())
 }
 
+fn next_arg<'a>(args: &'a [String], index: &mut usize) -> Result<&'a str, Failure> {
+    let s = args
+        .get(*index)
+        .filter(|s| !s.is_empty() && !s.starts_with("--"))
+        .ok_or_else(usage)?;
+    *index += 1;
+    Ok(s.as_str())
+}
+
+fn next_path(args: &[String], index: &mut usize) -> Result<PathBuf, Failure> {
+    path(next_arg(args, index)?.to_string())
+}
+
+fn next_port(args: &[String], index: &mut usize) -> Result<u16, Failure> {
+    let port: u16 = next_arg(args, index)?.parse().map_err(|_| usage())?;
+    if port == 0 {
+        return Err(usage());
+    }
+    Ok(port)
+}
+
+fn next_parsed<T: std::str::FromStr>(args: &[String], index: &mut usize) -> Result<T, Failure> {
+    next_arg(args, index)?.parse().map_err(|_| usage())
+}
+
 fn parse_status(args: &[String]) -> Result<Options, Failure> {
     let mut index = 1;
     let mut json = false;
@@ -154,14 +179,7 @@ fn parse_status(args: &[String]) -> Result<Options, Failure> {
         }
         match flag {
             "--json" => json = true,
-            "--socket" => {
-                let s = args
-                    .get(index)
-                    .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                    .ok_or_else(usage)?;
-                index += 1;
-                socket = Some(path(s.clone())?);
-            }
+            "--socket" => socket = Some(next_path(args, &mut index)?),
             _ => return Err(usage()),
         }
     }
@@ -190,25 +208,8 @@ fn parse_inspect(args: &[String]) -> Result<Options, Failure> {
         match flag {
             "--json" => json = true,
             "--by-name" => by_name = true,
-            "--port" => {
-                let s = args
-                    .get(index)
-                    .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                    .ok_or_else(usage)?;
-                index += 1;
-                port = s.parse().map_err(|_| usage())?;
-                if port == 0 {
-                    return Err(usage());
-                }
-            }
-            "--socket" => {
-                let s = args
-                    .get(index)
-                    .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                    .ok_or_else(usage)?;
-                index += 1;
-                socket = Some(path(s.clone())?);
-            }
+            "--port" => port = next_port(args, &mut index)?,
+            "--socket" => socket = Some(next_path(args, &mut index)?),
             _ => return Err(usage()),
         }
     }
@@ -238,14 +239,7 @@ fn parse_disconnect(args: &[String]) -> Result<Options, Failure> {
         }
         match flag {
             "--json" => json = true,
-            "--socket" => {
-                let s = args
-                    .get(index)
-                    .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                    .ok_or_else(usage)?;
-                index += 1;
-                socket = Some(path(s.clone())?);
-            }
+            "--socket" => socket = Some(next_path(args, &mut index)?),
             _ => return Err(usage()),
         }
     }
@@ -281,35 +275,14 @@ fn parse_robot(args: &[String]) -> Result<Options, Failure> {
                         match flag {
                             "--json" => json = true,
                             "--role" => {
-                                let s = args
-                                    .get(index)
-                                    .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                                    .ok_or_else(usage)?;
-                                index += 1;
+                                let s = next_arg(args, &mut index)?;
                                 if s != "view" && s != "control" {
                                     return Err(usage());
                                 }
-                                role.clone_from(s);
+                                role = s.to_string();
                             }
-                            "--port" => {
-                                let s = args
-                                    .get(index)
-                                    .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                                    .ok_or_else(usage)?;
-                                index += 1;
-                                port = s.parse().map_err(|_| usage())?;
-                                if port == 0 {
-                                    return Err(usage());
-                                }
-                            }
-                            "--socket" => {
-                                let s = args
-                                    .get(index)
-                                    .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                                    .ok_or_else(usage)?;
-                                index += 1;
-                                socket = Some(path(s.clone())?);
-                            }
+                            "--port" => port = next_port(args, &mut index)?,
+                            "--socket" => socket = Some(next_path(args, &mut index)?),
                             _ => return Err(usage()),
                         }
                     }
@@ -335,22 +308,8 @@ fn parse_robot(args: &[String]) -> Result<Options, Failure> {
                         }
                         match flag {
                             "--json" => json = true,
-                            "--lease" => {
-                                let s = args
-                                    .get(index)
-                                    .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                                    .ok_or_else(usage)?;
-                                index += 1;
-                                lease = Some(s.clone());
-                            }
-                            "--socket" => {
-                                let s = args
-                                    .get(index)
-                                    .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                                    .ok_or_else(usage)?;
-                                index += 1;
-                                socket = Some(path(s.clone())?);
-                            }
+                            "--lease" => lease = Some(next_arg(args, &mut index)?.to_string()),
+                            "--socket" => socket = Some(next_path(args, &mut index)?),
                             _ => return Err(usage()),
                         }
                     }
@@ -387,55 +346,20 @@ fn parse_robot(args: &[String]) -> Result<Options, Failure> {
                 }
                 match flag {
                     "--json" => json = true,
-                    "--display" => {
-                        let s = args
-                            .get(index)
-                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                            .ok_or_else(usage)?;
-                        index += 1;
-                        display = Some(s.parse::<u32>().map_err(|_| usage())?);
-                    }
-                    "--screenshot" => {
-                        let s = args
-                            .get(index)
-                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                            .ok_or_else(usage)?;
-                        index += 1;
-                        screenshot = Some(path(s.clone())?);
-                    }
+                    "--display" => display = Some(next_parsed(args, &mut index)?),
+                    "--screenshot" => screenshot = Some(next_path(args, &mut index)?),
                     "--evidence-level" => {
-                        let s = args
-                            .get(index)
-                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                            .ok_or_else(usage)?;
-                        index += 1;
+                        let s = next_arg(args, &mut index)?;
                         if s != "decoded"
                             && s != "submitted_to_compositor"
                             && s != "instrumentally_observed"
                         {
                             return Err(usage());
                         }
-                        evidence_level = Some(s.clone());
+                        evidence_level = Some(s.to_string());
                     }
-                    "--port" => {
-                        let s = args
-                            .get(index)
-                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                            .ok_or_else(usage)?;
-                        index += 1;
-                        port = s.parse().map_err(|_| usage())?;
-                        if port == 0 {
-                            return Err(usage());
-                        }
-                    }
-                    "--socket" => {
-                        let s = args
-                            .get(index)
-                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                            .ok_or_else(usage)?;
-                        index += 1;
-                        socket = Some(path(s.clone())?);
-                    }
+                    "--port" => port = next_port(args, &mut index)?,
+                    "--socket" => socket = Some(next_path(args, &mut index)?),
                     _ => return Err(usage()),
                 }
             }
@@ -475,68 +399,23 @@ fn parse_robot(args: &[String]) -> Result<Options, Failure> {
                 }
                 match flag {
                     "--json" => json = true,
-                    "--lease" => {
-                        let s = args
-                            .get(index)
-                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                            .ok_or_else(usage)?;
-                        index += 1;
-                        lease = Some(s.clone());
-                    }
-                    "--request-id" => {
-                        let s = args
-                            .get(index)
-                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                            .ok_or_else(usage)?;
-                        index += 1;
-                        request_id = Some(s.clone());
-                    }
-                    "--batch" => {
-                        let s = args
-                            .get(index)
-                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                            .ok_or_else(usage)?;
-                        index += 1;
-                        batch = Some(path(s.clone())?);
-                    }
+                    "--lease" => lease = Some(next_arg(args, &mut index)?.to_string()),
+                    "--request-id" => request_id = Some(next_arg(args, &mut index)?.to_string()),
+                    "--batch" => batch = Some(next_path(args, &mut index)?),
                     "--precondition-geometry" => {
-                        let s = args
-                            .get(index)
-                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                            .ok_or_else(usage)?;
-                        index += 1;
-                        precondition_geometry = Some(s.parse::<u64>().map_err(|_| usage())?);
+                        precondition_geometry = Some(next_parsed(args, &mut index)?);
                     }
                     "--max-observation-age" => {
-                        let s = args
-                            .get(index)
-                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                            .ok_or_else(usage)?;
-                        index += 1;
-                        max_observation_age_ms = Some(s.parse::<u64>().map_err(|_| usage())?);
+                        max_observation_age_ms = Some(next_parsed(args, &mut index)?);
                     }
                     "--precondition-lease" => {
-                        let s = args
-                            .get(index)
-                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                            .ok_or_else(usage)?;
-                        index += 1;
-                        precondition_lease = Some(s.clone());
+                        precondition_lease = Some(next_arg(args, &mut index)?.to_string());
                     }
                     "--precondition-focus" => {
-                        let s = args
-                            .get(index)
-                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                            .ok_or_else(usage)?;
-                        index += 1;
-                        precondition_focus = Some(s.clone());
+                        precondition_focus = Some(next_arg(args, &mut index)?.to_string());
                     }
                     "--semantic-evidence" => {
-                        let s = args
-                            .get(index)
-                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                            .ok_or_else(usage)?;
-                        index += 1;
+                        let s = next_arg(args, &mut index)?;
                         if s != "none"
                             && s != "unverified_pixels"
                             && s != "adapter"
@@ -544,27 +423,10 @@ fn parse_robot(args: &[String]) -> Result<Options, Failure> {
                         {
                             return Err(usage());
                         }
-                        semantic_evidence = Some(s.clone());
+                        semantic_evidence = Some(s.to_string());
                     }
-                    "--port" => {
-                        let s = args
-                            .get(index)
-                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                            .ok_or_else(usage)?;
-                        index += 1;
-                        port = s.parse().map_err(|_| usage())?;
-                        if port == 0 {
-                            return Err(usage());
-                        }
-                    }
-                    "--socket" => {
-                        let s = args
-                            .get(index)
-                            .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                            .ok_or_else(usage)?;
-                        index += 1;
-                        socket = Some(path(s.clone())?);
-                    }
+                    "--port" => port = next_port(args, &mut index)?,
+                    "--socket" => socket = Some(next_path(args, &mut index)?),
                     _ => return Err(usage()),
                 }
             }
@@ -660,24 +522,15 @@ fn parse_command(
         if !seen.insert(flag) {
             return Err(usage());
         }
-        let value = |index: &mut usize| -> Result<String, Failure> {
-            let value = args
-                .get(*index)
-                .filter(|s| !s.is_empty() && !s.starts_with("--"))
-                .ok_or_else(usage)?
-                .clone();
-            *index += 1;
-            Ok(value)
-        };
         match flag {
             "--json" => json = true,
-            "--socket" => socket = Some(path(value(&mut index)?)?),
+            "--socket" => socket = Some(next_path(args, &mut index)?),
             "--by-name" if remote => by_name = true,
             "--view-only" if connect => view_only = true,
             "--experimental-native" if remote => experimental = true,
             "--ipv6" if remote => ipv6 = true,
             "--display" if connect => {
-                let choice = value(&mut index)?;
+                let choice = next_arg(args, &mut index)?;
                 display = Some(if choice == "only" {
                     DisplayChoice::Only
                 } else if choice == "choose" {
@@ -690,16 +543,12 @@ fn parse_command(
                     DisplayChoice::Handle(handle)
                 });
             }
-            "--fit" if connect => fit_window = Some(fitted_size(&value(&mut index)?)?),
-            "--worker" if connect => worker = Some(path(value(&mut index)?)?),
-            "--trust-roots" if remote || doctor => roots = Some(path(value(&mut index)?)?),
-            "--x-display" if connect => x_display = Some(value(&mut index)?),
-            "--port" if remote || doctor => {
-                port = value(&mut index)?.parse().map_err(|_| usage())?;
-            }
-            "--attempts" if connect => {
-                attempts = value(&mut index)?.parse().map_err(|_| usage())?;
-            }
+            "--fit" if connect => fit_window = Some(fitted_size(next_arg(args, &mut index)?)?),
+            "--worker" if connect => worker = Some(next_path(args, &mut index)?),
+            "--trust-roots" if remote || doctor => roots = Some(next_path(args, &mut index)?),
+            "--x-display" if connect => x_display = Some(next_arg(args, &mut index)?.to_string()),
+            "--port" if remote || doctor => port = next_port(args, &mut index)?,
+            "--attempts" if connect => attempts = next_parsed(args, &mut index)?,
             _ => return Err(usage()),
         }
     }
@@ -776,7 +625,7 @@ mod tests {
     fn parses_only_explicit_bounded_connection_settings() {
         let o = options("connect n-host --view-only --experimental-native --worker /opt/fr/worker --trust-roots /opt/fr/ca.pem --display 9 --ipv6 --attempts 2 --json").unwrap();
         let Command::Connect(c) = o.command else {
-            panic!("connection required")
+            unreachable!("connection required");
         };
         assert_eq!(c.target.node, "n-host");
         assert_eq!(c.display, DisplayChoice::Handle(9));
@@ -856,7 +705,7 @@ mod display_tests {
     fn inventory_needs_trust_and_experimental_opt_in_but_no_display_or_worker() {
         let o = parse(&args("displays n-peer --experimental-native --trust-roots /opt/fr/ca.pem --ipv6 --port 1234 --json")).unwrap();
         let Command::Displays(t) = o.command else {
-            panic!("inventory required")
+            unreachable!("inventory required");
         };
         assert_eq!(t.node, "n-peer");
         assert_eq!(t.port, 1234);
@@ -887,7 +736,7 @@ mod display_tests {
         for choice in ["only".to_string(), u128::MAX.to_string()] {
             let o=parse(&args(&format!("connect n-peer --view-only --experimental-native --worker /opt/fr/worker --trust-roots /opt/fr/ca.pem --display {choice}"))).unwrap();
             let Command::Connect(c) = o.command else {
-                panic!("connection required")
+                unreachable!("connection required");
             };
             assert_eq!(
                 c.display,
@@ -918,7 +767,7 @@ mod picker_tests {
         let args = "connect n-peer --view-only --experimental-native --worker /opt/fr/worker --trust-roots /opt/fr/ca.pem --display choose"
             .split_whitespace().map(str::to_owned).collect::<Vec<_>>();
         let Command::Connect(connection) = parse(&args).unwrap().command else {
-            panic!("connection required")
+            unreachable!("connection required");
         };
         assert_eq!(connection.display, DisplayChoice::Choose);
         let catalog =
@@ -948,7 +797,7 @@ mod fit_tests {
             let Command::Connect(connection) =
                 options(&format!("{CONNECT}{suffix}")).unwrap().command
             else {
-                panic!("connection required")
+                unreachable!("connection required");
             };
             assert_eq!(connection.fit_window, expected);
             assert_eq!(connection.display, DisplayChoice::Only);
@@ -1002,7 +851,7 @@ mod doctor_tests {
     fn parses_doctor_defaults_and_explicit_port() {
         let o = parse(&["doctor".into()]).unwrap();
         let Command::Doctor(doc) = o.command else {
-            panic!("doctor required");
+            unreachable!("doctor required");
         };
         assert_eq!(doc.port, 8443);
         assert!(doc.roots.is_none());
@@ -1021,7 +870,7 @@ mod doctor_tests {
         ])
         .unwrap();
         let Command::Doctor(doc) = o.command else {
-            panic!("doctor required");
+            unreachable!("doctor required");
         };
         assert_eq!(doc.port, 9443);
         assert_eq!(doc.roots, Some(PathBuf::from("/etc/ssl/roots.pem")));
@@ -1086,7 +935,10 @@ mod robot_tests {
             "robot session open host-alpha --role control --json",
         ))
         .unwrap();
-        assert!(matches!(o.command, Command::Robot(RobotCommand::SessionOpen(_))));
+        assert!(matches!(
+            o.command,
+            Command::Robot(RobotCommand::SessionOpen(_))
+        ));
         let Command::Robot(RobotCommand::SessionOpen(s)) = o.command else {
             return;
         };
@@ -1098,7 +950,10 @@ mod robot_tests {
             "robot session close host-alpha --lease lease-123 --json",
         ))
         .unwrap();
-        assert!(matches!(o.command, Command::Robot(RobotCommand::SessionClose(_))));
+        assert!(matches!(
+            o.command,
+            Command::Robot(RobotCommand::SessionClose(_))
+        ));
         let Command::Robot(RobotCommand::SessionClose(s)) = o.command else {
             return;
         };
@@ -1106,7 +961,10 @@ mod robot_tests {
         assert_eq!(s.lease, Some("lease-123".into()));
 
         let o = parse(&to_args("robot observe host-alpha --display 2 --screenshot /tmp/screen.png --evidence-level submitted_to_compositor --json")).unwrap();
-        assert!(matches!(o.command, Command::Robot(RobotCommand::Observe(_))));
+        assert!(matches!(
+            o.command,
+            Command::Robot(RobotCommand::Observe(_))
+        ));
         let Command::Robot(RobotCommand::Observe(obs)) = o.command else {
             return;
         };

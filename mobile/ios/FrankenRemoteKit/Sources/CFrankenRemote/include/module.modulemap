@@ -1,0 +1,4 @@
+module CFrankenRemote [system] {
+    header "fr_mobile.h"
+    export *
+}

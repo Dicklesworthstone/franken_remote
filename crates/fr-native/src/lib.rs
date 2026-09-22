@@ -2,6 +2,9 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod macos;
+pub mod macos_presentation;
+pub mod wayland;
+pub mod windows;
 
 #[cfg(all(target_os = "linux", feature = "linux-opus"))]
 pub mod opus;
@@ -68,3 +71,5 @@ pub mod desktop;
 
 #[cfg(all(target_os = "linux", feature = "linux-viewer-window"))]
 pub mod display_picker;
+
+pub mod mobile_ffi;
