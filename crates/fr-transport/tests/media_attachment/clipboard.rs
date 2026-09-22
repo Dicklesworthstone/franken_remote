@@ -58,8 +58,7 @@ fn record(kind: u16, binding: u32, len: usize) -> Vec<u8> {
 }
 #[test]
 fn clipboard_requires_control_both_capabilities_and_completed_input() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         let before = l.h.usage();
@@ -105,8 +104,7 @@ fn clipboard_requires_control_both_capabilities_and_completed_input() {
 }
 #[test]
 fn clipboard_pair_is_reliable_bulk_bidirectional_and_not_a_second_input_lane() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         let _input = attach(&mut l, &cx, 8, MediaRole::Input).await;
@@ -158,8 +156,7 @@ fn clipboard_pair_is_reliable_bulk_bidirectional_and_not_a_second_input_lane() {
 }
 #[test]
 fn bulk_clipboard_backpressure_leaves_critical_control_capacity() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         let _input = attach(&mut l, &cx, 8, MediaRole::Input).await;
@@ -195,8 +192,7 @@ fn bulk_clipboard_backpressure_leaves_critical_control_capacity() {
 }
 #[test]
 fn abandoned_clipboard_attachment_fences_before_payload_or_native_work() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         let _input = attach(&mut l, &cx, 8, MediaRole::Input).await;
@@ -214,8 +210,7 @@ fn typed_clipboard_routes_check_scope_codec_and_original_connection() {
     use fr_core::clipboard::{Binding as Scope, Endpoint, Stamp};
     use fr_transport::quic::clipboard::ClipboardChannel;
     use fr_wire::clipboard::{self as wire, Body, Message};
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         let _input = attach(&mut l, &cx, 8, MediaRole::Input).await;

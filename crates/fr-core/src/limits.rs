@@ -731,100 +731,98 @@ impl ProtocolLimits {
         )
     }
 
-    /// Validates access-unit metadata fragment count against the fragment ceiling.
-    pub fn validate_fragment_count(&self, count: u32) -> Result<(), LimitsError> {
-        if count > u32::from(self.max_fragments_per_access_unit) {
+    fn validate_max(field: LimitField, count: u64, max: u64) -> Result<(), LimitsError> {
+        if count > max {
             return Err(LimitsError::AboveCeiling {
-                field: LimitField::FragmentsPerAccessUnit,
-                value: u64::from(count),
-                ceiling: u64::from(self.max_fragments_per_access_unit),
+                field,
+                value: count,
+                ceiling: max,
             });
         }
         Ok(())
+    }
+
+    fn validate_capacity(field: LimitField, count: u64, cap: u64) -> Result<(), LimitsError> {
+        if count >= cap {
+            return Err(LimitsError::AboveCeiling {
+                field,
+                value: count,
+                ceiling: cap,
+            });
+        }
+        Ok(())
+    }
+
+    /// Validates access-unit metadata fragment count against the fragment ceiling.
+    pub fn validate_fragment_count(&self, count: u32) -> Result<(), LimitsError> {
+        Self::validate_max(
+            LimitField::FragmentsPerAccessUnit,
+            u64::from(count),
+            u64::from(self.max_fragments_per_access_unit),
+        )
     }
 
     /// Validates concurrent handshake count before admitting another.
     pub fn validate_handshake_concurrency(&self, count: u32) -> Result<(), LimitsError> {
-        if count >= u32::from(self.max_concurrent_handshakes) {
-            return Err(LimitsError::AboveCeiling {
-                field: LimitField::ConcurrentHandshakes,
-                value: u64::from(count),
-                ceiling: u64::from(self.max_concurrent_handshakes),
-            });
-        }
-        Ok(())
+        Self::validate_capacity(
+            LimitField::ConcurrentHandshakes,
+            u64::from(count),
+            u64::from(self.max_concurrent_handshakes),
+        )
     }
 
     /// Validates pending approvals count before queuing another.
     pub fn validate_pending_approvals(&self, count: u32) -> Result<(), LimitsError> {
-        if count >= u32::from(self.max_pending_approvals) {
-            return Err(LimitsError::AboveCeiling {
-                field: LimitField::PendingApprovals,
-                value: u64::from(count),
-                ceiling: u64::from(self.max_pending_approvals),
-            });
-        }
-        Ok(())
+        Self::validate_capacity(
+            LimitField::PendingApprovals,
+            u64::from(count),
+            u64::from(self.max_pending_approvals),
+        )
     }
 
     /// Validates half-attached channels count before admitting another.
     pub fn validate_half_attached_channels(&self, count: u32) -> Result<(), LimitsError> {
-        if count >= u32::from(self.max_half_attached_channels) {
-            return Err(LimitsError::AboveCeiling {
-                field: LimitField::HalfAttachedChannels,
-                value: u64::from(count),
-                ceiling: u64::from(self.max_half_attached_channels),
-            });
-        }
-        Ok(())
+        Self::validate_capacity(
+            LimitField::HalfAttachedChannels,
+            u64::from(count),
+            u64::from(self.max_half_attached_channels),
+        )
     }
 
     /// Validates retained receipts count against the ledger ceiling.
     pub fn validate_retained_receipts(&self, count: usize) -> Result<(), LimitsError> {
-        if count > usize::from(self.max_retained_receipts) {
-            return Err(LimitsError::AboveCeiling {
-                field: LimitField::RetainedReceipts,
-                value: u64::try_from(count).unwrap_or(u64::MAX),
-                ceiling: u64::from(self.max_retained_receipts),
-            });
-        }
-        Ok(())
+        Self::validate_max(
+            LimitField::RetainedReceipts,
+            u64::try_from(count).unwrap_or(u64::MAX),
+            u64::from(self.max_retained_receipts),
+        )
     }
 
     /// Validates encoder session count before launching a new encoder.
     pub fn validate_encoder_sessions(&self, count: u32) -> Result<(), LimitsError> {
-        if count >= u32::from(self.max_encoder_sessions) {
-            return Err(LimitsError::AboveCeiling {
-                field: LimitField::EncoderSessions,
-                value: u64::from(count),
-                ceiling: u64::from(self.max_encoder_sessions),
-            });
-        }
-        Ok(())
+        Self::validate_capacity(
+            LimitField::EncoderSessions,
+            u64::from(count),
+            u64::from(self.max_encoder_sessions),
+        )
     }
 
     /// Validates GPU surfaces count before allocating additional surfaces.
     pub fn validate_gpu_surfaces(&self, count: u32) -> Result<(), LimitsError> {
-        if count >= u32::from(self.max_gpu_surfaces) {
-            return Err(LimitsError::AboveCeiling {
-                field: LimitField::GpuSurfaces,
-                value: u64::from(count),
-                ceiling: u64::from(self.max_gpu_surfaces),
-            });
-        }
-        Ok(())
+        Self::validate_capacity(
+            LimitField::GpuSurfaces,
+            u64::from(count),
+            u64::from(self.max_gpu_surfaces),
+        )
     }
 
     /// Validates viewer count before admitting another viewer.
     pub fn validate_viewers(&self, count: u32) -> Result<(), LimitsError> {
-        if count >= u32::from(self.max_viewers) {
-            return Err(LimitsError::AboveCeiling {
-                field: LimitField::Viewers,
-                value: u64::from(count),
-                ceiling: u64::from(self.max_viewers),
-            });
-        }
-        Ok(())
+        Self::validate_capacity(
+            LimitField::Viewers,
+            u64::from(count),
+            u64::from(self.max_viewers),
+        )
     }
 
     /// Checked surface-size arithmetic: validates the dimensions, then
@@ -1037,115 +1035,39 @@ fn resolve_session_overrides(
     })
 }
 
+#[rustfmt::skip]
 fn resolve_rate_overrides(
     o: &LimitOverrides,
     a: &ProtocolLimits,
 ) -> Result<RateOverrides, LimitsError> {
     Ok(RateOverrides {
-        max_concurrent_handshakes: take_l!(
-            ConcurrentHandshakes,
-            max_concurrent_handshakes,
-            1,
-            a,
-            o
-        )?,
-        max_handshake_duration_ms: take_l!(
-            HandshakeDurationMs,
-            max_handshake_duration_ms,
-            1_000,
-            a,
-            o
-        )?,
-        max_preadmission_rate_per_sec: take_l!(
-            PreadmissionRatePerSec,
-            max_preadmission_rate_per_sec,
-            1,
-            a,
-            o
-        )?,
-        max_half_attached_channels: take_l!(
-            HalfAttachedChannels,
-            max_half_attached_channels,
-            1,
-            a,
-            o
-        )?,
+        max_concurrent_handshakes: take_l!(ConcurrentHandshakes, max_concurrent_handshakes, 1, a, o)?,
+        max_handshake_duration_ms: take_l!(HandshakeDurationMs, max_handshake_duration_ms, 1_000, a, o)?,
+        max_preadmission_rate_per_sec: take_l!(PreadmissionRatePerSec, max_preadmission_rate_per_sec, 1, a, o)?,
+        max_half_attached_channels: take_l!(HalfAttachedChannels, max_half_attached_channels, 1, a, o)?,
         max_pending_approvals: take_l!(PendingApprovals, max_pending_approvals, 1, a, o)?,
-        idle_session_timeout_seconds: take_l!(
-            IdleSessionTimeoutSecs,
-            idle_session_timeout_seconds,
-            10,
-            a,
-            o
-        )?,
-        max_control_requests_per_sec: take_l!(
-            ControlRequestsPerSec,
-            max_control_requests_per_sec,
-            10,
-            a,
-            o
-        )?,
+        idle_session_timeout_seconds: take_l!(IdleSessionTimeoutSecs, idle_session_timeout_seconds, 10, a, o)?,
+        max_control_requests_per_sec: take_l!(ControlRequestsPerSec, max_control_requests_per_sec, 10, a, o)?,
         max_codec_probes_per_min: take_l!(CodecProbesPerMin, max_codec_probes_per_min, 1, a, o)?,
-        max_recovery_requests_per_sec: take_l!(
-            RecoveryRequestsPerSec,
-            max_recovery_requests_per_sec,
-            10,
-            a,
-            o
-        )?,
-        max_cursor_uploads_per_sec: take_l!(
-            CursorUploadsPerSec,
-            max_cursor_uploads_per_sec,
-            1,
-            a,
-            o
-        )?,
-        max_diagnostic_exports_per_min: take_l!(
-            DiagnosticExportsPerMin,
-            max_diagnostic_exports_per_min,
-            1,
-            a,
-            o
-        )?,
-        max_decoder_reconfigurations_per_min: take_l!(
-            DecoderReconfigurationsPerMin,
-            max_decoder_reconfigurations_per_min,
-            1,
-            a,
-            o
-        )?,
-        max_worker_restarts_per_min: take_l!(
-            WorkerRestartsPerMin,
-            max_worker_restarts_per_min,
-            1,
-            a,
-            o
-        )?,
+        max_recovery_requests_per_sec: take_l!(RecoveryRequestsPerSec, max_recovery_requests_per_sec, 10, a, o)?,
+        max_cursor_uploads_per_sec: take_l!(CursorUploadsPerSec, max_cursor_uploads_per_sec, 1, a, o)?,
+        max_diagnostic_exports_per_min: take_l!(DiagnosticExportsPerMin, max_diagnostic_exports_per_min, 1, a, o)?,
+        max_decoder_reconfigurations_per_min: take_l!(DecoderReconfigurationsPerMin, max_decoder_reconfigurations_per_min, 1, a, o)?,
+        max_worker_restarts_per_min: take_l!(WorkerRestartsPerMin, max_worker_restarts_per_min, 1, a, o)?,
     })
 }
 
+#[rustfmt::skip]
 fn resolve_resource_overrides(
     o: &LimitOverrides,
     a: &ProtocolLimits,
 ) -> Result<ResourceOverrides, LimitsError> {
     Ok(ResourceOverrides {
-        cursor_dimension_pixels: take_l!(
-            CursorDimensionPixels,
-            max_cursor_dimension_pixels,
-            16,
-            a,
-            o
-        )?,
+        cursor_dimension_pixels: take_l!(CursorDimensionPixels, max_cursor_dimension_pixels, 16, a, o)?,
         cursor_shape_bytes: take_l!(CursorShapeBytes, max_cursor_shape_bytes, 1024, a, o)?,
         name_bytes: take_l!(NameBytes, max_name_bytes, 1, a, o)?,
         parameter_set_bytes: take_l!(ParameterSetBytes, max_parameter_set_bytes, 32, a, o)?,
-        fragments_per_access_unit: take_l!(
-            FragmentsPerAccessUnit,
-            max_fragments_per_access_unit,
-            1,
-            a,
-            o
-        )?,
+        fragments_per_access_unit: take_l!(FragmentsPerAccessUnit, max_fragments_per_access_unit, 1, a, o)?,
         retained_receipts: take_l!(RetainedReceipts, max_retained_receipts, 16, a, o)?,
         encoder_sessions: take_l!(EncoderSessions, max_encoder_sessions, 1, a, o)?,
         gpu_surfaces: take_l!(GpuSurfaces, max_gpu_surfaces, 2, a, o)?,

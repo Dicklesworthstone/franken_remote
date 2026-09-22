@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::similar_names, clippy::too_many_lines)]
-#![rustfmt::skip]
 //! Fuzz smoke target and golden seed corpus harness for `fr-wire`.
 //!
 //! Provides a deterministic, coverage-ready fuzz runner seeded with golden
@@ -12,6 +11,8 @@
 //! Dump golden fixtures to disk:
 //! `cargo run -p fr-wire --example fuzz_smoke -- --dump-fixtures crates/fr-wire/tests/fixtures`
 
+#[rustfmt::skip]
+mod smoke {
 use fr_core::{
     clipboard::{Binding as ClipBinding, Endpoint as ClipEndpoint, Stamp as ClipStamp},
     held_state::{HeldState, HeldStateRequest},
@@ -642,7 +643,7 @@ pub fn dump_fixtures(base_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn main() {
+pub fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut iterations = 10_000;
     let mut seed = 0x4652_4430_2026_0919;
@@ -681,10 +682,15 @@ fn main() {
         run_fuzz_smoke(iterations, seed);
     }
 }
+}
+
+fn main() {
+    smoke::main();
+}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::smoke::*;
 
     #[test]
     fn all_golden_seeds_are_valid_and_distinct() {

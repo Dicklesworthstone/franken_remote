@@ -463,11 +463,17 @@ fn button(pressed: bool) -> Action<'static> {
     }
 }
 
+macro_rules! run_input {
+    ($cx:ident, $body:expr) => {{
+        let rt = network::runtime();
+        let $cx = rt.request_cx_with_budget(Budget::INFINITE);
+        rt.block_on(async { $body });
+    }};
+}
+
 #[test]
 fn real_client_quic_native_shift_drag_release_and_returned_receipts() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_input!(cx, {
         let mut f = Fixture::new(cx).await;
         let driver = f.driver.take().unwrap();
         let (shutdown, ()) = Box::pin(network::both(driver, async {
@@ -502,9 +508,7 @@ fn real_client_quic_native_shift_drag_release_and_returned_receipts() {
 }
 #[test]
 fn ordered_release_wins_native_slot_over_an_already_buffered_pointer() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_input!(cx, {
         let mut f = Fixture::new(cx).await;
         let driver = f.driver.take().unwrap();
         let (shutdown, ()) = Box::pin(network::both(driver, async {
@@ -598,9 +602,7 @@ fn filler() -> Vec<u8> {
 }
 #[test]
 fn receipt_backpressure_retains_identity_and_cannot_hold_a_revoked_drag() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_input!(cx, {
         let mut f = Fixture::new(cx).await;
         let driver = f.driver.take().unwrap();
         let (shutdown, ()) = Box::pin(network::both(driver, async {
@@ -652,9 +654,7 @@ fn receipt_backpressure_retains_identity_and_cannot_hold_a_revoked_drag() {
 }
 #[test]
 fn dropping_an_unpolled_network_drive_revokes_and_releases_native_input() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_input!(cx, {
         let mut f = Fixture::new(cx).await;
         let driver = f.driver.take().unwrap();
         let (shutdown, ()) = Box::pin(network::both(driver, async {
@@ -675,9 +675,7 @@ fn dropping_an_unpolled_network_drive_revokes_and_releases_native_input() {
 }
 #[test]
 fn closed_or_replaced_connection_cannot_retain_control_or_receive_old_results() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_input!(cx, {
         let mut f = Fixture::new(cx.clone()).await;
         let driver = f.driver.take().unwrap();
         let (shutdown, ()) = Box::pin(network::both(driver, async {
@@ -707,9 +705,7 @@ fn closed_or_replaced_connection_cannot_retain_control_or_receive_old_results() 
 }
 #[test]
 fn failed_connection_admission_closes_before_native_effects() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_input!(cx, {
         let mut f = Fixture::new(cx).await;
         let driver = f.driver.take().unwrap();
         let (shutdown, ()) = Box::pin(network::both(driver, async {
@@ -726,9 +722,7 @@ fn failed_connection_admission_closes_before_native_effects() {
 }
 #[test]
 fn local_authority_commands_share_native_ownership_without_becoming_network_input() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_input!(cx, {
         let mut f = Fixture::new(cx).await;
         let driver = f.driver.take().unwrap();
         let (shutdown, ()) = Box::pin(network::both(driver, async {
@@ -771,9 +765,7 @@ fn local_authority_commands_share_native_ownership_without_becoming_network_inpu
 }
 #[test]
 fn foreign_native_lease_is_refused_not_rewritten_into_a_successful_wire_receipt() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_input!(cx, {
         let mut f = Fixture::new(cx).await;
         let driver = f.driver.take().unwrap();
         let (shutdown, ()) = Box::pin(network::both(driver, async {
@@ -823,9 +815,7 @@ fn foreign_native_lease_is_refused_not_rewritten_into_a_successful_wire_receipt(
 
 #[test]
 fn malformed_action_payload_revokes_the_attachment_without_a_native_effect() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_input!(cx, {
         let mut f = Fixture::new(cx).await;
         let driver = f.driver.take().unwrap();
         let (shutdown, ()) = Box::pin(network::both(driver, async {

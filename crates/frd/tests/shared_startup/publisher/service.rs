@@ -62,9 +62,7 @@ async fn receive_frame(peer: &mut Peer, cx: &Cx, frame: u64) {
 
 #[test]
 fn source_service_keeps_capturing_for_the_other_viewer_after_first_departure() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, false)).await;
         let pid = cohort.publisher.worker_id();
         let mut reports = Vec::new();
@@ -106,9 +104,7 @@ fn source_service_keeps_capturing_for_the_other_viewer_after_first_departure() {
 
 #[test]
 fn full_cohort_pauses_native_production_instead_of_looping_or_skipping_references() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, false)).await;
         let mut reports = Vec::new();
         let source = cohort
@@ -135,9 +131,7 @@ fn full_cohort_pauses_native_production_instead_of_looping_or_skipping_reference
 
 #[test]
 fn slow_native_completion_does_not_trigger_catchup_captures() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, true)).await;
         let mut times = Vec::new();
         let source = cohort
@@ -174,9 +168,7 @@ fn slow_native_completion_does_not_trigger_catchup_captures() {
 
 #[test]
 fn idle_source_service_observes_revocation_before_its_next_one_second_capture() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, false)).await;
         let mut reports = 0;
         let source = cohort
@@ -201,9 +193,7 @@ fn idle_source_service_observes_revocation_before_its_next_one_second_capture() 
 
 #[test]
 fn cancelling_service_before_poll_or_during_idle_sleep_fences_all_subscribers() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         for poll_once in [false, true] {
             let mut cohort = Box::pin(joined(&rt, true, false)).await;
             let mut reports = 0;
@@ -231,9 +221,7 @@ fn cancelling_service_before_poll_or_during_idle_sleep_fences_all_subscribers() 
 
 #[test]
 fn invalid_source_cadence_refuses_without_native_capture_and_ends_the_attempt() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         for interval in [
             Duration::ZERO,
             Duration::from_micros(33_333),

@@ -85,8 +85,7 @@ pub(super) async fn transfer(
 
 #[test]
 fn input_requires_its_own_capability_and_control_intent_before_reserving() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         let before = l.h.usage();
         assert!(matches!(offer(&mut l, &cx, 8), Err(Error::WrongRoute)));
@@ -115,8 +114,7 @@ fn input_requires_its_own_capability_and_control_intent_before_reserving() {
 
 #[test]
 fn one_negotiated_input_family_preserves_order_and_reverse_feedback() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         let original = l.h.binding();
@@ -189,8 +187,7 @@ fn one_negotiated_input_family_preserves_order_and_reverse_feedback() {
 
 #[test]
 fn pointer_cannot_bypass_attachment_and_keeps_the_native_datagram_ceiling() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         let r = DatagramRoute {
@@ -239,8 +236,7 @@ fn pointer_cannot_bypass_attachment_and_keeps_the_native_datagram_ceiling() {
 
 #[test]
 fn a_second_input_ordering_domain_is_refused_even_after_owner_drop() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         let (h, c, _, _) = attach(&mut l, &cx).await;
@@ -259,8 +255,7 @@ fn a_second_input_ordering_domain_is_refused_even_after_owner_drop() {
 
 #[test]
 fn abandoning_input_before_ack_closes_without_installing_pointer() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         let mut h = offer(&mut l, &cx, 8).unwrap();
@@ -275,8 +270,7 @@ fn abandoning_input_before_ack_closes_without_installing_pointer() {
 
 #[test]
 fn smaller_selected_record_limits_bound_both_input_directions_and_pointer() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         l.selection.limits = ProtocolLimits::with_overrides(fr_core::limits::LimitOverrides {

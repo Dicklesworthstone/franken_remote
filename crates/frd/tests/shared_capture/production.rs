@@ -66,9 +66,7 @@ async fn pending(
 
 #[test]
 fn reservation_precedes_ipc_and_prevents_a_second_native_producer_from_overbooking() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let mut a = delayed(&owner, "delay").await;
         let mut b = source(&owner, true).await;
@@ -112,9 +110,7 @@ fn reservation_precedes_ipc_and_prevents_a_second_native_producer_from_overbooki
 
 #[test]
 fn impossible_profiles_refuse_before_capture_even_when_the_child_would_return_small_output() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let mut s = source(&owner, true).await;
         let small_bytes = SharedFramePool::new(ProtocolLimits::ABSOLUTE, 8192, 2).unwrap();
@@ -150,9 +146,7 @@ fn impossible_profiles_refuse_before_capture_even_when_the_child_would_return_sm
 
 #[test]
 fn polls_keep_one_reservation_and_published_allocation_includes_the_removed_prefix() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let mut s = delayed(&owner, "poll").await;
         let pool = physical(1);
@@ -186,9 +180,7 @@ fn polls_keep_one_reservation_and_published_allocation_includes_the_removed_pref
 
 #[test]
 fn cancelled_pending_capture_releases_host_credit_and_retains_poisoned_child_for_reaping() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let mut s = delayed(&owner, "delay").await;
         let pool = physical(1);
@@ -211,9 +203,7 @@ fn cancelled_pending_capture_releases_host_credit_and_retains_poisoned_child_for
 
 #[test]
 fn reserved_static_capture_refunds_only_its_slot_without_unpinning_other_viewers() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let mut s = source(&owner, false).await;
         let pool = physical(2);
@@ -236,9 +226,7 @@ fn reserved_static_capture_refunds_only_its_slot_without_unpinning_other_viewers
 
 #[test]
 fn reserved_capture_distributes_one_allocation_to_real_independent_delivery_pipelines() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let (ac, _) = gate(&rt, 2);
         let (bc, _) = gate(&rt, 3);
@@ -276,9 +264,7 @@ fn reserved_capture_distributes_one_allocation_to_real_independent_delivery_pipe
 
 #[test]
 fn physical_backpressure_preserves_the_queued_recovery_and_original_failure_deadline() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let (viewer, input) = gate(&rt, 2);
         let mut s = source(&owner, false).await;
@@ -371,9 +357,7 @@ fn physical_backpressure_preserves_the_queued_recovery_and_original_failure_dead
 
 #[test]
 fn revoked_capture_permission_does_not_borrow_credit_or_mutate_a_healthy_source() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let (denied, _) = gate(&rt, 2);
         let mut s = source(&owner, true).await;

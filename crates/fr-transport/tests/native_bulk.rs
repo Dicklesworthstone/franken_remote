@@ -32,10 +32,19 @@ fn recovery_packet(binding: u32, count: usize) -> Vec<u8> {
     out.truncate(size);
     out
 }
+
+macro_rules! run_test {
+    ($cx:ident, $body:expr) => {{
+        runtime().block_on(async {
+            let $cx = Cx::current().unwrap();
+            $body
+        });
+    }};
+}
+
 #[test]
 fn reliable_turn_advances_a_bounded_burst_without_an_idle_wait_per_prefix() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         for (payload, completes) in [(6_500, true), (8_000, false)] {
             let mut p = pair(&cx, Policy::default()).await;
             assert!(p.server.has_route(Route::Datagram(p.video)));
@@ -97,8 +106,7 @@ fn reliable_turn_advances_a_bounded_burst_without_an_idle_wait_per_prefix() {
 
 #[test]
 fn a_send_burst_keeps_checking_authority_between_native_prefixes() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut p = pair(&cx, Policy::default()).await;
         let packet = recovery_packet(2, 32_000);
         p.server
@@ -171,8 +179,7 @@ fn progress_packet(binding: u32) -> Vec<u8> {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn input_latency_stays_bounded_while_bulk_is_saturated_with_logged_queue_depths() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         // Configure policy with tight bulk limits and separate critical reservation
         let policy = Policy {
             retained_send_records: 2,
@@ -328,7 +335,10 @@ fn input_latency_stays_bounded_while_bulk_is_saturated_with_logged_queue_depths(
             }
         }
 
-        assert_eq!(critical_received, 2, "both critical packets must be received");
+        assert_eq!(
+            critical_received, 2,
+            "both critical packets must be received"
+        );
 
         // Now drain remaining bulk traffic
         for _ in 0..100 {

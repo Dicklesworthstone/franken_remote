@@ -83,8 +83,7 @@ async fn transfer(l: &mut Link, cx: &Cx, host: bool, send: Route, receive: Route
 
 #[test]
 fn legacy_selection_cannot_activate_recovery_or_video() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         for role in [MediaRole::Recovery, MediaRole::Video] {
             let before = l.h.usage();
@@ -117,8 +116,7 @@ fn legacy_selection_cannot_activate_recovery_or_video() {
 
 #[test]
 fn all_media_lanes_exchange_on_the_original_connection_without_static_routes() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         let identity = l.h.binding();
@@ -207,8 +205,7 @@ fn all_media_lanes_exchange_on_the_original_connection_without_static_routes() {
 
 #[test]
 fn datagram_is_not_a_pre_attachment_escape_and_has_the_negotiated_cap() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         l.selection.limits = ProtocolLimits::with_overrides(fr_core::limits::LimitOverrides {
@@ -280,8 +277,7 @@ fn datagram_is_not_a_pre_attachment_escape_and_has_the_negotiated_cap() {
 
 #[test]
 fn recovery_keeps_bulk_charges_and_does_not_consume_critical_record_credit() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         let (_, _, h, _) = attach(&mut l, &cx, MediaRole::Recovery, 8).await;
@@ -319,8 +315,7 @@ fn recovery_keeps_bulk_charges_and_does_not_consume_critical_record_credit() {
 
 #[test]
 fn fourth_video_slot_is_last_and_refusal_does_not_consume_another_binding() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         for id in 8..12 {

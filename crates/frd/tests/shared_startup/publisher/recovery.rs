@@ -294,9 +294,7 @@ async fn recover_loss(rt: &Runtime, keep_healthy: bool) {
 
 #[test]
 fn duplicate_failure_does_not_extend_deadline_or_stop_healthy_capture() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined_with_recovery(&rt, true, false, true)).await;
         admit(&mut cohort.peers[0]);
         let p = &mut cohort.peers[0];
@@ -339,9 +337,7 @@ fn duplicate_failure_does_not_extend_deadline_or_stop_healthy_capture() {
 
 #[test]
 fn foreign_connection_cannot_fence_a_shared_viewer_with_equal_numeric_routes() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined_with_recovery(&rt, true, false, true)).await;
         let (a, b) = cohort.peers.split_at_mut(1);
         let bytes = request(&a[0]);
@@ -365,9 +361,7 @@ fn foreign_connection_cannot_fence_a_shared_viewer_with_equal_numeric_routes() {
 
 #[test]
 fn invalid_replacement_tickets_retire_only_the_failed_subscriber() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined_with_recovery(&rt, true, false, true)).await;
         admit(&mut cohort.peers[0]);
         let p = &mut cohort.peers[0];
@@ -388,9 +382,7 @@ fn invalid_replacement_tickets_retire_only_the_failed_subscriber() {
 
 #[test]
 fn shared_capture_already_in_flight_finishes_only_for_healthy_viewers() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined_with_recovery(&rt, true, true, true)).await;
         let worker = cohort.publisher.worker_id();
         let next = {
@@ -412,9 +404,7 @@ fn shared_capture_already_in_flight_finishes_only_for_healthy_viewers() {
 }
 #[test]
 fn expired_recovery_cannot_extend_itself_using_healthy_capture_progress() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined_with_recovery(&rt, true, false, true)).await;
         admit(&mut cohort.peers[0]);
         let failed = &mut cohort.peers[0];

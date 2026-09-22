@@ -11,9 +11,7 @@ fn reserved_pool(pictures: usize) -> SharedFramePool {
 
 #[test]
 fn impossible_pool_and_profile_refuse_before_native_frame_identity_advances() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let mut s = source(&owner, true).await;
         assert_eq!(
@@ -48,9 +46,7 @@ fn impossible_pool_and_profile_refuse_before_native_frame_identity_advances() {
 
 #[test]
 fn full_pool_blocks_capture_without_skipping_the_next_reference() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let mut s = source(&owner, true).await;
         let p = reserved_pool(1);
@@ -86,9 +82,7 @@ fn full_pool_blocks_capture_without_skipping_the_next_reference() {
 
 #[test]
 fn unpolled_preparation_is_side_effect_free_and_native_cancellation_refunds_after_abort() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let mut s = source(&owner, true).await;
         let p = reserved_pool(1);
@@ -118,9 +112,7 @@ fn unpolled_preparation_is_side_effect_free_and_native_cancellation_refunds_afte
 
 #[test]
 fn pending_capture_retains_one_slot_then_shares_the_same_actual_output() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let (ac, _) = gate(&rt, 2);
         let (bc, _) = gate(&rt, 3);
@@ -158,9 +150,7 @@ fn pending_capture_retains_one_slot_then_shares_the_same_actual_output() {
 
 #[test]
 fn unchanged_native_result_returns_unused_reservation_without_new_picture() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let mut s = source(&owner, false).await;
         let p = reserved_pool(1);
@@ -184,9 +174,7 @@ fn unchanged_native_result_returns_unused_reservation_without_new_picture() {
 
 #[test]
 fn recipient_preflight_uses_full_charge_and_never_backpressures_another_viewer() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let (ac, _) = gate(&rt, 2);
         let (bc, bi) = gate(&rt, 3);
@@ -231,9 +219,7 @@ fn recipient_preflight_uses_full_charge_and_never_backpressures_another_viewer()
 
 #[test]
 fn revoked_permission_between_reservation_and_poll_does_not_issue_native_capture() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let mut s = source(&owner, true).await;
         let p = reserved_pool(1);
@@ -250,9 +236,7 @@ fn revoked_permission_between_reservation_and_poll_does_not_issue_native_capture
 
 #[test]
 fn foreign_source_recipient_preflight_refuses_without_touching_live_input() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let (viewer, input) = gate(&rt, 2);
         let mut s = source(&owner, true).await;

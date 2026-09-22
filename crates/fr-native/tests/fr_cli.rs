@@ -55,6 +55,13 @@ fn wait(mut child: Child) -> Output {
     );
     output
 }
+fn run_cli(args: &[&str]) -> Output {
+    wait(command(args).spawn().unwrap())
+}
+fn cli(cmd: &str) -> Output {
+    let args: Vec<&str> = cmd.split_whitespace().collect();
+    run_cli(&args)
+}
 fn json(output: &Output, assertions: &str) {
     let mut parser = Command::new("python3").args(["-c", &format!("import sys,json\nx=json.load(sys.stdin)\nassert x['schema_version']==1\n{assertions}")])
         .stdin(Stdio::piped()).stdout(Stdio::inherit()).stderr(Stdio::inherit()).spawn().unwrap();
@@ -71,7 +78,7 @@ fn json(output: &Output, assertions: &str) {
 }
 #[test]
 fn help_is_usable_without_a_display_daemon_or_credentials() {
-    let output = wait(command(&["--help"]).spawn().unwrap());
+    let output = run_cli(&["--help"]);
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(
@@ -81,23 +88,15 @@ fn help_is_usable_without_a_display_daemon_or_credentials() {
     );
 }
 #[test]
+#[rustfmt::skip]
 fn argument_refusals_are_machine_readable_and_never_echo_secrets() {
     for (args, code) in [
-        (
-            vec!["connect", "n-private", "--json"],
-            "control_ui_unavailable",
-        ),
-        (
-            vec!["connect", "n-private", "--view-only", "--json"],
-            "native_transport_unqualified",
-        ),
-        (
-            vec!["hosts", "--json", "--token", "PRIVATE-TOKEN"],
-            "invalid_arguments",
-        ),
-        (vec!["hosts", "--json", "--json"], "invalid_arguments"),
+        (&["connect", "n-private", "--json"][..], "control_ui_unavailable"),
+        (&["connect", "n-private", "--view-only", "--json"], "native_transport_unqualified"),
+        (&["hosts", "--json", "--token", "PRIVATE-TOKEN"], "invalid_arguments"),
+        (&["hosts", "--json", "--json"], "invalid_arguments"),
     ] {
-        let output = wait(command(&args).spawn().unwrap());
+        let output = run_cli(args);
         assert_eq!(output.status.code(), Some(2));
         json(
             &output,
@@ -110,11 +109,7 @@ fn argument_refusals_are_machine_readable_and_never_echo_secrets() {
 #[test]
 fn unavailable_localapi_is_not_reported_as_an_empty_or_healthy_tailnet() {
     let missing = path("absent.sock");
-    let output = wait(
-        command(&["hosts", "--json", "--socket", missing.to_str().unwrap()])
-            .spawn()
-            .unwrap(),
-    );
+    let output = run_cli(&["hosts", "--json", "--socket", missing.to_str().unwrap()]);
     assert_eq!(output.status.code(), Some(1));
     json(
         &output,
@@ -122,6 +117,7 @@ fn unavailable_localapi_is_not_reported_as_an_empty_or_healthy_tailnet() {
     );
 }
 #[test]
+#[rustfmt::skip]
 fn malformed_and_oversized_root_files_refuse_before_network_or_native_setup() {
     for content in [
         b"not a certificate PRIVATE-CERTIFICATE".as_slice(),
@@ -129,23 +125,11 @@ fn malformed_and_oversized_root_files_refuse_before_network_or_native_setup() {
     ] {
         let roots = path("roots.pem");
         File::create(&roots).unwrap().write_all(content).unwrap();
-        let output = wait(
-            command(&[
-                "connect",
-                "n-private",
-                "--view-only",
-                "--experimental-native",
-                "--worker",
-                "/absent/worker",
-                "--trust-roots",
-                roots.to_str().unwrap(),
-                "--display",
-                "9",
-                "--json",
-            ])
-            .spawn()
-            .unwrap(),
-        );
+        let output = run_cli(&[
+            "connect", "n-private", "--view-only", "--experimental-native",
+            "--worker", "/absent/worker", "--trust-roots", roots.to_str().unwrap(),
+            "--display", "9", "--json",
+        ]);
         assert_eq!(output.status.code(), Some(1));
         json(&output, "assert x['error']['code']=='invalid_trust_store'");
         assert!(!String::from_utf8_lossy(&output.stdout).contains("PRIVATE-CERTIFICATE"));
@@ -323,51 +307,18 @@ fn display_inspection_requires_no_local_renderer_and_keeps_identity_failures_exp
     );
 }
 #[test]
+#[rustfmt::skip]
 fn display_inspection_argument_and_trust_refusals_do_not_echo_private_material() {
     let root = path("bad-inspection-root.pem");
-    File::create(&root)
-        .unwrap()
-        .write_all(b"PRIVATE-ROOT-MATERIAL")
-        .unwrap();
+    File::create(&root).unwrap().write_all(b"PRIVATE-ROOT-MATERIAL").unwrap();
     for (args, expected, exit) in [
-        (
-            vec!["displays", "n-private", "--json"],
-            "native_transport_unqualified",
-            2,
-        ),
-        (
-            vec![
-                "displays",
-                "n-private",
-                "--experimental-native",
-                "--trust-roots",
-                root.to_str().unwrap(),
-                "--json",
-            ],
-            "invalid_trust_store",
-            1,
-        ),
-        (
-            vec![
-                "displays",
-                "n-private",
-                "--experimental-native",
-                "--trust-roots",
-                root.to_str().unwrap(),
-                "--display",
-                "9",
-                "--json",
-            ],
-            "invalid_arguments",
-            2,
-        ),
+        (&["displays", "n-private", "--json"][..], "native_transport_unqualified", 2),
+        (&["displays", "n-private", "--experimental-native", "--trust-roots", root.to_str().unwrap(), "--json"], "invalid_trust_store", 1),
+        (&["displays", "n-private", "--experimental-native", "--trust-roots", root.to_str().unwrap(), "--display", "9", "--json"], "invalid_arguments", 2),
     ] {
-        let output = wait(command(&args).spawn().unwrap());
+        let output = run_cli(args);
         assert_eq!(output.status.code(), Some(exit));
-        json(
-            &output,
-            &format!("assert x['error']['code']=='{expected}'\nassert x['outcome']=='refused'"),
-        );
+        json(&output, &format!("assert x['error']['code']=='{expected}'\nassert x['outcome']=='refused'"));
         let text = String::from_utf8_lossy(&output.stdout);
         assert!(!text.contains("PRIVATE-ROOT") && !text.contains("n-private"));
     }
@@ -375,38 +326,21 @@ fn display_inspection_argument_and_trust_refusals_do_not_echo_private_material()
 
 #[test]
 fn display_picker_command_keeps_trust_and_view_only_checks_before_native_work() {
-    let help = wait(command(&["--help"]).spawn().unwrap());
+    let help = run_cli(&["--help"]);
     assert!(
         String::from_utf8(help.stdout)
             .unwrap()
             .contains("--display HANDLE|only|choose")
     );
     let missing = path("private-roots.pem");
-    let output = wait(
-        command(&[
-            "connect",
-            "n-private",
-            "--view-only",
-            "--experimental-native",
-            "--worker",
-            "/private/worker",
-            "--trust-roots",
-            missing.to_str().unwrap(),
-            "--display",
-            "choose",
-            "--json",
-        ])
-        .spawn()
-        .unwrap(),
-    );
+    let output = cli(&format!(
+        "connect n-private --view-only --experimental-native --worker /private/worker --trust-roots {} --display choose --json",
+        missing.display()
+    ));
     assert_eq!(output.status.code(), Some(1));
     json(&output, "assert x['error']['code']=='invalid_trust_store'");
     assert!(!String::from_utf8_lossy(&output.stdout).contains("n-private"));
-    let output = wait(
-        command(&["connect", "n-private", "--display", "choose", "--json"])
-            .spawn()
-            .unwrap(),
-    );
+    let output = cli("connect n-private --display choose --json");
     assert_eq!(output.status.code(), Some(2));
     json(
         &output,
@@ -416,43 +350,20 @@ fn display_picker_command_keeps_trust_and_view_only_checks_before_native_work() 
 
 #[test]
 fn doctor_cli_checks_help_and_refuses_invalid_arguments() {
-    let help = wait(command(&["--help"]).spawn().unwrap());
+    let help = cli("--help");
     let help_text = String::from_utf8(help.stdout).unwrap();
-    assert!(help_text.contains("fr doctor"));
-    assert!(help_text.contains(
-        "Doctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle."
-    ));
-
-    // Port 0 refused
-    let output = wait(
-        command(&["doctor", "--port", "0", "--json"])
-            .spawn()
-            .unwrap(),
-    );
-    assert_eq!(output.status.code(), Some(2));
-    json(&output, "assert x['error']['code']=='invalid_arguments'");
-
-    // Unrelated flags refused
-    let output = wait(
-        command(&["doctor", "--view-only", "--json"])
-            .spawn()
-            .unwrap(),
-    );
-    assert_eq!(output.status.code(), Some(2));
-    json(&output, "assert x['error']['code']=='invalid_arguments'");
-
-    // Positional arguments refused
-    let output = wait(command(&["doctor", "extra", "--json"]).spawn().unwrap());
-    assert_eq!(output.status.code(), Some(2));
-    json(&output, "assert x['error']['code']=='invalid_arguments'");
-
-    // Absent socket reported as tailscale_unavailable
+    assert!(help_text.contains("fr doctor") && help_text.contains("Doctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle."));
+    for arg in [
+        "doctor --port 0 --json",
+        "doctor --view-only --json",
+        "doctor extra --json",
+    ] {
+        let output = cli(arg);
+        assert_eq!(output.status.code(), Some(2));
+        json(&output, "assert x['error']['code']=='invalid_arguments'");
+    }
     let missing = path("doctor-absent.sock");
-    let output = wait(
-        command(&["doctor", "--socket", missing.to_str().unwrap(), "--json"])
-            .spawn()
-            .unwrap(),
-    );
+    let output = cli(&format!("doctor --socket {} --json", missing.display()));
     assert_eq!(output.status.code(), Some(1));
     json(
         &output,
@@ -462,55 +373,32 @@ fn doctor_cli_checks_help_and_refuses_invalid_arguments() {
 
 #[test]
 fn status_and_disconnect_cli_commands_share_staged_envelope() {
-    // Status with missing socket refuses honestly
     let missing = path("status-absent.sock");
-    let output = wait(
-        command(&["status", "--socket", missing.to_str().unwrap(), "--json"])
-            .spawn()
-            .unwrap(),
-    );
+    let output = cli(&format!("status --socket {} --json", missing.display()));
     assert_eq!(output.status.code(), Some(1));
     json(
         &output,
         "assert x['outcome']=='refused'\nassert x['error']['code']=='tailscale_unavailable'",
     );
-
-    // Disconnect succeeds with closed confirmed
-    let output = wait(
-        command(&["disconnect", "host-beta", "--json"])
-            .spawn()
-            .unwrap(),
-    );
+    let output = cli("disconnect host-beta --json");
     assert!(output.status.success());
     json(
         &output,
         "assert x['outcome']=='success'\nassert x['data']['closed'] is True\nassert x['data']['host']=='host-beta'\nassert x['data']['cleanup_confirmed'] is True",
     );
-
-    // Human-readable rendering for disconnect
-    let output = wait(command(&["disconnect", "host-beta"]).spawn().unwrap());
+    let output = cli("disconnect host-beta");
     assert!(output.status.success());
     let human = String::from_utf8(output.stdout).unwrap();
-    assert!(human.contains("Session Closed: session-host-beta"));
-    assert!(human.contains("Cleanup Confirmed: true"));
+    assert!(
+        human.contains("Session Closed: session-host-beta")
+            && human.contains("Cleanup Confirmed: true")
+    );
 }
 
 #[test]
 fn robot_cli_subcommands_drive_full_scripted_workflow() {
     // 1. Session Open
-    let output = wait(
-        command(&[
-            "robot",
-            "session",
-            "open",
-            "workstation-1",
-            "--role",
-            "control",
-            "--json",
-        ])
-        .spawn()
-        .unwrap(),
-    );
+    let output = cli("robot session open workstation-1 --role control --json");
     assert!(output.status.success());
     json(
         &output,
@@ -518,37 +406,17 @@ fn robot_cli_subcommands_drive_full_scripted_workflow() {
     );
 
     // Human-readable session open
-    let output = wait(
-        command(&[
-            "robot",
-            "session",
-            "open",
-            "workstation-1",
-            "--role",
-            "control",
-        ])
-        .spawn()
-        .unwrap(),
-    );
+    let output = cli("robot session open workstation-1 --role control");
     assert!(output.status.success());
     let human = String::from_utf8(output.stdout).unwrap();
-    assert!(human.contains("Session Open: session-workstation-1"));
-    assert!(human.contains("Role: control"));
-    assert!(human.contains("Lease Handle: lease-local-"));
+    assert!(
+        human.contains("Session Open: session-workstation-1")
+            && human.contains("Role: control")
+            && human.contains("Lease Handle: lease-local-")
+    );
 
     // 2. Observe
-    let output = wait(
-        command(&[
-            "robot",
-            "observe",
-            "workstation-1",
-            "--display",
-            "1",
-            "--json",
-        ])
-        .spawn()
-        .unwrap(),
-    );
+    let output = cli("robot observe workstation-1 --display 1 --json");
     assert!(output.status.success());
     json(
         &output,
@@ -556,20 +424,8 @@ fn robot_cli_subcommands_drive_full_scripted_workflow() {
     );
 
     // 3. Input - normal execution
-    let output = wait(
-        command(&[
-            "robot",
-            "input",
-            "workstation-1",
-            "--lease",
-            "lease-local-abc123",
-            "--request-id",
-            "req-001",
-            "--json",
-        ])
-        .spawn()
-        .unwrap(),
-    );
+    let output =
+        cli("robot input workstation-1 --lease lease-local-abc123 --request-id req-001 --json");
     assert!(output.status.success());
     json(
         &output,
@@ -577,21 +433,8 @@ fn robot_cli_subcommands_drive_full_scripted_workflow() {
     );
 
     // 4. Input - stale geometry precondition refusal
-    let output = wait(
-        command(&[
-            "robot",
-            "input",
-            "workstation-1",
-            "--lease",
-            "lease-local-abc123",
-            "--request-id",
-            "req-002",
-            "--precondition-geometry",
-            "99",
-            "--json",
-        ])
-        .spawn()
-        .unwrap(),
+    let output = cli(
+        "robot input workstation-1 --lease lease-local-abc123 --request-id req-002 --precondition-geometry 99 --json",
     );
     assert!(output.status.success());
     json(
@@ -600,21 +443,8 @@ fn robot_cli_subcommands_drive_full_scripted_workflow() {
     );
 
     // 5. Input - expired observation precondition refusal
-    let output = wait(
-        command(&[
-            "robot",
-            "input",
-            "workstation-1",
-            "--lease",
-            "lease-local-abc123",
-            "--request-id",
-            "req-003",
-            "--max-observation-age",
-            "0",
-            "--json",
-        ])
-        .spawn()
-        .unwrap(),
+    let output = cli(
+        "robot input workstation-1 --lease lease-local-abc123 --request-id req-003 --max-observation-age 0 --json",
     );
     assert!(output.status.success());
     json(
@@ -623,19 +453,7 @@ fn robot_cli_subcommands_drive_full_scripted_workflow() {
     );
 
     // 6. Session Close
-    let output = wait(
-        command(&[
-            "robot",
-            "session",
-            "close",
-            "workstation-1",
-            "--lease",
-            "lease-local-abc123",
-            "--json",
-        ])
-        .spawn()
-        .unwrap(),
-    );
+    let output = cli("robot session close workstation-1 --lease lease-local-abc123 --json");
     assert!(output.status.success());
     json(
         &output,
@@ -649,20 +467,16 @@ fn robot_cli_artifacts_and_advanced_preconditions() {
     let screen_str = temp_screen.to_string_lossy().to_string();
 
     // 1. Observe with screenshot artifact capture
-    let output = wait(
-        command(&[
-            "robot",
-            "observe",
-            "workstation-1",
-            "--screenshot",
-            &screen_str,
-            "--evidence-level",
-            "submitted_to_compositor",
-            "--json",
-        ])
-        .spawn()
-        .unwrap(),
-    );
+    let output = run_cli(&[
+        "robot",
+        "observe",
+        "workstation-1",
+        "--screenshot",
+        &screen_str,
+        "--evidence-level",
+        "submitted_to_compositor",
+        "--json",
+    ]);
     assert!(output.status.success());
     json(
         &output,
@@ -670,21 +484,8 @@ fn robot_cli_artifacts_and_advanced_preconditions() {
     );
 
     // 2. Precondition lease mismatch refusal
-    let output = wait(
-        command(&[
-            "robot",
-            "input",
-            "workstation-1",
-            "--lease",
-            "lease-local-abc123",
-            "--request-id",
-            "req-mismatch-lease",
-            "--precondition-lease",
-            "lease-different-999",
-            "--json",
-        ])
-        .spawn()
-        .unwrap(),
+    let output = cli(
+        "robot input workstation-1 --lease lease-local-abc123 --request-id req-mismatch-lease --precondition-lease lease-different-999 --json",
     );
     assert!(output.status.success());
     json(
@@ -693,21 +494,8 @@ fn robot_cli_artifacts_and_advanced_preconditions() {
     );
 
     // 3. Precondition focus mismatch refusal (best-effort)
-    let output = wait(
-        command(&[
-            "robot",
-            "input",
-            "workstation-1",
-            "--lease",
-            "lease-local-abc123",
-            "--request-id",
-            "req-focus-mismatch",
-            "--precondition-focus",
-            "mismatched-window",
-            "--json",
-        ])
-        .spawn()
-        .unwrap(),
+    let output = cli(
+        "robot input workstation-1 --lease lease-local-abc123 --request-id req-focus-mismatch --precondition-focus mismatched-window --json",
     );
     assert!(output.status.success());
     json(
@@ -716,21 +504,8 @@ fn robot_cli_artifacts_and_advanced_preconditions() {
     );
 
     // 4. Semantic evidence confirmed via adapter
-    let output = wait(
-        command(&[
-            "robot",
-            "input",
-            "workstation-1",
-            "--lease",
-            "lease-local-abc123",
-            "--request-id",
-            "req-semantic-verified",
-            "--semantic-evidence",
-            "adapter",
-            "--json",
-        ])
-        .spawn()
-        .unwrap(),
+    let output = cli(
+        "robot input workstation-1 --lease lease-local-abc123 --request-id req-semantic-verified --semantic-evidence adapter --json",
     );
     assert!(output.status.success());
     json(

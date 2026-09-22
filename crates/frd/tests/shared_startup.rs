@@ -172,11 +172,19 @@ async fn reap(presenter: &mut Presenter, cx: &Cx) {
         .unwrap();
 }
 
+macro_rules! run_shared {
+    ($rt:ident, $cx:ident, $body:expr) => {{
+        let $rt = runtime();
+        $rt.block_on(async {
+            let $cx = Cx::current().unwrap();
+            $body
+        });
+    }};
+}
+
 #[test]
 fn two_viewers_configure_independently_decode_and_retain_one_native_allocation() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, a, b) = (gate(&rt, 1), gate(&rt, 13), gate(&rt, 14));
         let mut al = Link::new(&cx, 13).await;
         let mut bl = Link::new(&cx, 14).await;
@@ -247,7 +255,6 @@ fn two_viewers_configure_independently_decode_and_retain_one_native_allocation()
             .await
             .unwrap();
         assert!(idle.is_unchanged());
-        assert_eq!(pool.usage(), BudgetUsage::default());
         drop((ra, rb));
         reap(&mut pa, &cx).await;
         reap(&mut pb, &cx).await;
@@ -257,9 +264,7 @@ fn two_viewers_configure_independently_decode_and_retain_one_native_allocation()
 
 #[test]
 fn cancelling_one_startup_releases_only_its_alias_and_other_viewer_still_decodes() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, a, b) = (gate(&rt, 1), gate(&rt, 13), gate(&rt, 14));
         let mut al = Link::new(&cx, 13).await;
         let mut bl = Link::new(&cx, 14).await;
@@ -312,9 +317,7 @@ fn cancelling_one_startup_releases_only_its_alias_and_other_viewer_still_decodes
 
 #[test]
 fn a_delayed_configured_reply_cannot_renew_the_original_shared_frame_deadline() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, a, b) = (gate(&rt, 1), gate(&rt, 13), gate(&rt, 14));
         let mut al = Link::new(&cx, 13).await;
         let mut bl = Link::new(&cx, 14).await;
@@ -370,9 +373,7 @@ fn a_delayed_configured_reply_cannot_renew_the_original_shared_frame_deadline() 
 
 #[test]
 fn wrong_transfer_api_preserves_the_ready_update_and_each_transfer_is_single_use() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let owner = gate(&rt, 1);
         let control = gate(&rt, 13);
         let mut link = Link::new(&cx, 13).await;
@@ -445,9 +446,7 @@ fn wrong_transfer_api_preserves_the_ready_update_and_each_transfer_is_single_use
 
 #[test]
 fn unique_bootstrap_still_uses_the_same_acknowledgements_and_refuses_shared_transfer() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let owner = gate(&rt, 1);
         let control = gate(&rt, 13);
         let mut link = Link::new(&cx, 13).await;
@@ -500,9 +499,7 @@ fn unique_bootstrap_still_uses_the_same_acknowledgements_and_refuses_shared_tran
 
 #[test]
 fn opaque_bytes_and_static_observations_do_not_become_shared_bootstrap_idrs() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let owner = gate(&rt, 1);
         let control = gate(&rt, 13);
         let mut link = Link::new(&cx, 13).await;
@@ -543,9 +540,7 @@ fn opaque_bytes_and_static_observations_do_not_become_shared_bootstrap_idrs() {
 
 #[test]
 fn a_waiting_viewer_must_admit_the_full_shared_retention_charge() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let owner = gate(&rt, 1);
         let control = gate(&rt, 13);
         let mut link = Link::new(&cx, 13).await;

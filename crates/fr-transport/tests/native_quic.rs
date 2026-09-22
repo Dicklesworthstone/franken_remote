@@ -40,10 +40,19 @@ fn recovery_packet(binding: u32, count: usize) -> Vec<u8> {
     out.truncate(size);
     out
 }
+
+macro_rules! run_test {
+    ($cx:ident, $body:expr) => {{
+        runtime().block_on(async {
+            let $cx = Cx::current().unwrap();
+            $body
+        });
+    }};
+}
+
 #[test]
 fn authenticated_stream_reassembles_large_record_and_coalesced_records() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut p = pair(&cx, Policy::default()).await;
         let route = Route::Stream(p.host_routes[1]);
         let big = recovery_packet(2, 32000);
@@ -84,8 +93,7 @@ fn authenticated_stream_reassembles_large_record_and_coalesced_records() {
 }
 #[test]
 fn final_authority_refusal_and_expired_send_never_admit_bytes() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut p = pair(&cx, Policy::default()).await;
         let packet = recovery_packet(2, 100);
         let route = Route::Stream(p.host_routes[1]);
@@ -113,8 +121,7 @@ fn final_authority_refusal_and_expired_send_never_admit_bytes() {
 }
 #[test]
 fn backpressure_retains_original_record_until_retry_and_native_acks_release_batch() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let policy = Policy {
             retained_send_records: 1,
             ..Policy::default()
@@ -176,8 +183,7 @@ fn backpressure_retains_original_record_until_retry_and_native_acks_release_batc
 }
 #[test]
 fn stalled_complete_record_expires_without_a_new_packet() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut p = pair(
             &cx,
             Policy {
@@ -226,8 +232,7 @@ fn stalled_complete_record_expires_without_a_new_packet() {
 }
 #[test]
 fn cancelling_or_dropping_a_live_io_wait_prevents_connection_reuse() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let (c, s) = support::native_pair(&cx, "localhost", ALPN).await;
         let mut client = QuicRecords::new(c.unwrap(), &cx, &[], &[], Policy::default()).unwrap();
         let mut server = QuicRecords::new(s.unwrap(), &cx, &[], &[], Policy::default()).unwrap();
@@ -267,8 +272,7 @@ fn cancelling_or_dropping_a_live_io_wait_prevents_connection_reuse() {
 }
 #[test]
 fn hostname_and_application_protocol_are_actually_verified() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let (bad, _) = support::native_pair(&cx, "not-localhost.invalid", ALPN).await;
         assert!(
             bad.is_err(),
@@ -295,8 +299,7 @@ fn channel(route: Route) -> Channel {
 }
 #[test]
 fn production_media_packetizer_and_receiver_run_over_native_quic() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut p = pair(&cx, Policy::default()).await;
         let limits = MediaLimits::new(ProtocolLimits::ABSOLUTE, 1150, 16384, 64).unwrap();
         let bindings = MediaBindings::new(1, 2, 3, 4).unwrap();
@@ -396,8 +399,7 @@ fn production_media_packetizer_and_receiver_run_over_native_quic() {
 }
 #[test]
 fn datagram_cap_rejects_before_native_fatal_path_and_delivers_exact_boundary() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut p = pair(&cx, Policy::default()).await;
         let l = MediaLimits::new(ProtocolLimits::ABSOLUTE, 1150, 16384, 64).unwrap();
         let mut bytes = vec![0; 1150];
@@ -587,8 +589,7 @@ fn input_drive<'a>(
 }
 #[test]
 fn mixed_actions_keep_one_ordered_stream_and_share_binding_with_results_and_pointer() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut p = input_pair(&cx, Policy::default()).await;
         // The transport checks class/framing; action payload semantics stay in
         // the fr-wire action and HeldState codecs. Distinct markers expose
@@ -682,8 +683,7 @@ fn mixed_actions_keep_one_ordered_stream_and_share_binding_with_results_and_poin
 }
 #[test]
 fn exhausted_bulk_pool_cannot_consume_critical_storage_and_critical_runs_first() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut p = input_pair(
             &cx,
             Policy {
@@ -757,8 +757,7 @@ fn exhausted_bulk_pool_cannot_consume_critical_storage_and_critical_runs_first()
 }
 #[test]
 fn blocked_bulk_stream_cannot_pin_acknowledged_critical_storage() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut p = input_pair(
             &cx,
             Policy {
@@ -842,8 +841,7 @@ fn blocked_bulk_stream_cannot_pin_acknowledged_critical_storage() {
 }
 #[test]
 fn critical_credit_is_reserved_in_the_actual_native_connection_window() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut p = input_pair(
             &cx,
             Policy {
@@ -918,8 +916,7 @@ fn critical_credit_is_reserved_in_the_actual_native_connection_window() {
 }
 #[test]
 fn parallel_action_streams_and_wrong_initiators_are_refused_before_admission() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let (client, server) = support::native_pair(&cx, "localhost", ALPN).await;
         let (mut client, mut server) = (client.unwrap(), server.unwrap());
         let first = client.connection_mut().open_uni_stream(&cx).unwrap();
@@ -1002,9 +999,8 @@ async fn bootstrap_drive(cx: &Cx, client: &mut QuicRecords, host: &mut QuicRecor
 }
 #[test]
 fn bootstrap_hello_and_bound_ack_use_the_same_authenticated_streams() {
-    runtime().block_on(async {
+    run_test!(cx, {
         use fr_wire::negotiation::{self, Message};
-        let cx = Cx::current().unwrap();
         let (mut client, c, mut host, h) = Box::pin(bootstrap_connections(&cx)).await;
         let identity = host.binding();
         let hello = Message::ClientHello(startup_offer());
@@ -1080,8 +1076,7 @@ fn bootstrap_hello_and_bound_ack_use_the_same_authenticated_streams() {
 }
 #[test]
 fn bootstrap_is_not_a_zero_bound_media_or_input_escape() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let (mut client, c, host, _h) = Box::pin(bootstrap_connections(&cx)).await;
         for kind in [0x0040u16, 0x0032, 0x0034, 0x001c] {
             let mut bytes = vec![0u8; 24];
@@ -1121,9 +1116,8 @@ fn bootstrap_is_not_a_zero_bound_media_or_input_escape() {
 }
 #[test]
 fn bootstrap_transition_cannot_relabel_an_incomplete_record() {
-    runtime().block_on(async {
+    run_test!(cx, {
         use fr_wire::negotiation::{Capability, Message};
-        let cx = Cx::current().unwrap();
         let (mut client, c, mut host, h) = Box::pin(bootstrap_connections(&cx)).await;
         let mut offer = startup_offer();
         offer.capabilities = (0..16)

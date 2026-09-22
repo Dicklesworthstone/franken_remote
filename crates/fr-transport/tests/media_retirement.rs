@@ -48,6 +48,14 @@ fn selection() -> Selection {
     .select()
     .unwrap()
 }
+macro_rules! run_test {
+    ($cx:ident, $body:expr) => {{
+        runtime().block_on(async {
+            let $cx = Cx::current().unwrap();
+            $body
+        });
+    }};
+}
 struct Link {
     c: QuicRecords,
     h: QuicRecords,
@@ -333,8 +341,7 @@ async fn queue_stale_work(
 
 #[test]
 fn media_reset_and_fresh_generation_keep_the_original_control_connection() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         let identity = l.h.binding();
@@ -426,8 +433,7 @@ fn media_reset_and_fresh_generation_keep_the_original_control_connection() {
 
 #[test]
 fn viewer_initiated_video_retirement_preserves_input_ordering_and_control() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         l.selection.role = Role::RequestControl;
@@ -478,8 +484,7 @@ fn viewer_initiated_video_retirement_preserves_input_ordering_and_control() {
 
 #[test]
 fn retirement_refuses_foreign_connections_input_roles_and_partial_attachments() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         let mut foreign = Link::new(&cx).await;
         enable(&mut l);
@@ -523,8 +528,7 @@ fn retirement_refuses_foreign_connections_input_roles_and_partial_attachments() 
 
 #[test]
 fn retiring_media_does_not_recycle_consumed_streams_tickets_or_native_capacity() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         for id in 8..15 {
@@ -564,8 +568,7 @@ fn retiring_media_does_not_recycle_consumed_streams_tickets_or_native_capacity()
 
 #[test]
 fn late_old_datagrams_are_discarded_without_disrupting_another_video_binding() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         let (_h, mut c, old, _) = attach(

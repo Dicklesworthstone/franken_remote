@@ -199,6 +199,15 @@ fn runtime() -> asupersync::runtime::Runtime {
         .unwrap()
 }
 
+macro_rules! run_async {
+    ($cx:ident, $body:expr) => {{
+        runtime().block_on(async {
+            let $cx = Cx::current().unwrap();
+            $body
+        });
+    }};
+}
+
 #[test]
 fn runtime_context_localapi_keeps_narrowed_authority_during_real_lookup() {
     type LookupCaps = cap::CapSet<false, true, false, true, false>;
@@ -288,12 +297,12 @@ fn runtime_context_localapi_rejects_retained_timer_denial_before_socket_io() {
 }
 
 #[test]
+#[rustfmt::skip]
 fn real_unix_http_snapshot_has_exact_source_binding_and_exclusive_expiry() {
     for chunked in [false, true] {
         let (status, who) = fixtures();
         let server = Server::fixture(&status, &who, chunked);
-        runtime().block_on(async {
-            let cx = Cx::current().unwrap();
+        run_async!(cx, {
             let proof = server
                 .client
                 .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
@@ -318,14 +327,7 @@ fn real_unix_http_snapshot_has_exact_source_binding_and_exclusive_expiry() {
                 Err(Error::Clock)
             );
             let debug = format!("{proof:?} {:?} {:?}", server.client, endpoints());
-            for secret in [
-                "100.64.",
-                "n-peer",
-                "private-name",
-                "test.invalid",
-                "nodekey:",
-                ".sock",
-            ] {
+            for secret in ["100.64.", "n-peer", "private-name", "test.invalid", "nodekey:", ".sock"] {
                 assert!(!debug.contains(secret));
             }
         });
@@ -441,14 +443,10 @@ fn ipv6_source_and_own_address_prefixes_are_checked_exactly() {
     );
 }
 #[test]
+#[rustfmt::skip]
 fn changed_identity_backend_and_known_key_expiry_refuse() {
     let (s, w) = fixtures();
-    for (field, value) in [
-        ("ID", json!(55)),
-        ("StableID", json!("foreign")),
-        ("User", json!(99)),
-        ("Tags", json!(["tag:foreign"])),
-    ] {
+    for (field, value) in [("ID", json!(55)), ("StableID", json!("foreign")), ("User", json!(99)), ("Tags", json!(["tag:foreign"]))] {
         let mut bad = w.clone();
         bad["Node"][field] = value;
         assert_eq!(
@@ -539,8 +537,7 @@ fn installed_linux_1_102_3_projection_preserves_the_live_refusal() {
     assert_eq!(who.get("CapMap"), Some(&Value::Null));
     for scope in [Scope::OwnUser, Scope::Tailnet] {
         let server = Server::fixture(&status, &who, false);
-        runtime().block_on(async {
-            let cx = Cx::current().unwrap();
+        run_async!(cx, {
             let result = server
                 .client
                 .authorize_app_capability(
@@ -572,8 +569,7 @@ fn membership_profile_survives_real_localapi_lookup_and_revalidation_without_cap
         ],
         Duration::ZERO,
     );
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_async!(cx, {
         let proof = server
             .client
             .authorize_membership(&cx, endpoints(), GrantPolicy::default())
@@ -591,8 +587,7 @@ fn membership_profile_survives_real_localapi_lookup_and_revalidation_without_cap
     });
 
     let denied = Server::fixture(&status, &who, false);
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_async!(cx, {
         assert_eq!(
             denied
                 .client
@@ -684,7 +679,7 @@ fn actual_http_rejects_oversize_compression_redirects_and_truncation() {
         b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 20\r\n\r\n{}".to_vec(),
         b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: 2\r\n\r\n{}".to_vec()] {
         let server=Server::new(vec![reply],Duration::ZERO);
-        runtime().block_on(async {let cx=Cx::current().unwrap();assert!(server.client.authorize_app_capability(&cx,endpoints(),GrantPolicy::default()).await.is_err());});
+        run_async!(cx, assert!(server.client.authorize_app_capability(&cx,endpoints(),GrantPolicy::default()).await.is_err()));
     }
 }
 #[test]
@@ -703,8 +698,7 @@ fn inconsistent_snapshots_retry_once_without_unbounded_work() {
         ],
         Duration::ZERO,
     );
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_async!(cx, {
         let proof = server
             .client
             .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
@@ -724,8 +718,7 @@ fn inconsistent_snapshots_retry_once_without_unbounded_work() {
         ],
         Duration::ZERO,
     );
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_async!(cx, {
         assert_eq!(
             server
                 .client
@@ -748,8 +741,7 @@ fn delayed_snapshot_cannot_slide_issued_deadline_and_expired_proof_cannot_renew(
         ],
         Duration::from_millis(25),
     );
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_async!(cx, {
         let p = GrantPolicy {
             validity: Duration::from_millis(30),
             ..Default::default()
@@ -764,8 +756,7 @@ fn delayed_snapshot_cannot_slide_issued_deadline_and_expired_proof_cannot_renew(
         );
     });
     let server = Server::fixture(&s, &w, false);
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_async!(cx, {
         let proof = server
             .client
             .authorize_app_capability(
@@ -795,8 +786,7 @@ fn cancellation_timeout_and_dropped_future_release_single_lookup_credit() {
     for cancel in [false, true] {
         let (s, _) = fixtures();
         let server = Server::new(vec![response(&s, false)], Duration::from_millis(200));
-        runtime().block_on(async {
-            let cx = Cx::current().unwrap();
+        run_async!(cx, {
             let policy = GrantPolicy {
                 lookup_timeout: Duration::from_millis(35),
                 ..Default::default()
@@ -835,8 +825,7 @@ fn cancellation_timeout_and_dropped_future_release_single_lookup_credit() {
     }
     let (s, _) = fixtures();
     let server = Server::new(vec![response(&s, false)], Duration::from_millis(200));
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_async!(cx, {
         let mut lookup = Box::pin(server.client.authorize_app_capability(
             &cx,
             endpoints(),
@@ -852,6 +841,7 @@ fn cancellation_timeout_and_dropped_future_release_single_lookup_credit() {
     });
 }
 #[test]
+#[rustfmt::skip]
 fn go_expiry_timestamp_is_checked_and_clamps_local_authorization() {
     assert_eq!(
         expiry::unix_micros("1970-01-01T00:00:00Z").unwrap(),
@@ -867,22 +857,15 @@ fn go_expiry_timestamp_is_checked_and_clamps_local_authorization() {
     );
     assert_eq!(expiry::unix_micros("0001-01-01T00:00:00Z").unwrap(), None);
     for value in [
-        "2001-02-29T00:00:00Z",
-        "2000-13-01T00:00:00Z",
-        "2000-01-01T24:00:00Z",
-        "2000-01-01T00:00:60Z",
-        "2000-01-01T00:00:00.Z",
-        "2000-01-01T00:00:00+25:00",
-        "2000-01-01T00:00:00Zjunk",
-        "2026-01-01",
+        "2001-02-29T00:00:00Z", "2000-13-01T00:00:00Z", "2000-01-01T24:00:00Z", "2000-01-01T00:00:60Z",
+        "2000-01-01T00:00:00.Z", "2000-01-01T00:00:00+25:00", "2000-01-01T00:00:00Zjunk", "2026-01-01",
     ] {
         assert!(expiry::unix_micros(value).is_err(), "{value}");
     }
     let (s, mut w) = fixtures();
     w["Node"]["KeyExpiry"] = json!("1970-01-01T00:00:01Z");
     let server = Server::fixture(&s, &w, false);
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_async!(cx, {
         assert_eq!(
             server
                 .client
@@ -899,8 +882,7 @@ fn admission_owner_drop_revocation_and_cancellation_stop_every_clone() {
     for action in 0..3 {
         let (s, w) = fixtures();
         let server = Server::fixture(&s, &w, false);
-        runtime().block_on(async {
-            let cx = Cx::current().unwrap();
+        run_async!(cx, {
             let proof = server
                 .client
                 .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
@@ -959,8 +941,7 @@ fn unchanged_revalidation_extends_only_an_unexpired_owned_admission() {
         })
         .collect();
     let server = Server::new(replies, Duration::ZERO);
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_async!(cx, {
         let proof = server
             .client
             .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
@@ -1002,8 +983,7 @@ fn capability_removal_permission_changes_and_identity_switch_close_old_admission
             ],
             Duration::ZERO,
         );
-        runtime().block_on(async {
-            let cx = Cx::current().unwrap();
+        run_async!(cx, {
             let proof = server
                 .client
                 .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
@@ -1022,8 +1002,7 @@ fn read_only_admission_does_not_turn_a_control_refusal_into_observation_revocati
     let (s, mut w) = fixtures();
     w["CapMap"][DESKTOP_CAPABILITY][0]["control"] = json!(false);
     let server = Server::fixture(&s, &w, false);
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_async!(cx, {
         let proof = server
             .client
             .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
@@ -1039,8 +1018,7 @@ fn read_only_admission_does_not_turn_a_control_refusal_into_observation_revocati
 fn expired_shared_admission_is_terminal_without_additional_network_traffic() {
     let (s, w) = fixtures();
     let server = Server::fixture(&s, &w, false);
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_async!(cx, {
         let proof = server
             .client
             .authorize_app_capability(
@@ -1072,8 +1050,7 @@ fn dropped_started_refresh_cannot_leave_an_admission_active() {
         ],
         Duration::ZERO,
     );
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_async!(cx, {
         let proof = server
             .client
             .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
@@ -1105,8 +1082,7 @@ fn revocation_during_refresh_cannot_be_overwritten_by_a_successful_response() {
         })
         .collect();
     let server = Server::new(replies, Duration::ZERO);
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_async!(cx, {
         let proof = server
             .client
             .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
@@ -1302,8 +1278,7 @@ fn installed_node_snapshot_is_bounded_local_only_and_redacted() {
     status["Self"]["TailscaleIPs"] = status["TailscaleIPs"].clone();
     status.as_object_mut().unwrap().remove("Peer");
     let server = Server::new(vec![response(&status, true)], Duration::ZERO);
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_async!(cx, {
         let node = server.client.node_identity(&cx).await.unwrap();
         assert_eq!(server.calls.load(Ordering::SeqCst), 2);
         assert_eq!(node.addresses().len(), 2);
@@ -1323,14 +1298,13 @@ fn installed_node_snapshot_is_bounded_local_only_and_redacted() {
     });
 }
 #[test]
+#[rustfmt::skip]
 fn node_address_name_identity_and_backend_changes_refuse() {
     let (mut original, _) = fixtures();
     original["Self"]["DNSName"] = json!("host.fixture.ts.net.");
     for (field, value) in [
-        ("DNSName", json!("attacker.example.org.")),
-        ("DNSName", json!("host.fixture.ts.net..")),
-        ("TailscaleIPs", json!(["::ffff:100.64.0.1"])),
-        ("TailscaleIPs", json!(["127.0.0.1"])),
+        ("DNSName", json!("attacker.example.org.")), ("DNSName", json!("host.fixture.ts.net..")),
+        ("TailscaleIPs", json!(["::ffff:100.64.0.1"])), ("TailscaleIPs", json!(["127.0.0.1"])),
         ("Expired", json!(true)),
     ] {
         let mut invalid = original.clone();
@@ -1349,9 +1323,9 @@ fn node_address_name_identity_and_backend_changes_refuse() {
         vec![response(&original, false), response(&changed, false)],
         Duration::ZERO,
     );
-    runtime().block_on(async {
+    run_async!(cx, {
         assert!(matches!(
-            server.client.node_identity(&Cx::current().unwrap()).await,
+            server.client.node_identity(&cx).await,
             Err(Error::SnapshotChanged)
         ));
     });
@@ -1370,8 +1344,7 @@ fn node_refresh_cannot_replace_key_or_extend_a_dead_snapshot() {
         ],
         Duration::ZERO,
     );
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_async!(cx, {
         let node = server.client.node_identity(&cx).await.unwrap();
         assert!(matches!(
             server.client.revalidate_node(&cx, &node).await,

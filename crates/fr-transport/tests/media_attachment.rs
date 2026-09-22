@@ -49,6 +49,14 @@ fn selection() -> Selection {
     .select()
     .unwrap()
 }
+macro_rules! run_test {
+    ($cx:ident, $body:expr) => {{
+        runtime().block_on(async {
+            let $cx = Cx::current().unwrap();
+            $body
+        });
+    }};
+}
 struct Link {
     c: QuicRecords,
     h: QuicRecords,
@@ -183,8 +191,7 @@ fn encoded(m: Message, dir: D) -> Vec<u8> {
 }
 #[test]
 fn ticketed_pair_exchanges_real_records_and_promotes_without_replacing_connection() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         let conn = l.h.binding();
         let mut h = l.offer(&cx, 8, 90);
@@ -245,8 +252,7 @@ fn ticketed_pair_exchanges_real_records_and_promotes_without_replacing_connectio
 }
 #[test]
 fn fixed_pending_budget_expiry_and_owner_drop_fence_the_connection() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         let h = l.offer(&cx, 8, 90);
         assert!(matches!(
@@ -295,8 +301,7 @@ fn fixed_pending_budget_expiry_and_owner_drop_fence_the_connection() {
 }
 #[test]
 fn malformed_parent_or_unnegotiated_extension_never_allocates_a_route() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         let before = l.h.usage();
         let mut absent = l.selection.clone();
@@ -344,8 +349,7 @@ fn malformed_parent_or_unnegotiated_extension_never_allocates_a_route() {
 }
 #[test]
 fn final_authority_and_foreign_connection_refuse_before_packet_copy() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         let mut h = l.offer(&cx, 8, 90);
         let mut other = Link::new(&cx).await;
@@ -367,8 +371,7 @@ fn final_authority_and_foreign_connection_refuse_before_packet_copy() {
 }
 #[test]
 fn reused_ticket_and_binding_ids_cannot_allocate_a_second_channel() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         let mut h = l.offer(&cx, 8, 90);
         let mut c = l.viewer(&cx, &mut h).await;
@@ -401,8 +404,7 @@ fn reused_ticket_and_binding_ids_cannot_allocate_a_second_channel() {
 }
 #[test]
 fn unexpected_ticket_nonce_on_actual_auxiliary_stream_is_terminal() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         let mut h = l.offer(&cx, 8, 90);
         let mut c = l.viewer(&cx, &mut h).await;
@@ -467,8 +469,7 @@ fn unexpected_ticket_nonce_on_actual_auxiliary_stream_is_terminal() {
 }
 #[test]
 fn unrelated_renewal_and_actual_queue_pressure_do_not_consume_attachment_state() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         let mut h = l.offer(&cx, 8, 90);
         let deadline = h.deadline_us();
@@ -560,8 +561,7 @@ fn unrelated_renewal_and_actual_queue_pressure_do_not_consume_attachment_state()
 }
 #[test]
 fn seven_retired_pairs_are_bounded_and_an_eighth_refuses_without_recycling() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut link = Link::new(&cx).await;
         for i in 0..7 {
             let mut h = link.offer(&cx, 8 + i, 90 + u128::from(i));
@@ -594,8 +594,7 @@ fn seven_retired_pairs_are_bounded_and_an_eighth_refuses_without_recycling() {
 }
 #[test]
 fn decoder_reply_before_attachment_and_attachment_replay_after_promotion_refuse() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut link = Link::new(&cx).await;
         let mut h = link.offer(&cx, 8, 90);
         let mut c = link.viewer(&cx, &mut h).await;

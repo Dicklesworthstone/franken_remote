@@ -28,6 +28,14 @@ use std::{
     time::Duration,
 };
 const LIMITS: ProtocolLimits = ProtocolLimits::ABSOLUTE;
+macro_rules! run_obs {
+    ($cx:ident, $hc:ident, $body:expr) => {{
+        let rt = network::runtime();
+        let $cx = rt.request_cx_with_budget(Budget::INFINITE);
+        let $hc = rt.request_cx_with_budget(Budget::INFINITE);
+        rt.block_on(async { $body });
+    }};
+}
 fn binding() -> Binding {
     Binding {
         channel: 17,
@@ -166,10 +174,7 @@ fn challenge(cx: &Cx, c: &mut QuicRecords, routes: ControlRoutes) -> Option<(u12
 }
 #[test]
 fn real_viewer_responses_keep_observation_past_initial_expiry_with_issue_time_deadlines() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    let hc = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_obs!(cx, hc, {
         let (mut c, mut s, routes) = pair(&cx).await;
         let control = approved(hc, 3_000_000);
         let initial = control.deadline(Duration::from_secs(3)).unwrap().time();
@@ -244,10 +249,7 @@ fn real_viewer_responses_keep_observation_past_initial_expiry_with_issue_time_de
 }
 #[test]
 fn delayed_response_does_not_reset_the_host_deadline_or_bypass_the_old_expiry() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    let hc = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_obs!(cx, hc, {
         let (mut c, mut s, routes) = pair(&cx).await;
         let control = approved(hc, 3_000_000);
         let mut owner = ObservationRenewal::new(control.clone(), &s, routes, LIMITS).unwrap();
@@ -291,10 +293,7 @@ fn delayed_response_does_not_reset_the_host_deadline_or_bypass_the_old_expiry() 
 }
 #[test]
 fn queued_challenge_and_network_ack_are_not_renewal_and_late_response_cannot_revive() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    let hc = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_obs!(cx, hc, {
         let (mut c, mut s, routes) = pair(&cx).await;
         let control = approved(hc, 150_000);
         let mut owner = ObservationRenewal::new(control.clone(), &s, routes, LIMITS).unwrap();
@@ -322,10 +321,7 @@ fn queued_challenge_and_network_ack_are_not_renewal_and_late_response_cannot_rev
 }
 #[test]
 fn native_send_backpressure_preserves_nonce_bytes_and_fixed_expiry() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    let hc = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_obs!(cx, hc, {
         let (mut c, mut s, routes) = pair(&cx).await;
         // Occupy the one critical record slot with a separate framed control
         // marker. This is not renewal and its opaque body is not OS input.
@@ -400,10 +396,7 @@ fn native_send_backpressure_preserves_nonce_bytes_and_fixed_expiry() {
 }
 #[test]
 fn duplicate_attachment_and_foreign_connection_never_take_over_an_existing_owner() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    let hc = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_obs!(cx, hc, {
         let (_, s, routes) = pair(&cx).await;
         let (_, mut replacement, _) = pair(&cx).await;
         let control = approved(hc, 3_000_000);
@@ -424,10 +417,7 @@ fn duplicate_attachment_and_foreign_connection_never_take_over_an_existing_owner
 #[test]
 fn dropping_unpolled_io_or_panicking_nonce_source_revokes_before_connection_close() {
     for panic_nonce in [false, true] {
-        let rt = network::runtime();
-        let cx = rt.request_cx_with_budget(Budget::INFINITE);
-        let hc = rt.request_cx_with_budget(Budget::INFINITE);
-        rt.block_on(async {
+        run_obs!(cx, hc, {
             let (_, mut s, routes) = pair(&cx).await;
             let control = approved(hc, 3_000_000);
             let mut owner = ObservationRenewal::new(control.clone(), &s, routes, LIMITS).unwrap();
@@ -449,10 +439,7 @@ fn dropping_unpolled_io_or_panicking_nonce_source_revokes_before_connection_clos
 #[test]
 fn peer_fin_or_reset_ends_observation_without_waiting_for_another_application_record() {
     for reset in [false, true] {
-        let rt = network::runtime();
-        let cx = rt.request_cx_with_budget(Budget::INFINITE);
-        let hc = rt.request_cx_with_budget(Budget::INFINITE);
-        rt.block_on(async {
+        run_obs!(cx, hc, {
             let (mut peer, mut s, routes) = native(&cx).await;
             let control = approved(hc, 3_000_000);
             let owner = ObservationRenewal::new(control.clone(), &s, routes, LIMITS).unwrap();
@@ -494,10 +481,7 @@ fn peer_fin_or_reset_ends_observation_without_waiting_for_another_application_re
 
 #[test]
 fn an_unsent_challenge_expires_in_place_instead_of_sliding_with_backpressure() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    let hc = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_obs!(cx, hc, {
         let (_, mut s, routes) = pair(&cx).await;
         let mut marker = reply(1, Scope::Observation, 17);
         marker[7] = 0x12;
@@ -530,10 +514,7 @@ fn an_unsent_challenge_expires_in_place_instead_of_sliding_with_backpressure() {
 }
 #[test]
 fn other_control_responses_are_not_observation_renewal_and_bad_nonces_close_the_session() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    let hc = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_obs!(cx, hc, {
         let (mut c, mut s, routes) = pair(&cx).await;
         let control = approved(hc, 3_000_000);
         let mut owner = ObservationRenewal::new(control.clone(), &s, routes, LIMITS).unwrap();
@@ -580,10 +561,7 @@ fn other_control_responses_are_not_observation_renewal_and_bad_nonces_close_the_
 #[test]
 fn invalid_routes_and_failed_nonce_sources_do_not_create_a_renewal_bypass() {
     for zero in [false, true] {
-        let rt = network::runtime();
-        let cx = rt.request_cx_with_budget(Budget::INFINITE);
-        let hc = rt.request_cx_with_budget(Budget::INFINITE);
-        rt.block_on(async {
+        run_obs!(cx, hc, {
             let (c, mut s, routes) = pair(&cx).await;
             let control = approved(hc, 3_000_000);
             assert!(matches!(

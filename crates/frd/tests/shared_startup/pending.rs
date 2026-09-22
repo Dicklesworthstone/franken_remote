@@ -287,11 +287,19 @@ async fn cleanup(group: &mut PendingGroup, cx: &Cx) {
         .unwrap();
 }
 
+macro_rules! run_shared {
+    ($rt:ident, $cx:ident, $body:expr) => {{
+        let $rt = runtime();
+        $rt.block_on(async {
+            let $cx = Cx::current().unwrap();
+            $body
+        });
+    }};
+}
+
 #[test]
 fn pending_viewers_finish_independently_on_one_source_and_only_then_receive_dependents() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut group = Box::pin(group(&rt, 2)).await;
         let worker = group.publisher.worker_id();
         let usage = group.publisher.physical_usage();
@@ -347,9 +355,7 @@ fn pending_viewers_finish_independently_on_one_source_and_only_then_receive_depe
 
 #[test]
 fn one_unconfigured_peer_cannot_hold_back_an_already_decoding_viewer() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut group = Box::pin(group(&rt, 2)).await;
         let mut a = Box::pin(configure(&mut group.peers[0], &cx)).await;
         Box::pin(decode_without_ack(&mut group.peers[0], &mut a, &cx)).await;
@@ -379,9 +385,7 @@ fn one_unconfigured_peer_cannot_hold_back_an_already_decoding_viewer() {
 
 #[test]
 fn pending_last_viewer_drop_ends_source_and_keeps_the_original_child_collectable() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut group = Box::pin(group(&rt, 2)).await;
         let worker = group.publisher.worker_id();
         drop(group.peers[0].subscriber.take());
@@ -398,9 +402,7 @@ fn pending_last_viewer_drop_ends_source_and_keeps_the_original_child_collectable
 
 #[test]
 fn foreign_connection_cannot_advance_or_cancel_a_pending_handshake() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut group = Box::pin(group(&rt, 2)).await;
         let (a, b) = group.peers.split_at_mut(1);
         assert_eq!(
@@ -427,9 +429,7 @@ fn foreign_connection_cannot_advance_or_cancel_a_pending_handshake() {
 
 #[test]
 fn pending_slots_share_the_hard_cohort_bound_and_rejected_admission_does_not_send() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut group = Box::pin(group(&rt, MAX_SUBSCRIBERS)).await;
         assert_eq!(group.publisher.tick().unwrap(), MAX_SUBSCRIBERS);
         assert_eq!(group.publisher.physical_usage().pictures, 1);
@@ -500,9 +500,7 @@ async fn send_reply(peer: &mut PendingPeer, cx: &Cx, message: decoder::Message<'
 
 #[test]
 fn pending_expiry_is_idle_driven_terminal_and_does_not_expire_another_decoder() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut group = Box::pin(group_with_timeout(&rt, 2, Duration::from_millis(25))).await;
         let first_deadline = group.peers[0].deadline;
         let second_deadline = group.peers[1].deadline;
@@ -548,9 +546,7 @@ fn pending_expiry_is_idle_driven_terminal_and_does_not_expire_another_decoder() 
 
 #[test]
 fn wrong_first_decoded_report_refuses_only_the_offending_pending_viewer() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut group = Box::pin(group(&rt, 2)).await;
         let mut a = Box::pin(configure(&mut group.peers[0], &cx)).await;
         Box::pin(decode_without_ack(&mut group.peers[0], &mut a, &cx)).await;
@@ -599,9 +595,7 @@ fn wrong_first_decoded_report_refuses_only_the_offending_pending_viewer() {
 
 #[test]
 fn slow_first_decoded_report_is_fenced_before_the_next_shared_reference() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut group = Box::pin(group(&rt, 2)).await;
         let mut a = Box::pin(configure(&mut group.peers[0], &cx)).await;
         let mut b = Box::pin(configure(&mut group.peers[1], &cx)).await;
@@ -647,9 +641,7 @@ fn slow_first_decoded_report_is_fenced_before_the_next_shared_reference() {
 
 #[test]
 fn an_equal_numbered_foreign_bootstrap_cannot_enter_the_pending_cohort() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut group = Box::pin(group(&rt, 1)).await;
         let mut link = Link::new(&cx, 100).await;
         let media = link.media(&cx).await;

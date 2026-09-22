@@ -50,14 +50,13 @@ fn make_request(role: SessionRole) -> RequestedScope {
     }
 }
 
+fn agent(mode: ApprovalMode, platform: PlatformKind) -> SessionAgent {
+    SessionAgent::new(mode, platform, 1000, make_bounds())
+}
+
 #[test]
 fn test_approval_gating_observation_before_prompt() {
-    let mut agent = SessionAgent::new(
-        ApprovalMode::PromptAlways,
-        PlatformKind::LinuxWayland,
-        1000,
-        make_bounds(),
-    );
+    let mut agent = agent(ApprovalMode::PromptAlways, PlatformKind::LinuxWayland);
 
     let session_id = RemoteSessionId::from_raw(101);
     let peer = make_peer("alice");
@@ -112,12 +111,7 @@ fn test_approval_gating_observation_before_prompt() {
 
 #[test]
 fn test_approval_mode_transition_revokes_existing_grants() {
-    let mut agent = SessionAgent::new(
-        ApprovalMode::Unattended,
-        PlatformKind::LinuxWayland,
-        1000,
-        make_bounds(),
-    );
+    let mut agent = agent(ApprovalMode::Unattended, PlatformKind::LinuxWayland);
 
     let session_id = RemoteSessionId::from_raw(102);
     let peer = make_peer("bob");
@@ -189,12 +183,7 @@ fn test_indicator_immediate_revoke_latency_and_async_cleanup() {
 
 #[test]
 fn test_held_state_tracking_and_crash_uncertainty_report() {
-    let mut agent = SessionAgent::new(
-        ApprovalMode::Unattended,
-        PlatformKind::LinuxWayland,
-        1000,
-        make_bounds(),
-    );
+    let mut agent = agent(ApprovalMode::Unattended, PlatformKind::LinuxWayland);
     agent.permissions_mut().set_permission(
         PermissionKind::RemoteDesktopPortal,
         PermissionStatus::Granted,
@@ -253,12 +242,7 @@ fn test_held_state_tracking_and_crash_uncertainty_report() {
 
 #[test]
 fn test_held_state_synthesizes_cleanup_releases_on_normal_revoke() {
-    let mut agent = SessionAgent::new(
-        ApprovalMode::Unattended,
-        PlatformKind::LinuxWayland,
-        1000,
-        make_bounds(),
-    );
+    let mut agent = agent(ApprovalMode::Unattended, PlatformKind::LinuxWayland);
     agent.permissions_mut().set_permission(
         PermissionKind::RemoteDesktopPortal,
         PermissionStatus::Granted,
@@ -380,12 +364,7 @@ fn test_platform_permissions_surfacing_and_typed_refusal() {
 
 #[test]
 fn test_sleep_inhibitor_lifecycle_and_log_audit() {
-    let mut agent = SessionAgent::new(
-        ApprovalMode::Unattended,
-        PlatformKind::LinuxWayland,
-        1000,
-        make_bounds(),
-    );
+    let mut agent = agent(ApprovalMode::Unattended, PlatformKind::LinuxWayland);
 
     let session_1 = RemoteSessionId::from_raw(501);
     let session_2 = RemoteSessionId::from_raw(502);
@@ -428,25 +407,22 @@ fn test_sleep_inhibitor_lifecycle_and_log_audit() {
 
     // Verify inhibitor logs
     let logs = agent.sleep_inhibitor().logs();
-    assert_eq!(logs.len(), 4);
-    assert_eq!(logs[0].action, InhibitorAction::Acquired);
-    assert_eq!(logs[0].active_sessions_count, 1);
-    assert_eq!(logs[1].action, InhibitorAction::Acquired);
-    assert_eq!(logs[1].active_sessions_count, 2);
-    assert_eq!(logs[2].action, InhibitorAction::Released);
-    assert_eq!(logs[2].active_sessions_count, 1);
-    assert_eq!(logs[3].action, InhibitorAction::Released);
-    assert_eq!(logs[3].active_sessions_count, 0);
+    assert_eq!(
+        logs.iter()
+            .map(|l| (l.action, l.active_sessions_count))
+            .collect::<Vec<_>>(),
+        [
+            (InhibitorAction::Acquired, 1),
+            (InhibitorAction::Acquired, 2),
+            (InhibitorAction::Released, 1),
+            (InhibitorAction::Released, 0),
+        ]
+    );
 }
 
 #[test]
 fn test_local_priority_distinguishable_vs_indistinguishable() {
-    let mut agent = SessionAgent::new(
-        ApprovalMode::Unattended,
-        PlatformKind::LinuxWayland,
-        1000,
-        make_bounds(),
-    );
+    let mut agent = agent(ApprovalMode::Unattended, PlatformKind::LinuxWayland);
     agent.permissions_mut().set_permission(
         PermissionKind::RemoteDesktopPortal,
         PermissionStatus::Granted,
@@ -561,25 +537,22 @@ fn test_macos_injection_adapter_physical_key_vs_committed_text() {
     assert_eq!(sub_btn, Submission::Submitted);
 
     // Verify events recorded by poster
-    let events = &sink.poster().events;
-    assert_eq!(events.len(), 4);
     assert_eq!(
-        events[0],
-        PostedCgEvent::Key {
-            keycode: 0x00,
-            down: true,
-        }
-    );
-    assert_eq!(events[1], PostedCgEvent::Text { character: 'Ω' });
-    assert_eq!(events[2], PostedCgEvent::MouseMove { x: 500.0, y: 300.0 });
-    assert_eq!(
-        events[3],
-        PostedCgEvent::MouseButton {
-            button: 0,
-            down: true,
-            x: 500.0,
-            y: 300.0,
-        }
+        sink.poster().events,
+        [
+            PostedCgEvent::Key {
+                keycode: 0x00,
+                down: true,
+            },
+            PostedCgEvent::Text { character: 'Ω' },
+            PostedCgEvent::MouseMove { x: 500.0, y: 300.0 },
+            PostedCgEvent::MouseButton {
+                button: 0,
+                down: true,
+                x: 500.0,
+                y: 300.0,
+            },
+        ]
     );
 
     // Coordinate out of bounds is rejected
@@ -593,12 +566,7 @@ fn test_macos_injection_adapter_physical_key_vs_committed_text() {
 
 #[test]
 fn test_expired_lease_refuses_injection_at_submission_checkpoint() {
-    let mut agent = SessionAgent::new(
-        ApprovalMode::PromptAlways,
-        PlatformKind::LinuxWayland,
-        1000,
-        make_bounds(),
-    );
+    let mut agent = agent(ApprovalMode::PromptAlways, PlatformKind::LinuxWayland);
     agent.permissions_mut().set_permission(
         PermissionKind::RemoteDesktopPortal,
         PermissionStatus::Granted,
@@ -650,12 +618,7 @@ fn test_expired_lease_refuses_injection_at_submission_checkpoint() {
 
 #[test]
 fn test_fault_agent_alive_with_dead_worker() {
-    let mut agent = SessionAgent::new(
-        ApprovalMode::Unattended,
-        PlatformKind::LinuxWayland,
-        1000,
-        make_bounds(),
-    );
+    let mut agent = agent(ApprovalMode::Unattended, PlatformKind::LinuxWayland);
     agent.permissions_mut().set_permission(
         PermissionKind::RemoteDesktopPortal,
         PermissionStatus::Granted,
@@ -719,12 +682,7 @@ fn test_fault_agent_alive_with_dead_worker() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn test_connected_sessions_list_multi_viewer_tracking() {
-    let mut agent = SessionAgent::new(
-        ApprovalMode::Unattended,
-        PlatformKind::LinuxWayland,
-        1000,
-        make_bounds(),
-    );
+    let mut agent = agent(ApprovalMode::Unattended, PlatformKind::LinuxWayland);
 
     let t0 = HostInstant::from_micros(1_000_000);
 
@@ -755,10 +713,15 @@ fn test_connected_sessions_list_multi_viewer_tracking() {
         .expect("session 101 approved");
 
     let sessions = agent.connected_sessions();
-    assert_eq!(sessions.len(), 1);
-    assert_eq!(sessions[0].session_id, session_101);
-    assert_eq!(sessions[0].device_name, "alice-macbook");
-    assert_eq!(sessions[0].role, SessionRole::Controller);
+    assert_eq!(
+        (
+            sessions.len(),
+            sessions[0].session_id,
+            sessions[0].device_name.as_str(),
+            sessions[0].role
+        ),
+        (1, session_101, "alice-macbook", SessionRole::Controller)
+    );
     assert_eq!(
         sessions[0].capabilities,
         SessionCapabilitiesInUse {
@@ -799,13 +762,18 @@ fn test_connected_sessions_list_multi_viewer_tracking() {
         .expect("session 102 approved");
 
     let sessions = agent.connected_sessions();
-    assert_eq!(sessions.len(), 2);
-    // Sorted by session ID
-    assert_eq!(sessions[0].session_id, session_101);
-    assert_eq!(sessions[0].role, SessionRole::Controller);
-    assert_eq!(sessions[1].session_id, session_102);
-    assert_eq!(sessions[1].device_name, "bob-ipad");
-    assert_eq!(sessions[1].role, SessionRole::Observer);
+    assert_eq!(
+        (sessions.len(), sessions[0].session_id, sessions[0].role),
+        (2, session_101, SessionRole::Controller)
+    );
+    assert_eq!(
+        (
+            sessions[1].session_id,
+            sessions[1].device_name.as_str(),
+            sessions[1].role
+        ),
+        (session_102, "bob-ipad", SessionRole::Observer)
+    );
     assert_eq!(
         sessions[1].capabilities,
         SessionCapabilitiesInUse {
@@ -852,10 +820,15 @@ fn test_connected_sessions_list_multi_viewer_tracking() {
         .expect("session 103 approved");
 
     let sessions = agent.connected_sessions();
-    assert_eq!(sessions.len(), 3);
-    assert_eq!(sessions[2].session_id, session_103);
-    assert_eq!(sessions[2].device_name, "carol-linux");
-    assert_eq!(sessions[2].role, SessionRole::Observer);
+    assert_eq!(
+        (
+            sessions.len(),
+            sessions[2].session_id,
+            sessions[2].device_name.as_str(),
+            sessions[2].role
+        ),
+        (3, session_103, "carol-linux", SessionRole::Observer)
+    );
     assert_eq!(
         sessions[2].capabilities,
         SessionCapabilitiesInUse {
@@ -870,12 +843,7 @@ fn test_connected_sessions_list_multi_viewer_tracking() {
 
 #[test]
 fn test_per_session_revoke_leaves_other_sessions_undisturbed() {
-    let mut agent = SessionAgent::new(
-        ApprovalMode::Unattended,
-        PlatformKind::LinuxWayland,
-        1000,
-        make_bounds(),
-    );
+    let mut agent = agent(ApprovalMode::Unattended, PlatformKind::LinuxWayland);
 
     let t0 = HostInstant::from_micros(1_000_000);
     let session_101 = RemoteSessionId::from_raw(101);
@@ -964,12 +932,7 @@ fn test_per_session_revoke_leaves_other_sessions_undisturbed() {
 
 #[test]
 fn test_immediate_revoke_revokes_all_sessions_simultaneously() {
-    let mut agent = SessionAgent::new(
-        ApprovalMode::Unattended,
-        PlatformKind::LinuxWayland,
-        1000,
-        make_bounds(),
-    );
+    let mut agent = agent(ApprovalMode::Unattended, PlatformKind::LinuxWayland);
 
     let t0 = HostInstant::from_micros(1_000_000);
     let s1 = RemoteSessionId::from_raw(201);

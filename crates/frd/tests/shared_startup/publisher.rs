@@ -184,9 +184,7 @@ async fn stop_cohort(cohort: &mut Cohort, cx: &Cx) {
 
 #[test]
 fn completed_viewers_share_continuous_native_capture_and_survive_independent_departure() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, false)).await;
         let capture_pid = cohort.publisher.worker_id();
         let decoders = [
@@ -240,9 +238,7 @@ fn completed_viewers_share_continuous_native_capture_and_survive_independent_dep
 
 #[test]
 fn slow_viewer_is_refused_before_a_healthy_viewers_next_reference_is_encoded() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, false)).await;
         cohort.publisher.capture_next().await.unwrap();
         Box::pin(deliver(&mut cohort.peers[0], &cx, 1)).await;
@@ -264,9 +260,7 @@ fn slow_viewer_is_refused_before_a_healthy_viewers_next_reference_is_encoded() {
 
 #[test]
 fn all_blocked_viewers_pause_raw_capture_without_skipping_reference_identity() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, false)).await;
         let first = cohort.publisher.capture_next().await.unwrap();
         assert_eq!(first.frame, 1);
@@ -293,9 +287,7 @@ fn all_blocked_viewers_pause_raw_capture_without_skipping_reference_identity() {
 
 #[test]
 fn cancelling_native_publication_fences_every_viewer_before_reaping_original_worker() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, true)).await;
         let pid = cohort.publisher.worker_id();
         {
@@ -333,9 +325,7 @@ fn cancelling_native_publication_fences_every_viewer_before_reaping_original_wor
 
 #[test]
 fn source_revocation_fences_all_queued_outputs_even_without_another_capture_turn() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, false)).await;
         cohort.publisher.capture_next().await.unwrap();
         cohort.owner.revoke();
@@ -350,9 +340,7 @@ fn source_revocation_fences_all_queued_outputs_even_without_another_capture_turn
 
 #[test]
 fn equal_numbered_foreign_connection_and_invalid_turn_budget_do_not_mutate_membership() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, false)).await;
         let [a, b] = cohort.peers.as_mut_slice() else {
             panic!("two admitted peers");
@@ -393,9 +381,7 @@ fn equal_numbered_foreign_connection_and_invalid_turn_budget_do_not_mutate_membe
 
 #[test]
 fn static_source_observations_allocate_no_new_retained_picture() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, false, false)).await;
         let initial = cohort.publisher.physical_usage();
         for _ in 0..3 {
@@ -444,9 +430,7 @@ fn static_source_observations_allocate_no_new_retained_picture() {
 
 #[test]
 fn publisher_rejects_copied_pool_allowance_and_another_native_source() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let owner = gate(&rt, 1);
         let mut a = source(&owner, true).await;
         let p = pool();
@@ -475,9 +459,7 @@ fn publisher_rejects_copied_pool_allowance_and_another_native_source() {
 
 #[test]
 fn last_subscriber_departure_interrupts_pending_capture_and_keeps_the_child_collectable() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, true)).await;
         let pid = cohort.publisher.worker_id();
         {
@@ -502,9 +484,7 @@ fn last_subscriber_departure_interrupts_pending_capture_and_keeps_the_child_coll
 
 #[test]
 fn unpolled_publication_cancellation_is_terminal_before_any_native_work() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, false)).await;
         let pid = cohort.publisher.worker_id();
         let operation = cohort.publisher.capture_next();
@@ -520,9 +500,7 @@ fn unpolled_publication_cancellation_is_terminal_before_any_native_work() {
 
 #[test]
 fn native_completion_does_not_restore_a_viewer_revoked_during_capture() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, true)).await;
         let result = {
             let mut capture = pin!(cohort.publisher.capture_next());
@@ -545,9 +523,7 @@ fn native_completion_does_not_restore_a_viewer_revoked_during_capture() {
 
 #[test]
 fn an_unfinished_decoder_cannot_enter_shared_publication() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let owner = gate(&rt, 1);
         let viewer = gate(&rt, 13);
         let mut link = Link::new(&cx, 13).await;

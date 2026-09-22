@@ -32,6 +32,11 @@ use std::{
 fn runtime() -> Runtime {
     RuntimeBuilder::new().worker_threads(1).build().unwrap()
 }
+fn runtime_cx() -> (Runtime, Cx) {
+    let rt = runtime();
+    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    (rt, cx)
+}
 fn credentials() -> InputCredentials {
     InputCredentials {
         session: RemoteSessionId::from_raw(1),
@@ -249,8 +254,7 @@ fn input_reply(agent: &mut Agent) -> InputReply {
 }
 #[test]
 fn wire_results_retain_original_binding_and_distinguish_pointer_sequence_space() {
-    let rt = runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    let (rt, cx) = runtime_cx();
     let t = trace();
     let native = t.clone();
     let seat = Seat::default();
@@ -293,8 +297,7 @@ fn wire_results_retain_original_binding_and_distinguish_pointer_sequence_space()
 }
 #[test]
 fn late_receipt_does_not_take_the_successor_controllers_binding() {
-    let rt = runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    let (rt, cx) = runtime_cx();
     let t = trace();
     let native = t.clone();
     let seat = Seat::default();
@@ -312,8 +315,7 @@ fn late_receipt_does_not_take_the_successor_controllers_binding() {
     eventually(|| t.held.load(Ordering::Acquire));
     old.control().stop(StopReason::LocalRevoke);
     assert!(Runner::start(rt, driver).finish().handoff_safe());
-    let rt = runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    let (rt, cx) = runtime_cx();
     let native = trace();
     let (next, driver) = seat
         .start(
@@ -334,8 +336,7 @@ fn late_receipt_does_not_take_the_successor_controllers_binding() {
 }
 #[test]
 fn selecting_input_projection_never_consumes_an_authority_reply() {
-    let rt = runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    let (rt, cx) = runtime_cx();
     let native = trace();
     let seat = Seat::default();
     let (mut agent, driver) = seat
@@ -362,8 +363,7 @@ fn selecting_input_projection_never_consumes_an_authority_reply() {
 }
 #[test]
 fn dropping_projected_wait_revokes_but_retains_completed_result_and_context() {
-    let rt = runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    let (rt, cx) = runtime_cx();
     let t = trace();
     let native = t.clone();
     let seat = Seat::default();
@@ -390,8 +390,7 @@ fn dropping_projected_wait_revokes_but_retains_completed_result_and_context() {
 }
 #[test]
 fn panic_receipt_preserves_confirmed_text_prefix_in_the_existing_wire_codec() {
-    let rt = runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    let (rt, cx) = runtime_cx();
     let t = trace();
     let native = t.clone();
     let seat = Seat::default();
@@ -426,8 +425,7 @@ fn panic_receipt_preserves_confirmed_text_prefix_in_the_existing_wire_codec() {
 }
 #[test]
 fn evicted_receipts_do_not_become_fabricated_zero_effect_wire_results() {
-    let rt = runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    let (rt, cx) = runtime_cx();
     let t = trace();
     let native = t.clone();
     let seat = Seat::default();

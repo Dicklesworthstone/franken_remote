@@ -70,8 +70,7 @@ fn encoded_file(channel: &FilesChannel) -> Vec<u8> {
 
 #[test]
 fn files_require_control_positive_profiles_and_original_completed_input() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         let before = l.h.usage();
@@ -121,8 +120,7 @@ fn files_require_control_positive_profiles_and_original_completed_input() {
 
 #[test]
 fn files_use_a_separate_reliable_bulk_family_never_an_input_parser_exception() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         let _input = attach(&mut l, &cx, 8, MediaRole::Input).await;
@@ -166,8 +164,7 @@ fn files_use_a_separate_reliable_bulk_family_never_an_input_parser_exception() {
 
 #[test]
 fn typed_file_channel_retains_blocked_records_and_rejects_foreign_connection_and_wrong_role() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         let _input = attach(&mut l, &cx, 8, MediaRole::Input).await;
@@ -224,8 +221,7 @@ fn typed_file_channel_retains_blocked_records_and_rejects_foreign_connection_and
 
 #[test]
 fn retiring_files_keeps_control_input_and_clipboard_usable_and_consumes_file_ids() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         for (name, version) in [
@@ -296,8 +292,7 @@ fn retiring_files_keeps_control_input_and_clipboard_usable_and_consumes_file_ids
 
 #[test]
 fn saturated_file_bulk_storage_preserves_critical_control_credit() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
         let _input = attach(&mut l, &cx, 8, MediaRole::Input).await;

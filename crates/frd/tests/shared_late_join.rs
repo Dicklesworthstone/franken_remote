@@ -285,12 +285,31 @@ async fn cleanup(run: &mut Running, cx: &Cx) {
     assert_eq!(run.publisher.physical_usage(), BudgetUsage::default());
 }
 
+macro_rules! run_late_test {
+    ($rt:ident, $cx:ident, $run:ident, $changed:expr, $body:block) => {{
+        let $rt = runtime();
+        $rt.block_on(async {
+            let $cx = Cx::current().unwrap();
+            let mut $run = Box::pin(running(&$rt, $changed)).await;
+            $body
+            cleanup(&mut $run, &$cx).await;
+        });
+    }};
+}
+
+macro_rules! run_shared {
+    ($rt:ident, $cx:ident, $body:expr) => {{
+        let $rt = runtime();
+        $rt.block_on(async {
+            let $cx = Cx::current().unwrap();
+            $body
+        });
+    }};
+}
+
 #[test]
 fn two_late_joins_share_one_fresh_idr_and_continue_without_first_decode_rtt() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
-        let mut run = Box::pin(running(&rt, false)).await;
+    run_late_test!(rt, cx, run, false, {
         let pid = run.publisher.worker_id();
         let prior = run.publisher.capture_next().await.unwrap();
         run.old.receive(&cx, prior.frame).await;
@@ -334,16 +353,12 @@ fn two_late_joins_share_one_fresh_idr_and_continue_without_first_decode_rtt() {
         b.receive(&cx, next.frame).await;
         assert_eq!(next.delivered, 2);
         drop(b.sub.take());
-        cleanup(&mut run, &cx).await;
     });
 }
 
 #[test]
 fn stalled_newcomer_is_refused_before_next_capture_without_stalling_healthy_viewer() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
-        let mut run = Box::pin(running(&rt, false)).await;
+    run_late_test!(rt, cx, run, false, {
         let mut slow = Peer::new(&rt, 14).await;
         slow.queue(&run.publisher.join_queue(), Duration::from_secs(2))
             .unwrap();
@@ -369,16 +384,12 @@ fn stalled_newcomer_is_refused_before_next_capture_without_stalling_healthy_view
         assert!(run.owner.check().is_ok());
         assert!(run.old.ready().unwrap());
         drop(slow.sub.take());
-        cleanup(&mut run, &cx).await;
     });
 }
 
 #[test]
 fn join_expiry_during_native_capture_does_not_change_healthy_source_deadline() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
-        let mut run = Box::pin(running(&rt, true)).await;
+    run_late_test!(rt, cx, run, true, {
         let pid = run.publisher.worker_id();
         let mut short = Peer::new(&rt, 14).await;
         short
@@ -394,15 +405,12 @@ fn join_expiry_during_native_capture_does_not_change_healthy_source_deadline() {
         assert_eq!(run.publisher.worker_id(), pid);
         assert!(run.owner.check().is_ok());
         drop(short.sub.take());
-        cleanup(&mut run, &cx).await;
     });
 }
 
 #[test]
 fn waiting_joins_and_queue_handles_cannot_keep_last_viewers_source_alive() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut run = Box::pin(running(&rt, false)).await;
         let queue = run.publisher.join_queue();
         let mut pending = Peer::new(&rt, 14).await;
@@ -430,10 +438,7 @@ fn waiting_joins_and_queue_handles_cannot_keep_last_viewers_source_alive() {
 
 #[test]
 fn opaque_connection_and_duplicate_admission_do_not_mutate_an_existing_waiter() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
-        let mut run = Box::pin(running(&rt, false)).await;
+    run_late_test!(rt, cx, run, false, {
         let queue = run.publisher.join_queue();
         let mut pending = Peer::new(&rt, 14).await;
         pending.queue(&queue, Duration::from_secs(2)).unwrap();
@@ -471,16 +476,12 @@ fn opaque_connection_and_duplicate_admission_do_not_mutate_an_existing_waiter() 
         pending.receive(&cx, idr.frame).await;
         pending.first_decoded(&cx, idr.frame).await;
         drop(pending.sub.take());
-        cleanup(&mut run, &cx).await;
     });
 }
 
 #[test]
 fn all_viewer_pressure_cannot_be_bypassed_by_a_pending_join() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
-        let mut run = Box::pin(running(&rt, false)).await;
+    run_late_test!(rt, cx, run, false, {
         let mut pending = Peer::new(&rt, 14).await;
         let first = run.publisher.capture_next().await.unwrap(); // Original now has pending output.
         pending
@@ -499,16 +500,12 @@ fn all_viewer_pressure_cannot_be_bypassed_by_a_pending_join() {
         assert_eq!(next.delivered, 2);
         run.old.receive(&cx, next.frame).await;
         drop(pending.sub.take());
-        cleanup(&mut run, &cx).await;
     });
 }
 
 #[test]
 fn eight_total_slots_bound_pending_joins_and_drop_returns_only_one_slot() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
-        let mut run = Box::pin(running(&rt, false)).await;
+    run_late_test!(rt, cx, run, false, {
         let queue = run.publisher.join_queue();
         let mut waiting = Vec::new();
         for id in 14..=20 {
@@ -534,16 +531,12 @@ fn eight_total_slots_bound_pending_joins_and_drop_returns_only_one_slot() {
             drop(peer.sub.take());
         }
         drop(replacement.sub.take());
-        cleanup(&mut run, &cx).await;
     });
 }
 
 #[test]
 fn premature_first_decode_and_revoked_source_never_send_a_bootstrap() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
-        let mut run = Box::pin(running(&rt, false)).await;
+    run_late_test!(rt, cx, run, false, {
         let queue = run.publisher.join_queue();
         let mut bad = Peer::new(&rt, 14).await;
         bad.queue(&queue, Duration::from_secs(2)).unwrap();
@@ -589,17 +582,13 @@ fn premature_first_decode_and_revoked_source_never_send_a_bootstrap() {
         assert_eq!(pending.frames, [] as [u64; 0]);
         assert!(pending.control.check().is_err());
         drop(pending.sub.take());
-        cleanup(&mut run, &cx).await;
     });
 }
 
 #[test]
 fn late_join_drives_the_original_supervised_viewer_decoder_handshake() {
     use frd::media::decoder_startup::Viewer;
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
-        let mut run = Box::pin(running(&rt, false)).await;
+    run_late_test!(rt, cx, run, false, {
         let mut peer = Peer::new(&rt, 14).await;
         peer.queue(&run.publisher.join_queue(), Duration::from_secs(2))
             .unwrap();
@@ -686,7 +675,6 @@ fn late_join_drives_the_original_supervised_viewer_decoder_handshake() {
             .reap(&cx, Deadline::after(&cx, Duration::from_secs(1)).unwrap())
             .await
             .unwrap();
-        cleanup(&mut run, &cx).await;
     });
 }
 
@@ -721,10 +709,7 @@ async fn both<A: std::future::Future, B: std::future::Future>(
 
 #[test]
 fn queue_and_original_connections_run_while_source_service_exclusively_owns_capture() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
-        let mut run = Box::pin(running(&rt, false)).await;
+    run_late_test!(rt, cx, run, false, {
         let pid = run.publisher.worker_id();
         let queue = run.publisher.join_queue();
         let mut late = Peer::new(&rt, 14).await;
@@ -786,6 +771,5 @@ fn queue_and_original_connections_run_while_source_service_exclusively_owns_capt
         assert_eq!(run.old.frames, [0, 1, 2]);
         assert_eq!(run.publisher.worker_id(), pid);
         assert!(run.owner.check().is_err());
-        cleanup(&mut run, &cx).await;
     });
 }

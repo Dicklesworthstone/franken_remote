@@ -51,9 +51,7 @@ fn renew_viewer(peer: &Peer, nonce: u128) {
 
 #[test]
 fn local_source_renewal_sustains_original_capture_past_its_initial_permission_deadline() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, false)).await;
         let pid = cohort.publisher.worker_id();
         let first_until = cohort
@@ -114,9 +112,7 @@ fn local_source_renewal_sustains_original_capture_past_its_initial_permission_de
 
 #[test]
 fn unknown_capture_permission_and_duplicate_local_owners_cannot_change_a_live_publisher() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, false)).await;
         let mut unknown = agent(false);
         assert_eq!(
@@ -147,9 +143,7 @@ fn unknown_capture_permission_and_duplicate_local_owners_cannot_change_a_live_pu
 
 #[test]
 fn repeated_maintenance_does_not_consume_entropy_or_move_the_original_renewal_deadline() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, false, false)).await;
         let mut local = agent(true);
         local.attach_shared_source(&cohort.publisher).unwrap();
@@ -170,9 +164,7 @@ fn repeated_maintenance_does_not_consume_entropy_or_move_the_original_renewal_de
 
 #[test]
 fn local_indicator_revoke_fences_every_viewer_before_pending_native_capture_completes() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, true)).await;
         let mut local = agent(true);
         local.attach_shared_source(&cohort.publisher).unwrap();
@@ -210,9 +202,7 @@ fn local_indicator_revoke_fences_every_viewer_before_pending_native_capture_comp
 
 #[test]
 fn lock_and_screen_capture_revocation_and_agent_drop_are_terminal_without_a_poll() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         for reason in 0..4 {
             let mut cohort = Box::pin(joined(&rt, true, false)).await;
             let mut local = agent(true);
@@ -246,9 +236,7 @@ fn lock_and_screen_capture_revocation_and_agent_drop_are_terminal_without_a_poll
 
 #[test]
 fn failed_or_reused_entropy_fences_the_source_instead_of_inventing_a_challenge() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         for nonce in [Ok(0), Err(())] {
             let mut cohort = Box::pin(joined(&rt, true, false)).await;
             let mut local = agent(true);
@@ -275,9 +263,7 @@ fn failed_or_reused_entropy_fences_the_source_instead_of_inventing_a_challenge()
 
 #[test]
 fn caller_entropy_runs_outside_publisher_locks_and_revocation_wins_before_renewal() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, false)).await;
         let mut local = agent(true);
         local.attach_shared_source(&cohort.publisher).unwrap();
@@ -296,9 +282,7 @@ fn caller_entropy_runs_outside_publisher_locks_and_revocation_wins_before_renewa
 
 #[test]
 fn cached_permission_loss_is_checked_even_when_no_renewal_is_due() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, false)).await;
         let mut local = agent(true);
         local.attach_shared_source(&cohort.publisher).unwrap();
@@ -317,9 +301,7 @@ fn cached_permission_loss_is_checked_even_when_no_renewal_is_due() {
 
 #[test]
 fn renewed_viewers_cannot_resurrect_an_expired_source_after_local_service_stalls() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, false)).await;
         let mut local = agent(true);
         local.attach_shared_source(&cohort.publisher).unwrap();
@@ -350,9 +332,7 @@ fn renewed_viewers_cannot_resurrect_an_expired_source_after_local_service_stalls
 
 #[test]
 fn weak_registry_cannot_retain_a_dropped_publisher() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let cohort = Box::pin(joined(&rt, true, false)).await;
         let mut local = agent(true);
         local.attach_shared_source(&cohort.publisher).unwrap();
@@ -374,9 +354,7 @@ fn weak_registry_cannot_retain_a_dropped_publisher() {
 
 #[test]
 fn a_local_agent_bounds_source_registrations_and_reuses_only_retired_slots() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut local = agent(true);
         let mut cohorts = Vec::new();
         for _ in 0..frd::session_agent::source::MAX_SOURCES {
@@ -423,9 +401,7 @@ fn a_local_agent_bounds_source_registrations_and_reuses_only_retired_slots() {
 
 #[test]
 fn one_source_retiring_does_not_revoke_another_sources_local_permission() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut a = Box::pin(joined(&rt, true, false)).await;
         let mut b = Box::pin(joined(&rt, true, false)).await;
         let mut local = agent(true);
@@ -459,9 +435,7 @@ fn one_source_retiring_does_not_revoke_another_sources_local_permission() {
 
 #[test]
 fn interrupted_local_renewal_fences_its_source_before_unwinding_to_the_event_loop() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, false)).await;
         let mut local = agent(true);
         local.attach_shared_source(&cohort.publisher).unwrap();
@@ -481,9 +455,7 @@ fn capture_permission_loss_returns_held_input_cleanup_without_claiming_os_comple
         input::{KeyTransition, PhysicalKey, PointerButton},
         input_submission::Operation,
     };
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let mut cohort = Box::pin(joined(&rt, true, false)).await;
         let mut local = agent(true);
         local.attach_shared_source(&cohort.publisher).unwrap();

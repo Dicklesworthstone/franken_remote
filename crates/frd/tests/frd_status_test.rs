@@ -99,14 +99,18 @@ fn nominal_status_operational_contract() {
 
     // 5. Capability Matrix
     let cap_names: Vec<&str> = report.capabilities.iter().map(|c| c.name).collect();
-    assert!(cap_names.contains(&"video_encode"));
-    assert!(cap_names.contains(&"video_decode"));
-    assert!(cap_names.contains(&"screen_capture"));
-    assert!(cap_names.contains(&"input_injection"));
-    assert!(cap_names.contains(&"clipboard_sync"));
-    assert!(cap_names.contains(&"audio_playback"));
-    assert!(cap_names.contains(&"audio_microphone"));
-    assert!(cap_names.contains(&"file_transfer"));
+    for name in [
+        "video_encode",
+        "video_decode",
+        "screen_capture",
+        "input_injection",
+        "clipboard_sync",
+        "audio_playback",
+        "audio_microphone",
+        "file_transfer",
+    ] {
+        assert!(cap_names.contains(&name));
+    }
 
     for c in &report.capabilities {
         assert_eq!(
@@ -140,12 +144,16 @@ fn nominal_status_operational_contract() {
     // 7. Restrictions
     assert_eq!(report.restrictions.len(), 6);
     let restr_codes: Vec<&str> = report.restrictions.iter().map(|r| r.code).collect();
-    assert!(restr_codes.contains(&"video_hevc_only"));
-    assert!(restr_codes.contains(&"audio_opus_only"));
-    assert!(restr_codes.contains(&"full_display_only"));
-    assert!(restr_codes.contains(&"tailscale_ingress_only"));
-    assert!(restr_codes.contains(&"single_controller_authority"));
-    assert!(restr_codes.contains(&"no_zero_rtt_application_data"));
+    for code in [
+        "video_hevc_only",
+        "audio_opus_only",
+        "full_display_only",
+        "tailscale_ingress_only",
+        "single_controller_authority",
+        "no_zero_rtt_application_data",
+    ] {
+        assert!(restr_codes.contains(&code));
+    }
 
     // 8. Structured log
     assert_eq!(report.structured_logs.len(), 1);
@@ -165,14 +173,18 @@ fn nominal_status_operational_contract() {
     assert_or_write_fixture("nominal_operational.json", &json_render);
 
     let human_render = report.render_human();
-    assert!(human_render.contains("Status: [OK - OPERATIONAL]"));
-    assert!(human_render.contains("1. TAILSCALE NETWORK STATUS:"));
-    assert!(human_render.contains("2. TLS 1.3 CERTIFICATE LIFECYCLE:"));
-    assert!(human_render.contains("3. OS PERMISSION STATES:"));
-    assert!(human_render.contains("4. HARDWARE & MEDIA CAPABILITY MATRIX:"));
-    assert!(human_render.contains("5. ACTIVE SESSIONS & AUTHORITY:"));
-    assert!(human_render.contains("6. KNOWN RESTRICTIONS & SCOPE LIMITS:"));
-    assert!(human_render.contains("7. STRUCTURED DIAGNOSTIC LOG TRAIL:"));
+    for s in [
+        "Status: [OK - OPERATIONAL]",
+        "1. TAILSCALE NETWORK STATUS:",
+        "2. TLS 1.3 CERTIFICATE LIFECYCLE:",
+        "3. OS PERMISSION STATES:",
+        "4. HARDWARE & MEDIA CAPABILITY MATRIX:",
+        "5. ACTIVE SESSIONS & AUTHORITY:",
+        "6. KNOWN RESTRICTIONS & SCOPE LIMITS:",
+        "7. STRUCTURED DIAGNOSTIC LOG TRAIL:",
+    ] {
+        assert!(human_render.contains(s));
+    }
     assert_or_write_fixture("nominal_operational.txt", &human_render);
 }
 
@@ -374,7 +386,7 @@ fn frd_status_binary_nominal_json_contract() {
     assert!(output.status.success());
     let json_text = String::from_utf8_lossy(&output.stdout).to_string();
 
-    const REQUIRED_JSON_SNIPPETS: &str = "\
+    let required_json_snippets = "\
 \"schema_version\":\"fr.status.v1\"
 \"outcome\":\"success\"
 \"refusal_code\":null
@@ -411,7 +423,7 @@ fn frd_status_binary_nominal_json_contract() {
 \"structured_logs\":[
 \"event_code\":\"status_check\"";
 
-    for s in REQUIRED_JSON_SNIPPETS.lines() {
+    for s in required_json_snippets.lines() {
         assert!(json_text.contains(s), "missing json string: {s}");
     }
 }
@@ -422,7 +434,7 @@ fn frd_status_binary_nominal_human_contract() {
     assert!(output.status.success());
     let human_text = String::from_utf8_lossy(&output.stdout).to_string();
 
-    const REQUIRED_HUMAN_SNIPPETS: &str = "\
+    let required_human_snippets = "\
 FRANKENREMOTE HOST DAEMON STATUS (frd)
 Status: [OK - OPERATIONAL]
 1. TAILSCALE NETWORK STATUS:
@@ -437,7 +449,7 @@ video_encode       [PASSED]       [HW]
 video_hevc_only
 own-user";
 
-    for s in REQUIRED_HUMAN_SNIPPETS.lines() {
+    for s in required_human_snippets.lines() {
         assert!(human_text.contains(s), "missing human string: {s}");
     }
 }

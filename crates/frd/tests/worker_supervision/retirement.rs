@@ -11,8 +11,7 @@ fn launch(mode: &str) -> (Launch, Retirement) {
 
 #[test]
 fn unpolled_and_failed_spawn_have_positive_no_child_receipts() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_worker!(cx, {
         let (launch, mut closing) = launch("healthy");
         assert_eq!(
             closing.reap(&cx, deadline(&cx, 500)).await,
@@ -39,8 +38,7 @@ fn unpolled_and_failed_spawn_have_positive_no_child_receipts() {
 
 #[test]
 fn failed_and_timed_out_configuration_leave_the_actual_child_collectable() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_worker!(cx, {
         for mode in ["exit-configure", "stall-configure"] {
             let (launch, mut closing) = launch(mode);
             let result = Worker::start(&cx, launch, config(), deadline(&cx, 80)).await;
@@ -61,8 +59,7 @@ fn failed_and_timed_out_configuration_leave_the_actual_child_collectable() {
 
 #[test]
 fn dropped_polled_startup_retains_custody_and_does_not_kill_another_worker() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_worker!(cx, {
         let mut foreign = worker(&cx, "healthy").await;
         let (launch, mut closing) = launch("stall-configure");
         {
@@ -95,8 +92,7 @@ fn dropped_polled_startup_retains_custody_and_does_not_kill_another_worker() {
 
 #[test]
 fn live_worker_cannot_be_reaped_via_custody_and_drop_retains_its_exact_exit() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_worker!(cx, {
         let (launch, mut closing) = launch("healthy");
         let mut worker = Worker::start(&cx, launch, config(), deadline(&cx, 1000))
             .await
@@ -126,8 +122,7 @@ fn live_worker_cannot_be_reaped_via_custody_and_drop_retains_its_exact_exit() {
 
 #[test]
 fn ordinary_acknowledged_stop_and_reap_publish_the_same_receipt_to_custody() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_worker!(cx, {
         let (launch, mut closing) = launch("healthy");
         let mut worker = Worker::start(&cx, launch, config(), deadline(&cx, 1000))
             .await

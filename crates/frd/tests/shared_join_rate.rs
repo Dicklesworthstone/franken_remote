@@ -8,11 +8,19 @@ use fr_media::delivery::BudgetUsage;
 use frd::media::host_now;
 use support::*;
 
+macro_rules! run_join {
+    ($rt:ident, $cx:ident, $body:expr) => {{
+        let $rt = runtime();
+        $rt.block_on(async {
+            let $cx = Cx::current().unwrap();
+            $body
+        });
+    }};
+}
+
 #[test]
 fn late_join_idrs_are_throttled_without_stalling_healthy_dependent_output() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_join!(rt, cx, {
         let owner = gate(&rt, 1);
         let mut source = source_variant(&owner, true, true, false).await;
         let pool = pool();
@@ -65,9 +73,7 @@ fn late_join_idrs_are_throttled_without_stalling_healthy_dependent_output() {
 
 #[test]
 fn expired_join_and_unused_preparation_cannot_consume_rate_or_poison_static_capture() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_join!(rt, cx, {
         let owner = gate(&rt, 1);
         let mut source = source(&owner, true).await;
         let pool = pool();
@@ -114,9 +120,7 @@ fn expired_join_and_unused_preparation_cannot_consume_rate_or_poison_static_capt
 
 #[test]
 fn expiring_newcomer_cannot_abort_a_healthy_shared_native_capture() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_join!(rt, cx, {
         let owner = gate(&rt, 1);
         let mut source = source_variant(&owner, true, true, true).await;
         let pool = pool();

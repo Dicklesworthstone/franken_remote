@@ -42,6 +42,17 @@ fn runtime() -> Runtime {
         .build()
         .unwrap()
 }
+
+macro_rules! run_shared {
+    ($rt:ident, $cx:ident, $body:expr) => {{
+        let $rt = runtime();
+        $rt.block_on(async {
+            let $cx = Cx::current().unwrap();
+            $body
+        });
+    }};
+}
+
 fn gate(runtime: &Runtime, id: u128) -> (ObservationControl, InputSession) {
     let cx = runtime.request_cx_with_budget(Budget::INFINITE);
     let now = host_now(&cx).unwrap();
@@ -192,9 +203,7 @@ fn input_live(cx: &Cx, input: &InputSession) -> bool {
 
 #[test]
 fn one_native_allocation_feeds_independent_egresses_and_receiver_bindings() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let (ac, _) = gate(&rt, 2);
         let (bc, _) = gate(&rt, 3);
@@ -241,9 +250,7 @@ fn one_native_allocation_feeds_independent_egresses_and_receiver_bindings() {
 }
 #[test]
 fn unchanged_native_results_update_both_subscribers_without_another_encoded_allocation() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let (ac, _) = gate(&rt, 2);
         let (bc, _) = gate(&rt, 3);
@@ -290,9 +297,7 @@ fn unchanged_native_results_update_both_subscribers_without_another_encoded_allo
 }
 #[test]
 fn revoked_viewer_neither_blocks_fanout_nor_keeps_a_prepared_packet_authorized() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let (ac, ai) = gate(&rt, 2);
         let (bc, bi) = gate(&rt, 3);
@@ -343,9 +348,7 @@ fn revoked_viewer_neither_blocks_fanout_nor_keeps_a_prepared_packet_authorized()
 }
 #[test]
 fn a_missing_reference_fences_only_that_viewers_cache_and_native_input_tickets() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let (ac, ai) = gate(&rt, 2);
         let (bc, bi) = gate(&rt, 3);
@@ -388,9 +391,7 @@ fn a_missing_reference_fences_only_that_viewers_cache_and_native_input_tickets()
 }
 #[test]
 fn equal_numbers_from_a_foreign_native_source_do_not_change_the_accepted_view() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let (ac, ai) = gate(&rt, 2);
         let mut s = source(&owner, true).await;
@@ -420,9 +421,7 @@ fn equal_numbers_from_a_foreign_native_source_do_not_change_the_accepted_view() 
 }
 #[test]
 fn a_small_viewer_budget_refuses_without_pinning_history_or_disrupting_other_viewers() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let (ac, ai) = gate(&rt, 2);
         let (bc, _) = gate(&rt, 3);
@@ -459,9 +458,7 @@ fn a_small_viewer_budget_refuses_without_pinning_history_or_disrupting_other_vie
 }
 #[test]
 fn one_native_idr_recovers_one_egress_without_resetting_the_healthy_viewer() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let (ac, ai) = gate(&rt, 2);
         let (bc, bi) = gate(&rt, 3);
@@ -544,9 +541,7 @@ fn one_native_idr_recovers_one_egress_without_resetting_the_healthy_viewer() {
 }
 #[test]
 fn fanout_turn_limit_is_checked_before_mutating_any_recipient() {
-    let rt = runtime();
-    rt.block_on(async {
-        let cx = Cx::current().unwrap();
+    run_shared!(rt, cx, {
         let (owner, _) = gate(&rt, 1);
         let mut s = source(&owner, true).await;
         let pool = pool();

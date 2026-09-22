@@ -106,10 +106,16 @@ async fn selected(c: &ObservationControl, mode: &str) -> (CaptureSource, Retirem
     )
 }
 
+macro_rules! run_local {
+    ($rt:ident, $body:expr) => {{
+        let $rt = runtime();
+        $rt.block_on(async { $body });
+    }};
+}
+
 #[test]
 fn local_choice_retains_original_child_and_discloses_only_selected_alias() {
-    let rt = runtime();
-    rt.block_on(async {
+    run_local!(rt, {
         let c = owner(&rt, 1, false);
         let (d, mut retirement) = discover(&c, "normal").await;
         let pid = d.worker_id();
@@ -140,8 +146,7 @@ fn local_choice_retains_original_child_and_discloses_only_selected_alias() {
 }
 #[test]
 fn another_viewer_cannot_own_or_revoke_the_selected_source() {
-    let rt = runtime();
-    rt.block_on(async {
+    run_local!(rt, {
         let c = owner(&rt, 1, false);
         let viewer = owner(&rt, 1, false); // Deliberate equal numeric session ID.
         let (mut source, mut retirement) = selected(&c, "normal").await;
@@ -162,8 +167,7 @@ fn another_viewer_cannot_own_or_revoke_the_selected_source() {
 }
 #[test]
 fn abandoned_unpolled_configuration_revokes_before_original_child_is_collected() {
-    let rt = runtime();
-    rt.block_on(async {
+    run_local!(rt, {
         let c = owner(&rt, 1, false);
         let (d, mut retirement) = discover(&c, "normal").await;
         let catalog = d.catalog().unwrap();
@@ -180,8 +184,7 @@ fn abandoned_unpolled_configuration_revokes_before_original_child_is_collected()
 }
 #[test]
 fn stale_native_selection_and_wrong_dimensions_cannot_create_a_source() {
-    let rt = runtime();
-    rt.block_on(async {
+    run_local!(rt, {
         for wrong_dimensions in [false, true] {
             let c = owner(&rt, 1, false);
             let (d, mut retirement) = discover(&c, "normal").await;
@@ -204,8 +207,7 @@ fn stale_native_selection_and_wrong_dimensions_cannot_create_a_source() {
 }
 #[test]
 fn configured_input_owner_cannot_become_an_independent_source() {
-    let rt = runtime();
-    rt.block_on(async {
+    run_local!(rt, {
         let c = owner(&rt, 1, true);
         let (d, mut retirement) = discover(&c, "normal").await;
         let catalog = d.catalog().unwrap();
@@ -222,8 +224,7 @@ fn configured_input_owner_cannot_become_an_independent_source() {
 }
 #[test]
 fn native_configuration_refusal_and_idle_topology_loss_retire_source() {
-    let rt = runtime();
-    rt.block_on(async {
+    run_local!(rt, {
         let c = owner(&rt, 1, false);
         let (d, mut retirement) = discover(&c, "refuse-configure").await;
         let catalog = d.catalog().unwrap();
@@ -249,8 +250,7 @@ fn native_configuration_refusal_and_idle_topology_loss_retire_source() {
 }
 #[test]
 fn configuration_deadline_includes_time_before_first_poll() {
-    let rt = runtime();
-    rt.block_on(async {
+    run_local!(rt, {
         let c = owner(&rt, 1, false);
         let (d, mut retirement) = discover(&c, "normal").await;
         let catalog = d.catalog().unwrap();
@@ -270,8 +270,7 @@ fn configuration_deadline_includes_time_before_first_poll() {
 }
 #[test]
 fn mutable_worker_escape_retires_selected_catalog_and_capture_provenance() {
-    let rt = runtime();
-    rt.block_on(async {
+    run_local!(rt, {
         let c = owner(&rt, 1, false);
         let (mut source, mut retirement) = selected(&c, "normal").await;
         source.worker_mut().abort();

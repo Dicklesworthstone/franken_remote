@@ -610,6 +610,7 @@ fn invalid_utf8_encoding_refusal_tests() {
 }
 
 #[test]
+#[rustfmt::skip]
 #[allow(clippy::too_many_lines)]
 fn log_scrubbing_proves_clipboard_bytes_never_appear_in_diagnostics() {
     let canary_secrets = [
@@ -694,7 +695,6 @@ fn log_scrubbing_proves_clipboard_bytes_never_appear_in_diagnostics() {
         "ClipboardSession::Debug (post-commit)",
     );
 
-    #[rustfmt::skip]
     for err in [
         Error::InvalidUtf8, Error::Limit, Error::ChunkOrder, Error::Expired,
         Error::LocalChanged, Error::Disabled, Error::Closed, Error::Permission,

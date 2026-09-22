@@ -62,10 +62,18 @@ async fn worker(cx: &Cx, mode: &str) -> Worker {
     .await
     .unwrap()
 }
+macro_rules! run_worker {
+    ($cx:ident, $body:expr) => {{
+        runtime().block_on(async {
+            let $cx = Cx::current().unwrap();
+            $body
+        });
+    }};
+}
+
 #[test]
 fn real_pipe_exchange_and_acknowledged_stop_reap_the_child() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_worker!(cx, {
         let mut w = worker(&cx, "healthy").await;
         assert_eq!(
             w.request(&cx, Kind::Poll, vec![], deadline(&cx, 500))
@@ -85,8 +93,7 @@ fn real_pipe_exchange_and_acknowledged_stop_reap_the_child() {
 }
 #[test]
 fn deadline_and_partial_reply_poison_instead_of_retrying() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_worker!(cx, {
         for mode in ["stall", "partial"] {
             let mut w = worker(&cx, mode).await;
             assert_eq!(
@@ -142,8 +149,7 @@ fn cancel_while_waiting_and_dropping_polled_future_both_kill() {
 }
 #[test]
 fn forged_sequence_oversize_and_crash_fail_without_body_allocation_or_retry() {
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_worker!(cx, {
         for (mode, expected) in [
             (
                 "wrong-sequence",
@@ -189,8 +195,7 @@ fn launch_is_local_only_and_deadlines_cannot_be_unbounded() {
         )
         .is_err()
     );
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_worker!(cx, {
         assert!(Deadline::after(&cx, Duration::ZERO).is_err());
         assert!(Deadline::after(&cx, Duration::from_secs(6)).is_err());
         let mut w = worker(&cx, "healthy").await;
@@ -220,8 +225,7 @@ fn spawn_failures_are_sanitized_and_writable_image_recovers_after_reap() {
     ] {
         assert!(!format!("{}", Error::SpawnFailed(error.into())).contains(secret));
     }
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
+    run_worker!(cx, {
         let holder_image = fixture("hold-writer");
         let target = PathBuf::from(format!("{}.target", holder_image.display()));
         std::fs::write(

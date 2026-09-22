@@ -185,13 +185,25 @@ fn send(cx: &Cx, c: &mut QuicRecords, route: StreamRoute, bytes: &[u8]) {
     )
     .unwrap();
 }
+macro_rules! run_clock {
+    ($cx:ident, $a:ident, $body:expr) => {{
+        let rt = network::runtime();
+        let $cx = rt.request_cx_with_budget(Budget::INFINITE);
+        let $a = rt.request_cx_with_budget(Budget::INFINITE);
+        rt.block_on(async { $body });
+    }};
+    ($cx:ident, $vc:ident, $hc:ident, $body:expr) => {{
+        let rt = network::runtime();
+        let $cx = rt.request_cx_with_budget(Budget::INFINITE);
+        let $vc = rt.request_cx_with_budget(Budget::INFINITE);
+        let $hc = rt.request_cx_with_budget(Budget::INFINITE);
+        rt.block_on(async { $body });
+    }};
+}
+
 #[test]
 fn real_exchange_samples_both_ends_and_preserves_uncertainty_under_delayed_receive() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    let vc = rt.request_cx_with_budget(Budget::INFINITE);
-    let hc = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_clock!(cx, vc, hc, {
         let (mut c, mut s, routes) = pair(&cx).await;
         let control = approved(hc);
         let until = control.deadline(Duration::from_secs(3)).unwrap().time();
@@ -245,11 +257,7 @@ fn real_exchange_samples_both_ends_and_preserves_uncertainty_under_delayed_recei
 }
 #[test]
 fn client_send_backpressure_stays_inside_the_exchange_interval() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    let vc = rt.request_cx_with_budget(Budget::INFINITE);
-    let hc = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_clock!(cx, vc, hc, {
         let (mut c, mut s, r) = pair(&cx).await;
         // Occupy actual critical send storage with a separate valid control record.
         let mut other = [0; 82];
@@ -323,10 +331,7 @@ fn client_send_backpressure_stays_inside_the_exchange_interval() {
 }
 #[test]
 fn missing_capability_wrong_routes_and_repeat_attachment_are_refused() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    let hc = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_clock!(cx, hc, {
         let (_c, mut s, r) = pair(&cx).await;
         let control = approved(hc);
         let mut sel = selection();
@@ -360,10 +365,7 @@ fn missing_capability_wrong_routes_and_repeat_attachment_are_refused() {
 }
 #[test]
 fn lost_reply_times_out_without_another_packet_and_cancels_viewer_session() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    let vc = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_clock!(cx, vc, {
         let (mut c, mut s, r) = pair(&cx).await;
         let mut viewer = ClockSync::viewer(
             vc.clone(),
@@ -408,10 +410,7 @@ fn lost_reply_times_out_without_another_packet_and_cancels_viewer_session() {
 }
 #[test]
 fn unpolled_io_drop_cancels_only_its_bound_lifetime_not_a_successor() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    let hc = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_clock!(cx, hc, {
         let (_c, mut s, r) = pair(&cx).await;
         let control = approved(hc);
         let mut host =
@@ -427,10 +426,7 @@ fn unpolled_io_drop_cancels_only_its_bound_lifetime_not_a_successor() {
 #[test]
 fn replayed_probe_or_wrong_boot_ends_host_observation() {
     for foreign in [false, true] {
-        let rt = network::runtime();
-        let cx = rt.request_cx_with_budget(Budget::INFINITE);
-        let hc = rt.request_cx_with_budget(Budget::INFINITE);
-        rt.block_on(async {
+        run_clock!(cx, hc, {
             let (mut c, mut s, r) = pair(&cx).await;
             let control = approved(hc);
             let mut host =
@@ -467,11 +463,7 @@ fn actual_correlation_drives_view_freshness_but_cannot_invent_visibility() {
         Channel, MediaLimits, PipelineState, Progress, RecoveryChunk, SourceObservation,
         encode_progress, encode_recovery,
     };
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    let vc = rt.request_cx_with_budget(Budget::INFINITE);
-    let hc = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_clock!(cx, vc, hc, {
         let (mut client, mut server, routes) = pair(&cx).await;
         let control = approved(hc.clone());
         let mut host =
@@ -553,10 +545,7 @@ fn actual_correlation_drives_view_freshness_but_cannot_invent_visibility() {
 #[test]
 fn peer_fin_and_reset_stop_sampling_before_receiving_another_record() {
     for reset in [false, true] {
-        let rt = network::runtime();
-        let cx = rt.request_cx_with_budget(Budget::INFINITE);
-        let hc = rt.request_cx_with_budget(Budget::INFINITE);
-        rt.block_on(async {
+        run_clock!(cx, hc, {
             let (mut peer, mut s, r) = native(&cx).await;
             let control = approved(hc);
             let mut host =
@@ -593,10 +582,7 @@ fn peer_fin_and_reset_stop_sampling_before_receiving_another_record() {
 }
 #[test]
 fn duplicate_probe_cannot_replace_an_unsent_reply() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    let hc = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_clock!(cx, hc, {
         let (mut c, mut s, r) = pair(&cx).await;
         let control = approved(hc);
         let mut host =
@@ -643,11 +629,7 @@ fn duplicate_probe_cannot_replace_an_unsent_reply() {
 
 #[test]
 fn host_reply_backpressure_preserves_the_original_sample() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    let vc = rt.request_cx_with_budget(Budget::INFINITE);
-    let hc = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_clock!(cx, vc, hc, {
         let (mut client, mut server, routes) = pair(&cx).await;
         let mut host =
             ClockSync::host(approved(hc), &mut server, routes, binding(), &selection()).unwrap();
@@ -745,11 +727,7 @@ fn responder(cx: &Cx) -> fr_client::authority::ObservationResponder {
 
 #[test]
 fn renewal_and_clock_sampling_share_control_streams_past_initial_authorization() {
-    let rt = network::runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
-    let vc = rt.request_cx_with_budget(Budget::INFINITE);
-    let hc = rt.request_cx_with_budget(Budget::INFINITE);
-    rt.block_on(async {
+    run_clock!(cx, vc, hc, {
         let (mut client, mut server, routes) = pair(&cx).await;
         let control = approved(hc);
         let initial = control

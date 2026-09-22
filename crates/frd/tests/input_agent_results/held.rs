@@ -55,8 +55,7 @@ impl InputSink for Native {
     }
 }
 fn run(fault: Fault) -> Reconciliation {
-    let rt = runtime();
-    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    let (rt, cx) = runtime_cx();
     let native_cx = cx.clone();
     let effects = Arc::new(Mutex::new(Vec::new()));
     let native_effects = effects.clone();
