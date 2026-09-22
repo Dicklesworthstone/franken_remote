@@ -73,3 +73,6 @@ pub mod desktop;
 pub mod display_picker;
 
 pub mod mobile_ffi;
+
+#[cfg(all(target_os = "linux", feature = "linux-logind"))]
+pub mod logind;

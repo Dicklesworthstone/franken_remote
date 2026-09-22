@@ -29,6 +29,8 @@ fr-tailnet.workspace = true
 default = ["cli"]
 macos-media = []
 linux-media = []
+# Opt-in read-only systemd/logind lifecycle evidence; no alternate runtime.
+linux-logind = []
 # Opt-in native libopus ABI; independent of HEVC, GUI and async dependencies.
 linux-opus = []
 # Wire-to-codec worker boundary; still no native audio-device or CLI dependency.
