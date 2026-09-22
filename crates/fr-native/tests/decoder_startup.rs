@@ -1362,38 +1362,18 @@ fn host_selected_geometry_refuses_wrong_capture_and_selected_view_drop_revokes_m
     });
 }
 
+#[rustfmt::skip]
 fn selected_attachment() -> fr_wire::negotiation::Selection {
     Offer {
-        versions: vec![0],
-        profile: 1,
-        profile_version: 0,
-        role: fr_wire::negotiation::Role::Observe,
+        versions: vec![0], profile: 1, profile_version: 0, role: fr_wire::negotiation::Role::Observe,
         limits: configuration().limits().unwrap(),
         capabilities: vec![
-            Capability {
-                name: fr_wire::display::CAPABILITY.into(),
-                version: 1,
-                required: true,
-            },
-            Capability {
-                name: decoder::CAPABILITY.into(),
-                version: decoder::VERSION,
-                required: true,
-            },
-            Capability {
-                name: fr_wire::attachment::CAPABILITY.into(),
-                version: 1,
-                required: true,
-            },
-            Capability {
-                name: fr_wire::attachment::DELIVERY_CAPABILITY.into(),
-                version: 1,
-                required: true,
-            },
+            Capability { name: fr_wire::display::CAPABILITY.into(), version: 1, required: true },
+            Capability { name: decoder::CAPABILITY.into(), version: decoder::VERSION, required: true },
+            Capability { name: fr_wire::attachment::CAPABILITY.into(), version: 1, required: true },
+            Capability { name: fr_wire::attachment::DELIVERY_CAPABILITY.into(), version: 1, required: true },
         ],
-    }
-    .select()
-    .unwrap()
+    }.select().unwrap()
 }
 
 async fn drive_attachment(cx: &Cx, host: &mut QuicRecords, client: &mut QuicRecords) {

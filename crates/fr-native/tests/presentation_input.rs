@@ -50,28 +50,14 @@ struct Server {
 impl Server {
     fn start() -> Self {
         let mut child = Command::new("Xvfb")
-            .args([
-                "-displayfd",
-                "1",
-                "-screen",
-                "0",
-                "320x240x24",
-                "-nolisten",
-                "tcp",
-                "-noreset",
-            ])
+            .args(["-displayfd", "1", "-screen", "0", "320x240x24", "-nolisten", "tcp", "-noreset"])
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
         let mut number = String::new();
-        BufReader::new(child.stdout.take().unwrap().take(16))
-            .read_line(&mut number)
-            .unwrap();
-        Self {
-            child,
-            name: format!(":{}", number.trim().parse::<u32>().unwrap()),
-        }
+        BufReader::new(child.stdout.take().unwrap().take(16)).read_line(&mut number).unwrap();
+        Self { child, name: format!(":{}", number.trim().parse::<u32>().unwrap()) }
     }
 }
 impl Drop for Server {
@@ -80,27 +66,20 @@ impl Drop for Server {
         let _ = self.child.wait();
     }
 }
+#[rustfmt::skip]
 fn config() -> Configuration {
     Configuration {
-        width: 320,
-        height: 240,
-        fps: 30,
-        backend: Backend::SoftwareExplicit,
-        bitrate: 2_000_000,
-        max_access_unit_bytes: 1_048_576,
-        generation: CodecConfigurationGeneration::INITIAL,
+        width: 320, height: 240, fps: 30, backend: Backend::SoftwareExplicit,
+        bitrate: 2_000_000, max_access_unit_bytes: 1_048_576, generation: CodecConfigurationGeneration::INITIAL,
     }
 }
+#[rustfmt::skip]
 fn credentials() -> InputCredentials {
     InputCredentials {
-        session: RemoteSessionId::from_raw(1),
-        lease: InputLeaseId::from_raw(2),
-        ticket: InputTicketId::from_raw(3),
+        session: RemoteSessionId::from_raw(1), lease: InputLeaseId::from_raw(2), ticket: InputTicketId::from_raw(3),
         view: InputView {
-            geometry: DisplayGeometryGeneration::INITIAL,
-            viewport: ViewportMappingGeneration::INITIAL,
-            configuration: CodecConfigurationGeneration::INITIAL,
-            recovery: RecoveryGeneration::INITIAL,
+            geometry: DisplayGeometryGeneration::INITIAL, viewport: ViewportMappingGeneration::INITIAL,
+            configuration: CodecConfigurationGeneration::INITIAL, recovery: RecoveryGeneration::INITIAL,
         },
     }
 }
