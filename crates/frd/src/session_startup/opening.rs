@@ -72,9 +72,21 @@ impl Host {
         &mut self,
         source: crate::media::shared_publisher::JoinQueue,
     ) -> Result<(super::Cx, super::ControlBinding, u64), Error> {
-        let original = self.shared_open_context()?;
+        let original = self.restrict_shared_observer()?;
         source.check_source().map_err(Error::SharedPublication)?;
         self.shared_source = Some(source);
+        Ok(original)
+    }
+    pub(crate) fn cancellation_context(&self) -> super::Cx {
+        self.cx.clone()
+    }
+    // First-source admission has no Publisher/JoinQueue yet. Restrict the role
+    // before ClientHello without fabricating source permission or a source owner.
+    pub(crate) fn restrict_shared_observer(
+        &mut self,
+    ) -> Result<(super::Cx, super::ControlBinding, u64), Error> {
+        let original = self.shared_open_context()?;
+        self.observation_only = true;
         Ok(original)
     }
     pub(crate) fn shared_open_context(

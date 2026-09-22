@@ -25,6 +25,8 @@ use std::{
 pub enum Error {
     Consent(ConsentError),
     Startup(crate::session_startup::Error),
+    Preparation(super::prepare::Error),
+    SourceSetup,
     Publication(crate::session_startup::PublisherError),
     Viewers(shared_viewers::Error),
     Capture(shared_publisher::Error),
@@ -252,17 +254,15 @@ impl<L> Drop for Running<'_, L> {
     }
 }
 // One timer registered with the EXISTING source runtime, no worker/thread/ticker.
-// Update rather than accumulate registrations under network/event wake floods.
+// Keep one registration under network/event floods; spent handles cannot rearm.
 pub(super) struct Wake {
     pub(super) driver: TimerDriverHandle,
     pub(super) handle: Option<TimerHandle>,
 }
 impl Wake {
     pub(super) fn arm(&mut self, deadline: Time, task: &Context<'_>) {
-        self.handle = Some(match self.handle.take() {
-            Some(handle) => self.driver.update(&handle, deadline, task.waker().clone()),
-            None => self.driver.register(deadline, task.waker().clone()),
-        });
+        self.cancel();
+        self.handle = Some(self.driver.register(deadline, task.waker().clone()));
         if self.driver.now() >= deadline {
             task.waker().wake_by_ref();
         }
@@ -282,3 +282,6 @@ impl Drop for Wake {
 mod startup;
 
 mod launch;
+
+mod native;
+pub use native::NativeDesktop;

@@ -316,6 +316,8 @@ pub struct Host {
     until: u64,
     send_by: u64,
     observation_until: Option<u64>,
+    // Restrict first-source negotiation before any native source exists.
+    observation_only: bool,
     // Set only by the bounded shared-viewer ingress before ClientHello.
     shared_source: Option<crate::media::shared_publisher::JoinQueue>,
 }
@@ -374,6 +376,7 @@ impl Host {
             send_by: until,
             observation_until: None,
             shared_source: None,
+            observation_only: false,
         })
     }
     pub fn approval(&self) -> Option<Approval> {
@@ -487,7 +490,7 @@ impl Host {
             (Phase::Hello, Message::ClientHello(offer)) => {
                 // Observation-only shared service never silently downgrades a
                 // controller or exposes approval/capabilities for that intent.
-                if self.shared_source.is_some() && offer.role != Role::Observe {
+                if self.observation_only && offer.role != Role::Observe {
                     return Err(Error::Denied);
                 }
                 self.peer
