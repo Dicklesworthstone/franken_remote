@@ -542,7 +542,32 @@ fn frd_status_binary_nominal_human_contract() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn frd_approval_and_sharing_cli_commands() {
+    use std::os::unix::fs::DirBuilderExt;
+    struct TestDirectory(PathBuf);
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = TestDirectory(
+        std::env::temp_dir().join(format!("frd-policy-cli-{}-{unique}", std::process::id())),
+    );
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&directory.0)
+        .unwrap();
+    let path = directory.0.join("policy.json");
+    let frd_command = |args: &[&str]| {
+        let mut command = frd_command(args);
+        command.arg("--config").arg(&path);
+        command
+    };
     // Approval get / set
     let out = wait_for_child(frd_command(&["approval", "get"]).spawn().unwrap());
     assert!(out.status.success());
@@ -588,7 +613,12 @@ fn probe_host_generates_valid_report_envelope() {
     assert_eq!(report.schema_version, "fr.status.v1");
     assert!(report.timestamp_unix_ms > 0);
     assert!(report.outcome == "success" || report.outcome == "refusal");
-    assert!(report.permissions.iter().any(|p| p.capability == "screen_capture"));
+    assert!(
+        report
+            .permissions
+            .iter()
+            .any(|p| p.capability == "screen_capture")
+    );
     assert!(report.capabilities.iter().any(|c| c.name == "video_encode"));
     let json = report.render_json();
     assert!(json.contains("\"schema_version\":\"fr.status.v1\""));
@@ -596,4 +626,3 @@ fn probe_host_generates_valid_report_envelope() {
     let human = report.render_human();
     assert!(human.contains("Host Daemon Status"));
 }
-

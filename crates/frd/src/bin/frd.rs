@@ -48,6 +48,7 @@ OPTIONS:
     --user          Manage user-level service (systemd user unit / launchd agent; default)
     --system        Manage system-wide service
     --dry-run       Preview service generation without modifying filesystem
+    --config PATH   Local policy file for run/approval/sharing (absolute, Linux)
     --json          Output structured, schema-versioned JSON envelope
     --help, -h      Print this help text
 ";
@@ -65,23 +66,22 @@ fn main() -> ExitCode {
     }
 
     let json = args.iter().any(|a| a == "--json");
-    let non_flags: Vec<&str> = args
-        .iter()
-        .map(String::as_str)
-        .filter(|s| !s.starts_with("--"))
-        .collect();
-
-    if non_flags.is_empty() {
+    let Some(command_index) = args.iter().position(|arg| arg != "--json") else {
         print!("{HELP}");
         return ExitCode::SUCCESS;
-    }
-
-    let cmd = non_flags[0];
+    };
+    let cmd = args[command_index].as_str();
+    let args: Vec<String> = args
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != command_index)
+        .map(|(_, arg)| arg.clone())
+        .collect();
 
     match cmd {
         "status" => execute_status(&args, json),
-        "approval" => execute_approval(&non_flags, json),
-        "sharing" => execute_sharing(&non_flags, json),
+        "approval" => execute_policy(&args, true, json),
+        "sharing" => execute_policy(&args, false, json),
         "run" => execute_run(&args, json),
         "install" => execute_install(&args, json),
         "uninstall" => execute_uninstall(&args, json),
@@ -117,90 +117,19 @@ fn execute_status(args: &[String], json: bool) -> ExitCode {
     }
 }
 
-fn execute_approval(non_flags: &[&str], json: bool) -> ExitCode {
-    if non_flags.len() == 1 || (non_flags.len() == 2 && non_flags[1] == "get") {
-        if json {
-            println!("{{\"approval_mode\":\"unattended\",\"policy\":\"plan_defaults\"}}");
-        } else {
-            println!("Approval Mode: unattended (local operator prompt disabled)");
-        }
-        ExitCode::SUCCESS
-    } else if non_flags.len() >= 3 && non_flags[1] == "set" {
-        let mode = non_flags[2];
-        match mode {
-            "local" => {
-                if json {
-                    println!("{{\"approval_mode\":\"local\",\"updated\":true}}");
-                } else {
-                    println!(
-                        "Approval Mode updated to 'local' (all new remote sessions require operator approval)."
-                    );
-                }
-                ExitCode::SUCCESS
-            }
-            "none" | "unattended" => {
-                if json {
-                    println!("{{\"approval_mode\":\"unattended\",\"updated\":true}}");
-                } else {
-                    println!(
-                        "Approval Mode updated to 'unattended' (automatic admission under sharing scope)."
-                    );
-                }
-                ExitCode::SUCCESS
-            }
-            other => {
-                eprintln!("Error: Unknown approval mode '{other}'. Supported: 'local', 'none'");
-                ExitCode::from(2)
-            }
-        }
-    } else {
-        eprintln!("Usage: frd approval [get | set local | set none]");
-        ExitCode::from(2)
-    }
-}
+#[cfg(target_os = "linux")]
+#[path = "frd/policy.rs"]
+mod local_policy;
 
-fn execute_sharing(non_flags: &[&str], json: bool) -> ExitCode {
-    if non_flags.len() == 1 || (non_flags.len() == 2 && non_flags[1] == "get") {
-        if json {
-            println!("{{\"sharing_scope\":\"own-user\",\"policy\":\"default\"}}");
-        } else {
-            println!(
-                "Sharing Scope: own-user (admitting only devices owned by host's Tailscale user)"
-            );
-        }
-        ExitCode::SUCCESS
-    } else if non_flags.len() >= 3 && non_flags[1] == "set" {
-        let scope = non_flags[2];
-        match scope {
-            "own-user" => {
-                if json {
-                    println!("{{\"sharing_scope\":\"own-user\",\"updated\":true}}");
-                } else {
-                    println!(
-                        "Sharing Scope updated to 'own-user' (restricted to host user devices)."
-                    );
-                }
-                ExitCode::SUCCESS
-            }
-            "tailnet" => {
-                if json {
-                    println!("{{\"sharing_scope\":\"tailnet\",\"updated\":true}}");
-                } else {
-                    println!(
-                        "Sharing Scope updated to 'tailnet' (admitting all devices on the tailnet)."
-                    );
-                }
-                ExitCode::SUCCESS
-            }
-            other => {
-                eprintln!(
-                    "Error: Unknown sharing scope '{other}'. Supported: 'own-user', 'tailnet'"
-                );
-                ExitCode::from(2)
-            }
-        }
-    } else {
-        eprintln!("Usage: frd sharing [get | set own-user | set tailnet]");
+fn execute_policy(args: &[String], approval: bool, json: bool) -> ExitCode {
+    #[cfg(target_os = "linux")]
+    {
+        local_policy::execute(args, approval, json)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (args, approval, json);
+        eprintln!("Persistent host policy is not implemented on this platform.");
         ExitCode::from(2)
     }
 }
@@ -412,25 +341,27 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
     use frd::broker::config::{ApprovalMode, DaemonConfig, SharingScope};
     use frd::broker::service::BrokerService;
 
-    let port = parse_port(args);
-    let socket = parse_socket(args);
-    let approval_str = parse_approval_flag(args);
-    let sharing_str = parse_sharing_flag(args);
-
-    let approval_mode = match approval_str.as_str() {
-        "local" => ApprovalMode::PromptAlways,
-        _ => ApprovalMode::Unattended,
+    use frd::host_policy::{Approval, Sharing, options::RunOptions};
+    let options = match RunOptions::parse(args) {
+        Ok(options) => options,
+        Err(error) => return local_policy::refusal(error, json),
     };
-
-    let sharing_scope = match sharing_str.as_str() {
-        "tailnet" => SharingScope::Tailnet,
-        _ => SharingScope::OwnUser,
+    let effective = match options.resolve() {
+        Ok(effective) => effective,
+        Err(error) => return local_policy::refusal(error, json),
     };
-
+    let socket = options.socket;
+    let port = effective.port;
     let config = DaemonConfig {
-        service_port: port,
-        approval_mode,
-        sharing_scope,
+        service_port: effective.port,
+        approval_mode: match effective.approval {
+            Approval::Local => ApprovalMode::PromptAlways,
+            Approval::None => ApprovalMode::Unattended,
+        },
+        sharing_scope: match effective.sharing {
+            Sharing::OwnUser => SharingScope::OwnUser,
+            Sharing::Tailnet => SharingScope::Tailnet,
+        },
         ..Default::default()
     };
 

@@ -717,6 +717,9 @@ dependencies = [
  "fr-tailnet",
  "fr-transport",
  "fr-wire",
+ "rustix",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
