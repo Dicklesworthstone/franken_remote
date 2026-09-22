@@ -1,6 +1,6 @@
 use fr_web::{
-    WebClientSession, WebControlEvent, WebError, WebSessionConfig, WebSessionState, WebTouchMode,
-    CURRENT_WEB_ASSET_VERSION, generate_webcodecs_config, validate_asset_version,
+    CURRENT_WEB_ASSET_VERSION, WebClientSession, WebControlEvent, WebError, WebSessionConfig,
+    WebSessionState, WebTouchMode, generate_webcodecs_config, validate_asset_version,
 };
 
 #[test]
@@ -25,13 +25,17 @@ fn test_session_first_auth_and_lease_lifecycle() {
     assert_eq!(auth_val["version"], CURRENT_WEB_ASSET_VERSION);
 
     // Auth success grants lease
-    session.on_auth_response(true, Some(999)).expect("auth success");
+    session
+        .on_auth_response(true, Some(999))
+        .expect("auth success");
     assert_eq!(session.state(), WebSessionState::Connected);
     assert_eq!(session.input_lease(), Some(999));
 
     // Can encode pointer when connected
-    let ptr = session.encode_pointer(100, 200, 0, 1).expect("encode pointer");
-    assert!(!ptr.is_empty());
+    let ptr = session
+        .encode_pointer(100, 200, 0, 1)
+        .expect("encode pointer");
+    assert_ne!(ptr, [] as [u8; 0]);
 }
 
 #[test]
@@ -96,7 +100,7 @@ fn test_webcodecs_hvcc_generation() {
     assert_eq!(config.codec_string, "hvc1.1.6.L93.B0");
     assert_eq!(config.coded_width, 1920);
     assert_eq!(config.coded_height, 1080);
-    assert!(!config.description.is_empty());
+    assert_ne!(config.description, [] as [u8; 0]);
     assert_eq!(config.description[0], 1); // configurationVersion
 }
 

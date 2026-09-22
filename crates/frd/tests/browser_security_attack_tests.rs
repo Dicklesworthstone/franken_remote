@@ -87,51 +87,46 @@ fn attack_test_dns_rebinding_and_host_header_tampering() {
 #[test]
 fn attack_test_cross_origin_websocket_hijacking() {
     let origin = ExpectedHostOrigin::https_tailnet("workstation.my-tailnet.ts.net", 8443);
-
-    // 1. Foreign website runs script connecting to user's tailnet host
-    let attacker_origin = origin.validate_origin(Some("https://malicious-website.com"));
-    assert_eq!(attacker_origin, Err(OriginRefusal::HostMismatch));
-
-    // 2. Sandboxed iframe or local file trying with null origin
-    let null_origin = origin.validate_origin(Some("null"));
-    assert_eq!(null_origin, Err(OriginRefusal::NullOriginForbidden));
-
-    // 3. Wildcard origin
-    let wildcard = origin.validate_origin(Some("*"));
-    assert_eq!(wildcard, Err(OriginRefusal::WildcardForbidden));
-
-    // 4. Insecure HTTP origin attempting to connect to HTTPS host
-    let scheme_downgrade =
-        origin.validate_origin(Some("http://workstation.my-tailnet.ts.net:8443"));
-    assert_eq!(scheme_downgrade, Err(OriginRefusal::SchemeMismatch));
-
-    // 5. Missing Origin on socket / state-changing request
-    let missing = origin.validate_origin(None);
-    assert_eq!(missing, Err(OriginRefusal::MissingRequiredOrigin));
+    assert_eq!(
+        origin.validate_origin(Some("https://malicious-website.com")),
+        Err(OriginRefusal::HostMismatch)
+    );
+    assert_eq!(
+        origin.validate_origin(Some("null")),
+        Err(OriginRefusal::NullOriginForbidden)
+    );
+    assert_eq!(
+        origin.validate_origin(Some("*")),
+        Err(OriginRefusal::WildcardForbidden)
+    );
+    assert_eq!(
+        origin.validate_origin(Some("http://workstation.my-tailnet.ts.net:8443")),
+        Err(OriginRefusal::SchemeMismatch)
+    );
+    assert_eq!(
+        origin.validate_origin(None),
+        Err(OriginRefusal::MissingRequiredOrigin)
+    );
 }
 
 #[test]
 fn attack_test_nonce_replay_attack() {
     let mut mgr = BootstrapNonceManager::new();
-    let peer = admitted_peer_ip();
-    let now = HostInstant::from_micros(10_000_000);
-    let session_id = RemoteSessionId::from_raw(1001);
-
-    // Issue nonce via legitimate HTTPS POST
+    let (peer, now, session_id) = (
+        admitted_peer_ip(),
+        HostInstant::from_micros(10_000_000),
+        RemoteSessionId::from_raw(1001),
+    );
     let nonce = mgr
         .issue_nonce(peer, session_id, BrowserSessionRole::Controller, now)
         .unwrap();
-
-    // Legitimate first use consumes nonce
-    let first_use = mgr.consume_nonce(
+    let first = mgr.consume_nonce(
         nonce.as_bytes(),
         peer,
         BrowserSessionRole::Controller,
         now.checked_add(HostDuration::from_micros(500_000)).unwrap(),
     );
-    assert_eq!(first_use, Ok(session_id));
-
-    // Attacker captures and replays same nonce
+    assert_eq!(first, Ok(session_id));
     let replay = mgr.consume_nonce(
         nonce.as_bytes(),
         peer,
@@ -148,118 +143,91 @@ fn attack_test_nonce_replay_attack() {
 #[test]
 fn attack_test_stale_and_expired_nonce_refused() {
     let mut mgr = BootstrapNonceManager::new();
-    let peer = admitted_peer_ip();
-    let now = HostInstant::from_micros(10_000_000);
-    let session_id = RemoteSessionId::from_raw(1002);
-
+    let (peer, now, session_id) = (
+        admitted_peer_ip(),
+        HostInstant::from_micros(10_000_000),
+        RemoteSessionId::from_raw(1002),
+    );
     let nonce = mgr
         .issue_nonce(peer, session_id, BrowserSessionRole::Observer, now)
         .unwrap();
-
-    // Attacker waits until after TTL (15s + 1ms)
     let late = now
         .checked_add(BOOTSTRAP_NONCE_TTL)
         .unwrap()
         .checked_add(HostDuration::from_micros(1000))
         .unwrap();
-    let expired = mgr.consume_nonce(nonce.as_bytes(), peer, BrowserSessionRole::Observer, late);
     assert_eq!(
-        expired,
-        Err(NonceRefusal::NonceExpired),
-        "expired nonce must be refused"
+        mgr.consume_nonce(nonce.as_bytes(), peer, BrowserSessionRole::Observer, late),
+        Err(NonceRefusal::NonceExpired)
     );
 }
 
 #[test]
 fn attack_test_stolen_nonce_cross_peer_ip_mismatch() {
     let mut mgr = BootstrapNonceManager::new();
-    let victim_peer = admitted_peer_ip();
-    let attacker = attacker_peer_ip();
-    let now = HostInstant::from_micros(10_000_000);
-    let session_id = RemoteSessionId::from_raw(1003);
-
-    // Nonce issued to victim
+    let (victim, attacker, now, session_id) = (
+        admitted_peer_ip(),
+        attacker_peer_ip(),
+        HostInstant::from_micros(10_000_000),
+        RemoteSessionId::from_raw(1003),
+    );
     let nonce = mgr
-        .issue_nonce(victim_peer, session_id, BrowserSessionRole::Controller, now)
+        .issue_nonce(victim, session_id, BrowserSessionRole::Controller, now)
         .unwrap();
-
-    // Attacker from another node attempts to authenticate with victim's nonce
-    let result = mgr.consume_nonce(
+    let res = mgr.consume_nonce(
         nonce.as_bytes(),
         attacker,
         BrowserSessionRole::Controller,
         now.checked_add(HostDuration::from_micros(200_000)).unwrap(),
     );
-    assert_eq!(
-        result,
-        Err(NonceRefusal::PeerIpMismatch),
-        "stolen nonce used by another peer IP must be refused"
-    );
+    assert_eq!(res, Err(NonceRefusal::PeerIpMismatch));
 }
 
 #[test]
 fn attack_test_auxiliary_channel_bare_session_id_bypass_refused() {
     let mut ticket_mgr = AuxiliaryTicketManager::new();
-    let peer = admitted_peer_ip();
-    let now = HostInstant::from_micros(10_000_000);
-    let session_id = RemoteSessionId::from_raw(2001);
+    let (peer, now, session_id) = (
+        admitted_peer_ip(),
+        HostInstant::from_micros(10_000_000),
+        RemoteSessionId::from_raw(2001),
+    );
 
-    // Attacker attempts to attach audio/files with bare session ID
-    let bare_attempt = ticket_mgr.consume_ticket(
+    let bare = ticket_mgr.consume_ticket(
         None,
         session_id,
         AuxiliaryChannelRole::FilesTransfer,
         peer,
         now,
     );
-    assert_eq!(
-        bare_attempt,
-        Err(AuxiliaryTicketRefusal::AuxiliaryTicketRequired),
-        "bare session ID must never attach auxiliary channel"
-    );
+    assert_eq!(bare, Err(AuxiliaryTicketRefusal::AuxiliaryTicketRequired));
 
-    // Attacker attempts to attach with ticket issued for a different channel role
     let audio_ticket = ticket_mgr
         .issue_ticket(session_id, AuxiliaryChannelRole::AudioDownlink, peer, now)
         .unwrap();
-
-    let wrong_role = ticket_mgr.consume_ticket(
+    let wrong = ticket_mgr.consume_ticket(
         Some(audio_ticket.as_bytes()),
         session_id,
         AuxiliaryChannelRole::FilesTransfer,
         peer,
         now,
     );
-    assert_eq!(
-        wrong_role,
-        Err(AuxiliaryTicketRefusal::ChannelRoleMismatch),
-        "ticket for wrong role must be refused"
-    );
+    assert_eq!(wrong, Err(AuxiliaryTicketRefusal::ChannelRoleMismatch));
 }
 
 #[test]
 fn attack_test_bearer_credential_in_query_string_refused() {
-    // Tests plan §16.4: "Nonces/tickets are never put in query strings, host links, logs, or referrers."
-    assert_eq!(
-        check_url_query_safety("/connect?nonce=1234567890abcdef"),
-        Err(QuerySafetyRefusal::BearerInQueryForbidden)
-    );
-    assert_eq!(
-        check_url_query_safety("/files?ticket=secret_ticket_123"),
-        Err(QuerySafetyRefusal::BearerInQueryForbidden)
-    );
-    assert_eq!(
-        check_url_query_safety("/ws?token=bearer_xyz"),
-        Err(QuerySafetyRefusal::BearerInQueryForbidden)
-    );
-    assert_eq!(
-        check_url_query_safety("/session?auth=password123"),
-        Err(QuerySafetyRefusal::BearerInQueryForbidden)
-    );
-    assert_eq!(
-        check_url_query_safety("/audio?secret=key"),
-        Err(QuerySafetyRefusal::BearerInQueryForbidden)
-    );
+    for query in [
+        "/connect?nonce=1234567890abcdef",
+        "/files?ticket=secret_ticket_123",
+        "/ws?token=bearer_xyz",
+        "/session?auth=password123",
+        "/audio?secret=key",
+    ] {
+        assert_eq!(
+            check_url_query_safety(query),
+            Err(QuerySafetyRefusal::BearerInQueryForbidden)
+        );
+    }
 }
 
 #[test]

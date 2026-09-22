@@ -6,18 +6,18 @@
 //! - Shortcut-capture toggle: per-platform capability matrix advertising, permission gating,
 //!   mode toggling, and visibility in the minimal desktop toolbar.
 
-use fr_client::input::{
-    Action, ClientInstant, InputClient, Policy, PresentedObservation, StopReason,
-    viewport::{Error as ViewportError, LocalPoint, SurfaceRect},
-};
-use fr_client::session::{
-    ClientSession, ReconnectPolicy, SessionError, SessionState, SuspendReason,
-};
 use fr_client::connection_quality::{
     ConnectionQualityMetrics, QualityTier, QualityWarning, TransportType,
 };
 use fr_client::decoder_admission::{DecodeAdmissionRefusal, DecoderAdmissionController};
+use fr_client::input::{
+    Action, ClientInstant, InputClient, Policy, PresentedObservation, StopReason,
+    viewport::{Error as ViewportError, LocalPoint, SurfaceRect},
+};
 use fr_client::permissions::{PermissionCategory, PermissionExplanation, PermissionState};
+use fr_client::session::{
+    ClientSession, ReconnectPolicy, SessionError, SessionState, SuspendReason,
+};
 use fr_client::settings::{ClientSettings, ColorRangePreference, DisplayFitMode};
 use fr_client::shortcut::{
     PlatformCapabilityRow, PlatformId, ShortcutCaptureController, ShortcutCaptureError,
@@ -583,7 +583,7 @@ fn connection_quality_telemetry_and_classification() {
 
     let (tier, warnings) = metrics.evaluate();
     assert_eq!(tier, QualityTier::Excellent);
-    assert!(warnings.is_empty());
+    assert_eq!(warnings, []);
     assert_eq!(metrics.badge_text(), "Excellent");
 
     // Degradation under high jitter and moderate latency
@@ -661,18 +661,17 @@ fn untrusted_hevc_decoder_admission_bounds() {
     let mut admission = DecoderAdmissionController::new(limits);
 
     // Valid HEVC Main profile 8-bit 1080p
-    assert!(
-        admission
-            .admit_configuration(1920, 1080, 1, 8, 4)
-            .is_ok()
-    );
+    assert!(admission.admit_configuration(1920, 1080, 1, 8, 4).is_ok());
     assert_eq!(admission.active_dimensions(), Some((1920, 1080)));
 
     // Refusal: dimension exceeding absolute limit (e.g. 16384x8192)
     let err = admission
         .admit_configuration(16384, 8192, 1, 8, 4)
         .unwrap_err();
-    assert!(matches!(err, DecodeAdmissionRefusal::DimensionExceeded { .. }));
+    assert!(matches!(
+        err,
+        DecodeAdmissionRefusal::DimensionExceeded { .. }
+    ));
 
     // Refusal: non-Main profile (e.g. profile_idc = 2 Main 10)
     let err = admission
@@ -687,7 +686,10 @@ fn untrusted_hevc_decoder_admission_bounds() {
     let err = admission
         .admit_configuration(1920, 1080, 1, 10, 4)
         .unwrap_err();
-    assert_eq!(err, DecodeAdmissionRefusal::BitDepthMismatch { bit_depth: 10 });
+    assert_eq!(
+        err,
+        DecodeAdmissionRefusal::BitDepthMismatch { bit_depth: 10 }
+    );
 
     // Refusal: excessive DPB surface allocation (e.g. 32 buffers)
     let err = admission
@@ -711,5 +713,8 @@ fn untrusted_hevc_decoder_admission_bounds() {
     // Chunk refusal: oversized access unit exceeding protocol limit
     let max_bytes = limits.max_encoded_access_unit_bytes() as usize;
     let err = admission.admit_access_unit(max_bytes + 1, 1).unwrap_err();
-    assert!(matches!(err, DecodeAdmissionRefusal::AccessUnitTooLarge { .. }));
+    assert!(matches!(
+        err,
+        DecodeAdmissionRefusal::AccessUnitTooLarge { .. }
+    ));
 }

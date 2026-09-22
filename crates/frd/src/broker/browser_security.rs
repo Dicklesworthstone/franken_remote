@@ -66,10 +66,10 @@ pub enum BrowserSessionRole {
 
 impl fmt::Display for BrowserSessionRole {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Observer => f.write_str("observer"),
-            Self::Controller => f.write_str("controller"),
-        }
+        f.write_str(match self {
+            Self::Observer => "observer",
+            Self::Controller => "controller",
+        })
     }
 }
 
@@ -90,13 +90,13 @@ pub enum AuxiliaryChannelRole {
 
 impl fmt::Display for AuxiliaryChannelRole {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::FilesTransfer => f.write_str("files-transfer"),
-            Self::AudioDownlink => f.write_str("audio-downlink"),
-            Self::AudioUplink => f.write_str("audio-uplink"),
-            Self::ClipboardSync => f.write_str("clipboard-sync"),
-            Self::DiagnosticsStream => f.write_str("diagnostics-stream"),
-        }
+        f.write_str(match self {
+            Self::FilesTransfer => "files-transfer",
+            Self::AudioDownlink => "audio-downlink",
+            Self::AudioUplink => "audio-uplink",
+            Self::ClipboardSync => "clipboard-sync",
+            Self::DiagnosticsStream => "diagnostics-stream",
+        })
     }
 }
 
@@ -121,15 +121,15 @@ pub enum OriginRefusal {
 
 impl fmt::Display for OriginRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingRequiredOrigin => f.write_str("missing required Origin header"),
-            Self::NullOriginForbidden => f.write_str("null origin is strictly forbidden"),
-            Self::WildcardForbidden => f.write_str("wildcard origin is strictly forbidden"),
-            Self::SchemeMismatch => f.write_str("origin scheme mismatch: https required"),
-            Self::HostMismatch => f.write_str("origin hostname does not match configured host"),
-            Self::PortMismatch => f.write_str("origin port does not match configured port"),
-            Self::MalformedOriginHeader => f.write_str("malformed Origin header format"),
-        }
+        f.write_str(match self {
+            Self::MissingRequiredOrigin => "missing required Origin header",
+            Self::NullOriginForbidden => "null origin is strictly forbidden",
+            Self::WildcardForbidden => "wildcard origin is strictly forbidden",
+            Self::SchemeMismatch => "origin scheme mismatch: https required",
+            Self::HostMismatch => "origin hostname does not match configured host",
+            Self::PortMismatch => "origin port does not match configured port",
+            Self::MalformedOriginHeader => "malformed Origin header format",
+        })
     }
 }
 
@@ -152,13 +152,13 @@ pub enum HostRefusal {
 
 impl fmt::Display for HostRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingHostHeader => f.write_str("missing Host header"),
-            Self::HostnameMismatch => f.write_str("Host header mismatch: potential DNS rebinding"),
-            Self::PortMismatch => f.write_str("Host header port mismatch"),
-            Self::SniMismatch => f.write_str("TLS SNI does not match configured authority"),
-            Self::MalformedHostHeader => f.write_str("malformed Host header format"),
-        }
+        f.write_str(match self {
+            Self::MissingHostHeader => "missing Host header",
+            Self::HostnameMismatch => "Host header mismatch: potential DNS rebinding",
+            Self::PortMismatch => "Host header port mismatch",
+            Self::SniMismatch => "TLS SNI does not match configured authority",
+            Self::MalformedHostHeader => "malformed Host header format",
+        })
     }
 }
 
@@ -177,11 +177,11 @@ pub enum FetchMetadataRefusal {
 
 impl fmt::Display for FetchMetadataRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::CrossSiteForbidden => f.write_str("cross-site fetch forbidden by policy"),
-            Self::IframeEmbeddingForbidden => f.write_str("iframe embedding forbidden by policy"),
-            Self::InvalidFetchMode => f.write_str("invalid Sec-Fetch-Mode for requested action"),
-        }
+        f.write_str(match self {
+            Self::CrossSiteForbidden => "cross-site fetch forbidden by policy",
+            Self::IframeEmbeddingForbidden => "iframe embedding forbidden by policy",
+            Self::InvalidFetchMode => "invalid Sec-Fetch-Mode for requested action",
+        })
     }
 }
 
@@ -225,18 +225,14 @@ pub enum NonceRefusal {
 
 impl fmt::Display for NonceRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NonceNotFoundOrConsumed => {
-                f.write_str("bootstrap nonce unrecognized or already consumed")
-            }
-            Self::NonceExpired => f.write_str("bootstrap nonce expired"),
-            Self::PeerIpMismatch => f.write_str("connecting peer IP does not match nonce binding"),
-            Self::RoleMismatch => f.write_str("session role does not match nonce binding"),
-            Self::NonceCapacityExceeded => {
-                f.write_str("pending nonce capacity exceeded: throttling")
-            }
-            Self::RateLimitExceeded => f.write_str("bootstrap rate limit exceeded"),
-        }
+        f.write_str(match self {
+            Self::NonceNotFoundOrConsumed => "bootstrap nonce unrecognized or already consumed",
+            Self::NonceExpired => "bootstrap nonce expired",
+            Self::PeerIpMismatch => "connecting peer IP does not match nonce binding",
+            Self::RoleMismatch => "session role does not match nonce binding",
+            Self::NonceCapacityExceeded => "pending nonce capacity exceeded: throttling",
+            Self::RateLimitExceeded => "bootstrap rate limit exceeded",
+        })
     }
 }
 
@@ -263,21 +259,17 @@ pub enum AuxiliaryTicketRefusal {
 
 impl fmt::Display for AuxiliaryTicketRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+        f.write_str(match self {
             Self::AuxiliaryTicketRequired => {
-                f.write_str("bare session ID rejected: role-specific auxiliary ticket required")
+                "bare session ID rejected: role-specific auxiliary ticket required"
             }
-            Self::TicketNotFoundOrConsumed => {
-                f.write_str("auxiliary ticket unrecognized or already consumed")
-            }
-            Self::TicketExpired => f.write_str("auxiliary ticket expired"),
-            Self::SessionMismatch => f.write_str("auxiliary ticket session mismatch"),
-            Self::ChannelRoleMismatch => f.write_str("auxiliary ticket channel role mismatch"),
-            Self::PeerIpMismatch => f.write_str("connecting peer IP does not match ticket binding"),
-            Self::TicketCapacityExceeded => {
-                f.write_str("pending auxiliary ticket capacity exceeded")
-            }
-        }
+            Self::TicketNotFoundOrConsumed => "auxiliary ticket unrecognized or already consumed",
+            Self::TicketExpired => "auxiliary ticket expired",
+            Self::SessionMismatch => "auxiliary ticket session mismatch",
+            Self::ChannelRoleMismatch => "auxiliary ticket channel role mismatch",
+            Self::PeerIpMismatch => "connecting peer IP does not match ticket binding",
+            Self::TicketCapacityExceeded => "pending auxiliary ticket capacity exceeded",
+        })
     }
 }
 
@@ -1080,15 +1072,6 @@ pub struct BootstrapRequest<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
-
-    fn test_peer() -> IpAddr {
-        IpAddr::V4(Ipv4Addr::new(100, 64, 1, 42))
-    }
-
-    fn other_peer() -> IpAddr {
-        IpAddr::V4(Ipv4Addr::new(100, 64, 1, 99))
-    }
 
     #[test]
     fn exact_origin_validation_accepts_valid_and_rejects_mismatch() {

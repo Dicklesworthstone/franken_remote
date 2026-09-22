@@ -11,7 +11,6 @@
 
 use serde::{Deserialize, Serialize};
 
-
 /// Error types returned by web client operations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WebError {
@@ -125,7 +124,8 @@ impl WebClientSession {
     /// Called when the browser transport (WebTransport/WSS) opens.
     /// Returns the first application-level authentication payload carrying the single-use nonce.
     pub fn on_transport_open(&mut self) -> Result<Vec<u8>, WebError> {
-        if self.state != WebSessionState::Disconnected && self.state != WebSessionState::Connecting {
+        if self.state != WebSessionState::Disconnected && self.state != WebSessionState::Connecting
+        {
             return Err(WebError::InvalidState(format!("{:?}", self.state)));
         }
         self.state = WebSessionState::Authenticating;
@@ -142,7 +142,11 @@ impl WebClientSession {
     }
 
     /// Process host authentication response.
-    pub fn on_auth_response(&mut self, success: bool, lease_handle: Option<u64>) -> Result<(), WebError> {
+    pub fn on_auth_response(
+        &mut self,
+        success: bool,
+        lease_handle: Option<u64>,
+    ) -> Result<(), WebError> {
         if self.state != WebSessionState::Authenticating {
             return Err(WebError::InvalidState(format!("{:?}", self.state)));
         }
@@ -154,7 +158,9 @@ impl WebClientSession {
         } else {
             self.state = WebSessionState::Closed;
             self.input_lease = None;
-            Err(WebError::AuthenticationFailed("Host refused bootstrap token".into()))
+            Err(WebError::AuthenticationFailed(
+                "Host refused bootstrap token".into(),
+            ))
         }
     }
 

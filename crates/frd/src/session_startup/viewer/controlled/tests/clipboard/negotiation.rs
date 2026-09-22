@@ -210,7 +210,7 @@ fn either_local_consent_declines_before_native_open_without_disconnect() {
 #[test]
 fn capability_and_timeout_refusal_leave_existing_input_usable() {
     run(|c, h| async move {
-        let mut s = fixture(&c, &h).await;
+        let mut s = Box::pin(fixture(&c, &h)).await;
         assert_eq!(
             s.host.offer_clipboard(request(&s), true),
             Err(ClipboardError::NotNegotiated)

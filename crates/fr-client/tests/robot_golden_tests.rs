@@ -16,6 +16,26 @@ use fr_client::robot::{
     RobotStatusData, SemanticEvidenceType, WindowFocusPrecondition,
 };
 
+fn assert_envelope_roundtrip<
+    T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+>(
+    envelope: &RobotEnvelope<T>,
+    expected_json: &str,
+    expected_human: &str,
+    render_inner: Option<&str>,
+) {
+    let json = envelope.render_json().expect("render json");
+    for s in expected_json.split('|') {
+        assert!(json.contains(s), "missing json: {s}");
+    }
+    let parsed: RobotEnvelope<T> = serde_json::from_str(&json).expect("parse json");
+    assert_eq!(envelope, &parsed);
+    let human = envelope.render_human(render_inner);
+    for s in expected_human.split('|') {
+        assert!(human.contains(s), "missing human: {s}");
+    }
+}
+
 #[test]
 fn test_robot_session_open_golden_roundtrip() {
     let data = RobotSessionOpenData {
@@ -26,23 +46,14 @@ fn test_robot_session_open_golden_roundtrip() {
         status: "active".into(),
         limits: RobotSessionLimits::default(),
     };
-
+    let inner_human = data.render_human();
     let envelope = RobotEnvelope::success(1_700_000_000_000, AcknowledgementStage::Admitted, data);
-
-    let json = envelope.render_json().expect("render json");
-    assert!(json.contains("\"schema_version\": 1"));
-    assert!(json.contains("\"outcome\": \"success\""));
-    assert!(json.contains("\"stage\": \"admitted\""));
-    assert!(json.contains("\"lease_handle\": \"lease-local-a1b2c3d4\""));
-
-    let parsed: RobotEnvelope<RobotSessionOpenData> =
-        serde_json::from_str(&json).expect("parse json");
-    assert_eq!(envelope, parsed);
-
-    let human = envelope.render_human(Some(&envelope.data.as_ref().unwrap().render_human()));
-    assert!(human.contains("Outcome: success (stage: admitted)"));
-    assert!(human.contains("Session Open: session-101"));
-    assert!(human.contains("Lease Handle: lease-local-a1b2c3d4"));
+    assert_envelope_roundtrip(
+        &envelope,
+        "\"schema_version\": 1|\"outcome\": \"success\"|\"stage\": \"admitted\"|\"lease_handle\": \"lease-local-a1b2c3d4\"",
+        "Outcome: success (stage: admitted)|Session Open: session-101|Lease Handle: lease-local-a1b2c3d4",
+        Some(&inner_human),
+    );
 }
 
 #[test]
@@ -57,7 +68,6 @@ fn test_robot_observe_golden_roundtrip() {
         scale_denominator: 1,
         rotation_degrees: 0,
     };
-
     let data = RobotObservationData {
         host: "workstation-alpha".into(),
         geometry,
@@ -71,21 +81,14 @@ fn test_robot_observe_golden_roundtrip() {
         control_authority: Some("lease-local-a1b2c3d4".into()),
         artifact: None,
     };
-
+    let inner_human = data.render_human();
     let envelope = RobotEnvelope::success(1_700_000_000_550, AcknowledgementStage::Observed, data);
-
-    let json = envelope.render_json().expect("render json");
-    assert!(json.contains("\"geometry_generation\": 1"));
-    assert!(json.contains("\"frame_serial\": 42"));
-    assert!(json.contains("\"source_freshness\": \"fresh\""));
-
-    let parsed: RobotEnvelope<RobotObservationData> =
-        serde_json::from_str(&json).expect("parse json");
-    assert_eq!(envelope, parsed);
-
-    let human = envelope.render_human(Some(&envelope.data.as_ref().unwrap().render_human()));
-    assert!(human.contains("Outcome: success (stage: observed)"));
-    assert!(human.contains("Display: 0 (3840x2160 phys, 1920x1080 log, scale 2/1)"));
+    assert_envelope_roundtrip(
+        &envelope,
+        "\"geometry_generation\": 1|\"frame_serial\": 42|\"source_freshness\": \"fresh\"",
+        "Outcome: success (stage: observed)|Display: 0 (3840x2160 phys, 1920x1080 log, scale 2/1)",
+        Some(&inner_human),
+    );
 }
 
 #[test]
@@ -100,21 +103,15 @@ fn test_robot_input_staged_acknowledgement() {
         observed_receipt_count: 3,
         observed_application_result: None,
     };
-
+    let inner_human = data.render_human();
     let envelope =
         RobotEnvelope::success(1_700_000_001_000, AcknowledgementStage::SubmittedToOs, data);
-
-    let json = envelope.render_json().expect("render json");
-    assert!(json.contains("\"stage\": \"submitted_to_os\""));
-    assert!(json.contains("\"disposition\": \"committed\""));
-    assert!(json.contains("\"actions_submitted\": 3"));
-
-    let parsed: RobotEnvelope<RobotInputData> = serde_json::from_str(&json).expect("parse json");
-    assert_eq!(envelope, parsed);
-
-    let human = envelope.render_human(Some(&envelope.data.as_ref().unwrap().render_human()));
-    assert!(human.contains("Outcome: success (stage: submitted_to_os)"));
-    assert!(human.contains("Submitted: 3 / 3 actions"));
+    assert_envelope_roundtrip(
+        &envelope,
+        "\"stage\": \"submitted_to_os\"|\"disposition\": \"committed\"|\"actions_submitted\": 3",
+        "Outcome: success (stage: submitted_to_os)|Submitted: 3 / 3 actions",
+        Some(&inner_human),
+    );
 }
 
 #[test]
@@ -129,7 +126,7 @@ fn test_robot_input_partial_batch_reporting() {
         observed_receipt_count: 4,
         observed_application_result: None,
     };
-
+    let inner_human = data.render_human();
     let envelope = RobotEnvelope::partial(
         1_700_000_002_000,
         AcknowledgementStage::SubmittedToOs,
@@ -137,20 +134,13 @@ fn test_robot_input_partial_batch_reporting() {
         "Re-observe display geometry and reissue remaining actions with fresh ticket.",
         data,
     );
-
     assert_eq!(envelope.outcome, RobotOutcome::PartialSubmission);
-    let json = envelope.render_json().expect("render json");
-    assert!(json.contains("\"outcome\": \"partial_submission\""));
-    assert!(json.contains("\"input_ticket_expired\""));
-    assert!(json.contains("\"actions_submitted\": 4"));
-
-    let parsed: RobotEnvelope<RobotInputData> = serde_json::from_str(&json).expect("parse json");
-    assert_eq!(envelope, parsed);
-
-    let human = envelope.render_human(Some(&envelope.data.as_ref().unwrap().render_human()));
-    assert!(human.contains("Outcome: partial_submission (stage: submitted_to_os)"));
-    assert!(human.contains("Error: input_ticket_expired"));
-    assert!(human.contains("Submitted: 4 / 10 actions"));
+    assert_envelope_roundtrip(
+        &envelope,
+        "\"outcome\": \"partial_submission\"|\"input_ticket_expired\"|\"actions_submitted\": 4",
+        "Outcome: partial_submission (stage: submitted_to_os)|Error: input_ticket_expired|Submitted: 4 / 10 actions",
+        Some(&inner_human),
+    );
 }
 
 #[test]
@@ -165,26 +155,20 @@ fn test_robot_input_unknown_external_effect() {
         observed_receipt_count: 0,
         observed_application_result: None,
     };
-
+    let inner_human = data.render_human();
     let envelope = RobotEnvelope::unknown_effect(
         1_700_000_003_000,
         "transport_timeout_during_submission",
         "Check target host state or query application logs before retrying potentially non-idempotent actions.",
         Some(data),
     );
-
     assert_eq!(envelope.outcome, RobotOutcome::UnknownExternalEffect);
-    let json = envelope.render_json().expect("render json");
-    assert!(json.contains("\"outcome\": \"unknown_external_effect\""));
-    assert!(json.contains("\"transport_timeout_during_submission\""));
-
-    let parsed: RobotEnvelope<RobotInputData> = serde_json::from_str(&json).expect("parse json");
-    assert_eq!(envelope, parsed);
-
-    let human = envelope.render_human(Some(&envelope.data.as_ref().unwrap().render_human()));
-    assert!(human.contains("Outcome: unknown_external_effect"));
-    assert!(human.contains("Error: transport_timeout_during_submission"));
-    assert!(human.contains("Disposition: unknown_effect"));
+    assert_envelope_roundtrip(
+        &envelope,
+        "\"outcome\": \"unknown_external_effect\"|\"transport_timeout_during_submission\"",
+        "Outcome: unknown_external_effect|Error: transport_timeout_during_submission|Disposition: unknown_effect",
+        Some(&inner_human),
+    );
 }
 
 #[test]
@@ -196,21 +180,14 @@ fn test_robot_session_close_golden_roundtrip() {
         cleanup_confirmed: true,
         held_keys_released: 2,
     };
-
+    let inner_human = data.render_human();
     let envelope = RobotEnvelope::success(1_700_000_004_000, AcknowledgementStage::Observed, data);
-
-    let json = envelope.render_json().expect("render json");
-    assert!(json.contains("\"closed\": true"));
-    assert!(json.contains("\"cleanup_confirmed\": true"));
-    assert!(json.contains("\"held_keys_released\": 2"));
-
-    let parsed: RobotEnvelope<RobotSessionCloseData> =
-        serde_json::from_str(&json).expect("parse json");
-    assert_eq!(envelope, parsed);
-
-    let human = envelope.render_human(Some(&envelope.data.as_ref().unwrap().render_human()));
-    assert!(human.contains("Session Closed: session-101"));
-    assert!(human.contains("Held Keys Released: 2"));
+    assert_envelope_roundtrip(
+        &envelope,
+        "\"closed\": true|\"cleanup_confirmed\": true|\"held_keys_released\": 2",
+        "Session Closed: session-101|Held Keys Released: 2",
+        Some(&inner_human),
+    );
 }
 
 #[test]
@@ -251,19 +228,14 @@ fn test_robot_status_golden_roundtrip() {
         active_role: Some("control".into()),
         active_lease_handle: Some("lease-local-a1b2c3d4".into()),
     };
-
+    let inner_human = data.render_human();
     let envelope = RobotEnvelope::success(1_700_000_006_000, AcknowledgementStage::Observed, data);
-
-    let json = envelope.render_json().expect("render json");
-    assert!(json.contains("\"local_node_name\": \"laptop-controller\""));
-    assert!(json.contains("\"active_lease_handle\": \"lease-local-a1b2c3d4\""));
-
-    let parsed: RobotEnvelope<RobotStatusData> = serde_json::from_str(&json).expect("parse json");
-    assert_eq!(envelope, parsed);
-
-    let human = envelope.render_human(Some(&envelope.data.as_ref().unwrap().render_human()));
-    assert!(human.contains("Local Node: laptop-controller (100.64.0.2)"));
-    assert!(human.contains("Lease Handle: lease-local-a1b2c3d4"));
+    assert_envelope_roundtrip(
+        &envelope,
+        "\"local_node_name\": \"laptop-controller\"|\"active_lease_handle\": \"lease-local-a1b2c3d4\"",
+        "Local Node: laptop-controller (100.64.0.2)|Lease Handle: lease-local-a1b2c3d4",
+        Some(&inner_human),
+    );
 }
 
 #[test]
@@ -279,19 +251,14 @@ fn test_robot_inspect_golden_roundtrip() {
         requires_approval: false,
         transport_path: "direct".into(),
     };
-
+    let inner_human = data.render_human();
     let envelope = RobotEnvelope::success(1_700_000_007_000, AcknowledgementStage::Observed, data);
-
-    let json = envelope.render_json().expect("render json");
-    assert!(json.contains("\"certificate_name\": \"workstation-alpha.example.ts.net\""));
-    assert!(json.contains("\"transport_path\": \"direct\""));
-
-    let parsed: RobotEnvelope<RobotInspectData> = serde_json::from_str(&json).expect("parse json");
-    assert_eq!(envelope, parsed);
-
-    let human = envelope.render_human(Some(&envelope.data.as_ref().unwrap().render_human()));
-    assert!(human.contains("Host Inspection: workstation-alpha"));
-    assert!(human.contains("Transport: direct (DERP: false)"));
+    assert_envelope_roundtrip(
+        &envelope,
+        "\"certificate_name\": \"workstation-alpha.example.ts.net\"|\"transport_path\": \"direct\"",
+        "Host Inspection: workstation-alpha|Transport: direct (DERP: false)",
+        Some(&inner_human),
+    );
 }
 
 /// Simulated agent driving open -> observe -> input -> close against a remote workstation.
@@ -389,21 +356,32 @@ fn test_scripted_agent_e2e_robot_workflow() {
 }
 
 fn load_fixture<T: serde::de::DeserializeOwned>(name: &str) -> RobotEnvelope<T> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/robot").join(name);
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/robot")
+        .join(name);
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
 #[test]
 fn test_matches_saved_disk_fixtures() {
     let session_open: RobotEnvelope<RobotSessionOpenData> = load_fixture("session_open.json");
-    assert_eq!((session_open.schema_version, session_open.outcome), (1, RobotOutcome::Success));
+    assert_eq!(
+        (session_open.schema_version, session_open.outcome),
+        (1, RobotOutcome::Success)
+    );
 
     let session_close: RobotEnvelope<RobotSessionCloseData> = load_fixture("session_close.json");
     assert_eq!(session_close.schema_version, 1);
     assert!(session_close.data.unwrap().cleanup_confirmed);
 
     let observe: RobotEnvelope<RobotObservationData> = load_fixture("observe.json");
-    assert_eq!((observe.schema_version, observe.data.unwrap().geometry_generation), (1, 1));
+    assert_eq!(
+        (
+            observe.schema_version,
+            observe.data.unwrap().geometry_generation
+        ),
+        (1, 1)
+    );
 
     let input_success: RobotEnvelope<RobotInputData> = load_fixture("input_success.json");
     assert_eq!(input_success.outcome, RobotOutcome::Success);
@@ -493,20 +471,15 @@ fn test_artifact_binding_and_evidence_levels() {
     assert_eq!(err.code, "artifact_dimension_mismatch");
 
     // Verify envelope serialization and human rendering with artifact
+    let inner_human = obs_data.render_human();
     let envelope =
         RobotEnvelope::success(1_700_000_001_005, AcknowledgementStage::Observed, obs_data);
-    let json = envelope.render_json().expect("render json");
-    assert!(json.contains("\"artifact\""));
-    assert!(json.contains("\"evidence_level\": \"decoded\""));
-    assert!(json.contains("/tmp/screen-1204.png"));
-
-    let parsed: RobotEnvelope<RobotObservationData> =
-        serde_json::from_str(&json).expect("parse json");
-    assert_eq!(envelope, parsed);
-
-    let human = envelope.render_human(Some(&envelope.data.as_ref().unwrap().render_human()));
-    assert!(human.contains("Artifact: art-frame-1204-"));
-    assert!(human.contains("evidence: decoded"));
+    assert_envelope_roundtrip(
+        &envelope,
+        "\"artifact\"|\"evidence_level\": \"decoded\"|/tmp/screen-1204.png",
+        "Artifact: art-frame-1204-|evidence: decoded",
+        Some(&inner_human),
+    );
 }
 
 #[test]
