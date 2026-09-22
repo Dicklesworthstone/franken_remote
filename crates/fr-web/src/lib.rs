@@ -9,6 +9,9 @@
 //! - Tab visibility & bfcache authority management (hidden tabs never retain control)
 //! - Asset version handshake verification (detects host updates and forces clean reload)
 
+pub mod audio;
+pub use audio::*;
+
 use serde::{Deserialize, Serialize};
 
 /// Error types returned by web client operations.
