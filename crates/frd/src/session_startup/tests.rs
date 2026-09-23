@@ -256,6 +256,7 @@ fn denied_dropped_and_expired_approval_handles_cannot_authorize_equal_id_replace
         assert!(next.observation_until.is_none());
         next.close();
         let local = Approval {
+            binding: config(true).binding,
             role: Role::Observe,
             state: Arc::downgrade(&Arc::new(AtomicU8::new(WAITING))),
             cx: cx.clone(),
@@ -264,6 +265,7 @@ fn denied_dropped_and_expired_approval_handles_cannot_authorize_equal_id_replace
         assert_eq!(local.decide(true), Err(Error::Closed));
         let state = Arc::new(AtomicU8::new(WAITING));
         let local = Approval {
+            binding: config(true).binding,
             role: Role::Observe,
             state: Arc::downgrade(&state),
             cx: cx.clone(),

@@ -5,7 +5,10 @@
 //! replacement, permission grant or network approval endpoint are provided.
 use super::{Control, Status as SessionStatus};
 use fr_wire::negotiation::Role;
-use frd::session_startup::{Approval, Error as ApprovalError};
+use frd::{
+    session_agent::AgentIdentity,
+    session_startup::{Approval, Error as ApprovalError},
+};
 use std::{
     ffi::{CString, c_char, c_int, c_void},
     fmt,
@@ -33,6 +36,9 @@ unsafe extern "C" {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     WrongSession,
+    AgentUnavailable,
+    RoleMismatch,
+    Closed,
     SessionUnavailable,
     Approval(ApprovalError),
     Busy,
@@ -67,11 +73,15 @@ pub enum Status {
 struct Shared {
     approval: Approval,
     session: Control,
+    agent: Option<AgentIdentity>,
     status: Mutex<Status>,
     window: AtomicU32,
 }
 impl Shared {
     fn check(&self) -> Result<(), Error> {
+        if self.agent.as_ref().is_some_and(AgentIdentity::is_revoked) {
+            return Err(Error::AgentUnavailable);
+        }
         if self.session.status() != SessionStatus::Active {
             return Err(Error::SessionUnavailable);
         }
@@ -172,7 +182,17 @@ impl Prompt {
     /// Role text comes from the original Approval, not the notification argument.
     /// Rejected prompts deny only their supplied original request.
     pub fn start(session: Control, approval: Approval) -> Result<Self, Error> {
+        Self::start_scoped(session, approval, None)
+    }
+    fn start_scoped(
+        session: Control,
+        approval: Approval,
+        agent: Option<AgentIdentity>,
+    ) -> Result<Self, Error> {
         let mut denial = Denial(Some(approval.clone()));
+        if agent.as_ref().is_some_and(AgentIdentity::is_revoked) {
+            return Err(Error::AgentUnavailable);
+        }
         let display = &session.0.selection.display;
         if !session.matches_local_x11(display) || !local_display(display) {
             return Err(Error::WrongSession);
@@ -189,6 +209,7 @@ impl Prompt {
         let control = PromptControl(Arc::new(Shared {
             approval,
             session,
+            agent,
             status: Mutex::new(Status::Opening),
             window: AtomicU32::new(0),
         }));
@@ -353,3 +374,6 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
 
 #[cfg(test)]
 mod tests;
+
+mod ui;
+pub use ui::ApprovalUi;

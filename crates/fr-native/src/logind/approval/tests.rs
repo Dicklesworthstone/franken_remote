@@ -19,17 +19,17 @@ use frd::{
 use std::net::SocketAddr;
 #[allow(dead_code)]
 #[path = "../../../../frd/tests/native_host_accept/fixture.rs"]
-mod fixture;
+pub(super) mod fixture;
 #[allow(dead_code)]
 #[path = "../../../../fr-transport/tests/support/mod.rs"]
-mod network;
+pub(super) mod network;
 
-async fn until(cx: &Cx, ready: impl Fn() -> bool) {
+pub(super) async fn until(cx: &Cx, ready: impl Fn() -> bool) {
     while !ready() {
         sleep(cx.now(), Duration::from_millis(2)).await;
     }
 }
-async fn interaction(cx: &Cx, display: &str, window: u32, op: &str) {
+pub(super) async fn interaction(cx: &Cx, display: &str, window: u32, op: &str) {
     let mut child = std::process::Command::new("python3")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),

@@ -33,6 +33,35 @@ After a successful one-use decision, closing its UI cannot undo that decision:
 the original session's ongoing policy, logind, input and source guards remain
 responsible for active-session revocation.
 
+## Owning the existing notification callback
+
+`logind::approval::ApprovalUi::new(control, &agent)` binds one reusable notification
+slot to the exact original `SessionAgent`. Construct it before moving that agent
+into its independent native desktop `Driver`; pass `ui.callback()` to `Host::open`,
+`Incoming::serve_host`, or `Driver::serve_on_linux`. The closure satisfies the
+existing `Send + 'static` notification contract, but retains only a weak UI handle.
+Keep the UI owner, original logind Watch/Events, and sharing indicator separately;
+notification success still means only that a prompt was started.
+
+The original approval now exposes its immutable local `ControlBinding` as well
+as its negotiated role. The adapter rejects a mismatched notification role or
+OS-session binding before opening a window. Its opaque weak agent identity and
+original-agent revoke registration prevent an equal-numbered replacement agent
+from inheriting pending consent. Original-agent loss or revocation denies pending
+and future requests without revoking a different replacement agent. Dropping the
+UI makes its escaped callbacks refuse, rather than keeping a native owner alive.
+
+There is one slot and no queue. While a prompt is pending **or its native cleanup
+receipt remains uncollected**, another request is denied instead of reusing the
+old decision. Call `ui.collect()` on the local event/maintenance path; it never
+waits for a running foreign call and returns the original retirement outcome once.
+Keep that outcome in the caller's bounded status/receipt owner. A successful
+collection frees the slot for a fresh request, not a resumed old request.
+`ui.stop()` permanently denies pending/future requests while leaving native
+cleanup collectable. It does not retroactively undo already committed consent;
+active-session policy, source/input authority and logind event handling remain
+mandatory independent services.
+
 The focused tests use real UDP/TLS, Host/Viewer negotiation, credential-checked
 Unix HTTP, a private real D-Bus daemon, Xvfb, XCB and independent XTest/Xlib events.
 Tailnet metadata, login1 service data and user actions are explicit fixtures.

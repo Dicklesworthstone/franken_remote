@@ -151,6 +151,7 @@ impl Configuration {
 /// to another owner with equal numeric IDs. There is no network approval RPC.
 #[derive(Clone)]
 pub struct Approval {
+    binding: ControlBinding,
     role: Role,
     state: Weak<AtomicU8>,
     cx: Cx,
@@ -162,6 +163,10 @@ impl fmt::Debug for Approval {
     }
 }
 impl Approval {
+    /// Locally allocated original destination; inspecting it is not authority.
+    pub const fn binding(&self) -> ControlBinding {
+        self.binding
+    }
     /// The original negotiated intent, not a UI-supplied label. Neither role
     /// inspection nor pending-state inspection grants observation or control.
     pub const fn role(&self) -> Role {
@@ -401,6 +406,7 @@ impl Host {
     pub fn approval(&self) -> Option<Approval> {
         (self.phase == Phase::Approval && self.approval.load(Ordering::Acquire) == WAITING).then(
             || Approval {
+                binding: self.config.binding,
                 role: self.role,
                 state: Arc::downgrade(&self.approval),
                 cx: self.cx.clone(),
