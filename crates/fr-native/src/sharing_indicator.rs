@@ -66,6 +66,8 @@ pub enum Error {
     InvalidDisplay,
     AuthorityEnded,
     ThreadUnavailable,
+    /// The original indicator/source lifetime stopped while awaiting mapping.
+    Stopped(StopReason),
 }
 struct Shared {
     observation: ObservationControl,
@@ -330,3 +332,5 @@ impl frd::local_sharing::Surface for SharingIndicator {
         SharingIndicator::finish(self).is_some()
     }
 }
+
+mod mapping;
