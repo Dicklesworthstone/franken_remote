@@ -4,14 +4,7 @@ use super::{Host, Request, Server};
 use asupersync::{cx::Cx, types::CancelKind};
 use fr_tailnet::ingress;
 use fr_transport::native_accept::{self, Listener};
-use std::{
-    fmt,
-    future::Future,
-    net::SocketAddr,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll},
-};
+use std::{fmt, future::Future, net::SocketAddr, sync::Arc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -138,13 +131,13 @@ impl LinuxServer {
             .supervise(async move { initial?.await.map_err(Error::Host) });
         let serving = Serving {
             session: session.clone(),
-            inner: Box::pin(async move {
+            inner: Some(Box::pin(async move {
                 if let Some(error) = refusal {
                     drop(operation);
                     return Err(error);
                 }
                 operation.await.map_err(Error::Ingress)?
-            }),
+            })),
         };
         creation_fence.1 = true;
         serving
@@ -165,122 +158,7 @@ impl Drop for LinuxServer {
         self.close();
     }
 }
-// An ingress failure may finish before the nested native future is dropped.
-// Fence immediately even when the caller retains the completed/failed future.
-struct Serving<F> {
-    session: Cx,
-    inner: Pin<Box<F>>,
-}
-impl<T, F: Future<Output = Result<T, Error>>> Future for Serving<F> {
-    type Output = Result<T, Error>;
-    fn poll(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        let mut panic_fence = super::PanicFence(&this.session, false);
-        let result = this.inner.as_mut().poll(task);
-        if result.is_ready() {
-            this.session.cancel_fast(CancelKind::User);
-        }
-        panic_fence.1 = true;
-        result
-    }
-}
-impl<F> Drop for Serving<F> {
-    fn drop(&mut self) {
-        self.session.cancel_fast(CancelKind::User);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use asupersync::{runtime::RuntimeBuilder, types::Budget};
-    use std::future::poll_fn;
-
-    fn run(test: impl FnOnce(Cx, Cx)) {
-        let rt = RuntimeBuilder::current_thread()
-            .enable_platform_reactor(true)
-            .build()
-            .unwrap();
-        let broker = rt
-            .handle()
-            .try_request_cx_with_budget(Budget::INFINITE)
-            .unwrap();
-        let session = rt
-            .handle()
-            .try_request_cx_with_budget(Budget::INFINITE)
-            .unwrap();
-        rt.block_on(async {
-            test(broker, session);
-        });
-    }
-    #[test]
-    fn unpolled_protected_service_drop_fences_only_its_session() {
-        run(|broker, session| {
-            drop(Serving {
-                session: session.clone(),
-                inner: Box::pin(std::future::pending::<Result<(), Error>>()),
-            });
-            assert!(session.is_cancel_requested());
-            assert!(!broker.is_cancel_requested());
-        });
-    }
-    #[test]
-    fn ingress_failure_fences_while_completed_future_is_retained() {
-        run(|broker, session| {
-            let failure = Error::Ingress(ingress::Error::FirewallMismatch);
-            let mut serving = Box::pin(Serving {
-                session: session.clone(),
-                inner: Box::pin(std::future::ready(Err::<(), _>(failure))),
-            });
-            let wake = std::task::Waker::noop();
-            assert_eq!(
-                serving.as_mut().poll(&mut Context::from_waker(wake)),
-                Poll::Ready(Err(failure))
-            );
-            assert!(session.is_cancel_requested());
-            assert!(!broker.is_cancel_requested());
-            drop(serving);
-        });
-    }
-    #[test]
-    fn completion_keeps_the_actual_application_result_and_fences() {
-        run(|broker, session| {
-            let mut serving = Box::pin(Serving {
-                session: session.clone(),
-                inner: Box::pin(std::future::ready(Ok(17))),
-            });
-            assert_eq!(
-                serving
-                    .as_mut()
-                    .poll(&mut Context::from_waker(std::task::Waker::noop())),
-                Poll::Ready(Ok(17))
-            );
-            assert!(session.is_cancel_requested());
-            assert!(!broker.is_cancel_requested());
-        });
-    }
-    #[test]
-    fn caught_protected_application_panic_does_not_retain_authority() {
-        run(|broker, session| {
-            let mut serving = Box::pin(Serving {
-                session: session.clone(),
-                inner: Box::pin(poll_fn(|_| -> Poll<Result<(), Error>> {
-                    panic!("application fixture")
-                })),
-            });
-            assert!(
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    serving
-                        .as_mut()
-                        .poll(&mut Context::from_waker(std::task::Waker::noop()))
-                }))
-                .is_err()
-            );
-            assert!(session.is_cancel_requested());
-            assert!(!broker.is_cancel_requested());
-            drop(serving);
-        });
-    }
-}
+mod service;
+use service::Serving;
 
 mod persistent;

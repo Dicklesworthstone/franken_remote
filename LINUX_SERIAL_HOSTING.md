@@ -36,6 +36,14 @@ succeeds. Cleanup refuses `InUse` while any handed-off original transport retain
 an ingress lease. An uncertain cleanup leaves a restrictive rule, not an asserted
 successful teardown. Neither source cleanup nor credential cleanup is implied.
 
+Both single-peer and persistent services eagerly destroy pending native work
+once they return a result, after fencing the dedicated hosting context. Retaining
+that completed future does not retain its operation or pending ingress leases.
+The same ordering holds for an unpolled drop and a caught application panic.
+Polling an already spent service refuses rather than polling original work again.
+An escaped transport is still independently owned and continues to prevent rule
+removal; eager local retirement does not assert that every external owner is gone.
+
 ## Focused lifecycle verification
 
 Build the integration test with the repository's pinned compiler:

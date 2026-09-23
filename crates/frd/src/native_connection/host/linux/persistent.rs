@@ -70,7 +70,7 @@ impl LinuxServer {
         drop(fence);
         Serving {
             session: supervisor,
-            inner,
+            inner: Some(inner),
         }
     }
 }
