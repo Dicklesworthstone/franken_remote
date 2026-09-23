@@ -5,7 +5,10 @@
 mod shared;
 pub use shared::SharedObserver;
 
-use crate::session_startup::{Configuration, Host};
+use crate::{
+    host_policy::{self, live},
+    session_startup::{Configuration, Host},
+};
 use asupersync::{cx::Cx, net::quic_core::ConnectionId, types::CancelKind};
 use fr_tailnet::{
     Admission, ConnectionAddresses, GrantPolicy, LocalApi, NativeServerIdentity, NodeIdentity,
@@ -26,6 +29,7 @@ use std::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     IngressUnavailable,
+    Policy(live::Error),
     Cancelled,
     Clock,
     Tailnet(fr_tailnet::Error),
@@ -61,6 +65,7 @@ type Check = Arc<dyn Fn() -> Result<(), Error> + Send + Sync>;
 pub struct Server {
     api: LocalApi,
     identity: NativeServerIdentity,
+    live_policy: Option<live::Handle>,
 }
 impl fmt::Debug for Server {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -74,7 +79,28 @@ struct Factory {
 }
 impl Server {
     pub fn new(api: LocalApi, identity: NativeServerIdentity) -> Self {
-        Self { api, identity }
+        Self {
+            api,
+            identity,
+            live_policy: None,
+        }
+    }
+
+    /// Opt in to the original local file monitor. Its observed policy overrides
+    /// each Request's sharing scope and approval flag; other request budgets and
+    /// identities stay unchanged. The caller retains Watch and observes its disk
+    /// cleanup independently. No fallback to request flags is allowed if policy
+    /// evidence is opening, stale, malformed, rolled back, stopped or dropped.
+    ///
+    /// Each acceptance snapshots one epoch at CALL time. Any observed newer
+    /// revision ends pending and active connections; only a NEW acceptance can
+    /// use new values. This does not approve a viewer, change tailnet grants or
+    /// replace the independent credentials/OS-source owners. Existing callers
+    /// without this explicit opt-in retain their startup-selected policy.
+    #[must_use]
+    pub fn with_live_policy(mut self, policy: live::Handle) -> Self {
+        self.live_policy = Some(policy);
+        self
     }
 
     /// Accept a cold native client, perform fresh exact-endpoint membership
@@ -98,7 +124,7 @@ impl Server {
         &'a mut self,
         cx: &'a Cx,
         listener: Listener,
-        request: Request,
+        mut request: Request,
         ingress: IngressCheck,
         application: A,
     ) -> impl Future<Output = Result<T, Error>> + 'a
@@ -110,8 +136,31 @@ impl Server {
         let address = listener.local_addr();
         let identity = self.identity.clone();
         let clock = cx.clone();
+        // Snapshot policy before returning the acceptance future. A delayed
+        // first poll must not acquire a replacement epoch after local revocation.
+        let policy = self
+            .live_policy
+            .as_ref()
+            .map(live::Handle::lease)
+            .transpose()
+            .map_err(Error::Policy)
+            .and_then(|lease| {
+                if let Some(lease) = &lease {
+                    let value = lease.check().map_err(Error::Policy)?;
+                    request.admission.scope = match value.sharing_scope {
+                        host_policy::Sharing::OwnUser => fr_tailnet::Scope::OwnUser,
+                        host_policy::Sharing::Tailnet => fr_tailnet::Scope::Tailnet,
+                    };
+                    request.session.require_approval =
+                        value.approval_mode == host_policy::Approval::Local;
+                }
+                Ok(lease)
+            });
         let check: Check = Arc::new(move || {
             clock.checkpoint().map_err(|_| Error::Cancelled)?;
+            if let Some(lease) = policy.as_ref().map_err(|error| *error)? {
+                lease.check().map_err(Error::Policy)?;
+            }
             if !ingress(address) {
                 return Err(Error::IngressUnavailable);
             }
