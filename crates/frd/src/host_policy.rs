@@ -1,9 +1,10 @@
 //! Local, durable approval/sharing configuration, not a remote administration API.
 //!
-//! A saved policy applies at the NEXT daemon start. Reading or writing this file
-//! does not authenticate a peer, approve an individual session, or revoke a live
-//! grant. Callers must not describe a successful save as a live policy change.
+//! A saved policy applies at the NEXT daemon start unless the host explicitly
+//! opts into `live::Watch`. Saving does not prove that a running host applied it.
+//! Neither path authenticates a peer or approves an individual session.
 //! Filesystem work belongs on the local CLI or an owned disk worker, not a reactor.
+pub mod live;
 pub mod options;
 mod store;
 pub use store::{Change, Saved, Store};
