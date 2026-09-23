@@ -1,4 +1,5 @@
 #![cfg(target_os = "linux")]
+#![recursion_limit = "256"]
 //! Real native TLS/UDP/Host, policy store and bounded subprocess supervision.
 //! Privileged interface/firewall evidence and `LocalAPI` metadata are SYNTHETIC.
 //! Run via `scripts/test_linux_serial_lifecycle.sh` in its fresh mount/net namespace.
@@ -625,3 +626,6 @@ async fn retire_watch(cx: &Cx, mut watch: live::Watch) {
         sleep(cx.now(), Duration::from_millis(5)).await;
     }
 }
+
+#[path = "native_host_linux_serial/desktop.rs"]
+mod desktop;

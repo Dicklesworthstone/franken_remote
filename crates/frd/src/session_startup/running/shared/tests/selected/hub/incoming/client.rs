@@ -15,7 +15,7 @@ pub(super) struct Client {
 }
 impl Client {
     pub async fn start(c: Cx, viewer: Viewer) -> Box<Self> {
-        Self::start_when(c, viewer, || true).await
+        Box::pin(Self::start_when(c, viewer, || true)).await
     }
     // Delay the display request without starting/restarting its independent
     // deadline. Keep the original observation session renewing during setup.

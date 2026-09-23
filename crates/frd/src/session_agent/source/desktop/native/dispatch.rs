@@ -478,3 +478,6 @@ impl Drop for Peer {
         self.cx.cancel_fast(CancelKind::User);
     }
 }
+
+mod linux;
+pub use linux::{Completion, FinishedFirst};
