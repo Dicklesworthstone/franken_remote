@@ -337,3 +337,71 @@ fn native_dispatch_rejects_foreign_os_session_without_consuming_cold_slot() {
         assert!(h.is_cancel_requested());
     });
 }
+
+#[test]
+fn incoming_dispatch_awaits_local_source_setup_on_the_independent_driver() {
+    let rt = support::runtime();
+    rt.block_on(Box::pin(async {
+        let (incoming, mut driver, independent) = pair(&rt);
+        let Fresh {
+            c, h, host, viewer, ..
+        } = *fresh(&rt, 13, false, Role::Observe, Duration::from_secs(3)).await;
+        let connection = incoming
+            .serve_host(host, |_, _| panic!("unattended"))
+            .unwrap();
+        let (setup, source, mut retirement, trace) = preparation::setup(&rt, "normal");
+        let ready = Arc::new(AtomicBool::new(false));
+        let prepared = ready.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let local_stop = stop.clone();
+        let clock = independent.clone();
+        let mut operation = Box::pin(driver.serve_async(
+            move || async move {
+                assert!(!trace.exists(), "no worker before async setup");
+                asupersync::time::sleep(clock.now(), Duration::from_millis(50)).await;
+                assert!(!trace.exists(), "setup wait must not launch native work");
+                prepared.store(true, Ordering::Release);
+                Ok(setup)
+            },
+            preparation::choose,
+            move |_, _| {
+                Ok(if local_stop.load(Ordering::Acquire) {
+                    LocalAction::Stop
+                } else {
+                    LocalAction::Continue
+                })
+            },
+        ));
+        is_send(&operation);
+        let mut client = Box::pin(async {
+            let mut first = Box::pin(Client::start(c, viewer)).await;
+            first.ready().await;
+            assert!(ready.load(Ordering::Acquire));
+            assert!(!first.frames.is_empty());
+            assert!(!independent.is_cancel_requested());
+            assert!(!h.is_cancel_requested());
+            stop.store(true, Ordering::Release);
+            std::future::pending::<()>().await;
+            drop(connection);
+        });
+        let result = poll_fn(|task| {
+            if let Poll::Ready(result) = operation.as_mut().poll(task) {
+                return Poll::Ready(result);
+            }
+            assert!(client.as_mut().poll(task).is_pending());
+            Poll::Pending
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.viewers.admitted, 1);
+        assert!(source.check().is_err());
+        drop(client);
+        drop(operation);
+        assert!(
+            !independent.is_cancel_requested(),
+            "local source stop must not cancel its independent runtime context"
+        );
+        assert!(h.is_cancel_requested());
+        reap_driver(&mut driver, &mut retirement).await;
+    }));
+}

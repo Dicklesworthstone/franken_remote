@@ -236,6 +236,25 @@ impl Driver {
         S: FnOnce(&Catalog) -> Result<(Select, Configuration), ()> + Send + 'a,
         L: FnMut(&mut SessionAgent, &mut Context<'_>) -> Result<LocalAction, ()> + Send + 'a,
     {
+        self.serve_async(move || std::future::ready(factory()), select, local)
+    }
+
+    /// Async source factory variant of serve. Native initialization may wait
+    /// without blocking the reactor or moving source ownership into the first
+    /// peer's scope. Consent, deadlines, renewals and local events are unchanged.
+    #[allow(clippy::too_many_lines)]
+    pub fn serve_async<'a, F, P, S, L>(
+        &'a mut self,
+        factory: F,
+        select: S,
+        local: L,
+    ) -> impl Future<Output = Result<Report, Error>> + Send + 'a
+    where
+        F: FnOnce() -> P + Send + 'a,
+        P: Future<Output = Result<Setup, ()>> + Send + 'a,
+        S: FnOnce(&Catalog) -> Result<(Select, Configuration), ()> + Send + 'a,
+        L: FnMut(&mut SessionAgent, &mut Context<'_>) -> Result<LocalAction, ()> + Send + 'a,
+    {
         let initial = self.first.take();
         let shared = self.shared.clone();
         let lifetime = self.cx.clone();
@@ -312,7 +331,7 @@ impl Driver {
                 } = first;
                 let desktop = this
                     .agent
-                    .open_native_shared_desktop(
+                    .open_native_shared_desktop_async(
                         host,
                         factory,
                         select,

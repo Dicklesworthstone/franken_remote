@@ -90,6 +90,46 @@ impl SessionAgent {
     #[allow(clippy::too_many_arguments)]
     pub fn open_native_shared_desktop<'a, F, S, N, L>(
         &'a mut self,
+        first: Host,
+        factory: F,
+        select: S,
+        policy: Policy,
+        entropy: Entropy,
+        notify: N,
+        local: L,
+    ) -> Result<
+        impl Future<Output = Result<NativeDesktop, Error>> + Send + use<'a, F, S, N, L>,
+        Error,
+    >
+    where
+        F: FnOnce() -> Result<Setup, ()> + Send + 'a,
+        S: FnOnce(&Catalog) -> Result<(Select, Configuration), ()> + Send + 'a,
+        N: FnMut(Approval, Role) -> Result<(), ()> + Send + 'a,
+        L: FnMut(&mut SessionAgent, &mut Context<'_>) -> Result<LocalAction, ()> + Send + 'a,
+    {
+        self.open_native_shared_desktop_async(
+            first,
+            move || std::future::ready(factory()),
+            select,
+            policy,
+            entropy,
+            notify,
+            local,
+        )
+    }
+
+    /// Await local source setup without blocking connection renewal or local
+    /// permission events. The factory is invoked only after consent, the original
+    /// `BindingAccepted` and positive media negotiation. Its wait consumes the
+    /// ORIGINAL Host deadline; there is no new startup or authority budget.
+    ///
+    /// The factory must own/fence any work it starts and retain native cleanup
+    /// receipts. Dropping a pending factory is not proof of foreign-worker exit.
+    /// Canonical source preparation takes ownership only after reservation; a
+    /// foreign registered source must not be revoked by a rejected handoff.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub fn open_native_shared_desktop_async<'a, F, P, S, N, L>(
+        &'a mut self,
         mut first: Host,
         factory: F,
         select: S,
@@ -98,11 +138,12 @@ impl SessionAgent {
         notify: N,
         mut local: L,
     ) -> Result<
-        impl Future<Output = Result<NativeDesktop, Error>> + Send + use<'a, F, S, N, L>,
+        impl Future<Output = Result<NativeDesktop, Error>> + Send + use<'a, F, P, S, N, L>,
         Error,
     >
     where
-        F: FnOnce() -> Result<Setup, ()> + Send + 'a,
+        F: FnOnce() -> P + Send + 'a,
+        P: Future<Output = Result<Setup, ()>> + Send + 'a,
         S: FnOnce(&Catalog) -> Result<(Select, Configuration), ()> + Send + 'a,
         N: FnMut(Approval, Role) -> Result<(), ()> + Send + 'a,
         L: FnMut(&mut SessionAgent, &mut Context<'_>) -> Result<LocalAction, ()> + Send + 'a,
@@ -132,14 +173,13 @@ impl SessionAgent {
             })
             .await?;
             session.require_shared_profile().map_err(Error::Startup)?;
-            let setup = factory().map_err(|()| Error::SourceSetup)?;
             let mut prepared = prepare_during_session(
                 self,
                 &mut session,
                 &deadline,
                 &entropy,
                 &owned,
-                setup,
+                async { factory().await },
                 select,
                 &mut local,
             )
@@ -260,17 +300,18 @@ where
 // checks after native SUCCESS. Never drop/restart that turn just to regain access
 // to the agent: a stalled admission refresh must not suppress local revoke.
 #[allow(clippy::too_many_arguments)]
-async fn prepare_during_session<S, L>(
+async fn prepare_during_session<P, S, L>(
     agent: &mut SessionAgent,
     session: &mut HostSession,
     startup: &Startup,
     entropy: &Entropy,
     owned: &Source,
-    setup: Setup,
+    factory: P,
     select: S,
     local: &mut L,
 ) -> Result<Prepared, Error>
 where
+    P: Future<Output = Result<Setup, ()>> + Send,
     S: FnOnce(&Catalog) -> Result<(Select, Configuration), ()> + Send,
     L: FnMut(&mut SessionAgent, &mut Context<'_>) -> Result<LocalAction, ()> + Send,
 {
@@ -289,12 +330,23 @@ where
         Ok(())
     });
     let prepared = {
-        let control = setup.control.clone();
-        // A refusal cannot revoke a source registered to a different agent.
-        let work = agent
-            .prepare_native_shared_source(setup, select, &mut *local)
-            .map_err(Error::Preparation)?;
-        *owned.lock().map_err(|_| Error::Closed)? = Some(control);
+        let work = async {
+            let mut candidate = local_stage(agent, startup, local, None, entropy, async {
+                factory
+                    .await
+                    .map(|setup| Candidate(Some(setup)))
+                    .map_err(|()| Error::SourceSetup)
+            })
+            .await?;
+            let setup = candidate.0.take().ok_or(Error::Closed)?;
+            let control = setup.control.clone();
+            // Do not take ownership before canonical reservation succeeds.
+            let preparing = agent
+                .prepare_native_shared_source(setup, select, &mut *local)
+                .map_err(Error::Preparation)?;
+            *owned.lock().map_err(|_| Error::Closed)? = Some(control);
+            preparing.await.map_err(Error::Preparation)
+        };
         let mut work = pin!(work);
         let mut previous = startup.check()?;
         poll_fn(|task| {
@@ -306,7 +358,7 @@ where
             match work.as_mut().poll(task) {
                 Poll::Ready(result) => {
                     completed.store(true, Ordering::Release);
-                    Poll::Ready(result.map_err(Error::Preparation))
+                    Poll::Ready(result)
                 }
                 Poll::Pending => {
                     startup.check()?;
@@ -326,6 +378,20 @@ where
         .map_err(Error::Consent)?;
     local_stage(agent, startup, local, Some(&registration), entropy, network).await?;
     Ok(prepared)
+}
+
+// The factory may return a newly authorized source on its final poll after
+// consuming the deadline. Fence a discarded unclaimed result before dropping
+// its launch, but never revoke a source already registered to another owner.
+struct Candidate(Option<Setup>);
+impl Drop for Candidate {
+    fn drop(&mut self) {
+        if let Some(setup) = &self.0
+            && setup.control.reserve_local_preparation().is_ok()
+        {
+            setup.control.revoke();
+        }
+    }
 }
 
 struct Fence(Option<Cx>);

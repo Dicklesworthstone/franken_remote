@@ -14,11 +14,19 @@ pub(super) struct Client {
     pub frames: Vec<u64>,
 }
 impl Client {
-    pub async fn start(c: Cx, mut viewer: Viewer) -> Box<Self> {
+    pub async fn start(c: Cx, viewer: Viewer) -> Box<Self> {
+        Self::start_when(c, viewer, || true).await
+    }
+    // Delay the display request without starting/restarting its independent
+    // deadline. Keep the original observation session renewing during setup.
+    pub async fn start_when(c: Cx, mut viewer: Viewer, ready: impl Fn() -> bool) -> Box<Self> {
         while !viewer.is_complete() {
             viewer.drive(Duration::from_millis(1)).await.unwrap();
         }
         let mut viewer = viewer.finish().unwrap();
+        while !ready() {
+            viewer.drive(Duration::from_millis(1), block).await.unwrap();
+        }
         let selection = viewer.metadata().selection.clone();
         assert_eq!(selection.role, Role::Observe);
         let selected = select(&mut viewer).await;

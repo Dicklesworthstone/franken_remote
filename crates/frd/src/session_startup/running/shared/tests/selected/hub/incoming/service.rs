@@ -241,7 +241,7 @@ fn parked_service_keeps_the_original_startup_deadline_without_polling_the_hub() 
 }
 
 #[cfg(target_os = "linux")]
-#[path = "native.rs"]
+#[path = "native_admission.rs"]
 mod native;
 
 #[path = "native_source.rs"]
