@@ -210,6 +210,10 @@ impl Listener {
     pub fn local_addr(&self) -> SocketAddr {
         self.endpoint.local_addr()
     }
+    /// Original local bounds, retained unchanged by a serial replacement.
+    pub const fn configuration(&self) -> Configuration {
+        self.config
+    }
     /// Discover one candidate and establish TLS with that exact source/CID.
     /// The acquisition deadline starts NOW, not when the future is first polled.
     /// `identity` is called at most once, only after bounded header inspection.

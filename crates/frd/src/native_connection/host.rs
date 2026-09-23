@@ -282,3 +282,5 @@ impl<F> Drop for Scoped<F> {
 
 mod linux;
 pub use linux::{Error as LinuxError, LinuxServer};
+
+pub mod serial;
