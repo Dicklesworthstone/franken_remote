@@ -17,6 +17,7 @@ use std::{
 pub enum Error {
     Ingress(ingress::Error),
     Host(super::Error),
+    Serial(super::serial::Error),
     Spent,
 }
 impl fmt::Display for Error {
@@ -26,10 +27,10 @@ impl fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 
-/// A single-use listener and its separately observed firewall cleanup owner.
+/// An enforced listener and its separately observed firewall cleanup owner.
 /// The broker/credential context must be distinct from the session context used
-/// by run. No implicit rebind, scope widening, retry, or detached work is allowed.
-/// Retain this owner after service ends until stop observes completed cleanup.
+/// by `run` or `serve_serial`. Rebinding occurs only inside explicit serial service.
+/// No scope widening or effect retry occurs. Retain the owner until stop completes.
 pub struct LinuxServer {
     server: Server,
     boundary: ingress::Boundary,
@@ -281,3 +282,5 @@ mod tests {
         });
     }
 }
+
+mod persistent;
