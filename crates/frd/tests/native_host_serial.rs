@@ -574,3 +574,6 @@ fn caught_application_panic_retires_peer_while_failed_service_is_retained() {
         })
     });
 }
+
+#[path = "native_host_serial/live_policy.rs"]
+mod live_policy;

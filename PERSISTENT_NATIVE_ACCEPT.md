@@ -53,3 +53,21 @@ This API does not itself install ingress restrictions, renew host certificates,
 or enable the unfinished `frd run` CLI desktop dispatch path. Linux callers must
 keep the real Boundary alive and supervised across ALL attempts, not manufacture
 an always-true ingress assertion.
+
+## Live policy handover
+
+With `Server::with_live_policy`, a newer observed policy revision still ends the
+original pending or admitted connection. The serial owner reports that exact
+`Policy(Changed)` result, waits for destruction of its original transport, and
+checks that the monitor has a healthy replacement epoch before continuing.
+The next attempt has new identities, the original cooldown, and its own immutable
+policy lease; it never resumes or reauthorizes the old peer. A newly required
+local approval is enforced even when the static request flags say otherwise.
+
+Unavailable, stopped, expired, rolled-back or corrupt policy evidence is terminal,
+not a recoverable edit. Policy health is also checked before request allocation
+and after its callback, before a replacement bind. A completion callback asking
+to continue cannot override monitor failure or retained-transport refusal.
+The handover regressions exercise real Store writes, the bounded policy worker,
+TLS/UDP and Host/Viewer approval with the existing namespace-only identity fixture;
+they do not qualify installed Tailscale or kernel ingress.

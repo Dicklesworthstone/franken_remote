@@ -3,6 +3,7 @@
 //! completed/failed session is never resumed or replayed; the original ingress
 //! restriction and local identity remain requirements across every rebind.
 use super::{Error as HostError, Host, IngressCheck, Request, Server};
+use crate::host_policy::live;
 use asupersync::{
     cx::Cx,
     runtime::RuntimeHandle,
@@ -154,6 +155,7 @@ impl Server {
                 let mut previous = None;
                 loop {
                     inside()?;
+                    policy_available(self.live_policy.as_ref())?;
                     stats.attempts = stats.attempts.checked_add(1).ok_or(Error::Exhausted)?;
                     let request = application.request(stats.attempts)?;
                     request
@@ -173,6 +175,7 @@ impl Server {
                     }
                     previous = Some(ids);
                     inside()?;
+                    policy_available(self.live_policy.as_ref())?;
                     let peer = runtime
                         .try_request_cx_with_budget(cx.budget())
                         .map_err(|_| Error::Runtime)?;
@@ -233,7 +236,16 @@ impl Server {
                     if let Some(error) = failure
                         && !peer_refusal(error)
                     {
-                        return Err(Error::Host(error));
+                        // A healthy replacement policy may admit a NEW attempt,
+                        // never refresh the retired connection's immutable lease.
+                        // The original outcome has already been reported and its
+                        // transport has been destroyed before this decision.
+                        if error != HostError::Policy(live::Error::Changed)
+                            || self.live_policy.is_none()
+                        {
+                            return Err(Error::Host(error));
+                        }
+                        policy_available(self.live_policy.as_ref())?;
                     }
                     if action == Action::Stop {
                         return Ok(stats);
@@ -247,8 +259,19 @@ impl Server {
         }
     }
 }
-// Only unambiguous peer-local failures are recoverable. A changing host identity,
-// failed credential service, unavailable LocalAPI or loss of ingress ends hosting.
+// Observe health only; do not retain a refreshed epoch on an old connection.
+// The canonical accept owner snapshots its own exact lease at call time.
+fn policy_available(policy: Option<&live::Handle>) -> Result<(), Error> {
+    if let Some(policy) = policy {
+        policy
+            .lease()
+            .map_err(|e| Error::Host(HostError::Policy(e)))?;
+    }
+    Ok(())
+}
+// Only these peer-local failures recover without additional evidence. Policy
+// Changed separately requires a healthy new epoch after original retirement.
+// Host identity, credentials, LocalAPI and ingress failures remain terminal.
 fn peer_refusal(error: HostError) -> bool {
     matches!(
         error,
