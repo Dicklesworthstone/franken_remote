@@ -42,6 +42,8 @@ linux-displays = ["linux-media"]
 linux-input = []
 linux-clipboard = []
 linux-session-ui = ["dep:frd", "dep:asupersync"]
+# Original Host consent on one locally selected, logind-guarded X11 desktop.
+linux-local-approval = ["linux-session-ui", "linux-logind"]
 linux-viewer-input = ["dep:frd"]
 linux-viewer-window = ["linux-viewer-input"]
 cli = ["dep:asupersync", "dep:frd", "dep:fr-tailnet", "dep:fr-client"]

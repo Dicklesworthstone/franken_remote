@@ -15,6 +15,8 @@ use std::{
 };
 #[cfg(feature = "linux-session-events")]
 pub mod agent;
+#[cfg(feature = "linux-local-approval")]
+pub mod approval;
 mod bus;
 #[cfg(any(
     feature = "linux-input-agent",

@@ -151,6 +151,7 @@ impl Configuration {
 /// to another owner with equal numeric IDs. There is no network approval RPC.
 #[derive(Clone)]
 pub struct Approval {
+    role: Role,
     state: Weak<AtomicU8>,
     cx: Cx,
     deadline: u64,
@@ -161,11 +162,29 @@ impl fmt::Debug for Approval {
     }
 }
 impl Approval {
-    pub fn decide(&self, allow: bool) -> Result<(), Error> {
+    /// The original negotiated intent, not a UI-supplied label. Neither role
+    /// inspection nor pending-state inspection grants observation or control.
+    pub const fn role(&self) -> Role {
+        self.role
+    }
+    /// Check the original one-use capability without making a decision or
+    /// extending its budget. Native consent UIs use this while no packets arrive.
+    /// A successful check is not a reservation; `decide` rechecks atomically.
+    pub fn check_pending(&self) -> Result<(), Error> {
+        self.pending_state().map(|_| ())
+    }
+    fn pending_state(&self) -> Result<Arc<AtomicU8>, Error> {
         let state = self.state.upgrade().ok_or(Error::Closed)?;
         if now(&self.cx)? >= self.deadline {
             return Err(Error::Expired);
         }
+        if state.load(Ordering::Acquire) != WAITING {
+            return Err(Error::Order);
+        }
+        Ok(state)
+    }
+    pub fn decide(&self, allow: bool) -> Result<(), Error> {
+        let state = self.pending_state()?;
         let decision = if allow { ALLOWED } else { DENIED };
         state
             .compare_exchange(WAITING, decision, Ordering::AcqRel, Ordering::Acquire)
@@ -382,6 +401,7 @@ impl Host {
     pub fn approval(&self) -> Option<Approval> {
         (self.phase == Phase::Approval && self.approval.load(Ordering::Acquire) == WAITING).then(
             || Approval {
+                role: self.role,
                 state: Arc::downgrade(&self.approval),
                 cx: self.cx.clone(),
                 deadline: self.until,

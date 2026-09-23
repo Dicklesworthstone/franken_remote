@@ -15,10 +15,11 @@ struct fr_indicator {
     xcb_font_t font;
     xcb_atom_t protocols, close;
     uint8_t escape, enter, space;
+    uint8_t mode, mapped, allow_pressed;
 };
 /* One returned event accounts for one consumed XCB event, including ignored
  * events. Rust imposes the turn limit and checks authority between events. */
-enum { IGNORE, REDRAW, MAPPED, HIDDEN, LOST, STOP };
+enum { IGNORE, REDRAW, MAPPED, HIDDEN, LOST, STOP, ALLOW };
 static int checked(struct fr_indicator *h, xcb_void_cookie_t cookie) {
     xcb_generic_error_t *e = xcb_request_check(h->c, cookie);
     int ok = !e && !xcb_connection_has_error(h->c);
@@ -68,10 +69,11 @@ static int keys(struct fr_indicator *h) {
     free(r); free(e);
     return h->escape && h->enter && h->space;
 }
-struct fr_indicator *fr_indicator_open(const char *display, uint32_t *window) {
+static struct fr_indicator *open_window(const char *display, uint32_t *window, uint8_t mode) {
     if (!display || !window) return NULL;
     struct fr_indicator *h = calloc(1, sizeof(*h));
     if (!h) return NULL;
+    h->mode = mode;
     int screen = 0;
     h->c = xcb_connect(display, &screen);
     if (!h->c || xcb_connection_has_error(h->c)) goto fail;
@@ -83,7 +85,7 @@ struct fr_indicator *fr_indicator_open(const char *display, uint32_t *window) {
     uint32_t values[] = { it.data->white_pixel,
         XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_STRUCTURE_NOTIFY |
         XCB_EVENT_MASK_VISIBILITY_CHANGE | XCB_EVENT_MASK_BUTTON_PRESS |
-        XCB_EVENT_MASK_KEY_PRESS };
+        XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE };
     if (!checked(h, xcb_create_window_checked(h->c, XCB_COPY_FROM_PARENT,
         h->window, it.data->root, 0, 0, WIDTH, HEIGHT, 2,
         XCB_WINDOW_CLASS_INPUT_OUTPUT, it.data->root_visual,
@@ -99,15 +101,15 @@ struct fr_indicator *fr_indicator_open(const char *display, uint32_t *window) {
     h->close = atom(h, "WM_DELETE_WINDOW");
     xcb_atom_t utf8 = atom(h, "UTF8_STRING");
     xcb_atom_t above = atom(h, "_NET_WM_STATE_ABOVE");
-    const char title[] = "FrankenRemote - Stop sharing";
+    const char *title = mode ? "FrankenRemote - Local approval" : "FrankenRemote - Stop sharing";
     const char class[] = "franken-remote\0FrankenRemote\0";
     uint32_t size[18] = {0};
     size[0] = (1u << 4) | (1u << 5); /* ICCCM PMinSize | PMaxSize */
     size[5] = size[7] = WIDTH; size[6] = size[8] = HEIGHT;
     if (!h->close || !utf8 || !above ||
         !property(h, h->protocols, XCB_ATOM_ATOM, 32, 1, &h->close) ||
-        !property(h, XCB_ATOM_WM_NAME, XCB_ATOM_STRING, 8, sizeof(title)-1, title) ||
-        !property(h, atom(h, "_NET_WM_NAME"), utf8, 8, sizeof(title)-1, title) ||
+        !property(h, XCB_ATOM_WM_NAME, XCB_ATOM_STRING, 8, (uint32_t)strlen(title), title) ||
+        !property(h, atom(h, "_NET_WM_NAME"), utf8, 8, (uint32_t)strlen(title), title) ||
         !property(h, XCB_ATOM_WM_CLASS, XCB_ATOM_STRING, 8, sizeof(class)-1, class) ||
         !property(h, XCB_ATOM_WM_NORMAL_HINTS, XCB_ATOM_WM_SIZE_HINTS, 32, 18, size) ||
         !property(h, atom(h, "_NET_WM_STATE"), XCB_ATOM_ATOM, 32, 1, &above) ||
@@ -116,9 +118,31 @@ struct fr_indicator *fr_indicator_open(const char *display, uint32_t *window) {
 fail:
     fr_indicator_close(h); return NULL;
 }
+struct fr_indicator *fr_indicator_open(const char *display, uint32_t *window) {
+    return open_window(display, window, 0);
+}
+/* Role comes from Rust's original one-use Approval, never a remote UI string. */
+struct fr_indicator *fr_approval_open(const char *display, uint32_t role, uint32_t *window) {
+    if (role > 1) return NULL;
+    return open_window(display, window, (uint8_t)(role + 1));
+}
 int fr_indicator_draw(struct fr_indicator *h) {
     if (!h || xcb_connection_has_error(h->c)) return 0;
     xcb_clear_area(h->c, 0, h->window, 0, 0, WIDTH, HEIGHT);
+    if (h->mode) {
+        const char *lines[] = {
+            h->mode == 1 ? "Verified peer requests desktop viewing" : "Verified peer requests desktop CONTROL",
+            "Only this request; no approval of future peers.",
+            "DENY", h->mode == 1 ? "ALLOW VIEWING" : "ALLOW CONTROL",
+            "Esc / Enter: deny. Click Allow explicitly."};
+        const int16_t x[] = {16, 16, 100, 320, 16}, y[] = {27, 53, 103, 103, 138};
+        xcb_rectangle_t boxes[] = {{16, 73, 216, 46}, {248, 73, 216, 46}};
+        xcb_poly_rectangle(h->c, h->window, h->gc, 2, boxes);
+        for (unsigned i = 0; i < 5; ++i)
+            xcb_image_text_8(h->c, (uint8_t)strlen(lines[i]), h->window, h->gc,
+                             x[i], y[i], lines[i]);
+        return xcb_flush(h->c) > 0;
+    }
     const char *lines[] = {"FrankenRemote sharing is authorized",
         "Closing or hiding this window stops sharing.",
         "STOP SHARING", "Esc / Enter / Space: stop sharing"};
@@ -143,17 +167,23 @@ int fr_indicator_next(struct fr_indicator *h, uint32_t *kind) {
         if (((xcb_expose_event_t *)e)->window == h->window) *kind = REDRAW;
         break;
     case XCB_MAP_NOTIFY:
-        if (!synthetic && ((xcb_map_notify_event_t *)e)->window == h->window) *kind = MAPPED;
+        if (!synthetic && ((xcb_map_notify_event_t *)e)->window == h->window) {
+            h->mapped = 1; *kind = MAPPED;
+        }
         break;
     case XCB_UNMAP_NOTIFY:
-        if (((xcb_unmap_notify_event_t *)e)->window == h->window) *kind = HIDDEN;
+        if (((xcb_unmap_notify_event_t *)e)->window == h->window) {
+            h->mapped = 0; h->allow_pressed = 0; *kind = HIDDEN;
+        }
         break;
     case XCB_DESTROY_NOTIFY:
         if (((xcb_destroy_notify_event_t *)e)->window == h->window) *kind = LOST;
         break;
     case XCB_VISIBILITY_NOTIFY: {
         xcb_visibility_notify_event_t *v = (xcb_visibility_notify_event_t *)e;
-        if (v->window == h->window && v->state != XCB_VISIBILITY_UNOBSCURED) *kind = HIDDEN;
+        if (v->window == h->window && v->state != XCB_VISIBILITY_UNOBSCURED) {
+            h->allow_pressed = 0; *kind = HIDDEN;
+        }
         break;
     }
     case XCB_CONFIGURE_NOTIFY: {
@@ -162,10 +192,27 @@ int fr_indicator_next(struct fr_indicator *h, uint32_t *kind) {
         break;
     }
     case XCB_BUTTON_PRESS: {
+        h->allow_pressed = 0;
         xcb_button_press_event_t *v = (xcb_button_press_event_t *)e;
         if (v->event == h->window && v->detail == 1 && v->same_screen &&
             v->event_x >= 16 && v->event_x < 464 &&
-            v->event_y >= 73 && v->event_y < 119) *kind = STOP;
+            v->event_y >= 73 && v->event_y < 119) {
+            if (!h->mode || v->event_x < 232) *kind = STOP;
+            else if (!synthetic && h->mapped && v->event_x >= 248)
+                h->allow_pressed = 1;
+        } else h->allow_pressed = 0;
+        break;
+    }
+    case XCB_BUTTON_RELEASE: {
+        xcb_button_release_event_t *v = (xcb_button_release_event_t *)e;
+        /* A complete non-SendEvent primary click within Allow, after mapping.
+         * XTest is intentionally indistinguishable from the selected user's
+         * input: the local X server and same-user processes are trust boundaries. */
+        if (h->mode && h->allow_pressed && h->mapped && !synthetic &&
+            v->event == h->window && v->detail == 1 && v->same_screen &&
+            v->event_x >= 248 && v->event_x < 464 &&
+            v->event_y >= 73 && v->event_y < 119) *kind = ALLOW;
+        h->allow_pressed = 0;
         break;
     }
     case XCB_KEY_PRESS: {

@@ -44,13 +44,35 @@ w, op = int(sys.argv[2]), sys.argv[3]
 try:
     root = x.XDefaultRootWindow(d)
     px, py, child = c.c_int(), c.c_int(), W()
-    if op in ("click", "miss", "cover"):
+    if op in ("click", "miss", "cover", "allow", "synthetic-allow", "release-allow", "drag-out"):
         assert x.XTranslateCoordinates(d, w, root, 0, 0, c.byref(px), c.byref(py), c.byref(child))
     if op in ("click", "miss"):
         dx, dy = (50, 95) if op == "click" else (6, 6)
         assert xt.XTestFakeMotionEvent(d, x.XDefaultScreen(d), px.value + dx, py.value + dy, 0)
         assert xt.XTestFakeButtonEvent(d, 1, 1, 0)
         assert xt.XTestFakeButtonEvent(d, 1, 0, 0)
+    elif op in ("allow", "release-allow", "drag-out"):
+        assert xt.XTestFakeMotionEvent(d, x.XDefaultScreen(d), px.value + 350, py.value + 95, 0)
+        if op != "release-allow":
+            assert xt.XTestFakeButtonEvent(d, 1, 1, 0)
+        if op == "drag-out":
+            assert xt.XTestFakeMotionEvent(d, x.XDefaultScreen(d), px.value + 6, py.value + 6, 0)
+        assert xt.XTestFakeButtonEvent(d, 1, 0, 0)
+    elif op == "synthetic-allow":
+        class Button(c.Structure):
+            _fields_ = [("type", c.c_int), ("serial", W), ("send_event", c.c_int),
+                        ("display", D), ("window", W), ("root", W), ("subwindow", W),
+                        ("time", W), ("x", c.c_int), ("y", c.c_int),
+                        ("x_root", c.c_int), ("y_root", c.c_int),
+                        ("state", c.c_uint), ("button", c.c_uint), ("same_screen", c.c_int)]
+        class Event(c.Union):
+            _fields_ = [("button", Button), ("pad", c.c_long * 24)]
+        send = signature(x, "XSendEvent", c.c_int, D, W, c.c_int, c.c_long, c.POINTER(Event))
+        for kind, mask in ((4, 1 << 2), (5, 1 << 3)):
+            event = Event()
+            event.button = Button(kind, 0, 1, d, w, root, 0, 0, 350, 95,
+                                  px.value + 350, py.value + 95, 0, 1, 1)
+            assert send(d, w, 0, mask, c.byref(event))
     elif op == "key":
         key = int(sys.argv[4], 0) if len(sys.argv) > 4 else 0xff1b
         x.XSetInputFocus(d, w, 2, 0)
