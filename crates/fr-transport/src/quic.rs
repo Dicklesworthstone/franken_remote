@@ -214,18 +214,28 @@ impl EmptySendState {
         self.0 == *live
     }
 }
+// A closed set of records staged to native STREAM buffers. New admissions stay
+// in pending_writes until this epoch is proven absent from BOTH native pending
+// and retransmission storage. Continuous traffic cannot pin an acknowledged old
+// deadline forever; no acknowledgement is guessed from queue size or flight.
+struct SendEpoch {
+    bytes: usize,
+    records: usize,
+}
 struct Sender {
     route: StreamRoute,
     empty: EmptySendState,
     bytes: usize,
     records: usize,
     until: Option<u64>,
+    epoch: Option<SendEpoch>,
 }
 struct PendingWrite {
     route: StreamRoute,
     bytes: Bytes,
     offset: usize,
     send_by: u64,
+    in_epoch: bool,
 }
 struct Inbound {
     route: StreamRoute,
@@ -348,6 +358,7 @@ impl QuicRecords {
                     bytes: 0,
                     records: 0,
                     until: None,
+                    epoch: None,
                 });
             } else {
                 // Installing the accepted binding also bounds the native stream
@@ -468,6 +479,7 @@ impl QuicRecords {
             s.bytes = 0;
             s.records = 0;
             s.until = None;
+            s.epoch = None;
         }
     }
     pub fn usage(&self) -> Usage {
@@ -635,6 +647,7 @@ impl QuicRecords {
                     bytes: Bytes::from(storage),
                     offset: 0,
                     send_by: send_by_micros,
+                    in_epoch: false,
                 });
                 let sender = self
                     .senders
@@ -745,10 +758,15 @@ impl QuicRecords {
             self.close();
             return Err(Error::Closed);
         }
-        // Pending bytes alone exclude retransmission copies. Prove actual
-        // stream-buffer absence; total flight includes unrelated ACK/control.
+        // Retire only the CLOSED epoch, not every record admitted to this route.
+        // Waiting records stay counted with their own original deadlines. The
+        // live native stream is never cloned or modified to manufacture absence.
         for sender in &mut self.senders {
-            if !self.pending_writes.iter().any(|p| p.route == sender.route)
+            if sender.epoch.is_some()
+                && !self
+                    .pending_writes
+                    .iter()
+                    .any(|p| p.route == sender.route && p.in_epoch)
                 && native
                     .connection()
                     .inner()
@@ -756,11 +774,15 @@ impl QuicRecords {
                     .stream(sender.route.stream)
                     .is_ok_and(|live| sender.empty.matches(live))
             {
-                // A stalled bulk stream must not hold already acknowledged
-                // control receipts against the critical storage reservation.
-                sender.bytes = 0;
-                sender.records = 0;
-                sender.until = None;
+                let epoch = sender.epoch.take().expect("checked epoch");
+                sender.bytes -= epoch.bytes;
+                sender.records -= epoch.records;
+                sender.until = self
+                    .pending_writes
+                    .iter()
+                    .filter(|p| p.route == sender.route)
+                    .map(|p| p.send_by)
+                    .min();
             }
         }
         Ok(())
@@ -800,6 +822,11 @@ impl QuicRecords {
                 // Preserve bytes and whole-record order WITHIN each stream,
                 // while a flow-blocked stream cannot block another stream.
                 if pending.route.priority != priority
+                    || (!pending.in_epoch
+                        && self
+                            .senders
+                            .iter()
+                            .any(|s| s.route == pending.route && s.epoch.is_some()))
                     || self
                         .pending_writes
                         .iter()
@@ -830,6 +857,26 @@ impl QuicRecords {
         let Some((index, length, priority)) = selected else {
             return Ok(None);
         };
+        let route = self.pending_writes[index].route;
+        let sender = self
+            .senders
+            .iter_mut()
+            .find(|s| s.route == route)
+            .expect("validated outbound route");
+        if sender.epoch.is_none() {
+            // Freeze all records currently queued on this stream before the
+            // first native prefix. Later sends may queue but cannot join it.
+            let mut epoch = SendEpoch {
+                bytes: 0,
+                records: 0,
+            };
+            for pending in self.pending_writes.iter_mut().filter(|p| p.route == route) {
+                pending.in_epoch = true;
+                epoch.bytes += pending.bytes.len();
+                epoch.records += 1;
+            }
+            sender.epoch = Some(epoch);
+        }
         let pending = &mut self.pending_writes[index];
         native
             .connection_mut()

@@ -480,6 +480,7 @@ impl QuicRecords {
             bytes: 0,
             records: 0,
             until: None,
+            epoch: None,
         });
         self.inbound.push(Inbound {
             route: inbound,

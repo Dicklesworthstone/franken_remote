@@ -169,6 +169,7 @@ impl QuicRecords {
                 sender.bytes = 0;
                 sender.records = 0;
                 sender.until = None;
+                sender.epoch = None;
             }
         }
         for receiver in &mut self.inbound {

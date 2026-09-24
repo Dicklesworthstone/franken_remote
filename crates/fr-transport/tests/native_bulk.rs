@@ -375,3 +375,6 @@ fn input_latency_stays_bounded_while_bulk_is_saturated_with_logged_queue_depths(
         assert_eq!(u_final.critical_send_records, 0);
     });
 }
+
+#[path = "native_bulk/epochs.rs"]
+mod epochs;
