@@ -26,7 +26,13 @@ fn rule(addr: SocketAddr) -> Value {
     ]})
 }
 fn valid(value: &Value, addr: SocketAddr) -> Result<(), Error> {
-    validate_rule(&serde_json::to_vec(value).unwrap(), "frd_fixture", addr, 42)
+    validate_rule(
+        &serde_json::to_vec(value).unwrap(),
+        "frd_fixture",
+        addr,
+        42,
+        "tailscale0",
+    )
 }
 #[test]
 fn configuration_refuses_wildcards_and_script_or_path_injection() {
@@ -77,7 +83,8 @@ fn only_exact_ipv4_and_ipv6_readback_is_accepted() {
             ("/nftables/2/chain/policy", json!("drop")),
             ("/nftables/3/rule/expr/0/match/right", json!("100.64.0.3")),
             ("/nftables/3/rule/expr/1/match/right", json!(4711)),
-            ("/nftables/3/rule/expr/2/match/right", json!("tailscale0")),
+            ("/nftables/3/rule/expr/2/match/right", json!("eth0")),
+            ("/nftables/3/rule/expr/2/match/right", json!(43)),
             ("/nftables/3/rule/expr/2/match/op", json!("==")),
             ("/nftables/3/rule/expr/3", json!({"accept":null})),
         ] {
@@ -95,6 +102,29 @@ fn only_exact_ipv4_and_ipv6_readback_is_accepted() {
         }
     }
 }
+/// Captured from nftables 1.1.6 (`nft -j -n list table`) after applying
+/// `install_script` in a scratch network namespace, with the namespace's own
+/// names substituted: the kernel's iif index is printed back as the name.
+#[test]
+fn installed_nftables_prints_the_qualified_interface_by_name() {
+    let real = json!({"nftables":[
+        {"metainfo":{"version":"1.1.6","release_name":"Commodore Bullmoose #7","json_schema_version":1}},
+        {"table":{"family":"inet","name":"frd_fixture","handle":1}},
+        {"chain":{"family":"inet","table":"frd_fixture","name":"input","handle":1,"type":"filter","hook":"input","prio":-310,"policy":"accept"}},
+        {"rule":{"family":"inet","table":"frd_fixture","chain":"input","handle":2,"expr":[
+            {"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":"100.64.0.1"}},
+            {"match":{"op":"==","left":{"payload":{"protocol":"udp","field":"dport"}},"right":4710}},
+            {"match":{"op":"!=","left":{"meta":{"key":"iif"}},"right":"tailscale0"}},
+            {"drop":null}
+        ]}}
+    ]});
+    assert_eq!(valid(&real, address()), Ok(()));
+    let bytes = serde_json::to_vec(&real).unwrap();
+    assert_eq!(
+        validate_rule(&bytes, "frd_fixture", address(), 42, "tailscale1"),
+        Err(Error::FirewallMismatch)
+    );
+}
 #[test]
 fn extra_rules_and_unknown_objects_never_pass_readback() {
     for row in [
@@ -110,7 +140,7 @@ fn extra_rules_and_unknown_objects_never_pass_readback() {
     data["nftables"].as_array_mut().unwrap().pop();
     assert_eq!(valid(&data, address()), Err(Error::FirewallMismatch));
     assert_eq!(
-        validate_rule(b"not json", "frd_fixture", address(), 42),
+        validate_rule(b"not json", "frd_fixture", address(), 42, "tailscale0"),
         Err(Error::FirewallMismatch)
     );
 }

@@ -257,7 +257,16 @@ fn install_script(table: &str, addr: SocketAddr, index: u32) -> String {
         addr.port()
     )
 }
-fn validate_rule(bytes: &[u8], table: &str, addr: SocketAddr, index: u32) -> Result<(), Error> {
+/// nftables stores `meta iif` as an index but prints it back by the interface's
+/// current name (1.1.6 does so even with `-n`), or as the number when it has no
+/// name. Either must identify the interface already qualified by that index.
+fn validate_rule(
+    bytes: &[u8],
+    table: &str,
+    addr: SocketAddr,
+    index: u32,
+    interface: &str,
+) -> Result<(), Error> {
     use serde_json::json;
     let value: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|_| Error::FirewallMismatch)?;
@@ -266,12 +275,15 @@ fn validate_rule(bytes: &[u8], table: &str, addr: SocketAddr, index: u32) -> Res
         .ok_or(Error::FirewallMismatch)?;
     let (mut tables, mut chains, mut rules) = (0, 0, 0);
     let family = if addr.is_ipv4() { "ip" } else { "ip6" };
-    let expected = json!([
-        {"match":{"op":"==","left":{"payload":{"protocol":family,"field":"daddr"}},"right":addr.ip().to_string()}},
-        {"match":{"op":"==","left":{"payload":{"protocol":"udp","field":"dport"}},"right":addr.port()}},
-        {"match":{"op":"!=","left":{"meta":{"key":"iif"}},"right":index}},
-        {"drop":null}
-    ]);
+    let expected = |iif: serde_json::Value| {
+        json!([
+            {"match":{"op":"==","left":{"payload":{"protocol":family,"field":"daddr"}},"right":addr.ip().to_string()}},
+            {"match":{"op":"==","left":{"payload":{"protocol":"udp","field":"dport"}},"right":addr.port()}},
+            {"match":{"op":"!=","left":{"meta":{"key":"iif"}},"right":iif}},
+            {"drop":null}
+        ])
+    };
+    let (by_index, by_name) = (expected(json!(index)), expected(json!(interface)));
     for row in rows {
         if let Some(t) = row.get("table") {
             tables += 1;
@@ -299,7 +311,7 @@ fn validate_rule(bytes: &[u8], table: &str, addr: SocketAddr, index: u32) -> Res
             if r["family"] != "inet"
                 || r["table"] != table
                 || r["chain"] != "input"
-                || r["expr"] != expected
+                || (r["expr"] != by_index && r["expr"] != by_name)
             {
                 return Err(Error::FirewallMismatch);
             }
@@ -320,7 +332,7 @@ async fn read_rule(cx: &Cx, config: &Configuration, table: &str, index: u32) -> 
         b"",
     )
     .await?;
-    validate_rule(&bytes, table, config.address, index)
+    validate_rule(&bytes, table, config.address, index, &config.interface)
 }
 async fn residue_budget(cx: &Cx, config: &Configuration) -> Result<(), Error> {
     let bytes = command(cx, &config.nft, &["-j", "list", "tables", "inet"], b"").await?;
