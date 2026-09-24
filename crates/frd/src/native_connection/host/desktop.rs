@@ -19,6 +19,10 @@ use fr_wire::{
 use std::{
     future::Future,
     pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll},
 };
 
@@ -33,7 +37,8 @@ pub type PeerResult = Result<Result<(), dispatch::Error>, super::Error>;
 ///
 /// `completed` receives each result the listener actually obtained, before its
 /// transport-retirement wait. It cannot override fatal identity/ingress failures.
-/// It is not invoked with a fabricated result when the whole share is abandoned.
+/// A terminal desktop permits one final nonblocking poll of an admitted peer,
+/// with new requests fenced. Abandonment never fabricates a completion result.
 pub struct Connections<R, N, C> {
     pub request: R,
     pub approval: N,
@@ -50,8 +55,17 @@ pub enum End {
     Cancelled,
 }
 
+// Track only the original admitted application's completion, not a new task or
+// authority. A source can finish before its pending peer is polled one last time.
+#[derive(Default)]
+struct Completion {
+    active: AtomicBool,
+    ending: AtomicBool,
+}
+
 struct Application<R, N, C> {
     incoming: dispatch::Incoming,
+    completion: Arc<Completion>,
     callbacks: Connections<R, N, C>,
 }
 impl<R, N, C> serial::Application for Application<R, N, C>
@@ -62,9 +76,13 @@ where
 {
     type Output = Result<(), dispatch::Error>;
     fn request(&mut self, attempt: u64) -> Result<Request, serial::Error> {
+        if self.completion.ending.load(Ordering::Acquire) {
+            return Err(serial::Error::Cancelled);
+        }
         (self.callbacks.request)(attempt)
     }
     fn serve(&mut self, host: Host) -> impl Future<Output = Self::Output> {
+        self.completion.active.store(true, Ordering::Release);
         // Reserve the original dispatcher slot synchronously, before returning.
         // No unbounded channel, independent permission, transport or task.
         let peer = self
@@ -77,7 +95,13 @@ where
         stats: serial::Statistics,
         result: PeerResult,
     ) -> Result<serial::Action, serial::Error> {
-        (self.callbacks.completed)(stats, result)
+        self.completion.active.store(false, Ordering::Release);
+        let action = (self.callbacks.completed)(stats, result)?;
+        Ok(if self.completion.ending.load(Ordering::Acquire) {
+            serial::Action::Stop
+        } else {
+            action
+        })
     }
 }
 
@@ -130,8 +154,10 @@ impl LinuxServer {
             supervisor: supervisor.clone(),
         };
         let desktop = driver.serve_async(factory, select, local);
+        let completion = Arc::new(Completion::default());
         let mut application = Application {
             incoming,
+            completion: completion.clone(),
             callbacks: connections,
         };
         // Own the unused listener even before serial acceptance is polled.
@@ -146,6 +172,7 @@ impl LinuxServer {
         };
         Run {
             fence,
+            completion,
             desktop: Some(Box::pin(desktop)),
             listener: Some(Box::pin(listener)),
             result: None,
@@ -178,12 +205,14 @@ impl Drop for Fence {
 }
 struct Run<D, N> {
     fence: Fence,
+    completion: Arc<Completion>,
     desktop: Option<Pin<Box<D>>>,
     listener: Option<Pin<Box<N>>>,
     result: Option<End>,
 }
 impl<D, N> Run<D, N> {
     fn stop(&mut self) {
+        self.completion.ending.store(true, Ordering::Release);
         self.fence.stop();
         // Release the desktop's hub-owned transport before listener cleanup.
         drop(self.desktop.take());
@@ -214,7 +243,32 @@ where
                 .as_mut()
                 .poll(task)
             {
-                Poll::Ready(result) => Poll::Ready(End::Desktop(result)),
+                Poll::Ready(result) => {
+                    // The original Driver has already fenced the source/peer.
+                    // Collect a ready authentic peer result before destroying
+                    // its future. Never poll idle acceptance, wait past this
+                    // turn, renew a deadline, or allow completed(Continue) to
+                    // open another connection into a terminal desktop.
+                    this.completion.ending.store(true, Ordering::Release);
+                    let end = if this.completion.active.load(Ordering::Acquire)
+                        && let Poll::Ready(Err(error)) = this
+                            .listener
+                            .as_mut()
+                            .expect("active listener")
+                            .as_mut()
+                            .poll(task)
+                        && !matches!(
+                            error,
+                            LinuxError::Serial(serial::Error::Host(super::Error::Cancelled))
+                        ) {
+                        // The peer cancellation is induced by source teardown;
+                        // independent identity/ingress/retirement errors are not.
+                        End::Listener(Err(error))
+                    } else {
+                        End::Desktop(result)
+                    };
+                    Poll::Ready(end)
+                }
                 Poll::Pending => this
                     .listener
                     .as_mut()

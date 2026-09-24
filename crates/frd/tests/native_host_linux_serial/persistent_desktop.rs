@@ -656,6 +656,8 @@ fn peer_refusal_keeps_cold_desktop_available_for_next_authorized_client() {
         let notices = Arc::new(Mutex::new(None));
         let refused = Arc::new(AtomicBool::new(false));
         let recorded = refused.clone();
+        let finished = Arc::new(AtomicBool::new(false));
+        let completed = finished.clone();
         let requests = Arc::new(AtomicU64::new(0));
         let counted = requests.clone();
         let factories = Arc::new(AtomicU64::new(0));
@@ -675,12 +677,15 @@ fn peer_refusal_keeps_cold_desktop_available_for_next_authorized_client() {
                 },
                 approval: connections.approval,
                 completed: move |stats: serial::Statistics, outcome: frd::native_connection::host::desktop::PeerResult| {
-                    assert_eq!(stats.attempts, 1);
-                    assert_eq!(
-                        outcome,
-                        Err(HostError::Tailnet(fr_tailnet::Error::ScopeDenied))
-                    );
-                    recorded.store(true, Ordering::Release);
+                    if stats.attempts == 1 {
+                        assert_eq!(outcome, Err(HostError::Tailnet(fr_tailnet::Error::ScopeDenied)));
+                        assert!(!recorded.swap(true, Ordering::AcqRel));
+                    } else {
+                        assert_eq!(stats.attempts, 2);
+                        assert!(recorded.load(Ordering::Acquire));
+                        assert_eq!(outcome, Err(HostError::Cancelled));
+                        assert!(!completed.swap(true, Ordering::AcqRel));
+                    }
                     Ok(serial::Action::Continue)
                 },
             },
@@ -727,9 +732,94 @@ fn peer_refusal_keeps_cold_desktop_available_for_next_authorized_client() {
         assert!(matches!(end, End::Desktop(Ok(_))), "{end:?}");
         assert!(supervisor.is_cancel_requested());
         assert!(!broker.is_cancel_requested());
+        assert!(
+            finished.load(Ordering::Acquire),
+            "report the admitted peer too"
+        );
+        assert_eq!(requests.load(Ordering::Acquire), 2);
         let (control, mut retirement, _) = created.lock().unwrap().take().unwrap();
         assert!(control.check().is_err());
         cleanup(&mut server, &mut driver, &mut retirement, &broker, true).await;
         assert_eq!(tools.state()["created"], 1);
+    });
+}
+
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress"]
+fn departed_cold_observer_reports_completion_without_accepting_another_peer() {
+    run(async |broker, supervisor, client, runtime| {
+        let api = fixture::Api::new();
+        let tools = Tools::new();
+        let mut server = bound(&broker, &api, &tools).await;
+        let source = runtime
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .unwrap();
+        let (setup, control, mut retirement, trace) = setup(source.clone(), "normal");
+        let mut driver = driver(source);
+        let requests = Arc::new(AtomicU64::new(0));
+        let requested = requests.clone();
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        let completed = outcomes.clone();
+        let serving = server.serve_desktop(
+            &mut driver,
+            supervisor.clone(),
+            runtime,
+            serial::Policy::default(),
+            Connections {
+                request: move |n| {
+                    requested.fetch_add(1, Ordering::Relaxed);
+                    request(n)
+                },
+                approval: |notice: Approval, _| notice.decide(true).map_err(|_| ()),
+                completed: move |stats, result| {
+                    completed.lock().unwrap().push((stats, result));
+                    // A terminal desktop must not act on this Continue by
+                    // admitting another peer into its already-closed source.
+                    Ok(serial::Action::Continue)
+                },
+            },
+            move || async move { Ok(setup) },
+            choose,
+            |_, _| Ok(LocalAction::Continue),
+        );
+        let departing = async {
+            let native = fixture::client(&client, address()).await;
+            let mut viewer = Viewer::new(
+                client.clone(),
+                native,
+                offer(),
+                quic::Policy::default(),
+                Duration::from_secs(3),
+            )
+            .unwrap();
+            while !viewer.is_complete() {
+                viewer.drive(Duration::from_millis(5)).await.unwrap();
+            }
+            let mut session = viewer.finish().unwrap();
+            while !trace.exists() {
+                session
+                    .drive(Duration::from_millis(5), block)
+                    .await
+                    .unwrap();
+            }
+            // Leave after real source launch but before selecting a display.
+            // No fabricated close/renewal and no deadline extension: the host
+            // must observe this peer's original bounded failure itself.
+            session.close();
+        };
+        let (end, ()) = Box::pin(network::both(serving, departing)).await;
+        assert!(matches!(end, End::Desktop(Err(_))), "{end:?}");
+        {
+            let results = outcomes.lock().unwrap();
+            assert_eq!(results.len(), 1, "real peer completion lost: {end:?}");
+            assert!(results[0].1.is_err() || matches!(results[0].1, Ok(Err(_))));
+            assert_eq!(results[0].0.attempts, 1);
+        }
+        assert_eq!(requests.load(Ordering::Acquire), 1);
+        assert!(supervisor.is_cancel_requested());
+        assert!(!broker.is_cancel_requested());
+        assert!(control.check().is_err());
+        cleanup(&mut server, &mut driver, &mut retirement, &broker, true).await;
+        assert_eq!(tools.state()["deleted"], 1);
     });
 }
