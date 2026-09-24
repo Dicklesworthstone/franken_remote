@@ -420,3 +420,55 @@ fn frd_run_keeps_serving_sequential_viewers_and_departing_inspections() {
     assert_eq!(tools.state()["deleted"], 9);
     assert!(UdpSocket::bind(address()).is_ok(), "listener retired");
 }
+
+/// Planted negative for the renewal path: a viewer that stays connected but
+/// stops answering renewal challenges must still lose its observation within
+/// the provisional lease horizon. Departure handling must never make renewal
+/// unconditional.
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress"]
+fn frd_run_expires_a_connected_viewer_that_stops_answering_renewal() {
+    let api = fixture::Api::new();
+    let tools = Tools::new();
+    let (worker, _trace) = super::persistent_desktop::source_script("changing");
+    let options = Options {
+        socket: Some(api.path.clone()),
+        port: address().port(),
+        interface: "fr-fixture".into(),
+        worker,
+        display: ":0".into(),
+        xauthority: None,
+        trust_roots: fixture::pki().join("ca.pem"),
+        sharing: fr_tailnet::Scope::OwnUser,
+        fps: 30,
+        bitrate: 2_000_000,
+        ingress_tools: Some((tools.0.join("nft"), tools.0.join("ip"))),
+        once: false,
+        handle_signals: false,
+    };
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let report: Reporter = Arc::new(move |event| sink.lock().unwrap().push(event));
+    let stop = Arc::new(StopHandle::default());
+    let host_stop = stop.clone();
+    let host = thread::spawn(move || host_run::run(&options, &report, &host_stop));
+    let dump = || format!("{:?}", events.lock().unwrap());
+
+    assert!(wait_count(&events, listening, 1), "{}", dump());
+    // Frames flowed; from here the viewer's session is never driven again.
+    let idle = view(true);
+    let silent_since = Instant::now();
+    assert!(
+        wait_count(&events, peer_finished, 1),
+        "never expired: {}",
+        dump()
+    );
+    let lapsed = silent_since.elapsed();
+    assert!(lapsed < Duration::from_secs(10), "{lapsed:?}: {}", dump());
+    assert_eq!(count(&events, share_ended), 1, "{}", dump());
+    // The daemon listens again for the next viewer.
+    assert!(wait_count(&events, listening, 2), "{}", dump());
+    stop.request();
+    assert_eq!(host.join().unwrap(), Ok(()), "{}", dump());
+    drop(idle);
+}
