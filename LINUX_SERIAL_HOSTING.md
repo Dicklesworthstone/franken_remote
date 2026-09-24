@@ -73,9 +73,9 @@ cancellation, panic and unpolled abandonment without weakening production checks
 `host_run` drives the production `frd run` composition (`crates/frd/src/host_run.rs`)
 with a scripted capture worker: a real viewer receives frames for four seconds past
 the initial authority lease, then stop runs the fixed cleanup order.
-`shipped_client` runs the real `fr displays` binary against it. As of 2026-09-24
-the client side of that test passes; the host side (a departing inspection ends the
-share instead of finishing only that peer) is open as bead `fr-704`.
+`shipped_client` runs the real `fr displays` binary against it, serves sequential
+viewers and departing inspections without counting them as host failures, and
+expires a connected viewer that stops answering renewal.
 
 Actual TUN/nftables behavior still requires the separate
 `qualify_linux_ingress` executable and installed-tailnet testing. These tests do

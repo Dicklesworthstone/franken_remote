@@ -22,8 +22,10 @@
   - the Windows/macOS sandbox claims.
 - CI runs every lane independently. Missing native libraries and two flaky tests
   were fixed.
-- Still open: a departing viewer ends the share (fr-704), remote control
-  (input-agent process), a live tailnet run, and the size gate (272,665 at 0b543db against
+- Later on 2026-09-24: departing viewers are peer outcomes (fr-704 closed);
+  `frd run` started and stopped cleanly on a real tailnet host after the nft
+  readback fix (real nftables prints `meta iif` by name).
+- Still open: remote control (input-agent process), a live two-machine run, and the size gate (272,665 at 0b543db against
   a 250,000 hard stop).
 
 ## Native host publication bootstrap

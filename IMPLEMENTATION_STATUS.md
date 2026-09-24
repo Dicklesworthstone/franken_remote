@@ -14,9 +14,12 @@ tailnet address, installs the firewall ingress rule, admits peers through
 Tailscale WhoIs, launches the capture worker on admission, serves software HEVC
 to native viewers, renews authority and cleans up in a fixed order. This is
 verified by the namespace end-to-end suite (fixture LocalAPI, test CA, synthetic
-firewall; real UDP/TLS/QUIC, processes and media). It has **not** been run on a
-live tailnet, because that would issue the host's first Tailscale HTTPS
-certificate (published in Certificate Transparency logs).
+firewall; real UDP/TLS/QUIC, processes and media), including sequential viewers,
+departing inspections that do not count as host failures, and silent-viewer
+expiry. On a real tailnet host (root, with the owner's consent to issue its first
+Tailscale certificate) it obtained the certificate, installed and verified the
+`tailscale0` firewall rule, listened and stopped cleanly; no live client has
+connected yet (no second machine).
 
 **Fixed during the 2026-09-23/24 audit:**
 - Admission refused every real peer because it required `MachineAuthorized`.
@@ -39,12 +42,10 @@ certificate (published in Certificate Transparency logs).
 The Linux client decoder's seccomp sandbox is real and tested.
 
 **Open, in priority order:**
-- A viewer that leaves during cold start ends the host's share, and
-  `frd run` counts that as a host failure (bead `fr-704`).
+- A live two-machine run: a client on another tailnet node connecting to `frd run`.
 - Remote control: the client needs `--control`; the host needs an input-agent
   subprocess, because `frd` cannot link the XTest sink
   (`fr-rc-client-control-cli-ykt`).
-- A live two-machine tailnet run.
 - Hardware HEVC selection in `frd run`, and the ADR 0004 software ceilings.
 - Local approval in `frd run`, which needs the session-agent process.
 - Wayland, macOS, Windows, browser and mobile paths (not implemented).
