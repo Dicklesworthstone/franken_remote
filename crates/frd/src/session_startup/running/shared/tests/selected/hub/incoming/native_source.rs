@@ -23,6 +23,7 @@ fn factory<'a>(
         Ok(setup)
     }
 }
+#[allow(clippy::unnecessary_wraps)] // matches the local-event callback signature
 fn local(_: &mut SessionAgent, _: &mut Context<'_>) -> Result<LocalAction, ()> {
     Ok(LocalAction::Continue)
 }
@@ -67,6 +68,7 @@ async fn refused(
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn first_native_source_is_created_only_after_consent_and_streams_on_the_same_child() {
     let rt = support::runtime();
     rt.block_on(async {
@@ -154,7 +156,7 @@ fn first_native_source_is_created_only_after_consent_and_streams_on_the_same_chi
                 client.turn().await;
             }
             assert_eq!(ticket.state(), State::Serving);
-            assert!(!client.frames.is_empty());
+            assert_ne!(client.frames.len(), 0);
             stop.store(true, Ordering::Release);
             std::future::pending::<()>().await;
         });
@@ -257,7 +259,7 @@ fn initial_permission_and_os_session_refusals_never_enter_network_or_native_call
             } = *fresh(&rt, 13, true, Role::Observe, Duration::from_secs(2)).await;
             let mut agent = preparation::agent();
             if locked {
-                let _ = agent.on_os_session_changed(99, fr_core::time::HostInstant::from_micros(0));
+                agent.on_os_session_changed(99, fr_core::time::HostInstant::from_micros(0));
             } else {
                 agent
                     .permissions_mut()

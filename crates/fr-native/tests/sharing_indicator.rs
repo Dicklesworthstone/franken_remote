@@ -17,16 +17,15 @@ use std::{
     time::{Duration, Instant},
 };
 fn display() -> Option<String> {
-    match std::env::var("DISPLAY") {
-        Ok(display) => Some(display),
-        Err(_) => {
-            assert!(
-                std::env::var_os("FR_NATIVE_INDICATOR_REQUIRED").is_none(),
-                "required indicator tests need an X11 display"
-            );
-            eprintln!("BLOCKED: no X11 display; no native mapping qualification");
-            None
-        }
+    if let Ok(display) = std::env::var("DISPLAY") {
+        Some(display)
+    } else {
+        assert!(
+            std::env::var_os("FR_NATIVE_INDICATOR_REQUIRED").is_none(),
+            "required indicator tests need an X11 display"
+        );
+        eprintln!("BLOCKED: no X11 display; no native mapping qualification");
+        None
     }
 }
 fn lifetime() -> (Runtime, Cx, ObservationControl) {

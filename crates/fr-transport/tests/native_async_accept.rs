@@ -142,11 +142,11 @@ fn asynchronous_identity_uses_discovered_peer_and_completes_canonical_tls() {
                 }
             })
             .unwrap();
-        let (client, server) = timeout(
+        let (client, server) = Box::pin(timeout(
             cx.now(),
             Duration::from_secs(5),
             support::both(client(&cx, address), accepted),
-        )
+        ))
         .await
         .unwrap();
         let mut server = server.unwrap();

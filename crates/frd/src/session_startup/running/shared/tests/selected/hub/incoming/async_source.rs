@@ -8,6 +8,7 @@ impl Drop for Dropped {
     }
 }
 
+fn send<T: Send>(_: &T) {}
 #[test]
 fn async_source_wait_renews_the_original_peer_before_native_start() {
     let rt = support::runtime();
@@ -46,12 +47,11 @@ fn async_source_wait_renews_the_original_peer_before_native_start() {
                 },
             )
             .unwrap();
-        fn send<T: Send>(_: &T) {}
         send(&opening);
-        let (result, mut client) = support::both(
+        let (result, mut client) = Box::pin(support::both(
             opening,
             Client::start_when(c, viewer, || setup_ready.load(Ordering::Acquire)),
-        )
+        ))
         .await;
         let mut desktop = result.unwrap();
         let _original_child = desktop.worker_id();
@@ -188,7 +188,7 @@ fn async_factory_panic_fences_peer_and_drops_pending_native_owner() {
                 )
                 .unwrap();
             let _ = refused(Box::pin(operation), viewer).await;
-        })
+        });
     }));
     assert!(caught.is_err());
     assert!(dropped.load(Ordering::Acquire));

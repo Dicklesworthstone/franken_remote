@@ -129,7 +129,7 @@ fn native_dispatch_cold_consent_then_warm_sibling_survives_first_connection_drop
                 second.turn().await;
             }
             assert!(source.check().is_ok());
-            assert!(!second.frames.is_empty());
+            assert_ne!(second.frames.len(), 0);
             assert_eq!(
                 factories.load(Ordering::SeqCst),
                 1,
@@ -377,7 +377,7 @@ fn incoming_dispatch_awaits_local_source_setup_on_the_independent_driver() {
             let mut first = Box::pin(Client::start(c, viewer)).await;
             first.ready().await;
             assert!(ready.load(Ordering::Acquire));
-            assert!(!first.frames.is_empty());
+            assert_ne!(first.frames.len(), 0);
             assert!(!independent.is_cancel_requested());
             assert!(!h.is_cancel_requested());
             stop.store(true, Ordering::Release);

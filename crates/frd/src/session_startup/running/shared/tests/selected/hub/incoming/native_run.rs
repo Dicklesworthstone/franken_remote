@@ -123,7 +123,7 @@ fn native_run_admits_a_late_viewer_and_keeps_the_same_child_after_first_departur
             stop.store(true, Ordering::Release);
             std::future::pending::<()>().await;
         };
-        let report = drive_report(&mut run, peers).await.unwrap();
+        let report = Box::pin(drive_report(&mut run, peers)).await.unwrap();
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(report.viewers.admitted, 2);
         assert!(report.viewers.finished >= 1);
@@ -333,7 +333,7 @@ fn native_run_local_permission_loss_after_streaming_stops_without_a_caller_hando
         let peers = async {
             let mut client = Client::start(c, viewer).await;
             client.ready().await;
-            assert!(!client.frames.is_empty());
+            assert_ne!(client.frames.len(), 0);
             revoke.store(true, Ordering::Release);
             std::future::pending::<()>().await;
         };

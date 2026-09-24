@@ -73,7 +73,7 @@ fn negotiated_observation_without_media_profile_never_launches_native_work() {
                 |_, _| Ok(LocalAction::Continue),
             )
             .unwrap();
-        let result = together_native(work, async {
+        let result = Box::pin(together_native(work, async {
             while !viewer.is_complete() {
                 viewer.drive(Duration::from_millis(1)).await.unwrap();
             }
@@ -84,7 +84,7 @@ fn negotiated_observation_without_media_profile_never_launches_native_work() {
                 let _ = viewer.drive(Duration::from_millis(1), block).await;
                 asupersync::runtime::yield_now().await;
             }
-        })
+        }))
         .await;
         assert!(matches!(
             result,

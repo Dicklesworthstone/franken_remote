@@ -12,7 +12,7 @@ fn manifest(paths: &[(&str, &[u8])]) -> DirectoryManifest {
         hash.update_with_chunk(bytes);
         let (digest, _, _) = hash.finalize((*path).into());
         entries.push(ManifestEntry {
-            index: index as u32,
+            index: u32::try_from(index).unwrap(),
             rel_path: (*path).into(),
             size: bytes.len() as u64,
             sha256_hex: hex_encode(&digest.content_sha256),
@@ -175,7 +175,7 @@ fn traversal_reserved_names_duplicates_and_file_parent_aliases_refuse_before_dis
             .iter()
             .enumerate()
             .map(|(i, p)| ManifestEntry {
-                index: i as u32,
+                index: u32::try_from(i).unwrap(),
                 rel_path: (*p).into(),
                 size: 0,
                 sha256_hex: "00".repeat(32),

@@ -1347,6 +1347,7 @@ fn fixture_pair(status_str: &str, whois_str: &str) -> (Status, WhoIs) {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn fixture_sharing_matrix_matrix() {
     let (s_app, w_app) = fixture_pair(
         include_str!("../../tests/fixtures/sharing_matrix/positive_approved/status.json"),

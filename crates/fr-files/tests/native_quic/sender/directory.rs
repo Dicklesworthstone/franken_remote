@@ -8,7 +8,9 @@ fn nested_directory_crosses_real_tls_streams_then_legacy_file_uses_same_lane() {
         let mut f = Running::new(&cx).await;
         let source = f.path.join("selected");
         fs::create_dir_all(source.join("src/deep")).unwrap();
-        let data: Vec<u8> = (0..120_007).map(|n| (n % 251) as u8).collect();
+        let data: Vec<u8> = (0..120_007u32)
+            .map(|n| u8::try_from(n % 251).unwrap())
+            .collect();
         fs::write(source.join("README"), b"project").unwrap();
         fs::write(source.join("src/deep/data"), &data).unwrap();
         fs::write(source.join("src/empty"), b"").unwrap();

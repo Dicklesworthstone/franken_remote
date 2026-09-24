@@ -393,7 +393,7 @@ fn unsupported_and_malformed_manifest_cannot_create_any_file() {
                 value["entries"][0]["rel_path"] = "COM1".into();
             }
             14 => {
-                value["entries"][0]["members"] = serde_json::json!([{"rel_path":"packed","offset":0,"len":3,"sha256_hex":"00".repeat(32)}])
+                value["entries"][0]["members"] = serde_json::json!([{"rel_path":"packed","offset":0,"len":3,"sha256_hex":"00".repeat(32)}]);
             }
             _ => unreachable!(),
         }

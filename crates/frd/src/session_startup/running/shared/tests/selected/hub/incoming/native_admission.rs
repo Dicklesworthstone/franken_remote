@@ -1,7 +1,7 @@
-//! Actual UDP/TLS and credential-checked LocalAPI joined to the shared hub.
+//! Actual UDP/TLS and credential-checked `LocalAPI` joined to the shared hub.
 //! Synthetic metadata, ingress lifetime, source pictures and decoder acks are
 //! explicit fixtures. Run ignored cases in the isolated namespace used by
-//! crates/frd/tests/native_host_accept.rs, never on the host network.
+//! `crates/frd/tests/native_host_accept.rs`, never on the host network.
 use super::support as network;
 use super::*;
 use crate as frd;
@@ -106,13 +106,13 @@ fn cold_native_observer_joins_existing_hub_after_identity_and_approval() {
                     local.lock().unwrap().take().unwrap().decide(true).unwrap();
                     let mut client = Box::pin(Client::start(cc.clone(), viewer)).await;
                     client.ready().await;
-                    assert!(!client.frames.is_empty());
+                    assert_ne!(client.frames.len(), 0);
                     assert!(hc.checkpoint().is_ok());
                     assert!(owner.check().is_ok());
                     assert_eq!(initial.state(), State::Serving);
                     client.viewer.close();
                 };
-                let (result, ()) = support::both(operation, client).await;
+                let (result, ()) = Box::pin(support::both(operation, client)).await;
                 assert!(
                     matches!(result, Err(NativeError::Shared(service::Error::Session(_)))),
                     "{result:?}"
@@ -140,7 +140,7 @@ enum Stop {
 }
 // Keep the client half alive until after the host boundary under test fires.
 enum Connected {
-    Opening(Viewer),
+    Opening(Box<Viewer>),
     Streaming(Box<Client>),
 }
 impl Connected {
@@ -151,6 +151,7 @@ impl Connected {
         }
     }
 }
+#[allow(clippy::too_many_lines)]
 fn scoped_stop(stop: Stop) {
     let rt = support::runtime();
     bounded(&rt, async {
@@ -190,10 +191,10 @@ fn scoped_stop(stop: Stop) {
                         local.lock().unwrap().take().unwrap().decide(true).unwrap();
                         let mut client = Box::pin(Client::start(cc.clone(), viewer)).await;
                         client.ready().await;
-                        assert!(!client.frames.is_empty());
+                        assert_ne!(client.frames.len(), 0);
                         Connected::Streaming(client)
                     } else {
-                        Connected::Opening(viewer)
+                        Connected::Opening(Box::new(viewer))
                     }
                 });
                 let peer = poll_fn(|task| {
@@ -330,7 +331,7 @@ fn native_shared_refuses_bad_identity_before_any_hub_slot_or_approval() {
                 &mut publisher,
                 with_client(&mut first.peer, async {
                     let (result, peer) =
-                        support::both(operation, api_fixture::client(&cc, address)).await;
+                        Box::pin(support::both(operation, api_fixture::client(&cc, address))).await;
                     assert_eq!(result, Err(NativeError::Tailnet(error)));
                     assert_eq!(admission.statistics().unwrap().admitted, 1);
                     assert_eq!(initial.state(), State::Serving);
@@ -424,7 +425,7 @@ fn native_shared_preserves_scope_duplicate_and_capacity_admission() {
                 &mut publisher,
                 with_client(&mut first.peer, async {
                     let (result, peer) =
-                        support::both(operation, api_fixture::client(&cc, address)).await;
+                        Box::pin(support::both(operation, api_fixture::client(&cc, address))).await;
                     assert_eq!(result, Err(NativeError::Shared(expected)));
                     assert_eq!(admission.statistics().unwrap().admitted, 1);
                     assert_eq!(initial.state(), State::Serving);

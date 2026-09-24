@@ -75,12 +75,12 @@ fn scoped_host_survives_handoff_approval_and_streaming_until_its_ticket_closes()
                     client.ready().await;
                     assert_eq!(ticket.state(), State::Serving);
                     assert!(h.checkpoint().is_ok());
-                    assert!(!client.frames.is_empty());
+                    assert_ne!(client.frames.len(), 0);
                     assert_eq!(initial.state(), State::Serving);
                     ticket.close();
                     client.viewer.close();
                 };
-                let (outcome, ()) = support::both(run.as_mut(), client).await;
+                let (outcome, ()) = Box::pin(support::both(run.as_mut(), client)).await;
                 assert!(owner.check().is_ok());
                 assert_eq!(initial.state(), State::Serving);
                 outcome
@@ -119,7 +119,7 @@ fn scoped_approval_failure_preserves_hub_result_without_waiting_for_timer_expiry
                 let client = async {
                     finished(&mut viewer, &ticket).await;
                 };
-                let result = support::both(run.as_mut(), client).await.0;
+                let result = Box::pin(support::both(run.as_mut(), client)).await.0;
                 assert!(owner.check().is_ok());
                 assert_eq!(initial.state(), State::Serving);
                 result

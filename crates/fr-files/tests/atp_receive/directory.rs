@@ -15,7 +15,7 @@ fn tree() -> TransferManifest {
         hash.update_with_chunk(content);
         let (digest, _, _) = hash.finalize((*path).into());
         m.entries.push(ManifestEntry {
-            index: index as u32,
+            index: u32::try_from(index).unwrap(),
             rel_path: (*path).into(),
             size: content.len() as u64,
             sha256_hex: hex_encode(&digest.content_sha256),
