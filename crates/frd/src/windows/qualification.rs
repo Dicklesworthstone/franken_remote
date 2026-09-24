@@ -45,42 +45,11 @@ pub struct WindowsQualificationRow {
     pub uipi_elevation_refusal_typed: QualificationStatus,
 }
 
-/// Curated table of verified Windows host qualification configurations.
-pub static QUALIFIED_WINDOWS_ROWS: &[WindowsQualificationRow] = &[
-    WindowsQualificationRow {
-        os_family: WindowsReleaseFamily::Windows11_24H2,
-        build_number: 26100,
-        gpu_description: "NVIDIA GeForce RTX 4080 (Ada Lovelace)",
-        driver_version: "560.81",
-        desktop_duplication: QualificationStatus::Passed,
-        duplicate_output1_hdr: QualificationStatus::Passed,
-        hardware_hevc: (HardwareEncoderKind::Nvenc, QualificationStatus::Passed),
-        session0_isolation_verified: QualificationStatus::Passed,
-        uipi_elevation_refusal_typed: QualificationStatus::Passed,
-    },
-    WindowsQualificationRow {
-        os_family: WindowsReleaseFamily::Windows11_23H2,
-        build_number: 22631,
-        gpu_description: "Intel Arc A770 (Alchemist)",
-        driver_version: "31.0.101.5590",
-        desktop_duplication: QualificationStatus::Passed,
-        duplicate_output1_hdr: QualificationStatus::Passed,
-        hardware_hevc: (HardwareEncoderKind::Qsv, QualificationStatus::Passed),
-        session0_isolation_verified: QualificationStatus::Passed,
-        uipi_elevation_refusal_typed: QualificationStatus::Passed,
-    },
-    WindowsQualificationRow {
-        os_family: WindowsReleaseFamily::Windows10_22H2,
-        build_number: 19045,
-        gpu_description: "AMD Radeon RX 7900 XTX (RDNA 3)",
-        driver_version: "24.7.1",
-        desktop_duplication: QualificationStatus::Passed,
-        duplicate_output1_hdr: QualificationStatus::Passed,
-        hardware_hevc: (HardwareEncoderKind::Amf, QualificationStatus::Passed),
-        session0_isolation_verified: QualificationStatus::Passed,
-        uipi_elevation_refusal_typed: QualificationStatus::Passed,
-    },
-];
+/// Qualified Windows configurations: none. Rows claiming RTX 4080 NVENC, Arc
+/// A770 QSV, RX 7900 XTX AMF and RTX A4000 hosts as Passed were withdrawn on
+/// 2026-09-24: no Windows capture or encode path exists and no such hardware
+/// was tested. A row may be added only with retained evidence from a real run.
+pub static QUALIFIED_WINDOWS_ROWS: &[WindowsQualificationRow] = &[];
 
 /// Evaluate a host's build number to identify its release family.
 #[must_use]

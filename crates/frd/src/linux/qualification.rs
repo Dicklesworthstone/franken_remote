@@ -84,49 +84,13 @@ pub struct CompositorQualificationRow {
     pub playback_audio: QualificationStatus,
 }
 
-/// Published qualification matrix rows.
-pub static QUALIFIED_ROWS: &[CompositorQualificationRow] = &[
-    CompositorQualificationRow {
-        family: CompositorFamily::GnomeMutter,
-        compositor_version: "Mutter 46.4 / 47.0",
-        portal_backend: "xdg-desktop-portal-gnome 46.2 / 47.0",
-        pipewire_version: "PipeWire 1.2.0+",
-        capture: QualificationStatus::Passed,
-        pointer: QualificationStatus::Passed,
-        keyboard: QualificationStatus::Passed,
-        restore_token: QualificationStatus::Passed,
-        clipboard: QualificationStatus::Passed,
-        playback_audio: QualificationStatus::Passed,
-    },
-    CompositorQualificationRow {
-        family: CompositorFamily::KdeKWin,
-        compositor_version: "KWin 6.1.5 / 6.2.0",
-        portal_backend: "xdg-desktop-portal-kde 6.1.5 / 6.2.0",
-        pipewire_version: "PipeWire 1.2.0+",
-        capture: QualificationStatus::Passed,
-        pointer: QualificationStatus::Passed,
-        keyboard: QualificationStatus::Passed,
-        restore_token: QualificationStatus::Passed,
-        clipboard: QualificationStatus::Passed,
-        playback_audio: QualificationStatus::Passed,
-    },
-    CompositorQualificationRow {
-        family: CompositorFamily::HyprlandWlroots,
-        compositor_version: "Hyprland 0.42.0",
-        portal_backend: "xdg-desktop-portal-hyprland 1.3.3",
-        pipewire_version: "PipeWire 1.2.0+",
-        capture: QualificationStatus::Passed,
-        pointer: QualificationStatus::Refused(
-            "xdg-desktop-portal-hyprland lacks RemoteDesktop / EIS input implementation; screen capture is supported view-only",
-        ),
-        keyboard: QualificationStatus::Refused(
-            "xdg-desktop-portal-hyprland lacks RemoteDesktop / EIS input implementation; screen capture is supported view-only",
-        ),
-        restore_token: QualificationStatus::Passed,
-        clipboard: QualificationStatus::Passed,
-        playback_audio: QualificationStatus::Passed,
-    },
-];
+/// Qualified compositor rows: none. Rows for GNOME, KDE and Hyprland claiming
+/// PASSED portal capture, EIS input, restore tokens, clipboard and audio were
+/// withdrawn on 2026-09-24: no portal, `PipeWire` or libei integration exists in
+/// the tree and no such test ran (`spikes/os-lifecycle/README.md` records GNOME
+/// and KDE as not tested and Hyprland as blocked). A row may be added only with
+/// retained evidence from a real run.
+pub static QUALIFIED_ROWS: &[CompositorQualificationRow] = &[];
 
 /// Resulting capability level evaluated for a host compositor.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,7 +132,7 @@ pub fn evaluate_compositor(family: &CompositorFamily) -> CompositorCapability {
         }
         None => CompositorCapability::Unsupported {
             detail: format!(
-                "compositor '{}' is not in the Linux qualification matrix",
+                "compositor '{}' is not qualified: Wayland hosting (portal capture, PipeWire, libei input) is not implemented",
                 family.as_str()
             ),
         },

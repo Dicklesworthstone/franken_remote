@@ -61,17 +61,24 @@ The host surfaces its display server security model in runtime diagnostics:
 
 ## 2. Linux Compositor Qualification Matrix
 
-The table below records independent qualification rows per compositor family with exact software versions, matching Plan §10.1 and acceptance criteria.
+> **Withdrawn 2026-09-24: no evidence existed.** An earlier version of this table
+> marked GNOME 46.4/47.0, KDE Plasma 6.1.5/6.2.0 and Hyprland 0.42.0 as PASSED for
+> portal capture, EIS input, restore tokens, clipboard and audio, and claimed XShm
+> capture on X11. The tree contains no xdg-desktop-portal, PipeWire or libei
+> integration (no D-Bus client dependency at all), and X11 capture uses
+> `XGetImage` (`crates/fr-native/src/bridge.c`), not XShm. The honest spike record
+> [`spikes/os-lifecycle/README.md`](../spikes/os-lifecycle/README.md) lists GNOME
+> and KDE as not tested and Hyprland 0.56.2 as blocked. The runtime table
+> `frd::linux::QUALIFIED_ROWS` is empty and `evaluate_compositor` refuses every
+> compositor with a typed reason.
 
-| Compositor Family | Tested Environment | Portal Backend | Capture | Pointer | Keyboard | Restore Token | Clipboard | Playback Audio | Overall Status |
-|---|---|---|---|---|---|---|---|---|---|
-| **GNOME (Mutter)** | GNOME 46.4 / 47.0 (Fedora 40, Arch Linux) | `xdg-desktop-portal-gnome` 46.2 / 47.0 | **PASSED** (PipeWire 1.2.0+) | **PASSED** (EIS) | **PASSED** (EIS) | **PASSED** (Rotated) | **PASSED** | **PASSED** (PipeWire) | **Full Control** |
-| **KDE Plasma (KWin)** | Plasma 6.1.5 / 6.2.0 (Fedora 40 KDE, Arch Linux) | `xdg-desktop-portal-kde` 6.1.5 / 6.2.0 | **PASSED** (PipeWire 1.2.0+) | **PASSED** (EIS) | **PASSED** (EIS) | **PASSED** (Rotated) | **PASSED** | **PASSED** (PipeWire) | **Full Control** |
-| **Hyprland / wlroots** | Hyprland 0.42.0 (Arch Linux) | `xdg-desktop-portal-hyprland` 1.3.3 | **PASSED** (PipeWire 1.2.0+) | **REFUSED** (No EIS) | **REFUSED** (No EIS) | **PASSED** (Single-use) | **PASSED** | **PASSED** (PipeWire) | **View-Only** (Typed Refusal) |
-| **Traditional X11** | X.Org Server 21.1.13 | Native XShm / XTest | **PASSED** (XShm) | **PASSED** (XTest) | **PASSED** (XTest) | N/A (Session persistent) | **PASSED** (X11 selection) | **PASSED** (PipeWire / Pulse) | **Unconfined Host** (Diagnostics surfaced) |
+| Compositor Family | Capture | Pointer | Keyboard | Restore Token | Clipboard | Playback Audio | Status |
+|---|---|---|---|---|---|---|---|
+| **GNOME (Mutter)** | not tested | not tested | not tested | not tested | not tested | not tested | **blocked**: no portal/PipeWire/libei implementation |
+| **KDE Plasma (KWin)** | not tested | not tested | not tested | not tested | not tested | not tested | **blocked**: no portal/PipeWire/libei implementation |
+| **Hyprland / wlroots** | blocked (spike: VAAPI driver missing) | not tested | not tested | not tested | not tested | not tested | **blocked**: no portal/PipeWire/libei implementation |
+| **X11** | `XGetImage` capture exercised under Xvfb in CI | XTest exercised under Xvfb | XTest exercised under Xvfb | not applicable | X11 selection workers exercised under Xvfb | not tested | **not qualified**: Xvfb test evidence only; no installed-desktop run |
 
-### Notes on Compositor rows:
-1. **GNOME (Mutter):** Supports RemoteDesktop portal and EIS natively through Mutter's built-in EIS implementation. Provides monotonic `pipewire.serial` and supports single-use restore token rotation.
-2. **KDE Plasma (KWin):** KWin 6.1+ includes full RemoteDesktop portal and EIS support. Restore tokens are rotated per session establishment.
-3. **Hyprland / wlroots:** ScreenCast capture via PipeWire is fully qualified. However, `xdg-desktop-portal-hyprland` does not implement the `RemoteDesktop` interface or EIS virtual device injection. In accordance with Plan §10.1, this row is qualified as **View-Only** with an actionable typed refusal; no privileged or root uinput fallback is attempted.
-4. **X11:** Explicit adapter supported for legacy environments. Security diagnostics explicitly warn about the absence of per-window isolation and global input snooping risks.
+The X11 row reports source/test evidence (Xvfb in CI), a separate category from
+hardware or installed-desktop qualification. The design notes in section 1
+describe intended Wayland behaviour; none of it is implemented.

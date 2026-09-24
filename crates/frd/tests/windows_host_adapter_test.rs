@@ -8,9 +8,9 @@ use fr_core::{
 use frd::windows::{
     AdapterDesc, AdapterLuid, CrossAdapterStrategy, DesktopDuplicationSession, DuplicationError,
     DuplicationState, DxgiErrorCode, DxgiFormat, DxgiRotation, GpuVendor, HardwareEncoderKind,
-    HybridGpuSelector, HybridTopology, QUALIFIED_WINDOWS_ROWS, QualificationStatus,
-    RecordingSendInputPoster, SendInputRecordedEvent, SessionBoundPipe, SessionLockState,
-    SessionServiceError, StreamPixelPoint, StreamResolution, TargetWindowSecurity, TransitionCause,
+    HybridGpuSelector, HybridTopology, QUALIFIED_WINDOWS_ROWS, RecordingSendInputPoster,
+    SendInputRecordedEvent, SessionBoundPipe, SessionLockState, SessionServiceError,
+    StreamPixelPoint, StreamResolution, TargetWindowSecurity, TransitionCause,
     TransitionCoordinator, TransitionRecoveryState, VirtualDesktopRect, WindowsInputSink,
     WindowsIntegrityLevel, WindowsReleaseFamily, WindowsSessionInfo, WindowsSessionKind,
     WindowsSessionManager, WtsSessionEvent, classify_build_number, stream_pixel_to_virtual_desktop,
@@ -382,22 +382,8 @@ fn test_dxgi_rotation_coordinates_mapping() {
 
 #[test]
 fn test_windows_qualification_matrix_coverage() {
-    assert_eq!(QUALIFIED_WINDOWS_ROWS.len(), 3);
-
-    let row_win11 = &QUALIFIED_WINDOWS_ROWS[0];
-    assert_eq!(row_win11.os_family, WindowsReleaseFamily::Windows11_24H2);
-    assert_eq!(row_win11.desktop_duplication, QualificationStatus::Passed);
-    assert_eq!(row_win11.duplicate_output1_hdr, QualificationStatus::Passed);
-    assert_eq!(row_win11.hardware_hevc.0, HardwareEncoderKind::Nvenc);
-    assert_eq!(row_win11.hardware_hevc.1, QualificationStatus::Passed);
-    assert_eq!(
-        row_win11.session0_isolation_verified,
-        QualificationStatus::Passed
-    );
-    assert_eq!(
-        row_win11.uipi_elevation_refusal_typed,
-        QualificationStatus::Passed
-    );
+    // No Windows configuration has retained qualification evidence.
+    assert_eq!(QUALIFIED_WINDOWS_ROWS.len(), 0);
 
     // Build classification
     assert_eq!(

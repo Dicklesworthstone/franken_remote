@@ -27,7 +27,7 @@ use frd::linux::{
     CropScaleMapping, CursorManager, CursorMetadata, CursorMetadataRefusal, CursorMode,
     DeviceFlags, EisInputSink, EisRegion, GraphicalSessionEnvironment, PipeWireStreamCapability,
     PipeWireStreamInfo, PlatformSecurityModel, PortalSequenceError, PortalSession, PortalState,
-    RecordingEisPoster, RecordingX11Poster, RestoreOutcome, RestoreTokenManager,
+    QUALIFIED_ROWS, RecordingEisPoster, RecordingX11Poster, RestoreOutcome, RestoreTokenManager,
     SessionEnvironmentError, SessionType, StreamPixelPoint, StreamResolution, StreamResolver,
     StreamVerificationError, WorkerIsolationBoundary, X11InputSink, compositor_to_eis,
     compositor_to_stream_pixel, eis_to_compositor, evaluate_compositor, stream_pixel_to_compositor,
@@ -452,35 +452,20 @@ fn test_systemd_session_environment_detection() {
 }
 
 #[test]
-fn test_compositor_qualification_matrix_evaluation() {
-    // 1. GNOME (Mutter) -> FullControl
-    let gnome = CompositorFamily::GnomeMutter;
-    assert_eq!(
-        evaluate_compositor(&gnome),
-        CompositorCapability::FullControl
-    );
-
-    // 2. KDE Plasma (KWin) -> FullControl
-    let kde = CompositorFamily::KdeKWin;
-    assert_eq!(evaluate_compositor(&kde), CompositorCapability::FullControl);
-
-    // 3. Hyprland -> ViewOnly with explicit refusal reason (no EIS input in portal backend)
-    let hyprland = CompositorFamily::HyprlandWlroots;
-    let hypr_res = evaluate_compositor(&hyprland);
-    assert!(matches!(hypr_res, CompositorCapability::ViewOnly { .. }));
-    if let CompositorCapability::ViewOnly {
-        input_refusal_reason,
-    } = hypr_res
-    {
-        assert!(input_refusal_reason.contains("xdg-desktop-portal-hyprland lacks RemoteDesktop"));
-    }
-
-    // 4. Unknown compositor -> Unsupported refusal
-    let unknown = CompositorFamily::Other("Enlightenment".into());
-    let unk_res = evaluate_compositor(&unknown);
-    assert!(matches!(unk_res, CompositorCapability::Unsupported { .. }));
-    if let CompositorCapability::Unsupported { detail } = unk_res {
-        assert!(detail.contains("is not in the Linux qualification matrix"));
+fn test_no_compositor_is_qualified_without_evidence() {
+    // The matrix holds only rows backed by retained evidence; there are none.
+    assert_eq!(QUALIFIED_ROWS.len(), 0);
+    for family in [
+        CompositorFamily::GnomeMutter,
+        CompositorFamily::KdeKWin,
+        CompositorFamily::HyprlandWlroots,
+        CompositorFamily::Other("Enlightenment".into()),
+    ] {
+        let CompositorCapability::Unsupported { detail } = evaluate_compositor(&family) else {
+            panic!("{family:?} must not evaluate as capable without evidence");
+        };
+        assert!(detail.contains("is not qualified"), "{detail}");
+        assert!(detail.contains("not implemented"), "{detail}");
     }
 }
 

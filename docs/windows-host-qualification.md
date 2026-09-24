@@ -24,14 +24,19 @@ The Windows host adapter implements hardware-accelerated workstation hosting on 
 
 ## 2. Windows Qualification Matrix
 
-Tested and verified configurations on real Windows hardware (Plan §23 Phase 2 exit criteria):
+> **Withdrawn 2026-09-24: no evidence existed.** An earlier version of this table
+> listed RTX 4080 (NVENC), Arc A770 (QSV), RX 7900 XTX (AMF) and RTX A4000 hosts
+> as Qualified with every capability Passed. No Windows capture or encode path
+> exists in the tree, and none of that hardware was tested. The only Windows
+> evidence is the probe recorded in
+> [`spikes/os-lifecycle/README.md`](../spikes/os-lifecycle/README.md) (Windows 11
+> console session: not tested; Session 0: blocked by design). The runtime table
+> `frd::windows::QUALIFIED_WINDOWS_ROWS` is empty.
 
-| OS Release | Build | GPU Hardware & Driver | Desktop Duplication | DuplicateOutput1 (HDR) | HW HEVC Encoder | Session 0 Isolation | UIPI Elevation Refusal | Qualification Status |
-|---|---|---|---|---|---|---|---|---|
-| **Windows 11 24H2** | 26100 | NVIDIA GeForce RTX 4080 (Ada) Driver 560.81 | `Passed` | `Passed` | NVENC (`Passed`) | `Passed` | `Passed` (Typed Refusal) | **Qualified** |
-| **Windows 11 23H2** | 22631 | Intel Arc A770 (Alchemist) Driver 31.0.101.5590 | `Passed` | `Passed` | QSV (`Passed`) | `Passed` | `Passed` (Typed Refusal) | **Qualified** |
-| **Windows 10 22H2** | 19045 | AMD Radeon RX 7900 XTX (RDNA 3) Driver 24.7.1 | `Passed` | `Passed` | AMF (`Passed`) | `Passed` | `Passed` (Typed Refusal) | **Qualified** |
-| **Windows Server 2022** | 20348 | NVIDIA RTX A4000 Driver 552.74 | `Passed` | `NotTested` | NVENC (`Passed`) | `Passed` | `Passed` (Typed Refusal) | **Qualified** |
+| OS Release | Desktop Duplication | DuplicateOutput1 (HDR) | HW HEVC Encoder | Session 0 Isolation | UIPI Elevation Refusal | Status |
+|---|---|---|---|---|---|---|
+| **Windows 11** | not tested | not tested | not tested | not tested | not tested | **blocked**: no Windows capture/encode implementation |
+| **Windows 10 / Server 2022** | not tested | not tested | not tested | not tested | not tested | **blocked**: no Windows capture/encode implementation |
 
 ---
 

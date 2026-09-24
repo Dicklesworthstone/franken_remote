@@ -7,6 +7,13 @@
 - **Plan References**: [Plan Section 8.3](../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md#83-target-adapters), [§15.1](../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md#151-platform-capability-matrix), [§16.1](../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md#161-shared-core-thin-native-shells), [§25](../../COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md#25-risks-bounded-open-decisions-and-rejected-scope)
 - **Constitutional Reference**: [AGENTS.md Section 3.1](../../AGENTS.md#31-one-runtime), [§3.5](../../AGENTS.md#35-closed-dependency-universe), [§3.7](../../AGENTS.md#37-size-discipline)
 
+> **Implementation status (corrected 2026-09-24).** This ADR records the intended
+> architecture. What exists today: on Linux, `fr` decodes HEVC in software
+> (libavcodec) and presents with `XPutImage` from CPU memory
+> (`crates/fr-native/src/bridge.c`). There is no MIT-SHM/XPresent path, no
+> hardware-decoded surface and no zero-copy presentation. The macOS (AppKit/Metal)
+> and Windows (Win32/D3D) shells are not implemented.
+
 ---
 
 ## 1. Context and Problem Statement
