@@ -57,3 +57,29 @@ invalid flags/enums/presence/lengths, limits, binding mismatch, datagram refusal
 pre-session effect claims, and expiry while a peer trickles a record. Receiving
 a valid refusal in the negotiation decoder returns its typed reason as an
 error; it never becomes a successful negotiation message.
+
+## Native host startup reporting
+
+The owned `Host::open` path reports compatible pre-observation negotiation
+failures to the production viewer, including unavailable control, failed
+version/capability negotiation, and local consent denial. It fences session
+authority and retires consent before attempting any reporting I/O. Reporting
+never invokes admission refresh, capture, input, or another approval callback.
+
+The single refusal uses the original zero-bound reliable control stream. A
+100-ms outer timer and 16-turn ceiling bound the drain; the original peer proof,
+connection lifetime guard and retained-record deadlines may end it sooner.
+Backpressure retains the same prepared record, not a repeated additive grant.
+No transport guard is disabled to deliver a nicer error message.
+
+Only Hello/Selection/Approval phases may report. After SessionOpened can have
+been queued, this path closes without flushing potentially obsolete authority
+records. Refusals are not answered with refusals. Closed, cancelled, malformed
+transport or revoked-identity paths may be unable to report at all. Absence of
+a refusal therefore remains an unknown connection failure, never proof of
+clean shutdown. Established-session LeaseRevoked/Closed integration remains
+separate; this slice does not implement those message kinds.
+
+The added native startup regressions use real local TLS/QUIC/UDP and the
+production viewer with test-only identity admission. They are not a claim
+of installed-tailnet, two-machine desktop, or platform qualification.

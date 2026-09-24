@@ -3,6 +3,8 @@
 use super::{Approval, Error, Host, HostSession, Role};
 use std::{future::Future, time::Duration};
 
+mod refusal;
+
 impl Host {
     /// Drive this already authenticated/admitted connection through local consent
     /// and `BindingAccepted`, then move the SAME owners into the running session.
@@ -10,8 +12,10 @@ impl Host {
     /// and requested role. The callback must not block or infer consent from a
     /// remote packet. Returning successfully only records notification, not approval.
     ///
-    /// No new timeout begins here: the Host's original deadline includes parked
+    /// No new negotiation timeout begins here: the original deadline includes parked
     /// time, local approval, admission refresh and the final bound acknowledgement.
+    /// A failure may drain one bounded refusal only AFTER authority is fenced.
+    /// That reporting budget never extends negotiation or observation authority.
     /// Dropping even an unpolled open retires consent and revokes the peer before
     /// dropping callback state. Success transfers ownership without restarting it.
     pub fn open<'a>(
@@ -29,33 +33,47 @@ impl Host {
             {
                 return Err(Error::InvalidConfiguration);
             }
-            let mut notified = false;
-            loop {
-                let host = state.host.as_mut().ok_or(Error::Closed)?;
-                host.tick()?;
-                if !notified && let Some(approval) = host.approval() {
-                    (state.notify)(approval, host.role).map_err(|()| Error::Denied)?;
-                    notified = true;
-                    // A callback that crossed expiry or denied must not release
-                    // SessionOpened merely because it returned successfully.
-                    host.tick()?;
+            if let Err(error) = state.negotiate(network_turn).await {
+                if let Some(host) = &mut state.host {
+                    refusal::report(host, error).await;
                 }
-                if host.is_complete() {
-                    return state
-                        .host
-                        .take()
-                        .ok_or(Error::Closed)?
-                        .finish()?
-                        .into_running();
-                }
-                host.drive(network_turn).await?;
+                return Err(error);
             }
+            state
+                .host
+                .take()
+                .ok_or(Error::Closed)?
+                .finish()?
+                .into_running()
         })
     }
 }
 struct Opening<F> {
     host: Option<Host>,
     notify: F,
+}
+impl<F: FnMut(Approval, Role) -> Result<(), ()>> Opening<F> {
+    async fn negotiate(&mut self, network_turn: Duration) -> Result<(), Error> {
+        let mut notified = false;
+        loop {
+            let host = self.host.as_mut().ok_or(Error::Closed)?;
+            // Opening owns the same cancellation/drop guard as the public
+            // tick/drive wrappers. Keep transport only long enough to report a
+            // terminal pre-observation refusal; never retry failed negotiation.
+            host.step()?;
+            if !notified && let Some(approval) = host.approval() {
+                (self.notify)(approval, host.role).map_err(|()| Error::Denied)?;
+                notified = true;
+                // Returning from a callback is not permission to cross expiry
+                // or denial, even if it first recorded an approval.
+                host.step()?;
+            }
+            if host.is_complete() {
+                return Ok(());
+            }
+            host.drive_inner(network_turn).await?;
+        }
+    }
 }
 impl<F> Drop for Opening<F> {
     fn drop(&mut self) {
