@@ -650,7 +650,10 @@ mod tests {
         let Command::Connect(c) = o.command else {
             unreachable!("connection required");
         };
-        assert_eq!(c.target.roots, PathBuf::from("/etc/ssl/certs/ca-certificates.crt"));
+        assert_eq!(
+            c.target.roots,
+            PathBuf::from("/etc/ssl/certs/ca-certificates.crt")
+        );
         let exe = std::env::current_exe().unwrap();
         assert_eq!(c.worker, exe.parent().unwrap().join("fr-media-worker"));
         let o = options("displays n-host --experimental-native").unwrap();
