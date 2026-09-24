@@ -635,3 +635,6 @@ mod persistent_desktop;
 
 #[path = "native_host_linux_serial/host_run.rs"]
 mod host_run;
+
+#[path = "native_host_linux_serial/shipped_client.rs"]
+mod shipped_client;

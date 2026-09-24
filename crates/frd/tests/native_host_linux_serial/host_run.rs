@@ -65,6 +65,21 @@ fn frd_run_serves_a_real_viewer_and_stops_in_cleanup_order() {
             viewer.ready().await;
             assert_eq!(viewer.frames.first(), Some(&0));
             assert!(trace.exists(), "capture child launched after admission");
+            // The share must outlive the initial three-second authority lease:
+            // source consent and viewer observation are renewed, not expired.
+            let until = network::clock(&client) + 4_000_000;
+            while network::clock(&client) < until {
+                viewer.turn().await;
+            }
+            assert!(
+                !events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|e| matches!(e, Event::ShareEnded { .. })),
+                "share ended before stop: {:?}",
+                events.lock().unwrap()
+            );
             stop.request();
         })
         .await
