@@ -28,6 +28,15 @@ use std::{
     task::Poll,
     time::Duration,
 };
+/// Several tests prove a listener released its socket by re-binding the
+/// ephemeral port; a concurrently running test could otherwise be handed that
+/// freed port first. One test at a time keeps the check deterministic.
+fn serialized() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 fn id(bytes: &[u8]) -> ConnectionId {
     ConnectionId::new(bytes).unwrap()
 }
@@ -95,6 +104,7 @@ async fn client(
 }
 #[test]
 fn discovers_unknown_peer_completes_real_tls_and_delivers_authenticated_stream() {
+    let _serial = serialized();
     support::runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let listener = Listener::bind(&cx, "127.0.0.1:0".parse().unwrap(), config())
@@ -160,6 +170,7 @@ fn discovers_unknown_peer_completes_real_tls_and_delivers_authenticated_stream()
 // (and ACK latency) without limit until reliable-record deadlines close it.
 #[test]
 fn established_connection_drains_queued_datagrams_in_one_bounded_turn() {
+    let _serial = serialized();
     support::runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let listener = Listener::bind(&cx, "127.0.0.1:0".parse().unwrap(), config())
@@ -215,6 +226,7 @@ fn established_connection_drains_queued_datagrams_in_one_bounded_turn() {
 }
 #[test]
 fn arbitrary_datagram_flood_has_a_fixed_budget_and_never_opens_tls() {
+    let _serial = serialized();
     support::runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let cfg = Configuration {
@@ -241,6 +253,7 @@ fn arbitrary_datagram_flood_has_a_fixed_budget_and_never_opens_tls() {
 }
 #[test]
 fn acquisition_deadline_starts_before_first_poll_and_closes_socket() {
+    let _serial = serialized();
     support::runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let listener = Listener::bind(
@@ -266,6 +279,7 @@ fn acquisition_deadline_starts_before_first_poll_and_closes_socket() {
 }
 #[test]
 fn unpolled_accept_drop_releases_original_endpoint_without_calling_factory() {
+    let _serial = serialized();
     support::runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let listener = Listener::bind(&cx, "127.0.0.1:0".parse().unwrap(), config())
@@ -283,6 +297,7 @@ fn unpolled_accept_drop_releases_original_endpoint_without_calling_factory() {
 }
 #[test]
 fn cancellation_releases_pending_receive_and_never_calls_identity_factory() {
+    let _serial = serialized();
     support::runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let listener = Listener::bind(&cx, "127.0.0.1:0".parse().unwrap(), config())
@@ -308,6 +323,7 @@ fn cancellation_releases_pending_receive_and_never_calls_identity_factory() {
 }
 #[test]
 fn wrong_server_name_and_alpn_never_return_an_authenticated_server() {
+    let _serial = serialized();
     // Complete both bounded sides; the silent side may expire after peer refusal.
     for (name, alpn) in [
         ("other.invalid", ALPN),
@@ -358,6 +374,7 @@ fn candidate_packet() -> Vec<u8> {
 }
 #[test]
 fn stalled_candidate_expires_its_original_handshake_budget_and_releases_socket() {
+    let _serial = serialized();
     support::runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let cfg = Configuration {
@@ -385,6 +402,7 @@ fn stalled_candidate_expires_its_original_handshake_budget_and_releases_socket()
 }
 #[test]
 fn another_socket_cannot_inherit_the_discovered_candidates_routing_identity() {
+    let _serial = serialized();
     support::runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let listener = Listener::bind(&cx, "127.0.0.1:0".parse().unwrap(), config())
