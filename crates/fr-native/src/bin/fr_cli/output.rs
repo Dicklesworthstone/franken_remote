@@ -154,14 +154,14 @@ pub struct DoctorReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorPermissionReport {
     pub capability: &'static str,
-    pub status: &'static str, // "granted", "denied", "prompt_needed", "unsupported"
+    pub status: &'static str, // "granted", "denied", "prompt_needed", "not_tested", "unsupported"
     pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorCapabilityReport {
     pub name: &'static str,
-    pub status: &'static str, // "passed", "failed", "blocked", "not tested"
+    pub status: &'static str, // "passed", "failed", "blocked", "not_tested"
     pub detail: String,
     pub hardware_accelerated: Option<bool>,
     pub restriction: Option<&'static str>,
@@ -184,100 +184,47 @@ pub struct DoctorRestrictionReport {
 }
 
 impl DoctorReport {
-    pub fn standard_permissions() -> Vec<DoctorPermissionReport> {
-        vec![
-            DoctorPermissionReport {
-                capability: "screen_capture",
-                status: "granted",
-                detail: Some("Wayland portal / X11 root capture ready".into()),
-            },
-            DoctorPermissionReport {
-                capability: "input_injection",
-                status: "granted",
-                detail: Some("uinput / XTest input injection active".into()),
-            },
-            DoctorPermissionReport {
-                capability: "clipboard_sync",
-                status: "granted",
-                detail: Some("Wayland data-control / X11 selection active".into()),
-            },
-            DoctorPermissionReport {
-                capability: "audio_playback",
-                status: "granted",
-                detail: Some("PulseAudio / PipeWire monitor capture active".into()),
-            },
-            DoctorPermissionReport {
-                capability: "audio_microphone",
-                status: "granted",
-                detail: Some("Virtual source module authorized".into()),
-            },
-            DoctorPermissionReport {
-                capability: "file_transfer",
-                status: "granted",
-                detail: Some("Local staging directory accessible".into()),
-            },
+    /// `fr doctor` probes identity, ports and (on request) the certificate
+    /// only; every OS permission row stays `not_tested` until a probe fills it.
+    pub fn unmeasured_permissions() -> Vec<DoctorPermissionReport> {
+        [
+            "screen_capture",
+            "input_injection",
+            "clipboard_sync",
+            "audio_playback",
+            "audio_microphone",
+            "file_transfer",
         ]
+        .into_iter()
+        .map(|capability| DoctorPermissionReport {
+            capability,
+            status: "not_tested",
+            detail: Some("Not probed by fr doctor".into()),
+        })
+        .collect()
     }
 
-    pub fn standard_capabilities() -> Vec<DoctorCapabilityReport> {
-        vec![
-            DoctorCapabilityReport {
-                name: "video_encode",
-                status: "passed",
-                detail: "HEVC Main profile 8-bit 4:2:0 hardware encoder verified".into(),
-                hardware_accelerated: Some(true),
-                restriction: None,
-            },
-            DoctorCapabilityReport {
-                name: "video_decode",
-                status: "passed",
-                detail: "HEVC hardware decoder verified".into(),
-                hardware_accelerated: Some(true),
-                restriction: None,
-            },
-            DoctorCapabilityReport {
-                name: "screen_capture",
-                status: "passed",
-                detail: "Display geometry inventory active".into(),
-                hardware_accelerated: Some(true),
-                restriction: Some("Full display only (no window cropping)"),
-            },
-            DoctorCapabilityReport {
-                name: "input_injection",
-                status: "passed",
-                detail: "Direct OS input submission active".into(),
-                hardware_accelerated: None,
-                restriction: None,
-            },
-            DoctorCapabilityReport {
-                name: "clipboard_sync",
-                status: "passed",
-                detail: "Bidirectional text clipboard sync active".into(),
-                hardware_accelerated: None,
-                restriction: Some("Text only (images deferred to ATP channel)"),
-            },
-            DoctorCapabilityReport {
-                name: "audio_playback",
-                status: "passed",
-                detail: "Opus 48 kHz stereo downlink ready".into(),
-                hardware_accelerated: None,
-                restriction: None,
-            },
-            DoctorCapabilityReport {
-                name: "audio_microphone",
-                status: "passed",
-                detail: "Opus 48 kHz virtual-mic uplink ready".into(),
-                hardware_accelerated: None,
-                restriction: Some("Push-to-talk default"),
-            },
-            DoctorCapabilityReport {
-                name: "file_transfer",
-                status: "passed",
-                detail: "ATP object transfer channel ready".into(),
-                hardware_accelerated: None,
-                restriction: Some("Controlled session only"),
-            },
+    /// No media, input, clipboard, audio or transfer probe runs in `fr doctor`.
+    pub fn unmeasured_capabilities() -> Vec<DoctorCapabilityReport> {
+        [
+            "video_encode",
+            "video_decode",
+            "screen_capture",
+            "input_injection",
+            "clipboard_sync",
+            "audio_playback",
+            "audio_microphone",
+            "file_transfer",
         ]
+        .into_iter()
+        .map(|name| DoctorCapabilityReport {
+            name,
+            status: "not_tested",
+            detail: "Not probed by fr doctor".into(),
+            hardware_accelerated: None,
+            restriction: None,
+        })
+        .collect()
     }
 
     pub fn standard_restrictions() -> Vec<DoctorRestrictionReport> {
@@ -616,6 +563,7 @@ pub fn doctor(report: &DoctorReport, json: bool) -> String {
                 "granted" => "[GRANTED]       ",
                 "denied" => "[DENIED]        ",
                 "prompt_needed" => "[PROMPT NEEDED] ",
+                "not_tested" => "[NOT TESTED]    ",
                 _ => "[UNSUPPORTED]   ",
             };
             let _ = writeln!(out, "    {:18} {} {}", p.capability, badge, detail_text);
@@ -727,8 +675,8 @@ mod tests {
                     },
                 ],
             }),
-            permissions: DoctorReport::standard_permissions(),
-            capabilities: DoctorReport::standard_capabilities(),
+            permissions: DoctorReport::unmeasured_permissions(),
+            capabilities: DoctorReport::unmeasured_capabilities(),
             sessions: vec![],
             sharing_scope: "own-user",
             approval_mode: "unattended",
@@ -748,6 +696,8 @@ mod tests {
         assert!(json.contains("\"capabilities\":["));
         assert!(json.contains("\"restrictions\":["));
         assert!(json.contains("\"sharing_scope\":\"own-user\""));
+        assert!(!json.contains("\"passed\"") && !json.contains("\"granted\""));
+        assert!(json.contains("\"status\":\"not_tested\""));
 
         let text = doctor(&report, false);
         assert!(text.contains("Node Certificate Name: node.tailnet.ts.net"));
@@ -755,6 +705,8 @@ mod tests {
         assert!(text.contains("Last Event: Rotated [gen 2]"));
         assert!(text.contains("Service Port: 8443 (available, no collisions)"));
         assert!(text.contains("OS Permissions:"));
+        assert!(text.contains("screen_capture     [NOT TESTED]"));
+        assert!(!text.contains("[PASSED]") && !text.contains("[GRANTED]"));
         assert!(text.contains("Capability Matrix:"));
         assert!(text.contains("Known Restrictions:"));
     }
