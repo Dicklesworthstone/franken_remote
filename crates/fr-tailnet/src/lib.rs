@@ -16,6 +16,7 @@ pub use lease::{Admission, Lease};
 pub mod endpoint;
 #[cfg(target_os = "linux")]
 mod local;
+pub mod trust;
 pub use endpoint::{
     CERTIFICATE_TRANSPARENCY_NOTICE, DEFAULT_SERVICE_PORT, PROJECT_ALPN, PortCollision,
     TransportProtocol, WEBTRANSPORT_ALPN, check_port_collision, honest_https_endpoint,
