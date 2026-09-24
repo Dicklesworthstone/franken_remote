@@ -118,18 +118,16 @@ impl Budget {
     fn fail(&self, error: Error) -> Error {
         // Never retain the error lock while touching shared authority. This
         // fixed slot preserves the primary failure without making startup !Send.
-        if let Ok(mut failure) = self.failure.lock() {
-            failure.get_or_insert(error);
-        }
+        let first = self
+            .failure
+            .lock()
+            .map_or(Error::Session(super::Error::Closed), |mut failure| {
+                *failure.get_or_insert(error)
+            });
         self.control.revoke();
-        error
+        first
     }
     fn remaining(&self) -> Result<Duration, Error> {
-        if let Some(source) = &self.source {
-            source
-                .check_source()
-                .map_err(|e| self.fail(Error::Shared(e)))?;
-        }
         let failure = self
             .failure
             .lock()
@@ -138,6 +136,11 @@ impl Budget {
             self.control.revoke();
             return Err(error);
         }
+        if let Some(source) = &self.source {
+            source
+                .check_source()
+                .map_err(|e| self.fail(Error::Shared(e)))?;
+        }
         let result = self.control.check().map_err(Error::Media).and_then(|n| {
             self.until
                 .checked_sub(n.as_micros())
@@ -145,10 +148,7 @@ impl Budget {
                 .map(Duration::from_micros)
                 .ok_or(Error::Expired)
         });
-        if result.is_err() {
-            self.control.revoke();
-        }
-        result
+        result.map_err(|error| self.fail(error))
     }
     fn wait(&self) -> Result<Duration, Error> {
         Ok(self.turn.min(self.remaining()?))
@@ -434,6 +434,12 @@ async fn drive(
             return Poll::Ready(Err(e));
         }
         let outcome = network.as_mut().poll(task);
+        // A failed original network turn may already have revoked observation.
+        // Retain its actual refusal before checking that now-cancelled control;
+        // otherwise a departed peer is falsely diagnosed as a worker failure.
+        if let Poll::Ready(Err(error)) = outcome {
+            budget.fail(Error::Session(error));
+        }
         if let Err(e) = budget.remaining() {
             return Poll::Ready(Err(e));
         }

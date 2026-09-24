@@ -202,11 +202,12 @@ fn shipped_fr_displays_negotiates_with_frd_run() {
     let output = run_displays(&fr, &client_api.path, &roots);
     // The client closed its session; the host must notice and finish that peer
     // on its own (it then keeps listening for the next one).
-    wait_for_event(&events, Duration::from_secs(10), |e| {
+    let peer_finished = wait_for_event(&events, Duration::from_secs(10), |e| {
         matches!(e, Event::PeerFinished { .. })
     });
     stop.request();
     let result = host.join().unwrap();
+    assert!(peer_finished, "peer completion must precede the local stop");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -472,3 +473,6 @@ fn frd_run_expires_a_connected_viewer_that_stops_answering_renewal() {
     assert_eq!(host.join().unwrap(), Ok(()), "{}", dump());
     drop(idle);
 }
+
+#[path = "shipped_client/recovery.rs"]
+mod recovery;
