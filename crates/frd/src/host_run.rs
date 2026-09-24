@@ -112,6 +112,7 @@ impl Error {
             Self::Configuration => "invalid_configuration",
             Self::Cleanup(_) => "cleanup_incomplete",
             Self::Trust(_) => "trust_roots_unavailable",
+            Self::Tailnet(fr_tailnet::Error::LocalApiDenied) => "tailscale_permission_denied",
             Self::Tailnet(_) => "tailscale_unavailable",
             Self::Ingress(_) => "ingress_unenforced",
             Self::Listener(_) => "listener_failed",
@@ -124,6 +125,9 @@ impl Error {
 /// Progress for the operator; carries no peer names, addresses or content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
+    /// Fetching this node's Tailscale HTTPS certificate; a first issuance can
+    /// take a minute (it is published in Certificate Transparency logs).
+    ObtainingCertificate,
     Listening {
         address: SocketAddr,
     },
@@ -330,12 +334,6 @@ pub fn run(options: &Options, report: &Reporter, stop: &Arc<StopHandle>) -> Resu
             None => LocalApi::installed(),
         };
         let roots = fr_tailnet::trust::root_store(&options.trust_roots).map_err(Error::Trust)?;
-        let identity = api
-            .native_server_identity(&broker, roots, CertificatePolicy::default())
-            .await
-            .map_err(Error::Tailnet)?;
-        let host_boot = HostBootId::from_raw(random_nonzero_u128()?);
-        let renew = identity.serve_renewal(&renewal).map_err(Error::Tailnet)?;
         let mut signals = if options.handle_signals {
             (
                 signal(SignalKind::interrupt()).ok(),
@@ -344,6 +342,17 @@ pub fn run(options: &Options, report: &Reporter, stop: &Arc<StopHandle>) -> Resu
         } else {
             (None, None)
         };
+        // Nothing is bound yet, so a stop during the fetch just drops it.
+        report(Event::ObtainingCertificate);
+        let fetch = api.native_server_identity(&broker, roots, CertificatePolicy::default());
+        let identity = unless_stopped(fetch, stop, &mut signals).await;
+        let Some(identity) = identity else {
+            report(Event::Stopped);
+            return Ok(());
+        };
+        let identity = identity.map_err(Error::Tailnet)?;
+        let host_boot = HostBootId::from_raw(random_nonzero_u128()?);
+        let renew = identity.serve_renewal(&renewal).map_err(Error::Tailnet)?;
         let serving = async {
             let mut failures = 0u32;
             while !stop.is_requested() {
@@ -395,6 +404,32 @@ pub fn run(options: &Options, report: &Reporter, stop: &Arc<StopHandle>) -> Resu
         report(Event::Stopped);
         result
     })
+}
+
+/// Drive `work` unless a handled signal or the stop handle ends the wait first
+/// (`None`); used only before anything is bound, so dropping `work` is cleanup.
+async fn unless_stopped<T>(
+    work: impl Future<Output = T>,
+    stop: &StopHandle,
+    signals: &mut (
+        Option<asupersync::signal::Signal>,
+        Option<asupersync::signal::Signal>,
+    ),
+) -> Option<T> {
+    let mut work = pin!(work);
+    poll_fn(|task| {
+        for s in [&mut signals.0, &mut signals.1].into_iter().flatten() {
+            if pin!(s.recv()).poll(task).is_ready() {
+                stop.request();
+            }
+        }
+        stop.register(task.waker());
+        if stop.is_requested() {
+            return Poll::Ready(None);
+        }
+        work.as_mut().poll(task).map(Some)
+    })
+    .await
 }
 
 // Credential failure is a stop request, not permission to abandon a share's
@@ -770,5 +805,41 @@ mod tests {
             |_| stop.request(),
         ));
         assert_eq!(result, Err(Error::Cleanup("source")));
+    }
+
+    #[test]
+    fn a_stop_during_the_certificate_fetch_ends_the_wait_without_polling_it() {
+        let runtime = RuntimeBuilder::current_thread()
+            .enable_platform_reactor(true)
+            .build()
+            .unwrap();
+        let stop = StopHandle::default();
+        let mut signals = (None, None);
+        let done = runtime.block_on(unless_stopped(async { 7 }, &stop, &mut signals));
+        assert_eq!(done, Some(7));
+        stop.request();
+        let polled = std::cell::Cell::new(false);
+        let stopped = runtime.block_on(unless_stopped(
+            async {
+                polled.set(true);
+                7
+            },
+            &stop,
+            &mut signals,
+        ));
+        assert_eq!(stopped, None);
+        assert!(!polled.get());
+    }
+
+    #[test]
+    fn a_denied_certificate_request_has_its_own_refusal_code() {
+        assert_eq!(
+            Error::Tailnet(fr_tailnet::Error::LocalApiDenied).code(),
+            "tailscale_permission_denied"
+        );
+        assert_eq!(
+            Error::Tailnet(fr_tailnet::Error::LocalApiUnavailable).code(),
+            "tailscale_unavailable"
+        );
     }
 }

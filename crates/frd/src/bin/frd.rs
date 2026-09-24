@@ -264,6 +264,7 @@ fn print_event(json: bool, event: &frd::host_run::Event) {
 
     if json {
         let value = match event {
+            Event::ObtainingCertificate => serde_json::json!({"event": "obtaining_certificate"}),
             Event::Listening { address } => {
                 serde_json::json!({"event": "listening", "address": address.to_string()})
             }
@@ -285,6 +286,9 @@ fn print_event(json: bool, event: &frd::host_run::Event) {
         println!("{value}");
     } else {
         match event {
+            Event::ObtainingCertificate => println!(
+                "frd: fetching this host's Tailscale HTTPS certificate (a first issuance can take a minute)"
+            ),
             Event::Listening { address } => {
                 println!("frd: sharing this desktop (view-only) on {address}; Ctrl-C to stop");
             }
