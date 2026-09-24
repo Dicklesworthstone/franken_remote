@@ -71,6 +71,8 @@ fn metadata(mode: Mode, changed: bool) -> (Value, Value) {
 }
 pub struct Api {
     pub client: LocalApi,
+    #[allow(dead_code)] // read by the frd-run composition test only
+    pub path: PathBuf,
     pub mode: Arc<Mutex<Mode>>,
     pub whois: Arc<AtomicUsize>,
     pub calls: Arc<AtomicUsize>,
@@ -84,7 +86,7 @@ impl Api {
         let path = pki().join(format!("host-api-{}", NEXT.fetch_add(1, Ordering::SeqCst)));
         let listener = UnixListener::bind(&path).unwrap();
         listener.set_nonblocking(true).unwrap();
-        let client = LocalApi::new(path).unwrap();
+        let client = LocalApi::new(&path).unwrap();
         let mode = Arc::new(Mutex::new(Mode::Allowed));
         let whois = Arc::new(AtomicUsize::new(0));
         let calls = Arc::new(AtomicUsize::new(0));
@@ -164,6 +166,7 @@ impl Api {
             }
         });
         Self {
+            path,
             client,
             mode,
             whois,

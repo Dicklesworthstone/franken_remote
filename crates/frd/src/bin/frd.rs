@@ -32,7 +32,7 @@ USAGE:
     frd --help
 
 COMMANDS:
-    run             Run the host daemon broker in foreground
+    run             Share this desktop view-only over the tailnet (foreground; needs root for ingress)
     status          Report host daemon health, capabilities, sessions, and restrictions
     approval        Inspect or update local operator approval policy
     sharing         Inspect or update tailnet sharing admission scope
@@ -45,7 +45,12 @@ OPTIONS:
     --socket PATH   Path to tailscaled.sock
     --approval MODE Initial approval mode: 'local' (prompt) or 'none' (unattended)
     --sharing SCOPE Sharing scope: 'own-user' (default) or 'tailnet'
-    --headless      Enable headless virtual display provisioning (Xvfb)
+    --headless      Share a private headless Xvfb display (cookie-authenticated)
+    --display :N    X11 display to share (default: $DISPLAY)
+    --worker PATH   Absolute fr-media-worker path (default: next to frd)
+    --interface IF  Tailscale interface for ingress enforcement (default: tailscale0)
+    --trust-roots P PEM CA bundle for the host certificate chain (default: system)
+    --once          Serve one sharing session, then exit
     --user          Manage user-level service (systemd user unit / launchd agent; default)
     --system        Manage system-wide service
     --dry-run       Preview service generation without modifying filesystem
@@ -253,19 +258,63 @@ fn execute_service_status(args: &[String], json: bool) -> ExitCode {
 
 #[allow(clippy::too_many_lines)]
 #[cfg(target_os = "linux")]
-fn execute_run(args: &[String], json: bool) -> ExitCode {
-    use asupersync::net::quic_native::{QuicUdpEndpoint, QuicUdpEndpointConfig};
-    use asupersync::runtime::RuntimeBuilder;
-    use asupersync::signal::{SignalKind, signal};
-    use asupersync::types::Budget;
-    use fr_core::ids::{HostBootId, OsSessionId};
-    use fr_tailnet::LocalApi;
-    use frd::broker::config::{ApprovalMode, DaemonConfig, SharingScope};
-    use frd::broker::service::BrokerService;
-    use std::net::SocketAddr;
-    use std::time::Duration;
+fn run_refusal(json: bool, code: &str, detail: &str) -> ExitCode {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"outcome": "refusal", "code": code, "detail": detail})
+        );
+    } else {
+        eprintln!("Refusal ({code}): {detail}");
+    }
+    ExitCode::from(2)
+}
 
+#[cfg(target_os = "linux")]
+fn print_event(json: bool, event: &frd::host_run::Event) {
+    use frd::host_run::Event;
+
+    if json {
+        let value = match event {
+            Event::Listening { address } => {
+                serde_json::json!({"event": "listening", "address": address.to_string()})
+            }
+            Event::PeerFinished {
+                attempts,
+                admitted,
+                refused,
+                outcome,
+            } => serde_json::json!({"event": "peer_finished", "attempts": attempts,
+                "admitted": admitted, "refused": refused, "outcome": outcome}),
+            Event::ShareEnded { outcome } => {
+                serde_json::json!({"event": "share_ended", "outcome": outcome})
+            }
+            Event::CleanupFailed { stage } => {
+                serde_json::json!({"event": "cleanup_failed", "stage": stage})
+            }
+            Event::Stopped => serde_json::json!({"event": "stopped"}),
+        };
+        println!("{value}");
+    } else {
+        match event {
+            Event::Listening { address } => {
+                println!("frd: sharing this desktop (view-only) on {address}; Ctrl-C to stop");
+            }
+            Event::PeerFinished { outcome, .. } => println!("frd: peer finished: {outcome}"),
+            Event::ShareEnded { outcome } => println!("frd: share ended: {outcome}"),
+            Event::CleanupFailed { stage } => eprintln!("frd: cleanup failed: {stage}"),
+            Event::Stopped => println!("frd: stopped"),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn execute_run(args: &[String], json: bool) -> ExitCode {
+    use frd::broker::virtual_display::{VirtualDisplayConfig, VirtualDisplayManager};
     use frd::host_policy::{Approval, Sharing, options::RunOptions};
+    use frd::host_run::{self, Event, Options, Reporter};
+    use std::sync::Arc;
+
     let options = match RunOptions::parse(args) {
         Ok(options) => options,
         Err(error) => return local_policy::refusal(error, json),
@@ -274,260 +323,93 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         Ok(effective) => effective,
         Err(error) => return local_policy::refusal(error, json),
     };
-    let socket = options.socket;
-    let port = effective.port;
-    let headless = options.headless;
-
-    let desktop = if headless {
-        frd::broker::config::DesktopSelection::Headless
-    } else {
-        frd::broker::config::DesktopSelection::Primary
-    };
-
-    let mut virtual_display = frd::broker::virtual_display::VirtualDisplayConfig::default();
-    if headless {
-        virtual_display.enabled = true;
-    }
-
-    let config = DaemonConfig {
-        service_port: effective.port,
-        approval_mode: match effective.approval {
-            Approval::Local => ApprovalMode::PromptAlways,
-            Approval::None => ApprovalMode::Unattended,
-        },
-        sharing_scope: match effective.sharing {
-            Sharing::OwnUser => SharingScope::OwnUser,
-            Sharing::Tailnet => SharingScope::Tailnet,
-        },
-        desktop,
-        virtual_display,
-        ..Default::default()
-    };
-
-    let runtime = match RuntimeBuilder::current_thread()
-        .enable_platform_reactor(true)
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            if json {
-                println!(
-                    "{{\"outcome\":\"refusal\",\"code\":\"runtime_unavailable\",\"detail\":\"{e}\"}}"
-                );
-            } else {
-                eprintln!("Error: Failed to initialize async runtime: {e}");
-            }
-            return ExitCode::from(2);
-        }
-    };
-
-    let Ok(cx) = runtime
-        .handle()
-        .try_request_cx_with_budget(Budget::INFINITE)
-    else {
-        eprintln!("Error: Failed to acquire runtime context.");
-        return ExitCode::from(2);
-    };
-
-    let api = match &socket {
-        Some(p) => match LocalApi::new(p) {
-            Ok(a) => a,
-            Err(e) => {
-                if json {
-                    println!(
-                        "{{\"outcome\":\"refusal\",\"code\":\"tailscale_unavailable\",\"detail\":\"{e}\"}}"
-                    );
-                } else {
-                    eprintln!(
-                        "Error: Cannot connect to Tailscale at '{}': {e}",
-                        p.display()
-                    );
-                }
-                return ExitCode::from(1);
-            }
-        },
-        None => LocalApi::installed(),
-    };
-
-    // Query tailscale status to verify daemon connectivity and fetch host identity
-    let tailscale_status = runtime.block_on(async { api.node_identity(&cx).await });
-
-    let (fqdn, tailnet_ips) = match tailscale_status {
-        Ok(node) => {
-            let fqdn = node.certificate_name().to_string();
-            let ips = node.addresses().to_vec();
-            (fqdn, ips)
-        }
-        Err(e) => {
-            if json {
-                println!(
-                    "{{\"outcome\":\"refusal\",\"code\":\"tailscale_unavailable\",\"detail\":\"{e}\"}}"
-                );
-            } else {
-                eprintln!(
-                    "Refusal: Tailscale local daemon is not running or socket is inaccessible ({e})."
-                );
-                eprintln!("FrankenRemote requires an active Tailscale tailnet node to operate.");
-            }
-            return ExitCode::from(1);
-        }
-    };
-
-    if tailnet_ips.is_empty() {
-        if json {
-            println!(
-                "{{\"outcome\":\"refusal\",\"code\":\"no_tailnet_addresses\",\"detail\":\"Host node has no assigned tailnet IP addresses.\"}}"
-            );
-        } else {
-            eprintln!("Refusal: Host node has no assigned tailnet IP addresses.");
-        }
-        return ExitCode::from(1);
-    }
-
-    // Step 1: Detect port collisions on all tailnet IPs
-    for ip in &tailnet_ips {
-        if let Err(collision) = fr_tailnet::check_port_collision(*ip, port) {
-            if json {
-                println!(
-                    "{{\"outcome\":\"refusal\",\"code\":\"port_collision\",\"ip\":\"{ip}\",\"port\":{port},\"protocol\":\"{:?}\"}}",
-                    collision.protocol
-                );
-            } else {
-                eprintln!(
-                    "Refusal: Port collision on {ip}:{port} ({:?})",
-                    collision.protocol
-                );
-            }
-            return ExitCode::from(1);
-        }
-    }
-
-    // Step 2: Bind QUIC UDP endpoints for all tailnet IPs
-    let bound_endpoints = runtime.block_on(async {
-        let mut eps = Vec::with_capacity(tailnet_ips.len());
-        for ip in &tailnet_ips {
-            let addr = SocketAddr::new(*ip, port);
-            match QuicUdpEndpoint::bind(&cx, addr, QuicUdpEndpointConfig::default()).await {
-                Ok(ep) => eps.push((addr, ep)),
-                Err(e) => return Err((addr, format!("{e:?}"))),
-            }
-        }
-        Ok(eps)
-    });
-
-    let mut endpoints = match bound_endpoints {
-        Ok(eps) => eps,
-        Err((addr, err)) => {
-            if json {
-                println!(
-                    "{{\"outcome\":\"refusal\",\"code\":\"bind_failed\",\"addr\":\"{addr}\",\"detail\":\"{err}\"}}"
-                );
-            } else {
-                eprintln!("Refusal: Failed to bind QUIC UDP endpoint on {addr}: {err}");
-            }
-            return ExitCode::from(1);
-        }
-    };
-
-    let boot_id = HostBootId::from_raw(1);
-    let os_session_id = OsSessionId::from_raw(1);
-    let mut broker = BrokerService::new(
-        config,
-        boot_id,
-        os_session_id,
-        fqdn.clone(),
-        tailnet_ips.clone(),
-    );
-
-    let https_endpoints = broker.honest_https_endpoints();
-    let quic_endpoints = broker.honest_quic_endpoints();
-
-    if json {
-        println!(
-            "{{\"outcome\":\"running\",\"node\":\"{}\",\"port\":{},\"https_endpoints\":{:?},\"quic_endpoints\":{:?},\"desktop\":\"{:?}\",\"bound_listeners\":{}}}",
-            fqdn,
-            port,
-            https_endpoints,
-            quic_endpoints,
-            broker.desktop_availability,
-            endpoints.len()
+    if effective.approval == Approval::Local {
+        return run_refusal(
+            json,
+            "local_approval_unavailable",
+            "local approval needs the interactive session-agent process, which frd run does not \
+             host yet; set `frd approval set none` to share unattended (scope stays as configured)",
         );
+    }
+    // Keep the Xvfb owner alive for the whole run; dropping it stops the server
+    // and removes its private cookie.
+    let mut headless = None;
+    let (display, xauthority) = if options.headless {
+        match VirtualDisplayManager::start(&VirtualDisplayConfig {
+            enabled: true,
+            ..VirtualDisplayConfig::default()
+        }) {
+            Ok(instance) => {
+                let pair = (instance.display.clone(), instance.xauthority.clone());
+                headless = Some(instance);
+                pair
+            }
+            Err(error) => return run_refusal(json, "virtual_display_failed", &error.to_string()),
+        }
     } else {
-        println!("============================================================");
-        println!("FrankenRemote Host Daemon (frd) Starting");
-        println!("============================================================");
-        println!("  Tailnet Node:  {fqdn}");
-        println!("  Ingress Port:  {port}");
-        for ep in &https_endpoints {
-            println!("  HTTPS Endpoint: {ep}");
-        }
-        for ep in &quic_endpoints {
-            println!("  QUIC Endpoint:  {ep}");
-        }
-        println!("  Desktop State: {:?}", broker.desktop_availability);
-        println!("  Approval Mode: {:?}", broker.config.approval_mode);
-        println!("  Sharing Scope: {:?}", broker.config.sharing_scope);
-        println!(
-            "  Active Sockets: {} UDP listener(s) bound",
-            endpoints.len()
-        );
-        println!("============================================================");
-        println!("Broker listening. Press Ctrl-C to shut down.");
-    }
-
-    // Step 3: Run event loop driving endpoints and signal handling until SIGINT/SIGTERM
-    runtime.block_on(async {
-        let mut sigint = signal(SignalKind::interrupt()).ok();
-        let mut sigterm = signal(SignalKind::terminate()).ok();
-
-        loop {
-            // Check signals
-            let stop = std::future::poll_fn(|task| {
-                if let Some(ref mut s) = sigint
-                    && std::pin::pin!(s.recv()).poll(task).is_ready()
-                {
-                    return std::task::Poll::Ready(true);
-                }
-                if let Some(ref mut s) = sigterm
-                    && std::pin::pin!(s.recv()).poll(task).is_ready()
-                {
-                    return std::task::Poll::Ready(true);
-                }
-                std::task::Poll::Ready(false)
-            })
-            .await;
-
-            if stop {
-                break;
+        match options
+            .display
+            .clone()
+            .or_else(|| std::env::var("DISPLAY").ok())
+        {
+            Some(display) => (display, std::env::var_os("XAUTHORITY").map(PathBuf::from)),
+            None => {
+                return run_refusal(
+                    json,
+                    "no_display",
+                    "no X11 display to share: set DISPLAY, pass --display, or use --headless",
+                );
             }
-
-            // Receive any pending UDP packet batch from active endpoints
-            for (_addr, ep) in &mut endpoints {
-                let _ = asupersync::time::timeout(
-                    cx.now(),
-                    Duration::from_millis(20),
-                    ep.receive_batch(&cx, 16),
-                )
-                .await;
-            }
-
-            // Yield turn cooperatively
-            asupersync::time::sleep(cx.now(), Duration::from_millis(10)).await;
         }
-
-        // Drop listeners explicitly
-        drop(endpoints);
+    };
+    let worker = options.worker.clone().or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("fr-media-worker")))
     });
-
-    if let Some(mut vd) = broker.virtual_display.take() {
-        vd.stop();
+    let Some(worker) = worker.filter(|path| path.is_absolute() && path.is_file()) else {
+        return run_refusal(
+            json,
+            "worker_unavailable",
+            "fr-media-worker not found; build fr-native with --features linux-media and pass \
+             --worker /absolute/path/fr-media-worker",
+        );
+    };
+    let run_options = Options {
+        socket: options.socket.clone(),
+        port: effective.port,
+        interface: options
+            .interface
+            .clone()
+            .unwrap_or_else(|| "tailscale0".into()),
+        worker,
+        display,
+        xauthority,
+        trust_roots: options
+            .trust_roots
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(fr_tailnet::trust::SYSTEM_BUNDLE)),
+        sharing: match effective.sharing {
+            Sharing::OwnUser => fr_tailnet::Scope::OwnUser,
+            Sharing::Tailnet => fr_tailnet::Scope::Tailnet,
+        },
+        fps: 30,
+        bitrate: 8_000_000,
+        ingress_tools: None,
+        once: options.once,
+        handle_signals: true,
+    };
+    let report: Reporter = Arc::new(move |event: Event| print_event(json, &event));
+    let stop = Arc::new(host_run::StopHandle::default());
+    let result = host_run::run(&run_options, &report, &stop);
+    drop(headless);
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            let detail = error.to_string();
+            run_refusal(json, error.code(), &detail)
+        }
     }
-
-    if !json {
-        println!("\nShutdown signal received. Tearing down broker cleanly...");
-        println!("Broker stopped. Zero residual sessions or listeners retained.");
-    }
-    ExitCode::SUCCESS
 }
 
 #[cfg(not(target_os = "linux"))]

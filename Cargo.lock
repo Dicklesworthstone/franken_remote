@@ -728,6 +728,7 @@ dependencies = [
  "fr-tailnet",
  "fr-transport",
  "fr-wire",
+ "getrandom 0.4.3",
  "rustix",
  "serde",
  "serde_json",

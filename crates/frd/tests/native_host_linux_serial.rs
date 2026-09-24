@@ -632,3 +632,6 @@ mod desktop;
 
 #[path = "native_host_linux_serial/persistent_desktop.rs"]
 mod persistent_desktop;
+
+#[path = "native_host_linux_serial/host_run.rs"]
+mod host_run;

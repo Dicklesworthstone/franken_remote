@@ -41,7 +41,7 @@ fn now(cx: &Cx) -> Result<u64, ()> {
 fn block(_: Route, _: &[u8]) -> Result<Disposition, ()> {
     Ok(Disposition::Blocked)
 }
-fn offer() -> fr_wire::negotiation::Offer {
+pub(super) fn offer() -> fr_wire::negotiation::Offer {
     let mut offer = fixture::offer();
     offer.capabilities = [
         decoder::CAPABILITY,
@@ -109,7 +109,9 @@ fn choose(catalog: &Catalog) -> Result<(Select, Codec), ()> {
         },
     ))
 }
-fn setup(cx: Cx, mode: &str) -> (Setup, ObservationControl, Retirement, PathBuf) {
+/// A scripted capture worker speaking the real worker protocol with fixture
+/// HEVC; returns the executable and the path it records its PID in.
+pub(super) fn source_script(mode: &str) -> (PathBuf, PathBuf) {
     use std::fmt::Write;
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let mut payload = String::new();
@@ -138,6 +140,10 @@ fn setup(cx: Cx, mode: &str) -> (Setup, ObservationControl, Retirement, PathBuf)
     )
     .unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    (path, trace)
+}
+fn setup(cx: Cx, mode: &str) -> (Setup, ObservationControl, Retirement, PathBuf) {
+    let (path, trace) = source_script(mode);
     let mut authority = SessionAuthority::new(
         RemoteSessionId::from_raw(901),
         AuthorityPolicy::plan_defaults(),

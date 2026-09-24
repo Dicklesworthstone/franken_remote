@@ -19,6 +19,16 @@ pub struct RunOptions {
     pub approval: Option<Approval>,
     pub sharing: Option<Sharing>,
     pub headless: bool,
+    /// Absolute path of the capture worker; defaults next to the frd binary.
+    pub worker: Option<PathBuf>,
+    /// X11 display to share; defaults to the DISPLAY frd was started with.
+    pub display: Option<String>,
+    /// Tailscale interface for ingress enforcement; defaults to tailscale0.
+    pub interface: Option<String>,
+    /// Local PEM CA bundle for the host's own certificate chain.
+    pub trust_roots: Option<PathBuf>,
+    /// Serve one OS-share lifetime, then exit.
+    pub once: bool,
 }
 impl RunOptions {
     /// Arguments after `run`. Unknown, duplicate or valueless options refuse
@@ -42,6 +52,13 @@ impl RunOptions {
                 options.headless = true;
                 continue;
             }
+            if flag == "--once" {
+                if options.once {
+                    return Err(Error::InvalidArgument);
+                }
+                options.once = true;
+                continue;
+            }
             let value = value(&mut iter)?;
             match flag.as_str() {
                 "--port" => {
@@ -55,6 +72,10 @@ impl RunOptions {
                 "--config" => set(&mut options.config, PathBuf::from(value))?,
                 "--approval" => set(&mut options.approval, Approval::parse(value)?)?,
                 "--sharing" => set(&mut options.sharing, Sharing::parse(value)?)?,
+                "--worker" => set(&mut options.worker, PathBuf::from(value))?,
+                "--display" => set(&mut options.display, value.to_owned())?,
+                "--interface" => set(&mut options.interface, value.to_owned())?,
+                "--trust-roots" => set(&mut options.trust_roots, PathBuf::from(value))?,
                 _ => return Err(Error::InvalidArgument),
             }
         }
