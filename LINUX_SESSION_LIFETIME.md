@@ -64,7 +64,7 @@ or exercise an actual desktop locker, logind daemon, Tailscale, or codec.
 A desktop whose locker does not faithfully maintain it is NOT qualified by this
 adapter. The selected user, desktop and OS remain trust boundaries. Actual
 per-desktop lock/logout/suspend qualification is still required before enabling a
-host profile. This feature does not enable `frd run` or fabricate the separate
+host profile. This feature is not used by `frd run` yet and does not fabricate the separate
 capture/input permissions that startup requires.
 
 Primary API references: systemd's `org.freedesktop.login1`, `sd_bus_get_name_creds`,

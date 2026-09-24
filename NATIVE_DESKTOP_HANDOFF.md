@@ -49,4 +49,4 @@ third-party libraries. Full current-main workspace qualification is separate.
 
 This handoff builds on the first-source implementation at `bf9151d7`; it does not
 replace that implementation, implement multi-client UDP demultiplexing, or
-complete the `frd run` command's listener/session dispatcher.
+change the `frd run` composition in `crates/frd/src/host_run.rs`.

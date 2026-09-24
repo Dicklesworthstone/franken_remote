@@ -53,7 +53,7 @@ startup for failed/abandoned preparation, as required by the original opener.
 No cleanup call retries external effects or creates another native worker.
 
 This is the cold/warm authenticated-Host dispatcher, not multi-client UDP
-multiplexing or completed `frd run` wiring. It does not qualify an installed
+multiplexing (`frd run` composes it in `crates/frd/src/host_run.rs`). It does not qualify an installed
 Tailscale, logind/locker, kernel-ingress or hardware-media path. The focused
 regressions use real TLS/UDP and supervised child IPC with explicit permission,
 capture/HEVC and decoder-acknowledgement fixtures.

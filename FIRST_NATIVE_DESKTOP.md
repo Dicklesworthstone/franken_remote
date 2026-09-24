@@ -40,8 +40,8 @@ the pinned compiler, rebuilt first-party source and matching retained CI depende
 libraries. OS identity/permission and codec/decoder responses remain explicit
 fixtures: this is not hardware, installed-tailnet or full-workspace qualification.
 
-The actual `frd run` dispatcher and native platform permission/UI adapters still
-need integration. This API does not bind a listener, assert kernel ingress, or
+`frd run` now composes the listener and dispatcher (`crates/frd/src/host_run.rs`);
+native platform permission/UI adapters still need integration. This API does not bind a listener, assert kernel ingress, or
 make the unfinished command-line daemon a complete workstation. The source-size
 gate is unchanged and remains failing; no release or broad bead closure is claimed.
 

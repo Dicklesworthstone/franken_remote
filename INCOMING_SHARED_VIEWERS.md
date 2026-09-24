@@ -112,4 +112,4 @@ native cases run explicitly in disposable user/network namespaces using actual
 TLS/UDP and credential-checked Unix HTTP; metadata, ingress lifetime, source
 pictures and decoder acknowledgements are fixtures. This does not qualify a live
 tailnet, firewall, native HEVC or display. Kernel ingress enforcement, multi-client
-UDP demultiplexing, first-source provisioning and `frd run` dispatch remain separate.
+UDP demultiplexing and first-source provisioning remain separate; `frd run` composes this path in `crates/frd/src/host_run.rs`.

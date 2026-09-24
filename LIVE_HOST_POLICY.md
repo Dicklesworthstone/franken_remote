@@ -58,7 +58,7 @@ until actual thread exit, preventing unbounded replacements. Explicit
 Unmodified callers without with_live_policy retain their startup-selected policy.
 The existing CLI save commands still save only: their success does NOT prove that
 any running host observed or applied a revision. No CLI output is changed to claim
-live application, and the unfinished frd run desktop path is not enabled here.
+live application; `frd run` reads the saved policy once at startup.
 
 The concurrent capacity-one serial listener calls the same guarded acceptance
 for every peer. Its existing fatal-error classification treats policy change or

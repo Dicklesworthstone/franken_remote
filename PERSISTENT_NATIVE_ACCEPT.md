@@ -50,7 +50,7 @@ overlays. Unrelated host helper modules are omitted only in the disposable build
 there are no committed test exclusions beyond explicit namespace requirements.
 
 This API does not itself install ingress restrictions, renew host certificates,
-or enable the unfinished `frd run` CLI desktop dispatch path. Linux callers must
+or run a host by itself (`frd run` composes it in `crates/frd/src/host_run.rs`). Linux callers must
 keep the real Boundary alive and supervised across ALL attempts, not manufacture
 an always-true ingress assertion.
 

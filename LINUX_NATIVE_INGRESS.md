@@ -54,7 +54,7 @@ that is separate from installed-Tailscale qualification. This development
 container cannot execute nftables/TUN qualification, so no kernel or live-tailnet
 pass is asserted here.
 
-This does **not** enable the unfinished `frd run` CLI dispatcher, implement
+This does **not** by itself run a host (`frd run` composes it in `crates/frd/src/host_run.rs`), implement
 multi-client UDP demultiplexing, provide userspace-networking Tailscale ingress,
 or establish media/hardware readiness. It replaces the missing protected-socket
 ownership boundary; application consent, media readiness and input authority

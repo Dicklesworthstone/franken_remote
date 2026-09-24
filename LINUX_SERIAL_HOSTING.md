@@ -46,15 +46,22 @@ removal; eager local retirement does not assert that every external owner is gon
 
 ## Focused lifecycle verification
 
-Build the integration test with the repository's pinned compiler:
+Build the integration test and the shipped client with the repository's pinned
+compiler, then run every ignored test in a fresh namespace:
 
 ```sh
+cargo build -p fr-native --bin fr --locked
 cargo test -p frd --test native_host_linux_serial --no-run --locked
 scripts/test_linux_serial_lifecycle.sh /absolute/path/to/native_host_linux_serial-TEST_HASH
 ```
 
-The runner uses a fresh user/mount/network namespace and executes all eight
-explicitly ignored tests. It mounts synthetic `/sys` and `/run` only inside that
+`shipped_client` finds `fr` in the same cargo profile directory as the test
+executable. Hosts that restrict unprivileged user namespaces (Ubuntu's AppArmor
+default) can run the same fresh mount/network namespaces as real root with
+`FR_NS_SUDO=1`.
+
+The runner uses a fresh user/mount/network namespace and executes every
+explicitly ignored test. It mounts synthetic `/sys` and `/run` only inside that
 namespace. IPv4 UDP/TLS, Host/Viewer negotiation, Unix peer-credential HTTP, the
 protected policy store, command subprocesses, ingress renewal, and serial owners
 are real. **The selected interface and nftables replies are explicit fixtures:**
@@ -63,8 +70,14 @@ They check successor sessions across evidence renewal, fixed idle deadlines,
 rule loss during cooldown, retained transport, policy revision changes,
 cancellation, panic and unpolled abandonment without weakening production checks.
 
+`host_run` drives the production `frd run` composition (`crates/frd/src/host_run.rs`)
+with a scripted capture worker: a real viewer receives frames for four seconds past
+the initial authority lease, then stop runs the fixed cleanup order.
+`shipped_client` runs the real `fr displays` binary against it. As of 2026-09-24
+the client side of that test passes; the host side (a departing inspection ends the
+share instead of finishing only that peer) is open as bead `fr-704`.
+
 Actual TUN/nftables behavior still requires the separate
 `qualify_linux_ingress` executable and installed-tailnet testing. These tests do
-not claim actual desktop media, full newer-main workspace qualification, or a
-completed `frd run` integration. Simultaneous multi-client UDP dispatch and CLI
-wiring remain separate unfinished work.
+not claim actual desktop media, hardware encode or a live-tailnet run.
+Simultaneous multi-client UDP dispatch remains separate unfinished work.

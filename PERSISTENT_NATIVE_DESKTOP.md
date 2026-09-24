@@ -75,5 +75,5 @@ Interface/nftables replies, installed-tailnet metadata, OS capture permission,
 HEVC payloads and decoder acknowledgements are explicit fixtures. These tests
 do not qualify actual kernel filtering, installed Tailscale/logind, a physical
 display or codec. The existing isolated namespace runner remains authoritative
-for this lifecycle fixture. This does not wire the unfinished `frd run` CLI into
-a complete installed desktop host and does not change existing validation gates.
+for this lifecycle fixture. `frd run` composes this path (`crates/frd/src/host_run.rs`);
+that is not an installed-desktop qualification and does not change existing validation gates.
