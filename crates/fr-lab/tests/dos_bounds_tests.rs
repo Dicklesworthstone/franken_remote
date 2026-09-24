@@ -78,48 +78,102 @@ macro_rules! check_floor {
 }
 
 #[test]
-#[rustfmt::skip]
 fn protocol_limits_rate_overrides_above_ceiling_are_rejected() {
     let a = ProtocolLimits::ABSOLUTE;
-    check_ceiling!(max_handshake_duration_ms, a.max_handshake_duration_ms() + 1, LF::HandshakeDurationMs);
-    check_ceiling!(max_preadmission_rate_per_sec, a.max_preadmission_rate_per_sec() + 1, LF::PreadmissionRatePerSec);
-    check_ceiling!(max_half_attached_channels, a.max_half_attached_channels() + 1, LF::HalfAttachedChannels);
-    check_ceiling!(max_pending_approvals, a.max_pending_approvals() + 1, LF::PendingApprovals);
+    check_ceiling!(
+        max_handshake_duration_ms,
+        a.max_handshake_duration_ms() + 1,
+        LF::HandshakeDurationMs
+    );
+    check_ceiling!(
+        max_preadmission_rate_per_sec,
+        a.max_preadmission_rate_per_sec() + 1,
+        LF::PreadmissionRatePerSec
+    );
+    check_ceiling!(
+        max_half_attached_channels,
+        a.max_half_attached_channels() + 1,
+        LF::HalfAttachedChannels
+    );
+    check_ceiling!(
+        max_pending_approvals,
+        a.max_pending_approvals() + 1,
+        LF::PendingApprovals
+    );
 }
 
 #[test]
-#[rustfmt::skip]
 fn protocol_limits_payload_overrides_above_ceiling_are_rejected() {
     let a = ProtocolLimits::ABSOLUTE;
-    check_ceiling!(max_cursor_dimension_pixels, a.max_cursor_dimension_pixels() + 1, LF::CursorDimensionPixels);
-    check_ceiling!(max_cursor_shape_bytes, a.max_cursor_shape_bytes() + 1, LF::CursorShapeBytes);
+    check_ceiling!(
+        max_cursor_dimension_pixels,
+        a.max_cursor_dimension_pixels() + 1,
+        LF::CursorDimensionPixels
+    );
+    check_ceiling!(
+        max_cursor_shape_bytes,
+        a.max_cursor_shape_bytes() + 1,
+        LF::CursorShapeBytes
+    );
     check_ceiling!(max_name_bytes, a.max_name_bytes() + 1, LF::NameBytes);
-    check_ceiling!(max_parameter_set_bytes, a.max_parameter_set_bytes() + 1, LF::ParameterSetBytes);
-    check_ceiling!(max_fragments_per_access_unit, a.max_fragments_per_access_unit() + 1, LF::FragmentsPerAccessUnit);
+    check_ceiling!(
+        max_parameter_set_bytes,
+        a.max_parameter_set_bytes() + 1,
+        LF::ParameterSetBytes
+    );
+    check_ceiling!(
+        max_fragments_per_access_unit,
+        a.max_fragments_per_access_unit() + 1,
+        LF::FragmentsPerAccessUnit
+    );
 }
 
 #[test]
-#[rustfmt::skip]
 fn protocol_limits_resource_overrides_above_ceiling_are_rejected() {
     let a = ProtocolLimits::ABSOLUTE;
-    check_ceiling!(max_retained_receipts, a.max_retained_receipts() + 1, LF::RetainedReceipts);
-    check_ceiling!(max_encoder_sessions, a.max_encoder_sessions() + 1, LF::EncoderSessions);
+    check_ceiling!(
+        max_retained_receipts,
+        a.max_retained_receipts() + 1,
+        LF::RetainedReceipts
+    );
+    check_ceiling!(
+        max_encoder_sessions,
+        a.max_encoder_sessions() + 1,
+        LF::EncoderSessions
+    );
     check_ceiling!(max_gpu_surfaces, a.max_gpu_surfaces() + 1, LF::GpuSurfaces);
-    check_ceiling!(max_bandwidth_bps, a.max_bandwidth_bps() + 1, LF::BandwidthBps);
+    check_ceiling!(
+        max_bandwidth_bps,
+        a.max_bandwidth_bps() + 1,
+        LF::BandwidthBps
+    );
     check_ceiling!(max_viewers, a.max_viewers() + 1, LF::Viewers);
 }
 
 #[test]
-#[rustfmt::skip]
 fn protocol_limits_rate_overrides_below_floor_are_rejected() {
-    check_floor!(max_handshake_duration_ms, 999, LF::HandshakeDurationMs, 1000);
-    check_floor!(idle_session_timeout_seconds, 9, LF::IdleSessionTimeoutSecs, 10);
+    check_floor!(
+        max_handshake_duration_ms,
+        999,
+        LF::HandshakeDurationMs,
+        1000
+    );
+    check_floor!(
+        idle_session_timeout_seconds,
+        9,
+        LF::IdleSessionTimeoutSecs,
+        10
+    );
 }
 
 #[test]
-#[rustfmt::skip]
 fn protocol_limits_resource_overrides_below_floor_are_rejected() {
-    check_floor!(max_cursor_dimension_pixels, 15, LF::CursorDimensionPixels, 16);
+    check_floor!(
+        max_cursor_dimension_pixels,
+        15,
+        LF::CursorDimensionPixels,
+        16
+    );
     check_floor!(max_cursor_shape_bytes, 1023, LF::CursorShapeBytes, 1024);
     check_floor!(max_parameter_set_bytes, 31, LF::ParameterSetBytes, 32);
     check_floor!(max_retained_receipts, 15, LF::RetainedReceipts, 16);
@@ -128,28 +182,65 @@ fn protocol_limits_resource_overrides_below_floor_are_rejected() {
 }
 
 #[test]
-#[rustfmt::skip]
 fn protocol_limits_payload_validations_reject_violations() {
     let limits = ProtocolLimits::ABSOLUTE;
-    assert!(matches!(limits.validate_cursor_dimensions(0, 64), Err(LimitsError::ZeroDimension)));
-    assert!(matches!(limits.validate_cursor_dimensions(64, 0), Err(LimitsError::ZeroDimension)));
-    assert_err_field(limits.validate_cursor_dimensions(limits.max_cursor_dimension_pixels() + 1, 64), LF::CursorDimensionPixels);
-    assert_err_field(limits.validate_cursor_shape_len(limits.max_cursor_shape_bytes() as usize + 1), LF::CursorShapeBytes);
-    assert_err_field(limits.validate_name_len(limits.max_name_bytes() + 1), LF::NameBytes);
-    assert_err_field(limits.validate_parameter_set_len(limits.max_parameter_set_bytes() as usize + 1), LF::ParameterSetBytes);
-    assert_err_field(limits.validate_fragment_count(limits.max_fragments_per_access_unit() + 1), LF::FragmentsPerAccessUnit);
+    assert!(matches!(
+        limits.validate_cursor_dimensions(0, 64),
+        Err(LimitsError::ZeroDimension)
+    ));
+    assert!(matches!(
+        limits.validate_cursor_dimensions(64, 0),
+        Err(LimitsError::ZeroDimension)
+    ));
+    assert_err_field(
+        limits.validate_cursor_dimensions(limits.max_cursor_dimension_pixels() + 1, 64),
+        LF::CursorDimensionPixels,
+    );
+    assert_err_field(
+        limits.validate_cursor_shape_len(limits.max_cursor_shape_bytes() as usize + 1),
+        LF::CursorShapeBytes,
+    );
+    assert_err_field(
+        limits.validate_name_len(limits.max_name_bytes() + 1),
+        LF::NameBytes,
+    );
+    assert_err_field(
+        limits.validate_parameter_set_len(limits.max_parameter_set_bytes() as usize + 1),
+        LF::ParameterSetBytes,
+    );
+    assert_err_field(
+        limits.validate_fragment_count(limits.max_fragments_per_access_unit() + 1),
+        LF::FragmentsPerAccessUnit,
+    );
 }
 
 #[test]
-#[rustfmt::skip]
 fn protocol_limits_concurrency_validations_reject_violations() {
     let limits = ProtocolLimits::ABSOLUTE;
-    assert_err_field(limits.validate_retained_receipts(limits.max_retained_receipts() + 1), LF::RetainedReceipts);
-    assert_err_field(limits.validate_handshake_concurrency(limits.max_concurrent_handshakes()), LF::ConcurrentHandshakes);
-    assert_err_field(limits.validate_pending_approvals(limits.max_pending_approvals()), LF::PendingApprovals);
-    assert_err_field(limits.validate_half_attached_channels(limits.max_half_attached_channels()), LF::HalfAttachedChannels);
-    assert_err_field(limits.validate_encoder_sessions(limits.max_encoder_sessions()), LF::EncoderSessions);
-    assert_err_field(limits.validate_gpu_surfaces(limits.max_gpu_surfaces()), LF::GpuSurfaces);
+    assert_err_field(
+        limits.validate_retained_receipts(limits.max_retained_receipts() + 1),
+        LF::RetainedReceipts,
+    );
+    assert_err_field(
+        limits.validate_handshake_concurrency(limits.max_concurrent_handshakes()),
+        LF::ConcurrentHandshakes,
+    );
+    assert_err_field(
+        limits.validate_pending_approvals(limits.max_pending_approvals()),
+        LF::PendingApprovals,
+    );
+    assert_err_field(
+        limits.validate_half_attached_channels(limits.max_half_attached_channels()),
+        LF::HalfAttachedChannels,
+    );
+    assert_err_field(
+        limits.validate_encoder_sessions(limits.max_encoder_sessions()),
+        LF::EncoderSessions,
+    );
+    assert_err_field(
+        limits.validate_gpu_surfaces(limits.max_gpu_surfaces()),
+        LF::GpuSurfaces,
+    );
     assert_err_field(limits.validate_viewers(limits.max_viewers()), LF::Viewers);
 }
 

@@ -1011,39 +1011,115 @@ fn resolve_session_overrides(
     })
 }
 
-#[rustfmt::skip]
 fn resolve_rate_overrides(
     o: &LimitOverrides,
     a: &ProtocolLimits,
 ) -> Result<RateOverrides, LimitsError> {
     Ok(RateOverrides {
-        max_concurrent_handshakes: take_l!(ConcurrentHandshakes, max_concurrent_handshakes, 1, a, o)?,
-        max_handshake_duration_ms: take_l!(HandshakeDurationMs, max_handshake_duration_ms, 1_000, a, o)?,
-        max_preadmission_rate_per_sec: take_l!(PreadmissionRatePerSec, max_preadmission_rate_per_sec, 1, a, o)?,
-        max_half_attached_channels: take_l!(HalfAttachedChannels, max_half_attached_channels, 1, a, o)?,
+        max_concurrent_handshakes: take_l!(
+            ConcurrentHandshakes,
+            max_concurrent_handshakes,
+            1,
+            a,
+            o
+        )?,
+        max_handshake_duration_ms: take_l!(
+            HandshakeDurationMs,
+            max_handshake_duration_ms,
+            1_000,
+            a,
+            o
+        )?,
+        max_preadmission_rate_per_sec: take_l!(
+            PreadmissionRatePerSec,
+            max_preadmission_rate_per_sec,
+            1,
+            a,
+            o
+        )?,
+        max_half_attached_channels: take_l!(
+            HalfAttachedChannels,
+            max_half_attached_channels,
+            1,
+            a,
+            o
+        )?,
         max_pending_approvals: take_l!(PendingApprovals, max_pending_approvals, 1, a, o)?,
-        idle_session_timeout_seconds: take_l!(IdleSessionTimeoutSecs, idle_session_timeout_seconds, 10, a, o)?,
-        max_control_requests_per_sec: take_l!(ControlRequestsPerSec, max_control_requests_per_sec, 10, a, o)?,
+        idle_session_timeout_seconds: take_l!(
+            IdleSessionTimeoutSecs,
+            idle_session_timeout_seconds,
+            10,
+            a,
+            o
+        )?,
+        max_control_requests_per_sec: take_l!(
+            ControlRequestsPerSec,
+            max_control_requests_per_sec,
+            10,
+            a,
+            o
+        )?,
         max_codec_probes_per_min: take_l!(CodecProbesPerMin, max_codec_probes_per_min, 1, a, o)?,
-        max_recovery_requests_per_sec: take_l!(RecoveryRequestsPerSec, max_recovery_requests_per_sec, 10, a, o)?,
-        max_cursor_uploads_per_sec: take_l!(CursorUploadsPerSec, max_cursor_uploads_per_sec, 1, a, o)?,
-        max_diagnostic_exports_per_min: take_l!(DiagnosticExportsPerMin, max_diagnostic_exports_per_min, 1, a, o)?,
-        max_decoder_reconfigurations_per_min: take_l!(DecoderReconfigurationsPerMin, max_decoder_reconfigurations_per_min, 1, a, o)?,
-        max_worker_restarts_per_min: take_l!(WorkerRestartsPerMin, max_worker_restarts_per_min, 1, a, o)?,
+        max_recovery_requests_per_sec: take_l!(
+            RecoveryRequestsPerSec,
+            max_recovery_requests_per_sec,
+            10,
+            a,
+            o
+        )?,
+        max_cursor_uploads_per_sec: take_l!(
+            CursorUploadsPerSec,
+            max_cursor_uploads_per_sec,
+            1,
+            a,
+            o
+        )?,
+        max_diagnostic_exports_per_min: take_l!(
+            DiagnosticExportsPerMin,
+            max_diagnostic_exports_per_min,
+            1,
+            a,
+            o
+        )?,
+        max_decoder_reconfigurations_per_min: take_l!(
+            DecoderReconfigurationsPerMin,
+            max_decoder_reconfigurations_per_min,
+            1,
+            a,
+            o
+        )?,
+        max_worker_restarts_per_min: take_l!(
+            WorkerRestartsPerMin,
+            max_worker_restarts_per_min,
+            1,
+            a,
+            o
+        )?,
     })
 }
 
-#[rustfmt::skip]
 fn resolve_resource_overrides(
     o: &LimitOverrides,
     a: &ProtocolLimits,
 ) -> Result<ResourceOverrides, LimitsError> {
     Ok(ResourceOverrides {
-        cursor_dimension_pixels: take_l!(CursorDimensionPixels, max_cursor_dimension_pixels, 16, a, o)?,
+        cursor_dimension_pixels: take_l!(
+            CursorDimensionPixels,
+            max_cursor_dimension_pixels,
+            16,
+            a,
+            o
+        )?,
         cursor_shape_bytes: take_l!(CursorShapeBytes, max_cursor_shape_bytes, 1024, a, o)?,
         name_bytes: take_l!(NameBytes, max_name_bytes, 1, a, o)?,
         parameter_set_bytes: take_l!(ParameterSetBytes, max_parameter_set_bytes, 32, a, o)?,
-        fragments_per_access_unit: take_l!(FragmentsPerAccessUnit, max_fragments_per_access_unit, 1, a, o)?,
+        fragments_per_access_unit: take_l!(
+            FragmentsPerAccessUnit,
+            max_fragments_per_access_unit,
+            1,
+            a,
+            o
+        )?,
         retained_receipts: take_l!(RetainedReceipts, max_retained_receipts, 16, a, o)?,
         encoder_sessions: take_l!(EncoderSessions, max_encoder_sessions, 1, a, o)?,
         gpu_surfaces: take_l!(GpuSurfaces, max_gpu_surfaces, 2, a, o)?,

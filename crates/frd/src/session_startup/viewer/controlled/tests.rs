@@ -102,25 +102,83 @@ struct Fixture {
     effects: Arc<Mutex<Effects>>,
     observation: ObservationControl,
 }
-#[rustfmt::skip]
 async fn fixture(client_cx: &Cx, host_cx: &Cx) -> Fixture {
-    Box::pin(fixture_with_clipboard(client_cx, host_cx, caps(), false, false, false, ClipboardMode::Disabled)).await
+    Box::pin(fixture_with_clipboard(
+        client_cx,
+        host_cx,
+        caps(),
+        false,
+        false,
+        false,
+        ClipboardMode::Disabled,
+    ))
+    .await
 }
-#[rustfmt::skip]
 async fn fixture_with_caps(client_cx: &Cx, host_cx: &Cx, capabilities: Capabilities) -> Fixture {
-    Box::pin(fixture_with_clipboard(client_cx, host_cx, capabilities, false, false, false, ClipboardMode::Disabled)).await
+    Box::pin(fixture_with_clipboard(
+        client_cx,
+        host_cx,
+        capabilities,
+        false,
+        false,
+        false,
+        ClipboardMode::Disabled,
+    ))
+    .await
 }
-#[rustfmt::skip]
-async fn fixture_with_decoder(client_cx: &Cx, host_cx: &Cx, capabilities: Capabilities, decode: bool) -> Fixture {
-    Box::pin(fixture_with_clipboard(client_cx, host_cx, capabilities, decode, false, false, ClipboardMode::Disabled)).await
+async fn fixture_with_decoder(
+    client_cx: &Cx,
+    host_cx: &Cx,
+    capabilities: Capabilities,
+    decode: bool,
+) -> Fixture {
+    Box::pin(fixture_with_clipboard(
+        client_cx,
+        host_cx,
+        capabilities,
+        decode,
+        false,
+        false,
+        ClipboardMode::Disabled,
+    ))
+    .await
 }
-#[rustfmt::skip]
-async fn fixture_with_wire_feedback(client_cx: &Cx, host_cx: &Cx, capabilities: Capabilities, decode: bool, feedback: bool) -> Fixture {
-    Box::pin(fixture_with_clipboard(client_cx, host_cx, capabilities, decode, feedback, false, ClipboardMode::Disabled)).await
+async fn fixture_with_wire_feedback(
+    client_cx: &Cx,
+    host_cx: &Cx,
+    capabilities: Capabilities,
+    decode: bool,
+    feedback: bool,
+) -> Fixture {
+    Box::pin(fixture_with_clipboard(
+        client_cx,
+        host_cx,
+        capabilities,
+        decode,
+        feedback,
+        false,
+        ClipboardMode::Disabled,
+    ))
+    .await
 }
-#[rustfmt::skip]
-async fn fixture_with_clock_mode(client_cx: &Cx, host_cx: &Cx, capabilities: Capabilities, decode: bool, feedback: bool, managed: bool) -> Fixture {
-    Box::pin(fixture_with_clipboard(client_cx, host_cx, capabilities, decode, feedback, managed, ClipboardMode::Disabled)).await
+async fn fixture_with_clock_mode(
+    client_cx: &Cx,
+    host_cx: &Cx,
+    capabilities: Capabilities,
+    decode: bool,
+    feedback: bool,
+    managed: bool,
+) -> Fixture {
+    Box::pin(fixture_with_clipboard(
+        client_cx,
+        host_cx,
+        capabilities,
+        decode,
+        feedback,
+        managed,
+        ClipboardMode::Disabled,
+    ))
+    .await
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ClipboardMode {
@@ -141,14 +199,33 @@ async fn fixture_with_clipboard(
     managed: bool,
     clipboard: ClipboardMode,
 ) -> Fixture {
-    #[rustfmt::skip]
     let mut wire_capabilities: Vec<WireCapability> = [
-        fr_wire::clock::CAPABILITY, decoder::CAPABILITY, attachment::INPUT_CAPABILITY,
-        attachment::CAPABILITY, attachment::DELIVERY_CAPABILITY,
-    ].into_iter().map(|s| WireCapability { name: s.into(), version: 1, required: true }).collect();
-    if matches!(clipboard, ClipboardMode::Attached | ClipboardMode::Negotiate) {
-        for name in [attachment::CLIPBOARD_CAPABILITY, fr_wire::clipboard::CAPABILITY] {
-            wire_capabilities.push(WireCapability { name: name.into(), version: 1, required: false });
+        fr_wire::clock::CAPABILITY,
+        decoder::CAPABILITY,
+        attachment::INPUT_CAPABILITY,
+        attachment::CAPABILITY,
+        attachment::DELIVERY_CAPABILITY,
+    ]
+    .into_iter()
+    .map(|s| WireCapability {
+        name: s.into(),
+        version: 1,
+        required: true,
+    })
+    .collect();
+    if matches!(
+        clipboard,
+        ClipboardMode::Attached | ClipboardMode::Negotiate
+    ) {
+        for name in [
+            attachment::CLIPBOARD_CAPABILITY,
+            fr_wire::clipboard::CAPABILITY,
+        ] {
+            wire_capabilities.push(WireCapability {
+                name: name.into(),
+                version: 1,
+                required: false,
+            });
         }
     }
     if clipboard == ClipboardMode::Negotiate {
@@ -158,9 +235,16 @@ async fn fixture_with_clipboard(
             required: false,
         });
     }
-    if matches!(clipboard, ClipboardMode::Files | ClipboardMode::FilesNegotiate | ClipboardMode::FileDrop) {
+    if matches!(
+        clipboard,
+        ClipboardMode::Files | ClipboardMode::FilesNegotiate | ClipboardMode::FileDrop
+    ) {
         for name in [attachment::FILES_CAPABILITY, fr_wire::files::CAPABILITY] {
-            wire_capabilities.push(WireCapability { name: name.into(), version: 1, required: false });
+            wire_capabilities.push(WireCapability {
+                name: name.into(),
+                version: 1,
+                required: false,
+            });
         }
     }
     if clipboard == ClipboardMode::FileDrop {
@@ -183,20 +267,74 @@ async fn fixture_with_clipboard(
         let stamp = HostInstant::from_micros(now(host_cx).unwrap());
         host_result.mark_view_ready(stamp).unwrap();
         host_result.grant_lease(creds().lease, stamp).unwrap();
-        host_result.issue_input_ticket(creds().lease, creds().ticket, stamp).unwrap();
+        host_result
+            .issue_input_ticket(creds().lease, creds().ticket, stamp)
+            .unwrap();
     })
     .await;
-    let (hc, vc) = attach(&mut host, &mut viewer, client_cx, host_cx, MediaRole::Configuration, 8).await;
-    let (hr, vr) = attach(&mut host, &mut viewer, client_cx, host_cx, MediaRole::Recovery, 9).await;
-    let (hi, vi) = attach(&mut host, &mut viewer, client_cx, host_cx, MediaRole::Input, 10).await;
-    let (hv, vv) = attach(&mut host, &mut viewer, client_cx, host_cx, MediaRole::Video, 11).await;
+    let (hc, vc) = attach(
+        &mut host,
+        &mut viewer,
+        client_cx,
+        host_cx,
+        MediaRole::Configuration,
+        8,
+    )
+    .await;
+    let (hr, vr) = attach(
+        &mut host,
+        &mut viewer,
+        client_cx,
+        host_cx,
+        MediaRole::Recovery,
+        9,
+    )
+    .await;
+    let (hi, vi) = attach(
+        &mut host,
+        &mut viewer,
+        client_cx,
+        host_cx,
+        MediaRole::Input,
+        10,
+    )
+    .await;
+    let (hv, vv) = attach(
+        &mut host,
+        &mut viewer,
+        client_cx,
+        host_cx,
+        MediaRole::Video,
+        11,
+    )
+    .await;
     let file_channels = if clipboard == ClipboardMode::Files {
-        Some(attach(&mut host, &mut viewer, client_cx, host_cx, MediaRole::Files, 12).await)
+        Some(
+            attach(
+                &mut host,
+                &mut viewer,
+                client_cx,
+                host_cx,
+                MediaRole::Files,
+                12,
+            )
+            .await,
+        )
     } else {
         None
     };
     let clipboard_channels = if clipboard == ClipboardMode::Attached {
-        Some(attach(&mut host, &mut viewer, client_cx, host_cx, MediaRole::Clipboard, 12).await)
+        Some(
+            attach(
+                &mut host,
+                &mut viewer,
+                client_cx,
+                host_cx,
+                MediaRole::Clipboard,
+                12,
+            )
+            .await,
+        )
     } else {
         None
     };

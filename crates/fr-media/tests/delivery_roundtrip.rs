@@ -45,13 +45,18 @@ fn originals(cache: &mut SendCache, now: u64) -> Vec<(PacketOffer, Vec<u8>)> {
 fn push_ok(s: &mut SendCache, p: Progress, b: Vec<u8>, m: DeliveryMode, now: u64) {
     s.push(p, b, m, now).unwrap();
 }
-#[rustfmt::skip]
 fn bootstrap(c: ReceiveConfig, policy: SendPolicy) -> (SendCache, ReceivePipeline) {
     let mut sender = sender(c, policy);
     let mut receiver =
         ReceivePipeline::new(c, MediaBudget::new(c.limits.protocol()).unwrap()).unwrap();
     receiver.decoder_configured(0).unwrap();
-    push_ok(&mut sender, progress(0, 3_000, 0), vec![9; 3_000], DeliveryMode::Recovery, 0);
+    push_ok(
+        &mut sender,
+        progress(0, 3_000, 0),
+        vec![9; 3_000],
+        DeliveryMode::Recovery,
+        0,
+    );
     let packets = originals(&mut sender, 0);
     assert_eq!(packets[0].0.channel(), Channel::MediaConfig);
     for (offer, bytes) in packets {
@@ -78,7 +83,6 @@ fn repair_packet(frame: u64, start: u32, end: u32, count: u32, c: ReceiveConfig)
 }
 
 #[test]
-#[rustfmt::skip]
 fn sender_receiver_roundtrip_recovers_reordered_dropped_and_final_frame_packets() {
     let c = config();
     let (mut sender, mut receiver) = bootstrap(c, SendPolicy::default());
@@ -92,7 +96,13 @@ fn sender_receiver_roundtrip_recovers_reordered_dropped_and_final_frame_packets(
             .skip(usize::try_from(frame).unwrap())
             .take(size)
             .collect();
-        push_ok(&mut sender, progress(frame, size, now), bytes.clone(), DeliveryMode::Datagrams, now);
+        push_ok(
+            &mut sender,
+            progress(frame, size, now),
+            bytes.clone(),
+            DeliveryMode::Datagrams,
+            now,
+        );
         let packets = originals(&mut sender, now);
         for (index, (offer, packet)) in packets.iter().enumerate().rev() {
             // All final-picture datagrams are lost; reliable progress remains.
@@ -133,19 +143,30 @@ fn sender_receiver_roundtrip_recovers_reordered_dropped_and_final_frame_packets(
     assert_eq!(sender.cached_bytes(), 0);
 }
 #[test]
-#[rustfmt::skip]
 fn repairing_an_older_reference_unblocks_two_complete_pictures_in_order() {
     let c = config();
     let (mut sender, mut receiver) = bootstrap(c, SendPolicy::default());
     let first = progress(1, 3_000, 10);
     let second = progress(2, 3_000, 20);
-    push_ok(&mut sender, first, vec![1; 3_000], DeliveryMode::Datagrams, 10);
+    push_ok(
+        &mut sender,
+        first,
+        vec![1; 3_000],
+        DeliveryMode::Datagrams,
+        10,
+    );
     for (offer, packet) in originals(&mut sender, 10) {
         if offer.channel() == Channel::MediaConfig {
             receiver.receive(offer.channel(), &packet, 10).unwrap();
         }
     }
-    push_ok(&mut sender, second, vec![2; 3_000], DeliveryMode::Datagrams, 20);
+    push_ok(
+        &mut sender,
+        second,
+        vec![2; 3_000],
+        DeliveryMode::Datagrams,
+        20,
+    );
     for (offer, packet) in originals(&mut sender, 20) {
         receiver.receive(offer.channel(), &packet, 20).unwrap();
     }
@@ -165,25 +186,39 @@ fn repairing_an_older_reference_unblocks_two_complete_pictures_in_order() {
     }
 }
 #[test]
-#[rustfmt::skip]
 fn sender_cache_is_not_limited_to_twelve_pictures_at_sixty_fps() {
     let c = config();
     let mut sender = sender(c, SendPolicy::default());
     for frame in 0_u64..180 {
         let now = frame * 16_667;
-        let mode = if frame == 0 { DeliveryMode::Recovery } else { DeliveryMode::Datagrams };
-        push_ok(&mut sender, progress(frame, 100, now), vec![5; 100], mode, now);
+        let mode = if frame == 0 {
+            DeliveryMode::Recovery
+        } else {
+            DeliveryMode::Datagrams
+        };
+        push_ok(
+            &mut sender,
+            progress(frame, 100, now),
+            vec![5; 100],
+            mode,
+            now,
+        );
         assert_ne!(originals(&mut sender, now).len(), 0);
         assert!(sender.cached_pictures() <= 17);
     }
     assert!(sender.cached_pictures() > 12);
 }
 #[test]
-#[rustfmt::skip]
 fn repair_ranges_are_checked_against_the_actual_cached_picture() {
     let c = config();
     let (mut sender, _) = bootstrap(c, SendPolicy::default());
-    push_ok(&mut sender, progress(1, 3_000, 1), vec![7; 3_000], DeliveryMode::Datagrams, 1);
+    push_ok(
+        &mut sender,
+        progress(1, 3_000, 1),
+        vec![7; 3_000],
+        DeliveryMode::Datagrams,
+        1,
+    );
     originals(&mut sender, 1);
     let forged = repair_packet(1, 0, 4, 4, c);
     assert_eq!(
@@ -245,12 +280,23 @@ fn repair_lifetime_never_extends_and_expired_ids_cannot_be_reinserted() {
     );
 }
 #[test]
-#[rustfmt::skip]
 fn expiry_of_an_unsent_original_fences_its_dependents() {
     let c = config();
     let (mut sender, _) = bootstrap(c, SendPolicy::default());
-    push_ok(&mut sender, progress(1, 3_000, 10), vec![1; 3_000], DeliveryMode::Datagrams, 10);
-    push_ok(&mut sender, progress(2, 3_000, 20), vec![2; 3_000], DeliveryMode::Datagrams, 20);
+    push_ok(
+        &mut sender,
+        progress(1, 3_000, 10),
+        vec![1; 3_000],
+        DeliveryMode::Datagrams,
+        10,
+    );
+    push_ok(
+        &mut sender,
+        progress(2, 3_000, 20),
+        vec![2; 3_000],
+        DeliveryMode::Datagrams,
+        20,
+    );
     assert_eq!(
         sender.next_packet(250_010, &mut [0; 1_150]),
         Err(SendError::OriginalExpired)
@@ -263,7 +309,6 @@ fn expiry_of_an_unsent_original_fences_its_dependents() {
     );
 }
 #[test]
-#[rustfmt::skip]
 fn actual_vector_capacity_and_picture_count_are_admitted() {
     let c = config();
     let policy = SendPolicy {
@@ -280,7 +325,13 @@ fn actual_vector_capacity_and_picture_count_are_admitted() {
         Err(SendError::CacheFull)
     );
     assert_eq!(sender.cached_bytes(), 0);
-    push_ok(&mut sender, progress(0, 1, 0), vec![9], DeliveryMode::Recovery, 0);
+    push_ok(
+        &mut sender,
+        progress(0, 1, 0),
+        vec![9],
+        DeliveryMode::Recovery,
+        0,
+    );
     assert_eq!(
         sender.push(progress(1, 1, 1), vec![9], DeliveryMode::Datagrams, 1),
         Err(SendError::CacheFull)
@@ -288,7 +339,6 @@ fn actual_vector_capacity_and_picture_count_are_admitted() {
     assert!(sender.cached_bytes() > 1);
 }
 #[test]
-#[rustfmt::skip]
 fn repair_byte_budget_survives_recovery_generation_replacement() {
     let c = config();
     let policy = SendPolicy {
@@ -296,7 +346,13 @@ fn repair_byte_budget_survives_recovery_generation_replacement() {
         ..SendPolicy::default()
     };
     let (mut sender, _) = bootstrap(c, policy);
-    push_ok(&mut sender, progress(1, 3_000, 1), vec![1; 3_000], DeliveryMode::Datagrams, 1);
+    push_ok(
+        &mut sender,
+        progress(1, 3_000, 1),
+        vec![1; 3_000],
+        DeliveryMode::Datagrams,
+        1,
+    );
     originals(&mut sender, 1);
     let request = repair_packet(1, 0, 3, 3, c);
     sender.queue_repair(&request, 20_000).unwrap();
@@ -317,9 +373,21 @@ fn repair_byte_budget_survives_recovery_generation_replacement() {
     next.epoch.recovery = RecoveryGeneration::from_raw(1);
     next.bindings = MediaBindings::new(5, 6, 7, 8).unwrap();
     sender.replace(next.epoch, next.bindings, 30_000).unwrap();
-    push_ok(&mut sender, progress(0, 3_000, 30_000), vec![0; 3_000], DeliveryMode::Recovery, 30_000);
+    push_ok(
+        &mut sender,
+        progress(0, 3_000, 30_000),
+        vec![0; 3_000],
+        DeliveryMode::Recovery,
+        30_000,
+    );
     originals(&mut sender, 30_000);
-    push_ok(&mut sender, progress(1, 3_000, 30_001), vec![1; 3_000], DeliveryMode::Datagrams, 30_001);
+    push_ok(
+        &mut sender,
+        progress(1, 3_000, 30_001),
+        vec![1; 3_000],
+        DeliveryMode::Datagrams,
+        30_001,
+    );
     originals(&mut sender, 30_001);
     assert_eq!(
         sender.queue_repair(&request, 40_000),
@@ -334,11 +402,16 @@ fn repair_byte_budget_survives_recovery_generation_replacement() {
     );
 }
 #[test]
-#[rustfmt::skip]
 fn a_too_small_output_buffer_does_not_consume_an_original_packet() {
     let c = config();
     let mut sender = sender(c, SendPolicy::default());
-    push_ok(&mut sender, progress(0, 3_000, 0), vec![9; 3_000], DeliveryMode::Recovery, 0);
+    push_ok(
+        &mut sender,
+        progress(0, 3_000, 0),
+        vec![9; 3_000],
+        DeliveryMode::Recovery,
+        0,
+    );
     assert_eq!(
         sender.next_packet(0, &mut [0; 1]),
         Err(SendError::Wire(WireError::BufferTooSmall))
@@ -348,11 +421,16 @@ fn a_too_small_output_buffer_does_not_consume_an_original_packet() {
 }
 
 #[test]
-#[rustfmt::skip]
 fn final_write_rejects_foreign_and_replaced_original_and_repair_offers() {
     let c = config();
     let (mut cache, _) = bootstrap(c, SendPolicy::default());
-    push_ok(&mut cache, progress(1, 3_000, 1), vec![1; 3_000], DeliveryMode::Datagrams, 1);
+    push_ok(
+        &mut cache,
+        progress(1, 3_000, 1),
+        vec![1; 3_000],
+        DeliveryMode::Datagrams,
+        1,
+    );
     let packets = originals(&mut cache, 1);
     let original = &packets[1].0;
     cache.authorize_write(original, 1).unwrap();
@@ -389,7 +467,13 @@ fn final_write_rejects_foreign_and_replaced_original_and_repair_offers() {
             Err(SendError::Delivery(DeliveryError::StaleGeneration))
         );
     }
-    push_ok(&mut cache, progress(0, 3_000, 20_002), vec![2; 3_000], DeliveryMode::Recovery, 20_002);
+    push_ok(
+        &mut cache,
+        progress(0, 3_000, 20_002),
+        vec![2; 3_000],
+        DeliveryMode::Recovery,
+        20_002,
+    );
     let fresh = cache.next_packet(20_002, &mut [0; 1_150]).unwrap().unwrap();
     cache.authorize_write(&fresh, 20_002).unwrap();
     cache.close();
@@ -400,13 +484,18 @@ fn final_write_rejects_foreign_and_replaced_original_and_repair_offers() {
 }
 
 #[test]
-#[rustfmt::skip]
 fn final_write_services_unsent_predecessor_expiry_and_exact_deadline() {
     let c = config();
     // All original chunks were prepared: cache expiry alone does not fence the
     // chain, but the retained offer still ends at its exact exclusive deadline.
     let mut complete = sender(c, SendPolicy::default());
-    push_ok(&mut complete, progress(0, 100, 0), vec![0; 100], DeliveryMode::Recovery, 0);
+    push_ok(
+        &mut complete,
+        progress(0, 100, 0),
+        vec![0; 100],
+        DeliveryMode::Recovery,
+        0,
+    );
     let packets = originals(&mut complete, 0);
     let offered = &packets[1].0;
     complete.authorize_write(offered, 1_999_999).unwrap();
@@ -417,7 +506,13 @@ fn final_write_services_unsent_predecessor_expiry_and_exact_deadline() {
     assert!(!complete.needs_recovery());
     // Partly unsent originals instead fence the whole chain on expiry.
     let (mut fresh_cache, _) = bootstrap(c, SendPolicy::default());
-    push_ok(&mut fresh_cache, progress(1, 3_000, 1), vec![1; 3_000], DeliveryMode::Datagrams, 1);
+    push_ok(
+        &mut fresh_cache,
+        progress(1, 3_000, 1),
+        vec![1; 3_000],
+        DeliveryMode::Datagrams,
+        1,
+    );
     let offer = fresh_cache
         .next_packet(1, &mut [0; 1_150])
         .unwrap()
@@ -429,10 +524,22 @@ fn final_write_services_unsent_predecessor_expiry_and_exact_deadline() {
     assert!(fresh_cache.needs_recovery());
     // Retain a fully prepared recovery offer, then leave the next P unit unsent.
     let mut early = sender(c, SendPolicy::default());
-    push_ok(&mut early, progress(0, 100, 0), vec![0; 100], DeliveryMode::Recovery, 0);
+    push_ok(
+        &mut early,
+        progress(0, 100, 0),
+        vec![0; 100],
+        DeliveryMode::Recovery,
+        0,
+    );
     let packets = originals(&mut early, 0);
     let old = &packets[1].0;
-    push_ok(&mut early, progress(1, 3_000, 1), vec![1; 3_000], DeliveryMode::Datagrams, 1);
+    push_ok(
+        &mut early,
+        progress(1, 3_000, 1),
+        vec![1; 3_000],
+        DeliveryMode::Datagrams,
+        1,
+    );
     assert!(old.send_by_micros() > 250_001);
     assert_eq!(
         early.authorize_write(old, 250_001),
@@ -441,7 +548,6 @@ fn final_write_services_unsent_predecessor_expiry_and_exact_deadline() {
     assert_eq!(early.cached_bytes(), 0);
 }
 #[test]
-#[rustfmt::skip]
 fn bad_reference_and_counter_wrap_cannot_create_an_ambiguous_chain() {
     let c = config();
     let (mut sender, _) = bootstrap(c, SendPolicy::default());

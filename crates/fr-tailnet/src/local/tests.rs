@@ -300,7 +300,6 @@ fn runtime_context_localapi_rejects_retained_timer_denial_before_socket_io() {
 }
 
 #[test]
-#[rustfmt::skip]
 fn real_unix_http_snapshot_has_exact_source_binding_and_exclusive_expiry() {
     for chunked in [false, true] {
         let (status, who) = fixtures();
@@ -330,7 +329,14 @@ fn real_unix_http_snapshot_has_exact_source_binding_and_exclusive_expiry() {
                 Err(Error::Clock)
             );
             let debug = format!("{proof:?} {:?} {:?}", server.client, endpoints());
-            for secret in ["100.64.", "n-peer", "private-name", "test.invalid", "nodekey:", ".sock"] {
+            for secret in [
+                "100.64.",
+                "n-peer",
+                "private-name",
+                "test.invalid",
+                "nodekey:",
+                ".sock",
+            ] {
                 assert!(!debug.contains(secret));
             }
         });
@@ -446,10 +452,14 @@ fn ipv6_source_and_own_address_prefixes_are_checked_exactly() {
     );
 }
 #[test]
-#[rustfmt::skip]
 fn changed_identity_backend_and_known_key_expiry_refuse() {
     let (s, w) = fixtures();
-    for (field, value) in [("ID", json!(55)), ("StableID", json!("foreign")), ("User", json!(99)), ("Tags", json!(["tag:foreign"]))] {
+    for (field, value) in [
+        ("ID", json!(55)),
+        ("StableID", json!("foreign")),
+        ("User", json!(99)),
+        ("Tags", json!(["tag:foreign"])),
+    ] {
         let mut bad = w.clone();
         bad["Node"][field] = value;
         assert_eq!(
@@ -847,7 +857,6 @@ fn cancellation_timeout_and_dropped_future_release_single_lookup_credit() {
     });
 }
 #[test]
-#[rustfmt::skip]
 fn go_expiry_timestamp_is_checked_and_clamps_local_authorization() {
     assert_eq!(
         expiry::unix_micros("1970-01-01T00:00:00Z").unwrap(),
@@ -863,8 +872,14 @@ fn go_expiry_timestamp_is_checked_and_clamps_local_authorization() {
     );
     assert_eq!(expiry::unix_micros("0001-01-01T00:00:00Z").unwrap(), None);
     for value in [
-        "2001-02-29T00:00:00Z", "2000-13-01T00:00:00Z", "2000-01-01T24:00:00Z", "2000-01-01T00:00:60Z",
-        "2000-01-01T00:00:00.Z", "2000-01-01T00:00:00+25:00", "2000-01-01T00:00:00Zjunk", "2026-01-01",
+        "2001-02-29T00:00:00Z",
+        "2000-13-01T00:00:00Z",
+        "2000-01-01T24:00:00Z",
+        "2000-01-01T00:00:60Z",
+        "2000-01-01T00:00:00.Z",
+        "2000-01-01T00:00:00+25:00",
+        "2000-01-01T00:00:00Zjunk",
+        "2026-01-01",
     ] {
         assert!(expiry::unix_micros(value).is_err(), "{value}");
     }
@@ -1269,13 +1284,14 @@ fn installed_node_snapshot_is_bounded_local_only_and_redacted() {
     });
 }
 #[test]
-#[rustfmt::skip]
 fn node_address_name_identity_and_backend_changes_refuse() {
     let (mut original, _) = fixtures();
     original["Self"]["DNSName"] = json!("host.fixture.ts.net.");
     for (field, value) in [
-        ("DNSName", json!("attacker.example.org.")), ("DNSName", json!("host.fixture.ts.net..")),
-        ("TailscaleIPs", json!(["::ffff:100.64.0.1"])), ("TailscaleIPs", json!(["127.0.0.1"])),
+        ("DNSName", json!("attacker.example.org.")),
+        ("DNSName", json!("host.fixture.ts.net..")),
+        ("TailscaleIPs", json!(["::ffff:100.64.0.1"])),
+        ("TailscaleIPs", json!(["127.0.0.1"])),
         ("Expired", json!(true)),
     ] {
         let mut invalid = original.clone();
@@ -1331,32 +1347,124 @@ fn fixture_pair(status_str: &str, whois_str: &str) -> (Status, WhoIs) {
 }
 
 #[test]
-#[rustfmt::skip]
 fn fixture_sharing_matrix_matrix() {
     let (s_app, w_app) = fixture_pair(
         include_str!("../../tests/fixtures/sharing_matrix/positive_approved/status.json"),
         include_str!("../../tests/fixtures/sharing_matrix/positive_approved/whois.json"),
     );
-    assert!(evaluate(&s_app, &w_app, endpoints(), GrantPolicy { scope: Scope::OwnUser, ..Default::default() }).is_ok());
-    assert!(evaluate(&s_app, &w_app, endpoints(), GrantPolicy { scope: Scope::Tailnet, ..Default::default() }).is_ok());
-    assert!(evaluate_membership(&s_app, &w_app, endpoints(), GrantPolicy { scope: Scope::OwnUser, ..Default::default() }).is_ok());
+    assert!(
+        evaluate(
+            &s_app,
+            &w_app,
+            endpoints(),
+            GrantPolicy {
+                scope: Scope::OwnUser,
+                ..Default::default()
+            }
+        )
+        .is_ok()
+    );
+    assert!(
+        evaluate(
+            &s_app,
+            &w_app,
+            endpoints(),
+            GrantPolicy {
+                scope: Scope::Tailnet,
+                ..Default::default()
+            }
+        )
+        .is_ok()
+    );
+    assert!(
+        evaluate_membership(
+            &s_app,
+            &w_app,
+            endpoints(),
+            GrantPolicy {
+                scope: Scope::OwnUser,
+                ..Default::default()
+            }
+        )
+        .is_ok()
+    );
 
     let cases = [
-        (include_str!("../../tests/fixtures/sharing_matrix/different_owner/status.json"), include_str!("../../tests/fixtures/sharing_matrix/different_owner/whois.json"), Some(Error::ScopeDenied), None),
-        (include_str!("../../tests/fixtures/sharing_matrix/tagged_host/status.json"), include_str!("../../tests/fixtures/sharing_matrix/tagged_host/whois.json"), Some(Error::ExplicitScopeRequired), None),
-        (include_str!("../../tests/fixtures/sharing_matrix/tagged_peer/status.json"), include_str!("../../tests/fixtures/sharing_matrix/tagged_peer/whois.json"), Some(Error::ScopeDenied), None),
-        (include_str!("../../tests/fixtures/sharing_matrix/shared_in/status.json"), include_str!("../../tests/fixtures/sharing_matrix/shared_in/whois.json"), Some(Error::SharedPeer), Some(Error::SharedPeer)),
-        (include_str!("../../tests/fixtures/sharing_matrix/multi_tailnet/status.json"), include_str!("../../tests/fixtures/sharing_matrix/multi_tailnet/whois.json"), None, Some(Error::IdentityMismatch)),
+        (
+            include_str!("../../tests/fixtures/sharing_matrix/different_owner/status.json"),
+            include_str!("../../tests/fixtures/sharing_matrix/different_owner/whois.json"),
+            Some(Error::ScopeDenied),
+            None,
+        ),
+        (
+            include_str!("../../tests/fixtures/sharing_matrix/tagged_host/status.json"),
+            include_str!("../../tests/fixtures/sharing_matrix/tagged_host/whois.json"),
+            Some(Error::ExplicitScopeRequired),
+            None,
+        ),
+        (
+            include_str!("../../tests/fixtures/sharing_matrix/tagged_peer/status.json"),
+            include_str!("../../tests/fixtures/sharing_matrix/tagged_peer/whois.json"),
+            Some(Error::ScopeDenied),
+            None,
+        ),
+        (
+            include_str!("../../tests/fixtures/sharing_matrix/shared_in/status.json"),
+            include_str!("../../tests/fixtures/sharing_matrix/shared_in/whois.json"),
+            Some(Error::SharedPeer),
+            Some(Error::SharedPeer),
+        ),
+        (
+            include_str!("../../tests/fixtures/sharing_matrix/multi_tailnet/status.json"),
+            include_str!("../../tests/fixtures/sharing_matrix/multi_tailnet/whois.json"),
+            None,
+            Some(Error::IdentityMismatch),
+        ),
     ];
     for (s_str, w_str, own_err, tail_err) in cases {
         let (s, w) = fixture_pair(s_str, w_str);
         if let Some(e) = own_err {
-            assert_eq!(evaluate(&s, &w, endpoints(), GrantPolicy { scope: Scope::OwnUser, ..Default::default() }).err(), Some(e));
+            assert_eq!(
+                evaluate(
+                    &s,
+                    &w,
+                    endpoints(),
+                    GrantPolicy {
+                        scope: Scope::OwnUser,
+                        ..Default::default()
+                    }
+                )
+                .err(),
+                Some(e)
+            );
         }
         if let Some(e) = tail_err {
-            assert_eq!(evaluate(&s, &w, endpoints(), GrantPolicy { scope: Scope::Tailnet, ..Default::default() }).err(), Some(e));
+            assert_eq!(
+                evaluate(
+                    &s,
+                    &w,
+                    endpoints(),
+                    GrantPolicy {
+                        scope: Scope::Tailnet,
+                        ..Default::default()
+                    }
+                )
+                .err(),
+                Some(e)
+            );
         } else {
-            assert!(evaluate(&s, &w, endpoints(), GrantPolicy { scope: Scope::Tailnet, ..Default::default() }).is_ok());
+            assert!(
+                evaluate(
+                    &s,
+                    &w,
+                    endpoints(),
+                    GrantPolicy {
+                        scope: Scope::Tailnet,
+                        ..Default::default()
+                    }
+                )
+                .is_ok()
+            );
         }
     }
 }

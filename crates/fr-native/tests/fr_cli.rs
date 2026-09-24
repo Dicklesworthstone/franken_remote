@@ -88,12 +88,20 @@ fn help_is_usable_without_a_display_daemon_or_credentials() {
     );
 }
 #[test]
-#[rustfmt::skip]
 fn argument_refusals_are_machine_readable_and_never_echo_secrets() {
     for (args, code) in [
-        (&["connect", "n-private", "--json"][..], "control_ui_unavailable"),
-        (&["connect", "n-private", "--view-only", "--json"], "native_transport_unqualified"),
-        (&["hosts", "--json", "--token", "PRIVATE-TOKEN"], "invalid_arguments"),
+        (
+            &["connect", "n-private", "--json"][..],
+            "control_ui_unavailable",
+        ),
+        (
+            &["connect", "n-private", "--view-only", "--json"],
+            "native_transport_unqualified",
+        ),
+        (
+            &["hosts", "--json", "--token", "PRIVATE-TOKEN"],
+            "invalid_arguments",
+        ),
         (&["hosts", "--json", "--json"], "invalid_arguments"),
     ] {
         let output = run_cli(args);
@@ -117,7 +125,6 @@ fn unavailable_localapi_is_not_reported_as_an_empty_or_healthy_tailnet() {
     );
 }
 #[test]
-#[rustfmt::skip]
 fn malformed_and_oversized_root_files_refuse_before_network_or_native_setup() {
     for content in [
         b"not a certificate PRIVATE-CERTIFICATE".as_slice(),
@@ -126,9 +133,17 @@ fn malformed_and_oversized_root_files_refuse_before_network_or_native_setup() {
         let roots = path("roots.pem");
         File::create(&roots).unwrap().write_all(content).unwrap();
         let output = run_cli(&[
-            "connect", "n-private", "--view-only", "--experimental-native",
-            "--worker", "/absent/worker", "--trust-roots", roots.to_str().unwrap(),
-            "--display", "9", "--json",
+            "connect",
+            "n-private",
+            "--view-only",
+            "--experimental-native",
+            "--worker",
+            "/absent/worker",
+            "--trust-roots",
+            roots.to_str().unwrap(),
+            "--display",
+            "9",
+            "--json",
         ]);
         assert_eq!(output.status.code(), Some(1));
         json(&output, "assert x['error']['code']=='invalid_trust_store'");
@@ -307,18 +322,51 @@ fn display_inspection_requires_no_local_renderer_and_keeps_identity_failures_exp
     );
 }
 #[test]
-#[rustfmt::skip]
 fn display_inspection_argument_and_trust_refusals_do_not_echo_private_material() {
     let root = path("bad-inspection-root.pem");
-    File::create(&root).unwrap().write_all(b"PRIVATE-ROOT-MATERIAL").unwrap();
+    File::create(&root)
+        .unwrap()
+        .write_all(b"PRIVATE-ROOT-MATERIAL")
+        .unwrap();
     for (args, expected, exit) in [
-        (&["displays", "n-private", "--json"][..], "native_transport_unqualified", 2),
-        (&["displays", "n-private", "--experimental-native", "--trust-roots", root.to_str().unwrap(), "--json"], "invalid_trust_store", 1),
-        (&["displays", "n-private", "--experimental-native", "--trust-roots", root.to_str().unwrap(), "--display", "9", "--json"], "invalid_arguments", 2),
+        (
+            &["displays", "n-private", "--json"][..],
+            "native_transport_unqualified",
+            2,
+        ),
+        (
+            &[
+                "displays",
+                "n-private",
+                "--experimental-native",
+                "--trust-roots",
+                root.to_str().unwrap(),
+                "--json",
+            ],
+            "invalid_trust_store",
+            1,
+        ),
+        (
+            &[
+                "displays",
+                "n-private",
+                "--experimental-native",
+                "--trust-roots",
+                root.to_str().unwrap(),
+                "--display",
+                "9",
+                "--json",
+            ],
+            "invalid_arguments",
+            2,
+        ),
     ] {
         let output = run_cli(args);
         assert_eq!(output.status.code(), Some(exit));
-        json(&output, &format!("assert x['error']['code']=='{expected}'\nassert x['outcome']=='refused'"));
+        json(
+            &output,
+            &format!("assert x['error']['code']=='{expected}'\nassert x['outcome']=='refused'"),
+        );
         let text = String::from_utf8_lossy(&output.stdout);
         assert!(!text.contains("PRIVATE-ROOT") && !text.contains("n-private"));
     }

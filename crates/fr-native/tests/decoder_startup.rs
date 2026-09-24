@@ -49,14 +49,28 @@ struct Display {
 impl Display {
     fn start() -> Self {
         let mut child = Command::new("Xvfb")
-            .args(["-displayfd", "1", "-screen", "0", "320x240x24", "-nolisten", "tcp", "-noreset"])
+            .args([
+                "-displayfd",
+                "1",
+                "-screen",
+                "0",
+                "320x240x24",
+                "-nolisten",
+                "tcp",
+                "-noreset",
+            ])
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
         let mut number = String::new();
-        BufReader::new(child.stdout.take().unwrap().take(16)).read_line(&mut number).unwrap();
-        Self { child, name: format!(":{}", number.trim().parse::<u32>().unwrap()) }
+        BufReader::new(child.stdout.take().unwrap().take(16))
+            .read_line(&mut number)
+            .unwrap();
+        Self {
+            child,
+            name: format!(":{}", number.trim().parse::<u32>().unwrap()),
+        }
     }
 }
 impl Drop for Display {
@@ -65,19 +79,30 @@ impl Drop for Display {
         let _ = self.child.wait();
     }
 }
-#[rustfmt::skip]
 fn configuration() -> Configuration {
     Configuration {
-        width: 320, height: 240, fps: 30, backend: Backend::SoftwareExplicit,
-        bitrate: 4_000_000, max_access_unit_bytes: 1_048_576, generation: CodecConfigurationGeneration::INITIAL,
+        width: 320,
+        height: 240,
+        fps: 30,
+        backend: Backend::SoftwareExplicit,
+        bitrate: 4_000_000,
+        max_access_unit_bytes: 1_048_576,
+        generation: CodecConfigurationGeneration::INITIAL,
     }
 }
-#[rustfmt::skip]
 fn binding() -> Binding {
     Binding {
-        parent: ControlBinding { id: 8, host_boot: HostBootId::from_raw(1), os_session: OsSessionId::from_raw(2), remote_session: RemoteSessionId::from_raw(3) },
-        display: 4, geometry: DisplayGeometryGeneration::INITIAL, configuration: CodecConfigurationGeneration::INITIAL,
-        recovery: RecoveryGeneration::INITIAL, viewport: ViewportMappingGeneration::INITIAL,
+        parent: ControlBinding {
+            id: 8,
+            host_boot: HostBootId::from_raw(1),
+            os_session: OsSessionId::from_raw(2),
+            remote_session: RemoteSessionId::from_raw(3),
+        },
+        display: 4,
+        geometry: DisplayGeometryGeneration::INITIAL,
+        configuration: CodecConfigurationGeneration::INITIAL,
+        recovery: RecoveryGeneration::INITIAL,
+        viewport: ViewportMappingGeneration::INITIAL,
     }
 }
 fn launch(display: &Display, epoch: u128, role: Role) -> Launch {
@@ -1362,18 +1387,38 @@ fn host_selected_geometry_refuses_wrong_capture_and_selected_view_drop_revokes_m
     });
 }
 
-#[rustfmt::skip]
 fn selected_attachment() -> fr_wire::negotiation::Selection {
     Offer {
-        versions: vec![0], profile: 1, profile_version: 0, role: fr_wire::negotiation::Role::Observe,
+        versions: vec![0],
+        profile: 1,
+        profile_version: 0,
+        role: fr_wire::negotiation::Role::Observe,
         limits: configuration().limits().unwrap(),
         capabilities: vec![
-            Capability { name: fr_wire::display::CAPABILITY.into(), version: 1, required: true },
-            Capability { name: decoder::CAPABILITY.into(), version: decoder::VERSION, required: true },
-            Capability { name: fr_wire::attachment::CAPABILITY.into(), version: 1, required: true },
-            Capability { name: fr_wire::attachment::DELIVERY_CAPABILITY.into(), version: 1, required: true },
+            Capability {
+                name: fr_wire::display::CAPABILITY.into(),
+                version: 1,
+                required: true,
+            },
+            Capability {
+                name: decoder::CAPABILITY.into(),
+                version: decoder::VERSION,
+                required: true,
+            },
+            Capability {
+                name: fr_wire::attachment::CAPABILITY.into(),
+                version: 1,
+                required: true,
+            },
+            Capability {
+                name: fr_wire::attachment::DELIVERY_CAPABILITY.into(),
+                version: 1,
+                required: true,
+            },
         ],
-    }.select().unwrap()
+    }
+    .select()
+    .unwrap()
 }
 
 async fn drive_attachment(cx: &Cx, host: &mut QuicRecords, client: &mut QuicRecords) {

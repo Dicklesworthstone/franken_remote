@@ -2,9 +2,7 @@
 //! Browser audio: Opus playback downlink, AudioWorklet ring/credit protocol,
 //! and getUserMedia microphone uplink (plan §§15.4, 16.3; bead fr-p3-browser-audio-ebf).
 
-use fr_core::audio::{
-    AudioChannels, AudioGeneration, MicTalkMode, NOMINAL_SAMPLES_PER_FRAME,
-};
+use fr_core::audio::{AudioChannels, AudioGeneration, MicTalkMode, NOMINAL_SAMPLES_PER_FRAME};
 use serde::{Deserialize, Serialize};
 
 /// AudioWorklet ring buffer metrics and event counters.
@@ -413,19 +411,27 @@ mod tests {
 
         // Refused before gesture
         assert_eq!(
-            playback.receive_packet(AudioGeneration::INITIAL, 1, 480, vec![0.0; 960]).unwrap_err(),
+            playback
+                .receive_packet(AudioGeneration::INITIAL, 1, 480, vec![0.0; 960])
+                .unwrap_err(),
             "gesture_required"
         );
 
         // Gesture unlock
         playback.unlock_gesture();
         assert_eq!(playback.gesture_state(), AudioGestureState::Unlocked);
-        assert!(playback.receive_packet(AudioGeneration::INITIAL, 1, 480, vec![0.0; 960]).is_ok());
+        assert!(
+            playback
+                .receive_packet(AudioGeneration::INITIAL, 1, 480, vec![0.0; 960])
+                .is_ok()
+        );
 
         // Stale generation rejected
         let next_gen = AudioGeneration::from_raw(2);
         assert_eq!(
-            playback.receive_packet(next_gen, 2, 480, vec![0.0; 960]).unwrap_err(),
+            playback
+                .receive_packet(next_gen, 2, 480, vec![0.0; 960])
+                .unwrap_err(),
             "stale_generation"
         );
 
@@ -445,9 +451,15 @@ mod tests {
         assert_eq!(uplink.indicator_state(), MicIndicatorState::Inactive);
 
         // Cannot start without permission and authority
-        assert_eq!(uplink.start_transmission().unwrap_err(), "permission_denied");
+        assert_eq!(
+            uplink.start_transmission().unwrap_err(),
+            "permission_denied"
+        );
         uplink.set_permission(MicPermissionState::Granted);
-        assert_eq!(uplink.start_transmission().unwrap_err(), "authority_required");
+        assert_eq!(
+            uplink.start_transmission().unwrap_err(),
+            "authority_required"
+        );
 
         uplink.set_input_authority(true);
         // Still muted

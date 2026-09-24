@@ -83,13 +83,24 @@ fn assert_roundtrip_and_negatives<T: PartialEq + std::fmt::Debug, E: std::fmt::D
 // ---------------------------------------------------------------------------
 
 #[test]
-#[rustfmt::skip]
 fn test_negotiation_fixtures_round_trip_and_fail_closed() {
     for (hex_str, binding, name) in [
         (fix!("negotiation/client_hello"), 0, "client_hello"),
-        (fix!("negotiation/host_capabilities"), 0, "host_capabilities"),
-        (fix!("negotiation/selected_configuration"), 0, "selected_configuration"),
-        (fix!("negotiation/approval_required"), 0, "approval_required"),
+        (
+            fix!("negotiation/host_capabilities"),
+            0,
+            "host_capabilities",
+        ),
+        (
+            fix!("negotiation/selected_configuration"),
+            0,
+            "selected_configuration",
+        ),
+        (
+            fix!("negotiation/approval_required"),
+            0,
+            "approval_required",
+        ),
         (fix!("negotiation/session_opened"), 0, "session_opened"),
         (fix!("negotiation/binding_accepted"), 1, "binding_accepted"),
     ] {
@@ -142,16 +153,27 @@ fn test_control_fixtures_round_trip_and_fail_closed() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[rustfmt::skip]
 fn test_authority_fixtures_round_trip_and_fail_closed() {
     let auth_b = AuthBinding {
         channel: 0x0102_0304,
         session: RemoteSessionId::from_raw(0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00),
     };
     for (hex_str, dir, name) in [
-        (fix!("authority/challenge_observation"), H2V, "challenge_observation"),
-        (fix!("authority/challenge_control"), H2V, "challenge_control"),
-        (fix!("authority/response_observation"), V2H, "response_observation"),
+        (
+            fix!("authority/challenge_observation"),
+            H2V,
+            "challenge_observation",
+        ),
+        (
+            fix!("authority/challenge_control"),
+            H2V,
+            "challenge_control",
+        ),
+        (
+            fix!("authority/response_observation"),
+            V2H,
+            "response_observation",
+        ),
         (fix!("authority/response_control"), V2H, "response_control"),
     ] {
         let bytes = parse_hex(hex_str);
@@ -189,7 +211,6 @@ fn test_input_ticket_fixture_round_trip_and_fail_closed() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[rustfmt::skip]
 fn test_attachment_fixtures_round_trip_and_fail_closed() {
     let parent = ControlBinding {
         id: 7,
@@ -200,10 +221,20 @@ fn test_attachment_fixtures_round_trip_and_fail_closed() {
 
     for (hex_str, channel, dir, name) in [
         (fix!("attachment/stream_binding"), 7, H2V, "stream_binding"),
-        (fix!("attachment/binding_accepted"), 7, V2H, "binding_accepted"),
+        (
+            fix!("attachment/binding_accepted"),
+            7,
+            V2H,
+            "binding_accepted",
+        ),
         (fix!("attachment/channel_ticket"), 7, H2V, "channel_ticket"),
         (fix!("attachment/channel_attach"), 8, V2H, "channel_attach"),
-        (fix!("attachment/channel_attached"), 8, H2V, "channel_attached"),
+        (
+            fix!("attachment/channel_attached"),
+            8,
+            H2V,
+            "channel_attached",
+        ),
     ] {
         let bytes = parse_hex(hex_str);
         assert_roundtrip_and_negatives(
@@ -250,7 +281,6 @@ fn test_display_fixtures_round_trip_and_fail_closed() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[rustfmt::skip]
 fn test_decoder_fixtures_round_trip_and_fail_closed() {
     let b = DecBinding {
         parent: ControlBinding {
@@ -267,9 +297,21 @@ fn test_decoder_fixtures_round_trip_and_fail_closed() {
     };
 
     for (hex_str, dir, name) in [
-        (fix!("decoder/decoder_configuration"), H2V, "decoder_configuration"),
-        (fix!("decoder/decoder_configured"), V2H, "decoder_configured"),
-        (fix!("decoder/first_frame_decoded"), V2H, "first_frame_decoded"),
+        (
+            fix!("decoder/decoder_configuration"),
+            H2V,
+            "decoder_configuration",
+        ),
+        (
+            fix!("decoder/decoder_configured"),
+            V2H,
+            "decoder_configured",
+        ),
+        (
+            fix!("decoder/first_frame_decoded"),
+            V2H,
+            "first_frame_decoded",
+        ),
     ] {
         let bytes = parse_hex(hex_str);
         let msg = decode_decoder(&bytes, b, &L, dir, REL).expect("decode valid");
@@ -375,7 +417,6 @@ fn test_clipboard_fixtures_round_trip_and_fail_closed() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[rustfmt::skip]
 fn test_files_fixtures_round_trip_and_fail_closed() {
     let ctx = |sender: FileRole| FileContext {
         session: RemoteSessionId::from_raw(1),
@@ -393,7 +434,11 @@ fn test_files_fixtures_round_trip_and_fail_closed() {
         (fix!("files/file_accept"), FileRole::Host, "file_accept"),
         (fix!("files/file_chunk"), FileRole::Controller, "file_chunk"),
         (fix!("files/file_complete"), FileRole::Host, "file_complete"),
-        (fix!("files/file_cancel"), FileRole::Controller, "file_cancel"),
+        (
+            fix!("files/file_cancel"),
+            FileRole::Controller,
+            "file_cancel",
+        ),
     ] {
         let bytes = parse_hex(hex_str);
         let msg = decode_files(&bytes, ctx(role), file_limits).expect("decode valid");
@@ -411,7 +456,6 @@ fn test_files_fixtures_round_trip_and_fail_closed() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[rustfmt::skip]
 fn test_presented_fixtures_round_trip_and_fail_closed() {
     let b = DecBinding {
         parent: ControlBinding {
@@ -429,7 +473,10 @@ fn test_presented_fixtures_round_trip_and_fail_closed() {
 
     for (hex_str, name) in [
         (fix!("presented/presented_state_sample"), "presented_sample"),
-        (fix!("presented/presented_state_unavailable"), "presented_unavailable"),
+        (
+            fix!("presented/presented_state_unavailable"),
+            "presented_unavailable",
+        ),
     ] {
         let bytes = parse_hex(hex_str);
         assert_roundtrip_and_negatives(
@@ -507,11 +554,15 @@ fn test_clock_fixtures_round_trip_and_fail_closed() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[rustfmt::skip]
 fn test_input_fixtures_round_trip_and_fail_closed() {
     for hex_str in [
-        fix!("input/key_page_usage"), fix!("input/button"), fix!("input/pointer"),
-        fix!("input/relative"), fix!("input/scroll"), fix!("input/text"), fix!("input/mode"),
+        fix!("input/key_page_usage"),
+        fix!("input/button"),
+        fix!("input/pointer"),
+        fix!("input/relative"),
+        fix!("input/scroll"),
+        fix!("input/text"),
+        fix!("input/mode"),
     ] {
         let bytes = parse_hex(hex_str);
         let req = decode_input(&bytes, &L, 9, V2H, REL).expect("decode input");
@@ -530,9 +581,15 @@ fn test_input_fixtures_round_trip_and_fail_closed() {
     };
 
     for hex_str in [
-        fix!("input/result-submitted"), fix!("input/result-local"), fix!("input/result-refused"),
-        fix!("input/result-expired"), fix!("input/result-cancelled"), fix!("input/result-partial"),
-        fix!("input/result-unknown"), fix!("input/result-unknown-first"), fix!("input/result-pointer"),
+        fix!("input/result-submitted"),
+        fix!("input/result-local"),
+        fix!("input/result-refused"),
+        fix!("input/result-expired"),
+        fix!("input/result-cancelled"),
+        fix!("input/result-partial"),
+        fix!("input/result-unknown"),
+        fix!("input/result-unknown-first"),
+        fix!("input/result-pointer"),
     ] {
         let bytes = parse_hex(hex_str);
         let res = decode_input_result(&bytes, &L, res_b, H2V, REL).expect("decode input_result");

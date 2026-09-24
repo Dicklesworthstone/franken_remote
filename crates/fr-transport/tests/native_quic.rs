@@ -24,8 +24,19 @@ fn recovery_packet(binding: u32, count: usize) -> Vec<u8> {
     let mut out = vec![0; 65536];
     let data = vec![81; count];
     let l = MediaLimits::new(ProtocolLimits::ABSOLUTE, 65536, 16384, 64).unwrap();
-    #[rustfmt::skip]
-    let size = encode_recovery(RecoveryChunk { frame: 0, total_bytes: u32::try_from(count).unwrap(), offset: 0, capture_micros: 17, bytes: &data }, binding, &l, &mut out).unwrap();
+    let size = encode_recovery(
+        RecoveryChunk {
+            frame: 0,
+            total_bytes: u32::try_from(count).unwrap(),
+            offset: 0,
+            capture_micros: 17,
+            bytes: &data,
+        },
+        binding,
+        &l,
+        &mut out,
+    )
+    .unwrap();
     out.truncate(size);
     out
 }
@@ -487,25 +498,79 @@ struct InputPair {
     bulk: StreamRoute,
 }
 async fn input_pair(cx: &Cx, policy: Policy) -> InputPair {
-    let (client, server) = support::native_pair_with_windows(cx, "localhost", ALPN, policy.stream_window, policy.connection_window).await;
+    let (client, server) = support::native_pair_with_windows(
+        cx,
+        "localhost",
+        ALPN,
+        policy.stream_window,
+        policy.connection_window,
+    )
+    .await;
     let (mut client, mut server) = (client.unwrap(), server.unwrap());
     let input = client.connection_mut().open_uni_stream(cx).unwrap();
     let result = server.connection_mut().open_uni_stream(cx).unwrap();
     let bulk = server.connection_mut().open_uni_stream(cx).unwrap();
-    #[rustfmt::skip]
-    let actions = StreamRoute { stream: input, binding: 7, messages: Messages::InputActions, priority: Priority::Critical, outbound: true, maximum: 512 };
-    #[rustfmt::skip]
-    let results = StreamRoute { stream: result, binding: 7, messages: Messages::Exact(0x0048), priority: Priority::Critical, outbound: true, maximum: 512 };
-    #[rustfmt::skip]
-    let bulk = StreamRoute { stream: bulk, binding: 2, messages: Messages::Exact(0x0032), priority: Priority::Bulk, outbound: true, maximum: usize::try_from(policy.stream_window).unwrap() };
-    let pointer = DatagramRoute { binding: 7, kind: 0x0042, outbound: true };
-    #[rustfmt::skip]
-    let client_routes = [actions, StreamRoute { outbound: false, ..results }, StreamRoute { outbound: false, ..bulk }];
-    let server_routes = client_routes.map(|r| StreamRoute { outbound: !r.outbound, ..r });
+    let actions = StreamRoute {
+        stream: input,
+        binding: 7,
+        messages: Messages::InputActions,
+        priority: Priority::Critical,
+        outbound: true,
+        maximum: 512,
+    };
+    let results = StreamRoute {
+        stream: result,
+        binding: 7,
+        messages: Messages::Exact(0x0048),
+        priority: Priority::Critical,
+        outbound: true,
+        maximum: 512,
+    };
+    let bulk = StreamRoute {
+        stream: bulk,
+        binding: 2,
+        messages: Messages::Exact(0x0032),
+        priority: Priority::Bulk,
+        outbound: true,
+        maximum: usize::try_from(policy.stream_window).unwrap(),
+    };
+    let pointer = DatagramRoute {
+        binding: 7,
+        kind: 0x0042,
+        outbound: true,
+    };
+    let client_routes = [
+        actions,
+        StreamRoute {
+            outbound: false,
+            ..results
+        },
+        StreamRoute {
+            outbound: false,
+            ..bulk
+        },
+    ];
+    let server_routes = client_routes.map(|r| StreamRoute {
+        outbound: !r.outbound,
+        ..r
+    });
     InputPair {
         client: QuicRecords::new(client, cx, &client_routes, &[pointer], policy).unwrap(),
-        server: QuicRecords::new(server, cx, &server_routes, &[DatagramRoute { outbound: false, ..pointer }], policy).unwrap(),
-        actions, results, pointer, bulk,
+        server: QuicRecords::new(
+            server,
+            cx,
+            &server_routes,
+            &[DatagramRoute {
+                outbound: false,
+                ..pointer
+            }],
+            policy,
+        )
+        .unwrap(),
+        actions,
+        results,
+        pointer,
+        bulk,
     }
 }
 fn input_drive<'a>(
@@ -630,10 +695,44 @@ fn exhausted_bulk_pool_cannot_consume_critical_storage_and_critical_runs_first()
         .await;
         let bulk = record(2, 0x32, 32000, 8);
         let result = record(7, 0x48, 74, 9);
-        p.server.send(&cx, Route::Stream(p.bulk), &bulk, clock(&cx) + 2_000_000, || true).unwrap();
-        assert_eq!(p.server.send(&cx, Route::Stream(p.bulk), &bulk, clock(&cx) + 2_000_000, || true), Err(Error::Backpressure));
-        p.server.send(&cx, Route::Stream(p.results), &result, clock(&cx) + 2_000_000, || true).unwrap();
-        assert_eq!(p.server.send(&cx, Route::Stream(p.results), &result, clock(&cx) + 2_000_000, || true), Err(Error::Backpressure));
+        p.server
+            .send(
+                &cx,
+                Route::Stream(p.bulk),
+                &bulk,
+                clock(&cx) + 2_000_000,
+                || true,
+            )
+            .unwrap();
+        assert_eq!(
+            p.server.send(
+                &cx,
+                Route::Stream(p.bulk),
+                &bulk,
+                clock(&cx) + 2_000_000,
+                || true
+            ),
+            Err(Error::Backpressure)
+        );
+        p.server
+            .send(
+                &cx,
+                Route::Stream(p.results),
+                &result,
+                clock(&cx) + 2_000_000,
+                || true,
+            )
+            .unwrap();
+        assert_eq!(
+            p.server.send(
+                &cx,
+                Route::Stream(p.results),
+                &result,
+                clock(&cx) + 2_000_000,
+                || true
+            ),
+            Err(Error::Backpressure)
+        );
         assert_eq!(p.server.usage().critical_send_records, 1);
         assert_eq!(p.server.usage().retained_send_records, 2);
         let mut kinds = vec![];
@@ -671,17 +770,35 @@ fn blocked_bulk_stream_cannot_pin_acknowledged_critical_storage() {
         )
         .await;
         for tag in [11, 12, 13, 14] {
-            p.server.send(&cx, Route::Stream(p.bulk), &record(2, 0x32, 1024, tag), clock(&cx) + 2_000_000, || true).unwrap();
+            p.server
+                .send(
+                    &cx,
+                    Route::Stream(p.bulk),
+                    &record(2, 0x32, 1024, tag),
+                    clock(&cx) + 2_000_000,
+                    || true,
+                )
+                .unwrap();
         }
         // The bulk consumer is unavailable: do not drain its native window.
         // That stream fills, but ACKed control storage must remain reusable.
         for _ in 0..40 {
             input_drive(&cx, &mut p).await;
-            p.client.receive_ready(&cx, || true, |_| false, |_, _| panic!("blocked consumer")).unwrap();
+            p.client
+                .receive_ready(&cx, || true, |_| false, |_, _| panic!("blocked consumer"))
+                .unwrap();
         }
         for tag in 0..8 {
             let result = record(7, 0x48, 74, tag);
-            p.server.send(&cx, Route::Stream(p.results), &result, clock(&cx) + 2_000_000, || true).unwrap();
+            p.server
+                .send(
+                    &cx,
+                    Route::Stream(p.results),
+                    &result,
+                    clock(&cx) + 2_000_000,
+                    || true,
+                )
+                .unwrap();
             let mut received = false;
             for _ in 0..100 {
                 input_drive(&cx, &mut p).await;
@@ -751,7 +868,15 @@ fn critical_credit_is_reserved_in_the_actual_native_connection_window() {
             input_drive(&cx, &mut p).await;
         }
         let result = record(7, 0x48, 74, 42);
-        p.server.send(&cx, Route::Stream(p.results), &result, clock(&cx) + 2_000_000, || true).unwrap();
+        p.server
+            .send(
+                &cx,
+                Route::Stream(p.results),
+                &result,
+                clock(&cx) + 2_000_000,
+                || true,
+            )
+            .unwrap();
         for _ in 0..40 {
             input_drive(&cx, &mut p).await;
         }
@@ -796,15 +921,44 @@ fn parallel_action_streams_and_wrong_initiators_are_refused_before_admission() {
         let (mut client, mut server) = (client.unwrap(), server.unwrap());
         let first = client.connection_mut().open_uni_stream(&cx).unwrap();
         let second = client.connection_mut().open_uni_stream(&cx).unwrap();
-        #[rustfmt::skip]
-        let route = StreamRoute { stream: first, binding: 7, messages: Messages::InputActions, priority: Priority::Critical, outbound: true, maximum: 512 };
+        let route = StreamRoute {
+            stream: first,
+            binding: 7,
+            messages: Messages::InputActions,
+            priority: Priority::Critical,
+            outbound: true,
+            maximum: 512,
+        };
         assert_eq!(
-            QuicRecords::new(client, &cx, &[route, StreamRoute { stream: second, ..route }], &[], Policy::default()).unwrap_err(),
+            QuicRecords::new(
+                client,
+                &cx,
+                &[
+                    route,
+                    StreamRoute {
+                        stream: second,
+                        ..route
+                    }
+                ],
+                &[],
+                Policy::default()
+            )
+            .unwrap_err(),
             Error::InvalidPolicy
         );
         let wrong = server.connection_mut().open_uni_stream(&cx).unwrap();
         assert_eq!(
-            QuicRecords::new(server, &cx, &[StreamRoute { stream: wrong, ..route }], &[], Policy::default()).unwrap_err(),
+            QuicRecords::new(
+                server,
+                &cx,
+                &[StreamRoute {
+                    stream: wrong,
+                    ..route
+                }],
+                &[],
+                Policy::default()
+            )
+            .unwrap_err(),
             Error::InvalidPolicy
         );
     });
@@ -824,11 +978,14 @@ fn startup_bytes(message: &fr_wire::negotiation::Message) -> Vec<u8> {
     bytes.truncate(n);
     bytes
 }
-#[rustfmt::skip]
 fn startup_offer() -> fr_wire::negotiation::Offer {
     fr_wire::negotiation::Offer {
-        versions: vec![0], profile: 1, profile_version: 0, role: fr_wire::negotiation::Role::Observe,
-        limits: ProtocolLimits::ABSOLUTE, capabilities: vec![],
+        versions: vec![0],
+        profile: 1,
+        profile_version: 0,
+        role: fr_wire::negotiation::Role::Observe,
+        limits: ProtocolLimits::ABSOLUTE,
+        capabilities: vec![],
     }
 }
 async fn bootstrap_drive(cx: &Cx, client: &mut QuicRecords, host: &mut QuicRecords) {
@@ -847,7 +1004,15 @@ fn bootstrap_hello_and_bound_ack_use_the_same_authenticated_streams() {
         let (mut client, c, mut host, h) = Box::pin(bootstrap_connections(&cx)).await;
         let identity = host.binding();
         let hello = Message::ClientHello(startup_offer());
-        client.send(&cx, Route::Stream(c.outbound), &startup_bytes(&hello), clock(&cx) + 2_000_000, || true).unwrap();
+        client
+            .send(
+                &cx,
+                Route::Stream(c.outbound),
+                &startup_bytes(&hello),
+                clock(&cx) + 2_000_000,
+                || true,
+            )
+            .unwrap();
         assert!(matches!(
             client.bind_control(&cx, c, 1, 4096, || true),
             Err(Error::Backpressure)
@@ -880,7 +1045,15 @@ fn bootstrap_hello_and_bound_ack_use_the_same_authenticated_streams() {
             Err(Error::WrongRoute)
         ));
         let ack = Message::BindingAccepted { binding: 7 };
-        client.send(&cx, Route::Stream(c2.outbound), &startup_bytes(&ack), clock(&cx) + 2_000_000, || true).unwrap();
+        client
+            .send(
+                &cx,
+                Route::Stream(c2.outbound),
+                &startup_bytes(&ack),
+                clock(&cx) + 2_000_000,
+                || true,
+            )
+            .unwrap();
         let mut received = None;
         for _ in 0..100 {
             bootstrap_drive(&cx, &mut client, &mut host).await;
@@ -910,16 +1083,34 @@ fn bootstrap_is_not_a_zero_bound_media_or_input_escape() {
             bytes[..4].copy_from_slice(b"FRD0");
             bytes[6..8].copy_from_slice(&kind.to_be_bytes());
             assert!(matches!(
-                client.send(&cx, Route::Stream(c.outbound), &bytes, clock(&cx) + 1_000_000, || true),
+                client.send(
+                    &cx,
+                    Route::Stream(c.outbound),
+                    &bytes,
+                    clock(&cx) + 1_000_000,
+                    || true
+                ),
                 Err(Error::WrongRoute)
             ));
         }
         assert_eq!(client.usage().retained_send_records, 0);
         assert_eq!(client.addresses().unwrap().0, host.addresses().unwrap().1);
-        assert_eq!(client.role().unwrap(), asupersync::net::quic_native::StreamRole::Client);
-        assert!(matches!(client.bind_control(&cx, c, 0, 4096, || true), Err(Error::WrongRoute)));
-        assert!(matches!(client.bind_control(&cx, c, 1, 4097, || true), Err(Error::WrongRoute)));
-        assert!(matches!(client.bind_control(&cx, c, 1, 4096, || false), Err(Error::Unauthorized)));
+        assert_eq!(
+            client.role().unwrap(),
+            asupersync::net::quic_native::StreamRole::Client
+        );
+        assert!(matches!(
+            client.bind_control(&cx, c, 0, 4096, || true),
+            Err(Error::WrongRoute)
+        ));
+        assert!(matches!(
+            client.bind_control(&cx, c, 1, 4097, || true),
+            Err(Error::WrongRoute)
+        ));
+        assert!(matches!(
+            client.bind_control(&cx, c, 1, 4096, || false),
+            Err(Error::Unauthorized)
+        ));
         assert!(client.is_closed());
     });
 }
@@ -938,7 +1129,15 @@ fn bootstrap_transition_cannot_relabel_an_incomplete_record() {
             .collect();
         let bytes = startup_bytes(&Message::ClientHello(offer));
         assert!(bytes.len() > 900);
-        client.send(&cx, Route::Stream(c.outbound), &bytes, clock(&cx) + 2_000_000, || true).unwrap();
+        client
+            .send(
+                &cx,
+                Route::Stream(c.outbound),
+                &bytes,
+                clock(&cx) + 2_000_000,
+                || true,
+            )
+            .unwrap();
         bootstrap_drive(&cx, &mut client, &mut host).await;
         host.receive(
             &cx,

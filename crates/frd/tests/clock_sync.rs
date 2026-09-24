@@ -28,36 +28,90 @@ use frd::media::{
 };
 use std::time::Duration;
 const LIMITS: ProtocolLimits = ProtocolLimits::ABSOLUTE;
-#[rustfmt::skip]
 fn binding() -> ControlBinding {
-    ControlBinding { id: 17, host_boot: HostBootId::from_raw(1), os_session: OsSessionId::from_raw(2), remote_session: RemoteSessionId::from_raw(3) }
+    ControlBinding {
+        id: 17,
+        host_boot: HostBootId::from_raw(1),
+        os_session: OsSessionId::from_raw(2),
+        remote_session: RemoteSessionId::from_raw(3),
+    }
 }
-#[rustfmt::skip]
 fn selection() -> Selection {
-    Selection { version: 0, profile: 1, profile_version: 0, role: Role::Observe, limits: LIMITS, capabilities: vec![Capability { name: clock::CAPABILITY.into(), version: clock::VERSION, required: true }] }
+    Selection {
+        version: 0,
+        profile: 1,
+        profile_version: 0,
+        role: Role::Observe,
+        limits: LIMITS,
+        capabilities: vec![Capability {
+            name: clock::CAPABILITY.into(),
+            version: clock::VERSION,
+            required: true,
+        }],
+    }
 }
 fn approved(cx: Cx) -> ObservationControl {
     let mut a = SessionAuthority::new(binding().remote_session, AuthorityPolicy::plan_defaults());
-    a.mark_capabilities_checked().unwrap(); a.require_approval().unwrap();
+    a.mark_capabilities_checked().unwrap();
+    a.require_approval().unwrap();
     a.authorize_observation(host_now(&cx).unwrap()).unwrap();
     ObservationControl::new(cx, a).unwrap()
 }
-#[rustfmt::skip]
 fn reverse(routes: ControlRoutes) -> ControlRoutes {
-    ControlRoutes { outbound: StreamRoute { outbound: true, ..routes.inbound }, inbound: StreamRoute { outbound: false, ..routes.outbound } }
+    ControlRoutes {
+        outbound: StreamRoute {
+            outbound: true,
+            ..routes.inbound
+        },
+        inbound: StreamRoute {
+            outbound: false,
+            ..routes.outbound
+        },
+    }
 }
 async fn native(cx: &Cx) -> (NativeQuicUdpConnection, QuicRecords, ControlRoutes) {
     let (c, s) = network::native_pair(cx, "localhost", ALPN).await;
     let (mut c, mut s) = (c.unwrap(), s.unwrap());
-    let inbound = StreamRoute { stream: c.connection_mut().open_uni_stream(cx).unwrap(), binding: binding().id, messages: Messages::SessionControl, priority: Priority::Critical, maximum: 1024, outbound: false };
-    let outbound = StreamRoute { stream: s.connection_mut().open_uni_stream(cx).unwrap(), outbound: true, ..inbound };
-    let s = QuicRecords::new(s, cx, &[inbound, outbound], &[], Policy { critical_send_records: 1, ..Policy::default() }).unwrap();
+    let inbound = StreamRoute {
+        stream: c.connection_mut().open_uni_stream(cx).unwrap(),
+        binding: binding().id,
+        messages: Messages::SessionControl,
+        priority: Priority::Critical,
+        maximum: 1024,
+        outbound: false,
+    };
+    let outbound = StreamRoute {
+        stream: s.connection_mut().open_uni_stream(cx).unwrap(),
+        outbound: true,
+        ..inbound
+    };
+    let s = QuicRecords::new(
+        s,
+        cx,
+        &[inbound, outbound],
+        &[],
+        Policy {
+            critical_send_records: 1,
+            ..Policy::default()
+        },
+    )
+    .unwrap();
     (c, s, ControlRoutes { inbound, outbound })
 }
 async fn pair(cx: &Cx) -> (QuicRecords, QuicRecords, ControlRoutes) {
     let (c, s, routes) = native(cx).await;
     let r = reverse(routes);
-    let c = QuicRecords::new(c, cx, &[r.inbound, r.outbound], &[], Policy { critical_send_records: 1, ..Policy::default() }).unwrap();
+    let c = QuicRecords::new(
+        c,
+        cx,
+        &[r.inbound, r.outbound],
+        &[],
+        Policy {
+            critical_send_records: 1,
+            ..Policy::default()
+        },
+    )
+    .unwrap();
     (c, s, routes)
 }
 #[allow(clippy::unnecessary_wraps)] // Exact transport callback signature.
@@ -286,37 +340,73 @@ fn missing_capability_wrong_routes_and_repeat_attachment_are_refused() {
     run_clock!(cx, hc, {
         let (_c, mut s, r) = pair(&cx).await;
         let control = approved(hc);
-        let mut sel = selection(); sel.capabilities.clear();
-        assert!(matches!(ClockSync::host(control.clone(), &mut s, r, binding(), &sel), Err(Error::CapabilityMissing)));
+        let mut sel = selection();
+        sel.capabilities.clear();
+        assert!(matches!(
+            ClockSync::host(control.clone(), &mut s, r, binding(), &sel),
+            Err(Error::CapabilityMissing)
+        ));
         assert!(control.check().is_ok());
-        let wrong = ControlBinding { id: 18, ..binding() };
-        assert!(matches!(ClockSync::host(control.clone(), &mut s, r, wrong, &selection()), Err(Error::Configuration)));
+        let wrong = ControlBinding {
+            id: 18,
+            ..binding()
+        };
+        assert!(matches!(
+            ClockSync::host(control.clone(), &mut s, r, wrong, &selection()),
+            Err(Error::Configuration)
+        ));
         let owner = ClockSync::host(control.clone(), &mut s, r, binding(), &selection()).unwrap();
-        assert!(matches!(ClockSync::host(control.clone(), &mut s, r, binding(), &selection()), Err(Error::Transport(_))));
+        assert!(matches!(
+            ClockSync::host(control.clone(), &mut s, r, binding(), &selection()),
+            Err(Error::Transport(_))
+        ));
         assert!(control.check().is_ok());
         drop(owner);
         assert!(control.check().is_err());
-        assert!(s.claim_clock(r).is_err(), "claim must stay consumed after drop");
+        assert!(
+            s.claim_clock(r).is_err(),
+            "claim must stay consumed after drop"
+        );
     });
 }
 #[test]
 fn lost_reply_times_out_without_another_packet_and_cancels_viewer_session() {
     run_clock!(cx, vc, {
         let (mut c, mut s, r) = pair(&cx).await;
-        let mut viewer = ClockSync::viewer(vc.clone(), &mut c, reverse(r), binding(), &selection(), ClockPolicy { max_exchange_us: 250_000, ..ClockPolicy::default() }).unwrap();
+        let mut viewer = ClockSync::viewer(
+            vc.clone(),
+            &mut c,
+            reverse(r),
+            binding(),
+            &selection(),
+            ClockPolicy {
+                max_exchange_us: 250_000,
+                ..ClockPolicy::default()
+            },
+        )
+        .unwrap();
         viewer.service(&mut c).unwrap();
         let deadline = network::clock(&cx) + 200_000;
         let mut received = 0;
         while received == 0 || c.usage().critical_send_records != 0 {
             assert!(network::clock(&cx) < deadline);
             raw_drive(&cx, &mut c, &mut s).await;
-            received += s.receive(&cx, || true, |_, bytes| {
-                assert_eq!(bytes, record(Message::Probe { sequence: 1 }));
-                Ok(Disposition::Consumed)
-            }).unwrap();
+            received += s
+                .receive(
+                    &cx,
+                    || true,
+                    |_, bytes| {
+                        assert_eq!(bytes, record(Message::Probe { sequence: 1 }));
+                        Ok(Disposition::Consumed)
+                    },
+                )
+                .unwrap();
         }
         std::thread::sleep(Duration::from_millis(260));
-        assert_eq!(viewer.service(&mut c), Err(Error::Client(fr_client::clock::Error::Expired)));
+        assert_eq!(
+            viewer.service(&mut c),
+            Err(Error::Client(fr_client::clock::Error::Expired))
+        );
         assert!(c.is_closed() && vc.checkpoint().is_err() && viewer.correlation(&mut c).is_err());
     });
 }
@@ -325,9 +415,11 @@ fn unpolled_io_drop_cancels_only_its_bound_lifetime_not_a_successor() {
     run_clock!(cx, hc, {
         let (_c, mut s, r) = pair(&cx).await;
         let control = approved(hc);
-        let mut host = ClockSync::host(control.clone(), &mut s, r, binding(), &selection()).unwrap();
+        let mut host =
+            ClockSync::host(control.clone(), &mut s, r, binding(), &selection()).unwrap();
         drop(host.drive(&mut s, Duration::from_millis(2)));
-        assert!(s.is_closed()); assert!(control.check().is_err());
+        assert!(s.is_closed());
+        assert!(control.check().is_err());
         let (_other_c, mut other_s, _) = pair(&cx).await;
         assert_eq!(host.service(&mut other_s), Err(Error::ForeignConnection));
         assert!(!other_s.is_closed());
@@ -339,9 +431,14 @@ fn replayed_probe_or_wrong_boot_ends_host_observation() {
         run_clock!(cx, hc, {
             let (mut c, mut s, r) = pair(&cx).await;
             let control = approved(hc);
-            let mut host = ClockSync::host(control.clone(), &mut s, r, binding(), &selection()).unwrap();
-            let mut bytes = record(Message::Probe { sequence: if foreign { 1 } else { 2 } });
-            if foreign { bytes[39] ^= 1; }
+            let mut host =
+                ClockSync::host(control.clone(), &mut s, r, binding(), &selection()).unwrap();
+            let mut bytes = record(Message::Probe {
+                sequence: if foreign { 1 } else { 2 },
+            });
+            if foreign {
+                bytes[39] ^= 1;
+            }
             send(&cx, &mut c, reverse(r).outbound, &bytes);
             let deadline = network::clock(&cx) + 800_000;
             loop {
@@ -352,7 +449,8 @@ fn replayed_probe_or_wrong_boot_ends_host_observation() {
                     break;
                 }
             }
-            assert!(s.is_closed()); assert!(control.check().is_err());
+            assert!(s.is_closed());
+            assert!(control.check().is_err());
         });
     }
 }
@@ -452,22 +550,35 @@ fn peer_fin_and_reset_stop_sampling_before_receiving_another_record() {
         run_clock!(cx, hc, {
             let (mut peer, mut s, r) = native(&cx).await;
             let control = approved(hc);
-            let mut host = ClockSync::host(control.clone(), &mut s, r, binding(), &selection()).unwrap();
+            let mut host =
+                ClockSync::host(control.clone(), &mut s, r, binding(), &selection()).unwrap();
             if reset {
-                peer.connection_mut().reset_stream(&cx, r.inbound.stream, 0).unwrap();
+                peer.connection_mut()
+                    .reset_stream(&cx, r.inbound.stream, 0)
+                    .unwrap();
             } else {
-                peer.connection_mut().write_stream(&cx, r.inbound.stream, asupersync::bytes::Bytes::new(), true).unwrap();
+                peer.connection_mut()
+                    .write_stream(&cx, r.inbound.stream, asupersync::bytes::Bytes::new(), true)
+                    .unwrap();
             }
             let deadline = network::clock(&cx) + 500_000;
             loop {
                 assert!(network::clock(&cx) < deadline);
                 let ((), result) = Box::pin(network::both(
-                    async { peer.flush(&cx).await.unwrap(); let _ = peer.drive_io_once(&cx, Duration::from_millis(1)).await; },
+                    async {
+                        peer.flush(&cx).await.unwrap();
+                        let _ = peer.drive_io_once(&cx, Duration::from_millis(1)).await;
+                    },
                     host.drive(&mut s, Duration::from_millis(1)),
-                )).await;
-                if let Err(e) = result { assert_eq!(e, Error::PeerClosed); break; }
+                ))
+                .await;
+                if let Err(e) = result {
+                    assert_eq!(e, Error::PeerClosed);
+                    break;
+                }
             }
-            assert!(s.is_closed()); assert!(control.check().is_err());
+            assert!(s.is_closed());
+            assert!(control.check().is_err());
         });
     }
 }
@@ -476,16 +587,31 @@ fn duplicate_probe_cannot_replace_an_unsent_reply() {
     run_clock!(cx, hc, {
         let (mut c, mut s, r) = pair(&cx).await;
         let control = approved(hc);
-        let mut host = ClockSync::host(control.clone(), &mut s, r, binding(), &selection()).unwrap();
-        send(&cx, &mut c, reverse(r).outbound, &record(Message::Probe { sequence: 1 }));
+        let mut host =
+            ClockSync::host(control.clone(), &mut s, r, binding(), &selection()).unwrap();
+        send(
+            &cx,
+            &mut c,
+            reverse(r).outbound,
+            &record(Message::Probe { sequence: 1 }),
+        );
         let deadline = network::clock(&cx) + 800_000;
         loop {
             assert!(network::clock(&cx) < deadline);
             raw_drive(&cx, &mut c, &mut s).await;
-            if host.receive(&mut s, blocked).unwrap() > 0 { break; }
+            if host.receive(&mut s, blocked).unwrap() > 0 {
+                break;
+            }
         }
-        while c.usage().critical_send_records > 0 { raw_drive(&cx, &mut c, &mut s).await; }
-        send(&cx, &mut c, reverse(r).outbound, &record(Message::Probe { sequence: 1 }));
+        while c.usage().critical_send_records > 0 {
+            raw_drive(&cx, &mut c, &mut s).await;
+        }
+        send(
+            &cx,
+            &mut c,
+            reverse(r).outbound,
+            &record(Message::Probe { sequence: 1 }),
+        );
         for _ in 0..3 {
             raw_drive(&cx, &mut c, &mut s).await;
             assert_eq!(host.receive(&mut s, blocked), Ok(0));
@@ -500,17 +626,31 @@ fn duplicate_probe_cannot_replace_an_unsent_reply() {
 fn host_reply_backpressure_preserves_the_original_sample() {
     run_clock!(cx, vc, hc, {
         let (mut client, mut server, routes) = pair(&cx).await;
-        let mut host = ClockSync::host(approved(hc), &mut server, routes, binding(), &selection()).unwrap();
-        let mut viewer = ClockSync::viewer(vc, &mut client, reverse(routes), binding(), &selection(), ClockPolicy::default()).unwrap();
+        let mut host =
+            ClockSync::host(approved(hc), &mut server, routes, binding(), &selection()).unwrap();
+        let mut viewer = ClockSync::viewer(
+            vc,
+            &mut client,
+            reverse(routes),
+            binding(),
+            &selection(),
+            ClockPolicy::default(),
+        )
+        .unwrap();
         viewer.service(&mut client).unwrap();
         let deadline = network::clock(&cx) + 900_000;
         loop {
             assert!(network::clock(&cx) < deadline);
             drive(&mut client, &mut server, &mut viewer, &mut host).await;
-            if host.receive(&mut server, blocked).unwrap() > 0 { break; }
+            if host.receive(&mut server, blocked).unwrap() > 0 {
+                break;
+            }
         }
         let before_backpressure = network::clock(&cx);
-        let filler = record(Message::Reply { sequence: 999, host_sample_us: 0 });
+        let filler = record(Message::Reply {
+            sequence: 999,
+            host_sample_us: 0,
+        });
         send(&cx, &mut server, routes.outbound, &filler);
         assert_eq!(host.service(&mut server), Ok(Event::Backpressure));
         std::thread::sleep(Duration::from_millis(70));
@@ -519,15 +659,37 @@ fn host_reply_backpressure_preserves_the_original_sample() {
         loop {
             assert!(network::clock(&cx) < deadline);
             raw_drive(&cx, &mut client, &mut server).await;
-            client.receive(&cx, || true, |_, bytes| {
-                match clock::decode(bytes, binding(), &LIMITS, InputDirection::HostToViewer, InputDelivery::Reliable).unwrap() {
-                    Message::Reply { sequence: 999, .. } => { assert_eq!(bytes, filler); filler_read = true; }
-                    Message::Reply { sequence: 1, host_sample_us } => host_sample = Some(host_sample_us),
-                    _ => panic!("unexpected clock record"),
-                }
-                Ok(Disposition::Consumed)
-            }).unwrap();
-            if !sent { sent = host.service(&mut server).unwrap() == Event::ReplyQueued; }
+            client
+                .receive(
+                    &cx,
+                    || true,
+                    |_, bytes| {
+                        match clock::decode(
+                            bytes,
+                            binding(),
+                            &LIMITS,
+                            InputDirection::HostToViewer,
+                            InputDelivery::Reliable,
+                        )
+                        .unwrap()
+                        {
+                            Message::Reply { sequence: 999, .. } => {
+                                assert_eq!(bytes, filler);
+                                filler_read = true;
+                            }
+                            Message::Reply {
+                                sequence: 1,
+                                host_sample_us,
+                            } => host_sample = Some(host_sample_us),
+                            _ => panic!("unexpected clock record"),
+                        }
+                        Ok(Disposition::Consumed)
+                    },
+                )
+                .unwrap();
+            if !sent {
+                sent = host.service(&mut server).unwrap() == Event::ReplyQueued;
+            }
             if let Some(sample) = host_sample {
                 assert!(sample <= before_backpressure && network::clock(&cx) - sample >= 70_000);
                 break;
@@ -538,12 +700,16 @@ fn host_reply_backpressure_preserves_the_original_sample() {
     });
 }
 
-#[rustfmt::skip]
 fn responder(cx: &Cx) -> fr_client::authority::ObservationResponder {
     fr_client::authority::ObservationResponder::new(
-        fr_wire::authority::Binding { channel: binding().id, session: binding().remote_session },
-        LIMITS, fr_client::input::ClientInstant(network::clock(cx)),
-    ).unwrap()
+        fr_wire::authority::Binding {
+            channel: binding().id,
+            session: binding().remote_session,
+        },
+        LIMITS,
+        fr_client::input::ClientInstant(network::clock(cx)),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -551,37 +717,85 @@ fn renewal_and_clock_sampling_share_control_streams_past_initial_authorization()
     run_clock!(cx, vc, hc, {
         let (mut client, mut server, routes) = pair(&cx).await;
         let control = approved(hc);
-        let initial = control.deadline(Duration::from_secs(3)).unwrap().time().as_nanos() / 1000;
-        let mut host = ClockSync::host(control.clone(), &mut server, routes, binding(), &selection()).unwrap();
-        let mut renewal = ObservationRenewal::new(control.clone(), &server, routes, LIMITS).unwrap();
-        let mut viewer = ClockSync::viewer(vc, &mut client, reverse(routes), binding(), &selection(), ClockPolicy { valid_for_us: 1_000_000, ..ClockPolicy::default() }).unwrap();
+        let initial = control
+            .deadline(Duration::from_secs(3))
+            .unwrap()
+            .time()
+            .as_nanos()
+            / 1000;
+        let mut host = ClockSync::host(
+            control.clone(),
+            &mut server,
+            routes,
+            binding(),
+            &selection(),
+        )
+        .unwrap();
+        let mut renewal =
+            ObservationRenewal::new(control.clone(), &server, routes, LIMITS).unwrap();
+        let mut viewer = ClockSync::viewer(
+            vc,
+            &mut client,
+            reverse(routes),
+            binding(),
+            &selection(),
+            ClockPolicy {
+                valid_for_us: 1_000_000,
+                ..ClockPolicy::default()
+            },
+        )
+        .unwrap();
         let mut responder = responder(&cx);
         let (mut nonce, mut response_until, mut last_sample, mut samples) = (0, None, None, 0);
         let end = initial + 150_000;
         while network::clock(&cx) < end {
-            viewer.service(&mut client).unwrap(); host.service(&mut server).unwrap();
-            renewal.service(&mut server, || { nonce += 1; Ok(nonce) }).unwrap();
+            viewer.service(&mut client).unwrap();
+            host.service(&mut server).unwrap();
+            renewal
+                .service(&mut server, || {
+                    nonce += 1;
+                    Ok(nonce)
+                })
+                .unwrap();
             drive(&mut client, &mut server, &mut viewer, &mut host).await;
-            host.receive(&mut server, blocked).unwrap(); renewal.receive(&mut server, blocked).unwrap();
-            viewer.receive(&mut client, |route, bytes| {
-                assert_eq!(route, Route::Stream(reverse(routes).inbound));
-                let current = network::clock(&cx);
-                match responder.accept(bytes, ClientInstant(current)) {
-                    Ok(()) => { response_until = Some(current + 1_000_000); Ok(Disposition::Consumed) }
-                    Err(fr_client::authority::Error::Backpressure) => Ok(Disposition::Blocked),
-                    Err(e) => panic!("unexpected authority response refusal: {e:?}"),
-                }
-            }).unwrap();
+            host.receive(&mut server, blocked).unwrap();
+            renewal.receive(&mut server, blocked).unwrap();
+            viewer
+                .receive(&mut client, |route, bytes| {
+                    assert_eq!(route, Route::Stream(reverse(routes).inbound));
+                    let current = network::clock(&cx);
+                    match responder.accept(bytes, ClientInstant(current)) {
+                        Ok(()) => {
+                            response_until = Some(current + 1_000_000);
+                            Ok(Disposition::Consumed)
+                        }
+                        Err(fr_client::authority::Error::Backpressure) => Ok(Disposition::Blocked),
+                        Err(e) => panic!("unexpected authority response refusal: {e:?}"),
+                    }
+                })
+                .unwrap();
             let current = network::clock(&cx);
             if let Some(bytes) = responder.pending(ClientInstant(current)).unwrap() {
-                match client.send(&cx, Route::Stream(reverse(routes).outbound), bytes, response_until.unwrap(), || true) {
-                    Ok(()) => { responder.sent(ClientInstant(network::clock(&cx))).unwrap(); response_until = None; }
+                match client.send(
+                    &cx,
+                    Route::Stream(reverse(routes).outbound),
+                    bytes,
+                    response_until.unwrap(),
+                    || true,
+                ) {
+                    Ok(()) => {
+                        responder.sent(ClientInstant(network::clock(&cx))).unwrap();
+                        response_until = None;
+                    }
                     Err(fr_transport::quic::Error::Backpressure) => {}
                     Err(e) => panic!("response send failed: {e:?}"),
                 }
             }
-            if let Some(sample) = viewer.correlation(&mut client).unwrap() && last_sample != Some(sample.received_at_us()) {
-                samples += 1; last_sample = Some(sample.received_at_us());
+            if let Some(sample) = viewer.correlation(&mut client).unwrap()
+                && last_sample != Some(sample.received_at_us())
+            {
+                samples += 1;
+                last_sample = Some(sample.received_at_us());
             }
         }
         assert!(control.check().is_ok() && renewal.renewed_until().unwrap().as_micros() > initial);

@@ -657,8 +657,13 @@ fn swapped_button_mapping_preserves_logical_clicks_and_all_five_buttons() {
     assert_eq!(unsafe { XSetPointerMapping(o.d, map.as_ptr(), n) }, 0);
     let mut native = X11Pointer::open(&name).unwrap();
     let (mut owner, c) = session(&native);
-    #[rustfmt::skip]
-    let buttons = [(PointerButton::Primary, 1), (PointerButton::Secondary, 3), (PointerButton::Middle, 2), (PointerButton::Back, 8), (PointerButton::Forward, 9)];
+    let buttons = [
+        (PointerButton::Primary, 1),
+        (PointerButton::Secondary, 3),
+        (PointerButton::Middle, 2),
+        (PointerButton::Back, 8),
+        (PointerButton::Forward, 9),
+    ];
     for (i, (button, logical)) in buttons.into_iter().enumerate() {
         for (pressed, offset, event_kind) in [(true, 0, 4), (false, 1, 5)] {
             let r = completed(send(

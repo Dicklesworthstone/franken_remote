@@ -209,8 +209,16 @@ fn send_progress(
         pipeline,
     };
     let mut pkt = vec![0; c.limits.record_bytes()];
-    let np = encode_progress(prog, c.bindings.for_channel(Channel::MediaConfig), &c.limits, &mut pkt).unwrap();
-    receiver.receive(Channel::MediaConfig, &pkt[..np], time).unwrap();
+    let np = encode_progress(
+        prog,
+        c.bindings.for_channel(Channel::MediaConfig),
+        &c.limits,
+        &mut pkt,
+    )
+    .unwrap();
+    receiver
+        .receive(Channel::MediaConfig, &pkt[..np], time)
+        .unwrap();
 }
 
 fn send_fragments(
@@ -1259,7 +1267,10 @@ fn recovery_row_loss_immediately_before_idle() {
     assert!(receiver.repair_needed(1));
     let mut offer_buf = [0; 1150];
     let offer = receiver.repair_offer(22_000, &mut offer_buf).unwrap();
-    assert!(offer.is_some(), "Repair offer ready after delay even when idle");
+    assert!(
+        offer.is_some(),
+        "Repair offer ready after delay even when idle"
+    );
 }
 
 #[test]
@@ -1270,7 +1281,10 @@ fn recovery_row_reference_repair_after_own_display_deadline() {
     send_progress(&mut receiver, &c, d, 1000, PipelineState::Running);
     send_fragments(&mut receiver, &c, d, &[55_u8; 1000], &[0], 80_000);
     let pic = receiver.take_decodable(80_000).unwrap();
-    assert!(pic.is_some(), "Decodable as reference frame after display deadline");
+    assert!(
+        pic.is_some(),
+        "Decodable as reference frame after display deadline"
+    );
 }
 
 #[test]

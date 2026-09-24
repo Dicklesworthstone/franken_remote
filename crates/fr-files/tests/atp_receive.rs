@@ -362,7 +362,6 @@ fn plain_sha_content_id_and_merkle_are_distinct_fail_closed_contracts() {
 }
 
 #[test]
-#[rustfmt::skip]
 fn unsupported_and_malformed_manifest_cannot_create_any_file() {
     let base = serde_json::to_value(manifest("received.bin", b"abc")).unwrap();
     for case in 0..15 {
@@ -374,7 +373,10 @@ fn unsupported_and_malformed_manifest_cannot_create_any_file() {
             1 => value["entries"] = serde_json::json!([]),
             2 => value["entries"] = serde_json::json!([base["entries"][0], base["entries"][0]]),
             3 => value["root_name"] = "../escape".into(),
-            4 => { value["root_name"] = "../escape".into(); value["entries"][0]["rel_path"] = "../escape".into(); }
+            4 => {
+                value["root_name"] = "../escape".into();
+                value["entries"][0]["rel_path"] = "../escape".into();
+            }
             5 => value["total_bytes"] = 4.into(),
             6 => value["entries"][0]["index"] = 1.into(),
             7 => value["entries"][0]["sha256_hex"] = "not a hash".into(),
@@ -382,13 +384,29 @@ fn unsupported_and_malformed_manifest_cannot_create_any_file() {
             9 => value["transfer_id"] = "secret string not authority".into(),
             10 => value["metadata_root_hex"] = "00".repeat(32).into(),
             11 => value["unknown"] = "must refuse".into(),
-            12 => { value["root_name"] = ".fr-part-private".into(); value["entries"][0]["rel_path"] = ".fr-part-private".into(); }
-            13 => { value["root_name"] = "COM1".into(); value["entries"][0]["rel_path"] = "COM1".into(); }
-            14 => value["entries"][0]["members"] = serde_json::json!([{"rel_path":"packed","offset":0,"len":3,"sha256_hex":"00".repeat(32)}]),
+            12 => {
+                value["root_name"] = ".fr-part-private".into();
+                value["entries"][0]["rel_path"] = ".fr-part-private".into();
+            }
+            13 => {
+                value["root_name"] = "COM1".into();
+                value["entries"][0]["rel_path"] = "COM1".into();
+            }
+            14 => {
+                value["entries"][0]["members"] = serde_json::json!([{"rel_path":"packed","offset":0,"len":3,"sha256_hex":"00".repeat(32)}])
+            }
             _ => unreachable!(),
         }
-        let manifest_payload = wire(FrameType::ObjectManifest, serde_json::to_vec(&value).unwrap());
-        assert!(receiver.push(receiver.binding(), 1, &manifest_payload).is_err(), "case {case}");
+        let manifest_payload = wire(
+            FrameType::ObjectManifest,
+            serde_json::to_vec(&value).unwrap(),
+        );
+        assert!(
+            receiver
+                .push(receiver.binding(), 1, &manifest_payload)
+                .is_err(),
+            "case {case}"
+        );
         assert!(receiver.is_closed());
         stop(&mut task);
         fixture.empty();
@@ -398,8 +416,15 @@ fn unsupported_and_malformed_manifest_cannot_create_any_file() {
 
 #[test]
 fn wrong_offsets_indexes_empty_chunks_and_early_completion_retire_only_files() {
-    #[rustfmt::skip]
-    let bad_cases = [data(1, 0, b"abc"), data(0, 1, b"abc"), data(0, 0, b"abcd"), data(0, u64::MAX, b"abc"), data(0, 0, b""), wire(FrameType::ObjectComplete, vec![]), wire(FrameType::ObjectComplete, vec![1])];
+    let bad_cases = [
+        data(1, 0, b"abc"),
+        data(0, 1, b"abc"),
+        data(0, 0, b"abcd"),
+        data(0, u64::MAX, b"abc"),
+        data(0, 0, b""),
+        wire(FrameType::ObjectComplete, vec![]),
+        wire(FrameType::ObjectComplete, vec![1]),
+    ];
     for bad in bad_cases {
         let fixture = Fixture::new();
         let (mut receiver, mut task) = fixture.spawn(Policy::conservative(), 4096);
@@ -427,12 +452,17 @@ fn complete_frame_bounds_and_disallowed_atp_messages_fail_before_disk() {
         .header
         .extensions
         .insert(1, b"unnegotiated".to_vec());
-    #[rustfmt::skip]
     let cases = [
-        good[..good.len() - 1].to_vec(), multiple, extended.to_wire_bytes().unwrap(),
-        wire(FrameType::Handshake, b"{\"peer_id\":\"host\"}".to_vec()), wire(FrameType::ObjectRequest, b"{}".to_vec()),
-        wire(FrameType::Proof, b"{}".to_vec()), wire(FrameType::PathUpdate, vec![]), wire(FrameType::Repair, vec![]),
-        vec![0; 4097], vec![0xff; 100],
+        good[..good.len() - 1].to_vec(),
+        multiple,
+        extended.to_wire_bytes().unwrap(),
+        wire(FrameType::Handshake, b"{\"peer_id\":\"host\"}".to_vec()),
+        wire(FrameType::ObjectRequest, b"{}".to_vec()),
+        wire(FrameType::Proof, b"{}".to_vec()),
+        wire(FrameType::PathUpdate, vec![]),
+        wire(FrameType::Repair, vec![]),
+        vec![0; 4097],
+        vec![0xff; 100],
     ];
     for bad in cases {
         let fixture = Fixture::new();
@@ -895,12 +925,23 @@ fn wrong_outer_channel_handle_session_and_lease_never_reach_atp_or_disk() {
     let (mut host, mut task) = file_host(&fixture);
     let settings = file_settings();
     let atp = offered(&manifest("received.bin", b"abc"));
-    #[rustfmt::skip]
     let contexts = [
-        fr_wire::files::Context { channel: 77, ..settings.incoming },
-        fr_wire::files::Context { handle: 77, ..settings.incoming },
-        fr_wire::files::Context { session: RemoteSessionId::from_raw(77), ..settings.incoming },
-        fr_wire::files::Context { lease: InputLeaseId::from_raw(77), ..settings.incoming },
+        fr_wire::files::Context {
+            channel: 77,
+            ..settings.incoming
+        },
+        fr_wire::files::Context {
+            handle: 77,
+            ..settings.incoming
+        },
+        fr_wire::files::Context {
+            session: RemoteSessionId::from_raw(77),
+            ..settings.incoming
+        },
+        fr_wire::files::Context {
+            lease: InputLeaseId::from_raw(77),
+            ..settings.incoming
+        },
     ];
     for context in contexts {
         let mut bytes = [0; 4096];
@@ -1012,13 +1053,27 @@ fn observation_or_crossed_attachment_configuration_never_starts_disk_owner() {
     use fr_wire::files::{Context, Direction, Role};
     let fixture = Fixture::new();
     let original = file_settings();
-    #[rustfmt::skip]
     let contexts = [
-        Context { sender: Role::Observer, ..original.incoming },
-        Context { handle: 999, ..original.incoming },
-        Context { lease: InputLeaseId::from_raw(999), ..original.incoming },
-        Context { direction: Direction::ToController, ..original.incoming },
-        Context { channel: 12, ..original.incoming },
+        Context {
+            sender: Role::Observer,
+            ..original.incoming
+        },
+        Context {
+            handle: 999,
+            ..original.incoming
+        },
+        Context {
+            lease: InputLeaseId::from_raw(999),
+            ..original.incoming
+        },
+        Context {
+            direction: Direction::ToController,
+            ..original.incoming
+        },
+        Context {
+            channel: 12,
+            ..original.incoming
+        },
     ];
     for incoming in contexts {
         assert!(

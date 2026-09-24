@@ -634,12 +634,16 @@ mod tests {
         assert!(!c.target.by_name);
     }
     #[test]
-    #[rustfmt::skip]
     fn unknown_duplicate_credential_and_policy_switches_are_not_ignored() {
         for s in [
-            "hosts --json --json", "hosts --socket /a --socket /b", "hosts --port 8443",
-            "hosts --socket ../sock", "connect https://host.invalid", "hosts --token secret",
-            "connect n-peer --approval none", "hosts garbage",
+            "hosts --json --json",
+            "hosts --socket /a --socket /b",
+            "hosts --port 8443",
+            "hosts --socket ../sock",
+            "connect https://host.invalid",
+            "hosts --token secret",
+            "connect n-peer --approval none",
+            "hosts garbage",
         ] {
             assert!(options(s).is_err(), "{s}");
         }
@@ -698,7 +702,6 @@ mod display_tests {
         assert_eq!(DisplayChoice::Only.select(&catalog(&[9, 10])), None);
     }
     #[test]
-    #[rustfmt::skip]
     fn inventory_needs_trust_and_experimental_opt_in_but_no_display_or_worker() {
         let o = parse(&args("displays n-peer --experimental-native --trust-roots /opt/fr/ca.pem --ipv6 --port 1234 --json")).unwrap();
         let Command::Displays(t) = o.command else {
@@ -712,8 +715,13 @@ mod display_tests {
             "native_transport_unqualified"
         );
         for extra in [
-            "--worker /bin/false", "--display 9", "--view-only",
-            "--attempts 2", "--x-display :0", "--port 0", "--token secret",
+            "--worker /bin/false",
+            "--display 9",
+            "--view-only",
+            "--attempts 2",
+            "--x-display :0",
+            "--port 0",
+            "--token secret",
         ] {
             assert!(
                 parse(&args(&format!(
@@ -724,7 +732,6 @@ mod display_tests {
         }
     }
     #[test]
-    #[rustfmt::skip]
     fn connection_only_selection_is_explicit_and_handle_precision_is_preserved() {
         for choice in ["only".to_string(), u128::MAX.to_string()] {
             let o=parse(&args(&format!("connect n-peer --view-only --experimental-native --worker /opt/fr/worker --trust-roots /opt/fr/ca.pem --display {choice}"))).unwrap();
@@ -740,7 +747,13 @@ mod display_tests {
                 }
             );
         }
-        for choice in ["0", "first", "primary", "-1", "340282366920938463463374607431768211456"] {
+        for choice in [
+            "0",
+            "first",
+            "primary",
+            "-1",
+            "340282366920938463463374607431768211456",
+        ] {
             assert!(parse(&args(&format!("connect n-peer --view-only --experimental-native --worker /opt/fr/worker --trust-roots /opt/fr/ca.pem --display {choice}"))).is_err());
         }
     }
@@ -795,12 +808,23 @@ mod fit_tests {
         );
     }
     #[test]
-    #[rustfmt::skip]
     fn malformed_oversized_and_non_connection_fit_settings_refuse_before_io() {
         for value in [
-            "", "0x0", "15x16", "960x539", "959x540", "4294967296x540",
-            "16384x16384", "960X540", "960x540x2", "+960x540", "-960x540",
-            "960x", "x540", "960.0x540", "960x540 --fit 320x240",
+            "",
+            "0x0",
+            "15x16",
+            "960x539",
+            "959x540",
+            "4294967296x540",
+            "16384x16384",
+            "960X540",
+            "960x540x2",
+            "+960x540",
+            "-960x540",
+            "960x",
+            "x540",
+            "960.0x540",
+            "960x540 --fit 320x240",
         ] {
             assert_eq!(
                 options(&format!("{CONNECT} --fit {value}"))
@@ -985,13 +1009,16 @@ mod robot_tests {
     }
 
     #[test]
-    #[rustfmt::skip]
     fn robot_rejects_missing_node_or_invalid_flags() {
         for s in [
-            "robot session open", "robot session open host-alpha --role invalid_role",
-            "robot input host-alpha --lease lease-123", "robot input host-alpha --request-id req-1",
+            "robot session open",
+            "robot session open host-alpha --role invalid_role",
+            "robot input host-alpha --lease lease-123",
+            "robot input host-alpha --request-id req-1",
             "robot input host-alpha --lease lease-1 --request-id req-1 --port 0",
-            "inspect", "disconnect", "status extra_positional",
+            "inspect",
+            "disconnect",
+            "status extra_positional",
         ] {
             assert!(parse(&to_args(s)).is_err(), "{s}");
         }

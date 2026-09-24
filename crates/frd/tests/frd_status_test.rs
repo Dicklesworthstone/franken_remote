@@ -456,7 +456,6 @@ own-user";
 
 #[test]
 #[cfg(target_os = "linux")]
-#[rustfmt::skip]
 fn frd_approval_and_sharing_cli_commands() {
     use std::os::unix::fs::DirBuilderExt;
     struct TestDirectory(PathBuf);
@@ -472,7 +471,10 @@ fn frd_approval_and_sharing_cli_commands() {
     let directory = TestDirectory(
         std::env::temp_dir().join(format!("frd-policy-cli-{}-{unique}", std::process::id())),
     );
-    fs::DirBuilder::new().mode(0o700).create(&directory.0).unwrap();
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&directory.0)
+        .unwrap();
     let path = directory.0.join("policy.json");
     let frd_command = |args: &[&str]| {
         let mut command = frd_command(args);
@@ -482,13 +484,31 @@ fn frd_approval_and_sharing_cli_commands() {
 
     let cases: &[(&[&str], &str)] = &[
         (&["approval", "get"], "Approval Mode: unattended"),
-        (&["approval", "get", "--json"], "\"approval_mode\":\"unattended\""),
-        (&["approval", "set", "local"], "Approval Mode updated to 'local'"),
-        (&["approval", "set", "none"], "Approval Mode updated to 'unattended'"),
+        (
+            &["approval", "get", "--json"],
+            "\"approval_mode\":\"unattended\"",
+        ),
+        (
+            &["approval", "set", "local"],
+            "Approval Mode updated to 'local'",
+        ),
+        (
+            &["approval", "set", "none"],
+            "Approval Mode updated to 'unattended'",
+        ),
         (&["sharing", "get"], "Sharing Scope: own-user"),
-        (&["sharing", "get", "--json"], "\"sharing_scope\":\"own-user\""),
-        (&["sharing", "set", "tailnet"], "Sharing Scope updated to 'tailnet'"),
-        (&["sharing", "set", "own-user"], "Sharing Scope updated to 'own-user'"),
+        (
+            &["sharing", "get", "--json"],
+            "\"sharing_scope\":\"own-user\"",
+        ),
+        (
+            &["sharing", "set", "tailnet"],
+            "Sharing Scope updated to 'tailnet'",
+        ),
+        (
+            &["sharing", "set", "own-user"],
+            "Sharing Scope updated to 'own-user'",
+        ),
     ];
     for &(args, expected) in cases {
         let out = wait_for_child(frd_command(args).spawn().unwrap());
