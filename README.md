@@ -2,12 +2,30 @@
 
 **A tailnet-native remote workstation in Rust: open a machine on your Tailscale network and use its existing desktop, with hardware-accelerated HEVC, no separate account or pairing ceremony, and a system that refuses to accumulate invisible latency.**
 
-> **Status: early implementation; not an installable remote desktop yet.** The Rust workspace contains tested authority and bounded media delivery, HEVC admission/normalization, supervised Linux media workers, and input records joined to submission-time checks with an opt-in native X11 pointer/button adapter. There is no complete `frd`/`fr` application, qualified live transport, or hardware-qualified capture/codec path yet. [`IMPLEMENTATION_STATUS.md`](IMPLEMENTATION_STATUS.md) records the implemented slices and exact verification evidence. The design source of truth remains [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) (version 1.4). Every latency target, operating envelope, and platform claim below is a **proposed engineering objective from that plan, not a measured FrankenRemote result**.
+> **Status (audited 2026-09-24): early implementation; not an installable remote desktop yet.** A host can now serve a view-only X11 desktop to the native client, but only verified in an isolated test namespace, never yet across a live tailnet, and there is no remote control, no Wayland/macOS/Windows/browser/mobile path, and no hardware encoder selection. "What runs today" below lists exactly what exists and at which evidence level. The design source of truth remains [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) (version 1.4). Every latency target, operating envelope and platform claim further below is a **proposed engineering objective from that plan, not a measured FrankenRemote result**.
 
-The two planned binary names are:
+The two binaries are:
 
-- **`frd`** — FrankenRemoteDaemon, the host-side broker and its internal process-role family (interactive-session agent, on-demand media worker);
+- **`frd`** — FrankenRemoteDaemon, the host-side broker (plus its capture worker `fr-media-worker`);
 - **`fr`** — the FrankenRemote client and command-line interface.
+
+## What runs today
+
+Evidence levels: *live* = run against this repository's binaries on a real tailnet host; *namespace e2e* = real processes, UDP/TLS/QUIC, admission and media in an isolated network namespace with fixture Tailscale LocalAPI, test CA and synthetic firewall; *Xvfb* = real X server in CI; *unit* = tests only.
+
+| Command | What it does | Evidence |
+|---|---|---|
+| `frd status [--json]` | Probes the installed Tailscale LocalAPI for this node's identity; every media/permission row stays `not_tested` (nothing is measured) | live |
+| `fr hosts [--json]` | Lists machines from installed Tailscale discovery (machines, not ready desktops) | live |
+| `fr doctor [--json]` | Node identity and service-port collision check; permission/capability rows `not_tested`; `--trust-roots` additionally fetches the host certificate | live (without `--trust-roots`) |
+| `frd run --software-explicit [--headless]` | Hosts one X11 display (or a private cookie-authenticated Xvfb) to native viewers: tailnet-bound listener, firewall ingress rule, Tailscale WhoIs admission (own-user or tailnet scope), capture worker launched on admission, software HEVC, renewal, fixed-order cleanup | namespace e2e (a viewer receives frames past the initial lease; clean stop). **Not yet run on a live tailnet**: that issues the host's first Tailscale HTTPS certificate, which is public in Certificate Transparency logs |
+| `fr displays NODE --experimental-native` | One authenticated connection that fetches the host's display catalog | namespace e2e against `frd run`; a departing inspection currently ends the host's share (bead `fr-704`) |
+| `fr connect NODE --view-only --experimental-native --display only` | Native X11 viewer: software HEVC decode in a seccomp-sandboxed worker, `XPutImage` presentation, reconnects | Xvfb and library tests; not yet run against `frd run` |
+| `fr robot ...`, `fr disconnect` | Refuse with typed errors (`robot_surface_unavailable`, `no_background_session`) | unit/CLI tests |
+
+Not available: remote control/input from `fr` (the host has no input-agent process yet), local approval prompts in `frd run`, audio/clipboard/file transfer through `frd run`, hardware HEVC selection, Wayland, macOS, Windows, browser and mobile clients. Earlier documents that marked GNOME/KDE/Hyprland, Windows GPU rows or Windows/macOS worker sandboxes as passed or enforced were withdrawn on 2026-09-24: no evidence existed.
+
+**Size gate:** the fixed counter (`./scripts/verify.sh count`) reports 272,655 handwritten Rust lines against the 250,000 hard stop, so that lane refuses; the owner's budget decision is pending.
 
 The engineering thesis, from the plan:
 
@@ -23,7 +41,7 @@ The engineering thesis, from the plan:
 
 ## Develop and verify
 
-The current workspace contains `fr-core`, `fr-wire`, `fr-media`, `fr-native`, `frd`, and `fr-lab`. From a checkout with Rustup installed, the repository's `rust-toolchain.toml` selects the exact nightly:
+The workspace contains 13 crates: `fr-core`, `fr-wire`, `fr-media`, `fr-transport`, `fr-tailnet`, `fr-client`, `fr-native` (the `fr` and `fr-media-worker` binaries), `frd`, `fr-files`, `fr-ffi`, `fr-web`, `fr-lab` and `fr-e2e`. From a checkout with Rustup installed, the repository's `rust-toolchain.toml` selects the exact nightly:
 
 ```bash
 ./scripts/verify.sh fast                  # format, workspace check, strict clippy, tests
@@ -34,9 +52,7 @@ The current workspace contains `fr-core`, `fr-wire`, `fr-media`, `fr-native`, `f
 ./scripts/verify.sh crate <name> [action] # per-crate verification (fast|check|clippy|test|fmt)
 ```
 
-The fast lane runs formatting, workspace compilation, strict Clippy, and tests with all features, including the explicitly test-only media backend. At source commit `e7d57d5a1a284ec0b8da6374d3eda8613167c1e1`, the [retained Linux verification run](https://github.com/Dicklesworthstone/franken_remote/actions/runs/34231571592) passed **47 core unit tests, 17 media unit tests, 9 media contract tests, and 3 compile-fail doctests**. These are source/policy and fake-backend contract results, not live Asupersync, Tailscale, OS-input, or HEVC hardware qualification.
-
-The input implementation and its verification limits are described in [PROTOCOL_INPUT.md](PROTOCOL_INPUT.md) and [NATIVE_INPUT.md](NATIVE_INPUT.md). Pointer/button effects have been exercised against real X11/XTest servers; native keyboard/text, the independent input-agent watchdog, and the authenticated live-session join remain unfinished. This is not an installable controlled desktop.
+The fast lane runs formatting, workspace compilation, strict Clippy and tests with all features. CI (`.github/workflows/rust-verification.yml`) runs each lane independently (format, check, clippy, tests, examples, Xvfb indicator/input/clipboard/HEVC lanes, docs) and reports every red lane by name; the size count is report-only. These are source and Xvfb results, not live Tailscale, OS-input or HEVC hardware qualification. The namespace end-to-end suite (`scripts/test_linux_serial_lifecycle.sh`, see [LINUX_SERIAL_HOSTING.md](LINUX_SERIAL_HOSTING.md)) needs user namespaces or `FR_NS_SUDO=1` and is run manually.
 
 The `full` lane additionally requires UBS and fails explicitly when it is unavailable. The `release` lane remains blocked until native artifacts and qualification exist. CI calls the same repository-owned commands; it does not replace native builder or hardware evidence. See the [implementation status](IMPLEMENTATION_STATUS.md) for integration boundaries and remaining work.
 
@@ -172,7 +188,7 @@ FFmpeg integration is a deliberately narrow boundary (plan §9): a curated, allo
 
 ## Proposed workspace
 
-From plan §22 — responsibility boundaries, not a requirement to create every crate before the first working slice. Crates enter the workspace only with a real vertical slice. The current members are `fr-core`, `fr-wire`, `fr-media`, `fr-native`, `frd`, and `fr-lab`; the other responsibility boundaries below remain planned.
+From plan §22 — responsibility boundaries, not a requirement to create every crate before the first working slice. Crates enter the workspace only with a real vertical slice. The 13 current members are listed under "Develop and verify" above; `fr` currently lives in `fr-native`, and `fr-platform` has no crate of its own.
 
 ```text
 frankenremote/
@@ -214,7 +230,7 @@ An optional extension lane (native 4:4:4 precision, the HEVC-only chroma-carrier
 
 ## Agent ergonomics
 
-FrankenRemote is designed to be operated by coding agents as well as humans (plan §18). The planned command surface is small and JSON-first — `fr hosts --json`, `fr doctor --json`, `fr robot session open/observe/input/close`, `frd status --json` — with every robot response distinguishing success from partial submission, cancellation, refusal, or unknown external effect. Observations carry validity boundaries (geometry generation, source-freshness status, capture/presentation timestamps with uncertainty); actions can require preconditions and are refused rather than clicking an old coordinate system. An optional, explicitly granted adapter can expose FrankenTerm pane semantics through `ft robot` instead of forcing agents to read pixels. **These are planned interfaces, not commands that exist today.**
+FrankenRemote is designed to be operated by coding agents as well as humans (plan §18). The planned command surface is small and JSON-first — `fr hosts --json`, `fr doctor --json`, `fr robot session open/observe/input/close`, `frd status --json` — with every robot response distinguishing success from partial submission, cancellation, refusal, or unknown external effect. Observations carry validity boundaries (geometry generation, source-freshness status, capture/presentation timestamps with uncertainty); actions can require preconditions and are refused rather than clicking an old coordinate system. An optional, explicitly granted adapter can expose FrankenTerm pane semantics through `ft robot` instead of forcing agents to read pixels. Today `fr hosts --json`, `fr doctor --json` and `frd status --json` exist (reporting only what they probe); `fr robot` exists only as a typed refusal until a live session backs it.
 
 ## Verification discipline
 
