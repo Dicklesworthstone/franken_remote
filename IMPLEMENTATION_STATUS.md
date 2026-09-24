@@ -1,5 +1,59 @@
 # Implementation status
 
+## Audited state (2026-09-24)
+
+**Early implementation; not an installable remote desktop.** This section
+replaces the September 8 summary. The per-slice entries under "History" below
+are retained verbatim as the record of what each slice claimed when it landed.
+Some of them state things later found false; the corrections are listed here.
+The README's "What runs today" table gives the per-command evidence level.
+
+**What composes end to end.** `frd run --software-explicit` (composition in
+`crates/frd/src/host_run.rs`, CLI in `crates/frd/src/bin/frd.rs`) binds the
+tailnet address, installs the firewall ingress rule, admits peers through
+Tailscale WhoIs, launches the capture worker on admission, serves software HEVC
+to native viewers, renews authority and cleans up in a fixed order. This is
+verified by the namespace end-to-end suite (fixture LocalAPI, test CA, synthetic
+firewall; real UDP/TLS/QUIC, processes and media). It has **not** been run on a
+live tailnet, because that would issue the host's first Tailscale HTTPS
+certificate (published in Certificate Transparency logs).
+
+**Fixed during the 2026-09-23/24 audit:**
+- Admission refused every real peer because it required `MachineAuthorized`.
+- Installed tailscaled's `"Peer": null` status was rejected as malformed.
+- Hosted sessions died about 3 s in: the accepted QUIC socket read one datagram
+  per turn, so ACK latency grew until reliable records expired (61e56f8).
+- The headless Xvfb display had no X authority cookie.
+- `fr` refused the distribution CA bundle (limit of 64 roots).
+- CI lanes now run independently and the format gate is green again. Fixes for
+  the test/examples lanes (missing `libpulse0`) and two flaky tests are pushed;
+  CI confirmation is pending.
+
+**Withdrawn as fabricated** (no evidence existed):
+- `frd status` fixture output and `fr doctor` "granted/passed" rows (these now
+  probe live, or say `not_tested`);
+- `fr robot`/`fr disconnect` success envelopes (now typed refusals);
+- GNOME/KDE/Hyprland and Windows GPU qualification rows (docs and the runtime
+  tables `QUALIFIED_ROWS`/`QUALIFIED_WINDOWS_ROWS`, now empty);
+- Windows/macOS worker sandboxes and Landlock claims.
+The Linux client decoder's seccomp sandbox is real and tested.
+
+**Open, in priority order:**
+- A viewer that leaves during cold start ends the host's share, and
+  `frd run` counts that as a host failure (bead `fr-704`).
+- Remote control: the client needs `--control`; the host needs an input-agent
+  subprocess, because `frd` cannot link the XTest sink
+  (`fr-rc-client-control-cli-ykt`).
+- A live two-machine tailnet run.
+- Hardware HEVC selection in `frd run`, and the ADR 0004 software ceilings.
+- Local approval in `frd run`, which needs the session-agent process.
+- Wayland, macOS, Windows, browser and mobile paths (not implemented).
+- Size discipline: the fixed counter reads 272,655 handwritten Rust lines
+  against the 250,000 hard stop. That lane refuses and the owner's budget
+  decision is pending.
+
+## History (entries before 2026-09-23, retained verbatim)
+
 Updated September 8, 2026. **Early Rust implementation, not an installable remote desktop.** The comprehensive plan remains the design authority; this file records implementation and evidence, not additional product scope. No application or live-transport/hardware phase gate is declared complete by the tests below.
 
 ## Native-owner cancellation and returned input results

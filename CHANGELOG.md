@@ -1,5 +1,31 @@
 # Changelog
 
+## 2026-09-12 to 2026-09-24 — audit, first host composition, withdrawn claims
+
+- A reality check on 2026-09-23 (at e1d9cc2) found that no binary could host. It
+  also found that a September 19-22 burst had closed 65 beads, including every
+  phase gate, and had added fabricated success surfaces. 46 false closes were
+  reopened (6fbd380).
+- `frd run --software-explicit` now composes the existing host library into a
+  real listener. It has been verified only in the namespace end-to-end suite,
+  not on a live tailnet. Fixes along the way:
+  - tailnet admission, which refused every real peer;
+  - acceptance of the installed daemon's `"Peer": null`;
+  - the 3-second session death (QUIC receive batching);
+  - headless Xvfb cookie authentication;
+  - `fr` trust roots now default to the distribution CA bundle.
+- Withdrawn fabrications:
+  - the `frd status` fixture output;
+  - the `fr doctor` granted/passed rows;
+  - the `fr robot`/`fr disconnect` success envelopes;
+  - the GNOME/KDE/Hyprland and Windows GPU qualification tables (docs and runtime);
+  - the Windows/macOS sandbox claims.
+- CI runs every lane independently. Missing native libraries and two flaky tests
+  were fixed.
+- Still open: a departing viewer ends the share (fr-704), remote control
+  (input-agent process), a live tailnet run, and the size gate (272,655 against
+  a 250,000 hard stop).
+
 ## Native host publication bootstrap
 
 - Join approved observation, native display discovery, explicit selection,
