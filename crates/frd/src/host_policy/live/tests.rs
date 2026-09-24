@@ -344,3 +344,49 @@ fn cancellation_and_reader_panic_have_terminal_receipts_and_observed_cleanup() {
         assert!(!cx.is_cancel_requested());
     });
 }
+
+#[test]
+fn process_overrides_preserve_revision_fencing_without_mutating_saved_policy() {
+    run(|cx| {
+        let disk = Disk::new();
+        let saved = disk.saved();
+        let mut watch = Watch::start(&cx, disk.store()).unwrap();
+        let raw = watch.handle();
+        active(&raw);
+        let effective = raw
+            .clone()
+            .with_overrides(Some(Approval::Local), Some(Sharing::Tailnet));
+        let expected = Policy {
+            approval_mode: Approval::Local,
+            sharing_scope: Sharing::Tailnet,
+            ..saved
+        };
+        assert_eq!(effective.status(), Status::Active(expected));
+        let lease = effective.lease().unwrap();
+        assert_eq!(lease.check(), Ok(expected));
+        assert_eq!(raw.lease().unwrap().check(), Ok(saved));
+        assert_eq!(disk.store().load().unwrap(), saved);
+        // Deriving a different local handle cannot alter an existing selection.
+        let reset = effective.clone().with_overrides(None, None);
+        assert_eq!(reset.lease().unwrap().check(), Ok(saved));
+        assert_eq!(lease.check(), Ok(expected));
+        let next = disk
+            .store()
+            .update(Change::Approval(Approval::Local))
+            .unwrap()
+            .policy;
+        wait(|| raw.status() == Status::Active(next));
+        // Effective values did not change, but the saved epoch did.
+        assert_eq!(lease.check(), Err(Error::Changed));
+        assert_eq!(
+            effective.lease().unwrap().check(),
+            Ok(Policy {
+                revision: next.revision,
+                ..expected
+            })
+        );
+        finish(&mut watch);
+        assert_eq!(lease.check(), Err(Error::Changed));
+        assert!(!cx.is_cancel_requested());
+    });
+}

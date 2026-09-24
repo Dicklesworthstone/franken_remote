@@ -155,20 +155,41 @@ impl Shared {
 /// Weak access to an explicitly watched local policy. It does not keep a Watch
 /// alive, read a file, authenticate a peer, or approve an individual session.
 #[derive(Clone)]
-pub struct Handle(Weak<Shared>);
+pub struct Handle {
+    shared: Weak<Shared>,
+    approval: Option<super::Approval>,
+    sharing: Option<super::Sharing>,
+}
 impl fmt::Debug for Handle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("LiveHostPolicy([local lifetime])")
     }
 }
 impl Handle {
+    /// Local process overrides, never a saved-policy mutation. Every observed
+    /// disk revision still retires old leases, even when these effective values
+    /// remain unchanged. A connection keeps the overrides it captured at admission.
+    #[must_use]
+    pub fn with_overrides(
+        mut self,
+        approval: Option<super::Approval>,
+        sharing: Option<super::Sharing>,
+    ) -> Self {
+        self.approval = approval;
+        self.sharing = sharing;
+        self
+    }
+    fn effective(&self, mut policy: Policy) -> Policy {
+        policy.approval_mode = self.approval.unwrap_or(policy.approval_mode);
+        policy.sharing_scope = self.sharing.unwrap_or(policy.sharing_scope);
+        policy
+    }
     pub fn status(&self) -> Status {
-        match self.0.upgrade().ok_or(Error::Closed).and_then(|s| {
+        match self.shared.upgrade().ok_or(Error::Closed).and_then(|s| {
             s.with(|state, _| {
-                Ok(state
-                    .current
-                    .as_ref()
-                    .map_or(Status::Opening, |e| Status::Active(e.policy)))
+                Ok(state.current.as_ref().map_or(Status::Opening, |e| {
+                    Status::Active(self.effective(e.policy))
+                }))
             })
         }) {
             Ok(status) => status,
@@ -178,7 +199,7 @@ impl Handle {
     /// Snapshot policy and reserve its EXACT epoch atomically, before admission.
     /// Retain this lease through all connection handoffs and check before I/O.
     pub fn lease(&self) -> Result<Lease, Error> {
-        let shared = self.0.upgrade().ok_or(Error::Closed)?;
+        let shared = self.shared.upgrade().ok_or(Error::Closed)?;
         shared.with(|state, _| {
             Ok(Lease {
                 handle: self.clone(),
@@ -204,19 +225,24 @@ impl fmt::Debug for Lease {
 impl Lease {
     pub fn check(&self) -> Result<Policy, Error> {
         self.epoch.check()?;
-        let result = self.handle.0.upgrade().ok_or(Error::Closed).and_then(|s| {
-            s.with(|state, _| {
-                if !state
-                    .current
-                    .as_ref()
-                    .is_some_and(|e| Arc::ptr_eq(e, &self.epoch))
-                {
-                    return Err(Error::Changed);
-                }
-                self.epoch.check()?;
-                Ok(self.epoch.policy)
-            })
-        });
+        let result = self
+            .handle
+            .shared
+            .upgrade()
+            .ok_or(Error::Closed)
+            .and_then(|s| {
+                s.with(|state, _| {
+                    if !state
+                        .current
+                        .as_ref()
+                        .is_some_and(|e| Arc::ptr_eq(e, &self.epoch))
+                    {
+                        return Err(Error::Changed);
+                    }
+                    self.epoch.check()?;
+                    Ok(self.handle.effective(self.epoch.policy))
+                })
+            });
         if let Err(error) = result {
             self.epoch.retire(error);
         }
@@ -297,7 +323,11 @@ impl Watch {
         })
     }
     pub fn handle(&self) -> Handle {
-        Handle(Arc::downgrade(&self.shared))
+        Handle {
+            shared: Arc::downgrade(&self.shared),
+            approval: None,
+            sharing: None,
+        }
     }
     pub fn stop(&self) {
         self.shared.stop(Error::Closed);
