@@ -196,23 +196,33 @@ impl World {
             .unwrap();
         // Ordinary control remains usable in BOTH directions after native cleanup.
         for host in [true, false] {
-            let (q, outbound) = if host {
-                (&mut self.link.h, self.link.hr.outbound)
-            } else {
-                (&mut self.link.c, self.link.cr.outbound)
-            };
             let mut bytes = [0u8; 24];
             bytes[..4].copy_from_slice(b"FRD0");
             bytes[6..8].copy_from_slice(&0x0012u16.to_be_bytes());
             bytes[16..20].copy_from_slice(&7u32.to_be_bytes());
-            q.send(
-                &self.cx,
-                Route::Stream(outbound),
-                &bytes,
-                clock(&self.cx) + 500_000,
-                || true,
-            )
-            .unwrap();
+            // Records retired during native cleanup may still await the peer's
+            // acknowledgement; Backpressure means retry the same record.
+            loop {
+                let (q, outbound) = if host {
+                    (&mut self.link.h, self.link.hr.outbound)
+                } else {
+                    (&mut self.link.c, self.link.cr.outbound)
+                };
+                match q.send(
+                    &self.cx,
+                    Route::Stream(outbound),
+                    &bytes,
+                    clock(&self.cx) + 500_000,
+                    || true,
+                ) {
+                    Ok(()) => break,
+                    Err(fr_transport::quic::Error::Backpressure) => {
+                        assert!(Instant::now() < until, "control stayed backpressured");
+                        self.link.drive(&self.cx).await;
+                    }
+                    Err(error) => panic!("control send after cleanup: {error:?}"),
+                }
+            }
             let mut got = false;
             while !got {
                 assert!(Instant::now() < until);
