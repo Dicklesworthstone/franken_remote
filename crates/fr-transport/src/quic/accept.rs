@@ -35,6 +35,15 @@ use std::{
 };
 
 const MAX_DATAGRAM: usize = 1500;
+// Upper bound on datagrams one receive call may take from this socket. Discovery
+// still reads exactly one at a time (explicit `receive_batch(cx, 1)`), but the
+// SAME socket then carries the established connection. With a cap of one, each
+// bounded I/O turn could drain only a single datagram while a streaming viewer
+// sends more than one per host turn. The kernel backlog then grows without
+// limit, inflating ACK latency until a reliable record misses its deadline and
+// the session closes. Sixteen matches the upstream handshake batch and the
+// dialer's endpoint; buffers stay bounded (16 x `MAX_DATAGRAM + 1` bytes).
+const RECEIVE_BATCH: usize = 16;
 const MAX_SCAN: u16 = 256;
 const MAX_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -191,7 +200,7 @@ impl Listener {
                 // Sentinel byte detects truncation of oversized discovery
                 // datagrams. The later owner retains this same bounded socket.
                 max_packet_size: MAX_DATAGRAM + 1,
-                max_batch_size: 1,
+                max_batch_size: RECEIVE_BATCH,
                 socket_recv_buffer_size: Some(65_536),
                 socket_send_buffer_size: Some(65_536),
                 enable_timestamping: false,

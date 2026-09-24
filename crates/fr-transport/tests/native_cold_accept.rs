@@ -154,6 +154,65 @@ fn discovers_unknown_peer_completes_real_tls_and_delivers_authenticated_stream()
         assert!(UdpSocket::bind(address).is_ok());
     });
 }
+// Regression: the accepted connection keeps the discovery socket. One bounded
+// host I/O turn must drain a queued backlog, not a single datagram; otherwise a
+// viewer that sends more than one packet per host turn grows the kernel queue
+// (and ACK latency) without limit until reliable-record deadlines close it.
+#[test]
+fn established_connection_drains_queued_datagrams_in_one_bounded_turn() {
+    support::runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let listener = Listener::bind(&cx, "127.0.0.1:0".parse().unwrap(), config())
+            .await
+            .unwrap();
+        let address = listener.local_addr();
+        let accept = listener
+            .accept(&cx, id(b"server-local-cid"), server)
+            .unwrap();
+        let (client, server) = Box::pin(support::both(
+            timeout(
+                cx.now(),
+                Duration::from_secs(4),
+                client(&cx, address, "localhost", ALPN),
+            ),
+            accept,
+        ))
+        .await;
+        let (mut client, mut server) = (client.unwrap().unwrap(), server.unwrap());
+        let stream = client.connection_mut().open_uni_stream(&cx).unwrap();
+        // Separate flushes: at least four protected datagrams wait at the host.
+        for part in [&b"one;"[..], b"two;", b"six;", b"ten;"] {
+            client
+                .connection_mut()
+                .write_stream(
+                    &cx,
+                    stream,
+                    asupersync::bytes::Bytes::from_static(part),
+                    false,
+                )
+                .unwrap();
+            assert!(client.flush(&cx).await.unwrap() >= 1);
+        }
+        sleep(cx.now(), Duration::from_millis(10)).await;
+        let progress = server
+            .drive_io_once(&cx, Duration::from_millis(5))
+            .await
+            .unwrap();
+        assert!(progress.packets_received >= 4, "{progress:?}");
+        // All bytes are already delivered by that ONE turn; no further drive.
+        let mut received = Vec::new();
+        for _ in 0..4 {
+            match server.connection_mut().read_stream(&cx, stream, 64) {
+                Ok(bytes) if !bytes.is_empty() => received.extend_from_slice(&bytes),
+                _ => break,
+            }
+        }
+        assert_eq!(received, b"one;two;six;ten;");
+        drop(server);
+        drop(client);
+        assert!(UdpSocket::bind(address).is_ok());
+    });
+}
 #[test]
 fn arbitrary_datagram_flood_has_a_fixed_budget_and_never_opens_tls() {
     support::runtime().block_on(async {
