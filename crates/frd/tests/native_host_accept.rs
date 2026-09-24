@@ -133,7 +133,7 @@ async fn refusal(mode: Mode, expected: fr_tailnet::Error, hc: Cx, vc: Cx) {
     let operation = server.run_on_protected_listener(
         &hc,
         socket,
-        request(),
+        request_for(mode),
         boundary(address, Arc::new(AtomicBool::new(true))),
         |_| {
             called.set(true);

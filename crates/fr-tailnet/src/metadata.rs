@@ -303,11 +303,19 @@ impl WhoIs {
 }
 /// A grant is authoritative because it is a per-connection `CapMap` from the
 /// locally authenticated daemon. Node `CapMap`/Capabilities and names NEVER grant.
+///
+/// Installed daemons omit `MachineAuthorized` for peers (observed on Linux
+/// 1.102.3 and 1.102.4), so its absence is not a refusal by itself. Own-user
+/// scope rests on the positive equality of the peer's and host's user ids
+/// checked below; tailnet-wide scope still needs positive evidence: an explicit
+/// `MachineAuthorized: true` or a valid desktop grant (`granted`). An explicit
+/// `false` always refuses.
 fn evaluate_identity(
     status: &Status,
     who: &WhoIs,
     endpoints: ConnectionAddresses,
     policy: GrantPolicy,
+    granted: bool,
 ) -> Result<(Identity, Vec<Option<String>>), Error> {
     status.validate(endpoints)?;
     let n = &who.node;
@@ -322,6 +330,7 @@ fn evaluate_identity(
     match n.authorized {
         Some(true) => {}
         Some(false) => return Err(Error::MachineNotAuthorized),
+        None if policy.scope == Scope::OwnUser || granted => {}
         None => return Err(Error::TailnetMembershipUnverifiable),
     }
     if n.jailed || n.peer_api_only || !peer.in_map {
@@ -385,7 +394,7 @@ pub(crate) fn evaluate_membership(
     endpoints: ConnectionAddresses,
     policy: GrantPolicy,
 ) -> Result<(Identity, Permissions, Vec<Option<String>>), Error> {
-    let (identity, expiries) = evaluate_identity(status, who, endpoints, policy)?;
+    let (identity, expiries) = evaluate_identity(status, who, endpoints, policy, false)?;
     Ok((
         identity,
         Permissions {
@@ -404,18 +413,23 @@ pub(crate) fn evaluate(
     endpoints: ConnectionAddresses,
     policy: GrantPolicy,
 ) -> Result<(Identity, Permissions, Vec<Option<String>>), Error> {
-    let (identity, expiries) = evaluate_identity(status, who, endpoints, policy)?;
-    let mut permissions = Permissions {
+    let mut permissions = Ok(Permissions {
         observe: false,
         control: false,
-    };
+    });
     for grant in &who.grants.desktop {
-        if grant.version != 1 || (grant.control && !grant.observe) {
-            return Err(Error::InvalidCapability);
+        if let Ok(p) = &mut permissions {
+            if grant.version != 1 || (grant.control && !grant.observe) {
+                permissions = Err(Error::InvalidCapability);
+            } else {
+                p.observe |= grant.observe;
+                p.control |= grant.control;
+            }
         }
-        permissions.observe |= grant.observe;
-        permissions.control |= grant.control;
     }
+    let granted = matches!(permissions, Ok(Permissions { observe: true, .. }));
+    let (identity, expiries) = evaluate_identity(status, who, endpoints, policy, granted)?;
+    let permissions = permissions?;
     if !permissions.observe {
         return Err(Error::CapabilityDenied);
     }

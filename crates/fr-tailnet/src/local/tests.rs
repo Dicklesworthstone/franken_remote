@@ -477,7 +477,7 @@ fn changed_identity_backend_and_known_key_expiry_refuse() {
     );
 }
 #[test]
-fn machine_approval_requires_positive_evidence_for_every_profile() {
+fn absent_machine_authorization_needs_other_positive_evidence_per_scope() {
     let (status, mut who) = fixtures();
     for approval in [None, Some(json!(null))] {
         let node = who["Node"].as_object_mut().unwrap();
@@ -486,13 +486,38 @@ fn machine_approval_requires_positive_evidence_for_every_profile() {
         } else {
             node.remove("MachineAuthorized");
         }
+        // Own-user scope: equal user ids are the positive evidence.
+        let own = evaluate_membership_fixture(&status, &who, Scope::OwnUser).unwrap();
+        assert!(own.observe() && own.control());
+        assert!(evaluate_fixture(&status, &who, Scope::OwnUser).is_ok());
+        // Tailnet scope: no membership proof without a grant.
         assert_eq!(
-            evaluate_membership_fixture(&status, &who, Scope::OwnUser),
+            evaluate_membership_fixture(&status, &who, Scope::Tailnet),
             Err(Error::TailnetMembershipUnverifiable)
         );
+        // A valid per-connection desktop grant is the configured alternative.
+        assert!(evaluate_fixture(&status, &who, Scope::Tailnet).is_ok());
+        let mut ungranted = who.clone();
+        ungranted["CapMap"] = json!(null);
         assert_eq!(
-            evaluate_fixture(&status, &who, Scope::OwnUser),
+            evaluate_fixture(&status, &ungranted, Scope::Tailnet),
             Err(Error::TailnetMembershipUnverifiable)
+        );
+        let mut control_only = who.clone();
+        control_only["CapMap"] =
+            json!({DESKTOP_CAPABILITY: [{"version":1,"observe":false,"control":true}]});
+        assert_eq!(
+            evaluate_fixture(&status, &control_only, Scope::Tailnet),
+            Err(Error::TailnetMembershipUnverifiable)
+        );
+        // Positive user equality is still required under own-user scope.
+        let mut other_user = who.clone();
+        other_user["Node"]["User"] = json!(8);
+        let mut other_status = status.clone();
+        peer_mut(&mut other_status)["UserID"] = json!(8);
+        assert_eq!(
+            evaluate_membership_fixture(&other_status, &other_user, Scope::OwnUser),
+            Err(Error::ScopeDenied)
         );
     }
     who["Node"]["MachineAuthorized"] = json!(false);
@@ -522,7 +547,7 @@ fn machine_approval_requires_positive_evidence_for_every_profile() {
 }
 
 #[test]
-fn installed_linux_1_102_3_projection_preserves_the_live_refusal() {
+fn installed_linux_1_102_3_projection_admits_own_user_membership_only() {
     let status: Value = serde_json::from_str(include_str!(
         "../../tests/fixtures/linux-1.102.3/status.json"
     ))
@@ -538,22 +563,34 @@ fn installed_linux_1_102_3_projection_preserves_the_live_refusal() {
             .contains_key("MachineAuthorized")
     );
     assert_eq!(who.get("CapMap"), Some(&Value::Null));
-    for scope in [Scope::OwnUser, Scope::Tailnet] {
+    for (scope, membership_ok, app_error) in [
+        (Scope::OwnUser, true, Error::CapabilityDenied),
+        (Scope::Tailnet, false, Error::TailnetMembershipUnverifiable),
+    ] {
+        let policy = GrantPolicy {
+            scope,
+            ..Default::default()
+        };
         let server = Server::fixture(&status, &who, false);
         run_async!(cx, {
             let result = server
                 .client
-                .authorize_app_capability(
-                    &cx,
-                    endpoints(),
-                    GrantPolicy {
-                        scope,
-                        ..Default::default()
-                    },
-                )
+                .authorize_membership(&cx, endpoints(), policy)
                 .await;
-            assert!(matches!(result, Err(Error::TailnetMembershipUnverifiable)));
+            if membership_ok {
+                assert!(result.is_ok(), "{scope:?}: {:?}", result.err());
+            } else {
+                assert!(matches!(result, Err(Error::TailnetMembershipUnverifiable)));
+            }
             assert_eq!(server.calls.load(Ordering::SeqCst), 3);
+        });
+        let server = Server::fixture(&status, &who, false);
+        run_async!(cx, {
+            let result = server
+                .client
+                .authorize_app_capability(&cx, endpoints(), policy)
+                .await;
+            assert_eq!(result.err(), Some(app_error));
         });
     }
 }

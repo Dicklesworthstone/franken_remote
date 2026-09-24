@@ -209,6 +209,16 @@ pub fn request() -> Request {
         },
     }
 }
+/// Installed daemons omit `MachineAuthorized`; under own-user scope equal user
+/// ids are sufficient evidence, so "unverifiable" is exercised with the
+/// tailnet-wide scope, where absent evidence must still refuse.
+pub fn request_for(mode: Mode) -> Request {
+    let mut request = request();
+    if mode == Mode::Unverifiable {
+        request.admission.scope = fr_tailnet::Scope::Tailnet;
+    }
+    request
+}
 pub fn offer() -> fr_wire::negotiation::Offer {
     fr_wire::negotiation::Offer {
         versions: vec![0],

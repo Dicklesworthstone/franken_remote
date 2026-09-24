@@ -320,7 +320,7 @@ fn native_shared_refuses_bad_identity_before_any_hub_slot_or_approval() {
             let operation = server.serve_shared_observer(
                 &hc,
                 socket,
-                request(),
+                api_fixture::request_for(mode),
                 boundary(address, Arc::new(AtomicBool::new(true))),
                 admission.clone(),
                 |_, _| panic!("no notification before identity"),
