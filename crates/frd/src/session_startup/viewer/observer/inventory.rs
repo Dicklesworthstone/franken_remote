@@ -5,6 +5,8 @@ use super::{
     approved, retain,
 };
 
+mod closing;
+
 impl Viewer {
     /// Inspect the host's bounded display catalog after normal negotiation and
     /// optional local approval, then close this one session. The result is a
@@ -14,6 +16,8 @@ impl Viewer {
     /// Approval is a bounded notification callback, never a remote approval RPC.
     /// The original call-time budget includes unpolled time and approval. Failure,
     /// cancellation, callback unwind and unpolled abandonment fence this viewer.
+    /// A successful inspection attempts one bounded session-close request before
+    /// local shutdown; it does not claim the host's native cleanup is confirmed.
     pub fn inspect_displays<'a>(
         self,
         policy: Policy,
@@ -27,7 +31,9 @@ impl Viewer {
             inner: Box::pin(async move {
                 let budget = budget?;
                 let session = Box::pin(approved(self, &budget, &mut approval)).await?;
-                Box::pin(inspect(session, &budget)).await
+                // Fresh startup is owned throughout: no caller has borrowed the
+                // running connection to queue input or attach auxiliary lanes.
+                Box::pin(inspect(session, &budget, true)).await
             }),
         }
     }
@@ -42,11 +48,17 @@ impl ViewerSession {
         Attempt {
             cx,
             complete: false,
-            inner: Box::pin(async move { Box::pin(inspect(self, &budget?)).await }),
+            // An existing caller may already have loaned this connection to
+            // auxiliary owners. Preserve abrupt close; never flush their work.
+            inner: Box::pin(async move { Box::pin(inspect(self, &budget?, false)).await }),
         }
     }
 }
-async fn inspect(mut session: ViewerSession, budget: &Budget) -> Result<Catalog, Error> {
+async fn inspect(
+    mut session: ViewerSession,
+    budget: &Budget,
+    fresh_startup: bool,
+) -> Result<Catalog, Error> {
     let mut selection = session
         .select_display(budget.remaining()?)
         .map_err(Error::Display)?;
@@ -58,7 +70,11 @@ async fn inspect(mut session: ViewerSession, budget: &Budget) -> Result<Catalog,
             // Copy only the fixed-size, validated metadata. Never choose or
             // transmit SelectDisplay, even when the catalog contains one entry.
             budget.remaining()?;
-            session.close();
+            if fresh_startup {
+                closing::finish(session, budget).await;
+            } else {
+                session.close();
+            }
             return Ok(catalog);
         }
         session

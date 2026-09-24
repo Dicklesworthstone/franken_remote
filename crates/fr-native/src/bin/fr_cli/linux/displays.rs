@@ -1,5 +1,5 @@
 //! One authenticated, approved metadata lookup. No renderer, worker or reconnect
-//! is needed; output is written only after the original session has been closed.
+//! is needed; output is written only after the original local session is closed.
 use super::{
     Cell, Client, Configuration, Cx, Duration, Failure, LocalApi, ObserverPolicy, PeerSelector,
     Runtime, Shutdown, Target, failure, offer, output, read_roots, tailnet,
@@ -119,14 +119,14 @@ fn render(catalog: &Catalog, json: bool) -> String {
     }
     if json {
         format!(
-            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"success\",\"snapshot_only\":true,\"session_closed\":true,\"display_selected\":false,\"input_requested\":false,\"decoder_started\":false,\"transport_qualified\":false,\"catalog_revision\":\"{}\",\"displays\":[{}]}}\n",
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"success\",\"snapshot_only\":true,\"session_closed\":true,\"remote_cleanup_confirmed\":false,\"display_selected\":false,\"input_requested\":false,\"decoder_started\":false,\"transport_qualified\":false,\"catalog_revision\":\"{}\",\"displays\":[{}]}}\n",
             output::timestamp(),
             catalog.revision(),
             rows
         )
     } else {
         format!(
-            "Approved host display catalog (revision {}, {} display(s)):\n{}Snapshot only: this inspection session is closed. Handles are session-local; a new connection revalidates its current catalog. No screen, decoder or input was started.\n",
+            "Approved host display catalog (revision {}, {} display(s)):\n{}Snapshot only: this local inspection session is closed; remote cleanup is unconfirmed. Handles are session-local; a new connection revalidates its current catalog. No screen, decoder or input was started.\n",
             catalog.revision(),
             catalog.displays().len(),
             rows
@@ -179,20 +179,21 @@ mod tests {
         let output = render(&catalog, true);
         check_json(
             &output,
-            "assert x['catalog_revision']==str(2**64-1)\nassert len(x['displays'])==8\nr=x['displays'][0]\nassert r['handle']==str(2**128-1)\nassert r['geometry_generation']==str(2**64-1)\nassert r['x']==-1920 and r['scale_numerator']==3 and r['rotation_quarter_turns']==1\nassert x['snapshot_only'] and x['session_closed']\nassert not any(x[k] for k in ['input_requested','decoder_started','display_selected','transport_qualified'])",
+            "assert x['catalog_revision']==str(2**64-1)\nassert len(x['displays'])==8\nr=x['displays'][0]\nassert r['handle']==str(2**128-1)\nassert r['geometry_generation']==str(2**64-1)\nassert r['x']==-1920 and r['scale_numerator']==3 and r['rotation_quarter_turns']==1\nassert x['snapshot_only'] and x['session_closed']\nassert not any(x[k] for k in ['input_requested','decoder_started','display_selected','transport_qualified','remote_cleanup_confirmed'])",
         );
         assert!(output.len() < 8192);
         let human = render(&catalog, false);
         assert!(
             human.contains(&u128::MAX.to_string()) && human.contains("1920x1080 px at (-1920, 24)")
         );
+        assert!(human.contains("remote cleanup is unconfirmed"));
     }
     #[test]
     fn empty_inventory_is_successful_metadata_not_invented_display_availability() {
         let catalog = Catalog::new(7, &[], &ProtocolLimits::ABSOLUTE).unwrap();
         check_json(
             &render(&catalog, true),
-            "assert x['displays']==[]\nassert x['outcome']=='success'",
+            "assert x['displays']==[]\nassert x['outcome']=='success'\nassert not x['remote_cleanup_confirmed']",
         );
         assert!(render(&catalog, false).contains("0 display(s)"));
     }

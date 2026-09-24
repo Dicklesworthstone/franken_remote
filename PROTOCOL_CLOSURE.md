@@ -55,3 +55,24 @@ regressions exercise the production host/viewer drivers over local TLS/QUIC/UDP
 with private fixture admission, including a queued record behind the close,
 malformed requests and independently owned sessions. These tests are not
 installed-Tailscale or hardware qualification.
+
+## Shipped display-inspection client
+
+`fr displays` calls the fresh `Viewer::inspect_displays` path. After receiving
+the complete validated catalog, that path stops renewal/clock service and
+attempts one CloseRequest with reason InspectionComplete. It uses the original
+reliable control stream, original destination guard, and original pending-send
+deadlines. Backpressure retains the same prepared bytes. A 100-ms outer timer,
+16-turn ceiling, and the shorter original inspection/silence budget bound the
+send-only drain. It never dispatches new observations or attaches channels.
+
+The catalog remains a successful snapshot if the best-effort close cannot be
+delivered. Local teardown still runs, including on cancellation and unpolled
+abandonment. Transport acknowledgement or a dropped connection is not a final
+host-cleanup report. The CLI explicitly labels remote cleanup as unconfirmed.
+
+This drain is deliberately not shared with active-desktop teardown. Nor does it
+run for `ViewerSession::inspect_displays` on a caller-owned existing session:
+that caller might already have queued auxiliary work through its public I/O
+loan. Only fresh Viewer startup owned throughout the inspection is eligible;
+existing-session inspection retains its immediate local-close behavior.
