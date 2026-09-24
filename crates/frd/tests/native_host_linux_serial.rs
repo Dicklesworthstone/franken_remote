@@ -629,3 +629,6 @@ async fn retire_watch(cx: &Cx, mut watch: live::Watch) {
 
 #[path = "native_host_linux_serial/desktop.rs"]
 mod desktop;
+
+#[path = "native_host_linux_serial/persistent_desktop.rs"]
+mod persistent_desktop;

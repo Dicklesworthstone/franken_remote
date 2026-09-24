@@ -221,6 +221,12 @@ impl SessionAgent {
     }
 }
 impl Driver {
+    /// Access this exact driver's authenticated-Host dispatcher. The handle is
+    /// not permission and cannot keep the source alive after Driver stops.
+    pub fn incoming(&self) -> Incoming {
+        Incoming(self.shared.clone())
+    }
+
     /// One lifetime; terminal failure never retries source creation or replays a
     /// Host. Local events run before waiting/startup/service work and on the same
     /// bounded maintenance cadence. Capture permission and approval are separate.

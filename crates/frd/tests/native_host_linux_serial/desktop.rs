@@ -38,7 +38,7 @@ use std::fmt::Write;
 
 // Reuse the existing protocol-only viewer fixture without changing its checks.
 #[path = "../../src/session_startup/running/shared/tests/selected/hub/incoming/client.rs"]
-mod client;
+pub(super) mod client;
 fn now(cx: &Cx) -> Result<u64, frd::media::Error> {
     frd::media::host_now(cx).map(fr_core::time::HostInstant::as_micros)
 }

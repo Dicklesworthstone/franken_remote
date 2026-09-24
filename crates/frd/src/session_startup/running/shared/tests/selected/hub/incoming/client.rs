@@ -1,6 +1,6 @@
 //! Client-only fixture: no fabricated host observation/control is needed.
 use super::*;
-pub(super) struct Client {
+pub(crate) struct Client {
     c: Cx,
     pub viewer: ViewerSession,
     _selected: SelectedDisplay,
@@ -64,7 +64,7 @@ impl Client {
             self.turn().await;
         }
     }
-    pub(super) async fn turn(&mut self) {
+    pub(crate) async fn turn(&mut self) {
         let message = if self.configuration && !self.configured {
             Some(decoder::Message::Configured)
         } else if !self.acknowledged {

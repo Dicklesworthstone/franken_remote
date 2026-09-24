@@ -333,3 +333,6 @@ mod linux;
 pub use linux::{Error as LinuxError, LinuxServer};
 
 pub mod serial;
+
+// Persistent protected acceptance through the original native desktop driver.
+pub mod desktop;
