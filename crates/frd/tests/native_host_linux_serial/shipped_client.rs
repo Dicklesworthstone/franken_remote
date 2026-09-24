@@ -251,3 +251,172 @@ fn shipped_fr_displays_negotiates_with_frd_run() {
     assert!(matches!(events.last(), Some(Event::Stopped)), "{events:?}");
     assert_eq!(tools.state()["deleted"], 1);
 }
+
+fn count(events: &Mutex<Vec<Event>>, want: fn(&Event) -> bool) -> usize {
+    events.lock().unwrap().iter().filter(|e| want(e)).count()
+}
+fn wait_count(events: &Mutex<Vec<Event>>, want: fn(&Event) -> bool, n: usize) -> bool {
+    let until = Instant::now() + Duration::from_secs(30);
+    while count(events, want) < n {
+        if Instant::now() >= until {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+fn listening(e: &Event) -> bool {
+    matches!(e, Event::Listening { .. })
+}
+fn peer_finished(e: &Event) -> bool {
+    matches!(e, Event::PeerFinished { .. })
+}
+fn share_ended(e: &Event) -> bool {
+    matches!(e, Event::ShareEnded { .. })
+}
+
+/// A real viewer: negotiates, decodes frames for one second, and (unless kept)
+/// then vanishes WITHOUT a close, as a killed or unplugged viewer would.
+fn view(
+    keep: bool,
+) -> Option<(
+    asupersync::runtime::Runtime,
+    Box<super::desktop::client::Client>,
+)> {
+    let runtime = network::runtime();
+    let client = runtime.request_cx_with_budget(Budget::INFINITE);
+    let viewer = runtime.block_on(async {
+        timeout(client.now(), Duration::from_secs(20), async {
+            let native = fixture::client(&client, address()).await;
+            let viewer = Viewer::new(
+                client.clone(),
+                native,
+                super::persistent_desktop::offer(),
+                fr_transport::quic::Policy::default(),
+                Duration::from_secs(3),
+            )
+            .unwrap();
+            let mut viewer = Box::pin(super::desktop::client::Client::start(
+                client.clone(),
+                viewer,
+            ))
+            .await;
+            viewer.ready().await;
+            assert_eq!(viewer.frames.first(), Some(&0), "a fresh share");
+            let until = network::clock(&client) + 1_000_000;
+            while network::clock(&client) < until {
+                viewer.turn().await;
+            }
+            assert!(viewer.frames.len() >= 3, "{:?}", viewer.frames);
+            viewer
+        })
+        .await
+        .unwrap()
+    });
+    keep.then_some((runtime, viewer))
+}
+
+/// `frd run` is a daemon: viewers leaving, before or after their share is up,
+/// are peer outcomes. They are reported and never count as host failures.
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress"]
+fn frd_run_keeps_serving_sequential_viewers_and_departing_inspections() {
+    let fr = shipped_client();
+    let api = fixture::Api::new();
+    let tools = Tools::new();
+    let (worker, _trace) = super::persistent_desktop::source_script("changing");
+    let roots = fixture::pki().join("ca.pem");
+    let options = Options {
+        socket: Some(api.path.clone()),
+        port: address().port(),
+        interface: "fr-fixture".into(),
+        worker,
+        display: ":0".into(),
+        xauthority: None,
+        trust_roots: roots.clone(),
+        sharing: fr_tailnet::Scope::OwnUser,
+        fps: 30,
+        bitrate: 2_000_000,
+        ingress_tools: Some((tools.0.join("nft"), tools.0.join("ip"))),
+        once: false,
+        handle_signals: false,
+    };
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let report: Reporter = Arc::new(move |event| sink.lock().unwrap().push(event));
+    let stop = Arc::new(StopHandle::default());
+    let host_stop = stop.clone();
+    let host = thread::spawn(move || host_run::run(&options, &report, &host_stop));
+    let dump = || format!("{:?}", events.lock().unwrap());
+
+    // Viewer A, then viewer B, each served by a fresh share of the same daemon.
+    for n in 1..=2 {
+        assert!(wait_count(&events, listening, n), "share {n}: {}", dump());
+        assert!(view(false).is_none());
+        assert!(
+            wait_count(&events, peer_finished, n),
+            "viewer {n}: {}",
+            dump()
+        );
+    }
+    // More departing inspections than the consecutive-failure limit (5).
+    let client_api = ClientApi::new();
+    for n in 3..=8 {
+        assert!(wait_count(&events, listening, n), "share {n}: {}", dump());
+        let output = run_displays(&fr, &client_api.path, &roots);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "fr displays {n}: {stdout} {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let json: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(json["outcome"], "success");
+        assert!(
+            wait_count(&events, peer_finished, n),
+            "inspection {n}: {}",
+            dump()
+        );
+    }
+    // Still listening, and still serving real viewers.
+    assert!(wait_count(&events, listening, 9), "share 9: {}", dump());
+    assert!(!host.is_finished(), "{}", dump());
+    let kept = view(true);
+    stop.request();
+    let result = host.join().unwrap();
+    drop(kept);
+
+    assert_eq!(result, Ok(()), "{}", dump());
+    let events = events.lock().unwrap();
+    assert!(matches!(events.last(), Some(Event::Stopped)), "{events:?}");
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::CleanupFailed { .. })),
+        "{events:?}"
+    );
+    let kinds = |want: fn(&Event) -> bool| events.iter().filter(|e| want(e)).count();
+    assert_eq!(kinds(listening), 9, "{events:?}");
+    assert_eq!(kinds(share_ended), 9, "{events:?}");
+    // Each departed viewer is reported exactly once, before its share ends; the
+    // last share ends by local stop with its viewer still connected.
+    assert_eq!(kinds(peer_finished), 8, "{events:?}");
+    let shares: Vec<_> = events
+        .split(listening)
+        .skip(1)
+        .map(|share| {
+            share
+                .iter()
+                .map(|e| (peer_finished(e), share_ended(e)))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(shares.len(), 9, "{events:?}");
+    for share in &shares[..8] {
+        assert_eq!(share, &[(true, false), (false, true)], "{events:?}");
+    }
+    assert_eq!(shares[8][0], (false, true), "{events:?}");
+    assert_eq!(tools.state()["created"], 9);
+    assert_eq!(tools.state()["deleted"], 9);
+    assert!(UdpSocket::bind(address()).is_ok(), "listener retired");
+}

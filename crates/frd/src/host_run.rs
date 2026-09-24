@@ -2,6 +2,8 @@
 //! listener, installed-tailnet admission and native desktop driver; nothing here
 //! adds a transport, runtime, task or authority path. Each loop iteration owns one
 //! OS-share lifetime (capacity-one networking) and is torn down before the next.
+//! A viewer leaving, before or after its share is up, is a reported peer outcome
+//! that ends only that share; only host faults count toward stopping the service.
 //!
 //! Profile limits, stated rather than faked: observation only (no input is
 //! admitted, so the agent's input bounds are the protocol ceiling), local
@@ -125,6 +127,8 @@ pub enum Event {
     Listening {
         address: SocketAddr,
     },
+    /// One peer attempt ended, with the share's listener counters. Idle accept
+    /// windows that saw no Initial packet are not reported.
     PeerFinished {
         attempts: u64,
         admitted: u64,
@@ -275,7 +279,19 @@ impl StopHandle {
     }
 }
 
+/// Consecutive host faults (source setup, preparation, capture, consent, clock)
+/// that stop the service. Peer outcomes neither count nor reset the run.
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+
+/// How one OS-share lifetime ended, for the failure policy.
+enum Ended {
+    /// The source served a viewer, or the share was stopped locally.
+    Served,
+    /// Its first viewer left, timed out, broke protocol or was refused before
+    /// the share was up: a normal peer outcome, not evidence about the host.
+    Peer,
+    Failed(dispatch::Error),
+}
 
 /// 1s, 2s, 4s ... capped at 30s; wakes early when stop is requested.
 async fn backoff(cx: &Cx, stop: &StopHandle, failures: u32) {
@@ -342,8 +358,9 @@ pub fn run(options: &Options, report: &Reporter, stop: &Arc<StopHandle>) -> Resu
                     report,
                 };
                 match share.serve(&broker).await? {
-                    Ok(()) => failures = 0,
-                    Err(error) => {
+                    Ended::Served => failures = 0,
+                    Ended::Peer => {}
+                    Ended::Failed(error) => {
                         if options.once {
                             return Err(Error::Desktop(error));
                         }
@@ -555,9 +572,9 @@ impl Share<'_> {
         failure.map_or(Ok(()), Err)
     }
 
-    /// Outer error: fatal to the host. Inner error: this share's desktop failed
-    /// (retried with backoff by the caller).
-    async fn serve(self, broker: &Cx) -> Result<Result<(), dispatch::Error>, Error> {
+    /// Outer error: fatal to the host. `Failed`: this share's source failed
+    /// (retried with backoff by the caller). `Peer`: its viewer ended it.
+    async fn serve(self, broker: &Cx) -> Result<Ended, Error> {
         let mut linux = self.bind(broker).await?;
         (self.report)(Event::Listening {
             address: linux.address(),
@@ -589,6 +606,16 @@ impl Share<'_> {
                     // require_approval is false: no notification is ever delivered.
                     approval: |_, _| Err(()),
                     completed: move |stats: serial::Statistics, outcome: PeerResult| {
+                        // An accept window that closed before any Initial arrived
+                        // had no peer; it is idle listening, not a refusal.
+                        if matches!(
+                            outcome,
+                            Err(crate::native_connection::host::Error::Accept(
+                                fr_transport::native_accept::Error::InitialTimeout
+                            ))
+                        ) {
+                            return Ok(serial::Action::Continue);
+                        }
                         report(Event::PeerFinished {
                             attempts: stats.attempts,
                             admitted: stats.admitted,
@@ -618,8 +645,9 @@ impl Share<'_> {
         self.cleanup(&mut driver, &retirement, &mut linux).await?;
         match end {
             End::Listener(Err(error)) => Err(Error::Listener(Box::new(error))),
-            End::Desktop(Err(error)) => Ok(Err(error)),
-            End::Desktop(Ok(_)) | End::Listener(Ok(_)) | End::Cancelled => Ok(Ok(())),
+            End::Desktop(Err(error)) if error.is_peer_outcome() => Ok(Ended::Peer),
+            End::Desktop(Err(error)) => Ok(Ended::Failed(error)),
+            End::Desktop(Ok(_)) | End::Listener(Ok(_)) | End::Cancelled => Ok(Ended::Served),
         }
     }
 }

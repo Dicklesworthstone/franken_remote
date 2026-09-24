@@ -45,6 +45,94 @@ impl From<super::super::Error> for Error {
         Self::Desktop(Box::new(error))
     }
 }
+impl Error {
+    /// True when this is one observer's own outcome rather than a host fault:
+    /// the observer left, timed out, broke protocol or was refused. A running
+    /// share records each viewer's end in `Report` and ends `Ok` when its last
+    /// viewer leaves. A cold share instead fails with the FIRST observer's own
+    /// session, display-choice, attachment or deadline error, because that
+    /// observer's startup is fused with the source's. Source setup, preparation,
+    /// capture, consent, local, clock, entropy and hub failures are host faults.
+    /// Classification uses typed stages only. A new variant must be placed here.
+    #[must_use]
+    pub fn is_peer_outcome(&self) -> bool {
+        match self {
+            Self::Busy | Self::WrongSession => true,
+            Self::Startup(error) => peer_session(error),
+            Self::Viewers(error) => peer_viewers(error),
+            Self::Desktop(error) => match &**error {
+                super::super::Error::Startup(error) => peer_session(error),
+                super::super::Error::Publication(error) => peer_publication(error),
+                super::super::Error::Viewers(error) => peer_viewers(error),
+                super::super::Error::Consent(_)
+                | super::super::Error::Preparation(_)
+                | super::super::Error::SourceSetup
+                | super::super::Error::Capture(_)
+                | super::super::Error::LocalEvent
+                | super::super::Error::Closed
+                | super::super::Error::Clock => false,
+            },
+            Self::Closed | Self::Clock => false,
+        }
+    }
+}
+// One observer's Host session: its transport, negotiation, local approval,
+// renewal, admission refresh, deadline or cancellation.
+fn peer_session(error: &crate::session_startup::Error) -> bool {
+    use crate::session_startup::Error as E;
+    match error {
+        E::SharedPublication(_) | E::InvalidConfiguration | E::Clock => false,
+        E::ReferenceRecovery(_)
+        | E::DecoderStartup(_)
+        | E::Clipboard(_)
+        | E::ReceiverFeedback(_)
+        | E::PresentedState(_)
+        | E::Media(_)
+        | E::MediaTransport(_)
+        | E::ClientStartup(_)
+        | E::Input(_)
+        | E::ControlRenewal(_)
+        | E::ControlGrant(_)
+        | E::ClientRenewal(_)
+        | E::Renewal(_)
+        | E::Admission(_)
+        | E::Protocol(_)
+        | E::Transport(_)
+        | E::Authority
+        | E::Order
+        | E::Denied
+        | E::Expired
+        | E::ClockSynchronization
+        | E::Cancelled
+        | E::Closed => true,
+    }
+}
+// The first observer's display choice, attachments and decoder fit on its own
+// session. `Media` is that observer's authority; `Shared` is the source.
+fn peer_publication(error: &crate::session_startup::PublisherError) -> bool {
+    use crate::session_startup::PublisherError as E;
+    match error {
+        E::Session(error) => peer_session(error),
+        E::Expired
+        | E::Display(_)
+        | E::Media(_)
+        | E::Startup(_)
+        | E::Transport(_)
+        | E::Routes(_)
+        | E::Input(_)
+        | E::Wire(_) => true,
+        E::InvalidConfiguration | E::Identity | E::Clock(_) | E::Shared(_) => false,
+    }
+}
+fn peer_viewers(error: &crate::session_startup::shared_viewers::Error) -> bool {
+    use crate::session_startup::shared_viewers::Error as E;
+    match error {
+        E::Session(error) => peer_session(error),
+        E::Publication(error) => peer_publication(error),
+        E::Full | E::DuplicateSession | E::ForeignScope | E::WrongRole => true,
+        E::InvalidPolicy | E::Closed | E::Poisoned | E::Source(_) => false,
+    }
+}
 
 type Notify = Box<dyn FnMut(Approval, Role) -> Result<(), ()> + Send>;
 struct First {
@@ -487,3 +575,76 @@ impl Drop for Peer {
 
 mod linux;
 pub use linux::{Completion, FinishedFirst};
+
+#[cfg(test)]
+mod tests {
+    use super::{super::super::Error as Desktop, Error};
+    use crate::{
+        display_selection::Error as Display,
+        media::{self, shared_publisher},
+        session_agent::source::{Error as Consent, prepare},
+        session_startup::{Error as Session, PublisherError as Publication, shared_viewers},
+        worker,
+    };
+    use fr_transport::quic;
+
+    fn desktop(error: Desktop) -> Error {
+        Error::Desktop(Box::new(error))
+    }
+
+    #[test]
+    fn a_departing_or_refused_first_observer_is_a_peer_outcome() {
+        let cancelled = media::Error::Worker(worker::Error::Cancelled);
+        for error in [
+            // Observed when `fr displays` leaves after reading the catalog.
+            desktop(Desktop::Publication(Publication::Display(
+                Display::Transport(quic::Error::Expired),
+            ))),
+            desktop(Desktop::Publication(Publication::Media(cancelled))),
+            desktop(Desktop::Publication(Publication::Expired)),
+            desktop(Desktop::Startup(Session::Transport(quic::Error::Expired))),
+            desktop(Desktop::Startup(Session::Denied)),
+            desktop(Desktop::Startup(Session::Expired)),
+            desktop(Desktop::Startup(Session::Cancelled)),
+            desktop(Desktop::Viewers(shared_viewers::Error::Session(
+                Session::Expired,
+            ))),
+            Error::Busy,
+            Error::Startup(Session::Protocol(fr_wire::negotiation::Error::Version)),
+        ] {
+            assert!(error.is_peer_outcome(), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn source_capture_consent_local_and_clock_failures_are_host_faults() {
+        let exited = media::Error::Worker(worker::Error::PeerClosed);
+        for error in [
+            desktop(Desktop::SourceSetup),
+            desktop(Desktop::Preparation(prepare::Error::Media(exited))),
+            desktop(Desktop::Preparation(prepare::Error::Expired)),
+            desktop(Desktop::Capture(shared_publisher::Error::Closed)),
+            desktop(Desktop::Capture(shared_publisher::Error::Media(exited))),
+            desktop(Desktop::Consent(Consent::NoCapturePermission)),
+            desktop(Desktop::Publication(Publication::Shared(
+                shared_publisher::Error::Closed,
+            ))),
+            desktop(Desktop::Publication(Publication::Session(
+                Session::SharedPublication(shared_publisher::Error::Closed),
+            ))),
+            desktop(Desktop::Publication(Publication::Identity)),
+            desktop(Desktop::Startup(Session::Clock)),
+            desktop(Desktop::Viewers(shared_viewers::Error::Source(
+                shared_publisher::Error::Closed,
+            ))),
+            desktop(Desktop::LocalEvent),
+            desktop(Desktop::Closed),
+            desktop(Desktop::Clock),
+            Error::Viewers(shared_viewers::Error::Closed),
+            Error::Closed,
+            Error::Clock,
+        ] {
+            assert!(!error.is_peer_outcome(), "{error:?}");
+        }
+    }
+}
