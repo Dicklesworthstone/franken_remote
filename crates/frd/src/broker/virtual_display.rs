@@ -8,7 +8,11 @@
 
 use core::fmt;
 use std::io::{BufRead, BufReader, Read};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+
+/// Protected absolute location; never resolved through a caller's PATH.
+const XVFB: &str = "/usr/bin/Xvfb";
 
 /// Configuration for headless virtual display provisioning.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,6 +263,8 @@ pub struct VirtualDisplayInstance {
     pub height: u32,
     /// Emulated EDID 128-byte block if enabled.
     pub edid: Option<[u8; 128]>,
+    /// Private MIT-MAGIC-COOKIE-1 authority file; only holders can connect.
+    pub xauthority: Option<PathBuf>,
     /// Child process handle for supervised Xvfb instance.
     child: Option<Child>,
 }
@@ -282,6 +288,7 @@ impl VirtualDisplayInstance {
             width,
             height,
             edid: None,
+            xauthority: None,
             child: None,
         }
     }
@@ -301,6 +308,12 @@ impl VirtualDisplayInstance {
             let _ = child.kill();
             let _ = child.wait();
         }
+        if let Some(path) = self.xauthority.take() {
+            let _ = std::fs::remove_file(&path);
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::remove_dir(dir);
+            }
+        }
     }
 }
 
@@ -308,6 +321,44 @@ impl Drop for VirtualDisplayInstance {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// Write a fresh random cookie as a single `FamilyWild` Xauthority entry in a
+/// new 0700 directory. The server loads it via `-auth`; clients (the capture
+/// worker) use it via `XAUTHORITY`. Without it, any local user could connect.
+#[cfg(target_os = "linux")]
+fn private_authority() -> Result<PathBuf, VirtualDisplayError> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let failed =
+        |e: &dyn fmt::Display| VirtualDisplayError::SpawnFailed(format!("xauthority: {e}"));
+    let mut random = [0u8; 32];
+    getrandom::fill(&mut random).map_err(|e| failed(&e))?;
+    let (tag, cookie) = random.split_at(16);
+    let tag = tag.iter().fold(String::new(), |mut hex, b| {
+        let _ = std::fmt::Write::write_fmt(&mut hex, format_args!("{b:02x}"));
+        hex
+    });
+    let dir = std::env::temp_dir().join(format!("frd-xvfb-{tag}"));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .map_err(|e| failed(&e))?;
+    let mut entry = Vec::with_capacity(64);
+    entry.extend_from_slice(&0xffff_u16.to_be_bytes()); // FamilyWild
+    for field in [&b""[..], &b""[..], &b"MIT-MAGIC-COOKIE-1"[..], cookie] {
+        let len = u16::try_from(field.len()).map_err(|e| failed(&e))?;
+        entry.extend_from_slice(&len.to_be_bytes());
+        entry.extend_from_slice(field);
+    }
+    let path = dir.join("Xauthority");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|e| failed(&e))?;
+    std::io::Write::write_all(&mut file, &entry).map_err(|e| failed(&e))?;
+    Ok(path)
 }
 
 /// Headless virtual display lifecycle manager.
@@ -319,7 +370,7 @@ impl VirtualDisplayManager {
     pub fn is_available() -> bool {
         #[cfg(target_os = "linux")]
         {
-            Command::new("Xvfb")
+            Command::new(XVFB)
                 .arg("-help")
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -345,7 +396,9 @@ impl VirtualDisplayManager {
             return Err(VirtualDisplayError::UnsupportedResolution { width, height });
         }
 
-        let mut cmd = Command::new("Xvfb");
+        let xauthority = private_authority()?;
+        let mut cmd = Command::new(XVFB);
+        cmd.arg("-auth").arg(&xauthority);
         cmd.args([
             "-displayfd",
             "1",
@@ -364,8 +417,9 @@ impl VirtualDisplayManager {
         cmd.stdout(Stdio::piped()).stderr(Stdio::inherit());
 
         let mut child = cmd.spawn().map_err(|e| {
+            let _ = std::fs::remove_file(&xauthority);
             if e.kind() == std::io::ErrorKind::NotFound {
-                VirtualDisplayError::BinaryNotFound("Xvfb".into())
+                VirtualDisplayError::BinaryNotFound(XVFB.into())
             } else {
                 VirtualDisplayError::SpawnFailed(e.to_string())
             }
@@ -404,6 +458,7 @@ impl VirtualDisplayManager {
             width,
             height,
             edid,
+            xauthority: Some(xauthority),
             child: Some(child),
         })
     }
@@ -532,5 +587,66 @@ mod tests {
         // Stop cleanly
         instance.stop();
         assert!(!instance.is_alive(), "virtual display should be stopped");
+    }
+
+    /// Raw X11 connection setup: status byte 1 = Success, 0 = Failed.
+    #[cfg(target_os = "linux")]
+    fn setup_status(display: &str, cookie: Option<&[u8]>) -> u8 {
+        use std::io::Write;
+        let number = display.trim_start_matches(':');
+        let mut socket =
+            std::os::unix::net::UnixStream::connect(format!("/tmp/.X11-unix/X{number}")).unwrap();
+        let (name, data): (&[u8], &[u8]) = match cookie {
+            Some(c) => (b"MIT-MAGIC-COOKIE-1", c),
+            None => (b"", b""),
+        };
+        let pad = |n: usize| (4 - n % 4) % 4;
+        let mut request = vec![b'l', 0, 11, 0, 0, 0];
+        request.extend_from_slice(&u16::try_from(name.len()).unwrap().to_le_bytes());
+        request.extend_from_slice(&u16::try_from(data.len()).unwrap().to_le_bytes());
+        request.extend_from_slice(&[0, 0]);
+        request.extend_from_slice(name);
+        request.extend(std::iter::repeat_n(0, pad(name.len())));
+        request.extend_from_slice(data);
+        request.extend(std::iter::repeat_n(0, pad(data.len())));
+        socket.write_all(&request).unwrap();
+        let mut status = [0u8; 1];
+        socket.read_exact(&mut status).unwrap();
+        status[0]
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn headless_display_refuses_clients_without_its_private_cookie() {
+        use std::os::unix::fs::PermissionsExt;
+        if !std::path::Path::new(XVFB).exists() {
+            eprintln!("SKIPPED: {XVFB} not installed");
+            return;
+        }
+        let mut instance = VirtualDisplayManager::start(&VirtualDisplayConfig {
+            enabled: true,
+            width: 320,
+            height: 240,
+            ..VirtualDisplayConfig::default()
+        })
+        .unwrap();
+        let authority = instance.xauthority.clone().unwrap();
+        let bytes = std::fs::read(&authority).unwrap();
+        let cookie = &bytes[bytes.len() - 16..];
+        let mode = std::fs::metadata(&authority).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(setup_status(&instance.display, None), 0, "unauthenticated");
+        assert_eq!(
+            setup_status(&instance.display, Some(&[0u8; 16])),
+            0,
+            "wrong cookie"
+        );
+        assert_eq!(
+            setup_status(&instance.display, Some(cookie)),
+            1,
+            "owner cookie"
+        );
+        instance.stop();
+        assert!(!authority.exists(), "cookie removed on stop");
     }
 }
