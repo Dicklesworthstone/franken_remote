@@ -315,3 +315,6 @@ fn frd_run_stops_on_consecutive_source_failures_with_a_typed_error() {
     assert_eq!(tools.state()["deleted"], 5);
     assert!(UdpSocket::bind(address()).is_ok(), "listener retired");
 }
+
+#[path = "host_run/policy.rs"]
+mod policy;

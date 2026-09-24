@@ -9,6 +9,8 @@
 //! admitted, so the agent's input bounds are the protocol ceiling), local
 //! approval is refused until the separate session-agent process exists, and the
 //! encoder is the explicit software HEVC profile.
+pub mod policy;
+
 use crate::{
     media::{ObservationControl, host_now},
     native_connection::host::{
@@ -90,6 +92,8 @@ pub enum Error {
     Entropy,
     Configuration,
     Cleanup(&'static str),
+    Policy(crate::host_policy::live::Error),
+    LocalApprovalUnavailable,
     Trust(TrustError),
     Tailnet(fr_tailnet::Error),
     Ingress(ingress::Error),
@@ -111,6 +115,8 @@ impl Error {
             Self::Entropy => "entropy_unavailable",
             Self::Configuration => "invalid_configuration",
             Self::Cleanup(_) => "cleanup_incomplete",
+            Self::Policy(_) => "host_policy_unavailable",
+            Self::LocalApprovalUnavailable => "local_approval_unavailable",
             Self::Trust(_) => "trust_roots_unavailable",
             Self::Tailnet(fr_tailnet::Error::LocalApiDenied) => "tailscale_permission_denied",
             Self::Tailnet(_) => "tailscale_unavailable",
@@ -294,6 +300,7 @@ enum Ended {
     /// Its first viewer left, timed out, broke protocol or was refused before
     /// the share was up: a normal peer outcome, not evidence about the host.
     Peer,
+    PolicyChanged,
     Failed(dispatch::Error),
 }
 
@@ -310,6 +317,28 @@ async fn backoff(cx: &Cx, stop: &StopHandle, failures: u32) {
 
 /// Run until stopped. Returns after the last share is torn down.
 pub fn run(options: &Options, report: &Reporter, stop: &Arc<StopHandle>) -> Result<(), Error> {
+    run_inner(options, report, stop, None)
+}
+
+/// Serve with live saved policy on the original listener and independent source.
+/// Every observed revision fences old grants and retires the entire old share
+/// before another is opened. Local approval remains a typed refusal in this
+/// observation-only host. The caller's explicit overrides never mutate the Store.
+pub fn run_with_policy(
+    options: &Options,
+    report: &Reporter,
+    stop: &Arc<StopHandle>,
+    policy: policy::Configuration,
+) -> Result<(), Error> {
+    run_inner(options, report, stop, Some(policy))
+}
+
+fn run_inner(
+    options: &Options,
+    report: &Reporter,
+    stop: &Arc<StopHandle>,
+    policy: Option<policy::Configuration>,
+) -> Result<(), Error> {
     if !options.worker.is_absolute()
         || options.display.is_empty()
         || options.fps == 0
@@ -329,81 +358,106 @@ pub fn run(options: &Options, report: &Reporter, stop: &Arc<StopHandle>) -> Resu
     // promptly even while no viewer is connected.
     let active: Arc<Mutex<Option<Cx>>> = Arc::new(Mutex::new(None));
     runtime.block_on(async {
-        let api = match &options.socket {
-            Some(path) => LocalApi::new(path).map_err(Error::Tailnet)?,
-            None => LocalApi::installed(),
-        };
-        let roots = fr_tailnet::trust::root_store(&options.trust_roots).map_err(Error::Trust)?;
-        let mut signals = if options.handle_signals {
-            (
-                signal(SignalKind::interrupt()).ok(),
-                signal(SignalKind::terminate()).ok(),
-            )
-        } else {
-            (None, None)
-        };
-        // Nothing is bound yet, so a stop during the fetch just drops it.
-        report(Event::ObtainingCertificate);
-        let fetch = api.native_server_identity(&broker, roots, CertificatePolicy::default());
-        let identity = unless_stopped(fetch, stop, &mut signals).await;
-        let Some(identity) = identity else {
-            report(Event::Stopped);
-            return Ok(());
-        };
-        let identity = identity.map_err(Error::Tailnet)?;
-        let host_boot = HostBootId::from_raw(random_nonzero_u128()?);
-        let renew = identity.serve_renewal(&renewal).map_err(Error::Tailnet)?;
-        let serving = async {
-            let mut failures = 0u32;
-            while !stop.is_requested() {
-                let share = Share {
-                    options,
-                    runtime: &handle,
-                    api: &api,
-                    identity: &identity,
-                    host_boot,
-                    stop: stop.clone(),
-                    active: active.clone(),
-                    report,
-                };
-                match share.serve(&broker).await? {
-                    Ended::Served => failures = 0,
-                    Ended::Peer => {}
-                    Ended::Failed(error) => {
-                        if options.once {
-                            return Err(Error::Desktop(error));
+        let mut policy = policy::Owner::start(&broker, policy)?;
+        let result = async {
+            let api = match &options.socket {
+                Some(path) => LocalApi::new(path).map_err(Error::Tailnet)?,
+                None => LocalApi::installed(),
+            };
+            let roots =
+                fr_tailnet::trust::root_store(&options.trust_roots).map_err(Error::Trust)?;
+            let mut signals = signals(options.handle_signals);
+            let Some(ready) = unless_stopped(policy.ready(&broker), stop, &mut signals).await
+            else {
+                return Ok(());
+            };
+            ready?;
+            // Nothing is bound yet, so a stop during the fetch just drops it.
+            report(Event::ObtainingCertificate);
+            let fetch = api.native_server_identity(&broker, roots, CertificatePolicy::default());
+            let identity = unless_stopped(fetch, stop, &mut signals).await;
+            let Some(identity) = identity else {
+                return Ok(());
+            };
+            let identity = identity.map_err(Error::Tailnet)?;
+            let host_boot = HostBootId::from_raw(random_nonzero_u128()?);
+            let renew = identity.serve_renewal(&renewal).map_err(Error::Tailnet)?;
+            let serving = async {
+                let mut failures = 0u32;
+                while !stop.is_requested() {
+                    let share = Share {
+                        options,
+                        runtime: &handle,
+                        api: &api,
+                        identity: &identity,
+                        policy: policy.handle(),
+                        host_boot,
+                        stop: stop.clone(),
+                        active: active.clone(),
+                        report,
+                    };
+                    match share.serve(&broker).await? {
+                        Ended::Served => failures = 0,
+                        Ended::Peer | Ended::PolicyChanged => {}
+                        Ended::Failed(error) => {
+                            if options.once {
+                                return Err(Error::Desktop(error));
+                            }
+                            failures += 1;
+                            if failures >= MAX_CONSECUTIVE_FAILURES {
+                                return Err(Error::Desktop(error));
+                            }
+                            backoff(&broker, stop, failures).await;
                         }
-                        failures += 1;
-                        if failures >= MAX_CONSECUTIVE_FAILURES {
-                            return Err(Error::Desktop(error));
-                        }
-                        backoff(&broker, stop, failures).await;
+                    }
+                    if options.once {
+                        break;
                     }
                 }
-                if options.once {
-                    break;
-                }
-            }
-            Ok(())
-        };
-        let result = Box::pin(supervise(
-            async { renew.await.map_err(Error::Tailnet) },
-            serving,
-            &active,
-            stop,
-            |task| {
-                for s in [&mut signals.0, &mut signals.1].into_iter().flatten() {
-                    if pin!(s.recv()).poll(task).is_ready() {
-                        stop.request();
+                Ok(())
+            };
+            let result = Box::pin(supervise(
+                async { renew.await.map_err(Error::Tailnet) },
+                serving,
+                &active,
+                stop,
+                |task| {
+                    for s in [&mut signals.0, &mut signals.1].into_iter().flatten() {
+                        if pin!(s.recv()).poll(task).is_ready() {
+                            stop.request();
+                        }
                     }
-                }
-            },
-        ))
+                },
+            ))
+            .await;
+            identity.stop();
+            result
+        }
         .await;
-        identity.stop();
+        let cleanup = policy.finish(&broker).await;
+        if cleanup.is_err() {
+            report(Event::CleanupFailed { stage: "policy" });
+        }
         report(Event::Stopped);
-        result
+        // A failed stop must remain visible even when service already failed.
+        cleanup.and(result)
     })
+}
+
+fn signals(
+    enabled: bool,
+) -> (
+    Option<asupersync::signal::Signal>,
+    Option<asupersync::signal::Signal>,
+) {
+    if enabled {
+        (
+            signal(SignalKind::interrupt()).ok(),
+            signal(SignalKind::terminate()).ok(),
+        )
+    } else {
+        (None, None)
+    }
 }
 
 /// Drive `work` unless a handled signal or the stop handle ends the wait first
@@ -471,6 +525,7 @@ struct Share<'a> {
     runtime: &'a asupersync::runtime::RuntimeHandle,
     api: &'a LocalApi,
     identity: &'a fr_tailnet::NativeServerIdentity,
+    policy: Option<&'a crate::host_policy::live::Handle>,
     host_boot: HostBootId,
     stop: Arc<StopHandle>,
     active: Arc<Mutex<Option<Cx>>>,
@@ -502,7 +557,11 @@ impl Share<'_> {
         if let Some((nft, ip)) = &self.options.ingress_tools {
             ingress = ingress.executables(nft, ip).map_err(Error::Ingress)?;
         }
-        Server::new(self.api.clone(), self.identity.clone())
+        let mut server = Server::new(self.api.clone(), self.identity.clone());
+        if let Some(policy) = self.policy {
+            server = server.with_live_policy(policy.clone());
+        }
+        server
             .bind_linux(broker, ingress, native_accept::Configuration::default())
             .await
             .map_err(|e| Error::Listener(Box::new(e)))
@@ -610,6 +669,7 @@ impl Share<'_> {
     /// Outer error: fatal to the host. `Failed`: this share's source failed
     /// (retried with backoff by the caller). `Peer`: its viewer ended it.
     async fn serve(self, broker: &Cx) -> Result<Ended, Error> {
+        let epoch = policy::lease(self.policy)?;
         let mut linux = self.bind(broker).await?;
         (self.report)(Event::Listening {
             address: linux.address(),
@@ -630,6 +690,7 @@ impl Share<'_> {
         let (host_boot, scope) = (self.host_boot, self.options.sharing);
         let report = self.report.clone();
         let stop = self.stop.clone();
+        let source_epoch = epoch.clone();
         let end = linux
             .serve_desktop(
                 &mut driver,
@@ -663,11 +724,17 @@ impl Share<'_> {
                 factory,
                 move |catalog| choose(catalog, fps, bitrate),
                 move |_, _| {
-                    Ok(if stop.is_requested() {
-                        LocalAction::Stop
-                    } else {
-                        LocalAction::Continue
-                    })
+                    Ok(
+                        if stop.is_requested()
+                            || source_epoch
+                                .as_ref()
+                                .is_some_and(|lease| lease.check().is_err())
+                        {
+                            LocalAction::Stop
+                        } else {
+                            LocalAction::Continue
+                        },
+                    )
                 },
             )
             .await;
@@ -678,6 +745,13 @@ impl Share<'_> {
             *slot = None;
         }
         self.cleanup(&mut driver, &retirement, &mut linux).await?;
+        if let Some(epoch) = epoch {
+            match epoch.check() {
+                Err(crate::host_policy::live::Error::Changed) => return Ok(Ended::PolicyChanged),
+                Err(error) => return Err(Error::Policy(error)),
+                Ok(_) => {}
+            }
+        }
         match end {
             End::Listener(Err(error)) => Err(Error::Listener(Box::new(error))),
             End::Desktop(Err(error)) if error.is_peer_outcome() => Ok(Ended::Peer),
