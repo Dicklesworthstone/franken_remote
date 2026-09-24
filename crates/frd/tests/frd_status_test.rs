@@ -30,20 +30,22 @@ fn assert_or_write_fixture(filename: &str, content: &str) {
         fs::create_dir_all(parent).expect("failed to create fixture directory");
     }
 
-    if path.exists() {
-        let expected = fs::read_to_string(&path).expect("failed to read fixture");
-        assert_eq!(
-            content, expected,
-            "Fixture mismatch for {filename}. If intentional, update golden fixtures."
-        );
-    } else {
+    // A missing golden is a failure, never a silent regeneration; write new
+    // goldens only by explicit request.
+    if std::env::var_os("FR_WRITE_GOLDENS").is_some() && !path.exists() {
         fs::write(&path, content).expect("failed to write fixture");
     }
+    let expected = fs::read_to_string(&path)
+        .unwrap_or_else(|_| panic!("missing golden {filename}; set FR_WRITE_GOLDENS=1 to create"));
+    assert_eq!(
+        content, expected,
+        "Fixture mismatch for {filename}. If intentional, update golden fixtures."
+    );
 }
 
 #[test]
 fn nominal_status_operational_contract() {
-    let report = DaemonStatusReport::nominal_operational();
+    let report = DaemonStatusReport::fixture_operational();
 
     // 1. Overall outcome
     assert_eq!(report.schema_version, "fr.status.v1");
@@ -224,7 +226,7 @@ fn assert_refusal_fixtures(
 
 #[test]
 fn permission_revoked_failure_reproduction() {
-    let report = DaemonStatusReport::permission_revoked("screen_capture");
+    let report = DaemonStatusReport::fixture_permission_revoked("screen_capture");
     let perm = report
         .permissions
         .iter()
@@ -258,7 +260,7 @@ fn permission_revoked_failure_reproduction() {
 
 #[test]
 fn certificate_expired_failure_reproduction() {
-    let report = DaemonStatusReport::certificate_expired();
+    let report = DaemonStatusReport::fixture_certificate_expired();
     assert!(!report.certificate.valid);
     assert_eq!(report.certificate.expiry_countdown_secs, Some(0));
     assert_eq!(
@@ -281,7 +283,7 @@ fn certificate_expired_failure_reproduction() {
 
 #[test]
 fn no_hardware_encoder_failure_reproduction() {
-    let report = DaemonStatusReport::no_hardware_encoder();
+    let report = DaemonStatusReport::fixture_no_hardware_encoder();
     let enc = report
         .capabilities
         .iter()
@@ -315,7 +317,7 @@ fn no_hardware_encoder_failure_reproduction() {
 
 #[test]
 fn tailnet_disconnected_failure_reproduction() {
-    let report = DaemonStatusReport::tailnet_disconnected();
+    let report = DaemonStatusReport::fixture_tailnet_disconnected();
     assert!(!report.tailscale.connected);
     for c in &report.capabilities {
         assert_eq!(c.status, CapabilityStatus::Blocked);
@@ -335,7 +337,7 @@ fn tailnet_disconnected_failure_reproduction() {
 fn untested_capability_rule_adherence() {
     assert_eq!(CapabilityStatus::NotTested.as_str(), "not tested");
     assert_eq!(CapabilityStatus::NotTested.badge(), "[NOT TESTED]");
-    let mut report = DaemonStatusReport::nominal_operational();
+    let mut report = DaemonStatusReport::fixture_operational();
     report.capabilities[0].status = CapabilityStatus::NotTested;
     report.capabilities[0].detail = "Untested codec candidate".into();
     let json = report.render_json();
@@ -380,78 +382,170 @@ fn wait_for_child(mut child: std::process::Child) -> std::process::Output {
     output
 }
 
+const FIXTURE_VALUES: [&str; 4] = [
+    "workstation-alpha",
+    "laptop-controller",
+    "example.ts.net",
+    "1700000000000",
+];
+
+fn missing_socket() -> PathBuf {
+    std::env::temp_dir().join(format!("frd-status-missing-{}.sock", std::process::id()))
+}
+
 #[test]
-fn frd_status_binary_nominal_json_contract() {
-    let output = wait_for_child(frd_command(&["status", "--json"]).spawn().unwrap());
-    assert!(output.status.success());
+fn frd_status_binary_refuses_unreachable_localapi_json() {
+    let socket = missing_socket();
+    let output = wait_for_child(
+        frd_command(&["status", "--json", "--socket", socket.to_str().unwrap()])
+            .spawn()
+            .unwrap(),
+    );
+    assert_eq!(output.status.code(), Some(1));
     let json_text = String::from_utf8_lossy(&output.stdout).to_string();
-
-    let required_json_snippets = "\
-\"schema_version\":\"fr.status.v1\"
-\"outcome\":\"success\"
-\"refusal_code\":null
-\"next_action\":null
-\"variant\":\"standalone\"
-\"tailnet\":\"example.ts.net\"
-\"connected\":true
-\"node_name\":\"workstation-alpha\"
-\"certificate_name\":\"workstation-alpha.example.ts.net\"
-\"valid\":true
-\"expiry_countdown_secs\":7776000
-\"permissions\":[
-\"capability\":\"screen_capture\",\"status\":\"granted\"
-\"capability\":\"input_injection\",\"status\":\"granted\"
-\"capability\":\"clipboard_sync\",\"status\":\"granted\"
-\"capability\":\"audio_playback\",\"status\":\"granted\"
-\"capability\":\"audio_microphone\",\"status\":\"granted\"
-\"capability\":\"file_transfer\",\"status\":\"granted\"
-\"capabilities\":[
-\"name\":\"video_encode\",\"status\":\"passed\"
-\"name\":\"video_decode\",\"status\":\"passed\"
-\"hardware_accelerated\":true
-\"sharing_scope\":\"own-user\"
-\"approval_mode\":\"unattended\"
-\"sessions\":[
-\"role\":\"controller\"
-\"restrictions\":[
-\"code\":\"video_hevc_only\"
-\"code\":\"audio_opus_only\"
-\"code\":\"full_display_only\"
-\"code\":\"tailscale_ingress_only\"
-\"code\":\"single_controller_authority\"
-\"code\":\"no_zero_rtt_application_data\"
-\"structured_logs\":[
-\"event_code\":\"status_check\"";
-
-    for s in required_json_snippets.lines() {
-        assert!(json_text.contains(s), "missing json string: {s}");
+    let report: serde_json::Value = serde_json::from_str(&json_text).unwrap();
+    assert_eq!(report["schema_version"], "fr.status.v1");
+    assert_eq!(report["outcome"], "refusal");
+    assert_eq!(report["refusal_code"], "tailnet_disconnected");
+    assert_eq!(report["tailscale"]["connected"], false);
+    assert_eq!(report["certificate"]["valid"], false);
+    assert_eq!(report["sessions"].as_array().unwrap().len(), 0);
+    let capabilities = report["capabilities"].as_array().unwrap();
+    assert!(capabilities.iter().any(|c| c["name"] == "video_encode"));
+    assert!(capabilities.iter().all(|c| c["status"] == "blocked"));
+    let logs = report["structured_logs"].as_array().unwrap();
+    assert!(
+        logs.iter()
+            .any(|l| l["event_code"] == "tailnet_disconnected")
+    );
+    assert!(
+        logs.iter().any(|l| l["event_code"] == "tailnet_identity"
+            && l["message"] == "LocalAPI: LocalApiUnavailable"),
+        "{logs:?}"
+    );
+    let restrictions = report["restrictions"].as_array().unwrap();
+    for code in [
+        "video_hevc_only",
+        "audio_opus_only",
+        "tailscale_ingress_only",
+        "no_zero_rtt_application_data",
+    ] {
+        assert!(restrictions.iter().any(|r| r["code"] == code), "{code}");
+    }
+    for fixture in FIXTURE_VALUES {
+        assert!(!json_text.contains(fixture), "{fixture} in a live report");
     }
 }
 
 #[test]
-fn frd_status_binary_nominal_human_contract() {
-    let output = wait_for_child(frd_command(&["status"]).spawn().unwrap());
-    assert!(output.status.success());
+fn frd_status_binary_refuses_unreachable_localapi_human() {
+    let socket = missing_socket();
+    let output = wait_for_child(
+        frd_command(&["status", "--socket", socket.to_str().unwrap()])
+            .spawn()
+            .unwrap(),
+    );
+    assert_eq!(output.status.code(), Some(1));
     let human_text = String::from_utf8_lossy(&output.stdout).to_string();
-
-    let required_human_snippets = "\
-FRANKENREMOTE HOST DAEMON STATUS (frd)
-Status: [OK - OPERATIONAL]
-1. TAILSCALE NETWORK STATUS:
-2. TLS 1.3 CERTIFICATE LIFECYCLE:
-3. OS PERMISSION STATES:
-4. HARDWARE & MEDIA CAPABILITY MATRIX:
-5. ACTIVE SESSIONS & AUTHORITY:
-6. KNOWN RESTRICTIONS & SCOPE LIMITS:
-7. STRUCTURED DIAGNOSTIC LOG TRAIL:
-screen_capture     [GRANTED]
-video_encode       [PASSED]       [HW]
-video_hevc_only
-own-user";
-
-    for s in required_human_snippets.lines() {
+    for s in [
+        "FRANKENREMOTE HOST DAEMON STATUS (frd)",
+        "Status: [REFUSAL - ACTION REQUIRED]",
+        "Refusal Code: tailnet_disconnected",
+        "1. TAILSCALE NETWORK STATUS:",
+        "2. TLS 1.3 CERTIFICATE LIFECYCLE:",
+        "3. OS PERMISSION STATES:",
+        "4. HARDWARE & MEDIA CAPABILITY MATRIX:",
+        "5. ACTIVE SESSIONS & AUTHORITY:",
+        "6. KNOWN RESTRICTIONS & SCOPE LIMITS:",
+        "7. STRUCTURED DIAGNOSTIC LOG TRAIL:",
+        "video_hevc_only",
+    ] {
         assert!(human_text.contains(s), "missing human string: {s}");
     }
+    assert!(!human_text.contains("[OK - OPERATIONAL]"));
+    assert!(!human_text.contains("[PASSED]"));
+    for fixture in FIXTURE_VALUES {
+        assert!(!human_text.contains(fixture), "{fixture} in a live report");
+    }
+}
+
+/// A well-formed, fully connected status body served by a socket the calling
+/// user owns is still refused: identity comes only from the root-owned daemon,
+/// and the client sends nothing before checking the peer's credentials.
+#[test]
+#[cfg(target_os = "linux")]
+fn frd_status_binary_refuses_localapi_not_owned_by_root() {
+    use std::io::Read;
+    use std::os::unix::net::UnixListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Socket(PathBuf);
+    impl Drop for Socket {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    if std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .is_ok_and(|o| o.stdout.starts_with(b"0\n"))
+    {
+        eprintln!("SKIPPED: running as root, so a test-owned socket is the trusted uid");
+        return;
+    }
+    let socket =
+        Socket(std::env::temp_dir().join(format!("frd-status-user-{}.sock", std::process::id())));
+    let listener = UnixListener::bind(&socket.0).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let bytes_received = Arc::new(AtomicUsize::new(0));
+    let counter = bytes_received.clone();
+    let server = std::thread::spawn(move || {
+        let body = br#"{"Version":"1.102.4","BackendState":"Running","TailscaleIPs":["100.64.0.1"],"Self":{"ID":"n","NodeID":1,"PublicKey":"nodekey:11","UserID":7,"TailscaleIPs":["100.64.0.1"],"InNetworkMap":true,"DNSName":"spoofed.fixture.ts.net."},"Peer":null}"#;
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < until {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+                        .unwrap();
+                    let mut buffer = [0u8; 512];
+                    if let Ok(n) = stream.read(&mut buffer) {
+                        counter.fetch_add(n, Ordering::SeqCst);
+                    }
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = std::io::Write::write_all(&mut stream, header.as_bytes());
+                    let _ = std::io::Write::write_all(&mut stream, body);
+                    return;
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
+    });
+    let output = wait_for_child(
+        frd_command(&["status", "--json", "--socket", socket.0.to_str().unwrap()])
+            .spawn()
+            .unwrap(),
+    );
+    server.join().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let json_text = String::from_utf8_lossy(&output.stdout).to_string();
+    let report: serde_json::Value = serde_json::from_str(&json_text).unwrap();
+    assert_eq!(report["refusal_code"], "tailnet_disconnected");
+    assert_eq!(report["tailscale"]["connected"], false);
+    assert!(!json_text.contains("spoofed"));
+    assert!(
+        json_text.contains("LocalAPI: UntrustedLocalApi"),
+        "{json_text}"
+    );
+    assert_eq!(
+        bytes_received.load(Ordering::SeqCst),
+        0,
+        "request sent to an untrusted socket"
+    );
 }
 
 #[test]
@@ -521,6 +615,27 @@ fn frd_approval_and_sharing_cli_commands() {
 fn probe_host_generates_valid_report_envelope() {
     let report = DaemonStatusReport::probe_host(None);
     assert_eq!(report.schema_version, "fr.status.v1");
+    // A live probe never contains fixture values or unmeasured passes.
+    let json = report.render_json();
+    for fixture in [
+        "workstation-alpha",
+        "laptop-controller",
+        "example.ts.net",
+        "1700000000000",
+    ] {
+        assert!(
+            !json.contains(fixture),
+            "{fixture} leaked into a live report"
+        );
+    }
+    assert_eq!(report.sessions.len(), 0);
+    assert!(
+        report
+            .capabilities
+            .iter()
+            .all(|c| c.status != CapabilityStatus::Passed),
+        "no row may pass without a measurement"
+    );
     assert!(report.timestamp_unix_ms > 0);
     assert!(report.outcome == "success" || report.outcome == "refusal");
     assert!(

@@ -557,6 +557,22 @@ fn absent_machine_authorization_needs_other_positive_evidence_per_scope() {
 }
 
 #[test]
+fn installed_status_with_null_peer_map_yields_host_identity() {
+    // Installed tailscaled answers status?peers=false with "Peer": null.
+    let (mut status, _) = fixtures();
+    status["Peer"] = Value::Null;
+    status["Self"]["DNSName"] = json!("host.fixture.ts.net.");
+    let parsed = Status::parse(&serde_json::to_vec(&status).unwrap()).unwrap();
+    assert_eq!(parsed.peers.len(), 0);
+    assert_eq!(
+        parsed.host_identity().unwrap().certificate_name,
+        "host.fixture.ts.net"
+    );
+    // Any other non-map value still refuses.
+    status["Peer"] = json!([]);
+    assert!(Status::parse(&serde_json::to_vec(&status).unwrap()).is_err());
+}
+#[test]
 fn installed_linux_1_102_3_projection_admits_own_user_membership_only() {
     let status: Value = serde_json::from_str(include_str!(
         "../../tests/fixtures/linux-1.102.3/status.json"

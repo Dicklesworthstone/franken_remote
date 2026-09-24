@@ -103,26 +103,12 @@ fn main() -> ExitCode {
 }
 
 fn execute_status(args: &[String], json: bool) -> ExitCode {
-    let mut socket = None;
-    let mut live = false;
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == "--socket" && i + 1 < args.len() {
-            socket = Some(std::path::PathBuf::from(&args[i + 1]));
-            live = true;
-            i += 2;
-        } else if args[i] == "--live" {
-            live = true;
-            i += 1;
-        } else {
-            i += 1;
-        }
-    }
-    let report = if live {
-        DaemonStatusReport::probe_host(socket.as_deref())
-    } else {
-        DaemonStatusReport::nominal_operational()
-    };
+    // Always a live probe; a legacy `--live` flag is accepted and ignored.
+    let socket = args
+        .windows(2)
+        .find(|pair| pair[0] == "--socket")
+        .map(|pair| std::path::PathBuf::from(&pair[1]));
+    let report = DaemonStatusReport::probe_host(socket.as_deref());
     if json {
         print!("{}", report.render_json());
     } else {
@@ -258,7 +244,7 @@ fn execute_service_status(args: &[String], json: bool) -> ExitCode {
 
 #[allow(clippy::too_many_lines)]
 #[cfg(target_os = "linux")]
-fn run_refusal(json: bool, code: &str, detail: &str) -> ExitCode {
+fn run_refusal(json: bool, code: &str, detail: &str, status: u8) -> ExitCode {
     if json {
         println!(
             "{}",
@@ -267,7 +253,7 @@ fn run_refusal(json: bool, code: &str, detail: &str) -> ExitCode {
     } else {
         eprintln!("Refusal ({code}): {detail}");
     }
-    ExitCode::from(2)
+    ExitCode::from(status)
 }
 
 #[cfg(target_os = "linux")]
@@ -309,8 +295,59 @@ fn print_event(json: bool, event: &frd::host_run::Event) {
 }
 
 #[cfg(target_os = "linux")]
-fn execute_run(args: &[String], json: bool) -> ExitCode {
+type SelectedDesktop = (
+    String,
+    Option<PathBuf>,
+    Option<frd::broker::virtual_display::VirtualDisplayInstance>,
+);
+
+/// The X11 display to share: a private cookie-authenticated Xvfb for
+/// `--headless`, otherwise `--display` or the inherited DISPLAY/XAUTHORITY.
+#[cfg(target_os = "linux")]
+fn select_desktop(
+    options: &frd::host_policy::options::RunOptions,
+    json: bool,
+) -> Result<SelectedDesktop, ExitCode> {
     use frd::broker::virtual_display::{VirtualDisplayConfig, VirtualDisplayManager};
+    if options.headless {
+        return match VirtualDisplayManager::start(&VirtualDisplayConfig {
+            enabled: true,
+            ..VirtualDisplayConfig::default()
+        }) {
+            Ok(instance) => Ok((
+                instance.display.clone(),
+                instance.xauthority.clone(),
+                Some(instance),
+            )),
+            Err(error) => Err(run_refusal(
+                json,
+                "virtual_display_failed",
+                &error.to_string(),
+                1,
+            )),
+        };
+    }
+    match options
+        .display
+        .clone()
+        .or_else(|| std::env::var("DISPLAY").ok())
+    {
+        Some(display) => Ok((
+            display,
+            std::env::var_os("XAUTHORITY").map(PathBuf::from),
+            None,
+        )),
+        None => Err(run_refusal(
+            json,
+            "no_display",
+            "no X11 display to share: set DISPLAY, pass --display, or use --headless",
+            2,
+        )),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn execute_run(args: &[String], json: bool) -> ExitCode {
     use frd::host_policy::{Approval, Sharing, options::RunOptions};
     use frd::host_run::{self, Event, Options, Reporter};
     use std::sync::Arc;
@@ -323,44 +360,33 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         Ok(effective) => effective,
         Err(error) => return local_policy::refusal(error, json),
     };
+    // Tailscale first: without it nothing else matters (exit 1 = runtime refusal).
+    let tailscale = options
+        .socket
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("/var/run/tailscale/tailscaled.sock"));
+    if !tailscale.exists() {
+        return run_refusal(
+            json,
+            "tailscale_unavailable",
+            "the installed Tailscale LocalAPI socket is missing; start tailscaled",
+            1,
+        );
+    }
     if effective.approval == Approval::Local {
         return run_refusal(
             json,
             "local_approval_unavailable",
             "local approval needs the interactive session-agent process, which frd run does not \
              host yet; set `frd approval set none` to share unattended (scope stays as configured)",
+            2,
         );
     }
     // Keep the Xvfb owner alive for the whole run; dropping it stops the server
     // and removes its private cookie.
-    let mut headless = None;
-    let (display, xauthority) = if options.headless {
-        match VirtualDisplayManager::start(&VirtualDisplayConfig {
-            enabled: true,
-            ..VirtualDisplayConfig::default()
-        }) {
-            Ok(instance) => {
-                let pair = (instance.display.clone(), instance.xauthority.clone());
-                headless = Some(instance);
-                pair
-            }
-            Err(error) => return run_refusal(json, "virtual_display_failed", &error.to_string()),
-        }
-    } else {
-        match options
-            .display
-            .clone()
-            .or_else(|| std::env::var("DISPLAY").ok())
-        {
-            Some(display) => (display, std::env::var_os("XAUTHORITY").map(PathBuf::from)),
-            None => {
-                return run_refusal(
-                    json,
-                    "no_display",
-                    "no X11 display to share: set DISPLAY, pass --display, or use --headless",
-                );
-            }
-        }
+    let (display, xauthority, headless) = match select_desktop(&options, json) {
+        Ok(selected) => selected,
+        Err(code) => return code,
     };
     let worker = options.worker.clone().or_else(|| {
         std::env::current_exe()
@@ -373,6 +399,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
             "worker_unavailable",
             "fr-media-worker not found; build fr-native with --features linux-media and pass \
              --worker /absolute/path/fr-media-worker",
+            2,
         );
     };
     let run_options = Options {
@@ -407,7 +434,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             let detail = error.to_string();
-            run_refusal(json, error.code(), &detail)
+            run_refusal(json, error.code(), &detail, 1)
         }
     }
 }

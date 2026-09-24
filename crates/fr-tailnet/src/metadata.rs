@@ -117,12 +117,23 @@ pub(crate) struct Status {
     #[serde(rename = "Peer", deserialize_with = "peers", default)]
     pub peers: BTreeMap<String, Peer>,
 }
+/// Installed daemons answer `status?peers=false` with an explicit `"Peer": null`
+/// (serde's `default` covers only a missing field), so null is an empty map.
 fn peers<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, Peer>, D::Error> {
     struct Peers;
     impl<'de> Visitor<'de> for Peers {
         type Value = BTreeMap<String, Peer>;
         fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("bounded peer map")
+            f.write_str("bounded peer map or null")
+        }
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(BTreeMap::new())
+        }
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(BTreeMap::new())
+        }
+        fn visit_some<S: Deserializer<'de>>(self, d: S) -> Result<Self::Value, S::Error> {
+            d.deserialize_map(self)
         }
         fn visit_map<A: MapAccess<'de>>(self, mut a: A) -> Result<Self::Value, A::Error> {
             let mut map = BTreeMap::new();
@@ -135,7 +146,7 @@ fn peers<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, Peer>, D::E
             Ok(map)
         }
     }
-    d.deserialize_map(Peers)
+    d.deserialize_option(Peers)
 }
 #[derive(Deserialize)]
 pub(crate) struct Node {

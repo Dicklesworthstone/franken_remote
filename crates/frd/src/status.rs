@@ -615,110 +615,50 @@ impl DaemonStatusReport {
                 None => Ok(LocalApi::installed()),
             };
 
-            let (connected, fqdn, ips, node_id, user_id, tailnet_name) = match api {
-                Ok(local_api) => {
-                    let runtime = RuntimeBuilder::current_thread()
-                        .enable_platform_reactor(true)
-                        .build();
-                    match runtime {
-                        Ok(rt) => {
-                            let cx = rt.handle().try_request_cx_with_budget(Budget::INFINITE);
-                            match cx {
-                                Ok(cx) => {
-                                    let identity_res =
-                                        rt.block_on(async { local_api.node_identity(&cx).await });
-                                    match identity_res {
-                                        Ok(node) => {
-                                            let fqdn = node.certificate_name().to_string();
-                                            let ips = node
-                                                .addresses()
-                                                .iter()
-                                                .map(ToString::to_string)
-                                                .collect::<Vec<_>>();
-                                            let tailnet = fqdn
-                                                .split('.')
-                                                .skip(1)
-                                                .collect::<Vec<_>>()
-                                                .join(".");
-                                            let node_name =
-                                                fqdn.split('.').next().unwrap_or("").to_string();
-                                            (true, fqdn, ips, node_name, String::new(), tailnet)
-                                        }
-                                        Err(_) => (
-                                            false,
-                                            String::new(),
-                                            Vec::new(),
-                                            String::new(),
-                                            String::new(),
-                                            String::new(),
-                                        ),
-                                    }
-                                }
-                                Err(_) => (
-                                    false,
-                                    String::new(),
-                                    Vec::new(),
-                                    String::new(),
-                                    String::new(),
-                                    String::new(),
-                                ),
-                            }
-                        }
-                        Err(_) => (
-                            false,
-                            String::new(),
-                            Vec::new(),
-                            String::new(),
-                            String::new(),
-                            String::new(),
-                        ),
-                    }
-                }
-                Err(_) => (
-                    false,
-                    String::new(),
-                    Vec::new(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
+            let identity = api.map_err(|e| format!("{e:?}")).and_then(|local_api| {
+                let runtime = RuntimeBuilder::current_thread()
+                    .enable_platform_reactor(true)
+                    .build()
+                    .map_err(|_| "runtime_unavailable".to_string())?;
+                let cx = runtime
+                    .handle()
+                    .try_request_cx_with_budget(Budget::INFINITE)
+                    .map_err(|_| "runtime_unavailable".to_string())?;
+                runtime
+                    .block_on(async { local_api.node_identity(&cx).await })
+                    .map_err(|e| format!("{e:?}"))
+            });
+            let (fqdn, ips) = match identity {
+                Ok(node) => (
+                    node.certificate_name().to_string(),
+                    node.addresses()
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>(),
                 ),
+                Err(error) => {
+                    let mut report = Self::disconnected(timestamp_unix_ms);
+                    report.emit_log("error", "tailnet_identity", &format!("LocalAPI: {error}"));
+                    return report;
+                }
             };
-
-            let mut report = Self::nominal_operational();
-            report.timestamp_unix_ms = timestamp_unix_ms;
-
-            if connected {
-                report.outcome = "success";
-                report.refusal_code = None;
-                report.next_action = None;
-                report.tailscale = TailscaleStatus {
-                    variant: "standalone".into(),
-                    tailnet: tailnet_name,
-                    connected: true,
-                    node_id: if node_id.is_empty() {
-                        "local".into()
-                    } else {
-                        node_id
-                    },
-                    node_name: fqdn.split('.').next().unwrap_or("host").to_string(),
-                    user_id,
-                    addresses: ips,
-                };
-                report.certificate = CertificateStatus {
-                    certificate_name: fqdn,
-                    generation: 1,
-                    valid: true,
-                    not_after_wall_us: None,
-                    expiry_countdown_secs: None,
-                    next_refresh_us: 0,
-                    status_message: "Tailscale node identity active and verified via LocalAPI"
-                        .into(),
-                };
-            } else {
-                let mut ref_report = Self::tailnet_disconnected();
-                ref_report.timestamp_unix_ms = timestamp_unix_ms;
-                return ref_report;
-            }
+            let tailnet_name = fqdn.split('.').skip(1).collect::<Vec<_>>().join(".");
+            let node_id = fqdn.split('.').next().unwrap_or("").to_string();
+            let mut report = Self::unmeasured(timestamp_unix_ms);
+            report.tailscale = TailscaleStatus {
+                variant: "standalone".into(),
+                tailnet: tailnet_name,
+                connected: true,
+                node_id: if node_id.is_empty() {
+                    "local".into()
+                } else {
+                    node_id
+                },
+                node_name: fqdn.split('.').next().unwrap_or("host").to_string(),
+                user_id: String::new(),
+                addresses: ips,
+            };
+            report.certificate.certificate_name = fqdn;
 
             // 2. Probe Display & Screen Capture
             let has_display =
@@ -727,8 +667,9 @@ impl DaemonStatusReport {
             for p in &mut report.permissions {
                 if p.capability == "screen_capture" {
                     if has_display {
-                        p.status = "granted";
-                        p.detail = Some("Display server available for capture".into());
+                        p.status = "not_tested";
+                        p.detail =
+                            Some("A display is configured; capture access not probed".into());
                     } else {
                         p.status = "denied";
                         p.detail = Some(
@@ -738,47 +679,136 @@ impl DaemonStatusReport {
                 }
             }
 
-            // 3. Probe Hardware Acceleration
-            let has_vaapi = std::path::Path::new("/dev/dri/renderD128").exists();
-            let has_nvidia = std::path::Path::new("/dev/nvidiactl").exists();
-            let has_hw_accel = has_vaapi || has_nvidia;
-
+            // A render node is not evidence of a working HEVC encoder (plan 8.2):
+            // only a real probe encode can pass this row, and none runs here.
+            let render_node = std::path::Path::new("/dev/dri/renderD128").exists()
+                || std::path::Path::new("/dev/nvidiactl").exists();
             for c in &mut report.capabilities {
                 if c.name == "video_encode" {
-                    if has_hw_accel {
-                        c.status = CapabilityStatus::Passed;
-                        c.hardware_accelerated = Some(true);
-                        c.detail = if has_vaapi {
-                            "Hardware HEVC encoder device detected (/dev/dri/renderD128)".into()
-                        } else {
-                            "NVIDIA hardware device detected (/dev/nvidiactl)".into()
-                        };
+                    c.detail = if render_node {
+                        "GPU device node present; hardware HEVC encode not probed (frd run uses \
+                         the explicit software profile)"
+                            .into()
                     } else {
-                        c.status = CapabilityStatus::NotTested;
-                        c.hardware_accelerated = Some(false);
-                        c.detail = "No GPU render node detected; software or headless mode".into();
-                    }
+                        "No GPU device node; frd run uses the explicit software HEVC profile".into()
+                    };
                 }
             }
-
-            report.sessions.clear();
-            report.sharing.active_viewers = 0;
-            report.sharing.active_controller = None;
-
             report
         }
 
         #[cfg(not(target_os = "linux"))]
         {
-            let mut report = Self::nominal_operational();
-            report.timestamp_unix_ms = timestamp_unix_ms;
+            let mut report = Self::unmeasured(timestamp_unix_ms);
+            report.outcome = "refusal";
+            report.refusal_code = Some("platform_unavailable");
+            report.next_action = Some("frd hosting is currently implemented on Linux only.");
             report
         }
     }
 
-    /// Creates a nominal, fully operational report.
+    /// Honest baseline for a live probe: every row is `not tested` until a
+    /// measurement fills it. Nothing here is a fixture value.
+    pub fn unmeasured(timestamp_unix_ms: u64) -> Self {
+        let row = |name: &'static str| CapabilityRow {
+            name,
+            status: CapabilityStatus::NotTested,
+            detail: "Not probed by frd status".into(),
+            hardware_accelerated: None,
+            restriction: None,
+        };
+        let permission = |capability: &'static str| PermissionRow {
+            capability,
+            status: "not_tested",
+            detail: Some("Not probed by frd status".into()),
+        };
+        Self {
+            schema_version: Self::CURRENT_SCHEMA_VERSION,
+            timestamp_unix_ms,
+            outcome: "success",
+            refusal_code: None,
+            next_action: None,
+            tailscale: TailscaleStatus {
+                variant: "unknown".into(),
+                tailnet: String::new(),
+                connected: false,
+                node_id: String::new(),
+                node_name: String::new(),
+                user_id: String::new(),
+                addresses: Vec::new(),
+            },
+            certificate: CertificateStatus {
+                certificate_name: String::new(),
+                generation: 0,
+                valid: false,
+                not_after_wall_us: None,
+                expiry_countdown_secs: None,
+                next_refresh_us: 0,
+                status_message: "Not checked: fetching would issue a certificate and publish \
+                                 the host name in Certificate Transparency logs"
+                    .into(),
+            },
+            permissions: [
+                "screen_capture",
+                "input_injection",
+                "clipboard_sync",
+                "audio_playback",
+                "audio_microphone",
+                "file_transfer",
+            ]
+            .into_iter()
+            .map(permission)
+            .collect(),
+            capabilities: [
+                "video_encode",
+                "video_decode",
+                "screen_capture",
+                "input_injection",
+                "clipboard_sync",
+                "audio_playback",
+                "audio_microphone",
+                "file_transfer",
+            ]
+            .into_iter()
+            .map(row)
+            .collect(),
+            // frd status does not observe a running frd process.
+            sessions: Vec::new(),
+            sharing: SharingAndApprovalStatus {
+                sharing_scope: "unknown",
+                approval_mode: "unknown",
+                active_viewers: 0,
+                max_viewers: 3,
+                active_controller: None,
+            },
+            restrictions: Self::standard_restrictions(),
+            structured_logs: Vec::new(),
+        }
+    }
+
+    /// Live refusal when the installed Tailscale is unreachable.
+    pub fn disconnected(timestamp_unix_ms: u64) -> Self {
+        let mut report = Self::unmeasured(timestamp_unix_ms);
+        report.outcome = "refusal";
+        report.refusal_code = Some("tailnet_disconnected");
+        report.next_action =
+            Some("Connect Tailscale via 'tailscale up' or start the tailscaled daemon.");
+        for c in &mut report.capabilities {
+            c.status = CapabilityStatus::Blocked;
+            c.detail = "Blocked: host is offline from Tailscale network".into();
+        }
+        report.emit_log(
+            "error",
+            "tailnet_disconnected",
+            "Refusal: Tailscale client is not connected to any tailnet node",
+        );
+        report
+    }
+
+    /// GOLDEN-RENDERING FIXTURE: a fully operational example report used only
+    /// to test rendering. It is not a measurement; no production path returns it.
     #[allow(clippy::too_many_lines)]
-    pub fn nominal_operational() -> Self {
+    pub fn fixture_operational() -> Self {
         let mut report = Self {
             schema_version: Self::CURRENT_SCHEMA_VERSION,
             timestamp_unix_ms: 1_700_000_000_000,
@@ -919,8 +949,8 @@ impl DaemonStatusReport {
     }
 
     /// Creates a report reproducing `permission_revoked` / `permission_missing`.
-    pub fn permission_revoked(capability: &'static str) -> Self {
-        let mut report = Self::nominal_operational();
+    pub fn fixture_permission_revoked(capability: &'static str) -> Self {
+        let mut report = Self::fixture_operational();
         report.outcome = "refusal";
         report.refusal_code = Some("permission_missing");
         report.next_action = Some(
@@ -955,8 +985,8 @@ impl DaemonStatusReport {
     }
 
     /// Creates a report reproducing `certificate_expired`.
-    pub fn certificate_expired() -> Self {
-        let mut report = Self::nominal_operational();
+    pub fn fixture_certificate_expired() -> Self {
+        let mut report = Self::fixture_operational();
         report.outcome = "refusal";
         report.refusal_code = Some("certificate_expired");
         report.next_action = Some(
@@ -981,8 +1011,8 @@ impl DaemonStatusReport {
     }
 
     /// Creates a report reproducing `no_hardware_encoder`.
-    pub fn no_hardware_encoder() -> Self {
-        let mut report = Self::nominal_operational();
+    pub fn fixture_no_hardware_encoder() -> Self {
+        let mut report = Self::fixture_operational();
         report.outcome = "refusal";
         report.refusal_code = Some("no_hardware_encoder");
         report.next_action = Some(
@@ -1006,8 +1036,8 @@ impl DaemonStatusReport {
     }
 
     /// Creates a report reproducing `tailnet_disconnected`.
-    pub fn tailnet_disconnected() -> Self {
-        let mut report = Self::nominal_operational();
+    pub fn fixture_tailnet_disconnected() -> Self {
+        let mut report = Self::fixture_operational();
         report.outcome = "refusal";
         report.refusal_code = Some("tailnet_disconnected");
         report.next_action =
