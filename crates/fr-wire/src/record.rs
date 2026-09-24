@@ -96,6 +96,7 @@ pub enum Kind {
     ClientHello = 0x0001,
     HostCapabilities = 0x0002,
     SelectedConfiguration = 0x0003,
+    Refused = 0x0004,
     ApprovalRequired = 0x0010,
     SessionOpened = 0x0011,
     ControlRequest = 0x0012,
@@ -155,6 +156,7 @@ impl Kind {
             Self::ClientHello
                 | Self::HostCapabilities
                 | Self::SelectedConfiguration
+                | Self::Refused
                 | Self::ApprovalRequired
                 | Self::SessionOpened
         )
@@ -164,6 +166,7 @@ impl Kind {
             0x0001 => Ok(Self::ClientHello),
             0x0002 => Ok(Self::HostCapabilities),
             0x0003 => Ok(Self::SelectedConfiguration),
+            0x0004 => Ok(Self::Refused),
             0x0010 => Ok(Self::ApprovalRequired),
             0x0011 => Ok(Self::SessionOpened),
             0x0012 => Ok(Self::ControlRequest),
@@ -231,6 +234,7 @@ impl Kind {
             Self::ClientHello
             | Self::HostCapabilities
             | Self::SelectedConfiguration
+            | Self::Refused
             | Self::ApprovalRequired
             | Self::SessionOpened
             | Self::ControlRequest

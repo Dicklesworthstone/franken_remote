@@ -43,6 +43,7 @@ impl Role {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Wire(WireError),
+    Refused(crate::refusal::Refused),
     Invalid,
     Limits,
     Version,
@@ -512,6 +513,14 @@ pub fn encode(message: &Message, maximum: usize, out: &mut [u8]) -> Result<usize
 pub fn decode(bytes: &[u8], maximum: usize, expected_binding: u32) -> Result<Message, Error> {
     let record = Record::decode_bounded(bytes, maximum.min(MAX_RECORD), expected_binding, None)?;
     let kind = record.kind();
+    if kind == Kind::Refused {
+        return Err(Error::Refused(crate::refusal::decode(
+            bytes,
+            expected_binding,
+            maximum.min(MAX_RECORD),
+            crate::input::InputDelivery::Reliable,
+        )?));
+    }
     // Bootstrap kinds must use zero; only BindingAccepted uses its installed ID.
     if kind.initial() && expected_binding != 0 {
         return Err(Error::Invalid);

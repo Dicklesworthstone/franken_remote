@@ -148,7 +148,7 @@ impl RecordStream {
         if self.binding == 0
             && !matches!(
                 u16::from_be_bytes([h[6], h[7]]),
-                0x0001..=0x0003 | 0x0010 | 0x0011
+                0x0001..=0x0004 | 0x0010 | 0x0011
             )
         {
             return Err(WireError::UnsupportedKind);

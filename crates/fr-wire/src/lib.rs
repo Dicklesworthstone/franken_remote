@@ -23,6 +23,7 @@ pub mod presented;
 pub mod receiver_metrics;
 mod record;
 pub mod recovery_request;
+pub mod refusal;
 pub mod stream;
 
 pub use cursor::{
