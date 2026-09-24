@@ -35,7 +35,10 @@ env:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    # 26.04 matches the development hosts. fr-native's Opus decoder requires the
+    # libopus >= 1.5 ABI (decoder complexity control, keeping model-based PLC
+    # off) and refuses older libraries; ubuntu-24.04 ships libopus 1.4.
+    runs-on: ubuntu-26.04
     timeout-minutes: 90
     steps:
       - name: Check out repository
