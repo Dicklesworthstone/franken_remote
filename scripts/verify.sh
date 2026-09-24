@@ -66,8 +66,9 @@ rust_step() {
     fmt) cargo fmt --all --check ;;
     check) cargo check --workspace --all-targets --all-features --locked ;;
     clippy) cargo clippy --workspace --all-targets --all-features --locked -- -D warnings ;;
-    test) cargo test --workspace --all-features --locked ;;
-    examples) cargo test --workspace --all-features --locked --examples ;;
+    # --no-fail-fast: one failing test binary must not hide the rest.
+    test) cargo test --workspace --all-features --locked --no-fail-fast ;;
+    examples) cargo test --workspace --all-features --locked --examples --no-fail-fast ;;
     *) echo "unknown rust step: $1" >&2; return 2 ;;
   esac
 }
