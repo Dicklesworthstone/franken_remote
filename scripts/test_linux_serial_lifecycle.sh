@@ -6,7 +6,15 @@ set -euo pipefail
 [[ $# == 1 && -x "$1" ]] || { echo 'usage: test_linux_serial_lifecycle.sh TEST_BINARY' >&2; exit 2; }
 binary=$(realpath -- "$1")
 parent_netns=$(readlink /proc/self/ns/net)
-exec unshare --user --map-root-user --mount --net -- bash -ec '
+# Hosts that restrict unprivileged user namespaces (Ubuntu's AppArmor
+# kernel.apparmor_restrict_unprivileged_userns=1) can opt into real root in the
+# same fresh mount/net namespaces with FR_NS_SUDO=1.
+if [[ "${FR_NS_SUDO:-0}" == 1 ]]; then
+  enter=(sudo unshare --mount --net --)
+else
+  enter=(unshare --user --map-root-user --mount --net --)
+fi
+exec "${enter[@]}" bash -ec '
   mount --make-rprivate /
   mount -t tmpfs tmpfs /sys
   mount -t tmpfs -o mode=0755 tmpfs /run
