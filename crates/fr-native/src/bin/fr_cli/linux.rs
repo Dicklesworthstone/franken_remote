@@ -225,22 +225,8 @@ pub fn run(options: &Options) -> Result<String, Failure> {
             inspect_opts,
             options.json,
         ),
-        Command::Disconnect(disconnect_opts) => robot::run_disconnect(
-            &runtime,
-            &cx,
-            &mut shutdown,
-            &stopped,
-            disconnect_opts,
-            options.json,
-        ),
-        Command::Robot(robot_cmd) => robot::run_robot(
-            &runtime,
-            &cx,
-            &mut shutdown,
-            &stopped,
-            robot_cmd,
-            options.json,
-        ),
+        Command::Disconnect(disconnect_opts) => Err(robot::run_disconnect(disconnect_opts)),
+        Command::Robot(robot_cmd) => Err(robot::run_robot(robot_cmd)),
     }
 }
 #[cfg(feature = "linux-desktop")]

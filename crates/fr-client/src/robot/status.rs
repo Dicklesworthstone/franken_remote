@@ -17,8 +17,8 @@ pub struct RobotStatusData {
     pub local_node_name: String,
     /// Primary Tailscale IP address.
     pub local_ip: String,
-    /// Number of active remote connections.
-    pub active_sessions_count: usize,
+    /// Number of active remote connections; `None` when nothing tracks them.
+    pub active_sessions_count: Option<usize>,
     /// Currently connected host, if any.
     pub active_host: Option<String>,
     /// Active session role ("view" or "control"), if connected.
@@ -36,7 +36,8 @@ impl RobotStatusData {
             self.tailnet_connected,
             self.local_node_name,
             self.local_ip,
-            self.active_sessions_count,
+            self.active_sessions_count
+                .map_or_else(|| "unknown".to_string(), |n| n.to_string()),
             self.active_host.as_deref().unwrap_or("none"),
             self.active_role.as_deref().unwrap_or("none"),
             self.active_lease_handle.as_deref().unwrap_or("none")

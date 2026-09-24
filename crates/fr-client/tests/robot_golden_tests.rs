@@ -223,7 +223,7 @@ fn test_robot_status_golden_roundtrip() {
         tailnet_connected: true,
         local_node_name: "laptop-controller".into(),
         local_ip: "100.64.0.2".into(),
-        active_sessions_count: 1,
+        active_sessions_count: Some(1),
         active_host: Some("workstation-alpha".into()),
         active_role: Some("control".into()),
         active_lease_handle: Some("lease-local-a1b2c3d4".into()),
@@ -247,8 +247,8 @@ fn test_robot_inspect_golden_roundtrip() {
         port: 8443,
         is_derp_relayed: false,
         state: "ready".into(),
-        displays_count: 2,
-        requires_approval: false,
+        displays_count: Some(2),
+        requires_approval: Some(false),
         transport_path: "direct".into(),
     };
     let inner_human = data.render_human();

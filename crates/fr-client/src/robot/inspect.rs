@@ -22,10 +22,10 @@ pub struct RobotInspectData {
     pub is_derp_relayed: bool,
     /// Current discovery/readiness state.
     pub state: String,
-    /// Number of detected displays if ready.
-    pub displays_count: usize,
-    /// Whether local operator approval is required before observation/control.
-    pub requires_approval: bool,
+    /// Number of detected displays; `None` unless a host session reported them.
+    pub displays_count: Option<usize>,
+    /// Whether local operator approval is required; `None` unless the host said.
+    pub requires_approval: Option<bool>,
     /// Verified transport path kind ("direct", "`derp_relayed`", "unknown").
     pub transport_path: String,
 }
@@ -42,8 +42,10 @@ impl RobotInspectData {
             self.transport_path,
             self.is_derp_relayed,
             self.state,
-            self.displays_count,
+            self.displays_count
+                .map_or_else(|| "unknown".to_string(), |n| n.to_string()),
             self.requires_approval
+                .map_or_else(|| "unknown".to_string(), |b| b.to_string())
         )
     }
 }

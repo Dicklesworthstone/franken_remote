@@ -164,7 +164,10 @@ fn distribution_bundle_is_the_default_trust_store_and_symlinks_are_refused() {
         "--json",
     ]);
     assert_eq!(output.status.code(), Some(1));
-    json(&output, "assert x['error']['code']=='tailscale_unavailable'");
+    json(
+        &output,
+        "assert x['error']['code']=='tailscale_unavailable'",
+    );
     let link = path("roots-link.pem");
     std::os::unix::fs::symlink("/etc/ssl/certs/ca-certificates.crt", &link).unwrap();
     let output = run_cli(&[
@@ -451,7 +454,7 @@ fn doctor_cli_checks_help_and_refuses_invalid_arguments() {
 }
 
 #[test]
-fn status_and_disconnect_cli_commands_share_staged_envelope() {
+fn status_needs_localapi_and_disconnect_refuses_without_a_background_session() {
     let missing = path("status-absent.sock");
     let output = cli(&format!("status --socket {} --json", missing.display()));
     assert_eq!(output.status.code(), Some(1));
@@ -460,135 +463,71 @@ fn status_and_disconnect_cli_commands_share_staged_envelope() {
         "assert x['outcome']=='refused'\nassert x['error']['code']=='tailscale_unavailable'",
     );
     let output = cli("disconnect host-beta --json");
-    assert!(output.status.success());
+    assert_eq!(output.status.code(), Some(2));
     json(
         &output,
-        "assert x['outcome']=='success'\nassert x['data']['closed'] is True\nassert x['data']['host']=='host-beta'\nassert x['data']['cleanup_confirmed'] is True",
+        "assert x['outcome']=='refused'\nassert x['error']['code']=='no_background_session'\nassert 'data' not in x",
     );
-    let output = cli("disconnect host-beta");
-    assert!(output.status.success());
-    let human = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        human.contains("Session Closed: session-host-beta")
-            && human.contains("Cleanup Confirmed: true")
-    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("host-beta"));
 }
 
 #[test]
-fn robot_cli_subcommands_drive_full_scripted_workflow() {
-    // 1. Session Open
-    let output = cli("robot session open workstation-1 --role control --json");
-    assert!(output.status.success());
-    json(
-        &output,
-        "assert x['outcome']=='success'\nassert x['stage']=='admitted'\nassert x['data']['role']=='control'\nassert x['data']['lease_handle'].startswith('lease-local-')",
-    );
-
-    // Human-readable session open
-    let output = cli("robot session open workstation-1 --role control");
-    assert!(output.status.success());
-    let human = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        human.contains("Session Open: session-workstation-1")
-            && human.contains("Role: control")
-            && human.contains("Lease Handle: lease-local-")
-    );
-
-    // 2. Observe
-    let output = cli("robot observe workstation-1 --display 1 --json");
-    assert!(output.status.success());
-    json(
-        &output,
-        "assert x['outcome']=='success'\nassert x['stage']=='observed'\nassert x['data']['geometry']['display_index']==1\nassert x['data']['geometry_generation']==1",
-    );
-
-    // 3. Input - normal execution
-    let output =
-        cli("robot input workstation-1 --lease lease-local-abc123 --request-id req-001 --json");
-    assert!(output.status.success());
-    json(
-        &output,
-        "assert x['outcome']=='success'\nassert x['stage']=='submitted_to_os'\nassert x['data']['request_id']=='req-001'\nassert x['data']['disposition']=='committed'",
-    );
-
-    // 4. Input - stale geometry precondition refusal
-    let output = cli(
-        "robot input workstation-1 --lease lease-local-abc123 --request-id req-002 --precondition-geometry 99 --json",
-    );
-    assert!(output.status.success());
-    json(
-        &output,
-        "assert x['outcome']=='refusal'\nassert x['error']['code']=='geometry_generation_stale'",
-    );
-
-    // 5. Input - expired observation precondition refusal
-    let output = cli(
-        "robot input workstation-1 --lease lease-local-abc123 --request-id req-003 --max-observation-age 0 --json",
-    );
-    assert!(output.status.success());
-    json(
-        &output,
-        "assert x['outcome']=='refusal'\nassert x['error']['code']=='observation_expired'",
-    );
-
-    // 6. Session Close
-    let output = cli("robot session close workstation-1 --lease lease-local-abc123 --json");
-    assert!(output.status.success());
-    json(
-        &output,
-        "assert x['outcome']=='success'\nassert x['stage']=='observed'\nassert x['data']['closed'] is True\nassert x['data']['cleanup_confirmed'] is True",
-    );
-}
-
-#[test]
-fn robot_cli_artifacts_and_advanced_preconditions() {
-    let temp_screen = std::env::temp_dir().join("fr_test_screenshot_art.png");
-    let screen_str = temp_screen.to_string_lossy().to_string();
-
-    // 1. Observe with screenshot artifact capture
-    let output = run_cli(&[
-        "robot",
-        "observe",
-        "workstation-1",
-        "--screenshot",
-        &screen_str,
-        "--evidence-level",
-        "submitted_to_compositor",
-        "--json",
-    ]);
-    assert!(output.status.success());
-    json(
-        &output,
-        "assert x['outcome']=='success'\nassert x['stage']=='observed'\nassert x['data']['artifact'] is not None\nassert x['data']['artifact']['evidence_level']=='submitted_to_compositor'\nassert len(x['data']['artifact']['sha256'])==64",
-    );
-
-    // 2. Precondition lease mismatch refusal
-    let output = cli(
-        "robot input workstation-1 --lease lease-local-abc123 --request-id req-mismatch-lease --precondition-lease lease-different-999 --json",
-    );
-    assert!(output.status.success());
-    json(
-        &output,
-        "assert x['outcome']=='refusal'\nassert x['error']['code']=='lease_mismatch_or_expired'",
-    );
-
-    // 3. Precondition focus mismatch refusal (best-effort)
-    let output = cli(
-        "robot input workstation-1 --lease lease-local-abc123 --request-id req-focus-mismatch --precondition-focus mismatched-window --json",
-    );
-    assert!(output.status.success());
-    json(
-        &output,
-        "assert x['outcome']=='refusal'\nassert x['error']['code']=='focus_mismatch'",
-    );
-
-    // 4. Semantic evidence confirmed via adapter
-    let output = cli(
-        "robot input workstation-1 --lease lease-local-abc123 --request-id req-semantic-verified --semantic-evidence adapter --json",
-    );
-    assert!(output.status.success());
-    json(
-        &output,
-        "assert x['outcome']=='success'\nassert x['stage']=='observed'\nassert x['data']['observed_application_result']['confirmed'] is True\nassert x['data']['observed_application_result']['evidence_type']=='semantic_adapter'",
-    );
+fn robot_surface_refuses_every_subcommand_without_side_effects() {
+    let screen = path("robot-screen.png");
+    let screen = screen.to_str().unwrap();
+    for args in [
+        &[
+            "robot",
+            "session",
+            "open",
+            "workstation-1",
+            "--role",
+            "control",
+            "--json",
+        ][..],
+        &[
+            "robot",
+            "session",
+            "close",
+            "workstation-1",
+            "--lease",
+            "lease-local-abc123",
+            "--json",
+        ],
+        &[
+            "robot",
+            "observe",
+            "workstation-1",
+            "--display",
+            "1",
+            "--screenshot",
+            screen,
+            "--evidence-level",
+            "submitted_to_compositor",
+            "--json",
+        ],
+        &[
+            "robot",
+            "input",
+            "workstation-1",
+            "--lease",
+            "lease-local-abc123",
+            "--request-id",
+            "req-001",
+            "--semantic-evidence",
+            "adapter",
+            "--json",
+        ],
+    ] {
+        let output = run_cli(args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        json(
+            &output,
+            "assert x['outcome']=='refused'\nassert x['error']['code']=='robot_surface_unavailable'\nassert 'data' not in x and 'stage' not in x",
+        );
+        assert!(
+            !std::path::Path::new(screen).exists(),
+            "no artifact is written"
+        );
+    }
 }
