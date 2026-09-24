@@ -58,6 +58,11 @@ We must establish whether software encoding can meet the real-time requirements,
      - Maximum resolution: **1280×720** (refuses 1080p or 4K).
      - Maximum frame rate: **30 fps**.
    - Diagnostics must visibly declare `software_encoding: true` and report CPU utilization per frame.
+   - **Implementation status (corrected 2026-09-24):** neither ceiling nor the
+     `software_encoding` diagnostic is enforced yet; the software profile encodes
+     the selected display at its native size. `frd run` requires an explicit
+     `--software-explicit` flag and otherwise refuses with
+     `hardware_hevc_unavailable`.
 3. **Retain `oxideav-h265` for Testing Only**:
    - `oxideav-h265` may be used as an offline test generator and bitstream validator in non-shipping test harnesses.
 

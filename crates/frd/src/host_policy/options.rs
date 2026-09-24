@@ -29,6 +29,9 @@ pub struct RunOptions {
     pub trust_roots: Option<PathBuf>,
     /// Serve one OS-share lifetime, then exit.
     pub once: bool,
+    /// Opt into the CPU software HEVC developer profile (ADR 0004); frd run
+    /// has no hardware encoder selection yet and refuses without it.
+    pub software_explicit: bool,
 }
 impl RunOptions {
     /// Arguments after `run`. Unknown, duplicate or valueless options refuse
@@ -50,6 +53,13 @@ impl RunOptions {
                     return Err(Error::InvalidArgument);
                 }
                 options.headless = true;
+                continue;
+            }
+            if flag == "--software-explicit" {
+                if options.software_explicit {
+                    return Err(Error::InvalidArgument);
+                }
+                options.software_explicit = true;
                 continue;
             }
             if flag == "--once" {

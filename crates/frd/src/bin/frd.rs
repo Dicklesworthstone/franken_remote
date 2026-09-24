@@ -51,6 +51,8 @@ OPTIONS:
     --interface IF  Tailscale interface for ingress enforcement (default: tailscale0)
     --trust-roots P PEM CA bundle for the host certificate chain (default: system)
     --once          Serve one sharing session, then exit
+    --software-explicit  Encode HEVC on the CPU (developer profile; required by
+                    frd run until hardware encoder selection exists)
     --user          Manage user-level service (systemd user unit / launchd agent; default)
     --system        Manage system-wide service
     --dry-run       Preview service generation without modifying filesystem
@@ -379,6 +381,15 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
             "local_approval_unavailable",
             "local approval needs the interactive session-agent process, which frd run does not \
              host yet; set `frd approval set none` to share unattended (scope stays as configured)",
+            2,
+        );
+    }
+    if !options.software_explicit {
+        return run_refusal(
+            json,
+            "hardware_hevc_unavailable",
+            "frd run has no hardware HEVC encoder selection yet; pass --software-explicit to \
+             share with the CPU software profile (docs/decisions/0004-software-encoder-profile.md)",
             2,
         );
     }

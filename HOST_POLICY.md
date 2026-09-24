@@ -10,11 +10,17 @@ another file for these commands and `frd run`.
 For example:
 
 ```sh
-frd approval set local
+frd approval set none
 frd sharing set own-user
 frd approval get --json
-frd run
+frd run --software-explicit
 ```
+
+`frd run` currently refuses a saved `local` approval mode
+(`local_approval_unavailable`: the interactive session-agent process that would
+show the prompt does not exist yet), and it refuses without
+`--software-explicit` (`hardware_hevc_unavailable`: no hardware encoder
+selection yet; see [ADR 0004](docs/decisions/0004-software-encoder-profile.md)).
 
 These are **saved startup defaults**, not live-session administration. They do
 not revoke an existing connection or confirm the state of a running daemon.
@@ -22,8 +28,7 @@ Restart to load them, and remove any explicit `--approval` or `--sharing`
 arguments in a service unit that should inherit the saved defaults. Explicit
 startup flags take precedence and never rewrite the file. JSON output reports
 revision, persistence, activation scope, and whether anything actually changed.
-No listener or browser qualification is implied; the active listener/session
-reactor remains tracked separately by `fr-0il`.
+No listener or browser qualification is implied.
 
 Missing files use the plan's own-user sharing and optional approval-off defaults.
 Unreadable, malformed, duplicate-field, unknown-version, oversized, symlinked,
