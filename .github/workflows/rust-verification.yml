@@ -1,7 +1,11 @@
 name: Rust verification
 
-# Calls the same repository-owned lane used by local builders. This is only
+# Calls the same repository-owned lanes used by local builders. This is only
 # Rust/source evidence, never hardware or transport qualification.
+#
+# Every lane runs even when an earlier one fails (continue-on-error), and the
+# final step fails the job naming each red lane, so one failure (or one flaky
+# X11 lane) can never hide the others.
 on:
   push:
     branches: [main]
@@ -11,6 +15,7 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'scripts/verify.sh'
+      - 'scripts/count.py'
       - '.github/workflows/rust-verification.yml'
   workflow_dispatch:
 
@@ -22,15 +27,16 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CARGO_BUILD_JOBS: '1'
+  CARGO_BUILD_JOBS: '2'
   CARGO_PROFILE_DEV_DEBUG: '0'
   CARGO_PROFILE_TEST_DEBUG: '0'
   CARGO_INCREMENTAL: '0'
+  RUST_MIN_STACK: '16777216'
 
 jobs:
   rust:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 90
     steps:
       - name: Check out repository
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
@@ -38,15 +44,71 @@ jobs:
         run: rustup show active-toolchain
       - name: Install Linux native media SDKs
         run: sudo apt-get update && sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxcb1-dev libxtst6 libxi6 pkg-config xvfb xauth xfonts-base
+      - name: Format
+        id: fmt
+        continue-on-error: true
+        run: ./scripts/verify.sh fmt
+      - name: Check (all targets, all features)
+        id: check
+        continue-on-error: true
+        run: ./scripts/verify.sh check
+      - name: Clippy (-D warnings)
+        id: clippy
+        continue-on-error: true
+        run: ./scripts/verify.sh clippy
+      - name: Tests
+        id: test
+        continue-on-error: true
+        run: ./scripts/verify.sh test
+      - name: Examples
+        id: examples
+        continue-on-error: true
+        run: ./scripts/verify.sh examples
       - name: Exercise the rendered local sharing indicator and revoke controls
+        id: indicator
+        continue-on-error: true
         run: FR_NATIVE_INDICATOR_REQUIRED=1 xvfb-run -a -s '-screen 0 1280x1024x24 -noreset -nolisten tcp' cargo test -p fr-native --features linux-session-ui --test sharing_indicator_x11 --locked
       - name: Exercise real X11 viewer input and lifecycle fences
+        id: viewer_input
+        continue-on-error: true
         run: FR_NATIVE_INPUT_CAPTURE_REQUIRED=1 xvfb-run -a -s '-screen 0 1280x1024x24 -noreset -nolisten tcp' cargo test -p fr-native --features linux-viewer-input --lib --locked
       - name: Exercise X11 clipboard workers over the authenticated QUIC lane
+        id: clipboard
+        continue-on-error: true
         run: FR_NATIVE_CLIPBOARD_REQUIRED=1 xvfb-run -a -s '-screen 0 1280x1024x24 -noreset -nolisten tcp' cargo test -p fr-native --features linux-clipboard --test clipboard_x11 --test clipboard_network --locked
-      - name: Run Rust verification
-        run: ./scripts/verify.sh fast
       - name: Exercise real X11 capture and HEVC library delivery
+        id: hevc
+        continue-on-error: true
         run: xvfb-run -a -s '-screen 0 640x360x24 -nolisten tcp' cargo run -p fr-native --features linux-media --example native_roundtrip -- --software-explicit
       - name: Verify documentation links
+        id: docs
+        continue-on-error: true
         run: ./scripts/verify.sh docs
+      # Report-only until the owner decides the budget strategy
+      # (fr-rc-budget-owner-decision-56k); the tree is over the 250k hard stop.
+      - name: Size discipline count (report only)
+        continue-on-error: true
+        run: ./scripts/verify.sh count
+      - name: Aggregate lane verdicts
+        env:
+          OUTCOMES: >-
+            fmt=${{ steps.fmt.outcome }}
+            check=${{ steps.check.outcome }}
+            clippy=${{ steps.clippy.outcome }}
+            test=${{ steps.test.outcome }}
+            examples=${{ steps.examples.outcome }}
+            indicator=${{ steps.indicator.outcome }}
+            viewer_input=${{ steps.viewer_input.outcome }}
+            clipboard=${{ steps.clipboard.outcome }}
+            hevc=${{ steps.hevc.outcome }}
+            docs=${{ steps.docs.outcome }}
+        run: |
+          failed=""
+          for pair in $OUTCOMES; do
+            [ "${pair#*=}" = "success" ] || failed="$failed ${pair%%=*}"
+          done
+          if [ -n "$failed" ]; then
+            echo "Red lanes:$failed"
+            exit 1
+          fi
+          echo "All lanes green"

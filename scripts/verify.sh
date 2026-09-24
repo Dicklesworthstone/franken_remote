@@ -5,6 +5,7 @@
 #
 # Commands:
 #   scripts/verify.sh fast                  - Quick Rust check: fmt, check, clippy, tests, examples
+#   scripts/verify.sh fmt|check|clippy|test|examples - One fast-lane step (CI runs each independently)
 #   scripts/verify.sh docs                  - Verify docs links and mandatory core design files
 #   scripts/verify.sh count [--fixture DIR] - Run the fixed line counter & size discipline audit
 #   scripts/verify.sh audit [--fixture DIR] - Feature-resolved per-target dependency & unsafe audit
@@ -60,16 +61,27 @@ docs_lane() {
   echo "docs lane: passed"
 }
 
+rust_step() {
+  case "$1" in
+    fmt) cargo fmt --all --check ;;
+    check) cargo check --workspace --all-targets --all-features --locked ;;
+    clippy) cargo clippy --workspace --all-targets --all-features --locked -- -D warnings ;;
+    test) cargo test --workspace --all-features --locked ;;
+    examples) cargo test --workspace --all-features --locked --examples ;;
+    *) echo "unknown rust step: $1" >&2; return 2 ;;
+  esac
+}
+
 rust_lane() {
   if [ ! -f Cargo.toml ]; then
     echo "Rust lane: BLOCKED (workspace manifest missing)" >&2
     return 2
   fi
-  cargo fmt --all --check
-  cargo check --workspace --all-targets --all-features --locked
-  cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-  cargo test --workspace --all-features --locked
-  cargo test --workspace --all-features --locked --examples
+  rust_step fmt
+  rust_step check
+  rust_step clippy
+  rust_step test
+  rust_step examples
   echo "Rust lane: passed (format/check/clippy/tests, including test-only media contracts)"
 }
 
@@ -135,6 +147,9 @@ case "$lane" in
   fast)
     rust_lane
     ;;
+  fmt|check|clippy|test|examples)
+    rust_step "$lane"
+    ;;
   crate)
     shift
     crate_lane "$@"
@@ -167,7 +182,7 @@ case "$lane" in
     exit 2
     ;;
   *)
-    echo "usage: scripts/verify.sh <docs|fast|full|count|audit|crate|test-fixtures|release>" >&2
+    echo "usage: scripts/verify.sh <docs|fast|fmt|check|clippy|test|examples|full|count|audit|crate|test-fixtures|release>" >&2
     exit 2
     ;;
 esac
