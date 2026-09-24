@@ -243,9 +243,10 @@ impl ObservationRenewal {
         self.bytes.fill(0);
         Ok(())
     }
-    /// Consume observation responses only. Other control/media/input records
-    /// stay with the enclosing session's bounded handler. In particular a control
-    /// response is not silently interpreted as an observation renewal.
+    /// Consume observation responses and terminal session-close requests. Other
+    /// control/media/input records stay with the enclosing bounded handler. A
+    /// close fences this session before another record in the batch can dispatch;
+    /// it does not cancel the shared source or report native cleanup completed.
     pub fn receive(
         &mut self,
         connection: &mut QuicRecords,
@@ -261,6 +262,26 @@ impl ObservationRenewal {
             || control.check().is_ok(),
             |route, bytes| {
                 let kind = bytes.get(6..8);
+                if route == Route::Stream(self.routes.inbound)
+                    && kind == Some(&(Kind::CloseRequest as u16).to_be_bytes())
+                {
+                    failure = Some(match fr_wire::closure::decode_request(
+                        bytes,
+                        self.binding,
+                        &self.limits,
+                        InputDirection::ViewerToHost,
+                        InputDelivery::Reliable,
+                    ) {
+                        Ok(_) => {
+                            self.stop();
+                            Error::PeerClosed
+                        }
+                        Err(error) => Error::Wire(error),
+                    });
+                    // A terminal result, not callback backpressure. The I/O guard
+                    // closes this connection and fences malformed requests too.
+                    return Err(());
+                }
                 if route == Route::Stream(self.routes.inbound)
                     && (kind == Some(&(Kind::Challenge as u16).to_be_bytes())
                         || kind == Some(&(Kind::ChallengeResponse as u16).to_be_bytes()))
@@ -370,3 +391,6 @@ impl Drop for IoGuard<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod close_tests;

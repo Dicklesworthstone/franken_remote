@@ -10,6 +10,7 @@ pub mod audio;
 pub mod authority;
 pub mod clipboard;
 pub mod clock;
+pub mod closure;
 pub mod cursor;
 pub mod decoder;
 pub mod display;
