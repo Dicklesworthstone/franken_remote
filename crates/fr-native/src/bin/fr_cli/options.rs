@@ -127,6 +127,14 @@ fn path(value: String) -> Result<PathBuf, Failure> {
     Ok(path)
 }
 
+/// The media worker installed beside this `fr` executable.
+fn sibling_worker() -> Result<PathBuf, Failure> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("fr-media-worker")))
+        .ok_or_else(usage)
+}
+
 fn validate_node(node: &str) -> Result<(), Failure> {
     if node.is_empty()
         || node.len() > 254
@@ -573,7 +581,7 @@ fn parse_command(
         let target = Target {
             node,
             by_name,
-            roots: roots.ok_or_else(usage)?,
+            roots: roots.unwrap_or_else(|| PathBuf::from(fr_tailnet::trust::SYSTEM_BUNDLE)),
             port,
             ipv6,
         };
@@ -583,7 +591,10 @@ fn parse_command(
             Command::Connect(Connection {
                 target,
                 display: display.ok_or_else(usage)?,
-                worker: worker.ok_or_else(usage)?,
+                worker: match worker {
+                    Some(worker) => worker,
+                    None => sibling_worker()?,
+                },
                 x_display,
                 attempts,
                 fit_window,
@@ -632,6 +643,21 @@ mod tests {
         assert_eq!(c.attempts, 2);
         assert!(c.target.ipv6 && o.json);
         assert!(!c.target.by_name);
+    }
+    #[test]
+    fn trust_roots_and_worker_default_to_installed_locations() {
+        let o = options("connect n-host --view-only --experimental-native --display only").unwrap();
+        let Command::Connect(c) = o.command else {
+            unreachable!("connection required");
+        };
+        assert_eq!(c.target.roots, PathBuf::from("/etc/ssl/certs/ca-certificates.crt"));
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(c.worker, exe.parent().unwrap().join("fr-media-worker"));
+        let o = options("displays n-host --experimental-native").unwrap();
+        let Command::Displays(t) = o.command else {
+            unreachable!("inspection required");
+        };
+        assert_eq!(t.roots, PathBuf::from("/etc/ssl/certs/ca-certificates.crt"));
     }
     #[test]
     fn unknown_duplicate_credential_and_policy_switches_are_not_ignored() {

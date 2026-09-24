@@ -42,9 +42,7 @@ use frd::{
 };
 use std::{
     cell::Cell,
-    fs::File,
     future::{Future, poll_fn},
-    io::Read,
     path::Path,
     pin::pin,
     task::Poll,
@@ -416,34 +414,18 @@ fn connect(
     ))
 }
 
+/// The native client accepts at most this many roots (`NativeClient::new`).
+const MAX_CLIENT_ROOTS: usize = 256;
+
 fn read_roots(path: &Path) -> Result<Vec<Certificate>, Failure> {
     let refused = || {
         failure(
             "invalid_trust_store",
-            "Use a locally provisioned regular PEM CA-root file, at most 1 MiB and 64 certificates; never use roots from the contacted peer.",
+            "Use a locally provisioned regular (non-symlink) PEM CA-root file, at most 1 MiB and 256 certificates; the default is the distribution bundle. Never use roots from the contacted peer.",
         )
     };
-    if !std::fs::symlink_metadata(path)
-        .map_err(|_| refused())?
-        .is_file()
-    {
-        return Err(refused());
-    }
-    let file = File::open(path).map_err(|_| refused())?;
-    if !file.metadata().map_err(|_| refused())?.is_file() {
-        return Err(refused());
-    }
-    let mut bytes = Vec::new();
-    file.take(1_048_577)
-        .read_to_end(&mut bytes)
-        .map_err(|_| refused())?;
-    let marker = b"-----BEGIN CERTIFICATE-----";
-    if bytes.len() > 1_048_576 || bytes.windows(marker.len()).filter(|s| *s == marker).count() > 64
-    {
-        return Err(refused());
-    }
-    let roots = Certificate::from_pem(&bytes).map_err(|_| refused())?;
-    if roots.is_empty() || roots.len() > 64 {
+    let roots = fr_tailnet::trust::read_certificates(path).map_err(|_| refused())?;
+    if roots.len() > MAX_CLIENT_ROOTS {
         return Err(refused());
     }
     Ok(roots)

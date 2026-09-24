@@ -28,10 +28,10 @@ fr status [--json] [--socket /absolute/tailscaled.sock]
 fr doctor [--port 8443] [--socket /absolute/tailscaled.sock] [--trust-roots /absolute/local-ca-roots.pem] [--json]
 fr inspect NODE_ID [--by-name] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
 fr disconnect NODE_ID [--socket /absolute/tailscaled.sock] [--json]
-fr displays NODE_ID --experimental-native --trust-roots /absolute/local-ca-roots.pem
+fr displays NODE_ID --experimental-native [--trust-roots /absolute/ca-roots.pem]
     [--by-name] [--socket /absolute/tailscaled.sock] [--port 8443] [--ipv6] [--json]
 fr connect NODE_ID --view-only --experimental-native --display HANDLE|only|choose
-    --worker /absolute/fr-media-worker --trust-roots /absolute/local-ca-roots.pem
+    [--worker /absolute/fr-media-worker] [--trust-roots /absolute/ca-roots.pem]
     [--by-name] [--x-display :0] [--socket /absolute/tailscaled.sock]
     [--port 8443] [--ipv6] [--attempts 1..32] [--fit WIDTHxHEIGHT] [--json]
 fr robot session open NODE_ID [--role view|control] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
@@ -41,6 +41,8 @@ fr robot input NODE_ID --lease LEASE --request-id REQUEST [--batch /path/batch.j
 
 Doctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle.
 Discovery lists machines, not installed/ready desktops or access permissions.
+--trust-roots defaults to the distribution bundle /etc/ssl/certs/ca-certificates.crt;
+--worker defaults to the fr-media-worker installed beside fr.
 Displays requires host approval when configured; it starts no decoder or input.
 --display only explicitly selects the sole current display, refusing ambiguity.
 --display choose opens a native chooser in each approved connection.

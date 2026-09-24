@@ -38,8 +38,7 @@ authority handle. Opaque identifiers are escaped in human terminal output.
 ## Inspect approved remote displays without a local renderer
 
 ```sh
-./target/debug/fr displays NODE_ID --experimental-native \
-  --trust-roots /opt/fr/share/ca-roots.pem --json
+./target/debug/fr displays NODE_ID --experimental-native --json
 ```
 
 This is one freshly authenticated connection, using the same installed-tailnet
@@ -68,9 +67,7 @@ host, instead of having to know an opaque handle ahead of time.
 
 ```sh
 ./target/debug/fr connect NODE_ID \
-  --view-only --experimental-native --display only \
-  --worker /opt/fr/bin/fr-media-worker \
-  --trust-roots /opt/fr/share/ca-roots.pem
+  --view-only --experimental-native --display only
 ```
 
 Select an existing host running the compatible native host startup/listener; this
@@ -104,10 +101,14 @@ visibility witness or input grant is fabricated from a decode or map event.
 unqualified. It is a development opt-in, not a change to any protocol, admission
 or release gate. There is no alternate QUIC stack, runtime or codec fallback.
 
-The CA file is explicit local configuration, never supplied by the peer. It must
-be a regular PEM file with at most 64 certificates and 1 MiB. Certificate checking
-cannot be disabled. An absolute worker path does not itself establish a trusted
-package: the installer/user must select the protected verified worker image.
+Trust roots are local configuration, never supplied by the peer. By default they
+are the distribution bundle `/etc/ssl/certs/ca-certificates.crt`, which verifies
+the Let's Encrypt certificates Tailscale issues; `--trust-roots` selects another
+file. It must be a regular (non-symlink) PEM file with at most 256 certificates
+and 1 MiB. Certificate checking cannot be disabled. The media worker defaults to
+the `fr-media-worker` installed beside `fr`; `--worker` selects another absolute
+path. A worker path does not itself establish a trusted package: the
+installer/user must select the protected verified worker image.
 
 Optional settings are `--port` (default 8443), `--ipv6` (no silent family fallback),
 `--attempts` (default 5, maximum 32), `--x-display`, `--socket` and `--json`.
@@ -180,9 +181,7 @@ For multiple monitors, select in the same approved session instead of copying a
 session-local alias from an earlier inspection:
 
 ```sh
-fr connect NODE_ID --view-only --experimental-native --display choose \
-  --worker /opt/fr/bin/fr-media-worker \
-  --trust-roots /opt/fr/share/ca-roots.pem
+fr connect NODE_ID --view-only --experimental-native --display choose
 ```
 
 The native X11 chooser opens only after host approval (when required) and receipt

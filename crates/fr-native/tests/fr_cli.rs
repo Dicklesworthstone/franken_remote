@@ -151,6 +151,37 @@ fn malformed_and_oversized_root_files_refuse_before_network_or_native_setup() {
     }
 }
 #[test]
+fn distribution_bundle_is_the_default_trust_store_and_symlinks_are_refused() {
+    let missing = path("default-roots-absent.sock");
+    // Roots load before any LocalAPI use, so reaching the LocalAPI proves the
+    // default distribution bundle (well over 64 roots) was accepted.
+    let output = run_cli(&[
+        "displays",
+        "n-private",
+        "--experimental-native",
+        "--socket",
+        missing.to_str().unwrap(),
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    json(&output, "assert x['error']['code']=='tailscale_unavailable'");
+    let link = path("roots-link.pem");
+    std::os::unix::fs::symlink("/etc/ssl/certs/ca-certificates.crt", &link).unwrap();
+    let output = run_cli(&[
+        "displays",
+        "n-private",
+        "--experimental-native",
+        "--trust-roots",
+        link.to_str().unwrap(),
+        "--socket",
+        missing.to_str().unwrap(),
+        "--json",
+    ]);
+    let _ = std::fs::remove_file(&link);
+    assert_eq!(output.status.code(), Some(1));
+    json(&output, "assert x['error']['code']=='invalid_trust_store'");
+}
+#[test]
 fn output_write_failure_is_a_nonzero_exit_not_a_successful_command() {
     let output = OpenOptions::new().write(true).open("/dev/full").unwrap();
     let mut command = command(&["--help"]);
