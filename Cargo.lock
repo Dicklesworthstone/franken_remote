@@ -729,9 +729,11 @@ dependencies = [
  "fr-transport",
  "fr-wire",
  "getrandom 0.4.3",
+ "ring",
  "rustix",
  "serde",
  "serde_json",
+ "subtle",
 ]
 
 [[package]]

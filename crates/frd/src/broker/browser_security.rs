@@ -26,7 +26,10 @@ use fr_core::{
     ids::RemoteSessionId,
     time::{HostDuration, HostInstant},
 };
-use std::{collections::HashMap, net::IpAddr, sync::Mutex};
+use std::{net::IpAddr, sync::Mutex};
+
+mod tokens;
+use tokens::Tokens;
 
 /// Default Content-Security-Policy for browser workstation UI.
 pub const BROWSER_UI_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; object-src 'none'; base-uri 'self'";
@@ -221,6 +224,10 @@ pub enum NonceRefusal {
     NonceCapacityExceeded,
     /// Authentication attempt rate limit exceeded.
     RateLimitExceeded,
+    /// OS randomness failed, or repeated candidates could not be issued safely.
+    EntropyUnavailable,
+    /// The supplied clock cannot represent or precedes the original validity interval.
+    InvalidClock,
 }
 
 impl fmt::Display for NonceRefusal {
@@ -232,6 +239,8 @@ impl fmt::Display for NonceRefusal {
             Self::RoleMismatch => "session role does not match nonce binding",
             Self::NonceCapacityExceeded => "pending nonce capacity exceeded: throttling",
             Self::RateLimitExceeded => "bootstrap rate limit exceeded",
+            Self::EntropyUnavailable => "secure bootstrap entropy unavailable",
+            Self::InvalidClock => "invalid bootstrap clock",
         })
     }
 }
@@ -255,6 +264,10 @@ pub enum AuxiliaryTicketRefusal {
     PeerIpMismatch,
     /// Pending auxiliary ticket capacity exceeded.
     TicketCapacityExceeded,
+    /// OS randomness failed, or repeated candidates could not be issued safely.
+    EntropyUnavailable,
+    /// The supplied clock cannot represent or precedes the original validity interval.
+    InvalidClock,
 }
 
 impl fmt::Display for AuxiliaryTicketRefusal {
@@ -269,6 +282,8 @@ impl fmt::Display for AuxiliaryTicketRefusal {
             Self::ChannelRoleMismatch => "auxiliary ticket channel role mismatch",
             Self::PeerIpMismatch => "connecting peer IP does not match ticket binding",
             Self::TicketCapacityExceeded => "pending auxiliary ticket capacity exceeded",
+            Self::EntropyUnavailable => "secure attachment entropy unavailable",
+            Self::InvalidClock => "invalid attachment clock",
         })
     }
 }
@@ -313,11 +328,8 @@ impl std::error::Error for FirstMessageAuthRefusal {}
 /// Constant-time 32-byte equality check to avoid timing side channels on secrets.
 #[inline]
 pub fn constant_time_eq_32(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    let mut diff = 0u8;
-    for i in 0..32 {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
+    use subtle::ConstantTimeEq;
+    a.ct_eq(b).into()
 }
 
 /// Compute a 32-byte SHA-256 digest of input bytes.
@@ -564,10 +576,9 @@ pub fn check_url_query_safety(uri: &str) -> Result<(), QuerySafetyRefusal> {
     Ok(())
 }
 
-/// An active single-use bootstrap nonce record.
+/// Binding metadata for an active bootstrap nonce; the bearer bytes are not retained.
 #[derive(Debug, Clone)]
 pub struct BootstrapNonceRecord {
-    pub nonce: RedactedSecret,
     pub peer_ip: IpAddr,
     pub role: BrowserSessionRole,
     pub session_id: RemoteSessionId,
@@ -575,10 +586,9 @@ pub struct BootstrapNonceRecord {
     pub expires_at: HostInstant,
 }
 
-/// An active single-use auxiliary channel ticket record.
+/// Binding metadata for an active attachment ticket; the bearer bytes are not retained.
 #[derive(Debug, Clone)]
 pub struct AuxiliaryTicketRecord {
-    pub ticket: RedactedSecret,
     pub peer_ip: IpAddr,
     pub session_id: RemoteSessionId,
     pub channel_role: AuxiliaryChannelRole,
@@ -589,9 +599,7 @@ pub struct AuxiliaryTicketRecord {
 /// In-memory manager for short-lived, strictly single-use bootstrap nonces.
 #[derive(Debug, Default)]
 pub struct BootstrapNonceManager {
-    nonces: HashMap<[u8; 32], BootstrapNonceRecord>,
-    per_peer_count: HashMap<IpAddr, usize>,
-    sequence: u64,
+    nonces: Tokens<BootstrapNonceRecord>,
 }
 
 impl BootstrapNonceManager {
@@ -615,43 +623,30 @@ impl BootstrapNonceManager {
             return Err(NonceRefusal::NonceCapacityExceeded);
         }
 
-        let peer_count = self.per_peer_count.get(&peer_ip).copied().unwrap_or(0);
+        let peer_count = self
+            .nonces
+            .records()
+            .filter(|r| r.peer_ip == peer_ip)
+            .count();
         if peer_count >= MAX_PENDING_NONCES_PER_PEER {
             return Err(NonceRefusal::RateLimitExceeded);
         }
 
-        self.sequence = self.sequence.wrapping_add(1);
-
-        // Derive pseudo-random 32-byte nonce using monotonic time, peer IP, sequence, and secret salt
-        let mut entropy_input = Vec::with_capacity(64);
-        entropy_input.extend_from_slice(b"fr-bootstrap-nonce-salt-v1");
-        entropy_input.extend_from_slice(&now.as_micros().to_le_bytes());
-        entropy_input.extend_from_slice(&self.sequence.to_le_bytes());
-        entropy_input.extend_from_slice(&session_id.as_raw().to_le_bytes());
-        match peer_ip {
-            IpAddr::V4(v4) => entropy_input.extend_from_slice(&v4.octets()),
-            IpAddr::V6(v6) => entropy_input.extend_from_slice(&v6.octets()),
-        }
-
-        let raw_nonce = sha256_digest(&entropy_input);
-        let secret = RedactedSecret::new(raw_nonce);
         let expires_at = now
             .checked_add(BOOTSTRAP_NONCE_TTL)
-            .unwrap_or(HostInstant::from_micros(u64::MAX));
-
-        let record = BootstrapNonceRecord {
-            nonce: secret,
-            peer_ip,
-            role,
-            session_id,
-            issued_at: now,
-            expires_at,
-        };
-
-        self.nonces.insert(raw_nonce, record);
-        *self.per_peer_count.entry(peer_ip).or_insert(0) += 1;
-
-        Ok(secret)
+            .ok_or(NonceRefusal::InvalidClock)?;
+        self.nonces
+            .issue(
+                b"fr-browser-bootstrap-v2",
+                BootstrapNonceRecord {
+                    peer_ip,
+                    role,
+                    session_id,
+                    issued_at: now,
+                    expires_at,
+                },
+            )
+            .map_err(|()| NonceRefusal::EntropyUnavailable)
     }
 
     /// Consume a bootstrap nonce atomically (single-use invariant).
@@ -664,53 +659,34 @@ impl BootstrapNonceManager {
         role: BrowserSessionRole,
         now: HostInstant,
     ) -> Result<RemoteSessionId, NonceRefusal> {
-        let Some(record) = self.nonces.remove(raw_nonce) else {
+        let Some(index) = self.nonces.find(b"fr-browser-bootstrap-v2", raw_nonce) else {
             self.sweep_expired(now);
             return Err(NonceRefusal::NonceNotFoundOrConsumed);
         };
-
-        // Decrement per-peer tracking count
-        if let Some(count) = self.per_peer_count.get_mut(&record.peer_ip) {
-            *count = count.saturating_sub(1);
-            if *count == 0 {
-                self.per_peer_count.remove(&record.peer_ip);
-            }
+        let record = self.nonces.get(index);
+        if now < record.issued_at {
+            return Err(NonceRefusal::InvalidClock);
         }
-
-        self.sweep_expired(now);
-
-        if now > record.expires_at {
+        if now >= record.expires_at {
+            self.sweep_expired(now);
             return Err(NonceRefusal::NonceExpired);
         }
-
+        // A different peer/role cannot burn the legitimate caller's credential.
         if record.peer_ip != peer_ip {
             return Err(NonceRefusal::PeerIpMismatch);
         }
-
         if record.role != role {
             return Err(NonceRefusal::RoleMismatch);
         }
-
-        Ok(record.session_id)
+        let session = record.session_id;
+        self.nonces.remove(index);
+        self.sweep_expired(now);
+        Ok(session)
     }
 
-    /// Remove expired nonces.
+    /// Remove expired nonces. The deadline is exclusive, never extended on use.
     pub fn sweep_expired(&mut self, now: HostInstant) {
-        let mut expired_keys = Vec::new();
-        for (k, record) in &self.nonces {
-            if now > record.expires_at {
-                expired_keys.push((*k, record.peer_ip));
-            }
-        }
-        for (k, peer) in expired_keys {
-            self.nonces.remove(&k);
-            if let Some(count) = self.per_peer_count.get_mut(&peer) {
-                *count = count.saturating_sub(1);
-                if *count == 0 {
-                    self.per_peer_count.remove(&peer);
-                }
-            }
-        }
+        self.nonces.retain(|record| now < record.expires_at);
     }
 
     /// Total count of pending nonces.
@@ -723,8 +699,7 @@ impl BootstrapNonceManager {
 /// In-memory manager for role-specific single-use auxiliary channel tickets.
 #[derive(Debug, Default)]
 pub struct AuxiliaryTicketManager {
-    tickets: HashMap<[u8; 32], AuxiliaryTicketRecord>,
-    sequence: u64,
+    tickets: Tokens<AuxiliaryTicketRecord>,
 }
 
 impl AuxiliaryTicketManager {
@@ -748,37 +723,21 @@ impl AuxiliaryTicketManager {
             return Err(AuxiliaryTicketRefusal::TicketCapacityExceeded);
         }
 
-        self.sequence = self.sequence.wrapping_add(1);
-
-        let mut entropy_input = Vec::with_capacity(64);
-        entropy_input.extend_from_slice(b"fr-auxiliary-ticket-salt-v1");
-        entropy_input.extend_from_slice(&now.as_micros().to_le_bytes());
-        entropy_input.extend_from_slice(&self.sequence.to_le_bytes());
-        entropy_input.extend_from_slice(&session_id.as_raw().to_le_bytes());
-        entropy_input.push(channel_role as u8);
-        match peer_ip {
-            IpAddr::V4(v4) => entropy_input.extend_from_slice(&v4.octets()),
-            IpAddr::V6(v6) => entropy_input.extend_from_slice(&v6.octets()),
-        }
-
-        let raw_ticket = sha256_digest(&entropy_input);
-        let secret = RedactedSecret::new(raw_ticket);
         let expires_at = now
             .checked_add(AUXILIARY_TICKET_TTL)
-            .unwrap_or(HostInstant::from_micros(u64::MAX));
-
-        let record = AuxiliaryTicketRecord {
-            ticket: secret,
-            peer_ip,
-            session_id,
-            channel_role,
-            issued_at: now,
-            expires_at,
-        };
-
-        self.tickets.insert(raw_ticket, record);
-
-        Ok(secret)
+            .ok_or(AuxiliaryTicketRefusal::InvalidClock)?;
+        self.tickets
+            .issue(
+                b"fr-browser-attachment-v2",
+                AuxiliaryTicketRecord {
+                    peer_ip,
+                    session_id,
+                    channel_role,
+                    issued_at: now,
+                    expires_at,
+                },
+            )
+            .map_err(|()| AuxiliaryTicketRefusal::EntropyUnavailable)
     }
 
     /// Consume an auxiliary ticket atomically (single-use invariant).
@@ -794,35 +753,35 @@ impl AuxiliaryTicketManager {
     ) -> Result<(), AuxiliaryTicketRefusal> {
         let ticket_bytes = raw_ticket.ok_or(AuxiliaryTicketRefusal::AuxiliaryTicketRequired)?;
 
-        let Some(record) = self.tickets.remove(ticket_bytes) else {
+        let Some(index) = self.tickets.find(b"fr-browser-attachment-v2", ticket_bytes) else {
             self.sweep_expired(now);
             return Err(AuxiliaryTicketRefusal::TicketNotFoundOrConsumed);
         };
-
-        self.sweep_expired(now);
-
-        if now > record.expires_at {
+        let record = self.tickets.get(index);
+        if now < record.issued_at {
+            return Err(AuxiliaryTicketRefusal::InvalidClock);
+        }
+        if now >= record.expires_at {
+            self.sweep_expired(now);
             return Err(AuxiliaryTicketRefusal::TicketExpired);
         }
-
         if record.session_id != session_id {
             return Err(AuxiliaryTicketRefusal::SessionMismatch);
         }
-
         if record.channel_role != channel_role {
             return Err(AuxiliaryTicketRefusal::ChannelRoleMismatch);
         }
-
         if record.peer_ip != peer_ip {
             return Err(AuxiliaryTicketRefusal::PeerIpMismatch);
         }
-
+        self.tickets.remove(index);
+        self.sweep_expired(now);
         Ok(())
     }
 
-    /// Remove expired tickets.
+    /// Remove expired tickets; pending tokens retain their original deadlines.
     pub fn sweep_expired(&mut self, now: HostInstant) {
-        self.tickets.retain(|_, record| now <= record.expires_at);
+        self.tickets.retain(|record| now < record.expires_at);
     }
 
     /// Total count of pending tickets.
