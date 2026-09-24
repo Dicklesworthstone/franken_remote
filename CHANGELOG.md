@@ -23,7 +23,7 @@
 - CI runs every lane independently. Missing native libraries and two flaky tests
   were fixed.
 - Still open: a departing viewer ends the share (fr-704), remote control
-  (input-agent process), a live tailnet run, and the size gate (272,655 against
+  (input-agent process), a live tailnet run, and the size gate (272,665 at 0b543db against
   a 250,000 hard stop).
 
 ## Native host publication bootstrap

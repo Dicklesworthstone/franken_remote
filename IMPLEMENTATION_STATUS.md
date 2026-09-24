@@ -48,7 +48,7 @@ The Linux client decoder's seccomp sandbox is real and tested.
 - Hardware HEVC selection in `frd run`, and the ADR 0004 software ceilings.
 - Local approval in `frd run`, which needs the session-agent process.
 - Wayland, macOS, Windows, browser and mobile paths (not implemented).
-- Size discipline: the fixed counter reads 272,655 handwritten Rust lines
+- Size discipline: the fixed counter read 272,665 handwritten Rust lines at 0b543db
   against the 250,000 hard stop. That lane refuses and the owner's budget
   decision is pending.
 

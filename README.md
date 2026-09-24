@@ -25,7 +25,7 @@ Evidence levels: *live* = run against this repository's binaries on a real tailn
 
 Not available: remote control/input from `fr` (the host has no input-agent process yet), local approval prompts in `frd run`, audio/clipboard/file transfer through `frd run`, hardware HEVC selection, Wayland, macOS, Windows, browser and mobile clients. Earlier documents that marked GNOME/KDE/Hyprland, Windows GPU rows or Windows/macOS worker sandboxes as passed or enforced were withdrawn on 2026-09-24: no evidence existed.
 
-**Size gate:** the fixed counter (`./scripts/verify.sh count`) reports 272,655 handwritten Rust lines against the 250,000 hard stop, so that lane refuses; the owner's budget decision is pending.
+**Size gate:** the fixed counter (`./scripts/verify.sh count`) reported 272,665 handwritten Rust lines at commit 0b543db against the 250,000 hard stop, so that lane refuses; the owner's budget decision is pending.
 
 The engineering thesis, from the plan:
 
