@@ -76,14 +76,7 @@ pub(super) fn run_inspect(
     if stopped.get() {
         return Err(Failure::new("cancelled", "Host inspection cancelled.", 130));
     }
-    // Exact identity only: a prefix could select a different machine.
-    let peer = snapshot.peers().iter().find(|p| {
-        if opts.by_name {
-            p.certificate_name() == opts.node
-        } else {
-            p.stable_id() == opts.node
-        }
-    });
+    let peer = snapshot.peers().iter().find(|p| exact_match(p, opts));
     let Some(p) = peer else {
         return Err(failure(
             "peer_not_found",
@@ -127,6 +120,15 @@ pub(super) fn run_inspect(
     }
 }
 
+/// Exact identity only: a prefix could select a different machine.
+fn exact_match(peer: &fr_tailnet::DiscoveredPeer, opts: &InspectOptions) -> bool {
+    if opts.by_name {
+        peer.certificate_name() == opts.node
+    } else {
+        peer.stable_id() == opts.node
+    }
+}
+
 pub(super) fn run_disconnect(_opts: &DisconnectOptions) -> Failure {
     Failure::new(
         "no_background_session",
@@ -141,4 +143,41 @@ pub(super) fn run_robot(_cmd: &RobotCommand) -> Failure {
         "The robot surface is not backed by a live session yet: no session was opened, nothing was observed, no file was written and no input was sent. Use `fr displays` or `fr connect --view-only`.",
         2,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inspect_matches_exact_stable_id_or_canonical_name_never_a_prefix() {
+        let peer = fr_tailnet::DiscoveredPeer::from_parts(
+            "n-host".into(),
+            "workstation.fixture.ts.net".into(),
+            vec!["100.64.0.2".parse().unwrap()],
+            fr_tailnet::PeerTransportPath::Unknown,
+        );
+        let opts = |node: &str, by_name| InspectOptions {
+            node: node.into(),
+            by_name,
+            port: 8443,
+        };
+        assert!(exact_match(&peer, &opts("n-host", false)));
+        assert!(exact_match(
+            &peer,
+            &opts("workstation.fixture.ts.net", true)
+        ));
+        for (node, by_name) in [
+            ("n-hos", false),
+            ("workstation.fixture.ts.net", false),
+            ("workstation", true),
+            ("workstation.fixture", true),
+            ("n-host", true),
+        ] {
+            assert!(
+                !exact_match(&peer, &opts(node, by_name)),
+                "{node} {by_name}"
+            );
+        }
+    }
 }
