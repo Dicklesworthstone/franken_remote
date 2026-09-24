@@ -87,6 +87,7 @@ pub enum Error {
     Runtime,
     Entropy,
     Configuration,
+    Cleanup(&'static str),
     Trust(TrustError),
     Tailnet(fr_tailnet::Error),
     Ingress(ingress::Error),
@@ -107,6 +108,7 @@ impl Error {
             Self::Runtime => "runtime_unavailable",
             Self::Entropy => "entropy_unavailable",
             Self::Configuration => "invalid_configuration",
+            Self::Cleanup(_) => "cleanup_incomplete",
             Self::Trust(_) => "trust_roots_unavailable",
             Self::Tailnet(_) => "tailscale_unavailable",
             Self::Ingress(_) => "ingress_unenforced",
@@ -317,7 +319,7 @@ pub fn run(options: &Options, report: &Reporter, stop: &Arc<StopHandle>) -> Resu
             .await
             .map_err(Error::Tailnet)?;
         let host_boot = HostBootId::from_raw(random_nonzero_u128()?);
-        let mut renew = pin!(identity.serve_renewal(&renewal).map_err(Error::Tailnet)?);
+        let renew = identity.serve_renewal(&renewal).map_err(Error::Tailnet)?;
         let mut signals = if options.handle_signals {
             (
                 signal(SignalKind::interrupt()).ok(),
@@ -342,6 +344,9 @@ pub fn run(options: &Options, report: &Reporter, stop: &Arc<StopHandle>) -> Resu
                 match share.serve(&broker).await? {
                     Ok(()) => failures = 0,
                     Err(error) => {
+                        if options.once {
+                            return Err(Error::Desktop(error));
+                        }
                         failures += 1;
                         if failures >= MAX_CONSECUTIVE_FAILURES {
                             return Err(Error::Desktop(error));
@@ -355,35 +360,58 @@ pub fn run(options: &Options, report: &Reporter, stop: &Arc<StopHandle>) -> Resu
             }
             Ok(())
         };
-        let mut serving = pin!(serving);
-        let mut renewing = true;
-        let result = poll_fn(|task| {
-            for s in [&mut signals.0, &mut signals.1].into_iter().flatten() {
-                if pin!(s.recv()).poll(task).is_ready() {
-                    stop.request();
+        let result = Box::pin(supervise(
+            async { renew.await.map_err(Error::Tailnet) },
+            serving,
+            &active,
+            stop,
+            |task| {
+                for s in [&mut signals.0, &mut signals.1].into_iter().flatten() {
+                    if pin!(s.recv()).poll(task).is_ready() {
+                        stop.request();
+                    }
                 }
-            }
-            if renewing && let Poll::Ready(outcome) = renew.as_mut().poll(task) {
-                renewing = false;
-                // Credentials ended: nothing new can be admitted safely.
-                stop.request();
-                if let Err(error) = outcome {
-                    return Poll::Ready(Err(Error::Tailnet(error)));
-                }
-            }
-            stop.register(task.waker());
-            if stop.is_requested()
-                && let Some(supervisor) = active.lock().ok().and_then(|slot| slot.clone())
-            {
-                supervisor.cancel_fast(CancelKind::User);
-            }
-            serving.as_mut().poll(task)
-        })
+            },
+        ))
         .await;
         identity.stop();
         report(Event::Stopped);
         result
     })
+}
+
+// Credential failure is a stop request, not permission to abandon a share's
+// cleanup await. Retain its first error while the ORIGINAL service fences and
+// reaps its resources. The cleanup context is independent and stays usable.
+async fn supervise(
+    renewal: impl Future<Output = Result<(), Error>>,
+    serving: impl Future<Output = Result<(), Error>>,
+    active: &Mutex<Option<Cx>>,
+    stop: &StopHandle,
+    mut signals: impl FnMut(&mut std::task::Context<'_>),
+) -> Result<(), Error> {
+    let (mut renewal, mut serving) = (pin!(renewal), pin!(serving));
+    let mut renewing = true;
+    let mut failure = None;
+    poll_fn(|task| {
+        signals(task);
+        if renewing && let Poll::Ready(outcome) = renewal.as_mut().poll(task) {
+            renewing = false;
+            failure = outcome.err();
+            stop.request();
+        }
+        stop.register(task.waker());
+        if stop.is_requested()
+            && let Some(supervisor) = active.lock().ok().and_then(|slot| slot.clone())
+        {
+            supervisor.cancel_fast(CancelKind::User);
+        }
+        match serving.as_mut().poll(task) {
+            Poll::Ready(result) => Poll::Ready(failure.take().map_or(result, Err)),
+            Poll::Pending => Poll::Pending,
+        }
+    })
+    .await
 }
 
 struct Share<'a> {
@@ -506,19 +534,25 @@ impl Share<'_> {
         let cleanup = self.cx()?;
         let deadline =
             Deadline::after(&cleanup, Duration::from_secs(3)).map_err(|_| Error::Runtime)?;
+        let mut failure = None;
         if driver.reap(&cleanup, deadline).await.is_err() {
             (self.report)(Event::CleanupFailed { stage: "source" });
+            failure = Some(Error::Cleanup("source"));
         }
         let pending = retirement.lock().ok().and_then(|mut slot| slot.take());
         if let Some(mut retirement) = pending
             && retirement.reap(&cleanup, deadline).await.is_err()
         {
             (self.report)(Event::CleanupFailed { stage: "launch" });
+            failure.get_or_insert(Error::Cleanup("launch"));
         }
         if linux.stop(&cleanup).await.is_err() {
             (self.report)(Event::CleanupFailed { stage: "ingress" });
+            failure.get_or_insert(Error::Cleanup("ingress"));
         }
-        Ok(())
+        // Attempt every cleanup stage, but never launch a replacement share
+        // after one failed. Restrictive residue is not successful retirement.
+        failure.map_or(Ok(()), Err)
     }
 
     /// Outer error: fatal to the host. Inner error: this share's desktop failed
@@ -649,5 +683,64 @@ mod tests {
         empty.worker = PathBuf::from("/usr/bin/fr-media-worker");
         empty.display = String::new();
         assert_eq!(run(&empty, &report, &stop), Err(Error::Configuration));
+    }
+
+    #[test]
+    fn credential_termination_drains_the_share_before_returning_its_original_error() {
+        use std::cell::Cell;
+        for outcome in [Ok(()), Err(Error::Tailnet(fr_tailnet::Error::KeyExpired))] {
+            let runtime = RuntimeBuilder::current_thread()
+                .enable_platform_reactor(true)
+                .build()
+                .unwrap();
+            let broker = runtime.request_cx_with_budget(Budget::INFINITE);
+            let peer = runtime.request_cx_with_budget(Budget::INFINITE);
+            let active = Mutex::new(Some(peer.clone()));
+            let stop = StopHandle::default();
+            let (polls, cleaned) = (Cell::new(0), Cell::new(false));
+            let expected = outcome.clone();
+            let result = runtime.block_on(supervise(
+                poll_fn(|_| {
+                    polls.set(polls.get() + 1);
+                    assert_eq!(polls.get(), 1, "never repoll terminal renewal");
+                    Poll::Ready(outcome.clone())
+                }),
+                async {
+                    assert!(stop.is_requested());
+                    assert!(peer.is_cancel_requested(), "fence before cleanup");
+                    asupersync::time::sleep(broker.now(), Duration::from_millis(1)).await;
+                    assert!(!broker.is_cancel_requested());
+                    cleaned.set(true);
+                    Ok(())
+                },
+                &active,
+                &stop,
+                |_| {},
+            ));
+            assert_eq!(result, expected);
+            assert!(cleaned.get(), "credential failure must not abandon cleanup");
+        }
+    }
+
+    #[test]
+    fn requested_stop_preserves_cleanup_failure_instead_of_reporting_success() {
+        let runtime = RuntimeBuilder::current_thread()
+            .enable_platform_reactor(true)
+            .build()
+            .unwrap();
+        let peer = runtime.request_cx_with_budget(Budget::INFINITE);
+        let active = Mutex::new(Some(peer.clone()));
+        let stop = StopHandle::default();
+        let result = runtime.block_on(supervise(
+            std::future::pending(),
+            async {
+                assert!(peer.is_cancel_requested());
+                Err(Error::Cleanup("source"))
+            },
+            &active,
+            &stop,
+            |_| stop.request(),
+        ));
+        assert_eq!(result, Err(Error::Cleanup("source")));
     }
 }
