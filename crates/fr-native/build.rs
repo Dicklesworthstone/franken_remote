@@ -6,6 +6,8 @@ fn main() {
     build_viewer_input();
     build_viewer_window();
     println!("cargo:rerun-if-changed=src/bridge.c");
+    println!("cargo:rerun-if-changed=src/x11_image.c");
+    println!("cargo:rerun-if-changed=src/x11_image.h");
     println!("cargo:rerun-if-changed=src/decoder_sandbox.c");
     if env::var_os("CARGO_FEATURE_LINUX_MEDIA").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux")
@@ -17,7 +19,7 @@ fn main() {
         env::var("TARGET").unwrap(),
         "native media cross-build requires an explicit qualified sysroot"
     );
-    let packages = ["libavcodec", "libavutil", "libswscale", "x11"];
+    let packages = ["libavcodec", "libavutil", "libswscale", "x11", "xcb"];
     println!("cargo:rerun-if-env-changed=FR_NATIVE_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=FR_NATIVE_LIBRARY_DIR");
     let include = env::var_os("FR_NATIVE_INCLUDE_DIR");
@@ -78,9 +80,11 @@ fn main() {
     );
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=frnative");
+    // Narrow public ABI for checked MIT-SHM on the original Xlib connection.
+    println!("cargo:rustc-link-lib=dylib:+verbatim=libX11-xcb.so.1");
     let libs = if let Some(path) = library {
         format!(
-            "-L{} -lavcodec -lavutil -lswscale -lX11",
+            "-L{} -lavcodec -lavutil -lswscale -lX11 -lxcb",
             PathBuf::from(path).display()
         )
     } else {

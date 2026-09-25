@@ -82,6 +82,15 @@ pub struct ChangeAwareCapture {
     stats: CaptureStats,
 }
 impl ChangeAwareCapture {
+    /// Counts actual X11 transfers, not source freshness or estimated GPU work.
+    pub fn transfer_statistics(&self) -> Result<crate::image_transfer::Statistics, NativeError> {
+        match &self.surface {
+            CaptureSurface::Root(surface) => surface.transfer_statistics(),
+            #[cfg(feature = "linux-displays")]
+            CaptureSurface::Selected(surface) => surface.transfer_statistics(),
+        }
+    }
+
     /// Separate cursor observation: no capture freshness, frame ID or encode.
     pub fn capture_cursor(&mut self) -> Result<Option<crate::cursor::CursorSnapshot>, NativeError> {
         if self.closed {

@@ -37,6 +37,14 @@ pub struct PresentationMaintenance {
 }
 
 impl X11Surface {
+    /// Snapshot counters from this original native owner, without capturing.
+    pub fn transfer_statistics(&self) -> Result<crate::image_transfer::Statistics, NativeError> {
+        let mut raw = crate::image_transfer::Raw::default();
+        // SAFETY: this live surface is thread-confined; output is a fixed scalar structure.
+        unsafe { crate::image_transfer::fr_x11_transfer_stats(self.raw.as_ptr(), &raw mut raw) };
+        raw.decode()
+    }
+
     /// Block until the original X connection needs maintenance or the parent's
     /// unbuffered command pipe can be read (including EOF). Parent readiness has
     /// priority over queued native events. `false` requires one bounded

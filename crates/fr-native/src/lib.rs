@@ -25,6 +25,9 @@ pub use linux::*;
 pub mod capture;
 
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
+pub mod image_transfer;
+
+#[cfg(all(target_os = "linux", feature = "linux-media"))]
 mod parent;
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 pub use parent::bind_worker_parent;

@@ -1,3 +1,6 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 /* The only C ABI boundary for the Linux CPU-staging media path. */
 #include <stdint.h>
 #include <stdlib.h>
@@ -194,15 +197,24 @@ int fr_decoder_receive(FrDecoder *d,uint8_t *out,size_t len,int64_t *pts) {
     *pts=f->pts; av_frame_unref(f); d->have_frame=0; return FR_OK;
 }
 
+#include "x11_image.c"
+
 typedef struct {
     Display *display; Window window,canvas; GC gc;
     int screen,w,h,presenter,invalid,exposed;
     /* Exactly one owned, tightly packed submitted picture, never a decoder
        surface. It survives idle periods, not a window lifetime transition. */
     XImage *front;
+    FrXImageTransfer *capture;
+    FrXImageStats retired_transfer;
 } FrX11;
 static int fr_x11_retire(FrX11 *x) {
     x->invalid=1; x->exposed=0;
+    if (x->capture) {
+        fr_ximage_stats(x->capture,&x->retired_transfer);
+        x->retired_transfer.retained_bytes=0;
+        fr_ximage_free(x->capture); x->capture=NULL;
+    }
     if (x->front) { XDestroyImage(x->front); x->front=NULL; }
     /* Retire the private presentation connection, not the UI-owned parent.
        Default DestroyAll removes the child even after an UnmapNotify preceded
@@ -321,6 +333,7 @@ int fr_x11_validate(FrX11 *x) {
 }
 void fr_x11_free(FrX11 *x) {
     if (!x) return;
+    fr_ximage_free(x->capture);
     if (x->front) XDestroyImage(x->front);
     /* XCloseDisplay's default DestroyAll releases our own window, even when
        UnmapNotify retired us before a queued DestroyNotify could be consumed.
@@ -404,13 +417,32 @@ int fr_x11_damage_source(FrX11 *x,Display **display,unsigned long *drawable) {
 int fr_x11_capture(FrX11 *x,uint8_t *out,size_t len) {
     if (!x || !out || !bgra_buffer(x->w,x->h,len)) return FR_INVALID;
     int code=fr_x11_geometry(x); if (code!=FR_OK) return code;
-    XImage *image=XGetImage(x->display,x->window,0,0,x->w,x->h,AllPlanes,ZPixmap); if (!image) return FR_DISPLAY;
-    code=fr_x11_geometry(x);
-    if (code!=FR_OK) { XDestroyImage(image); return code; }
-    if (image->bits_per_pixel!=32 || image->byte_order!=LSBFirst || image->bytes_per_line<x->w*4) { XDestroyImage(image); return FR_UNAVAILABLE; }
-    for (int y=0;y<x->h;y++) memcpy(out+(size_t)y*x->w*4,image->data+(size_t)y*image->bytes_per_line,(size_t)x->w*4);
-    for (size_t i=3;i<len;i+=4) out[i]=255;
-    XDestroyImage(image); return FR_OK;
+    if (x->presenter) {
+        /* Preserve explicit local readback/instrumentation. A presentation
+           destination never becomes a source-owned capture or SHM witness. */
+        XImage *image=XGetImage(x->display,x->window,0,0,x->w,x->h,AllPlanes,ZPixmap);
+        if (!image) return FR_DISPLAY;
+        code=fr_x11_geometry(x);
+        if (code!=FR_OK) { XDestroyImage(image); return code; }
+        if (image->bits_per_pixel!=32 || image->byte_order!=LSBFirst ||
+            image->bytes_per_line<x->w*4) { XDestroyImage(image); return FR_UNAVAILABLE; }
+        for (int y=0;y<x->h;y++)
+            memcpy(out+(size_t)y*x->w*4,image->data+(size_t)y*image->bytes_per_line,(size_t)x->w*4);
+        for (size_t i=3;i<len;i+=4) out[i]=255;
+        XDestroyImage(image); return FR_OK;
+    }
+    if (!x->capture) {
+        code=fr_ximage_new(x->display,DefaultVisual(x->display,x->screen),24,
+                          x->w,x->h,1,&x->capture);
+        if (code!=FR_OK) return code;
+    }
+    code=fr_ximage_capture(x->capture,x->window,0,0,out,len);
+    if (code!=FR_OK) return code;
+    return fr_x11_geometry(x);
+}
+void fr_x11_transfer_stats(FrX11 *x,FrXImageStats *out) {
+    if (x && !x->capture && out) *out=x->retired_transfer;
+    else fr_ximage_stats(x ? x->capture : NULL,out);
 }
 /* Reuse a single exact-size image. The XImage metadata is fixed-size; no
    decoder/reference picture or history queue is retained here. */
@@ -478,22 +510,22 @@ int fr_x11_wait_presentation_input(FrX11 *x,int input,int *input_ready) {
 /* Borrowed X connection, selected whole-monitor rectangle. This never captures
    an all-monitor bounding framebuffer. Rust revalidates topology on both sides. */
 int fr_x11_capture_rectangle(Display *display, Window root, int x, int y,
-                             int w, int h, uint8_t *out, size_t len) {
-    if (!display || !out || !bgra_buffer(w,h,len) || x<0 || y<0) return FR_INVALID;
+                             int w, int h, uint8_t *out, size_t len,
+                             FrXImageTransfer **capture) {
+    if (!capture || !display || !out || !bgra_buffer(w,h,len) || x<0 || y<0) return FR_INVALID;
     XWindowAttributes a;
     if (!XGetWindowAttributes(display,root,&a)) return FR_DISPLAY;
     if ((int64_t)x+w>a.width || (int64_t)y+h>a.height) return FR_GEOMETRY;
     if (a.depth!=24 || a.visual->class!=TrueColor ||
         a.visual->red_mask!=0xff0000 || a.visual->green_mask!=0xff00 ||
         a.visual->blue_mask!=0xff) return FR_UNAVAILABLE;
-    XImage *image=XGetImage(display,root,x,y,w,h,AllPlanes,ZPixmap);
-    if (!image) return FR_DISPLAY;
-    if (image->bits_per_pixel!=32 || image->byte_order!=LSBFirst ||
-        image->bytes_per_line<w*4) { XDestroyImage(image); return FR_UNAVAILABLE; }
-    for (int row=0;row<h;row++)
-        memcpy(out+(size_t)row*w*4,image->data+(size_t)row*image->bytes_per_line,(size_t)w*4);
-    for (size_t i=3;i<len;i+=4) out[i]=255;
-    XDestroyImage(image); return FR_OK;
+    if (!*capture) {
+        int code=fr_ximage_new(display,a.visual,a.depth,w,h,1,capture);
+        if (code!=FR_OK) return code;
+    }
+    if ((*capture)->display!=display || (*capture)->image->width!=w ||
+        (*capture)->image->height!=h) return FR_INVALID;
+    return fr_ximage_capture(*capture,root,x,y,out,len);
 }
 
 #include "decoder_sandbox.c"

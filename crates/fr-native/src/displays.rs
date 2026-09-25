@@ -80,6 +80,7 @@ unsafe extern "C" {
         height: c_int,
         output: *mut u8,
         length: usize,
+        capture: *mut *mut c_void,
     ) -> c_int;
 }
 
@@ -233,6 +234,7 @@ impl X11Inventory {
         Ok(X11SelectedCapture {
             inventory: self,
             selected,
+            capture: core::ptr::null_mut(),
         })
     }
     fn barrier(&mut self, initial: bool) -> Result<(), NativeError> {
@@ -354,8 +356,22 @@ impl Drop for X11Inventory {
 pub struct X11SelectedCapture {
     inventory: X11Inventory,
     selected: Display,
+    capture: *mut c_void,
+}
+impl Drop for X11SelectedCapture {
+    fn drop(&mut self) {
+        // SAFETY: free the unique transfer before Rust drops the original inventory/display.
+        unsafe { crate::image_transfer::fr_ximage_free(self.capture) };
+    }
 }
 impl X11SelectedCapture {
+    pub fn transfer_statistics(&self) -> Result<crate::image_transfer::Statistics, NativeError> {
+        let mut raw = crate::image_transfer::Raw::default();
+        // SAFETY: null means not initialized; otherwise this is our unique live transfer.
+        unsafe { crate::image_transfer::fr_ximage_stats(self.capture, &raw mut raw) };
+        raw.decode()
+    }
+
     /// Separate cursor from the original selected monitor. A pointer outside
     /// this rectangle yields no shape/position data from a neighboring display.
     pub fn capture_cursor(&mut self) -> Result<Option<crate::cursor::CursorSnapshot>, NativeError> {
@@ -426,7 +442,7 @@ impl X11SelectedCapture {
         let mut bytes = super::linux::zeroed(len)?;
         // SAFETY: root/connection are retained by this owner; coordinates came
         // from its immutable checked native inventory, never a peer rectangle.
-        // The C bridge copies into exactly len initialized bytes and frees XImage.
+        // The C bridge retains at most one bounded shared image on this same connection.
         let result = super::linux::status(unsafe {
             fr_x11_capture_rectangle(
                 self.inventory.display.as_ptr(),
@@ -437,13 +453,14 @@ impl X11SelectedCapture {
                 c_int::try_from(d.pixel_height).map_err(|_| NativeError::InvalidConfiguration)?,
                 bytes.as_mut_ptr(),
                 bytes.len(),
+                &raw mut self.capture,
             )
         });
         if result.is_err() {
             self.inventory.closed = true;
         }
         result?;
-        // A move/removal during XGetImage discards the captured bytes, even when
+        // A move/removal during native readback discards the captured bytes, even when
         // the output returns to identical bounds before this reply arrives.
         self.revalidate()?;
         BgraFrame::new(d.pixel_width, d.pixel_height, bytes, &self.inventory.limits)
