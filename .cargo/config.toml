@@ -4,3 +4,7 @@
 # frd's unit tests miss those deadlines, while 4 threads matches the CI runners.
 # An explicit RUST_TEST_THREADS in the environment still takes precedence.
 RUST_TEST_THREADS = { value = "4", force = false }
+# The same 16 MiB test-thread stack scripts/verify.sh and rust-verification.yml
+# already export. Without it, plain `cargo test` (and the narrow workflows)
+# overflow the default 2 MiB stack in frd's fanout test.
+RUST_MIN_STACK = { value = "16777216", force = false }
