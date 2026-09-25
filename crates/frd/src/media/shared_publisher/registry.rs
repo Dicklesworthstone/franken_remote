@@ -44,6 +44,30 @@ impl Publication {
             members: self.members.clone(),
         })
     }
+    /// Explicit local OS-session removal, not an unauthenticated peer callback.
+    /// Retain failed slots until their original Subscriber drops, so existing
+    /// network handles cannot address a replacement occupying that slot.
+    pub(crate) fn remove_session(&self, session: fr_core::ids::RemoteSessionId) -> bool {
+        let Some(shared) = self.members.upgrade() else {
+            return false;
+        };
+        let mut members = match shared.lock() {
+            Ok(members) => members,
+            Err(poisoned) => {
+                poisoned.into_inner().close(Error::Poisoned);
+                return false;
+            }
+        };
+        let mut removed = false;
+        for entry in members.entries.iter_mut().flatten() {
+            if entry.failure.is_none() && entry.view.parent.remote_session == session {
+                entry.close(Error::Closed);
+                removed = true;
+            }
+        }
+        members.stop_if_empty();
+        removed
+    }
     /// Revoke every original authority before dropping retained media. The
     /// publisher's independent task still owns worker cancellation and reaping.
     pub(crate) fn revoke(&self) {

@@ -86,6 +86,22 @@ impl Publications {
             })),
         }
     }
+    pub(super) fn remove_session(&mut self, session: fr_core::ids::RemoteSessionId) -> bool {
+        let sources = match self.sources.lock() {
+            Ok(sources) => sources,
+            Err(poisoned) => {
+                poisoned.into_inner().clear();
+                return false;
+            }
+        };
+        let mut removed = false;
+        for entry in sources.slots.iter().flatten() {
+            // Do not short-circuit: one remote session can retain multiple
+            // display subscriptions, all of which must lose authority together.
+            removed |= entry.publication.remove_session(session);
+        }
+        removed
+    }
     pub(super) fn clear(&mut self) {
         self.sources
             .lock()

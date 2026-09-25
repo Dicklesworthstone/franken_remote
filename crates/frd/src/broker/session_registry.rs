@@ -375,8 +375,12 @@ impl SessionRegistry {
         Some(next)
     }
 
-    /// Close and remove a session.
+    /// Explicit local removal: revoke the actual shared subscriber before
+    /// removing descriptive registry metadata. All its display subscriptions
+    /// retire, but unrelated viewers and sources continue. This is not a
+    /// generationless network/worker callback entry point.
     pub fn remove_session(&mut self, session_id: RemoteSessionId) -> bool {
+        let removed_live = self.publications.remove_session(session_id);
         if self.active_controller_id == Some(session_id) {
             self.active_controller_id = None;
         }
@@ -388,7 +392,7 @@ impl SessionRegistry {
             self.sessions.swap_remove(pos);
             true
         } else {
-            false
+            removed_live
         }
     }
 

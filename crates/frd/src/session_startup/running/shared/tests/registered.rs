@@ -251,3 +251,124 @@ fn registered_join_rejects_control_intent_and_unregistered_scope_without_new_mem
         cleanup(&mut g, &cx).await;
     });
 }
+
+#[test]
+fn explicit_registry_removal_stops_one_real_session_and_keeps_healthy_renewal_running() {
+    let rt = support::runtime();
+    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    rt.block_on(async {
+        let mut g = Box::pin(group(&rt, 2)).await;
+        ready(&mut g).await;
+        let pid = g.publisher.worker_id();
+        let mut registry = registry();
+        let root = registry.register_publisher(&g.publisher).unwrap();
+        let first = g.peers[0].media.binding().parent.remote_session;
+        let second = g.peers[1].media.binding().parent.remote_session;
+        assert_eq!(registry.session_count(), 0, "legacy rows are not authority");
+        assert!(
+            registry.remove_session(first),
+            "actual removal needs no synthetic row"
+        );
+        assert!(!registry.remove_session(first));
+        assert!(g.peers[0].control.check().is_err());
+        assert!(g.peers[0].turn().await.is_err());
+        root.check().unwrap();
+        g.owner.check().unwrap();
+        g.peers[1].control.check().unwrap();
+        assert_eq!(g.publisher.tick().unwrap(), 1);
+        let until = now(&g.peers[1].h).unwrap() + 3_200_000;
+        let source = g.publisher.serve(Duration::from_millis(50), |_| {});
+        let network = async {
+            while now(&g.peers[1].h).unwrap() < until {
+                g.peers[1].turn().await.unwrap();
+            }
+            assert!(
+                g.peers[1]
+                    .shared
+                    .as_ref()
+                    .unwrap()
+                    .renewed_until()
+                    .unwrap()
+                    .as_micros()
+                    > until
+            );
+            assert!(registry.remove_session(second));
+            assert!(g.peers[1].control.check().is_err());
+            assert!(g.owner.check().is_err());
+            assert!(root.check().is_err());
+        };
+        let (result, ()) = Box::pin(support::both(source, network)).await;
+        assert!(result.is_err());
+        assert_eq!(g.publisher.worker_id(), pid);
+        cleanup(&mut g, &cx).await;
+    });
+}
+
+#[test]
+fn removing_a_registered_pending_join_releases_it_without_forcing_or_resetting_capture() {
+    let rt = support::runtime();
+    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    rt.block_on(async {
+        let mut g = Box::pin(group(&rt, 1)).await;
+        ready(&mut g).await;
+        let mut registry = registry();
+        registry.register_publisher(&g.publisher).unwrap();
+        let mut late = Box::pin(peer(&rt, 14, Role::Observe)).await;
+        let id = late.media.binding().parent.remote_session;
+        late.shared = Some(
+            late.session
+                .take()
+                .unwrap()
+                .join_registered(
+                    &registry,
+                    late.host_media.take().unwrap(),
+                    SendPolicy::default(),
+                    Duration::from_secs(2),
+                )
+                .unwrap(),
+        );
+        let usage = g.publisher.physical_usage();
+        assert!(registry.remove_session(id));
+        assert!(late.control.check().is_err());
+        assert!(late.turn().await.is_err());
+        let observation = g.publisher.capture_next().await.unwrap();
+        assert!(
+            observation.unchanged,
+            "a removed waiting join cannot spend an IDR"
+        );
+        assert_eq!((observation.frame, observation.delivered), (0, 1));
+        assert!(g.publisher.physical_usage().bytes <= usage.bytes);
+        assert!(!registry.remove_session(RemoteSessionId::from_raw(999)));
+        g.owner.check().unwrap();
+        g.peers[0].turn().await.unwrap();
+        assert_eq!(late.frames, [] as [u64; 0]);
+        late.viewer.close();
+        cleanup(&mut g, &cx).await;
+    });
+}
+
+#[test]
+fn registry_removal_is_scoped_even_when_an_unrelated_registry_reuses_remote_ids() {
+    let rt = support::runtime();
+    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    rt.block_on(async {
+        let mut a = Box::pin(group(&rt, 1)).await;
+        let mut b = Box::pin(group(&rt, 1)).await;
+        ready(&mut a).await;
+        ready(&mut b).await;
+        let mut ar = registry();
+        let mut br = registry();
+        ar.register_publisher(&a.publisher).unwrap();
+        let bh = br.register_publisher(&b.publisher).unwrap();
+        let id = a.peers[0].media.binding().parent.remote_session;
+        assert_eq!(id, b.peers[0].media.binding().parent.remote_session);
+        assert!(ar.remove_session(id));
+        assert!(a.owner.check().is_err());
+        bh.check().unwrap();
+        b.owner.check().unwrap();
+        b.peers[0].turn().await.unwrap();
+        assert!(!ar.remove_session(id));
+        cleanup(&mut a, &cx).await;
+        cleanup(&mut b, &cx).await;
+    });
+}

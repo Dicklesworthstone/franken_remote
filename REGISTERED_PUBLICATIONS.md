@@ -29,15 +29,32 @@ custody, or claim that a child exited. The original publisher task must handle
 cancellation and retain the Publisher until `reap` confirms cleanup. New local
 consent and fresh native ownership are required to register a replacement.
 
+## Removing one viewer
+
+The existing `SessionRegistry::remove_session` now revokes matching actual shared
+subscribers before removing descriptive metadata. It visits every registered
+source with bounded work, including multiple display subscriptions of one remote
+session. Failed member slots remain reserved until their original Subscriber
+owners drop, preventing old network tasks from addressing a replacement slot.
+An unknown session is non-mutating. Removing one viewer preserves other viewers'
+source and renewal; removing the last admitted viewer ends source consent and
+leaves its original child available for confirmed reap. This is an explicit local
+registry command, not a generationless network or worker callback endpoint.
+
 ## Executed evidence
 
-Six new tests exercise actual negotiated TLS/UDP sessions, source/receiver owners,
+Nine new tests exercise actual negotiated TLS/UDP sessions, source/receiver owners,
 shared storage and supervised native source IPC. They cover live registered joins,
 OS switching during continuous publication, every generation transition, teardown,
 registry Drop, explicit retirement, stale/foreign routing handles, duplicate
-source and registry ownership, wrong scope, and control-intent exclusion.
-The selected 20-test in-crate group (six new, ten existing shared-session tests,
-four existing registry tests) and 16 existing broker integration tests pass.
+source and registry ownership, wrong scope, and control-intent exclusion. Additional removal cases exercise independent
+renewal beyond three seconds, cancellation of a waiting join without forcing
+an IDR, last-viewer shutdown, and unrelated registries reusing numeric IDs.
+The final selected 23-test in-crate group (nine new, ten existing shared-session
+tests, four existing registry tests) and 109 existing integration tests pass
+(132 unique tests). The integration group covers broker16, shared-startup25,
+pending-startup9, late-join10, shared-capture24, fanout6, native-recovery9, egress7
+and authority3. These are unique results; repeated runs are not added twice.
 Production and complete daemon test-source strict pedantic Clippy and changed-file
 formatting/diff checks pass. Full daemon runtime test generation exceeded the
 execution limit; selected registrations run from a separate copy with production
@@ -55,3 +72,23 @@ entry point and supply the independently authorized first source. Independent
 local source-consent renewal and shared failed-viewer recovery are not added by
 these registry APIs. Source registration count is not an active GPU/encoder
 measurement. Refs: plan sections 5, 7, 11.2 and 19; fr-p1-frame-pipeline-am1.
+
+## Publication retry — September 25, 2026
+
+The saved registry changes were reconciled with later shared-source recovery,
+selected-display, cursor and native-control work, rather than restoring their
+older whole-file snapshots. Source preimages for every modified existing file
+were matched by Git blob hash against main at 284b3d6734be2ca3b3f1988c1b34c57d51d89229.
+The current exhaustive native error dispatcher explicitly treats registry errors
+as host faults; removal uses the stable installed view even while recovery has
+retired the media attachments. Existing cursor/control/recovery code is preserved.
+
+All nine saved registry integration tests were rerun and passed on checksum-verified
+4b156d9 source plus the reconciled registry changes, using the pinned compiler
+and matching retained external libraries. All eight first-party libraries rebuilt,
+and the complete daemon test-source strict Clippy check passed for the first slice.
+Runtime selection used a separate copy changing only unselected test registrations;
+production code and the nine tests' assertions were unchanged. The additional
+current-main changes after 4b156d9 are source-reconciled, not a new full-workspace
+runtime qualification. The original 132-test result above is historical and was
+not rerun in full during publication. No new hardware or live-tailnet claim is made.
