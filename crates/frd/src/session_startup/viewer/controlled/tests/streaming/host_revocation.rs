@@ -18,7 +18,9 @@ async fn settle(fixture: &mut Fixture, host_cx: &Cx) {
                 },
                 block,
             ),
-            fixture.viewer.drive(Duration::from_millis(1), |_| {}, block),
+            fixture
+                .viewer
+                .drive(Duration::from_millis(1), |_| {}, block),
         ))
         .await;
         host.unwrap();
@@ -69,7 +71,7 @@ fn exercise(service_turn: bool) {
                             .revocation_delivery()
                             .expect("terminal attempt completed")
                     } else {
-                        f.host.revoke_and_close(HostStop::LocalRevoke).await
+                        Box::pin(f.host.revoke_and_close(HostStop::LocalRevoke)).await
                     }
                 },
                 async {
@@ -79,7 +81,9 @@ fn exercise(service_turn: bool) {
                             .drive(
                                 Duration::from_millis(1),
                                 |_| {
-                                    panic!("an unsubmitted action cannot acquire a fabricated receipt");
+                                    panic!(
+                                        "an unsubmitted action cannot acquire a fabricated receipt"
+                                    );
                                 },
                                 block,
                             )
@@ -104,7 +108,7 @@ fn exercise(service_turn: bool) {
         assert_eq!(revoked.effects, EffectStage::Unknown);
         assert!(control.is_stopped());
         assert!(summary.handoff_safe());
-        assert!(f.effects.lock().unwrap().keys.is_empty());
+        assert_eq!(f.effects.lock().unwrap().keys, [] as [bool; 0]);
         assert!(f.viewer.is_closed());
         assert_eq!(f.viewer.pending_actions(), 1);
         assert_eq!(f.viewer.action(key(false)), Err(Error::Closed));

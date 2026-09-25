@@ -145,7 +145,8 @@ impl ControlledHost {
                 .unwrap_or(StopReason::AuthorityEnded);
             // Delivery is separately retained by revocation_delivery. Whether
             // acknowledged or lost, this service's outcome is terminal closure.
-            let _ = self.revoke_and_close(reason).await;
+            // Boxed: its state would otherwise inflate every drive future.
+            let _ = Box::pin(self.revoke_and_close(reason)).await;
             return Err(Error::Closed);
         }
         let mut services = InputServices {
