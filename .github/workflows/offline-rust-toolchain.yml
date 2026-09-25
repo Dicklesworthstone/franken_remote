@@ -8,12 +8,14 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - 'crates/fr-transport/src/quic/lifetime/**'
+      - 'crates/fr-transport/tests/terminal_revocation.rs'
 permissions:
   contents: read
 jobs:
   toolchain:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
@@ -50,3 +52,13 @@ jobs:
           retention-days: 7
           compression-level: 0
           if-no-files-found: error
+      - name: Verify terminal reporting against the exact exported source
+        env:
+          CARGO_BUILD_JOBS: '1'
+          CARGO_PROFILE_DEV_DEBUG: '0'
+          CARGO_PROFILE_TEST_DEBUG: '0'
+          CARGO_INCREMENTAL: '0'
+          RUST_MIN_STACK: '16777216'
+        run: |
+          cargo test -p fr-transport --test terminal_revocation --locked
+          cargo clippy -p fr-transport --test terminal_revocation --locked -- -D warnings

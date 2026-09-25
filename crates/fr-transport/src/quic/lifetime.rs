@@ -1,5 +1,7 @@
 //! A connection-wide destination/ingress guard cannot be replaced by a later
 //! application caller's authorization closure. This adds no peer permission.
+mod terminal;
+
 use super::{Error, QuicRecords, now};
 use asupersync::cx::Cx;
 use std::{
