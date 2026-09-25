@@ -18,6 +18,7 @@ pub mod files;
 pub mod held_state;
 pub mod input;
 pub mod input_result;
+pub mod lease_revoked;
 mod media;
 pub mod negotiation;
 pub mod presented;
