@@ -79,6 +79,7 @@ struct Members {
     entries: [Option<Entry>; MAX_SUBSCRIBERS],
     owner: ObservationControl,
     anchor: Option<Binding>,
+    registry_owner: Option<Weak<()>>,
     configuration: fr_media::worker::Configuration,
     selected_catalog: Option<fr_wire::display::Catalog>,
     started: bool,
@@ -210,6 +211,7 @@ impl Publisher {
                 entries: core::array::from_fn(|_| None),
                 owner,
                 anchor: None,
+                registry_owner: None,
                 configuration,
                 selected_catalog,
                 started: false,
@@ -736,3 +738,6 @@ pub(crate) mod consent;
 
 mod recovery;
 pub use recovery::RecoveryState;
+
+mod registry;
+pub(crate) use registry::Publication;

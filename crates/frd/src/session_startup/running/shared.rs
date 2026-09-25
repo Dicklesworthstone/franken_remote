@@ -44,6 +44,35 @@ pub struct SharedHost {
     selected_display: Option<crate::display_selection::SelectedDisplay>,
 }
 impl HostSession {
+    /// Resolve this session's completed media scope through the original OS
+    /// registry, then enter that actual publisher on this original connection.
+    /// Registry metadata grants no consent, and source retirement between lookup
+    /// and admission refuses. No new source or arbitrary queue is accepted here.
+    pub fn join_registered(
+        mut self,
+        registry: &crate::broker::session_registry::SessionRegistry,
+        media: crate::media_quic::NegotiatedMedia,
+        policy: fr_media::delivery::SendPolicy,
+        timeout: Duration,
+    ) -> Result<SharedHost, Error> {
+        self.check()?;
+        if self.opened.selected.role != Role::Observe {
+            return Err(Error::Order);
+        }
+        let source = registry
+            .publisher(media.binding())
+            .map_err(Error::PublicationRegistry)?;
+        let subscriber = source
+            .admit(
+                self.opened.control.clone(),
+                media,
+                &self.opened.transport,
+                policy,
+                timeout,
+            )
+            .map_err(Error::PublicationRegistry)?;
+        self.into_shared(subscriber)
+    }
     /// Queue a live source join using THIS session's consent and completed media
     /// attachments. No caller-supplied authority or copied connection can stand
     /// in for the original admitted owner. The queue retains the same bounded

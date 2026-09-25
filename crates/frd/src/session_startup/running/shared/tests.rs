@@ -651,3 +651,5 @@ mod admission;
 mod recovery;
 
 mod selected;
+
+mod registered;

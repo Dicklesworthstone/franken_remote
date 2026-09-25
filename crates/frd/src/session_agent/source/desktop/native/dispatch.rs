@@ -83,7 +83,10 @@ impl Error {
 fn peer_session(error: &crate::session_startup::Error) -> bool {
     use crate::session_startup::Error as E;
     match error {
-        E::SharedPublication(_) | E::InvalidConfiguration | E::Clock => false,
+        E::PublicationRegistry(_)
+        | E::SharedPublication(_)
+        | E::InvalidConfiguration
+        | E::Clock => false,
         E::ReferenceRecovery(_)
         | E::DecoderStartup(_)
         | E::Clipboard(_)

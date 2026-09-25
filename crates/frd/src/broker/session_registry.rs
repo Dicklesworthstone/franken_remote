@@ -7,6 +7,9 @@
 //! - Generation fencing: requests tagged with stale generations are rejected.
 //! - Orderly teardown: revoke input -> invalidate generations -> close sessions.
 
+mod publications;
+pub use publications::{MAX_PUBLICATIONS, PublicationError, RegisteredPublisher};
+
 use super::process_role::ProcessGeneration;
 use core::fmt;
 use fr_core::ids::{
@@ -68,19 +71,20 @@ impl SessionRecord {
 #[derive(Debug)]
 pub struct SessionRegistry {
     /// Host boot identity.
-    pub host_boot_id: HostBootId,
+    host_boot_id: HostBootId,
     /// Current interactive OS session identity.
-    pub os_session_id: OsSessionId,
+    os_session_id: OsSessionId,
     /// Active process generation.
-    pub process_generation: ProcessGeneration,
+    process_generation: ProcessGeneration,
     /// Active display geometry generation.
-    pub geometry_generation: DisplayGeometryGeneration,
+    geometry_generation: DisplayGeometryGeneration,
     /// Active codec configuration generation.
-    pub codec_generation: CodecConfigurationGeneration,
+    codec_generation: CodecConfigurationGeneration,
     /// Maximum concurrent viewer sessions permitted.
     pub max_viewers: usize,
     /// Admitted sessions.
     sessions: Vec<SessionRecord>,
+    publications: publications::Publications,
     /// Currently assigned controller session ID (if any).
     active_controller_id: Option<RemoteSessionId>,
 }
@@ -141,6 +145,33 @@ pub struct TeardownPlan {
 }
 
 impl SessionRegistry {
+    /// Current canonical registry scope. Changes use the retiring lifecycle methods.
+    pub const fn host_boot_id(&self) -> HostBootId {
+        self.host_boot_id
+    }
+    /// Current canonical registry scope. Changes use the retiring lifecycle methods.
+    pub const fn os_session_id(&self) -> OsSessionId {
+        self.os_session_id
+    }
+    /// Current canonical registry scope. Changes use the retiring lifecycle methods.
+    pub const fn process_generation(&self) -> ProcessGeneration {
+        self.process_generation
+    }
+    /// Current canonical registry scope. Changes use the retiring lifecycle methods.
+    pub const fn geometry_generation(&self) -> DisplayGeometryGeneration {
+        self.geometry_generation
+    }
+    /// Current canonical registry scope. Changes use the retiring lifecycle methods.
+    pub const fn codec_generation(&self) -> CodecConfigurationGeneration {
+        self.codec_generation
+    }
+    /// End the old desktop lifetime before accepting a different interactive
+    /// OS session. No old source, viewer or routing proof is inherited.
+    pub fn switch_os_session(&mut self, os_session: OsSessionId) -> TeardownPlan {
+        let plan = self.teardown_all();
+        self.os_session_id = os_session;
+        plan
+    }
     /// Initialize a new session registry.
     #[must_use]
     pub fn new(host_boot_id: HostBootId, os_session_id: OsSessionId, max_viewers: usize) -> Self {
@@ -152,6 +183,7 @@ impl SessionRegistry {
             codec_generation: CodecConfigurationGeneration::INITIAL,
             max_viewers: max_viewers.max(1),
             sessions: Vec::with_capacity(max_viewers.min(16)),
+            publications: publications::Publications::new(),
             active_controller_id: None,
         }
     }
@@ -318,6 +350,8 @@ impl SessionRegistry {
 
     /// Advance display geometry generation (fences all subsequent input to new layout).
     pub fn advance_geometry_generation(&mut self) -> Option<DisplayGeometryGeneration> {
+        // End actual source/viewer authority even if the generation is exhausted.
+        self.publications.clear();
         let next = self.geometry_generation.next()?;
         self.geometry_generation = next;
         Some(next)
@@ -325,6 +359,8 @@ impl SessionRegistry {
 
     /// Advance codec configuration generation.
     pub fn advance_codec_generation(&mut self) -> Option<CodecConfigurationGeneration> {
+        // End actual source/viewer authority even if the generation is exhausted.
+        self.publications.clear();
         let next = self.codec_generation.next()?;
         self.codec_generation = next;
         Some(next)
@@ -332,6 +368,8 @@ impl SessionRegistry {
 
     /// Advance process generation.
     pub fn advance_process_generation(&mut self) -> Option<ProcessGeneration> {
+        // End actual source/viewer authority even if the generation is exhausted.
+        self.publications.clear();
         let next = self.process_generation.next()?;
         self.process_generation = next;
         Some(next)
@@ -358,6 +396,10 @@ impl SessionRegistry {
     pub fn teardown_all(&mut self) -> TeardownPlan {
         let count = self.sessions.len();
         let had_controller = self.active_controller_id.is_some();
+
+        // Fence actual shared source/viewer authorities before metadata or
+        // generation changes; native custody remains with each Publisher.
+        self.publications.clear();
 
         // 1. Invalidate controller
         self.active_controller_id = None;

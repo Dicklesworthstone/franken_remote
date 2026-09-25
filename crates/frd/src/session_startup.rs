@@ -65,6 +65,7 @@ const CONSUMED: u8 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
+    PublicationRegistry(crate::broker::session_registry::PublicationError),
     SharedPublication(crate::media::shared_publisher::Error),
     ReferenceRecovery(crate::media_quic::replacement::Error),
     DecoderStartup(crate::media::decoder_startup::Error),
