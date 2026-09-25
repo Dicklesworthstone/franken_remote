@@ -452,6 +452,39 @@ fn conversion_keeps_actual_prefix_and_never_promotes_to_observed() {
 }
 
 #[test]
+fn executor_boundary_expiry_is_an_expired_receipt_not_a_rejection() {
+    let result = InputResult::from_receipt(
+        binding(),
+        SequenceSpace::Action,
+        Receipt {
+            sequence: 3,
+            outcome: InputOutcome::ExpiredBeforeSubmission,
+            submitted_operations: 0,
+            refusal: Some(Refusal::ExpiredAtBoundary),
+        },
+    )
+    .unwrap();
+    let received = decode(&encode(result).unwrap()).unwrap();
+    assert_eq!(received.outcome, InputOutcome::ExpiredBeforeSubmission);
+    assert_eq!(received.stage, Stage::Admitted);
+    assert_eq!(received.reason, Some(Reason::TicketExpired));
+    // It can never be relabelled as an ordinary rejection.
+    assert!(
+        InputResult::from_receipt(
+            binding(),
+            SequenceSpace::Action,
+            Receipt {
+                sequence: 3,
+                outcome: InputOutcome::RejectedBeforeSubmission,
+                submitted_operations: 0,
+                refusal: Some(Refusal::ExpiredAtBoundary),
+            },
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn stable_reason_codes_cover_authority_sequence_and_platform_refusals() {
     use AuthorityError as A;
     use InputSequenceError as S;
@@ -509,6 +542,7 @@ fn stable_reason_codes_cover_authority_sequence_and_platform_refusals() {
         (R::Platform(PlatformError::Unavailable), 31),
         (R::UnknownEffect, 32),
         (R::AuthorityUnavailable, 33),
+        (R::ExpiredAtBoundary, 10),
         (R::StaleLease, 4),
         (R::Sequence(S::StaleLease), 4),
         (R::Platform(PlatformError::Unsupported), 24),

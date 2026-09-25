@@ -17,6 +17,7 @@ use crate::{
 };
 mod control;
 mod held;
+pub mod process;
 pub mod scroll;
 pub use control::ControlLease;
 use core::fmt;
@@ -86,6 +87,20 @@ pub enum Operation {
     },
     Text(char),
 }
+impl Operation {
+    /// Release-only transitions: the only operations local cleanup may submit
+    /// after revocation. Positioning, presses, scrolls and text never qualify.
+    pub const fn is_release(self) -> bool {
+        matches!(
+            self,
+            Self::Key {
+                transition: KeyTransition::Release,
+                ..
+            } | Self::Button { pressed: false, .. }
+                | Self::Wheel { pressed: false, .. }
+        )
+    }
+}
 impl fmt::Debug for Operation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -112,6 +127,12 @@ pub enum Submission {
     Submitted,
     NotSubmitted(PlatformError),
     Unknown,
+    /// A separate executor sampled its own clock at or after the deadline passed
+    /// to `submit_until` and made NO native call. Never retried.
+    Expired,
+    /// A separate executor was fenced (revoked) before its native call and made
+    /// NO native call. Only release-only cleanup remains possible there.
+    Fenced,
 }
 
 /// Implementations must not defer submission to another queue or perform
@@ -121,6 +142,27 @@ pub enum Submission {
 pub trait InputSink {
     fn prepare(&mut self, operation: Operation) -> Result<(), PlatformError>;
     fn submit(&mut self, operation: Operation) -> Submission;
+    /// Submit with the exclusive authority deadline sampled by the owner's final
+    /// check. An executor that runs apart from that check (another process)
+    /// MUST re-check its own monotonic clock immediately before the native call
+    /// and return `Expired` without calling it once `until` has passed. The
+    /// default is for in-thread sinks called directly after the final check.
+    fn submit_until(&mut self, operation: Operation, until: HostInstant) -> Submission {
+        let _ = until;
+        self.submit(operation)
+    }
+    /// A local owner outside the network path (for example a sharing indicator
+    /// shown by an out-of-process executor) revoked input. Polled between
+    /// operations by the native owner; true is terminal. Never grants anything.
+    fn locally_revoked(&mut self) -> bool {
+        false
+    }
+    /// The backend's own native executor was lost (for example an injector
+    /// process exited or broke its private protocol). Polled like
+    /// `locally_revoked`; true is terminal and never proves release.
+    fn native_failed(&mut self) -> bool {
+        false
+    }
     /// Undo reversible preparation when final authorization fails, on unwind,
     /// or after submission. Idempotent, release-only and never a new input event.
     /// Backends must retain uncertain restoration state for local cleanup.
@@ -258,6 +300,9 @@ pub enum Refusal {
     Platform(PlatformError),
     UnknownEffect,
     AuthorityUnavailable,
+    /// The executor's own final clock check found the submission deadline
+    /// passed; no native call was made. Never transparently retried.
+    ExpiredAtBoundary,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Receipt {
@@ -640,13 +685,20 @@ impl InputSession {
             Ok(())
         }
     }
-    fn check(&mut self, credentials: InputCredentials, now: HostInstant) -> Result<(), Refusal> {
+    /// Final authorization, returning the exclusive deadline for this exact
+    /// submission (ticket, lease, observation and bounded view, whichever is
+    /// earliest). A separate executor must not submit at or after it.
+    fn check(
+        &mut self,
+        credentials: InputCredentials,
+        now: HostInstant,
+    ) -> Result<HostInstant, Refusal> {
         self.check_active()?;
         if credentials.view != self.view {
             return Err(Refusal::StaleView);
         }
         self.authority.with_time(&mut self.clock, now, |a, at| {
-            a.authorize_submission(self.lease, credentials.ticket, at)
+            a.submission_deadline(self.lease, credentials.ticket, at)
         })
     }
     fn require(&self, cap: Capability) -> Result<(), Refusal> {
@@ -717,7 +769,7 @@ impl Attempt<'_, '_> {
         // in prepare, and a stale ticket must not leave that state stranded.
         let prepared = PreparedSink(sink);
         prepared.0.prepare(op).map_err(Refusal::Platform)?;
-        self.owner.check(self.request.credentials, clock())?;
+        let until = self.owner.check(self.request.credentials, clock())?;
         // Track a possible press BEFORE invoking the platform. Even a panic or
         // an unknown native result must leave enough state for release cleanup.
         let previous = match op {
@@ -734,33 +786,36 @@ impl Attempt<'_, '_> {
         let previous_wheel = self.owner.wheel;
         self.track(op, true);
         self.uncertain = true;
-        match prepared.0.submit(op) {
+        let refusal = match prepared.0.submit_until(op, until) {
             Submission::Submitted => {
                 self.uncertain = false;
                 self.submitted += 1;
                 self.track(op, false);
-                Ok(())
+                return Ok(());
             }
-            Submission::Unknown => Err(Refusal::UnknownEffect),
-            Submission::NotSubmitted(error) => {
-                self.uncertain = false;
-                if matches!(op, Operation::Wheel { pressed: true, .. }) {
-                    self.owner.wheel = previous_wheel;
+            Submission::Unknown => return Err(Refusal::UnknownEffect),
+            // Each names a confirmed absence of the native call, like
+            // NotSubmitted: restore the pessimistic press tracking below.
+            Submission::NotSubmitted(error) => Refusal::Platform(error),
+            Submission::Expired => Refusal::ExpiredAtBoundary,
+            Submission::Fenced => Refusal::Revoked,
+        };
+        self.uncertain = false;
+        if matches!(op, Operation::Wheel { pressed: true, .. }) {
+            self.owner.wheel = previous_wheel;
+        }
+        if let Some(old) = previous {
+            match op {
+                Operation::Key { key, .. } => {
+                    self.owner.keys[usize::from(key.usage())] = old;
                 }
-                if let Some(old) = previous {
-                    match op {
-                        Operation::Key { key, .. } => {
-                            self.owner.keys[usize::from(key.usage())] = old;
-                        }
-                        Operation::Button { button, .. } => {
-                            self.owner.buttons[button as usize - 1] = old;
-                        }
-                        _ => {}
-                    }
+                Operation::Button { button, .. } => {
+                    self.owner.buttons[button as usize - 1] = old;
                 }
-                Err(Refusal::Platform(error))
+                _ => {}
             }
         }
+        Err(refusal)
     }
     fn track(&mut self, op: Operation, before: bool) {
         match op {
@@ -963,11 +1018,14 @@ impl Attempt<'_, '_> {
             InputOutcome::PartiallySubmittedToOs
         } else {
             match result {
-                Err(Refusal::Authority(
-                    AuthorityError::TicketExpired
-                    | AuthorityError::LeaseExpired
-                    | AuthorityError::ObservationExpired,
-                )) => InputOutcome::ExpiredBeforeSubmission,
+                Err(
+                    Refusal::Authority(
+                        AuthorityError::TicketExpired
+                        | AuthorityError::LeaseExpired
+                        | AuthorityError::ObservationExpired,
+                    )
+                    | Refusal::ExpiredAtBoundary,
+                ) => InputOutcome::ExpiredBeforeSubmission,
                 Err(Refusal::Revoked) => InputOutcome::CancelledBeforeSubmission,
                 _ => InputOutcome::RejectedBeforeSubmission,
             }

@@ -204,13 +204,19 @@ impl ReconcileGuard<'_> {
                     report.remaining_releases -= 1;
                     report.outcome = ReconciliationOutcome::Interrupted;
                 }
-                Submission::NotSubmitted(error) => {
+                refused @ (Submission::NotSubmitted(_)
+                | Submission::Expired
+                | Submission::Fenced) => {
                     owner
                         .reconciliation
                         .as_mut()
                         .expect("active reconciliation")
                         .outcome = ReconciliationOutcome::Refused;
-                    return Err(Refusal::Platform(error));
+                    return Err(match refused {
+                        Submission::NotSubmitted(error) => Refusal::Platform(error),
+                        Submission::Expired => Refusal::ExpiredAtBoundary,
+                        _ => Refusal::Revoked,
+                    });
                 }
                 Submission::Unknown => return Err(Refusal::UnknownEffect),
             }

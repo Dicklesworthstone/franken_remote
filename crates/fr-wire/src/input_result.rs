@@ -179,6 +179,11 @@ impl TryFrom<Refusal> for Reason {
             Refusal::Platform(PlatformError::Unavailable) => Self::PlatformUnavailable,
             Refusal::UnknownEffect => Self::UnknownEffect,
             Refusal::AuthorityUnavailable => Self::AuthorityUnavailable,
+            // A separate executor enforced the action's validity window: the
+            // ticket deadline, itself clamped to lease/observation (and the
+            // bounded view). The client can act on it only as ticket expiry;
+            // no new wire code, and never a transparent retry.
+            Refusal::ExpiredAtBoundary => Self::TicketExpired,
         })
     }
 }

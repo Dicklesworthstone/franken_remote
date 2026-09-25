@@ -554,6 +554,34 @@ impl SessionAuthority {
         Ok(())
     }
 
+    /// `authorize_submission` plus the exclusive deadline of that authorization:
+    /// the earliest of the ticket, lease, observation and bounded-view deadlines.
+    /// An executor outside this lock must not submit at or after it. The value
+    /// is a fence for one submission, never a renewal or a new ticket.
+    pub fn submission_deadline(
+        &mut self,
+        lease_id: InputLeaseId,
+        ticket_id: InputTicketId,
+        now: HostInstant,
+    ) -> Result<HostInstant, AuthorityError> {
+        self.authorize_submission(lease_id, ticket_id, now)?;
+        let lease = self.lease.ok_or(AuthorityError::NoLease)?;
+        let ticket = lease
+            .tickets
+            .iter()
+            .flatten()
+            .find(|ticket| ticket.id == ticket_id)
+            .ok_or(AuthorityError::TicketInvalid)?;
+        let observation = self
+            .observation_until
+            .ok_or(AuthorityError::ObservationExpired)?;
+        let until = ticket
+            .expires_at
+            .min(lease.authorized_until)
+            .min(observation);
+        Ok(self.view_until.map_or(until, |view| until.min(view)))
+    }
+
     /// Fences control synchronously. The input owner then releases held keys
     /// and buttons; this does not claim that OS cleanup has completed.
     pub fn revoke_lease(&mut self) {
@@ -823,6 +851,53 @@ mod tests {
         assert_eq!(
             a.authorize_submission(lease, ticket, at(1_000_000)),
             Err(AuthorityError::TicketExpired)
+        );
+    }
+
+    #[test]
+    fn submission_deadline_is_the_earliest_live_bound_and_never_authorizes_more() {
+        let (mut a, lease, ticket) = viewing_with_control(at(0));
+        // Ticket (1s) before lease and observation (3s).
+        assert_eq!(
+            a.submission_deadline(lease, ticket, at(10)),
+            Ok(at(1_000_000))
+        );
+        // Same refusals as authorize_submission; no deadline is minted.
+        assert_eq!(
+            a.submission_deadline(lease, ticket, at(1_000_000)),
+            Err(AuthorityError::TicketExpired)
+        );
+        // Renewed lease (4.1s), unrenewed observation (3s): a late ticket is
+        // bounded by observation, not by its own 1s lifetime or the lease.
+        a.issue_control_challenge(1, at(1_100_000)).unwrap();
+        a.respond_control_challenge(lease, 1, at(1_200_000))
+            .unwrap();
+        let late = InputTicketId::from_raw(8);
+        a.issue_input_ticket(lease, late, at(2_500_000)).unwrap();
+        assert_eq!(
+            a.submission_deadline(lease, late, at(2_500_001)),
+            Ok(at(3_000_000))
+        );
+        assert_eq!(
+            a.submission_deadline(InputLeaseId::from_raw(99), late, at(2_600_000)),
+            Err(AuthorityError::StaleLease)
+        );
+        assert_eq!(
+            a.submission_deadline(lease, late, at(3_000_000)),
+            Err(AuthorityError::ObservationExpired)
+        );
+        // A bounded source deadline earlier than the ticket bounds submission.
+        let (session, lease, ticket) = ids();
+        let mut b = SessionAuthority::new(session, AuthorityPolicy::plan_defaults());
+        b.mark_capabilities_checked().unwrap();
+        b.authorize_observation(at(0)).unwrap();
+        b.mark_view_ready_until(at(400_000), at(0)).unwrap();
+        b.grant_lease(lease, at(0)).unwrap();
+        b.issue_input_ticket(lease, ticket, at(0)).unwrap();
+        assert_eq!(b.submission_deadline(lease, ticket, at(1)), Ok(at(400_000)));
+        assert_eq!(
+            b.submission_deadline(lease, ticket, at(400_000)),
+            Err(AuthorityError::ViewUnready)
         );
     }
 
