@@ -385,9 +385,12 @@ mod tests {
         assert!(toolbar.status_line().contains("[Mic: Disabled]"));
 
         let generation = fr_core::ids::AudioGeneration::INITIAL;
-        let mut mic_ctrl =
-            crate::audio::ClientMicController::new(generation, fr_core::audio::AudioChannels::Mono)
-                .unwrap();
+        let mut mic_ctrl = crate::audio::ClientMicController::with_encoder(
+            generation,
+            fr_core::audio::AudioChannels::Mono,
+            Box::new(fr_media::audio::SyntheticAudioEncoder::new()),
+        )
+        .unwrap();
 
         toolbar.update_from_mic(&mic_ctrl);
         assert_eq!(toolbar.mic_status_text, "Disabled");

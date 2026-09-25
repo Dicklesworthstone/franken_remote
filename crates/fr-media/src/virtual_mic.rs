@@ -11,6 +11,11 @@
 //!   TYPED UNSUPPORTED capability there — never a silent fake device, never an
 //!   undisclosed driver install.
 //! - Revoke or lease expiry silences the uplink at the host boundary immediately.
+//!
+//! No OS endpoint in this crate injects PCM yet: every `probe()` reports
+//! `Unsupported` and every `submit_pcm` is a typed refusal
+//! (`microphone_endpoint_unqualified`). Nothing is buffered where no host
+//! application can read it.
 
 use core::fmt;
 use fr_core::audio::{AudioDirection, AudioGeneration, AudioStreamConfig, MicEndpointStatus};
@@ -40,6 +45,50 @@ pub enum MicEndpointError {
     },
     /// Endpoint has been closed.
     Closed,
+}
+
+impl MicEndpointError {
+    /// Stable machine-readable refusal code.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::EndpointNotQualified { .. } => "microphone_endpoint_unqualified",
+            Self::EndpointNotFound { .. } => "microphone_endpoint_not_found",
+            Self::PermissionDenied { .. } => "microphone_endpoint_permission_denied",
+            Self::DeviceLoss { .. } => "microphone_endpoint_device_loss",
+            Self::BufferOverrun => "microphone_endpoint_buffer_overrun",
+            Self::FormatMismatch { .. } => "microphone_endpoint_format_mismatch",
+            Self::Closed => "microphone_endpoint_closed",
+        }
+    }
+}
+
+/// Why no adapter below accepts PCM: none has an injection backend. A status
+/// declared `Qualified` (test construction only) still cannot make one accept.
+const NO_INJECTION_BACKEND: &str = "no PCM injection backend is implemented for this endpoint";
+
+/// The single refusal every OS adapter in this module returns from `submit_pcm`.
+fn refuse_submission(
+    status: &MicEndpointStatus,
+    endpoint_os: &'static str,
+    closed: bool,
+) -> MicEndpointError {
+    if closed {
+        return MicEndpointError::Closed;
+    }
+    match status {
+        MicEndpointStatus::Unsupported { os, reason } => {
+            MicEndpointError::EndpointNotQualified { os, reason }
+        }
+        MicEndpointStatus::Disabled => MicEndpointError::EndpointNotQualified {
+            os: endpoint_os,
+            reason: "virtual microphone is disabled",
+        },
+        MicEndpointStatus::Qualified { .. } => MicEndpointError::EndpointNotQualified {
+            os: endpoint_os,
+            reason: NO_INJECTION_BACKEND,
+        },
+    }
 }
 
 impl fmt::Display for MicEndpointError {
@@ -91,60 +140,42 @@ pub trait VirtualMicEndpoint: Send + Sync {
 
 /// Linux `PipeWire` virtual microphone source adapter.
 ///
-/// Implements a `PipeWire` virtual source node (`media.class = Audio/Source/Virtual`)
-/// as validated by the Phase 0 virtual-mic spike.
+/// The final endpoint is a `PipeWire` virtual source node
+/// (`media.class = Audio/Source/Virtual`). No such node is implemented, so this
+/// adapter is unqualified on every host, whether or not a `PipeWire` socket
+/// exists: a socket is not an endpoint any application can select.
 #[derive(Debug)]
 pub struct LinuxPipeWireMicEndpoint {
     status: MicEndpointStatus,
-    buffered_frames: Vec<AudioPcmFrame>,
-    max_buffered_frames: usize,
     is_closed: bool,
 }
 
 impl LinuxPipeWireMicEndpoint {
-    /// Probe the Linux host environment for `PipeWire` runtime and virtual source support.
+    /// Typed reason reported by [`Self::probe`].
+    pub const UNQUALIFIED_REASON: &'static str =
+        "no PipeWire virtual source is implemented; microphone forwarding is unsupported";
+
+    /// Probe the Linux host. Always `Unsupported` until a real `PipeWire`
+    /// virtual source exists; never inferred from the runtime socket.
     #[must_use]
     pub fn probe() -> Self {
-        // Probe for PipeWire runtime directory or socket
-        let has_runtime = std::env::var_os("PIPEWIRE_RUNTIME_DIR").is_some()
-            || std::env::var_os("XDG_RUNTIME_DIR")
-                .is_some_and(|p| std::path::Path::new(&p).join("pipewire-0").exists());
-
-        let status = if has_runtime {
-            MicEndpointStatus::Qualified {
-                endpoint_name: "fr-virtual-mic",
-                description: "PipeWire virtual source (Audio/Source/Virtual)",
-            }
-        } else {
-            MicEndpointStatus::Unsupported {
-                os: "linux",
-                reason: "PipeWire runtime socket pipewire-0 not found in XDG_RUNTIME_DIR",
-            }
-        };
-
         Self {
-            status,
-            buffered_frames: Vec::new(),
-            max_buffered_frames: 10, // 100 ms at 10 ms/frame
+            status: MicEndpointStatus::Unsupported {
+                os: "linux",
+                reason: Self::UNQUALIFIED_REASON,
+            },
             is_closed: false,
         }
     }
 
-    /// Construct a synthetic instance with an explicitly declared status (for lab qualification).
+    /// Construct with an explicitly declared status (feature `testing` only).
+    #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn with_status(status: MicEndpointStatus) -> Self {
         Self {
             status,
-            buffered_frames: Vec::new(),
-            max_buffered_frames: 10,
             is_closed: false,
         }
-    }
-
-    /// Return the count of buffered PCM frames awaiting consumption.
-    #[must_use]
-    pub fn buffered_frame_count(&self) -> usize {
-        self.buffered_frames.len()
     }
 }
 
@@ -153,37 +184,13 @@ impl VirtualMicEndpoint for LinuxPipeWireMicEndpoint {
         self.status.clone()
     }
 
-    fn submit_pcm(&mut self, frame: &AudioPcmFrame) -> Result<(), MicEndpointError> {
-        if self.is_closed {
-            return Err(MicEndpointError::Closed);
-        }
-        match &self.status {
-            MicEndpointStatus::Qualified { .. } => {}
-            MicEndpointStatus::Unsupported { os, reason } => {
-                return Err(MicEndpointError::EndpointNotQualified { os, reason });
-            }
-            MicEndpointStatus::Disabled => {
-                return Err(MicEndpointError::EndpointNotQualified {
-                    os: "linux",
-                    reason: "virtual microphone is disabled",
-                });
-            }
-        }
-
-        if self.buffered_frames.len() >= self.max_buffered_frames {
-            // Buffer overrun: discard oldest frame to bound memory and prevent latency buildup
-            self.buffered_frames.remove(0);
-        }
-        self.buffered_frames.push(*frame);
-        Ok(())
+    fn submit_pcm(&mut self, _frame: &AudioPcmFrame) -> Result<(), MicEndpointError> {
+        Err(refuse_submission(&self.status, "linux", self.is_closed))
     }
 
-    fn silence(&mut self) {
-        self.buffered_frames.clear();
-    }
+    fn silence(&mut self) {}
 
     fn close(&mut self) {
-        self.silence();
         self.is_closed = true;
     }
 }
@@ -199,30 +206,25 @@ pub struct MacOSCoreAudioMicEndpoint {
 }
 
 impl MacOSCoreAudioMicEndpoint {
-    /// Probe the macOS host environment for the signed `CoreAudio` HAL driver plugin.
+    /// Typed reason reported by [`Self::probe`].
+    pub const UNQUALIFIED_REASON: &'static str =
+        "no CoreAudio server plugin is implemented; microphone forwarding is unsupported";
+
+    /// Probe the macOS host. Always `Unsupported` until the signed plugin and
+    /// its injection path exist; a file at the plugin path is not evidence.
     #[must_use]
     pub fn probe() -> Self {
-        let plugin_path =
-            std::path::Path::new("/Library/Audio/Plug-Ins/HAL/FrankenRemoteAudioServer.driver");
-        let status = if plugin_path.exists() {
-            MicEndpointStatus::Qualified {
-                endpoint_name: "FrankenRemote Audio Driver",
-                description: "Signed CoreAudio AudioServerPlugin virtual microphone",
-            }
-        } else {
-            MicEndpointStatus::Unsupported {
-                os: "macos",
-                reason: "signed CoreAudio server plugin not found at /Library/Audio/Plug-Ins/HAL/FrankenRemoteAudioServer.driver",
-            }
-        };
-
         Self {
-            status,
+            status: MicEndpointStatus::Unsupported {
+                os: "macos",
+                reason: Self::UNQUALIFIED_REASON,
+            },
             is_closed: false,
         }
     }
 
-    /// Construct with explicitly declared status.
+    /// Construct with an explicitly declared status (feature `testing` only).
+    #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn with_status(status: MicEndpointStatus) -> Self {
         Self {
@@ -238,19 +240,7 @@ impl VirtualMicEndpoint for MacOSCoreAudioMicEndpoint {
     }
 
     fn submit_pcm(&mut self, _frame: &AudioPcmFrame) -> Result<(), MicEndpointError> {
-        if self.is_closed {
-            return Err(MicEndpointError::Closed);
-        }
-        match &self.status {
-            MicEndpointStatus::Qualified { .. } => Ok(()),
-            MicEndpointStatus::Unsupported { os, reason } => {
-                Err(MicEndpointError::EndpointNotQualified { os, reason })
-            }
-            MicEndpointStatus::Disabled => Err(MicEndpointError::EndpointNotQualified {
-                os: "macos",
-                reason: "virtual microphone is disabled",
-            }),
-        }
+        Err(refuse_submission(&self.status, "macos", self.is_closed))
     }
 
     fn silence(&mut self) {}
@@ -287,7 +277,8 @@ impl WindowsVirtualAudioMicEndpoint {
         }
     }
 
-    /// Construct with explicitly declared status.
+    /// Construct with an explicitly declared status (feature `testing` only).
+    #[cfg(any(test, feature = "testing"))]
     #[must_use]
     pub fn with_status(status: MicEndpointStatus) -> Self {
         Self {
@@ -303,19 +294,7 @@ impl VirtualMicEndpoint for WindowsVirtualAudioMicEndpoint {
     }
 
     fn submit_pcm(&mut self, _frame: &AudioPcmFrame) -> Result<(), MicEndpointError> {
-        if self.is_closed {
-            return Err(MicEndpointError::Closed);
-        }
-        match &self.status {
-            MicEndpointStatus::Qualified { .. } => Ok(()),
-            MicEndpointStatus::Unsupported { os, reason } => {
-                Err(MicEndpointError::EndpointNotQualified { os, reason })
-            }
-            MicEndpointStatus::Disabled => Err(MicEndpointError::EndpointNotQualified {
-                os: "windows",
-                reason: "virtual microphone is disabled",
-            }),
-        }
+        Err(refuse_submission(&self.status, "windows", self.is_closed))
     }
 
     fn silence(&mut self) {}
@@ -325,7 +304,10 @@ impl VirtualMicEndpoint for WindowsVirtualAudioMicEndpoint {
     }
 }
 
-/// Synthetic virtual microphone endpoint for deterministic lab tests and qualification.
+/// Synthetic virtual microphone endpoint for deterministic lab tests (feature
+/// `testing` only). It records frames in memory; it is never an OS endpoint and
+/// never qualification evidence.
+#[cfg(any(test, feature = "testing"))]
 #[derive(Debug)]
 pub struct SyntheticVirtualMicEndpoint {
     status: MicEndpointStatus,
@@ -337,6 +319,7 @@ pub struct SyntheticVirtualMicEndpoint {
     is_closed: bool,
 }
 
+#[cfg(any(test, feature = "testing"))]
 impl SyntheticVirtualMicEndpoint {
     #[must_use]
     pub fn new_qualified(name: &'static str) -> Self {
@@ -397,6 +380,7 @@ impl SyntheticVirtualMicEndpoint {
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 impl VirtualMicEndpoint for SyntheticVirtualMicEndpoint {
     fn status(&self) -> MicEndpointStatus {
         self.status.clone()
@@ -631,34 +615,89 @@ mod tests {
     use crate::audio::SyntheticAudioDecoder;
     use fr_core::audio::AudioChannels;
 
-    #[test]
-    fn test_linux_pipewire_endpoint_probe_and_submit() {
-        let mut endpoint = LinuxPipeWireMicEndpoint::with_status(MicEndpointStatus::Qualified {
-            endpoint_name: "fr-virtual-mic",
-            description: "PipeWire virtual source",
-        });
-        assert!(endpoint.is_qualified());
-
+    fn mono_frame() -> AudioPcmFrame {
         let samples = vec![1000i16; 480];
-        let frame = AudioPcmFrame::from_interleaved(
-            AudioGeneration::INITIAL,
-            AudioChannels::Mono,
-            0,
-            &samples,
-        )
-        .unwrap();
+        AudioPcmFrame::from_interleaved(AudioGeneration::INITIAL, AudioChannels::Mono, 0, &samples)
+            .unwrap()
+    }
 
-        assert_eq!(endpoint.buffered_frame_count(), 0);
-        endpoint.submit_pcm(&frame).unwrap();
-        assert_eq!(endpoint.buffered_frame_count(), 1);
+    #[test]
+    fn linux_probe_is_unqualified_and_submission_is_a_typed_refusal() {
+        // Production entry point: never Qualified, whatever PipeWire sockets exist.
+        let mut endpoint = LinuxPipeWireMicEndpoint::probe();
+        assert_eq!(
+            endpoint.status(),
+            MicEndpointStatus::Unsupported {
+                os: "linux",
+                reason: LinuxPipeWireMicEndpoint::UNQUALIFIED_REASON,
+            }
+        );
+        assert!(!endpoint.is_qualified());
 
-        // Silence flushes buffer
-        endpoint.silence();
-        assert_eq!(endpoint.buffered_frame_count(), 0);
+        let err = endpoint.submit_pcm(&mono_frame()).unwrap_err();
+        assert_eq!(
+            err,
+            MicEndpointError::EndpointNotQualified {
+                os: "linux",
+                reason: LinuxPipeWireMicEndpoint::UNQUALIFIED_REASON,
+            }
+        );
+        assert_eq!(err.code(), "microphone_endpoint_unqualified");
 
-        // Close marks closed
         endpoint.close();
-        assert_eq!(endpoint.submit_pcm(&frame), Err(MicEndpointError::Closed));
+        assert_eq!(
+            endpoint.submit_pcm(&mono_frame()),
+            Err(MicEndpointError::Closed)
+        );
+    }
+
+    #[test]
+    fn declared_qualified_status_never_makes_an_os_adapter_accept_pcm() {
+        let qualified = MicEndpointStatus::Qualified {
+            endpoint_name: "fr-virtual-mic",
+            description: "declared, not implemented",
+        };
+        let endpoints: [(Box<dyn VirtualMicEndpoint>, &'static str); 3] = [
+            (
+                Box::new(LinuxPipeWireMicEndpoint::with_status(qualified.clone())),
+                "linux",
+            ),
+            (
+                Box::new(MacOSCoreAudioMicEndpoint::with_status(qualified.clone())),
+                "macos",
+            ),
+            (
+                Box::new(WindowsVirtualAudioMicEndpoint::with_status(qualified)),
+                "windows",
+            ),
+        ];
+        for (mut endpoint, os) in endpoints {
+            assert_eq!(
+                endpoint.submit_pcm(&mono_frame()),
+                Err(MicEndpointError::EndpointNotQualified {
+                    os,
+                    reason: NO_INJECTION_BACKEND,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn macos_and_windows_probes_are_unqualified() {
+        let mut macos = MacOSCoreAudioMicEndpoint::probe();
+        assert!(!macos.is_qualified());
+        assert_eq!(
+            macos.submit_pcm(&mono_frame()),
+            Err(MicEndpointError::EndpointNotQualified {
+                os: "macos",
+                reason: MacOSCoreAudioMicEndpoint::UNQUALIFIED_REASON,
+            })
+        );
+
+        let mut windows = WindowsVirtualAudioMicEndpoint::probe();
+        assert!(!windows.is_qualified());
+        let refusal = windows.submit_pcm(&mono_frame()).unwrap_err();
+        assert_eq!(refusal.code(), "microphone_endpoint_unqualified");
     }
 
     #[test]

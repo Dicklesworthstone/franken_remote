@@ -13,7 +13,8 @@ fr-core.workspace = true
 
 [dev-dependencies]
 fr-client.workspace = true
-fr-media.workspace = true
+# Lab scenarios drive the placeholder audio codecs and virtual-mic endpoint.
+fr-media = { workspace = true, features = ["testing"] }
 fr-wire.workspace = true
 
 [lints]

@@ -9,14 +9,35 @@ use core::fmt;
 use fr_core::ids::{HostBootId, OsSessionId};
 use std::net::IpAddr;
 
+/// Pixel geometry of an available desktop, reported only with its basis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopGeometry {
+    /// Screen size this broker gave the virtual display it launched
+    /// (`Xvfb -screen 0 WxH`); a creation-time value, not a live query.
+    Provisioned { width: u32, height: u32 },
+    /// Nothing measured the display (typed `display_unknown`); an environment
+    /// variable names a display, not its size.
+    Unknown,
+}
+
+impl DesktopGeometry {
+    /// Stable machine-readable label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Provisioned { .. } => "provisioned",
+            Self::Unknown => "display_unknown",
+        }
+    }
+}
+
 /// Availability of a shareable user desktop on the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DesktopAvailability {
     /// A graphical desktop session is available for capture.
     Available {
         display: String,
-        width: u32,
-        height: u32,
+        geometry: DesktopGeometry,
         compositor: &'static str,
     },
     /// No shareable desktop exists (e.g. pre-login, locked, or headless).
@@ -106,8 +127,6 @@ impl BrokerService {
         {
             let is_headless_selected =
                 matches!(config.desktop, super::config::DesktopSelection::Headless);
-            let has_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
-            let has_x11 = std::env::var("DISPLAY").is_ok();
 
             if is_headless_selected || config.virtual_display.enabled {
                 match super::virtual_display::VirtualDisplayManager::start(&config.virtual_display)
@@ -115,8 +134,10 @@ impl BrokerService {
                     Ok(instance) => {
                         let availability = DesktopAvailability::Available {
                             display: instance.display.clone(),
-                            width: instance.width,
-                            height: instance.height,
+                            geometry: DesktopGeometry::Provisioned {
+                                width: instance.width,
+                                height: instance.height,
+                            },
                             compositor: "xvfb",
                         };
                         return (availability, Some(instance));
@@ -132,37 +153,13 @@ impl BrokerService {
                 }
             }
 
-            if has_wayland {
-                let display =
-                    std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".into());
-                (
-                    DesktopAvailability::Available {
-                        display,
-                        width: 1920,
-                        height: 1080,
-                        compositor: "wayland",
-                    },
-                    None,
-                )
-            } else if has_x11 {
-                let display = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into());
-                (
-                    DesktopAvailability::Available {
-                        display,
-                        width: 1920,
-                        height: 1080,
-                        compositor: "x11",
-                    },
-                    None,
-                )
-            } else {
-                (
-                    DesktopAvailability::NoShareableDesktop {
-                        reason: DesktopUnavailableReason::NoDisplayServerDetected,
-                    },
-                    None,
-                )
-            }
+            (
+                Self::session_desktop(
+                    std::env::var("WAYLAND_DISPLAY").ok(),
+                    std::env::var("DISPLAY").ok(),
+                ),
+                None,
+            )
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -172,6 +169,29 @@ impl BrokerService {
                 },
                 None,
             )
+        }
+    }
+
+    /// Availability from the session's display variables. A named display is
+    /// reported with [`DesktopGeometry::Unknown`]: its size was never measured.
+    #[cfg(target_os = "linux")]
+    fn session_desktop(
+        wayland_display: Option<String>,
+        x11_display: Option<String>,
+    ) -> DesktopAvailability {
+        let (display, compositor) = match (wayland_display, x11_display) {
+            (Some(display), _) => (display, "wayland"),
+            (None, Some(display)) => (display, "x11"),
+            (None, None) => {
+                return DesktopAvailability::NoShareableDesktop {
+                    reason: DesktopUnavailableReason::NoDisplayServerDetected,
+                };
+            }
+        };
+        DesktopAvailability::Available {
+            display,
+            geometry: DesktopGeometry::Unknown,
+            compositor,
         }
     }
 
@@ -266,6 +286,37 @@ mod tests {
         assert_eq!(service.active_captures(), 0);
         assert_eq!(service.active_encoders(), 0);
         assert_eq!(service.gpu_surfaces(), 0);
+    }
+
+    #[test]
+    fn named_display_reports_unknown_geometry_not_1080p() {
+        for (wayland, x11, compositor, display) in [
+            (Some("wayland-1"), None, "wayland", "wayland-1"),
+            (None, Some(":7"), "x11", ":7"),
+            (Some("wayland-0"), Some(":0"), "wayland", "wayland-0"),
+        ] {
+            let availability =
+                BrokerService::session_desktop(wayland.map(String::from), x11.map(String::from));
+            assert_eq!(
+                availability,
+                DesktopAvailability::Available {
+                    display: display.into(),
+                    geometry: DesktopGeometry::Unknown,
+                    compositor,
+                }
+            );
+        }
+        assert_eq!(DesktopGeometry::Unknown.as_str(), "display_unknown");
+    }
+
+    #[test]
+    fn no_display_variables_is_a_typed_refusal() {
+        assert_eq!(
+            BrokerService::session_desktop(None, None),
+            DesktopAvailability::NoShareableDesktop {
+                reason: DesktopUnavailableReason::NoDisplayServerDetected,
+            }
+        );
     }
 
     #[test]

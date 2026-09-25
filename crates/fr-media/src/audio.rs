@@ -20,7 +20,9 @@
 //! - Linear-interpolating resampler with phase accumulator for arbitrary input device rates.
 //! - Bounded PCM frames with zero allocations in the hot path.
 //! - [`AudioEncoder`] and [`AudioDecoder`] contracts with typed backpressure and error states.
-//! - [`SyntheticAudioEncoder`] and [`SyntheticAudioDecoder`] test doubles for deterministic testing and qualification.
+//! - `SyntheticAudioEncoder` and `SyntheticAudioDecoder` test doubles (feature
+//!   `testing` only): tagged placeholder bytes, never Opus and never evidence of
+//!   codec support. Production callers supply a real codec (fr-native's libopus).
 
 use core::fmt;
 use fr_core::audio::{
@@ -603,9 +605,11 @@ pub trait AudioDecoder {
     fn reset(&mut self, new_generation: AudioGeneration);
 }
 
-/// Deterministic synthetic audio codec test double.
+/// Deterministic synthetic audio encoder test double (feature `testing` only).
 ///
-/// Deterministic synthetic audio encoder test double.
+/// Emits 16 tagged placeholder bytes per frame, not Opus. It is gated like the
+/// `fake` video codec so no production build can default to it.
+#[cfg(any(test, feature = "testing"))]
 pub struct SyntheticAudioEncoder {
     config: Option<AudioStreamConfig>,
     encoder_sequence: u64,
@@ -613,12 +617,14 @@ pub struct SyntheticAudioEncoder {
     pending_packet_count: usize,
 }
 
+#[cfg(any(test, feature = "testing"))]
 impl Default for SyntheticAudioEncoder {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 impl SyntheticAudioEncoder {
     #[must_use]
     pub const fn new() -> Self {
@@ -631,6 +637,7 @@ impl SyntheticAudioEncoder {
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 impl AudioEncoder for SyntheticAudioEncoder {
     fn configure(&mut self, config: AudioStreamConfig) -> Result<(), AudioMediaError> {
         self.config = Some(config);
@@ -699,7 +706,10 @@ impl AudioEncoder for SyntheticAudioEncoder {
     }
 }
 
-/// Deterministic synthetic audio decoder test double.
+/// Deterministic synthetic audio decoder test double (feature `testing` only).
+///
+/// Decodes only [`SyntheticAudioEncoder`] placeholder bytes, never Opus.
+#[cfg(any(test, feature = "testing"))]
 pub struct SyntheticAudioDecoder {
     config: Option<AudioStreamConfig>,
     pending_pcm: [Option<AudioPcmFrame>; 8],
@@ -707,12 +717,14 @@ pub struct SyntheticAudioDecoder {
     last_decoded_sample: i16,
 }
 
+#[cfg(any(test, feature = "testing"))]
 impl Default for SyntheticAudioDecoder {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 impl SyntheticAudioDecoder {
     #[must_use]
     pub const fn new() -> Self {
@@ -725,6 +737,7 @@ impl SyntheticAudioDecoder {
     }
 }
 
+#[cfg(any(test, feature = "testing"))]
 impl AudioDecoder for SyntheticAudioDecoder {
     fn configure(&mut self, config: AudioStreamConfig) -> Result<(), AudioMediaError> {
         self.config = Some(config);

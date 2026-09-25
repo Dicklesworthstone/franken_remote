@@ -13,5 +13,10 @@ fr-media.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
+[dev-dependencies]
+# Placeholder codecs for this crate's own tests only; dev-dependency features
+# never reach a non-test build of fr-client.
+fr-media = { workspace = true, features = ["testing"] }
+
 [lints]
 workspace = true

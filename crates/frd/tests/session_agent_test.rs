@@ -22,11 +22,37 @@ use fr_core::{
 use frd::input_watchdog::StopReason;
 use frd::session_agent::{
     ApprovalMode, ApprovalState, AudioScope, DenialReason, Distinguishability, GrantedScope,
-    IndicatorDisplayState, InhibitorAction, LocalPriorityOutcome, MacOsInputSink, PeerIdentity,
-    PermissionKind, PermissionStatus, PlatformKind, PlatformPermissionError, PostedCgEvent,
-    RecordingPoster, ReleaseCertainty, RequestedScope, SessionAgent, SessionCapabilitiesInUse,
-    SessionRole, SubmissionRefusal,
+    IndicatorDisplayState, InhibitorAction, InhibitorError, LocalPriorityOutcome, MacOsInputSink,
+    PeerIdentity, PermissionKind, PermissionStatus, PlatformKind, PlatformPermissionError,
+    PostedCgEvent, RecordingPoster, ReleaseCertainty, RequestedScope, SessionAgent,
+    SessionCapabilitiesInUse, SessionRole, SleepInhibitor, SleepInhibitorPlatform,
+    SubmissionRefusal,
 };
+
+/// Test-owned in-memory inhibitor platform. It asserts nothing to any OS; it
+/// lets these tests drive the agent's ref-counting, which production cannot
+/// until a native backend exists (the default refuses `sleep_inhibitor_unavailable`).
+#[derive(Default)]
+struct SimulatedInhibitorPlatform {
+    inhibited: bool,
+}
+
+impl SleepInhibitorPlatform for SimulatedInhibitorPlatform {
+    fn set_inhibited(&mut self, inhibited: bool) -> Result<(), InhibitorError> {
+        self.inhibited = inhibited;
+        Ok(())
+    }
+
+    fn is_inhibited(&self) -> bool {
+        self.inhibited
+    }
+}
+
+fn with_simulated_inhibitor(mut agent: SessionAgent) -> SessionAgent {
+    *agent.sleep_inhibitor_mut() =
+        SleepInhibitor::new(Box::<SimulatedInhibitorPlatform>::default(), true);
+    agent
+}
 
 fn make_bounds() -> InputBounds {
     InputBounds::new(DesktopPoint { x: 0, y: 0 }, 1920, 1080).expect("valid bounds")
@@ -376,8 +402,37 @@ fn test_platform_permissions_surfacing_and_typed_refusal() {
 }
 
 #[test]
+fn test_default_sleep_inhibitor_reports_unavailable_not_held() {
+    let mut agent = agent(ApprovalMode::Unattended, PlatformKind::LinuxX11);
+    let session = RemoteSessionId::from_raw(500);
+    let t0 = HostInstant::from_micros(6_000_000);
+
+    agent
+        .request_session(
+            session,
+            &make_peer("ivan"),
+            &make_request(SessionRole::Controller),
+            t0,
+        )
+        .unwrap();
+
+    // The grant stands, but no inhibition is claimed: the production platform
+    // has no native backend and refuses with `sleep_inhibitor_unavailable`.
+    assert!(!agent.sleep_inhibitor().is_inhibiting());
+    assert_eq!(agent.sleep_inhibitor().active_session_count(), 0);
+    assert_eq!(agent.sleep_inhibitor().logs(), []);
+    let refusal = agent
+        .sleep_inhibitor_mut()
+        .acquire(RemoteSessionId::from_raw(501), t0)
+        .unwrap_err();
+    assert_eq!(refusal, InhibitorError::PlatformUnavailable);
+    assert_eq!(refusal.code(), "sleep_inhibitor_unavailable");
+}
+
+#[test]
 fn test_sleep_inhibitor_lifecycle_and_log_audit() {
-    let mut agent = agent(ApprovalMode::Unattended, PlatformKind::LinuxWayland);
+    let mut agent =
+        with_simulated_inhibitor(agent(ApprovalMode::Unattended, PlatformKind::LinuxWayland));
 
     let session_1 = RemoteSessionId::from_raw(501);
     let session_2 = RemoteSessionId::from_raw(502);
@@ -631,7 +686,8 @@ fn test_expired_lease_refuses_injection_at_submission_checkpoint() {
 
 #[test]
 fn test_fault_agent_alive_with_dead_worker() {
-    let mut agent = agent(ApprovalMode::Unattended, PlatformKind::LinuxWayland);
+    let mut agent =
+        with_simulated_inhibitor(agent(ApprovalMode::Unattended, PlatformKind::LinuxWayland));
     agent.permissions_mut().set_permission(
         PermissionKind::RemoteDesktopPortal,
         PermissionStatus::Granted,

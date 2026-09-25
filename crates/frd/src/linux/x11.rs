@@ -71,76 +71,18 @@ impl PlatformSecurityReport {
     }
 }
 
-/// Poster for X11 events (can be implemented by libXtst or simulated for testing).
+/// Poster for X11 events, to be implemented over libXtst.
+///
+/// frd has no production implementation: `frd run` injects through the
+/// fr-native worker's own `XTest` path, not this sink. The only implementation
+/// is the recording poster owned by `tests/linux_host_adapter_test.rs`, so no
+/// build of this library carries a sink that records events and reports them
+/// submitted.
 pub trait X11EventPoster: Send + Sync {
     fn fake_motion_event(&mut self, x: i32, y: i32) -> Result<(), PlatformError>;
     fn fake_button_event(&mut self, button: u32, down: bool) -> Result<(), PlatformError>;
     fn fake_key_event(&mut self, keycode: u32, down: bool) -> Result<(), PlatformError>;
     fn is_connected(&self) -> bool;
-}
-
-/// Recorded event in the test X11 poster.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum X11RecordedEvent {
-    Motion { x: i32, y: i32 },
-    Button { button: u32, down: bool },
-    Key { keycode: u32, down: bool },
-}
-
-/// Recording poster for X11 tests and deterministic verification.
-#[derive(Default)]
-pub struct RecordingX11Poster {
-    events: Vec<X11RecordedEvent>,
-    connected: bool,
-}
-
-impl RecordingX11Poster {
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            events: Vec::new(),
-            connected: true,
-        }
-    }
-
-    #[must_use]
-    pub fn events(&self) -> &[X11RecordedEvent] {
-        &self.events
-    }
-
-    pub fn set_connected(&mut self, connected: bool) {
-        self.connected = connected;
-    }
-}
-
-impl X11EventPoster for RecordingX11Poster {
-    fn fake_motion_event(&mut self, x: i32, y: i32) -> Result<(), PlatformError> {
-        if !self.connected {
-            return Err(PlatformError::Unavailable);
-        }
-        self.events.push(X11RecordedEvent::Motion { x, y });
-        Ok(())
-    }
-
-    fn fake_button_event(&mut self, button: u32, down: bool) -> Result<(), PlatformError> {
-        if !self.connected {
-            return Err(PlatformError::Unavailable);
-        }
-        self.events.push(X11RecordedEvent::Button { button, down });
-        Ok(())
-    }
-
-    fn fake_key_event(&mut self, keycode: u32, down: bool) -> Result<(), PlatformError> {
-        if !self.connected {
-            return Err(PlatformError::Unavailable);
-        }
-        self.events.push(X11RecordedEvent::Key { keycode, down });
-        Ok(())
-    }
-
-    fn is_connected(&self) -> bool {
-        self.connected
-    }
 }
 
 /// X11 input sink implementing `InputSink` with X11 specific requirements.

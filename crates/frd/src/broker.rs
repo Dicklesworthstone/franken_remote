@@ -37,7 +37,7 @@ pub use ipc::{
 };
 pub use peer_cache::{PeerCacheError, PeerIdentity, PeerIdentityCache};
 pub use process_role::{ProcessGeneration, ProcessRole, RoleCapability};
-pub use service::{BrokerService, DesktopAvailability, DesktopUnavailableReason};
+pub use service::{BrokerService, DesktopAvailability, DesktopGeometry, DesktopUnavailableReason};
 pub use session_registry::{
     MediaReadinessState, RegistryError, SessionRecord, SessionRegistry, TeardownPlan,
 };

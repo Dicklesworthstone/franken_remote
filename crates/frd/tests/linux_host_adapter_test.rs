@@ -7,13 +7,36 @@ use std::path::PathBuf;
 
 use fr_core::{
     input::{DesktopPoint, InputBounds, PointerButton},
-    input_submission::{InputSink, Operation, Submission},
+    input_submission::{InputSink, Operation, PlatformError, Submission},
 };
 
 use frd::linux::{
-    GraphicalSessionEnvironment, PlatformSecurityModel, RecordingX11Poster,
-    SessionEnvironmentError, SessionType, X11InputSink,
+    GraphicalSessionEnvironment, PlatformSecurityModel, SessionEnvironmentError, SessionType,
+    X11EventPoster, X11InputSink,
 };
+
+/// Test-only poster (moved here from the library): it accepts every event and
+/// injects nothing. It drives the sink's pairing and bounds logic; it is not
+/// X11 injection evidence.
+struct AcceptingTestPoster;
+
+impl X11EventPoster for AcceptingTestPoster {
+    fn fake_motion_event(&mut self, _x: i32, _y: i32) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
+    fn fake_button_event(&mut self, _button: u32, _down: bool) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
+    fn fake_key_event(&mut self, _keycode: u32, _down: bool) -> Result<(), PlatformError> {
+        Ok(())
+    }
+
+    fn is_connected(&self) -> bool {
+        true
+    }
+}
 
 fn make_test_bounds() -> InputBounds {
     InputBounds::new(DesktopPoint { x: 0, y: 0 }, 1920, 1080).expect("valid bounds")
@@ -21,8 +44,7 @@ fn make_test_bounds() -> InputBounds {
 
 #[test]
 fn test_x11_host_adapter_security_diagnostics_and_pairs() {
-    let poster = RecordingX11Poster::new();
-    let mut x11_sink = X11InputSink::new(poster, make_test_bounds());
+    let mut x11_sink = X11InputSink::new(AcceptingTestPoster, make_test_bounds());
 
     // Surfaced security diagnostics
     let diag = x11_sink.security_report();

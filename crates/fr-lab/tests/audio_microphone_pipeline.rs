@@ -15,13 +15,25 @@ use fr_core::audio::{
     AudioChannels, AudioDirection, AudioGeneration, AudioStreamConfig, MicEndpointStatus,
     MicPermission, MicTalkMode, NOMINAL_PACKET_DURATION_MS,
 };
-use fr_media::audio::{AudioAccessUnit, AudioDecoder, AudioPcmFrame, SyntheticAudioDecoder};
+use fr_media::audio::{
+    AudioAccessUnit, AudioDecoder, AudioPcmFrame, SyntheticAudioDecoder, SyntheticAudioEncoder,
+};
 use fr_media::virtual_mic::{
     HostAudioUplinkPipeline, LinuxPipeWireMicEndpoint, MacOSCoreAudioMicEndpoint, MicEndpointError,
     SyntheticVirtualMicEndpoint, UplinkPipelineError, VirtualMicEndpoint,
     WindowsVirtualAudioMicEndpoint,
 };
 use fr_wire::audio::{AudioPacket, decode_packet, encode_packet};
+
+/// The controller has no default encoder; the lab supplies the placeholder one.
+fn synthetic_mic(generation: AudioGeneration) -> ClientMicController {
+    ClientMicController::with_encoder(
+        generation,
+        AudioChannels::Mono,
+        Box::new(SyntheticAudioEncoder::new()),
+    )
+    .unwrap()
+}
 
 fn make_synthetic_packet(
     direction: AudioDirection,
@@ -43,7 +55,7 @@ fn make_synthetic_packet(
 #[test]
 fn hot_mic_security_test_activation_requires_explicit_enable() {
     let generation = AudioGeneration::INITIAL;
-    let mut ctrl = ClientMicController::new(generation, AudioChannels::Mono).unwrap();
+    let mut ctrl = synthetic_mic(generation);
 
     // Invariant 1: Must NOT be enabled or transmitting upon creation/connect
     assert!(!ctrl.is_explicitly_enabled());
@@ -252,7 +264,7 @@ fn lab_client_to_host_microphone_wire_pipeline() {
     let binding = 0xABCD_1234;
 
     // 1. Client side setup
-    let mut client_mic = ClientMicController::new(generation, AudioChannels::Mono).unwrap();
+    let mut client_mic = synthetic_mic(generation);
     client_mic.set_permission(MicPermission::Granted);
     client_mic.set_explicit_enabled(true).unwrap();
     client_mic.set_talk_mode(MicTalkMode::PushToTalk { active: true });

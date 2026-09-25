@@ -4,6 +4,11 @@
 //! on Windows, systemd/logind inhibitor on Linux) while at least one session is actively shared.
 //! It prevents idle sleep ONLY — it never defeats lid-close policy or a deliberate local lock,
 //! and it releases immediately when the last session ends or on worker crash.
+//!
+//! No native backend is implemented yet. The default platform is
+//! [`UnavailableInhibitorPlatform`]: every assertion attempt is refused with
+//! `sleep_inhibitor_unavailable` and the inhibitor never reports that it holds
+//! an assertion the OS was never given.
 
 use fr_core::{ids::RemoteSessionId, time::HostInstant};
 use std::collections::HashSet;
@@ -15,6 +20,18 @@ pub enum InhibitorError {
     AlreadyAcquired,
     NotAcquired,
     LockFailed,
+}
+
+impl InhibitorError {
+    /// Stable machine-readable refusal code.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::PlatformUnavailable => "sleep_inhibitor_unavailable",
+            Self::AlreadyAcquired => "sleep_inhibitor_already_acquired",
+            Self::NotAcquired => "sleep_inhibitor_not_acquired",
+            Self::LockFailed => "sleep_inhibitor_lock_failed",
+        }
+    }
 }
 
 impl core::fmt::Display for InhibitorError {
@@ -55,26 +72,24 @@ pub trait SleepInhibitorPlatform: Send + Sync {
     fn is_inhibited(&self) -> bool;
 }
 
-/// In-memory simulated platform backend for testing and platforms without native bindings.
-#[derive(Default)]
-pub struct SimulatedInhibitorPlatform {
-    inhibited: bool,
-}
+/// The platform used until a native backend (logind `Inhibit`, `IOKit`,
+/// `SetThreadExecutionState`) exists: it never asserts anything and refuses
+/// every assertion with [`InhibitorError::PlatformUnavailable`].
+#[derive(Debug, Default)]
+pub struct UnavailableInhibitorPlatform;
 
-impl SimulatedInhibitorPlatform {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl SleepInhibitorPlatform for SimulatedInhibitorPlatform {
+impl SleepInhibitorPlatform for UnavailableInhibitorPlatform {
     fn set_inhibited(&mut self, inhibited: bool) -> Result<(), InhibitorError> {
-        self.inhibited = inhibited;
-        Ok(())
+        if inhibited {
+            Err(InhibitorError::PlatformUnavailable)
+        } else {
+            // Nothing is held, so there is nothing to release.
+            Ok(())
+        }
     }
 
     fn is_inhibited(&self) -> bool {
-        self.inhibited
+        false
     }
 }
 
@@ -87,8 +102,10 @@ pub struct SleepInhibitor {
 }
 
 impl Default for SleepInhibitor {
+    /// Enabled, over [`UnavailableInhibitorPlatform`]: acquisition is a typed
+    /// `sleep_inhibitor_unavailable` refusal, never a simulated assertion.
     fn default() -> Self {
-        Self::new(Box::new(SimulatedInhibitorPlatform::new()), true)
+        Self::new(Box::new(UnavailableInhibitorPlatform), true)
     }
 }
 
@@ -160,7 +177,12 @@ impl SleepInhibitor {
         self.active_sessions.insert(session_id);
 
         let newly_inhibited = if was_empty {
-            self.platform.set_inhibited(true)?;
+            if let Err(error) = self.platform.set_inhibited(true) {
+                // The OS holds nothing: the session does not hold the inhibitor,
+                // and no `Acquired` entry is logged for an assertion that failed.
+                self.active_sessions.remove(&session_id);
+                return Err(error);
+            }
             true
         } else {
             false
@@ -227,5 +249,76 @@ impl SleepInhibitor {
         }
 
         Ok(dropped)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test-only in-memory platform; it asserts nothing to any OS.
+    #[derive(Default)]
+    struct SimulatedInhibitorPlatform {
+        inhibited: bool,
+    }
+
+    impl SleepInhibitorPlatform for SimulatedInhibitorPlatform {
+        fn set_inhibited(&mut self, inhibited: bool) -> Result<(), InhibitorError> {
+            self.inhibited = inhibited;
+            Ok(())
+        }
+
+        fn is_inhibited(&self) -> bool {
+            self.inhibited
+        }
+    }
+
+    const T0: HostInstant = HostInstant::from_micros(1_000_000);
+
+    #[test]
+    fn default_inhibitor_refuses_with_sleep_inhibitor_unavailable() {
+        let mut inhibitor = SleepInhibitor::default();
+        let session = RemoteSessionId::from_raw(1);
+
+        assert_eq!(
+            inhibitor.acquire(session, T0),
+            Err(InhibitorError::PlatformUnavailable)
+        );
+        assert_eq!(
+            InhibitorError::PlatformUnavailable.code(),
+            "sleep_inhibitor_unavailable"
+        );
+        // Nothing was asserted, so nothing is claimed as held or logged.
+        assert!(!inhibitor.is_inhibiting());
+        assert_eq!(inhibitor.active_session_count(), 0);
+        assert_eq!(inhibitor.logs(), []);
+
+        // A second session is refused the same way instead of piggybacking on
+        // an assertion that never existed.
+        assert_eq!(
+            inhibitor.acquire(RemoteSessionId::from_raw(2), T0),
+            Err(InhibitorError::PlatformUnavailable)
+        );
+        assert_eq!(inhibitor.active_session_count(), 0);
+
+        // Releasing and emergency release stay harmless with nothing held.
+        assert_eq!(inhibitor.release(session, T0), Ok(false));
+        assert_eq!(inhibitor.emergency_release_all(T0), Ok(false));
+        assert_eq!(inhibitor.logs(), []);
+    }
+
+    #[test]
+    fn sleep_inhibitor_ref_counts_over_an_explicit_platform() {
+        let mut inhibitor = SleepInhibitor::new(Box::<SimulatedInhibitorPlatform>::default(), true);
+        let first = RemoteSessionId::from_raw(1);
+        let second = RemoteSessionId::from_raw(2);
+
+        assert_eq!(inhibitor.acquire(first, T0), Ok(true));
+        assert_eq!(inhibitor.acquire(second, T0), Ok(false));
+        assert!(inhibitor.is_inhibiting());
+        assert_eq!(inhibitor.release(first, T0), Ok(false));
+        assert!(inhibitor.is_inhibiting());
+        assert_eq!(inhibitor.release(second, T0), Ok(true));
+        assert!(!inhibitor.is_inhibiting());
     }
 }

@@ -14,7 +14,7 @@ use fr_core::audio::{
     AudioChannels, AudioDirection, AudioGeneration, AudioStreamConfig, MicPermission, MicTalkMode,
     NOMINAL_PACKET_DURATION_MS,
 };
-use fr_media::audio::{AudioAccessUnit, AudioEncoder, AudioPcmFrame, SyntheticAudioEncoder};
+use fr_media::audio::{AudioAccessUnit, AudioEncoder, AudioPcmFrame};
 
 /// Errors encountered in client microphone operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,45 +72,19 @@ pub struct ClientMicController {
 }
 
 impl ClientMicController {
-    /// Create a new client microphone controller.
+    /// Create a client microphone controller around an explicitly supplied Opus
+    /// encoder (in production, fr-native's libopus encoder).
+    ///
+    /// There is deliberately no default encoder: a controller that silently fell
+    /// back to a placeholder would emit non-Opus bytes as microphone audio. The
+    /// encoder is configured for the uplink stream here; a refusal is returned as
+    /// [`MicControllerError::ConfigError`] and no controller is built.
     ///
     /// By invariant, `explicit_enabled` is initialized to `false` and talk mode to `Muted`.
-    pub fn new(
-        generation: AudioGeneration,
-        channels: AudioChannels,
-    ) -> Result<Self, MicControllerError> {
-        let config = AudioStreamConfig::new(
-            AudioDirection::Uplink,
-            generation,
-            channels,
-            NOMINAL_PACKET_DURATION_MS,
-            20,
-        )
-        .map_err(|e| MicControllerError::ConfigError(e.to_string()))?;
-
-        let mut encoder = Box::new(SyntheticAudioEncoder::new());
-        encoder
-            .configure(config)
-            .map_err(|e| MicControllerError::ConfigError(e.to_string()))?;
-
-        Ok(Self {
-            explicit_enabled: false,
-            permission: MicPermission::NotRequested,
-            talk_mode: MicTalkMode::Muted,
-            generation,
-            config,
-            encoder,
-            sequence: 0,
-            current_rms: 0.0,
-            total_packets_transmitted: 0,
-        })
-    }
-
-    /// Create a controller with a custom encoder (e.g. for testing or native Opus wrapper).
     pub fn with_encoder(
         generation: AudioGeneration,
         channels: AudioChannels,
-        encoder: Box<dyn AudioEncoder>,
+        mut encoder: Box<dyn AudioEncoder>,
     ) -> Result<Self, MicControllerError> {
         let config = AudioStreamConfig::new(
             AudioDirection::Uplink,
@@ -120,6 +94,9 @@ impl ClientMicController {
             20,
         )
         .map_err(|e| MicControllerError::ConfigError(e.to_string()))?;
+        encoder
+            .configure(config)
+            .map_err(|e| MicControllerError::ConfigError(e.to_string()))?;
 
         Ok(Self {
             explicit_enabled: false,
@@ -282,11 +259,68 @@ impl ClientMicController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fr_media::audio::{AudioMediaError, SyntheticAudioEncoder};
+
+    fn synthetic(
+        generation: AudioGeneration,
+        channels: AudioChannels,
+    ) -> Result<ClientMicController, MicControllerError> {
+        ClientMicController::with_encoder(
+            generation,
+            channels,
+            Box::new(SyntheticAudioEncoder::new()),
+        )
+    }
+
+    /// An encoder that refuses configuration, standing in for a missing or
+    /// unqualified native Opus encoder.
+    struct RefusingEncoder;
+
+    impl AudioEncoder for RefusingEncoder {
+        fn configure(&mut self, _config: AudioStreamConfig) -> Result<(), AudioMediaError> {
+            Err(AudioMediaError::UnsupportedFormat)
+        }
+
+        fn submit_pcm(&mut self, _pcm: &AudioPcmFrame) -> Result<(), AudioMediaError> {
+            Err(AudioMediaError::NotConfigured)
+        }
+
+        fn poll_packet(&mut self) -> Result<Option<AudioAccessUnit>, AudioMediaError> {
+            Err(AudioMediaError::NotConfigured)
+        }
+
+        fn configuration(&self) -> Option<AudioStreamConfig> {
+            None
+        }
+    }
+
+    #[test]
+    fn controller_refuses_an_encoder_that_cannot_be_configured() {
+        let result = ClientMicController::with_encoder(
+            AudioGeneration::INITIAL,
+            AudioChannels::Mono,
+            Box::new(RefusingEncoder),
+        );
+        let Err(MicControllerError::ConfigError(reason)) = result else {
+            panic!("an unconfigurable encoder must be a typed refusal");
+        };
+        assert_eq!(reason, AudioMediaError::UnsupportedFormat.to_string());
+    }
+
+    #[test]
+    fn supplied_encoder_is_configured_for_the_uplink_stream() {
+        let generation = AudioGeneration::INITIAL;
+        let ctrl = synthetic(generation, AudioChannels::Mono).unwrap();
+        let configured = ctrl.encoder.configuration().expect("encoder configured");
+        assert_eq!(configured.direction(), AudioDirection::Uplink);
+        assert_eq!(configured.generation(), generation);
+        assert_eq!(configured.channels(), AudioChannels::Mono);
+    }
 
     #[test]
     fn test_hot_mic_protection_strictly_enforced() {
         let generation = AudioGeneration::INITIAL;
-        let mut ctrl = ClientMicController::new(generation, AudioChannels::Mono).unwrap();
+        let mut ctrl = synthetic(generation, AudioChannels::Mono).unwrap();
 
         // Invariant: starts disabled and muted
         assert!(!ctrl.is_explicitly_enabled());
@@ -341,7 +375,7 @@ mod tests {
     #[test]
     fn test_revoking_permission_immediately_disables_mic() {
         let generation = AudioGeneration::INITIAL;
-        let mut ctrl = ClientMicController::new(generation, AudioChannels::Mono).unwrap();
+        let mut ctrl = synthetic(generation, AudioChannels::Mono).unwrap();
         ctrl.set_permission(MicPermission::Granted);
         ctrl.set_explicit_enabled(true).unwrap();
         ctrl.set_talk_mode(MicTalkMode::OpenMic { active: true });

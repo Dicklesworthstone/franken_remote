@@ -42,8 +42,8 @@ pub use permissions::{
     PermissionKind, PermissionStatus, PermissionsManager, PlatformKind, PlatformPermissionError,
 };
 pub use sleep_inhibitor::{
-    InhibitorAction, InhibitorError, InhibitorLogEntry, SimulatedInhibitorPlatform, SleepInhibitor,
-    SleepInhibitorPlatform,
+    InhibitorAction, InhibitorError, InhibitorLogEntry, SleepInhibitor, SleepInhibitorPlatform,
+    UnavailableInhibitorPlatform,
 };
 
 use crate::input_watchdog::{Control as InputControl, StopReason};

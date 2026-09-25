@@ -8,7 +8,4 @@ pub mod x11;
 
 pub use systemd_session::{GraphicalSessionEnvironment, SessionEnvironmentError, SessionType};
 
-pub use x11::{
-    PlatformSecurityModel, PlatformSecurityReport, RecordingX11Poster, X11EventPoster,
-    X11InputSink, X11RecordedEvent,
-};
+pub use x11::{PlatformSecurityModel, PlatformSecurityReport, X11EventPoster, X11InputSink};
