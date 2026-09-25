@@ -2,9 +2,7 @@
 //! `PROTOCOL_REFUSAL.md` for the byte contract. A refusal is not an input
 //! receipt, a grant, or proof that remote cleanup succeeded.
 use crate::{
-    HEADER_BYTES, Kind, Record, WireError,
-    input::InputDelivery,
-    input_result::Stage,
+    HEADER_BYTES, Kind, Record, WireError, input::InputDelivery, input_result::Stage,
     record::Writer,
 };
 use core::fmt;

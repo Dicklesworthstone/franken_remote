@@ -112,8 +112,8 @@ impl Messages {
             Self::SessionControl => {
                 matches!(
                     kind,
-                    0x0004
-                        | 0x0012..=0x001e
+                    0x0004 | 0x0012
+                        ..=0x001e
                             | 0x0020
                             | 0x0022
                             | 0x0036

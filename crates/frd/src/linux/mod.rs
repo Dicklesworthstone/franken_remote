@@ -1,5 +1,5 @@
 //! Linux host adapters that remain after the 2026-09-24 removal of the Wayland
-//! portal, PipeWire and EIS models (none were wired to a real portal, PipeWire
+//! portal, `PipeWire` and EIS models (none were wired to a real portal, `PipeWire`
 //! or libei). `frd run` hosts X11 through the fr-native capture worker; these
 //! modules are not on that path.
 

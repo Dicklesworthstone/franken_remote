@@ -16,7 +16,11 @@ fn independent_fixtures_decode_and_encode_exactly() {
     assert_eq!(BOOTSTRAP.len(), refusal::MIN_BYTES);
     assert_eq!(BOUND.len(), refusal::MAX_BYTES);
     for (bytes, binding, message) in [
-        (BOOTSTRAP, 0, Refused::connection(Reason::ControlUnavailable)),
+        (
+            BOOTSTRAP,
+            0,
+            Refused::connection(Reason::ControlUnavailable),
+        ),
         (
             BOUND,
             7,
@@ -87,7 +91,13 @@ fn wrong_binding_channel_limits_and_short_buffers_are_rejected() {
             Err(WireError::ResourceLimit)
         );
         assert_eq!(
-            refusal::encode(message, binding, 4096, &mut out[..bytes.len() - 1], Reliable),
+            refusal::encode(
+                message,
+                binding,
+                4096,
+                &mut out[..bytes.len() - 1],
+                Reliable
+            ),
             Err(WireError::BufferTooSmall)
         );
     }
@@ -96,8 +106,16 @@ fn wrong_binding_channel_limits_and_short_buffers_are_rejected() {
 #[test]
 fn malformed_values_and_framing_never_become_a_peer_refusal() {
     for (index, value) in [
-        (0, b'X'), (5, 1), (7, 5), (8, 1), (15, 255),
-        (23, 5), (25, 0), (25, 255), (26, 2), (27, 2),
+        (0, b'X'),
+        (5, 1),
+        (7, 5),
+        (8, 1),
+        (15, 255),
+        (23, 5),
+        (25, 0),
+        (25, 255),
+        (26, 2),
+        (27, 2),
     ] {
         let mut bytes = BOOTSTRAP.to_vec();
         bytes[index] = value;

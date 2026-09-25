@@ -172,7 +172,11 @@ fn bound_or_revoked_sessions_cannot_use_the_bootstrap_reporting_path() {
             report(&mut host, Error::Denied).await;
             assert!(host.transport.as_ref().unwrap().is_closed());
             assert_eq!(
-                host.transport.as_ref().unwrap().usage().retained_send_records,
+                host.transport
+                    .as_ref()
+                    .unwrap()
+                    .usage()
+                    .retained_send_records,
                 0
             );
             assert_eq!(host.check(), Err(Error::Closed));

@@ -82,6 +82,11 @@ fn main() {
     println!("cargo:rustc-link-lib=static=frnative");
     // Narrow public ABI for checked MIT-SHM on the original Xlib connection.
     println!("cargo:rustc-link-lib=dylib:+verbatim=libX11-xcb.so.1");
+    link_system_libraries(&packages, library);
+}
+
+/// Link FFmpeg/X11 either from the explicit SDK directory or from pkg-config.
+fn link_system_libraries(packages: &[&str], library: Option<std::ffi::OsString>) {
     let libs = if let Some(path) = library {
         format!(
             "-L{} -lavcodec -lavutil -lswscale -lX11 -lxcb",

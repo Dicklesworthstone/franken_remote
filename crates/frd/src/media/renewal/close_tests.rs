@@ -118,13 +118,17 @@ fn close_and_invalid_close_fence_before_following_application_records() {
             };
             let deadline = c.timer_driver().unwrap().now().as_nanos() / 1000 + 1_000_000;
             let (q, routes) = viewer.io().unwrap();
-            q.send(&c, Route::Stream(routes.outbound), &bytes, deadline, || true)
-                .unwrap();
+            q.send(&c, Route::Stream(routes.outbound), &bytes, deadline, || {
+                true
+            })
+            .unwrap();
             // A following control-family record must not reach the application,
             // even if both arrive in one turn. No input effect is simulated here.
             bytes[6..8].copy_from_slice(&(Kind::ControlRequest as u16).to_be_bytes());
-            q.send(&c, Route::Stream(routes.outbound), &bytes, deadline, || true)
-                .unwrap();
+            q.send(&c, Route::Stream(routes.outbound), &bytes, deadline, || {
+                true
+            })
+            .unwrap();
             let (error, callbacks) = terminal(&mut host, &mut viewer).await;
             assert_eq!(error, StartupError::Renewal(expected));
             assert_eq!(callbacks, 0);
@@ -150,8 +154,10 @@ fn closing_one_session_does_not_revoke_another_owner_with_equal_numeric_ids() {
         let bytes = request(&host);
         let deadline = c.timer_driver().unwrap().now().as_nanos() / 1000 + 1_000_000;
         let (q, routes) = viewer.io().unwrap();
-        q.send(&c, Route::Stream(routes.outbound), &bytes, deadline, || true)
-            .unwrap();
+        q.send(&c, Route::Stream(routes.outbound), &bytes, deadline, || {
+            true
+        })
+        .unwrap();
         let (error, callbacks) = terminal(&mut host, &mut viewer).await;
         assert_eq!(error, StartupError::Renewal(Error::PeerClosed));
         assert_eq!(callbacks, 0);

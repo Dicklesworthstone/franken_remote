@@ -265,19 +265,21 @@ impl ObservationRenewal {
                 if route == Route::Stream(self.routes.inbound)
                     && kind == Some(&(Kind::CloseRequest as u16).to_be_bytes())
                 {
-                    failure = Some(match fr_wire::closure::decode_request(
-                        bytes,
-                        self.binding,
-                        &self.limits,
-                        InputDirection::ViewerToHost,
-                        InputDelivery::Reliable,
-                    ) {
-                        Ok(_) => {
-                            self.stop();
-                            Error::PeerClosed
-                        }
-                        Err(error) => Error::Wire(error),
-                    });
+                    failure = Some(
+                        match fr_wire::closure::decode_request(
+                            bytes,
+                            self.binding,
+                            &self.limits,
+                            InputDirection::ViewerToHost,
+                            InputDelivery::Reliable,
+                        ) {
+                            Ok(_) => {
+                                self.stop();
+                                Error::PeerClosed
+                            }
+                            Err(error) => Error::Wire(error),
+                        },
+                    );
                     // A terminal result, not callback backpressure. The I/O guard
                     // closes this connection and fences malformed requests too.
                     return Err(());
