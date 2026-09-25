@@ -1,4 +1,4 @@
-//! Independent, hand-written bytes from PROTOCOL_LEASE_REVOKED.md, not an
+//! Independent, hand-written bytes from `PROTOCOL_LEASE_REVOKED.md`, not an
 //! encoder-generated golden. These are codec tests, not live-wire evidence.
 use fr_core::{
     ids::{InputLeaseId, RemoteSessionId},
@@ -170,7 +170,7 @@ fn every_defined_reason_and_stage_round_trips_without_losing_information() {
                 let mut out = [0; REVOKED_BYTES];
                 encode(value, &mut out).expect("valid stage");
                 assert_eq!(decode(&out), Ok(value));
-                assert!(!reason.code().is_empty());
+                assert_ne!(reason.code(), "");
             }
         }
     }

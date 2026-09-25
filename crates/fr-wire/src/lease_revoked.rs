@@ -78,7 +78,7 @@ impl CleanupStage {
 }
 
 /// Receipt accounting, NOT a claim that external effects have been undone.
-/// Individual InputResult records remain authoritative and must be retained.
+/// Individual `InputResult` records remain authoritative and must be retained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum EffectStage {
