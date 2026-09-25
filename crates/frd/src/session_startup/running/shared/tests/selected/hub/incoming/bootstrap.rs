@@ -229,9 +229,10 @@ fn first_observer_refuses_control_intent_without_prompt_or_downgrade() {
                 .unwrap(),
         );
         let mut client = Box::pin(async {
-            loop {
-                let _ = viewer.drive(Duration::from_millis(1)).await;
-            }
+            // A terminal viewer returns its error before awaiting anything, so
+            // driving it again would spin this poll forever.
+            while viewer.drive(Duration::from_millis(1)).await.is_ok() {}
+            std::future::pending::<()>().await;
         });
         let result = poll_fn(|task| {
             if let Poll::Ready(result) = opening.as_mut().poll(task) {
@@ -287,9 +288,10 @@ fn first_observer_unused_source_budget_is_not_renewed_by_local_service() {
                 .unwrap(),
         );
         let mut client = Box::pin(async {
-            loop {
-                let _ = viewer.drive(Duration::from_millis(1)).await;
-            }
+            // A terminal viewer returns its error before awaiting anything, so
+            // driving it again would spin this poll forever.
+            while viewer.drive(Duration::from_millis(1)).await.is_ok() {}
+            std::future::pending::<()>().await;
         });
         let result = poll_fn(|task| {
             if let Poll::Ready(result) = opening.as_mut().poll(task) {
