@@ -202,12 +202,24 @@ fn shipped_fr_displays_negotiates_with_frd_run() {
     let output = run_displays(&fr, &client_api.path, &roots);
     // The client closed its session; the host must notice and finish that peer
     // on its own (it then keeps listening for the next one).
-    let peer_finished = wait_for_event(&events, Duration::from_secs(10), |e| {
+    let peer_finished = wait_for_event(&events, Duration::from_millis(750), |e| {
         matches!(e, Event::PeerFinished { .. })
     });
+    let closed_by_request = wait_for_event(
+        &events,
+        Duration::from_millis(750),
+        |e| matches!(e, Event::ShareEnded { outcome } if outcome.contains("PeerClosed")),
+    );
     stop.request();
     let result = host.join().unwrap();
-    assert!(peer_finished, "peer completion must precede the local stop");
+    assert!(
+        closed_by_request,
+        "source owner must retain the actual close intent: {events:?}"
+    );
+    assert!(
+        peer_finished,
+        "inspection must end its peer promptly, without waiting for lease expiry: {events:?}"
+    );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -218,6 +230,7 @@ fn shipped_fr_displays_negotiates_with_frd_run() {
     let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(report["outcome"], "success");
     assert_eq!(report["session_closed"], true);
+    assert_eq!(report["remote_cleanup_confirmed"], false);
     assert_eq!(report["decoder_started"], false);
     assert_eq!(report["input_requested"], false);
     assert_eq!(report["transport_qualified"], false);
@@ -476,3 +489,6 @@ fn frd_run_expires_a_connected_viewer_that_stops_answering_renewal() {
 
 #[path = "shipped_client/recovery.rs"]
 mod recovery;
+
+#[path = "shipped_client/refusal.rs"]
+mod refusal;

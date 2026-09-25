@@ -2,6 +2,8 @@
 mod displays;
 #[path = "linux/doctor.rs"]
 mod doctor;
+#[path = "linux/refusal.rs"]
+mod refusal;
 #[path = "linux/robot.rs"]
 mod robot;
 #[cfg(feature = "linux-desktop")]
@@ -372,6 +374,9 @@ fn completed(
     if let Err(error) = result
         && !progress.user_closed
     {
+        if let Some(refused) = refusal::reconnect(error) {
+            return Err(refused);
+        }
         return Err(match error {
             reconnect::Failure::Connection(frd::native_connection::Error::Tailnet(e)) => tailnet(e),
             _ => failure(
@@ -678,6 +683,29 @@ mod tests {
                 .is_err()
             );
         }
+        #[test]
+        fn desktop_completion_retains_host_refusal_but_does_not_override_local_stop() {
+            let refusal =
+                reconnect::Failure::Observation(frd::session_startup::ObserverError::Session(
+                    frd::session_startup::Error::ClientStartup(
+                        fr_client::startup::Error::Protocol(fr_wire::negotiation::Error::Refused(
+                            fr_wire::refusal::Refused::connection(
+                                fr_wire::refusal::Reason::LocalApprovalDenied,
+                            ),
+                        )),
+                    ),
+                ));
+            let progress = Progress::default();
+            let error =
+                completed(&unused_session(), Err(refusal), false, &progress, true).unwrap_err();
+            assert_eq!(error.code, "host_local_approval_denied");
+            assert!(output::failure(error, true).contains("\"outcome\":\"refused\""));
+            let stopped =
+                completed(&unused_session(), Err(refusal), true, &progress, true).unwrap_err();
+            assert_eq!(stopped.code, "cancelled");
+            assert_eq!(stopped.exit, 130);
+        }
+
         #[test]
         fn supervisor_cleanup_failure_cannot_be_masked_by_a_user_close_or_signal() {
             let mut progress = Progress::default();

@@ -55,6 +55,9 @@ pub(super) fn run(
     Ok(render(&catalog, json))
 }
 fn connection_error(error: native_connection::Error) -> Failure {
+    if let Some(refused) = super::refusal::connection(error) {
+        return refused;
+    }
     match error {
         native_connection::Error::Tailnet(error) => tailnet(error),
         _ => failure(
@@ -64,6 +67,9 @@ fn connection_error(error: native_connection::Error) -> Failure {
     }
 }
 fn inspection_error(error: ObserverError) -> Failure {
+    if let Some(refused) = super::refusal::observation(error) {
+        return refused;
+    }
     match error {
         ObserverError::Expired => failure(
             "display_inspection_timeout",

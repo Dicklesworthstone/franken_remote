@@ -83,3 +83,20 @@ separate; this slice does not implement those message kinds.
 The added native startup regressions use real local TLS/QUIC/UDP and the
 production viewer with test-only identity admission. They are not a claim
 of installed-tailnet, two-machine desktop, or platform qualification.
+
+## Native CLI projection
+
+The native client preserves content-free host startup refusals through connection,
+observation and reconnect wrappers. `fr displays` and desktop-enabled `fr connect`
+return the existing version-1 refusal envelope with a stable `host_*` error code
+and locally authored next-action text. For example, required-capability mismatch
+is `host_required_capability_missing`, while denied local approval is
+`host_local_approval_denied`; neither is reduced to a generic connection failure.
+
+Only connection-level refusals without an operation/effect receipt use this
+projection. Local cancellation and unconfirmed native cleanup retain their own
+outcomes and take precedence. Host refusals do not become reconnectable, change
+the requested role, or replay approval or input. The shipped-CLI namespace tests
+exercise both example reasons over real TLS/UDP with fixture LocalAPI/ingress;
+the default and desktop-enabled CLI unit targets cover all reason assignments.
+These are implementation tests, not installed-tailnet qualification.

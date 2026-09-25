@@ -35,14 +35,14 @@ fn reason(phase: Phase, observation_only: bool, error: Error) -> Option<Reason> 
         Error::Protocol(_) => Reason::InvalidMessage,
         Error::Denied if phase == Phase::Hello && observation_only => Reason::ControlUnavailable,
         Error::Denied if phase == Phase::Approval => Reason::LocalApprovalDenied,
-        Error::Denied => Reason::PermissionDenied,
         Error::Expired if phase == Phase::Approval => Reason::ApprovalExpired,
         Error::Expired => Reason::Expired,
         Error::Order => Reason::InvalidState,
         Error::Admission(fr_tailnet::Error::TailnetMembershipUnverifiable) => {
             Reason::TailnetMembershipUnverifiable
         }
-        Error::Admission(
+        Error::Denied
+        | Error::Admission(
             fr_tailnet::Error::CapabilityDenied
             | fr_tailnet::Error::ScopeDenied
             | fr_tailnet::Error::MachineNotAuthorized
@@ -71,9 +71,12 @@ pub(super) async fn report(host: &mut Host, error: Error) {
     if host.phase == Phase::Detached {
         return;
     }
-    let report = matches!(host.phase, Phase::Hello | Phase::Selection | Phase::Approval)
-        .then(|| reason(host.phase, host.observation_only, error))
-        .flatten();
+    let report = matches!(
+        host.phase,
+        Phase::Hello | Phase::Selection | Phase::Approval
+    )
+    .then(|| reason(host.phase, host.observation_only, error))
+    .flatten();
     // Fence BEFORE any await, including when reporting is impossible. These
     // phases have never enqueued SessionOpened, media, input or channel grants.
     // Later phases close without flushing potentially obsolete authority data.
