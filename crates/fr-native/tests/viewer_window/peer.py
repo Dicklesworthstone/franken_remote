@@ -58,6 +58,19 @@ try:
         assert image
         try: print(x.XGetPixel(image, 0, 0))
         finally: x.XDestroyImage(image)
+    elif op == "dump":
+        # BGRA bytes (alpha forced opaque) of the window as composited on screen.
+        width, height = int(sys.argv[4]), int(sys.argv[5])
+        image = x.XGetImage(d, w, 0, 0, width, height, W(-1), 2)
+        assert image
+        try:
+            out = bytearray()
+            for row in range(height):
+                for col in range(width):
+                    p = x.XGetPixel(image, col, row)
+                    out += bytes((p & 0xff, (p >> 8) & 0xff, (p >> 16) & 0xff, 255))
+            print(out.hex())
+        finally: x.XDestroyImage(image)
     else: raise AssertionError("unknown operation")
     x.XSync(d, 0)
 finally: x.XCloseDisplay(d)

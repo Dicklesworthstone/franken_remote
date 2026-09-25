@@ -62,6 +62,22 @@ impl Desktop {
         );
         String::from_utf8(result.stdout).unwrap().trim().into()
     }
+    /// The window's on-screen BGRA pixels, read by an independent X client
+    /// that creates no canvas of its own.
+    fn dump(&self, id: u32, width: u32, height: u32) -> Vec<u8> {
+        let result = Command::new("python3")
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/viewer_window/peer.py"))
+            .args([&self.display, &id.to_string(), "dump"])
+            .args([width.to_string(), height.to_string()])
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        let hex = String::from_utf8(result.stdout).unwrap();
+        (0..hex.trim().len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex.trim()[i..i + 2], 16).unwrap())
+            .collect()
+    }
 }
 impl Drop for Desktop {
     fn drop(&mut self) {
@@ -350,21 +366,21 @@ fn fitted_renderer_uses_the_original_ui_drawable_and_window_stop_owner() {
     assert!(!original.is_stopped());
     let limits = ProtocolLimits::ABSOLUTE;
     let mut renderer = X11Surface::present_in(Some(&desktop.display), target, limits).unwrap();
-    let mut readback = X11Surface::present_in(Some(&desktop.display), target, limits).unwrap();
     let mut fit = FittedFrame::new(320, 240, target, limits).unwrap();
     let source = BgraFrame::new(320, 240, [29, 51, 83, 255].repeat(320 * 240), &limits).unwrap();
     let output = fit.render(&source).unwrap();
     renderer.present(output).unwrap();
-    let observed = readback.snapshot().unwrap();
-    assert_eq!(observed.pixels(), output.pixels());
-    assert_eq!(&observed.pixels()[..4], &[0, 0, 0, 255]);
+    // Read the UI window independently: a second present_in would stack its
+    // own (black) canvas over the renderer's and read that instead.
+    let observed = desktop.dump(id, 160, 160);
+    assert_eq!(observed, output.pixels());
+    assert_eq!(&observed[..4], &[0, 0, 0, 255]);
     let first_image_pixel = 20 * 160 * 4;
     assert_eq!(
-        &observed.pixels()[first_image_pixel..first_image_pixel + 4],
+        &observed[first_image_pixel..first_image_pixel + 4],
         &[29, 51, 83, 255]
     );
     drop(renderer);
-    drop(readback);
     assert_eq!(desktop.peer(id, "exists"), "1");
     assert!(!original.is_stopped());
     control.stop();
