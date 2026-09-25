@@ -448,11 +448,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
     // Watch the SAME path resolved at startup. Only explicitly supplied flags
     // are overrides: copying saved effective values here would freeze them and
     // defeat later approval/scope changes. Every revision still fences old grants.
-    let policy = host_run::policy::Configuration {
-        path: effective.policy_path,
-        approval: options.approval,
-        sharing: options.sharing,
-    };
+    let policy = run_policy(&options, effective);
     let result = host_run::run_with_policy(&run_options, &report, &stop, policy);
     drop(headless);
     match result {
@@ -474,4 +470,58 @@ fn execute_run(_args: &[String], json: bool) -> ExitCode {
         eprintln!("Refusal: frd host runtime is currently supported on Linux.");
     }
     ExitCode::from(2)
+}
+
+#[cfg(target_os = "linux")]
+fn run_policy(
+    options: &frd::host_policy::options::RunOptions,
+    effective: frd::host_policy::options::Effective,
+) -> frd::host_run::policy::Configuration {
+    frd::host_run::policy::Configuration {
+        path: effective.policy_path,
+        // Only explicit process flags are overrides. Projecting the resolved
+        // snapshot here would freeze saved values and defeat later changes.
+        approval: options.approval,
+        sharing: options.sharing,
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod run_policy_tests {
+    use super::run_policy;
+    use frd::host_policy::{
+        Approval, Policy, Sharing,
+        options::{Effective, RunOptions},
+    };
+    use std::path::PathBuf;
+
+    #[test]
+    fn live_host_uses_the_original_resolved_path_and_only_explicit_overrides() {
+        for approval in [None, Some(Approval::None), Some(Approval::Local)] {
+            for sharing in [None, Some(Sharing::OwnUser), Some(Sharing::Tailnet)] {
+                let saved = Policy {
+                    approval_mode: Approval::Local,
+                    sharing_scope: Sharing::Tailnet,
+                    ..Policy::default()
+                };
+                let effective = Effective {
+                    policy_path: PathBuf::from("/resolved/policy.json"),
+                    saved,
+                    approval: approval.unwrap_or(saved.approval_mode),
+                    sharing: sharing.unwrap_or(saved.sharing_scope),
+                    port: 8443,
+                };
+                let options = RunOptions {
+                    config: Some(PathBuf::from("/different/policy.json")),
+                    approval,
+                    sharing,
+                    ..RunOptions::default()
+                };
+                let configuration = run_policy(&options, effective);
+                assert_eq!(configuration.path, PathBuf::from("/resolved/policy.json"));
+                assert_eq!(configuration.approval, approval);
+                assert_eq!(configuration.sharing, sharing);
+            }
+        }
+    }
 }
