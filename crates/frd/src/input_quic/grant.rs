@@ -24,7 +24,7 @@ use fr_wire::{
 };
 use std::time::Duration;
 
-pub const CAPABILITY: &str = "native-control-grant";
+pub use fr_wire::control::GRANT_CAPABILITY as CAPABILITY;
 const REQUEST_LIFETIME_US: u64 = 2_000_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {

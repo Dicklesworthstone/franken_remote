@@ -1,13 +1,13 @@
 //! Actual startup bytes for the profile used by the desktop executable.
 use fr_client::{
-    native::observation_offer,
+    native::{control_offer, observation_offer},
     startup::{Error, Startup},
 };
 use fr_core::ids::{HostBootId, OsSessionId, RemoteSessionId};
 use fr_wire::{
-    attachment, decoder, display,
+    attachment, clock, control, decoder, display,
     negotiation::{self, ControlBinding, Message, Offer, Role, Selection},
-    receiver_metrics, recovery_request,
+    presented, receiver_metrics, recovery_request,
 };
 
 fn bytes(message: &Message) -> Vec<u8> {
@@ -184,4 +184,95 @@ fn optional_features_cannot_refresh_the_original_startup_deadline() {
         Err(Error::Expired)
     );
     assert_eq!(startup.tick(20), Err(Error::Closed));
+}
+#[test]
+fn control_profile_adds_only_mandatory_control_boundaries_and_completes_startup() {
+    let offer = control_offer();
+    offer.validate().unwrap();
+    assert_eq!(offer.role, Role::RequestControl);
+    let observation = observation_offer();
+    for cap in &observation.capabilities {
+        assert!(offer.capabilities.contains(cap), "{}", cap.name);
+    }
+    let added: Vec<_> = offer
+        .capabilities
+        .iter()
+        .filter(|c| !observation.capabilities.contains(c))
+        .collect();
+    assert_eq!(added.len(), 4);
+    for (name, version) in [
+        (attachment::INPUT_CAPABILITY, attachment::INPUT_VERSION),
+        (control::GRANT_CAPABILITY, 1),
+        (clock::CAPABILITY, clock::VERSION),
+        (presented::CAPABILITY, presented::VERSION),
+    ] {
+        assert!(
+            added
+                .iter()
+                .any(|c| c.name == name && c.version == version && c.required),
+            "{name}"
+        );
+    }
+    assert!(
+        offer
+            .capabilities
+            .iter()
+            .all(|c| !c.name.contains("clipboard")
+                && !c.name.contains("audio")
+                && !c.name.contains("file"))
+    );
+    // The real client startup against a control-capable host intersection.
+    let host = control_offer().intersect(&control_offer()).unwrap();
+    let mut startup = Startup::new(control_offer(), 10, 10_000).unwrap();
+    assert_eq!(
+        negotiation::decode(
+            startup.pending(10).unwrap().unwrap(),
+            negotiation::MAX_RECORD,
+            0
+        )
+        .unwrap(),
+        Message::ClientHello(control_offer())
+    );
+    startup.sent(11).unwrap();
+    startup
+        .receive(&bytes(&Message::HostCapabilities(host)), 12)
+        .unwrap();
+    let Message::SelectedConfiguration(selected) = negotiation::decode(
+        startup.pending(13).unwrap().unwrap(),
+        negotiation::MAX_RECORD,
+        0,
+    )
+    .unwrap() else {
+        panic!("expected selected configuration")
+    };
+    startup.sent(14).unwrap();
+    assert_eq!(selected.role, Role::RequestControl);
+    assert!(
+        selected
+            .capabilities
+            .iter()
+            .any(|c| c.name == control::GRANT_CAPABILITY && c.required)
+    );
+    startup
+        .receive(&bytes(&opened(selected.clone())), 15)
+        .unwrap();
+    startup.bound(7, 16).unwrap();
+    startup.sent(17).unwrap();
+    assert_eq!(startup.finish(18).unwrap().selection, selected);
+}
+#[test]
+fn observation_only_host_refuses_control_intent_as_a_typed_capability_error() {
+    assert!(matches!(
+        observation_offer().intersect(&control_offer()),
+        Err(negotiation::Error::RequiredCapability)
+    ));
+    let mut host = observation_offer();
+    host.role = Role::RequestControl;
+    let mut startup = Startup::new(control_offer(), 0, 10_000).unwrap();
+    startup.sent(1).unwrap();
+    assert_eq!(
+        startup.receive(&bytes(&Message::HostCapabilities(host)), 2),
+        Err(Error::Protocol(negotiation::Error::RequiredCapability))
+    );
+    assert_eq!(startup.tick(3), Err(Error::Closed));
 }

@@ -18,6 +18,9 @@ use fr_core::{
     limits::ProtocolLimits,
 };
 
+/// Negotiated name (version 1) of the explicit native control-grant exchange
+/// defined here. Shared by host and client; selecting it grants nothing.
+pub const GRANT_CAPABILITY: &str = "native-control-grant";
 pub const REQUEST_BYTES: usize = HEADER_BYTES + 109;
 pub const GRANTED_BYTES: usize = REQUEST_BYTES + 76;
 pub const MAX_LEASE_LIFETIME_US: u64 = 3_000_000;

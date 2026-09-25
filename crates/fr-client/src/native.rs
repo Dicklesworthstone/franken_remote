@@ -1,13 +1,13 @@
-//! The native desktop client's implemented observation profile.
+//! The native desktop client's implemented observation and control profiles.
 //!
 //! This is application capability negotiation, not a codec/transport probe or
 //! authority. The caller still performs installed-tailnet/TLS admission and
 //! explicitly opts into the currently unqualified native transport.
 use fr_core::limits::ProtocolLimits;
 use fr_wire::{
-    attachment, decoder, display,
+    attachment, clock, control, decoder, display,
     negotiation::{Capability, Offer, Role},
-    receiver_metrics, recovery_request,
+    presented, receiver_metrics, recovery_request,
 };
 
 /// Offer the same bounded recovery and solicited decoder-load paths used by the
@@ -20,6 +20,32 @@ use fr_wire::{
 /// existing connection/decoder under the original failure deadline; namespace
 /// exhaustion and native failures retain their existing terminal behavior.
 pub fn observation_offer() -> Offer {
+    offer(Role::Observe, &[])
+}
+
+/// The observation profile plus the four boundaries the host's explicit
+/// control bootstrap requires: the input attachment, the one-use control
+/// grant, clock correlation and presented-state proof, all mandatory. Asking
+/// for control is an intent, never permission: the host may still refuse
+/// (typed), and no input is sent before its local grant and the client's own
+/// presented view.
+pub fn control_offer() -> Offer {
+    offer(
+        Role::RequestControl,
+        &[
+            (
+                attachment::INPUT_CAPABILITY,
+                attachment::INPUT_VERSION,
+                true,
+            ),
+            (control::GRANT_CAPABILITY, 1, true),
+            (clock::CAPABILITY, clock::VERSION, true),
+            (presented::CAPABILITY, presented::VERSION, true),
+        ],
+    )
+}
+
+fn offer(role: Role, extra: &[(&str, u16, bool)]) -> Offer {
     let mut capabilities: Vec<_> = [
         (display::CAPABILITY, 1, true),
         (decoder::CAPABILITY, 1, true),
@@ -36,11 +62,12 @@ pub fn observation_offer() -> Offer {
             false,
         ),
     ]
-    .into_iter()
+    .iter()
+    .chain(extra)
     .map(|(name, version, required)| Capability {
-        name: name.into(),
-        version,
-        required,
+        name: (*name).into(),
+        version: *version,
+        required: *required,
     })
     .collect();
     capabilities.sort_by(|a, b| a.name.cmp(&b.name));
@@ -48,7 +75,7 @@ pub fn observation_offer() -> Offer {
         versions: vec![0],
         profile: 1,
         profile_version: 0,
-        role: Role::Observe,
+        role,
         limits: ProtocolLimits::ABSOLUTE,
         capabilities,
     }

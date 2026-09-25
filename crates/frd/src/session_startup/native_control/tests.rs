@@ -111,6 +111,29 @@ fn explicit_control_profile_never_upgrades_or_omits_a_required_boundary() {
     assert!(!profile(&observer, true));
 }
 #[test]
+fn shipped_client_control_offer_selects_exactly_the_host_control_profile() {
+    use fr_client::native::{control_offer, observation_offer};
+    let control = control_offer()
+        .intersect(&control_offer())
+        .unwrap()
+        .select()
+        .unwrap();
+    assert!(profile(&control, true));
+    assert!(!profile(&control, false));
+    let observe = observation_offer()
+        .intersect(&observation_offer())
+        .unwrap()
+        .select()
+        .unwrap();
+    assert!(profile(&observe, false));
+    assert!(!profile(&observe, true));
+    // The shared constant is the one the host's grant exchange negotiates.
+    assert_eq!(
+        crate::input_quic::grant::CAPABILITY,
+        fr_wire::control::GRANT_CAPABILITY
+    );
+}
+#[test]
 fn cancelled_and_expired_control_bootstrap_cannot_start_native_work() {
     for expiry in [false, true] {
         run(|c, h| async move {
