@@ -165,17 +165,26 @@ case "$lane" in
     test_fixtures_lane
     ;;
   full)
-    rust_lane
-    docs_lane
-    count_lane
-    audit_lane
-    test_fixtures_lane
-    if ! command -v ubs >/dev/null 2>&1; then
-      echo "full lane: BLOCKED (ubs is not installed; Rust/docs/count/audit gates ran above)" >&2
-      exit 2
+    # Every lane runs; one failure never hides another. The verdict names them.
+    failed=""
+    for step in fmt check clippy test examples; do
+      rust_step "$step" || failed="$failed $step"
+    done
+    ( docs_lane ) || failed="$failed docs"
+    ( count_lane ) || failed="$failed count"
+    ( audit_lane ) || failed="$failed audit"
+    ( test_fixtures_lane ) || failed="$failed fixtures"
+    if command -v ubs >/dev/null 2>&1; then
+      # Scan the source tree, not an empty git diff after a clean checkout.
+      ubs . || failed="$failed ubs"
+    else
+      echo "full lane: ubs BLOCKED (not installed)" >&2
+      failed="$failed ubs(blocked)"
     fi
-    # Scan the source tree, not an empty git diff after a clean checkout.
-    ubs .
+    if [ -n "$failed" ]; then
+      echo "full lane: FAILED lanes:$failed" >&2
+      exit 1
+    fi
     echo "full source lane: passed; native/wire/hardware qualification is separate"
     ;;
   release)
