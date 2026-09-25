@@ -25,7 +25,7 @@ Evidence levels: *live* = run against this repository's binaries on a real tailn
 
 Not available: remote control/input from `fr` (the host has no input-agent process yet), local approval prompts in `frd run`, audio/clipboard/file transfer through `frd run`, hardware HEVC selection, Wayland, macOS, Windows, browser and mobile clients. Earlier documents that marked GNOME/KDE/Hyprland, Windows GPU rows or Windows/macOS worker sandboxes as passed or enforced were withdrawn on 2026-09-24: no evidence existed.
 
-**Size gate:** the fixed counter (`./scripts/verify.sh count`) reported 272,665 handwritten Rust lines at commit 0b543db against the 250,000 hard stop, so that lane refuses; the owner's budget decision is pending.
+**Size gate:** the owner raised the hard stop from 250,000 to 500,000 handwritten Rust lines on 2026-09-24 and approved deleting the clearly fake modules (about 15k lines removed). The fixed counter (`./scripts/verify.sh count`) now reports about 264,500 lines: over the 240,000 planned maximum, within the hard stop.
 
 The engineering thesis, from the plan:
 
@@ -41,7 +41,7 @@ The engineering thesis, from the plan:
 
 ## Develop and verify
 
-The workspace contains 13 crates: `fr-core`, `fr-wire`, `fr-media`, `fr-transport`, `fr-tailnet`, `fr-client`, `fr-native` (the `fr` and `fr-media-worker` binaries), `frd`, `fr-files`, `fr-ffi`, `fr-web`, `fr-lab` and `fr-e2e`. From a checkout with Rustup installed, the repository's `rust-toolchain.toml` selects the exact nightly:
+The workspace contains 10 crates: `fr-core`, `fr-wire`, `fr-media`, `fr-transport`, `fr-tailnet`, `fr-client`, `fr-native` (the `fr` and `fr-media-worker` binaries), `frd`, `fr-files` and `fr-lab` (the synthetic `fr-e2e` model, the orphan `fr-ffi` wrapper and the `fr-web` mockup were removed on 2026-09-24). From a checkout with Rustup installed, the repository's `rust-toolchain.toml` selects the exact nightly:
 
 ```bash
 ./scripts/verify.sh fast                  # format, workspace check, strict clippy, tests
@@ -102,7 +102,7 @@ Condensed from plan §1; each row is a settled decision, not an open question.
 | Browser transport | Actual HTTP/3 WebTransport interoperability, qualified early. Bounded secure-WebSocket channels are the explicit degraded fallback. |
 | Safety | Safe Rust (`#![forbid(unsafe_code)]`) in protocol and authority code; a small audited unsafe/foreign boundary for OS and media APIs, with media work isolated from input authority. |
 | Product scope | Selected full displays of an existing interactive desktop. No window-isolation promise, independent remote login, preboot access, USB/printer forwarding, or public-internet brokering. |
-| Size discipline | ~194,000 handwritten Rust lines including tests; 240,000 planned ceiling; hard stop below 250,000. |
+| Size discipline | ~194,000 handwritten Rust lines including tests; 240,000 planned ceiling; hard stop below 500,000 (raised from 250,000 by the owner on 2026-09-24). |
 
 Four assumptions the plan makes explicit rather than burying: HEVC is not x265; HEVC-only does not imply every browser (the supported set comes from a real decode-and-present probe); high bitrate does not repair 4:2:0 chroma subsampling; and a daemon cannot erase OS consent boundaries.
 
@@ -188,7 +188,7 @@ FFmpeg integration is a deliberately narrow boundary (plan §9): a curated, allo
 
 ## Proposed workspace
 
-From plan §22 — responsibility boundaries, not a requirement to create every crate before the first working slice. Crates enter the workspace only with a real vertical slice. The 13 current members are listed under "Develop and verify" above; `fr` currently lives in `fr-native`, and `fr-platform` has no crate of its own.
+From plan §22 — responsibility boundaries, not a requirement to create every crate before the first working slice. Crates enter the workspace only with a real vertical slice. The 10 current members are listed under "Develop and verify" above; `fr` currently lives in `fr-native`, and `fr-platform` has no crate of its own.
 
 ```text
 frankenremote/
@@ -211,7 +211,7 @@ frankenremote/
   xtask/              repository-owned verification/release commands
 ```
 
-Budget: **194k handwritten Rust lines** (tests and project-induced upstream work included) as the target, **240k planned maximum**, hard stop below 250k, plus a separate ≤20k allowance for JS/Swift/Kotlin/build glue — raised in v1.4 because the mobile apps deliberately carry first-class native UIs. One fixed counting command in the repository; the counting method does not get redefined near the end.
+Budget: **194k handwritten Rust lines** (tests and project-induced upstream work included) as the target, **240k planned maximum**, hard stop below 500k (raised from 250k by the owner on 2026-09-24), plus a separate ≤20k allowance for JS/Swift/Kotlin/build glue — raised in v1.4 because the mobile apps deliberately carry first-class native UIs. One fixed counting command in the repository; the counting method does not get redefined near the end.
 
 ## Implementation sequence
 
