@@ -3,6 +3,7 @@
 //! display loss; the independent watchdog/revoke path must remain outside it.
 //! This is not a Wayland permission fallback or an X11 security sandbox.
 use crate::keyboard::Keyboard;
+pub mod emergency;
 mod scroll;
 use core::{
     ffi::{c_char, c_int, c_uint, c_ulong, c_void},
@@ -175,6 +176,50 @@ impl X11Pointer {
             return Err(PlatformError::Unsupported);
         }
         Ok(owner)
+    }
+    /// Open the locally selected display and revalidate the exact granted
+    /// bounds and negotiated capabilities before any input is possible. The
+    /// single check shared by the in-process factory and the input executor.
+    pub fn open_exact(
+        name: &str,
+        expected_bounds: InputBounds,
+        required: Capabilities,
+    ) -> Result<Self, PlatformError> {
+        let sink = Self::open(name)?;
+        if sink.bounds() != expected_bounds {
+            return Err(PlatformError::GeometryChanged);
+        }
+        if !sink.capabilities().contains_all(required) {
+            return Err(PlatformError::Unsupported);
+        }
+        Ok(sink)
+    }
+    /// Every native code this owner holds OR has prepared to press, including
+    /// wheel buttons: the executor's last-resort release set. Pessimistic by
+    /// design (an `XTest` release of an up key/button is ignored by the server);
+    /// never evidence that a press happened.
+    pub fn native_held(&self) -> NativeHeld {
+        let mut held = NativeHeld::default();
+        for code in self.keyboard.held_codes() {
+            held.keys.insert(code);
+        }
+        for code in self
+            .buttons
+            .iter()
+            .flatten()
+            .chain(&self.prepared_button)
+            .chain(self.wheel.held.as_ref().map(|(_, code)| code))
+            .chain(
+                self.wheel
+                    .prepared
+                    .as_ref()
+                    .filter(|(_, pressed, _)| *pressed)
+                    .map(|(_, _, code)| code),
+            )
+        {
+            held.buttons.insert(*code);
+        }
+        held
     }
     pub fn capabilities(&self) -> Capabilities {
         let mut caps = Capabilities::default()
@@ -468,6 +513,48 @@ impl Drop for X11Pointer {
         unsafe {
             XCloseDisplay(self.display.as_ptr());
         }
+    }
+}
+/// A fixed 256-bit set of native X11 codes. No allocation, no Debug payload.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct CodeSet([u64; 4]);
+impl CodeSet {
+    pub fn insert(&mut self, code: u8) {
+        self.0[usize::from(code / 64)] |= 1 << (code % 64);
+    }
+    pub fn contains(&self, code: u8) -> bool {
+        self.0[usize::from(code / 64)] & (1 << (code % 64)) != 0
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0 == [0; 4]
+    }
+    pub fn codes(&self) -> impl Iterator<Item = u8> + '_ {
+        (0..=u8::MAX).filter(|code| self.contains(*code))
+    }
+    pub const fn words(&self) -> [u64; 4] {
+        self.0
+    }
+    pub const fn from_words(words: [u64; 4]) -> Self {
+        Self(words)
+    }
+}
+/// Keyboard keycodes and physical pointer-button codes an owner may hold.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct NativeHeld {
+    pub keys: CodeSet,
+    pub buttons: CodeSet,
+}
+impl NativeHeld {
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty() && self.buttons.is_empty()
+    }
+}
+impl core::fmt::Debug for NativeHeld {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Which keys are held is input content; only emptiness is diagnostic.
+        f.debug_struct("NativeHeld")
+            .field("empty", &self.is_empty())
+            .finish()
     }
 }
 fn relative_supported(major: c_int, minor: c_int, screens: c_int) -> bool {

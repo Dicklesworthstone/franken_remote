@@ -5,7 +5,7 @@ use fr_core::input_submission::scroll::WheelDirection;
 
 #[derive(Default)]
 pub(super) struct WheelState {
-    held: Option<(WheelDirection, u8)>,
+    pub(super) held: Option<(WheelDirection, u8)>,
     pub(super) prepared: Option<(WheelDirection, bool, u8)>,
 }
 fn logical(direction: WheelDirection) -> u8 {

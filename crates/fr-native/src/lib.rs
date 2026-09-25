@@ -22,10 +22,21 @@ pub mod capture;
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 pub mod image_transfer;
 
-#[cfg(all(target_os = "linux", feature = "linux-media"))]
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "linux-media", feature = "linux-input")
+))]
 mod parent;
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 pub use parent::bind_worker_parent;
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "linux-media", feature = "linux-input")
+))]
+pub use parent::{ParentUnbound, bind_parent};
+
+#[cfg(all(target_os = "linux", feature = "linux-input"))]
+pub mod clock;
 
 #[cfg(all(target_os = "linux", feature = "linux-input"))]
 pub mod input;

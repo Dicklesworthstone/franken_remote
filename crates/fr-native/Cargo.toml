@@ -79,3 +79,9 @@ required-features = ["cli"]
 name = "fr-session-monitor"
 path = "src/bin/session_monitor.rs"
 required-features = ["linux-session-monitor"]
+
+# Per-lease input injection executor launched by frd (frd never loads Xlib).
+[[bin]]
+name = "fr-input-agent"
+path = "src/bin/input_agent.rs"
+required-features = ["linux-input"]

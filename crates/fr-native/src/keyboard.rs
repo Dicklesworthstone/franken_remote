@@ -45,6 +45,11 @@ impl Keyboard {
     pub(super) const fn enabled(&self) -> bool {
         self.enabled
     }
+    /// X keycodes this owner holds or has prepared to press. Pessimistic by
+    /// design: it is the last-resort release set, never evidence of a press.
+    pub(super) fn held_codes(&self) -> impl Iterator<Item = u8> + '_ {
+        self.held.iter().flatten().map(|h| h.code)
+    }
     fn repeat(&self, code: u8, mode: c_int) -> Result<bool, PlatformError> {
         // SAFETY: bounded XKB keycode; mode is query=-1, disabled=0, enabled=1.
         match unsafe { fr_key_repeat(self.display.as_ptr(), u32::from(code), mode) } {

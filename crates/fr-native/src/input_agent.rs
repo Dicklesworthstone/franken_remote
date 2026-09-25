@@ -44,16 +44,7 @@ pub fn x11_factory(
         return Err(Error::InvalidDisplay);
     }
     let display = display.to_owned();
-    Ok(move || {
-        let sink = X11Pointer::open(&display)?;
-        if sink.bounds() != expected_bounds {
-            return Err(PlatformError::GeometryChanged);
-        }
-        if !sink.capabilities().contains_all(required) {
-            return Err(PlatformError::Unsupported);
-        }
-        Ok(sink)
-    })
+    Ok(move || X11Pointer::open_exact(&display, expected_bounds, required))
 }
 
 /// Start the original X11 input owner with a final logind checkpoint on every
