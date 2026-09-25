@@ -6,8 +6,15 @@ pub fn execute(args: &[String], json: bool) -> ExitCode {
     let options = match InstallOptions::parse_cli(args) {
         Ok(options) => options,
         Err(error) => {
+            let code = match &error {
+                frd::service_install::ServiceError::HostProfileUnavailable { code, .. } => code,
+                _ => "invalid_service_options",
+            };
             if json {
-                println!("{{\"outcome\":\"refusal\",\"code\":\"invalid_service_options\"}}");
+                println!(
+                    "{}",
+                    serde_json::json!({"outcome": "refusal", "code": code})
+                );
             } else {
                 eprintln!("Service installation refused: {error}");
             }

@@ -50,6 +50,7 @@ duplicate, or missing startup option values refuse before contacting Tailscale.
 
 ## Installing a service with these settings
 
+`frd install` requires `--software-explicit` for Linux systemd units and refuses `--approval local` (typed `hardware_hevc_unavailable` / `local_approval_unavailable`), because `frd run` would refuse both at every restart.
 `frd install` leaves omitted `--approval` and `--sharing` flags out of the unit,
 so the daemon inherits the saved policy at startup and on later revisions. Explicit values are retained,
 including `--approval none` and `--sharing own-user`; they never disappear merely

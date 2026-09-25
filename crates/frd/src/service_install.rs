@@ -80,6 +80,12 @@ pub enum ServiceError {
     UnsupportedPlatform { detail: String },
     /// Invalid or ambiguous local service configuration.
     InvalidOptions,
+    /// The installed `frd run` would refuse this profile at every start (and
+    /// the service manager would restart it forever), so installation refuses.
+    HostProfileUnavailable {
+        code: &'static str,
+        detail: &'static str,
+    },
     /// General I/O failure.
     IoError { detail: String },
 }
@@ -90,6 +96,7 @@ impl fmt::Display for ServiceError {
             Self::InvalidOptions => {
                 write!(f, "invalid service options; no service change was applied")
             }
+            Self::HostProfileUnavailable { code, detail } => write!(f, "{code}: {detail}"),
             Self::PortConflict { port } => {
                 write!(
                     f,
@@ -138,6 +145,9 @@ pub struct InstallOptions {
     pub dry_run: bool,
     /// Optional directory override (primarily for test isolation).
     pub custom_unit_dir: Option<PathBuf>,
+    /// Pass `--software-explicit` to `frd run` (the CPU HEVC developer profile;
+    /// `frd run` has no hardware encoder selection yet and refuses without it).
+    pub software_explicit: bool,
 }
 
 impl Default for InstallOptions {
@@ -153,6 +163,7 @@ impl Default for InstallOptions {
             exec_path,
             dry_run: false,
             custom_unit_dir: None,
+            software_explicit: false,
         }
     }
 }
@@ -216,6 +227,9 @@ pub fn render_systemd_unit(options: &InstallOptions) -> String {
             " --sharing {}",
             quoting::systemd(&options.sharing_scope)
         );
+    }
+    if options.software_explicit {
+        args.push_str(" --software-explicit");
     }
 
     let is_user = matches!(options.kind, ServiceKind::SystemdUser);
@@ -514,6 +528,7 @@ mod tests {
             exec_path: PathBuf::from("/usr/local/bin/frd"),
             dry_run: true,
             custom_unit_dir: None,
+            software_explicit: true,
         };
 
         let unit = render_systemd_unit(&options);
@@ -534,6 +549,7 @@ mod tests {
             exec_path: PathBuf::from("/Applications/frd"),
             dry_run: true,
             custom_unit_dir: None,
+            software_explicit: true,
         };
 
         let plist = render_launchd_plist(&options);
@@ -558,6 +574,7 @@ mod tests {
             exec_path: PathBuf::from("/bin/sh"),
             dry_run: false,
             custom_unit_dir: Some(temp_dir.clone()),
+            software_explicit: true,
         };
 
         // 1. First install succeeds
@@ -592,6 +609,7 @@ mod tests {
             exec_path: PathBuf::from("/nonexistent/path/to/frd_binary_xyz"),
             dry_run: false,
             custom_unit_dir: None,
+            software_explicit: true,
         };
 
         let result = preflight_check(&options);

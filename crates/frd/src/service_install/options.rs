@@ -39,6 +39,7 @@ impl InstallOptions {
                     }
                 }
                 "--sharing" => value(&mut iter)?.clone_into(&mut options.sharing_scope),
+                "--software-explicit" => options.software_explicit = true,
                 _ => return Err(ServiceError::InvalidOptions),
             }
         }
@@ -54,6 +55,24 @@ impl InstallOptions {
             || !matches!(self.sharing_scope.as_str(), "" | "own-user" | "tailnet")
         {
             return Err(ServiceError::InvalidOptions);
+        }
+        if matches!(
+            self.kind,
+            ServiceKind::SystemdUser | ServiceKind::SystemdSystem
+        ) {
+            // Refuse a unit that `frd run` would refuse at every (re)start.
+            if !self.software_explicit {
+                return Err(ServiceError::HostProfileUnavailable {
+                    code: "hardware_hevc_unavailable",
+                    detail: "frd run has no hardware HEVC encoder selection yet; pass --software-explicit to install the CPU software profile",
+                });
+            }
+            if self.approval_mode == "local" {
+                return Err(ServiceError::HostProfileUnavailable {
+                    code: "local_approval_unavailable",
+                    detail: "frd run cannot show local approval prompts yet; install with --approval none",
+                });
+            }
         }
         for path in std::iter::once(&self.exec_path)
             .chain(self.socket_path.iter())

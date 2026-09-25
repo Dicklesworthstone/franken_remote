@@ -6,7 +6,7 @@ fn parse(args: &[&str]) -> Result<InstallOptions, ServiceError> {
 }
 #[test]
 fn omitted_overrides_inherit_saved_policy() {
-    let options = parse(&["--dry-run"]).unwrap();
+    let options = parse(&["--software-explicit", "--dry-run"]).unwrap();
     assert_eq!(options.approval_mode, "");
     assert_eq!(options.sharing_scope, "");
     let unit = render_systemd_unit(&options);
@@ -15,14 +15,24 @@ fn omitted_overrides_inherit_saved_policy() {
 }
 #[test]
 fn explicit_default_values_are_not_dropped() {
-    let options = parse(&["--approval", "none", "--sharing", "own-user", "--dry-run"]).unwrap();
+    let options = parse(&[
+        "--approval",
+        "none",
+        "--sharing",
+        "own-user",
+        "--software-explicit",
+        "--dry-run",
+    ])
+    .unwrap();
     let unit = render_systemd_unit(&options);
     assert!(unit.contains("--approval none --sharing own-user"));
     let plist = render_launchd_plist(&options);
     assert!(plist.contains("<string>--approval</string>\n        <string>none</string>"));
     assert!(plist.contains("<string>--sharing</string>\n        <string>own-user</string>"));
     assert_eq!(
-        parse(&["--approval", "unattended"]).unwrap().approval_mode,
+        parse(&["--approval", "unattended", "--software-explicit"])
+            .unwrap()
+            .approval_mode,
         "none"
     );
 }
@@ -72,6 +82,7 @@ fn systemd_paths_remain_single_literal_arguments() {
         socket_path: Some(PathBuf::from("/run/a & b/$SOCKET%1.sock")),
         config_path: Some(PathBuf::from("/etc/frd/policy with \\ and % and $.json")),
         dry_run: true,
+        software_explicit: true,
         ..InstallOptions::default()
     };
     options.validate().unwrap();
@@ -148,7 +159,12 @@ fn selected_policy_path_and_explicit_overrides_reach_startup_resolution() {
     store.update(Change::Approval(Approval::Local)).unwrap();
     store.update(Change::Sharing(Sharing::Tailnet)).unwrap();
     for explicit in [false, true] {
-        let mut argv = vec!["--config", config.to_str().unwrap(), "--dry-run"];
+        let mut argv = vec![
+            "--config",
+            config.to_str().unwrap(),
+            "--software-explicit",
+            "--dry-run",
+        ];
         if explicit {
             argv.extend(["--approval", "none", "--sharing", "own-user"]);
         }
@@ -185,4 +201,34 @@ fn selected_policy_path_and_explicit_overrides_reach_startup_resolution() {
         assert_eq!(effective.saved.revision, 2);
     }
     assert_eq!(store.load().unwrap().revision, 2);
+}
+#[test]
+#[cfg(target_os = "linux")]
+fn systemd_install_refuses_units_that_frd_run_would_refuse() {
+    // Without the explicit software profile, frd run exits at every start and
+    // Restart=always would loop forever.
+    assert_eq!(
+        parse(&["--dry-run"]).err(),
+        Some(ServiceError::HostProfileUnavailable {
+            code: "hardware_hevc_unavailable",
+            detail: "frd run has no hardware HEVC encoder selection yet; pass --software-explicit to install the CPU software profile",
+        })
+    );
+    let local = parse(&["--software-explicit", "--approval", "local", "--dry-run"]).err();
+    assert!(
+        matches!(
+            local,
+            Some(ServiceError::HostProfileUnavailable {
+                code: "local_approval_unavailable",
+                ..
+            })
+        ),
+        "{local:?}"
+    );
+    let options = parse(&["--software-explicit", "--approval", "none", "--dry-run"]).unwrap();
+    let unit = render_systemd_unit(&options);
+    assert!(
+        unit.contains(" --approval none --software-explicit\n"),
+        "{unit}"
+    );
 }
