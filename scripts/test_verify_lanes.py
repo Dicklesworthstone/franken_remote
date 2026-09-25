@@ -37,15 +37,15 @@ def test_baseline() -> None:
 
 
 def test_planted_over_budget_rust() -> None:
-    print("[3/8] Testing planted over-budget Rust fixture (>250,000 lines)...")
+    print("[3/8] Testing planted over-budget Rust fixture (>500,000 lines)...")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         crates_dir = tmp_path / "crates" / "fake-crate" / "src"
         crates_dir.mkdir(parents=True)
-        # Write 250,005 lines of dummy Rust code
+        # Write 500,005 lines of dummy Rust code (just over the hard stop)
         with open(crates_dir / "lib.rs", "w", encoding="utf-8") as fp:
             fp.write("#![forbid(unsafe_code)]\n")
-            fp.write("// padding\n" * 250_005)
+            fp.write("// padding\n" * 500_005)
 
         rc, stdout, stderr = run_cmd([
             sys.executable, "scripts/count.py", "--fixture", str(tmp_path)

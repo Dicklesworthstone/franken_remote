@@ -4,7 +4,7 @@
 Enforces size discipline per AGENTS.md Section 3.7 and Plan Section 22.2:
 - 194,000 target handwritten Rust lines
 - 240,000 planned maximum
-- 250,000 hard stop (refusal)
+- 500,000 hard stop (refusal; raised from 250,000 by the owner on 2026-09-24)
 - 20,000 separate allowance for non-Rust glue (JS/Swift/Kotlin/C/Python/shell)
 
 Reports handwritten Rust, generated bindings, non-Rust glue, vendored source,
@@ -22,7 +22,8 @@ from pathlib import Path
 # Budget thresholds
 RUST_TARGET_LINES = 194_000
 RUST_PLANNED_MAX_LINES = 240_000
-RUST_HARD_STOP_LINES = 250_000
+# Owner decision 2026-09-24: "lift the hard stop to 500k lines".
+RUST_HARD_STOP_LINES = 500_000
 GLUE_ALLOWANCE_LINES = 20_000
 
 # File classifications

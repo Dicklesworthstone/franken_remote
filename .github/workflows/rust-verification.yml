@@ -16,6 +16,8 @@ on:
       - 'rust-toolchain.toml'
       - 'scripts/verify.sh'
       - 'scripts/count.py'
+      - 'scripts/audit.py'
+      - 'scripts/test_verify_lanes.py'
       - '.github/workflows/rust-verification.yml'
   workflow_dispatch:
 
@@ -89,11 +91,15 @@ jobs:
         id: docs
         continue-on-error: true
         run: ./scripts/verify.sh docs
-      # Report-only until the owner decides the budget strategy
-      # (fr-rc-budget-owner-decision-56k); the tree is over the 250k hard stop.
-      - name: Size discipline count (report only)
+      # The owner raised the hard stop to 500k on 2026-09-24; the count gates again.
+      - name: Size discipline count
+        id: count
         continue-on-error: true
         run: ./scripts/verify.sh count
+      - name: Planted over-budget and violation fixtures
+        id: fixtures
+        continue-on-error: true
+        run: ./scripts/verify.sh test-fixtures
       - name: Aggregate lane verdicts
         env:
           OUTCOMES: >-
@@ -107,6 +113,8 @@ jobs:
             clipboard=${{ steps.clipboard.outcome }}
             hevc=${{ steps.hevc.outcome }}
             docs=${{ steps.docs.outcome }}
+            count=${{ steps.count.outcome }}
+            fixtures=${{ steps.fixtures.outcome }}
         run: |
           failed=""
           for pair in $OUTCOMES; do
