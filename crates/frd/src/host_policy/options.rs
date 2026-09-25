@@ -6,6 +6,8 @@ use std::path::PathBuf;
 #[derive(Debug)]
 pub struct Effective {
     pub saved: Policy,
+    /// Exact path used by startup resolution; retain it for the live watcher.
+    pub policy_path: PathBuf,
     pub approval: Approval,
     pub sharing: Sharing,
     pub port: u16,
@@ -102,6 +104,7 @@ impl RunOptions {
         let saved = Store::new(&path)?.load()?;
         Ok(Effective {
             saved,
+            policy_path: path,
             approval: self.approval.unwrap_or(saved.approval_mode),
             sharing: self.sharing.unwrap_or(saved.sharing_scope),
             port: self.port.unwrap_or(8443),

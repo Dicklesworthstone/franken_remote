@@ -58,7 +58,9 @@ until actual thread exit, preventing unbounded replacements. Explicit
 Unmodified callers without with_live_policy retain their startup-selected policy.
 The existing CLI save commands still save only: their success does NOT prove that
 any running host observed or applied a revision. No CLI output is changed to claim
-live application; `frd run` reads the saved policy once at startup.
+live application. The installed `frd run` command uses `run_with_policy` and
+retains its initial resolved path, forwarding only explicitly provided flags as
+process overrides. It never turns a saved snapshot into permanent overrides.
 
 The concurrent capacity-one serial listener calls the same guarded acceptance
 for every peer. Its existing fatal-error classification treats policy change or
@@ -71,3 +73,15 @@ use actual UDP/TLS, Host/Viewer negotiation and credential-checked Unix HTTP in 
 isolated namespace, with explicitly synthetic LocalAPI metadata, test PKI and an
 ingress-lifetime fixture. This is not installed-Tailscale, actual input injection,
 kernel ingress, hardware-media or full-workspace qualification.
+
+## Shipped-daemon coverage
+
+The serial namespace target also launches the actual `frd` binary, writes policy
+with the actual `frd approval` command, and verifies active-share revocation
+before the silent viewer's lease deadline. Explicit overrides retain their values
+but still retire the old worker before a new listener; malformed policy stops the
+daemon. The command output reports publication without claiming acknowledged
+live application. Executables at `/usr/sbin/ip` and `/usr/sbin/nft` are fixture
+bind mounts visible only to the test child's private mount namespace. No shipping
+trust or ingress bypass option is added; kernel-filtering qualification is not
+claimed. Build `frd` as well as `fr` before running this integration target.

@@ -1,4 +1,4 @@
-//! The local management command path. Saving is not a live-session operation.
+//! Local policy publication. A save does not acknowledge any daemon's application.
 use frd::host_policy::{Error, Saved, Store, options::PolicyCommand};
 use std::process::ExitCode;
 
@@ -51,8 +51,10 @@ pub fn execute(args: &[String], approval: bool, json: bool) -> ExitCode {
                 "revision": saved.policy.revision,
                 "policy": if saved.policy.revision == 0 { "plan_defaults" } else { "local_file" },
                 "updated": saved.changed, "durable": if writing { Some(saved.durable) } else { None },
-                "applies_to": "next_start", "applied_to_running_daemon": false,
-                "restart_required": writing, "explicit_startup_flags_override": true,
+                "applies_to": "matching_live_daemon_or_next_start",
+                "applied_to_running_daemon": serde_json::Value::Null,
+                "restart_required": serde_json::Value::Null,
+                "live_application": "unconfirmed", "explicit_startup_flags_override": true,
             })
         );
     } else {
@@ -73,9 +75,9 @@ pub fn execute(args: &[String], approval: bool, json: bool) -> ExitCode {
             );
         }
         println!(
-            "Saved defaults apply at the next daemon start; explicit startup flags override them."
+            "frd run watches this policy path; observed revisions end old shares before new admission.\nExplicit startup flags override values, but never bypass revision fencing."
         );
-        println!("No running session was changed.");
+        println!("This command confirms the saved policy only; live application is unconfirmed.");
         if !saved.durable {
             eprintln!("Policy was published, but crash durability could not be confirmed.");
         }

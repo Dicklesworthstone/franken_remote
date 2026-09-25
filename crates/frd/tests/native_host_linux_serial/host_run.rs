@@ -318,3 +318,6 @@ fn frd_run_stops_on_consecutive_source_failures_with_a_typed_error() {
 
 #[path = "host_run/policy.rs"]
 mod policy;
+
+#[path = "shipped_host.rs"]
+mod shipped_host;

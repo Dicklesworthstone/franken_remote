@@ -43,8 +43,8 @@ COMMANDS:
 OPTIONS:
     --port PORT     Ingress port for QUIC and HTTPS (default: 8443)
     --socket PATH   Path to tailscaled.sock
-    --approval MODE Initial approval mode: 'local' (prompt) or 'none' (unattended)
-    --sharing SCOPE Sharing scope: 'own-user' (default) or 'tailnet'
+    --approval MODE Process override: 'local' (prompt) or 'none' (unattended)
+    --sharing SCOPE Process override: 'own-user' (default) or 'tailnet'
     --headless      Share a private headless Xvfb display (cookie-authenticated)
     --display :N    X11 display to share (default: $DISPLAY)
     --worker PATH   Absolute fr-media-worker path (default: next to frd)
@@ -56,7 +56,9 @@ OPTIONS:
     --user          Manage user-level service (systemd user unit / launchd agent; default)
     --system        Manage system-wide service
     --dry-run       Preview service generation without modifying filesystem
-    --config PATH   Local policy file for run/install/approval/sharing (absolute, Linux)
+    --config PATH   Local policy file (absolute, Linux); run watches revisions
+                    and ends old shares before applying changes. Explicit
+                    --approval/--sharing override values, not revision fencing.
     --json          Output structured, schema-versioned JSON envelope
     --help, -h      Print this help text
 ";
@@ -443,7 +445,15 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
     };
     let report: Reporter = Arc::new(move |event: Event| print_event(json, &event));
     let stop = Arc::new(host_run::StopHandle::default());
-    let result = host_run::run(&run_options, &report, &stop);
+    // Watch the SAME path resolved at startup. Only explicitly supplied flags
+    // are overrides: copying saved effective values here would freeze them and
+    // defeat later approval/scope changes. Every revision still fences old grants.
+    let policy = host_run::policy::Configuration {
+        path: effective.policy_path,
+        approval: options.approval,
+        sharing: options.sharing,
+    };
+    let result = host_run::run_with_policy(&run_options, &report, &stop, policy);
     drop(headless);
     match result {
         Ok(()) => ExitCode::SUCCESS,

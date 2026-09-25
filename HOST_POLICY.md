@@ -22,13 +22,22 @@ show the prompt does not exist yet), and it refuses without
 `--software-explicit` (`hardware_hevc_unavailable`: no hardware encoder
 selection yet; see [ADR 0004](docs/decisions/0004-software-encoder-profile.md)).
 
-These are **saved startup defaults**, not live-session administration. They do
-not revoke an existing connection or confirm the state of a running daemon.
-Restart to load them, and remove any explicit `--approval` or `--sharing`
-arguments in a service unit that should inherit the saved defaults. Explicit
-startup flags take precedence and never rewrite the file. JSON output reports
-revision, persistence, activation scope, and whether anything actually changed.
-No listener or browser qualification is implied.
+`frd run` watches the **same resolved policy file** throughout its lifetime.
+An observed new revision fences existing grants and retires the old source,
+transport and ingress before accepting a new share. Changing approval to `local`
+stops an active unattended share; the current host then refuses with
+`local_approval_unavailable` instead of silently continuing without a prompt.
+Malformed or stale policy evidence also stops sharing rather than falling back.
+
+Explicit `--approval` and `--sharing` flags override saved values for that process,
+not revision fencing. Even a revision whose effective settings are unchanged
+ends old grants. Remove these flags from a service unit to inherit saved values.
+The management commands publish the file but do not receive an application
+acknowledgement from a running daemon: `live_application` is `unconfirmed`,
+`applied_to_running_daemon` and `restart_required` are JSON null. A successful
+save is not proof that a particular process is watching the same path or has
+finished cleanup. Startup-only library callers still load on their next start.
+See [live-policy ownership and bounds](LIVE_HOST_POLICY.md).
 
 Missing files use the plan's own-user sharing and optional approval-off defaults.
 Unreadable, malformed, duplicate-field, unknown-version, oversized, symlinked,
@@ -42,7 +51,7 @@ duplicate, or missing startup option values refuse before contacting Tailscale.
 ## Installing a service with these settings
 
 `frd install` leaves omitted `--approval` and `--sharing` flags out of the unit,
-so the daemon loads the saved policy at each start. Explicit values are retained,
+so the daemon inherits the saved policy at startup and on later revisions. Explicit values are retained,
 including `--approval none` and `--sharing own-user`; they never disappear merely
 because they match the original plan defaults. `--config /absolute/path.json`
 is preserved in Linux service definitions. The file must be readable by the
