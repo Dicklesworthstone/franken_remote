@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
-//! Deterministic end-to-end qualification tests for the client-to-host microphone pipeline.
+//! Deterministic lab tests (not end-to-end or qualification evidence) for the
+//! client-to-host microphone pipeline, over synthetic codec and virtual-mic stand-ins.
 //!
 //! Conforms to plan section 15.4 and bead `fr-p2-audio-microphone-lz6`:
 //! 1. Hot-mic security test: activation without explicit enable must fail; connection alone never enables capture.
@@ -7,7 +8,7 @@
 //! 3. Lease expiry and approval revocation: uplink silenced at host boundary immediately with zero residual buffered playback.
 //! 4. Endpoint absence produces typed capability refusal: no fake device, no silent drop.
 //! 5. Audio generation fencing: stale buffered speech dropped across reconnects and device switches.
-//! 6. Wire-level packet framing and decoding across the network boundary.
+//! 6. Wire-level packet framing and decoding in memory (no network).
 
 use fr_client::audio::{ClientMicController, MicControllerError};
 use fr_core::audio::{
@@ -246,7 +247,7 @@ fn generation_fencing_prevents_stale_buffered_speech() {
 }
 
 #[test]
-fn e2e_client_to_host_microphone_wire_pipeline() {
+fn lab_client_to_host_microphone_wire_pipeline() {
     let generation = AudioGeneration::INITIAL;
     let binding = 0xABCD_1234;
 

@@ -36,7 +36,7 @@ fn windows_loopback_scope_disclosure_verification() {
 }
 
 #[test]
-fn e2e_audio_pipeline_with_induced_loss_and_plc() {
+fn lab_audio_pipeline_with_induced_loss_and_plc() {
     let generation = AudioGeneration::INITIAL;
     let config = AudioStreamConfig::new(
         AudioDirection::Downlink,
