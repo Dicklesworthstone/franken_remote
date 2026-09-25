@@ -364,9 +364,14 @@ fn stalled_newcomer_is_refused_before_next_capture_without_stalling_healthy_view
             .unwrap();
         let idr = run.publisher.capture_next().await.unwrap();
         run.old.receive(&cx, idr.frame).await;
-        slow.service(&cx).unwrap();
-        slow.network(&cx).await; // Withhold Configured.
-        assert!(slow.configuration.is_some());
+        // Withhold Configured. One 1ms drive does not always carry the
+        // configuration across loopback on a loaded host, so wait (bounded).
+        let until = clock(&cx) + 1_000_000;
+        while slow.configuration.is_none() {
+            assert!(clock(&cx) < until, "configuration never arrived");
+            slow.service(&cx).unwrap();
+            slow.network(&cx).await;
+        }
         assert_eq!(slow.frames, [] as [u64; 0]);
         // Preserve a SHORT source-bound chain while native configuration is
         // pending, rather than making every 30fps join lose its next reference.
