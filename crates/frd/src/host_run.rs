@@ -194,13 +194,15 @@ fn random_nonzero_u32() -> Result<u32, Error> {
 fn offer(control: bool) -> Offer {
     host_offer(control)
 }
-/// Native operations a controller may request in this X11 slice.
+/// Native operations a controller may request in this X11 slice. Discrete
+/// wheel input uses bounded `XTest` press/release pairs, not pixel-scroll emulation.
 fn control_capabilities() -> Capabilities {
     Capabilities::default()
         .with(Capability::Keys)
         .with(Capability::Repeat)
         .with(Capability::Absolute)
         .with(Capability::Buttons)
+        .with(Capability::LineScroll)
 }
 
 fn request(
@@ -840,8 +842,22 @@ mod tests {
             control.capabilities.iter().filter(|c| c.required).count(),
             4
         );
-        assert!(control_capabilities().contains(Capability::Keys));
-        assert!(!control_capabilities().contains(Capability::Text));
+        for allowed in [
+            Capability::Keys,
+            Capability::Repeat,
+            Capability::Absolute,
+            Capability::Buttons,
+            Capability::LineScroll,
+        ] {
+            assert!(control_capabilities().contains(allowed));
+        }
+        for absent in [
+            Capability::Text,
+            Capability::PixelScroll,
+            Capability::Relative,
+        ] {
+            assert!(!control_capabilities().contains(absent));
+        }
     }
 
     #[test]

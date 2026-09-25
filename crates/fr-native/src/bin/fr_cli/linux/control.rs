@@ -32,14 +32,16 @@ use frd::{
 };
 
 /// Exactly what this X11 viewer captures and the `frd run --input-agent` host
-/// profile executes: keys (with repeat), absolute pointer and buttons. No text,
-/// relative pointer or scrolling in this slice.
+/// profile executes: keys (with repeat), absolute pointer, buttons and discrete
+/// line scrolling on both axes. Pixel scrolling, relative pointer and text stay
+/// unavailable; no fractional wheel accumulation or keyboard emulation is used.
 pub(super) fn capabilities() -> Capabilities {
     Capabilities::default()
         .with(Capability::Keys)
         .with(Capability::Repeat)
         .with(Capability::Absolute)
         .with(Capability::Buttons)
+        .with(Capability::LineScroll)
 }
 pub(super) fn policy() -> ControlPolicy {
     ControlPolicy {
@@ -224,12 +226,13 @@ mod tests {
             Capability::Repeat,
             Capability::Absolute,
             Capability::Buttons,
+            Capability::LineScroll,
         ] {
             assert!(caps.contains(granted));
         }
         for absent in [
             Capability::Text,
-            Capability::LineScroll,
+            Capability::PixelScroll,
             Capability::Relative,
         ] {
             assert!(!caps.contains(absent));

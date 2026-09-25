@@ -82,10 +82,10 @@ it does not accept an intermediate count as a completed action. Partial and
 unknown receipts retain the actual prefix and stop further actions as before.
 No receipt means “exactly once application execution.”
 
-The existing GUI event queue can already submit positioned line-scroll actions.
-This implementation supplies their native backend. It does not install a GUI,
-provide a platform wheel-event collector, implement high-resolution smooth
-scrolling or qualify a live tailnet desktop session.
+The GUI event queue submits positioned line-scroll actions to this backend.
+The X11 wheel-event collector and the command-profile integration are described
+below. High-resolution smooth scrolling and live-tailnet desktop qualification
+remain separate work.
 
 ## Verification and reproduction
 
@@ -161,3 +161,46 @@ completed candidate run does not imply that later checks have already passed.
 Physical devices/displays, live Tailscale ingress, Wayland, macOS and Windows
 qualification remain separate acceptance work. The former saved scrolling patch
 is superseded by these published commits and should not be reapplied.
+
+
+## Command integration — 25 September 2026
+
+The `fr connect NODE --control --experimental-native --display only` profile now
+requests `Capability::LineScroll`, and `frd run --software-explicit --input-agent
+PATH` permits that same native operation. The original control grant, fresh-view
+checks, action sequence, ticket deadline, native preparation and final submission
+checks still apply. Observation-only clients never gain input permission.
+Use matching current host/client builds: a host without the requested operation
+refuses the request rather than silently changing its scope or retrying it.
+
+The X11 viewer maps button-press notches 4/5/6/7 to up/down/left/right using the
+existing `LINE = 65536` fixed-point unit. Its former `+/-1` values were fractional
+lines that the discrete native backend correctly refused. Wheel release edges
+produce no second scroll; missing negotiated line-scroll capability ignores the
+wheel without consuming subsequent key actions. Pixel scrolling, relative input
+and committed text remain excluded from this command profile.
+
+Verification for this integration: a new actual-X11 capture regression fails on
+the original unit conversion (`-1` instead of `-65536`) and passes on the fixed
+source. All 23 tests in the selected native input/capture build pass under Xvfb,
+as do all 11 existing native scroll tests (including independent Xlib observation,
+expiry, revoke, replay and remapping). Strict pedantic Clippy for the capture test
+build and pinned rustfmt pass. Two additional local contract checks compile the
+exact host/client capability function bodies, verify equality across all eight
+operation bits, and confirm that the set fits the real X11 sink's capability
+probe. Those two checks do not compile the enclosing CLI or daemon modules.
+
+This is scoped evidence: first-party libraries were rebuilt from the retained
+`2fc9711` snapshot using the pinned compiler and matching unchanged external CI
+libraries. The capture source and its original tests were hash-identical to
+current main before the fix; the two command-profile files were separately
+reconciled to their exact current-main hashes before editing. The complete
+current-main workspace and the two-machine/namespace CLI scenario have NOT been
+rerun for this change. No physical wheel, smooth-trackpad, GPU or live-tailnet
+qualification is claimed.
+
+In a full checkout, the capture regression can be repeated with:
+
+```sh
+xvfb-run -a env FR_NATIVE_INPUT_CAPTURE_REQUIRED=1 cargo test -p fr-native --features linux-input,linux-viewer-input --lib viewer_input::tests --locked -- --test-threads=1
+```
