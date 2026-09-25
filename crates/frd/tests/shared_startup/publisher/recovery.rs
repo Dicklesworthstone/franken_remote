@@ -217,7 +217,7 @@ async fn recover_loss(rt: &Runtime, keep_healthy: bool) {
             .receive_ready(
                 &cx,
                 || true,
-                |r| matches!(r, Route::Stream(s) if s.messages == Messages::Exact(0x30)),
+                |r| matches!(r, Route::Stream(s) if s.messages == Messages::MediaConfiguration),
                 |_, b| {
                     bytes = Some(b.to_vec());
                     Ok(Disposition::Consumed)

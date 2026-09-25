@@ -174,7 +174,7 @@ fn retained_sender_replaces_real_channels_and_preserves_chronic_failure_history(
                 .receive_ready(
                     &cx,
                     || true,
-                    |r| matches!(r,Route::Stream(s) if s.messages==Messages::Exact(0x30)),
+                    |r| matches!(r,Route::Stream(s) if s.messages==Messages::MediaConfiguration),
                     |_, b| {
                         let fr_wire::decoder::Message::Configuration(_) = fr_wire::decoder::decode(
                             b,

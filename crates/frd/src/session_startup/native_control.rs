@@ -43,6 +43,9 @@ pub fn host_offer(control: bool) -> Offer {
                 .filter(|_| control)
                 .map(|&(name, version)| (name, version, false)),
         )
+        // Remote-cursor forwarding is optional in both modes: an older viewer
+        // omits it and receives no cursor records.
+        .chain([(fr_wire::cursor::CAPABILITY, fr_wire::cursor::VERSION, false)])
         .map(|(name, version, required)| Capability {
             name: name.into(),
             version,

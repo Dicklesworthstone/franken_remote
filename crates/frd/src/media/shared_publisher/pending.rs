@@ -86,6 +86,7 @@ impl Publisher {
                 first,
                 seeded: false,
             }),
+            cursor: super::cursor::EntryCursor::default(),
         });
         Ok(Subscriber {
             members: Arc::downgrade(&self.members),

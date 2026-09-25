@@ -321,7 +321,7 @@ impl Link {
                 .receive_ready(
                     cx,
                     || true,
-                    |r| matches!(r,Route::Stream(s) if s.messages==Messages::Exact(0x30)),
+                    |r| matches!(r,Route::Stream(s) if s.messages==Messages::MediaConfiguration),
                     |_, b| {
                         record = Some(b.to_vec());
                         Ok(Disposition::Consumed)

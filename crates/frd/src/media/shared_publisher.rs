@@ -58,6 +58,7 @@ struct Entry {
     failure: Option<Error>,
     join: Option<join::PendingJoin>,
     starting: Option<pending::Starting>,
+    cursor: cursor::EntryCursor,
 }
 impl Entry {
     fn close(&mut self, error: Error) {
@@ -84,6 +85,8 @@ struct Members {
     closed: bool,
     until: u64,
     last: u64,
+    /// The source's bounded serial→wire-ID map and latest cursor target.
+    cursor: fr_media::cursor::HostCursor,
 }
 impl Members {
     fn selected_view(&self, view: Binding) -> bool {
@@ -213,6 +216,7 @@ impl Publisher {
                 closed: false,
                 until,
                 last: now,
+                cursor: fr_media::cursor::HostCursor::new(),
             })),
         })
     }
@@ -286,6 +290,7 @@ impl Publisher {
             failure: None,
             join: None,
             starting: None,
+            cursor: cursor::EntryCursor::default(),
         });
         Ok(Subscriber {
             members: Arc::downgrade(&self.members),
@@ -555,7 +560,12 @@ impl Subscriber {
         }
         members.tick()?;
         let owner = members.owner.clone();
-        let entry = members.entries[self.slot].as_mut().ok_or(Error::Closed)?;
+        let Members {
+            entries,
+            cursor: host_cursor,
+            ..
+        } = &mut *members;
+        let entry = entries[self.slot].as_mut().ok_or(Error::Closed)?;
         if let Some(error) = entry.failure {
             return Err(error);
         }
@@ -608,6 +618,8 @@ impl Subscriber {
                     crate::media_egress::Progress::Idle => break,
                 }
             }
+            // Bounded: at most one reliable shape and one position datagram.
+            entry.service_cursor(cx, transport, host_cursor, &owner, &mut report)?;
             Ok(report)
         })();
         if let Err(error) = result {
@@ -713,6 +725,7 @@ impl Subscription {
     }
 }
 
+mod cursor;
 mod join;
 mod pending;
 mod service;

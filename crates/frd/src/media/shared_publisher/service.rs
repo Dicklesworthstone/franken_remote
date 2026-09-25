@@ -106,6 +106,9 @@ impl Publisher {
                     Err(Error::Media(MediaError::Backpressure)) => {}
                     Err(error) => return Err(error),
                 }
+                // Same cadence, separate from pixels: a moving pointer over a
+                // static desktop needs no new picture and is not freshness.
+                publisher.sample_cursor().await?;
                 cadence.after_turn(owner.check().map_err(Error::Media)?.as_micros())?;
             }
         }

@@ -62,6 +62,48 @@ pub(super) fn accepts_length(len: usize, limits: &ProtocolLimits) -> bool {
             .checked_add(HEADER_BYTES)
             .is_some_and(|n| n <= limits.max_control_message_bytes() as usize)
 }
+/// One typed `ReadCursor` outcome. Only `Inside` carries an image; the other
+/// states are non-fatal and never fabricate coordinates or pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Observation<'a> {
+    /// A logical image with the pointer inside the selected capture scope.
+    Inside(Snapshot<'a>),
+    /// Pointer outside the selected capture scope (not a hidden-cursor claim).
+    Outside,
+    /// The pointer moved between the native image and position queries.
+    Moving,
+    /// The display cannot observe a separate cursor (e.g. no XFIXES).
+    Unsupported,
+    /// A cursor exists but cannot be represented within the admitted bounds.
+    Unrepresentable,
+}
+const UNSUPPORTED: u8 = 2;
+const UNREPRESENTABLE: u8 = 3;
+/// Encode a typed observation. `Moving` is carried by the `NeedInput` reply
+/// kind, never by this body.
+pub fn encode_observation(
+    observation: Observation<'_>,
+    limits: &ProtocolLimits,
+) -> Result<Vec<u8>, Error> {
+    match observation {
+        Observation::Inside(s) => encode(Some(s), limits),
+        Observation::Outside => encode(None, limits),
+        Observation::Unsupported => Ok(vec![UNSUPPORTED]),
+        Observation::Unrepresentable => Ok(vec![UNREPRESENTABLE]),
+        Observation::Moving => Err(Error::WrongState),
+    }
+}
+/// Decode a `CursorSnapshot` body into its typed observation.
+pub fn decode_observation<'a>(
+    body: &'a [u8],
+    limits: &ProtocolLimits,
+) -> Result<Observation<'a>, Error> {
+    match body {
+        [UNSUPPORTED] => Ok(Observation::Unsupported),
+        [UNREPRESENTABLE] => Ok(Observation::Unrepresentable),
+        _ => Ok(decode(body, limits)?.map_or(Observation::Outside, Observation::Inside)),
+    }
+}
 /// `None` means outside the selected capture scope, never a hidden-cursor claim.
 /// A present logical image does not certify visibility: no visibility bit exists
 /// in this private format. Encode bounds are checked before the owned allocation.

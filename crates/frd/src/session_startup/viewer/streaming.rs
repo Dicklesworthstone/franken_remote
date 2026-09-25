@@ -2,6 +2,7 @@
 //! One owned picture stays charged while QUIC, repairs and control keep moving.
 mod acquisition;
 mod continuation;
+mod cursor;
 mod interactive;
 mod recovery;
 use super::{
@@ -47,6 +48,8 @@ pub enum Error {
     Feedback(feedback::Error),
     PresentedState(presented::Error),
     Freshness(fr_media::freshness::Error),
+    /// A malformed or hostile remote cursor record (typed, no pixels).
+    Cursor(cursor::Fault),
     Application,
     RequestAlreadyStarted,
     Closed,
@@ -248,6 +251,8 @@ pub struct StreamingViewer {
     recovery: Option<Box<recovery_control::Receiver>>,
     feedback: Option<ViewerFeedback>,
     presentation: Option<ViewerPresentation>,
+    /// Present only when the host selected `remote-cursor`.
+    cursor: Option<cursor::ViewerCursor>,
     control: StreamingViewerControl,
     statistics: Statistics,
     served: bool,
@@ -391,9 +396,10 @@ impl StreamingViewer {
             } else {
                 None
             };
-            Ok((feedback, presentation, recovery))
+            let cursor = cursor::ViewerCursor::attach(media, &session.transport)?;
+            Ok((feedback, presentation, recovery, cursor))
         })();
-        let (feedback, presentation, recovery) = match setup {
+        let (feedback, presentation, recovery, cursor) = match setup {
             Ok(owners) => owners,
             Err(error) => {
                 peer.close();
@@ -412,6 +418,7 @@ impl StreamingViewer {
             recovery: recovery.map(Box::new),
             feedback,
             presentation,
+            cursor,
             control: StreamingViewerControl { cx, input },
             statistics: Statistics::default(),
             served: false,
@@ -652,6 +659,10 @@ impl StreamingViewer {
                 )?;
                 continue;
             }
+            if !recovering {
+                // Between decode jobs only: the presenter is not borrowed.
+                self.apply_cursor(cx).await?;
+            }
             let ready = !recovering && self.peer.prepare_decode(&self.receiver)?;
             let job = if ready {
                 recovery::admit(
@@ -676,6 +687,7 @@ impl StreamingViewer {
                     &mut self.statistics,
                     self.feedback.as_mut(),
                     self.presentation.as_mut(),
+                    self.cursor.as_mut(),
                     cx,
                     result,
                     other,
@@ -703,6 +715,7 @@ impl StreamingViewer {
                             &mut self.statistics,
                             self.feedback.as_mut(),
                             self.presentation.as_mut(),
+                            self.cursor.as_mut(),
                             cx,
                             result,
                             other,
@@ -875,6 +888,7 @@ async fn network(
     statistics: &mut Statistics,
     mut feedback: Option<&mut ViewerFeedback>,
     presentation: Option<&mut ViewerPresentation>,
+    mut cursor: Option<&mut cursor::ViewerCursor>,
     cx: &Cx,
     result: &mut impl FnMut(ResultEvent),
     other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
@@ -889,6 +903,9 @@ async fn network(
     let routes = media
         .viewer_routes(&session.transport)
         .map_err(Error::Routes)?;
+    if let Some(cursor) = cursor.as_deref_mut() {
+        cursor.refresh(media, &session.transport)?;
+    }
     if repair.len != 0 {
         let route = Route::Stream(
             media
@@ -921,6 +938,13 @@ async fn network(
                 })?;
                 f.receive(route, bytes, receiver, current).map_err(|e| {
                     failure = Some(Error::Feedback(e));
+                })?;
+                Ok(Disposition::Consumed)
+            } else if let Some(cursor) = cursor.as_deref_mut().filter(|c| c.owns(route, bytes)) {
+                // Before the media pipeline: cursor records are never progress,
+                // fragments or freshness evidence.
+                cursor.receive(route, bytes).map_err(|e| {
+                    failure = Some(Error::Cursor(e));
                 })?;
                 Ok(Disposition::Consumed)
             } else if let Some((_, channel)) = routes.iter().find(|(r, _)| *r == route) {

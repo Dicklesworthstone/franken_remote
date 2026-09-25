@@ -5,7 +5,7 @@
 //! explicitly opts into the currently unqualified native transport.
 use fr_core::limits::ProtocolLimits;
 use fr_wire::{
-    attachment, clock, control, decoder, display,
+    attachment, clock, control, cursor, decoder, display,
     negotiation::{Capability, Offer, Role},
     presented, receiver_metrics, recovery_request,
 };
@@ -61,6 +61,8 @@ fn offer(role: Role, extra: &[(&str, u16, bool)]) -> Offer {
             recovery_request::VERSION,
             false,
         ),
+        // The single client-rendered remote cursor; absent hosts send none.
+        (cursor::CAPABILITY, cursor::VERSION, false),
     ]
     .iter()
     .chain(extra)

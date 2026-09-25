@@ -176,6 +176,32 @@ fn native_cursor_ipc_does_not_consume_video_ids_or_unchanged_evidence() {
     worker.wait();
 }
 #[test]
+fn missing_xfixes_is_a_typed_state_that_never_ends_capture() {
+    let server = Server::start(false);
+    let mut worker = Worker::start(&server);
+    worker.configure();
+    for _ in 0..2 {
+        let reply = worker.request(Kind::ReadCursor, vec![]);
+        assert_eq!(reply.header.kind, Kind::CursorSnapshot);
+        assert_eq!(
+            worker::cursor::decode_observation(reply.body(), &ProtocolLimits::ABSOLUTE),
+            Ok(worker::cursor::Observation::Unsupported)
+        );
+    }
+    // The same capture worker still produces real video afterwards.
+    let capture = worker::capture_payload(FrameId::FIRST, 1, true);
+    let mut unit = worker.request(Kind::CaptureIfChanged, capture);
+    while unit.header.kind == Kind::NeedInput {
+        unit = worker.request(Kind::Poll, vec![]);
+    }
+    assert_eq!(unit.header.kind, Kind::Unit);
+    assert_eq!(
+        worker.request(Kind::Stop, vec![]).header.kind,
+        Kind::Stopped
+    );
+    worker.wait();
+}
+#[test]
 fn cursor_request_cannot_skip_role_bootstrap() {
     let server = Server::start(true);
     let mut worker = Worker::start(&server);

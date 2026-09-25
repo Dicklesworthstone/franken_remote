@@ -280,6 +280,7 @@ fn lost_final_picture(ack_stall: Duration) {
                     &mut stats,
                     None,
                     None,
+                    None,
                     &c,
                     &mut |_| {},
                     &mut block,

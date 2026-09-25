@@ -49,6 +49,20 @@ impl FittedFrame {
     pub const fn placement(&self) -> Fit {
         self.placement
     }
+    /// Decoded picture dimensions this viewport was built for.
+    pub const fn source(&self) -> (u32, u32) {
+        self.source
+    }
+    /// Render into the owned output and lend it for local compositing (the
+    /// client-rendered remote cursor) before presentation.
+    pub fn render_mut(&mut self, source: &BgraFrame) -> Result<&mut BgraFrame, NativeError> {
+        self.render(source)?;
+        Ok(&mut self.output)
+    }
+    /// The retained output, re-composited without a new picture.
+    pub fn output_mut(&mut self) -> &mut BgraFrame {
+        &mut self.output
+    }
     pub fn retained_bytes(&self) -> usize {
         self.output.bytes.capacity()
     }

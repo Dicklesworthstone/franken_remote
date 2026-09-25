@@ -20,6 +20,7 @@ pub const UNIT_PREFIX_BYTES: usize = 40;
 const CONFIG_BYTES: usize = 28;
 pub mod capture;
 pub mod cursor;
+pub mod overlay;
 pub mod presentation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +42,8 @@ pub enum Kind {
     ConfigurePresentation = 14,
     ConfigureFittedPresentation = 15,
     ReadCursor = 16,
+    /// Presenter-only: replace the client-rendered remote cursor overlay.
+    CursorOverlay = 17,
     Ready = 257,
     Unit = 258,
     NeedInput = 259,
@@ -59,6 +62,9 @@ pub enum Kind {
     PresentationReady = 272,
     FittedPresentationReady = 273,
     CursorSnapshot = 274,
+    /// The overlay state was installed (and re-presented if a picture exists).
+    /// Not a decode, presentation or visibility receipt.
+    CursorOverlayApplied = 275,
 }
 impl Kind {
     fn parse(n: u16) -> Result<Self, Error> {
@@ -79,6 +85,7 @@ impl Kind {
             14 => Self::ConfigurePresentation,
             15 => Self::ConfigureFittedPresentation,
             16 => Self::ReadCursor,
+            17 => Self::CursorOverlay,
             257 => Self::Ready,
             258 => Self::Unit,
             259 => Self::NeedInput,
@@ -97,6 +104,7 @@ impl Kind {
             272 => Self::PresentationReady,
             273 => Self::FittedPresentationReady,
             274 => Self::CursorSnapshot,
+            275 => Self::CursorOverlayApplied,
             _ => return Err(Error::Malformed),
         })
     }
@@ -115,7 +123,8 @@ impl Kind {
             | Self::DiscoverCapture
             | Self::DiscoverMonitors
             | Self::CheckMonitor
-            | Self::MonitorValid => length == 0,
+            | Self::MonitorValid
+            | Self::CursorOverlayApplied => length == 0,
             Self::CaptureMonitors => {
                 (9..=capture::monitors::CATALOG_MAX_BYTES).contains(&length)
                     && length <= limits.max_control_message_bytes() as usize
@@ -139,6 +148,7 @@ impl Kind {
                     && length <= limits.max_control_message_bytes() as usize
             }
             Self::CursorSnapshot => cursor::accepts_length(length, limits),
+            Self::CursorOverlay => overlay::accepts_length(length, limits),
             Self::Capture | Self::CaptureIfChanged => length == 17,
             Self::Unchanged => length == 24,
             Self::Poll | Self::Stop | Self::NeedInput | Self::NeedDrain | Self::Stopped => {

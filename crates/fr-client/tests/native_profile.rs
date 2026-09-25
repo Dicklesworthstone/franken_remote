@@ -63,7 +63,7 @@ fn shipped_profile_is_observation_only_with_mandatory_bootstrap_and_optional_rec
     let offer = observation_offer();
     offer.validate().unwrap();
     assert_eq!(offer.role, Role::Observe);
-    assert_eq!(offer.capabilities.len(), 6);
+    assert_eq!(offer.capabilities.len(), 7);
     for name in [
         display::CAPABILITY,
         decoder::CAPABILITY,
@@ -74,7 +74,11 @@ fn shipped_profile_is_observation_only_with_mandatory_bootstrap_and_optional_rec
         assert!(cap.required);
         assert_eq!(cap.version, 1);
     }
-    for name in [receiver_metrics::CAPABILITY, recovery_request::CAPABILITY] {
+    for name in [
+        receiver_metrics::CAPABILITY,
+        recovery_request::CAPABILITY,
+        fr_wire::cursor::CAPABILITY,
+    ] {
         let cap = offer.capabilities.iter().find(|c| c.name == name).unwrap();
         assert!(!cap.required);
         assert_eq!(cap.version, 1);

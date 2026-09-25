@@ -117,6 +117,7 @@ impl JoinQueue {
             sender,
             failure: None,
             starting: None,
+            cursor: super::cursor::EntryCursor::default(),
             join: Some(PendingJoin {
                 setup,
                 cfg,

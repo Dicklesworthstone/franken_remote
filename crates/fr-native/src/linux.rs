@@ -5,6 +5,9 @@ pub use decoder_sandbox::DecoderSandboxUnavailable;
 #[path = "presentation_fit.rs"]
 mod presentation_fit;
 pub use presentation_fit::FittedFrame;
+#[path = "cursor_overlay.rs"]
+mod cursor_overlay;
+pub use cursor_overlay::{CursorOverlay, Placement as OverlayPlacement};
 #[path = "presentation.rs"]
 mod presentation;
 pub use presentation::PresentationMaintenance;

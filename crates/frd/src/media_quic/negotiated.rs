@@ -1,6 +1,7 @@
 //! Join completed native attachments to the actual media owners. This is not
 //! admission: the containing session still selects the view and services consent,
 //! observation renewal, revocation and input cleanup independently of the codec.
+mod cursor;
 mod handoff;
 pub mod replacement;
 use super::{Error, QuicEgress, Routes};
@@ -8,6 +9,7 @@ use crate::{
     media::{ObservationControl, Subscription, decoder_startup::Setup},
     media_egress::Egress,
 };
+pub(crate) use cursor::CursorLanes;
 use fr_media::delivery::{MediaBindings, MediaEpoch, ReceiveConfig, ReceivePolicy, SendPolicy};
 use fr_transport::quic::{
     AttachedChannel, ConnectionBinding, Disposition, MediaChannel, QuicRecords, Route, StreamRoute,

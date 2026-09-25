@@ -109,7 +109,7 @@ impl Client {
         }
         self.viewer
             .drive(Duration::from_millis(1), |route, bytes| {
-                if matches!(route, Route::Stream(r) if r.messages == Messages::Exact(0x30)) {
+                if matches!(route, Route::Stream(r) if r.messages == Messages::MediaConfiguration) {
                     assert!(!self.configuration);
                     assert!(matches!(
                         decoder::decode(

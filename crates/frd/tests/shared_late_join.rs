@@ -87,7 +87,7 @@ impl Peer {
             .receive_ready(
                 cx,
                 || true,
-                |r| matches!(r, Route::Stream(s) if s.messages == Messages::Exact(0x30)),
+                |r| matches!(r, Route::Stream(s) if s.messages == Messages::MediaConfiguration),
                 |_, bytes| {
                     assert!(self.configuration.is_none(), "configuration sent twice");
                     assert!(matches!(

@@ -1,9 +1,13 @@
 //! Host and client media pipeline policy, queue accounting, cursor management,
 //! damage reconstruction, and idle state machine (Plan §11.1–§11.4, §13.4).
 
+use crate::cursor::{Refusal as CursorRefusal, ShapeSet, check_geometry};
 use core::fmt;
 use fr_core::ids::DisplayGeometryGeneration;
-use fr_wire::{CursorPosition, CursorShape, SourceObservation, WireError};
+use fr_wire::{
+    CursorPosition, CursorShape, SHAPE_FLAG_HOST_COMPOSITED, SHAPE_FLAG_VISIBLE, SourceObservation,
+    WireError,
+};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// All distinct stages of the media pipeline (7 primary stages + 5 hidden stages).
@@ -94,6 +98,8 @@ pub enum PipelineError {
     CaptureStalled { last_observation_age_us: u64 },
     /// General wire protocol error.
     Wire(WireError),
+    /// Hostile, unrepresentable or exhausted cursor state (typed refusal).
+    Cursor(CursorRefusal),
 }
 
 impl fmt::Display for PipelineError {
@@ -147,6 +153,7 @@ impl fmt::Display for PipelineError {
                 "capture stalled: last observation was {last_observation_age_us}us ago"
             ),
             Self::Wire(e) => write!(f, "wire error: {e}"),
+            Self::Cursor(e) => write!(f, "cursor refused: {e}"),
         }
     }
 }
@@ -685,36 +692,115 @@ pub struct EffectiveCursor {
     pub is_fallback_shape: bool,
 }
 
+/// One validated, bounded client copy of a reliable host cursor shape.
+#[derive(Clone, PartialEq, Eq)]
+pub struct StoredCursorShape {
+    pub shape_id: u32,
+    pub width: u16,
+    pub height: u16,
+    pub hotspot_x: u16,
+    pub hotspot_y: u16,
+    pub scale_1000: u16,
+    pub flags: u8,
+    rgba: Vec<u8>,
+}
+impl fmt::Debug for StoredCursorShape {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Geometry only: cursor pixels never reach diagnostics.
+        f.debug_struct("StoredCursorShape")
+            .field("shape_id", &self.shape_id)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("bytes", &self.rgba.len())
+            .finish_non_exhaustive()
+    }
+}
+impl StoredCursorShape {
+    /// Straight (not premultiplied) alpha RGBA8, exactly `width * height * 4`.
+    pub fn rgba(&self) -> &[u8] {
+        &self.rgba
+    }
+    pub const fn is_visible(&self) -> bool {
+        self.flags & SHAPE_FLAG_VISIBLE != 0
+    }
+    pub const fn is_host_composited(&self) -> bool {
+        self.flags & SHAPE_FLAG_HOST_COMPOSITED != 0
+    }
+    /// A small built-in crosshair (white core, black outline). It stands in
+    /// for a shape that has not arrived or cannot be carried; it is never
+    /// presented as the host's actual cursor image.
+    fn fallback() -> Self {
+        const SIZE: usize = 7;
+        let mut rgba = vec![0; SIZE * SIZE * 4];
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let core = x == 3 || y == 3;
+                let outline = x.abs_diff(3) == 1 || y.abs_diff(3) == 1;
+                let pixel = if core {
+                    [0xFF, 0xFF, 0xFF, 0xFF]
+                } else if outline {
+                    [0x00, 0x00, 0x00, 0xFF]
+                } else {
+                    [0, 0, 0, 0]
+                };
+                rgba[(y * SIZE + x) * 4..][..4].copy_from_slice(&pixel);
+            }
+        }
+        Self {
+            shape_id: crate::cursor::FALLBACK_SHAPE_ID,
+            width: 7,
+            height: 7,
+            hotspot_x: 3,
+            hotspot_y: 3,
+            scale_1000: 1000,
+            flags: SHAPE_FLAG_VISIBLE,
+            rgba,
+        }
+    }
+}
+
+/// Outcome of admitting one reliable shape (typed eviction, never silent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShapeAdmission {
+    /// Oldest shapes evicted to keep BOTH the count and byte bounds.
+    pub evicted: usize,
+}
+
 /// Bounded cache of reliable cursor shapes and safe fallback logic (Plan §11.4).
+///
+/// Shapes are validated BEFORE their bounded copy is allocated; the cache
+/// holds at most [`crate::cursor::MAX_SHAPES`] images and
+/// [`crate::cursor::MAX_SHAPE_BYTES`] RGBA bytes, evicting oldest-first exactly
+/// like the host's per-viewer mirror. A position referencing an unknown shape
+/// resolves to the built-in fallback, never an allocation, and re-resolves when
+/// the reliable shape arrives later.
 #[derive(Debug)]
 pub struct CursorPipelineTracker {
     rendering_owner: CursorRenderingOwner,
     geometry: DisplayGeometryGeneration,
     latest_sequence: u64,
-    shapes: HashMap<u32, Vec<u8>>,
-    shape_order: VecDeque<u32>,
-    max_shapes: usize,
+    set: ShapeSet,
+    shapes: VecDeque<StoredCursorShape>,
+    fallback: StoredCursorShape,
     pointer_locked: bool,
+    last: Option<CursorPosition>,
 }
 
 impl CursorPipelineTracker {
-    pub const DEFAULT_MAX_SHAPES: usize = 32;
-    pub const FALLBACK_SHAPE_ID: u32 = 0;
+    pub const DEFAULT_MAX_SHAPES: usize = crate::cursor::MAX_SHAPES;
+    pub const FALLBACK_SHAPE_ID: u32 = crate::cursor::FALLBACK_SHAPE_ID;
 
     pub fn new(rendering_owner: CursorRenderingOwner, geometry: DisplayGeometryGeneration) -> Self {
-        let mut tracker = Self {
+        Self {
             rendering_owner,
             geometry,
             latest_sequence: 0,
-            shapes: HashMap::new(),
-            shape_order: VecDeque::new(),
-            max_shapes: Self::DEFAULT_MAX_SHAPES,
+            set: ShapeSet::default(),
+            shapes: VecDeque::new(),
+            fallback: StoredCursorShape::fallback(),
             pointer_locked: false,
-        };
-        // Seed default 1x1 fallback white dot cursor
-        let fallback_dot = vec![0xFF, 0xFF, 0xFF, 0xFF];
-        tracker.shapes.insert(Self::FALLBACK_SHAPE_ID, fallback_dot);
-        tracker
+            last: None,
+        }
     }
 
     pub fn set_rendering_owner(&mut self, owner: CursorRenderingOwner) {
@@ -725,31 +811,102 @@ impl CursorPipelineTracker {
         self.pointer_locked = locked;
     }
 
+    /// A geometry change fences every older position; the old confirmed
+    /// position is dropped rather than mapped into the new coordinate space.
     pub fn set_geometry(&mut self, geometry: DisplayGeometryGeneration) {
+        if geometry != self.geometry {
+            self.last = None;
+        }
         self.geometry = geometry;
     }
 
-    /// Stores a reliable cursor shape received from the host.
-    pub fn store_shape(&mut self, shape: &CursorShape<'_>) {
-        if self.shapes.len() >= self.max_shapes && !self.shapes.contains_key(&shape.shape_id) {
-            // Evict oldest shape that is not the fallback
-            while let Some(oldest) = self.shape_order.pop_front() {
-                if oldest != Self::FALLBACK_SHAPE_ID {
-                    self.shapes.remove(&oldest);
-                    break;
-                }
-            }
-        }
-        self.shapes.insert(shape.shape_id, shape.rgba.to_vec());
-        self.shape_order.push_back(shape.shape_id);
+    /// New media bindings: an empty cache, sequence space and position.
+    pub fn reset(&mut self, geometry: DisplayGeometryGeneration) {
+        self.geometry = geometry;
+        self.latest_sequence = 0;
+        self.set.clear();
+        self.shapes.clear();
+        self.last = None;
     }
 
-    /// Processes a replaceable cursor position, enforcing monotonicity, geometry fencing,
-    /// single rendering owner, and unknown-shape safe fallback.
+    /// Cached shapes as (count, RGBA bytes); the built-in fallback is excluded.
+    pub fn usage(&self) -> (usize, usize) {
+        (self.set.len(), self.set.bytes())
+    }
+
+    /// Stores a reliable cursor shape received from the host. All geometry,
+    /// reserved-ID, scale and flag checks precede the bounded copy.
+    pub fn store_shape(
+        &mut self,
+        shape: &CursorShape<'_>,
+    ) -> Result<ShapeAdmission, PipelineError> {
+        if shape.shape_id == Self::FALLBACK_SHAPE_ID {
+            return Err(PipelineError::Cursor(CursorRefusal::ReservedShapeId));
+        }
+        let bytes = check_geometry(
+            shape.width,
+            shape.height,
+            shape.hotspot_x,
+            shape.hotspot_y,
+            shape.rgba.len(),
+        )
+        .map_err(PipelineError::Cursor)?;
+        if shape.scale_1000 == 0 || shape.scale_1000 > 10_000 {
+            return Err(PipelineError::Cursor(CursorRefusal::InvalidScale));
+        }
+        if shape.flags & !(SHAPE_FLAG_VISIBLE | SHAPE_FLAG_HOST_COMPOSITED) != 0 {
+            return Err(PipelineError::Cursor(CursorRefusal::InvalidFlags));
+        }
+        let mut rgba = Vec::new();
+        rgba.try_reserve_exact(bytes)
+            .map_err(|_| PipelineError::Cursor(CursorRefusal::ShapeExceedsCache))?;
+        rgba.extend_from_slice(shape.rgba);
+        // A re-sent ID replaces its old image with fresh accounting.
+        if let Some(index) = self.set.remove(shape.shape_id) {
+            self.shapes.remove(index);
+        }
+        let evicted = self
+            .set
+            .admit(shape.shape_id, bytes)
+            .map_err(PipelineError::Cursor)?;
+        for _ in 0..evicted {
+            self.shapes.pop_front();
+        }
+        self.shapes.push_back(StoredCursorShape {
+            shape_id: shape.shape_id,
+            width: shape.width,
+            height: shape.height,
+            hotspot_x: shape.hotspot_x,
+            hotspot_y: shape.hotspot_y,
+            scale_1000: shape.scale_1000,
+            flags: shape.flags,
+            rgba,
+        });
+        Ok(ShapeAdmission { evicted })
+    }
+
+    /// The stored shape for an effective cursor, or the built-in fallback.
+    pub fn shape(&self, shape_id: u32) -> Option<&StoredCursorShape> {
+        if shape_id == Self::FALLBACK_SHAPE_ID {
+            return Some(&self.fallback);
+        }
+        self.shapes.iter().find(|s| s.shape_id == shape_id)
+    }
+
+    /// Processes a replaceable cursor position, enforcing geometry fencing,
+    /// monotonicity, single rendering owner, and unknown-shape safe fallback.
+    /// A fenced position does not advance the accepted sequence.
     pub fn process_position(
         &mut self,
         pos: &CursorPosition,
     ) -> Result<Option<EffectiveCursor>, PipelineError> {
+        pos.validate().map_err(PipelineError::Wire)?;
+        if pos.geometry_generation != self.geometry.as_raw() {
+            return Err(PipelineError::MismatchedGeometry {
+                expected: self.geometry,
+                actual: DisplayGeometryGeneration::from_raw(pos.geometry_generation),
+            });
+        }
         // Monotonic sequence check (replaceable datagram drops older sequence)
         if pos.sequence <= self.latest_sequence {
             return Err(PipelineError::StaleSequence {
@@ -758,46 +915,44 @@ impl CursorPipelineTracker {
             });
         }
         self.latest_sequence = pos.sequence;
+        self.last = Some(*pos);
+        Ok(self.current())
+    }
 
-        // Geometry generation fence
-        if pos.geometry_generation != self.geometry.as_raw() {
-            return Err(PipelineError::MismatchedGeometry {
-                expected: self.geometry,
-                actual: DisplayGeometryGeneration::from_raw(pos.geometry_generation),
-            });
-        }
-
+    /// The latest confirmed position resolved against the CURRENT cache, so a
+    /// shape arriving after its position replaces the fallback.
+    pub fn current(&self) -> Option<EffectiveCursor> {
+        let pos = self.last?;
+        let shape = self.shapes.iter().find(|s| s.shape_id == pos.shape_id);
+        let locked = self.pointer_locked || pos.is_locked();
         // If host composites cursor or pointer is locked / hidden, do not render a local double cursor
         if self.rendering_owner == CursorRenderingOwner::HostComposited
             || !pos.is_visible()
-            || self.pointer_locked
-            || pos.is_locked()
+            || locked
+            || shape.is_some_and(|s| s.is_host_composited() || !s.is_visible())
         {
-            return Ok(Some(EffectiveCursor {
+            return Some(EffectiveCursor {
                 shape_id: pos.shape_id,
                 x: pos.x,
                 y: pos.y,
                 visible: false,
-                locked: self.pointer_locked || pos.is_locked(),
+                locked,
                 is_fallback_shape: false,
-            }));
+            });
         }
-
         // Shape resolution with safe fallback if shape has not arrived yet
-        let (resolved_id, is_fallback) = if self.shapes.contains_key(&pos.shape_id) {
-            (pos.shape_id, false)
-        } else {
-            (Self::FALLBACK_SHAPE_ID, true)
+        let (shape_id, is_fallback_shape) = match shape {
+            Some(s) => (s.shape_id, false),
+            None => (Self::FALLBACK_SHAPE_ID, true),
         };
-
-        Ok(Some(EffectiveCursor {
-            shape_id: resolved_id,
+        Some(EffectiveCursor {
+            shape_id,
             x: pos.x,
             y: pos.y,
             visible: true,
             locked: false,
-            is_fallback_shape: is_fallback,
-        }))
+            is_fallback_shape,
+        })
     }
 }
 

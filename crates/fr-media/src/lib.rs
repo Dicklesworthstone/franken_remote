@@ -24,6 +24,7 @@ pub mod audio;
 pub mod capabilities;
 pub mod codec;
 pub mod config;
+pub mod cursor;
 pub mod delivery;
 pub mod freshness;
 pub mod hevc;

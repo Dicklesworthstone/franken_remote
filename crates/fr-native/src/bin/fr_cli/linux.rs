@@ -647,7 +647,7 @@ mod tests {
         assert!(offer.validate().is_ok());
         assert_eq!(offer.role, fr_wire::negotiation::Role::Observe);
         assert_eq!(offer, fr_client::native::observation_offer());
-        assert_eq!(offer.capabilities.len(), 6);
+        assert_eq!(offer.capabilities.len(), 7);
         assert!(offer.capabilities.iter().all(|c| !c.name.contains("input")
             && !c.name.contains("clipboard")
             && !c.name.contains("audio")));

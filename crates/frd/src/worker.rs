@@ -492,9 +492,11 @@ impl Worker {
             (self.role, kind),
             (
                 Role::Capture,
-                Kind::Capture | Kind::CaptureIfChanged | Kind::CheckMonitor
-            ) | (Role::Present, Kind::Present | Kind::Decode)
-                | (_, Kind::Poll | Kind::Stop)
+                Kind::Capture | Kind::CaptureIfChanged | Kind::CheckMonitor | Kind::ReadCursor
+            ) | (
+                Role::Present,
+                Kind::Present | Kind::Decode | Kind::CursorOverlay
+            ) | (_, Kind::Poll | Kind::Stop)
         ) {
             return Err(Error::Protocol(worker::Error::WrongRole));
         }
@@ -737,6 +739,10 @@ fn allowed_reply(request: Kind, reply: Kind) -> bool {
                 Kind::Unit | Kind::Presented | Kind::Decoded | Kind::NeedInput
             ),
             Kind::Stop => reply == Kind::Stopped,
+            // Typed cursor states (outside/unsupported/unrepresentable) share
+            // one reply kind; NeedInput means the pointer moved mid-query.
+            Kind::ReadCursor => matches!(reply, Kind::CursorSnapshot | Kind::NeedInput),
+            Kind::CursorOverlay => reply == Kind::CursorOverlayApplied,
             _ => false,
         }
 }

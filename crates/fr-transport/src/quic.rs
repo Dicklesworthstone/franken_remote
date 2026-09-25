@@ -94,6 +94,10 @@ pub enum Messages {
     Files,
     /// Decoder configuration and first-frame acknowledgements, one ordered lane.
     DecoderReplies,
+    /// The host's reliable media-configuration lane: `DecoderConfiguration`
+    /// and, only after `remote-cursor` selection, `CursorShape`. The session
+    /// still refuses a shape the peer did not negotiate.
+    MediaConfiguration,
     /// Initial native control only, before the host installs a binding.
     Negotiation,
     /// Bound connection control. The session codec still checks kind/state.
@@ -108,6 +112,7 @@ impl Messages {
             Self::Clipboard => matches!(kind, 0x0050..=0x0053),
             Self::Files => matches!(kind, 0x0070..=0x0074),
             Self::DecoderReplies => matches!(kind, 0x0031 | 0x0033),
+            Self::MediaConfiguration => matches!(kind, 0x0030 | 0x0038),
             Self::Negotiation => matches!(kind, 0x0001..=0x0004 | 0x0010 | 0x0011),
             Self::SessionControl => {
                 matches!(
@@ -129,6 +134,23 @@ impl Messages {
             Self::InputActions => matches!(kind, 0x0040 | 0x0041 | 0x0043..=0x0047),
         }
     }
+}
+/// Kinds admitted on one installed datagram route. The video route carries
+/// both Video-channel kinds: access-unit fragments and replaceable cursor
+/// positions. The session still refuses a position its peer did not negotiate.
+fn datagram_admits(route_kind: u16, kind: u16) -> bool {
+    kind == route_kind || (route_kind == 0x0034 && kind == 0x0039)
+}
+/// Full validation of one datagram record against its installed route.
+fn validate_datagram(bytes: &[u8], maximum: usize, route: DatagramRoute) -> Result<(), Error> {
+    let kind = bytes
+        .get(6..8)
+        .map(|k| u16::from_be_bytes([k[0], k[1]]))
+        .ok_or(Error::Malformed)?;
+    if !datagram_admits(route.kind, kind) {
+        return Err(Error::WrongRoute);
+    }
+    validate_record(bytes, maximum, route.binding, Messages::Exact(kind))
 }
 /// Locally selected traffic class, never chosen by a peer's record flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -607,12 +629,7 @@ impl QuicRecords {
                 if !r.outbound || !self.datagrams.contains(&r) {
                     return Err(Error::WrongRoute);
                 }
-                validate_record(
-                    bytes,
-                    self.datagram_maximum(r),
-                    r.binding,
-                    Messages::Exact(r.kind),
-                )?;
+                validate_datagram(bytes, self.datagram_maximum(r), r)?;
                 let queued = native
                     .connection()
                     .inner()
@@ -952,7 +969,7 @@ impl QuicRecords {
                 // response allocation and no reinterpretation as current.
                 return Ok(0);
             };
-            if kind != route.kind {
+            if !datagram_admits(route.kind, kind) {
                 return Err(Error::WrongRoute);
             }
             validate_record(

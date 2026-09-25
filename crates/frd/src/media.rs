@@ -26,6 +26,8 @@ use std::{
 };
 mod capture_update;
 pub mod clock;
+mod cursor;
+pub use cursor::CursorReply;
 pub mod decoder_startup;
 #[cfg(target_os = "linux")]
 pub mod discovery;

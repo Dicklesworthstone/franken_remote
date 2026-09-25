@@ -204,6 +204,57 @@ fn all_media_lanes_exchange_on_the_original_connection_without_static_routes() {
 }
 
 #[test]
+fn remote_cursor_records_ride_only_the_configuration_and_video_lanes() {
+    run_test!(cx, {
+        let mut l = Link::new(&cx).await;
+        enable(&mut l);
+        let (_, _, hc, cc) = attach(&mut l, &cx, MediaRole::Configuration, 8).await;
+        let (_, _, hr, _) = attach(&mut l, &cx, MediaRole::Recovery, 9).await;
+        let (_, _, hv, cv) = attach(&mut l, &cx, MediaRole::Video, 10).await;
+        assert_eq!(hc.outbound.messages, Messages::MediaConfiguration);
+        // Reliable shapes share the host's configuration lane, bounded by its
+        // own 8 KiB allowance rather than the 1150-byte datagram cap.
+        transfer(
+            &mut l,
+            &cx,
+            true,
+            Route::Stream(hc.outbound),
+            Route::Stream(cc.inbound),
+            &record(0x38, 8, 4139),
+        )
+        .await;
+        // Replaceable positions share the video datagram route.
+        transfer(
+            &mut l,
+            &cx,
+            true,
+            Route::Datagram(hv.datagram.unwrap()),
+            Route::Datagram(cv.datagram.unwrap()),
+            &record(0x39, 10, 53),
+        )
+        .await;
+        let before = l.h.usage();
+        // Neither cursor kind escapes onto an unrelated lane.
+        for (route, bytes) in [
+            (Route::Stream(hr.outbound), record(0x38, 9, 120)),
+            (Route::Stream(hv.outbound), record(0x38, 10, 120)),
+            (Route::Datagram(hv.datagram.unwrap()), record(0x38, 10, 120)),
+            (Route::Stream(hc.outbound), record(0x39, 8, 53)),
+            (Route::Stream(hc.outbound), record(0x38, 8, 8193)),
+        ] {
+            assert!(
+                matches!(
+                    l.h.send(&cx, route, &bytes, clock(&cx) + 1_000_000, || true),
+                    Err(Error::WrongRoute | Error::TooLarge)
+                ),
+                "{route:?}"
+            );
+        }
+        assert_eq!(l.h.usage(), before);
+    });
+}
+
+#[test]
 fn datagram_is_not_a_pre_attachment_escape_and_has_the_negotiated_cap() {
     run_test!(cx, {
         let mut l = Link::new(&cx).await;

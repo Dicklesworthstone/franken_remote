@@ -603,3 +603,24 @@ query/reply form in `fr-wire/src/receiver_metrics.rs`. Its continuous runtime
 ownership, clocks, queue bounds and limits are described in
 [RECEIVER_FEEDBACK.md](RECEIVER_FEEDBACK.md). This is advisory decode load, not
 `ReceiverPressure` credit or `PresentedState` visibility/authority.
+
+### Implemented remote cursor (native QUIC)
+
+The optional `remote-cursor` v1 capability selects `CursorShape`/`CursorPosition`
+(`fr-wire/src/cursor.rs`); without it neither kind is sent or accepted. On the
+native profile the media-config `CursorShape` rides the host's reliable
+configuration stream (after `DecoderConfiguration`, bounded by that lane's
+admitted allowance and C), and `CursorPosition` rides the video DATAGRAM binding.
+Shape IDs are connection-scoped, assigned from native cursor identities, never
+reused; `0` is reserved for the viewer's built-in fallback, also named explicitly
+when an image cannot fit the reliable record bound. Host and viewer caches hold
+at most 16 shapes and 1 MiB RGBA8 with identical oldest-first eviction, so the
+host re-sends a shape the viewer must have evicted. A shape is admitted to its
+reliable lane before any position references it; positions are one replaceable
+slot per viewer with strictly increasing sequences and the view's geometry
+generation. Only admitted, streaming viewers (not in decoder startup, late join
+or recovery) receive either kind. The viewer is the single rendering owner (the
+host capture excludes the pointer) and composites one overlay; a hidden position
+removes it. Cursor records are never source freshness, decode, presentation or
+input evidence. `POSITION_FLAG_VISIBLE` means the X11 logical cursor is inside
+the shared view; XFIXES cannot observe `XFixesHideCursor`.

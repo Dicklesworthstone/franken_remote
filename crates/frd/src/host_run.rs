@@ -826,10 +826,16 @@ mod tests {
         ] {
             assert!(names.iter().any(|n| n == required), "{required}");
         }
-        assert!(observe.capabilities.iter().all(|c| c.required));
+        // Only remote-cursor forwarding is optional; bootstrap stays mandatory.
+        assert!(
+            observe
+                .capabilities
+                .iter()
+                .all(|c| c.required != (c.name == fr_wire::cursor::CAPABILITY))
+        );
         // Control boundaries are offered only with an input agent, optionally.
         let control = offer(true);
-        assert_eq!(control.capabilities.len(), 8);
+        assert_eq!(control.capabilities.len(), 9);
         assert_eq!(
             control.capabilities.iter().filter(|c| c.required).count(),
             4

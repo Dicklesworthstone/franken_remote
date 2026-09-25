@@ -115,8 +115,14 @@ fn host_offer_makes_control_optional_and_never_upgrades_an_observer() {
     use fr_client::native::{control_offer, observation_offer};
     let observe_only = host_offer(false);
     assert!(observe_only.validate().is_ok());
-    assert_eq!(observe_only.capabilities.len(), 4);
-    assert!(observe_only.capabilities.iter().all(|c| c.required));
+    assert_eq!(observe_only.capabilities.len(), 5);
+    // Only remote-cursor forwarding is optional; bootstrap stays mandatory.
+    assert!(
+        observe_only
+            .capabilities
+            .iter()
+            .all(|c| c.required != (c.name == fr_wire::cursor::CAPABILITY))
+    );
     // Without control, a controller is a typed required-capability refusal.
     assert!(matches!(
         observe_only.intersect(&control_offer()),
@@ -124,7 +130,7 @@ fn host_offer_makes_control_optional_and_never_upgrades_an_observer() {
     ));
     let control = host_offer(true);
     assert!(control.validate().is_ok());
-    assert_eq!(control.capabilities.len(), 8);
+    assert_eq!(control.capabilities.len(), 9);
     assert_eq!(
         control.capabilities.iter().filter(|c| c.required).count(),
         4

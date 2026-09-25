@@ -87,9 +87,8 @@ fn normal_network_loop_reports_lost_reference_and_keeps_original_observation_ren
     run(|c, h| async move {
         let (mut host, mut peer, mut receiver, mut watcher, media) = Box::pin(pair(&c, &h)).await;
         let (mut hf, mut vf) = telemetry(&mut host, &mut peer);
-        let parent = host.binding();
         let mut bound = media.binding();
-        bound.parent = parent;
+        bound.parent = host.binding();
         let (cfg, descriptor, route, initial, loss) =
             announce_loss(&mut host, &mut peer, &media, &h);
         let mut announced = false;
@@ -152,6 +151,7 @@ fn normal_network_loop_reports_lost_reference_and_keeps_original_observation_ren
                     &mut statistics,
                     Some(&mut vf),
                     None,
+                    None,
                     &c,
                     &mut |_| {},
                     &mut block,
@@ -206,6 +206,7 @@ fn malformed_receiver_remains_terminal_without_emitting_a_recovery_record() {
             &mut Statistics::default(),
             None,
             None,
+            None,
             &c,
             &mut |_| {},
             &mut block,
@@ -247,6 +248,7 @@ fn omitted_recovery_owner_preserves_the_original_terminal_failure() {
                 &mut Repair::default(),
                 None,
                 &mut Statistics::default(),
+                None,
                 None,
                 None,
                 &c,

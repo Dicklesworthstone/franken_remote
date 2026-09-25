@@ -199,7 +199,7 @@ fn ticketed_pair_exchanges_real_records_and_promotes_without_replacing_connectio
         assert!(!l.h.has_route(Route::Stream(StreamRoute {
             stream: StreamId(7),
             binding: 8,
-            messages: Messages::Exact(0x30),
+            messages: Messages::MediaConfiguration,
             priority: Priority::Critical,
             outbound: true,
             maximum: 8192

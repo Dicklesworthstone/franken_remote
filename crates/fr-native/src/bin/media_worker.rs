@@ -4,10 +4,11 @@
 #[cfg(target_os = "linux")]
 mod linux {
     use fr_core::limits::ProtocolLimits;
+    use fr_media::worker::cursor::Observation;
     use fr_media::worker::{self, Backend, Configuration, Error, Kind, Record, Role, Sequence};
     use fr_native::{
-        EncodeBackend, FittedFrame, HevcDecoder, HevcEncoder, NativeError, X11Screens, X11Surface,
-        bind_worker_parent,
+        BgraFrame, CursorOverlay, EncodeBackend, FittedFrame, HevcDecoder, HevcEncoder,
+        NativeError, OverlayPlacement, X11Screens, X11Surface, bind_worker_parent,
         capture::{CaptureOutput, ChangeAwareCapture},
     };
     use std::{
@@ -25,7 +26,24 @@ mod linux {
             codec: HevcDecoder,
             display_next: Option<bool>,
             fitted: Option<FittedFrame>,
+            /// The single client-rendered remote cursor (parent-supplied state).
+            overlay: CursorOverlay,
+            /// Last presented 1:1 picture, retained so a cursor move on a static
+            /// desktop is re-composited without a new decode. Fit mode retains
+            /// its output inside `FittedFrame` instead.
+            last: Option<BgraFrame>,
+            presented: bool,
         },
+    }
+    fn placement(fitted: Option<&FittedFrame>) -> OverlayPlacement {
+        fitted.map_or(OverlayPlacement::Identity, |f| {
+            let (source_width, source_height) = f.source();
+            OverlayPlacement::Fitted {
+                fit: f.placement(),
+                source_width,
+                source_height,
+            }
+        })
     }
     fn native(e: NativeError) -> Error {
         match e {
@@ -104,6 +122,9 @@ mod linux {
                     } else {
                         None
                     },
+                    overlay: CursorOverlay::new(),
+                    last: None,
+                    presented: false,
                 }
             }
         })
@@ -132,23 +153,40 @@ mod linux {
                     codec,
                     display_next,
                     fitted,
+                    overlay,
+                    last,
+                    presented,
                 } => match codec.poll_output() {
                     Ok((frame, pixels)) => {
                         let display = display_next.take().ok_or(Error::WrongState)?;
                         if !display {
                             return Ok((Kind::Decoded, frame.as_raw().to_be_bytes().to_vec()));
                         }
-                        let pixels = match fitted {
-                            Some(fitted) => fitted.render(&pixels).map_err(native)?,
-                            None => &pixels,
+                        let place = placement(fitted.as_ref());
+                        let mut pixels = pixels;
+                        // The single client-rendered cursor is composited over a
+                        // fresh copy of the decoded picture, then presented.
+                        let shown = if let Some(fitted) = fitted {
+                            let output = fitted.render_mut(&pixels).map_err(native)?;
+                            overlay.composite_fresh(output, place).map_err(native)?;
+                            &*output
+                        } else {
+                            overlay
+                                .composite_fresh(&mut pixels, place)
+                                .map_err(native)?;
+                            &pixels
                         };
-                        surface.present(pixels).map_err(native)?;
+                        surface.present(shown).map_err(native)?;
                         // Explicit local verification mode only, never a remote peer option.
                         // Production does not read every presented frame back from the GPU/X server.
-                        if verify && surface.snapshot().map_err(native)?.pixels() != pixels.pixels()
+                        if verify && surface.snapshot().map_err(native)?.pixels() != shown.pixels()
                         {
                             return Err(Error::NativeFailure);
                         }
+                        if fitted.is_none() {
+                            *last = Some(pixels);
+                        }
+                        *presented = true;
                         // This acknowledges X11 submission/synchronization, not optical visibility.
                         Ok((Kind::Presented, frame.as_raw().to_be_bytes().to_vec()))
                     }
@@ -157,6 +195,78 @@ mod linux {
                 },
             }
         }
+        /// Missing XFIXES or an unrepresentable image is a typed, NON-fatal
+        /// state: remote cursor forwarding must never end capture.
+        fn read_cursor(&mut self, limits: &ProtocolLimits) -> Result<(Kind, Vec<u8>), Error> {
+            let Self::Capture(capture) = self else {
+                return Err(Error::WrongRole);
+            };
+            let typed = |observation: Observation<'_>| -> Result<(Kind, Vec<u8>), Error> {
+                Ok((
+                    Kind::CursorSnapshot,
+                    worker::cursor::encode_observation(observation, limits)?,
+                ))
+            };
+            match capture.capture_cursor() {
+                Ok(snapshot) => {
+                    let observation = snapshot.as_ref().map_or(Observation::Outside, |s| {
+                        Observation::Inside(s.observation())
+                    });
+                    match worker::cursor::encode_observation(observation, limits) {
+                        Ok(body) => Ok((Kind::CursorSnapshot, body)),
+                        Err(Error::ResourceLimit) => typed(Observation::Unrepresentable),
+                        Err(error) => Err(error),
+                    }
+                }
+                Err(NativeError::NeedInput) => Ok((Kind::NeedInput, Vec::new())),
+                Err(NativeError::Unavailable) => typed(Observation::Unsupported),
+                Err(NativeError::InvalidConfiguration) => typed(Observation::Unrepresentable),
+                Err(error) => Err(native(error)),
+            }
+        }
+        /// Install the parent's client-rendered cursor and, once a picture was
+        /// presented, re-composite the retained picture. Installed state only:
+        /// not a decode, presentation receipt or visibility witness.
+        fn cursor_overlay(
+            &mut self,
+            body: &[u8],
+            limits: &ProtocolLimits,
+            verify: bool,
+        ) -> Result<(Kind, Vec<u8>), Error> {
+            let Self::Present {
+                surface,
+                display_next,
+                fitted,
+                overlay,
+                last,
+                presented,
+                ..
+            } = self
+            else {
+                return Err(Error::WrongRole);
+            };
+            // Only between pictures; never interleaved with a decode.
+            if display_next.is_some() {
+                return Err(Error::WrongState);
+            }
+            let update = worker::overlay::decode(body, limits)?;
+            overlay.apply(&update).map_err(native)?;
+            if *presented {
+                let place = placement(fitted.as_ref());
+                let retained = match fitted {
+                    Some(fitted) => Some(fitted.output_mut()),
+                    None => last.as_mut(),
+                };
+                if let Some(frame) = retained {
+                    overlay.recomposite(frame, place).map_err(native)?;
+                    surface.present(frame).map_err(native)?;
+                    if verify && surface.snapshot().map_err(native)?.pixels() != frame.pixels() {
+                        return Err(Error::NativeFailure);
+                    }
+                }
+            }
+            Ok((Kind::CursorOverlayApplied, Vec::new()))
+        }
         fn handle(
             &mut self,
             request: Record,
@@ -164,22 +274,8 @@ mod linux {
             verify: bool,
         ) -> Result<(Kind, Vec<u8>), Error> {
             match request.header.kind {
-                Kind::ReadCursor => {
-                    let Self::Capture(capture) = self else {
-                        return Err(Error::WrongRole);
-                    };
-                    match capture.capture_cursor() {
-                        Ok(snapshot) => Ok((
-                            Kind::CursorSnapshot,
-                            worker::cursor::encode(
-                                snapshot.as_ref().map(|s| s.observation()),
-                                limits,
-                            )?,
-                        )),
-                        Err(NativeError::NeedInput) => Ok((Kind::NeedInput, Vec::new())),
-                        Err(error) => Err(native(error)),
-                    }
-                }
+                Kind::ReadCursor => self.read_cursor(limits),
+                Kind::CursorOverlay => self.cursor_overlay(request.body(), limits, verify),
                 Kind::CheckMonitor => {
                     let Self::Capture(capture) = self else {
                         return Err(Error::WrongRole);

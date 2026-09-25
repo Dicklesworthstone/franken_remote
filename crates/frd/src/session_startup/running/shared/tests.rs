@@ -386,7 +386,7 @@ impl Member {
                 block,
             ),
             self.viewer.drive(Duration::from_millis(1), |route, bytes| {
-                if matches!(route,Route::Stream(r) if r.messages==Messages::Exact(0x30)) {
+                if matches!(route,Route::Stream(r) if r.messages==Messages::MediaConfiguration) {
                     assert!(cfg.is_none());
                     *cfg = Some(bytes.to_vec());
                     Ok(Disposition::Consumed)

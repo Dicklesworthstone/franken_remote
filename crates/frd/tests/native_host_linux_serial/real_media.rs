@@ -17,7 +17,7 @@ use std::{
 
 /// Host desktop colours (first picture, then a changed desktop); after HEVC
 /// 4:2:0 each channel may drift a little.
-const COLOUR: (i32, i32, i32) = (0x31, 0x72, 0xb4);
+pub(super) const COLOUR: (i32, i32, i32) = (0x31, 0x72, 0xb4);
 const CHANGED: (i32, i32, i32) = (0xb4, 0x5a, 0x31);
 const TOLERANCE: i32 = 24;
 
@@ -158,14 +158,14 @@ x.XSync(d, 0)
     );
 }
 
-fn near(pixel: u32, colour: (i32, i32, i32)) -> bool {
+pub(super) fn near(pixel: u32, colour: (i32, i32, i32)) -> bool {
     let channel = |shift: u32| i32::try_from((pixel >> shift) & 0xff).unwrap();
     (channel(16) - colour.0).abs() <= TOLERANCE
         && (channel(8) - colour.1).abs() <= TOLERANCE
         && (channel(0) - colour.2).abs() <= TOLERANCE
 }
 
-fn set_root(display: &str, (r, g, b): (i32, i32, i32)) {
+pub(super) fn set_root(display: &str, (r, g, b): (i32, i32, i32)) {
     assert!(
         Command::new("xsetroot")
             .args([
@@ -180,8 +180,38 @@ fn set_root(display: &str, (r, g, b): (i32, i32, i32)) {
     );
 }
 
+/// Move the HOST's own pointer (X server state, not `FrankenRemote` input) with an
+/// independent X client. The viewer composites the forwarded host cursor, so a
+/// desktop-colour sample must not sit under the pointer.
+pub(super) fn warp_pointer(display: &str, x: i32, y: i32) {
+    const WARP: &str = r#"
+import ctypes as c, sys
+x = c.CDLL("libX11.so.6")
+D, W = c.c_void_p, c.c_ulong
+x.XOpenDisplay.restype = D; x.XOpenDisplay.argtypes = [c.c_char_p]
+x.XDefaultRootWindow.restype = W; x.XDefaultRootWindow.argtypes = [D]
+x.XWarpPointer.argtypes = [D, W, W, c.c_int, c.c_int, c.c_uint, c.c_uint, c.c_int, c.c_int]
+x.XSync.argtypes = [D, c.c_int]
+d = x.XOpenDisplay(sys.argv[1].encode())
+assert d
+x.XWarpPointer(d, 0, x.XDefaultRootWindow(d), 0, 0, 0, 0, int(sys.argv[2]), int(sys.argv[3]))
+x.XSync(d, 0)
+"#;
+    assert!(
+        Command::new("python3")
+            .args(["-c", WARP, display, &x.to_string(), &y.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
 /// Poll the viewer display until a window shows `colour` (or time runs out).
-fn await_colour(display: &str, colour: (i32, i32, i32), client: &mut Child) -> Option<u64> {
+pub(super) fn await_colour(
+    display: &str,
+    colour: (i32, i32, i32),
+    client: &mut Child,
+) -> Option<u64> {
     let until = Instant::now() + Duration::from_secs(45);
     while Instant::now() < until {
         assert!(
@@ -200,7 +230,7 @@ fn await_colour(display: &str, colour: (i32, i32, i32), client: &mut Child) -> O
 }
 
 /// The shipped client, view-only, on the viewer's own display.
-fn connect(fr: &Path, api: &Path, roots: &Path, display: &str, worker: &Path) -> Child {
+pub(super) fn connect(fr: &Path, api: &Path, roots: &Path, display: &str, worker: &Path) -> Child {
     let port = address().port().to_string();
     Command::new(fr)
         .args(["connect", "n-host", "--view-only", "--experimental-native"])
@@ -228,6 +258,10 @@ fn fr_connect_presents_real_host_pixels_through_frd_run() {
     let host = Xvfb::start("640x480x24");
     let viewer = Xvfb::start("800x600x24");
     set_root(&host.display, COLOUR);
+    // Xvfb starts its pointer at the screen centre, which is exactly where the
+    // desktop colour is sampled; the viewer now draws the forwarded host cursor
+    // there. Park the host pointer in a corner instead.
+    warp_pointer(&host.display, 16, 16);
 
     let api = fixture::Api::new();
     let tools = Tools::new();

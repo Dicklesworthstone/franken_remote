@@ -148,7 +148,7 @@ impl Bound {
         if transport.role()? != role
             || setup.configuration.outbound != host
             || setup.replies.outbound == host
-            || setup.configuration.messages != Messages::Exact(0x30)
+            || setup.configuration.messages != Messages::MediaConfiguration
             || setup.replies.messages != Messages::DecoderReplies
             || setup.configuration.stream == setup.replies.stream
             || setup.configuration.maximum < decoder::CONFIGURATION_OVERHEAD

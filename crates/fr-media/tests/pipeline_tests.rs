@@ -244,7 +244,7 @@ fn cursor_pipeline_tracking_and_single_rendering_owner() {
         flags: SHAPE_FLAG_VISIBLE,
         rgba: &rgba,
     };
-    tracker.store_shape(&shape);
+    tracker.store_shape(&shape).unwrap();
 
     // 1. Valid position referencing cached shape
     let pos1 = CursorPosition {

@@ -5,10 +5,17 @@
 //!   and checked RGBA8 bytes (`width * height * 4`).
 //! - `0x0039 CursorPosition`: replaceable state channel (Video datagram).
 //!   Shape ID, screen coordinates (x, y), geometry generation, sequence, flags.
+//!
+//! Both kinds require positive selection of [`CAPABILITY`]. A peer that did not
+//! select it never receives either record; absence is not an error state.
 
 use crate::record::Writer;
-use crate::{HEADER_BYTES, Kind, Record, WireError};
+use crate::{Channel, HEADER_BYTES, Kind, Record, WireError};
 use fr_core::limits::ProtocolLimits;
+
+/// Optional host-to-viewer remote cursor forwarding (shape + position records).
+pub const CAPABILITY: &str = "remote-cursor";
+pub const VERSION: u16 = 1;
 
 /// Maximum cursor dimension (width or height) in pixels.
 pub const MAX_CURSOR_DIMENSION: u16 = 256;
@@ -51,7 +58,11 @@ pub struct CursorShape<'a> {
 
 impl CursorShape<'_> {
     /// Validates dimensions, hotspot, scale, and exact pixel buffer size.
+    /// A zero-sized image is refused: invisibility is a flag, never an empty shape.
     pub fn validate(&self, limits: &ProtocolLimits) -> Result<(), WireError> {
+        if self.width == 0 || self.height == 0 {
+            return Err(WireError::InvalidValue);
+        }
         if self.width > MAX_CURSOR_DIMENSION || self.height > MAX_CURSOR_DIMENSION {
             return Err(WireError::ResourceLimit);
         }
@@ -63,16 +74,7 @@ impl CursorShape<'_> {
         if self.rgba.len() != expected_bytes {
             return Err(WireError::InvalidValue);
         }
-        if self.width > 0 && self.hotspot_x >= self.width {
-            return Err(WireError::InvalidValue);
-        }
-        if self.height > 0 && self.hotspot_y >= self.height {
-            return Err(WireError::InvalidValue);
-        }
-        if self.width == 0 && self.hotspot_x != 0 {
-            return Err(WireError::InvalidValue);
-        }
-        if self.height == 0 && self.hotspot_y != 0 {
+        if self.hotspot_x >= self.width || self.hotspot_y >= self.height {
             return Err(WireError::InvalidValue);
         }
         if self.scale_1000 == 0 || self.scale_1000 > 10_000 {
@@ -172,6 +174,45 @@ pub fn decode_cursor_shape<'a>(
     };
     shape.validate(limits)?;
     Ok(shape)
+}
+
+/// Complete `CursorShape` record bytes (header, fixed fields, data length and
+/// RGBA8), computed with checked arithmetic BEFORE any encode buffer exists.
+/// Zero or oversized dimensions have no record size.
+#[must_use]
+pub fn shape_record_bytes(width: u16, height: u16) -> Option<usize> {
+    if width == 0 || height == 0 || width > MAX_CURSOR_DIMENSION || height > MAX_CURSOR_DIMENSION {
+        return None;
+    }
+    usize::from(width)
+        .checked_mul(usize::from(height))?
+        .checked_mul(4)?
+        .checked_add(HEADER_BYTES + CURSOR_SHAPE_HEADER_BYTES + 4)
+}
+
+/// Parse one complete `CursorShape` from an admitted reliable lane whose
+/// complete-record bound is `maximum` (further capped by C). Framing, binding
+/// and channel are checked before the payload is read; the RGBA8 slice stays
+/// borrowed, so nothing is allocated for a refused record.
+pub fn decode_shape_record<'a>(
+    bytes: &'a [u8],
+    binding: u32,
+    maximum: usize,
+    limits: &ProtocolLimits,
+) -> Result<CursorShape<'a>, WireError> {
+    let maximum = maximum.min(limits.max_control_message_bytes() as usize);
+    let record = Record::decode_bounded(bytes, maximum, binding, Some(Channel::MediaConfig))?;
+    decode_cursor_shape(record, limits)
+}
+
+/// Parse one complete `CursorPosition` datagram on the admitted video binding.
+pub fn decode_position_record(
+    bytes: &[u8],
+    binding: u32,
+    maximum: usize,
+) -> Result<CursorPosition, WireError> {
+    let record = Record::decode_bounded(bytes, maximum, binding, Some(Channel::Video))?;
+    decode_cursor_position(record)
 }
 
 /// Replaceable confirmed cursor position received from the host.
@@ -433,5 +474,91 @@ mod tests {
             flags: 0x04,
         };
         assert_eq!(bad_flags.validate(), Err(WireError::InvalidFlags));
+    }
+
+    #[test]
+    fn zero_sized_shapes_are_refused_even_with_an_empty_buffer() {
+        let (limits, _) = test_limits();
+        for (width, height) in [(0, 0), (0, 4), (4, 0)] {
+            let shape = CursorShape {
+                shape_id: 3,
+                width,
+                height,
+                hotspot_x: 0,
+                hotspot_y: 0,
+                scale_1000: 1000,
+                flags: SHAPE_FLAG_VISIBLE,
+                rgba: &[],
+            };
+            assert_eq!(shape.validate(&limits), Err(WireError::InvalidValue));
+            assert_eq!(shape_record_bytes(width, height), None);
+        }
+        assert_eq!(shape_record_bytes(257, 1), None);
+        assert_eq!(
+            shape_record_bytes(2, 3),
+            Some(HEADER_BYTES + CURSOR_SHAPE_HEADER_BYTES + 4 + 24)
+        );
+    }
+
+    #[test]
+    fn bounded_record_decoders_check_size_binding_and_channel_before_payload() {
+        let (limits, media) = test_limits();
+        let rgba = [7_u8; 4 * 4 * 4];
+        let shape = CursorShape {
+            shape_id: 9,
+            width: 4,
+            height: 4,
+            hotspot_x: 3,
+            hotspot_y: 1,
+            scale_1000: 1000,
+            flags: SHAPE_FLAG_VISIBLE,
+            rgba: &rgba,
+        };
+        let mut buf = [0_u8; 256];
+        let len = encode_cursor_shape(&shape, 5, &limits, &mut buf).unwrap();
+        assert_eq!(Some(len), shape_record_bytes(4, 4));
+        let decoded = decode_shape_record(&buf[..len], 5, len, &limits).unwrap();
+        assert_eq!(decoded, shape);
+        // The payload stays borrowed from the received record.
+        assert_eq!(decoded.rgba.as_ptr(), buf[len - rgba.len()..].as_ptr());
+        assert_eq!(
+            decode_shape_record(&buf[..len], 5, len - 1, &limits),
+            Err(WireError::ResourceLimit)
+        );
+        assert_eq!(
+            decode_shape_record(&buf[..len], 6, len, &limits),
+            Err(WireError::InvalidBinding)
+        );
+        let pos = CursorPosition {
+            shape_id: 9,
+            x: 1,
+            y: 2,
+            geometry_generation: 0,
+            sequence: 4,
+            flags: POSITION_FLAG_VISIBLE,
+        };
+        let mut datagram = [0_u8; CURSOR_POSITION_RECORD_BYTES];
+        encode_cursor_position(&pos, 8, media.record_bytes(), &mut datagram).unwrap();
+        assert_eq!(
+            decode_position_record(&datagram, 8, datagram.len()),
+            Ok(pos)
+        );
+        // A position is a Video record; a shape is MediaConfig. Neither decoder
+        // reinterprets the other channel's kind.
+        assert_eq!(
+            decode_shape_record(&datagram, 8, datagram.len(), &limits),
+            Err(WireError::WrongChannel)
+        );
+        assert_eq!(
+            decode_position_record(&buf[..len], 5, len),
+            Err(WireError::WrongChannel)
+        );
+        // A hostile hotspot outside the declared image refuses on decode.
+        let mut hostile = buf;
+        hostile[HEADER_BYTES + 8..HEADER_BYTES + 10].copy_from_slice(&4_u16.to_be_bytes());
+        assert_eq!(
+            decode_shape_record(&hostile[..len], 5, len, &limits),
+            Err(WireError::InvalidValue)
+        );
     }
 }

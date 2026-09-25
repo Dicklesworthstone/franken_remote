@@ -94,11 +94,24 @@ by this executable.
 Exactly one role is mandatory: `--view-only` or `--control`. Neither, or both,
 refuses with `connection_role_required` before any I/O; the command never
 silently requests control or downgrades a control request to viewing. With
-`--view-only` the offered capability set contains only display selection,
-decoder startup, media attachment and media delivery. No input, clipboard,
+`--view-only` the offered capability set contains display selection, decoder
+startup, media attachment and media delivery (required) plus the optional
+decoder-metrics, reference-recovery and remote-cursor capabilities. No input, clipboard,
 microphone, playback, file-transfer or semantic-access capability is requested.
 No UI mapping, visibility witness or input grant is fabricated from a decode or
 map event.
+
+When the host also selects `remote-cursor` (`frd run` offers it), the host's
+pointer, which its X11 capture excludes, arrives as a reliable shape on the
+media-configuration lane plus replaceable position datagrams. The sandboxed
+presenter composites ONE cursor into the presented image at the mapped position
+(straight alpha, clipped to the picture, hidden when the pointer leaves the
+shared display). It is confirmed host state for drawing only: never an input
+command, decode receipt or freshness evidence. Evidence is the namespace e2e on
+two Xvfb displays (`crates/frd/tests/native_host_linux_serial/real_cursor.rs`),
+not a real GPU compositor, HiDPI scaling or Wayland. XFIXES cannot observe
+`XFixesHideCursor`, and an image too large for the 8 KiB reliable record is shown
+as a small built-in crosshair.
 
 ### Request control (`--control`)
 
@@ -132,6 +145,9 @@ grant needs a new `fr connect --control`. The completion record has
 `role: "control"`, `control_requested`, `control_granted`, and content-free
 counts of host input results (`input_results`, `input_submitted_to_os`); these
 are host-reported stages, not local proof of an effect.
+
+The controlled share does not forward the remote cursor yet: while
+controlling, the only pointer shown over the viewer window is the local one.
 
 `--experimental-native` is also mandatory because the native transport remains
 unqualified. It is a development opt-in, not a change to any protocol, admission

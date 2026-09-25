@@ -244,7 +244,7 @@ fn priority(role: MediaRole, host_direction: bool) -> Priority {
 }
 fn messages(role: MediaRole, host_direction: bool) -> Messages {
     match (role, host_direction) {
-        (MediaRole::Configuration, true) => Messages::Exact(0x30),
+        (MediaRole::Configuration, true) => Messages::MediaConfiguration,
         (MediaRole::Configuration, false) => Messages::DecoderReplies,
         (MediaRole::Recovery, true) => Messages::Exact(0x32),
         (MediaRole::Recovery, false) => Messages::NoApplication,
