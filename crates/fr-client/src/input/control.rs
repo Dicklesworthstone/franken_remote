@@ -92,3 +92,35 @@ impl InputClient {
         Ok(())
     }
 }
+
+impl super::presentation::PresentedInput {
+    /// Consume a host notification on the ORIGINAL authenticated, reliable
+    /// session-control route supplied by the coordinator, not the input route.
+    /// Revocation is terminal even without a fresh view or usable ticket; do
+    /// not call tick here or let renewal backpressure hide this notification.
+    /// A mismatched session/lease does not mutate this owner. The caller decides
+    /// how to close a connection that supplied an invalid record.
+    pub fn accept_lease_revoked(
+        &mut self,
+        bytes: &[u8],
+        control: Binding,
+    ) -> Result<fr_wire::lease_revoked::Revoked, super::presentation::Error> {
+        let input = self.binding();
+        if control.session != input.session {
+            return Err(Error::Wire(fr_wire::WireError::InvalidBinding).into());
+        }
+        let revoked = fr_wire::lease_revoked::decode(
+            bytes,
+            control,
+            input.lease,
+            &self.protocol_limits(),
+            fr_wire::input::InputDirection::HostToViewer,
+            fr_wire::input::InputDelivery::Reliable,
+        )
+        .map_err(Error::Wire)?;
+        // Disconnect this grant, not its pending receipt ledger. Return the
+        // precise host reason/stages rather than guessing from the local stop.
+        self.stop(StopReason::Disconnected);
+        Ok(revoked)
+    }
+}

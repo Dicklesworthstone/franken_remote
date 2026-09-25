@@ -1,6 +1,9 @@
 //! Continuous receiving shares the already-established real control connection.
 //! Native effects and codec output here are explicit fixtures, not pixel claims.
 use super::*;
+
+mod revocation;
+
 #[test]
 #[allow(clippy::too_many_lines)]
 fn continuous_viewer_keeps_input_and_receipts_live_during_decode() {

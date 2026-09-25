@@ -48,6 +48,8 @@ pub enum Error {
     Capture(events::Error),
     ControlRequest(fr_client::control_grant::Error),
     ControlNotNegotiated,
+    /// The exact authenticated host report, not an inferred cleanup result.
+    LeaseRevoked(fr_wire::lease_revoked::Revoked),
 }
 impl From<super::Error> for Error {
     fn from(e: super::Error) -> Self {
@@ -446,6 +448,10 @@ impl ControlledViewer {
             .map_err(Error::Media)?;
         let limits = self.media.limits();
         let inbound = self.session.routes.inbound;
+        let control_binding = fr_wire::authority::Binding {
+            channel: inbound.binding,
+            session: self.session.opened.binding.remote_session,
+        };
         let cx = self.session.cx.clone();
         let files = &self.files;
         let clipboard = &self.clipboard;
@@ -461,6 +467,18 @@ impl ControlledViewer {
                 return Ok(Disposition::Blocked);
             }
             let kind = bytes.get(6..8);
+            if route == Route::Stream(inbound)
+                && kind == Some(&(Kind::LeaseRevoked as u16).to_be_bytes())
+            {
+                // Fence immediately, before another record/captured action or
+                // renewal send. Operation's existing teardown stops native
+                // capture and drops unsent bytes without erasing input receipts.
+                failure = Some(match input.accept_lease_revoked(bytes, control_binding) {
+                    Ok(revoked) => Error::LeaseRevoked(revoked),
+                    Err(error) => Error::View(error),
+                });
+                return Err(());
+            }
             let t = ClientInstant(now(&cx).map_err(|e| {
                 failure = Some(Error::Session(e));
             })?);
