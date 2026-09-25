@@ -113,6 +113,44 @@ not a real GPU compositor, HiDPI scaling or Wayland. XFIXES cannot observe
 `XFixesHideCursor`, and an image too large for the 8 KiB reliable record is shown
 as a small built-in crosshair.
 
+### Host playback audio (`--audio`)
+
+```sh
+cargo build -p fr-native --features linux-desktop,linux-audio --bin fr --locked
+./target/debug/fr connect NODE_ID \
+  --view-only --audio --experimental-native --display only \
+  [--audio-server /run/user/1000/pulse/native] [--audio-sink NAME]
+```
+
+`--audio` is an explicit local request: without it the client offers no audio
+capability at all. With it, the view-only offer adds the OPTIONAL
+`native-audio-down` capability. The host must run `frd run --audio` (its own
+local enable); a host without it simply omits the capability, the session
+continues with video only, and the completion record reports
+`audio_absence: "host_did_not_offer"`. `--audio` with `--control` is refused
+before any connection (`audio_control_unsupported`): the client decodes audio in
+its own session thread, and this slice never runs that decode in a controlling
+session. Builds without the `linux-audio` feature refuse `--audio`
+(`audio_unavailable_in_build`).
+
+The attached `audio-down` channel carries `AudioConfiguration`/`AudioStop` on a
+reliable lane and `AudioPacket` datagrams (Opus, 48 kHz stereo, 20 ms). Every
+record is validated, including the negotiated packet/sample bounds, before the
+real libopus decoder sees it. The client configures its local PulseAudio output
+(the server from `--audio-server`, else `PULSE_SERVER`, else
+`$XDG_RUNTIME_DIR/pulse/native`; the server's default sink, pinned at stream
+start, unless `--audio-sink` names one), answers `AudioConfigured`, and only then
+receives packets. A host `AudioStop` fences queued audio at once. A local playout
+failure (for example a missed device slot) drops that stream without flushing old
+samples into the next one and asks the host for a fresh audio epoch, at most
+eight times per session. Audio never feeds video presentation or freshness.
+
+The completion record adds `audio_requested`, `audio_active` (at least one decoded
+frame was accepted by the local audio server), `audio_frames_submitted`,
+`audio_output_resets`, `audio_absence` (null or a typed reason such as
+`host_did_not_offer`, `host_audio_unavailable` or `local_output_failed`) and
+`audibility_proven: false`: a submission receipt is not proof that anyone heard it.
+
 ### Request control (`--control`)
 
 ```sh
@@ -260,19 +298,30 @@ cargo test -p fr-native --features linux-desktop --test fr_cli --locked -- --tes
 cargo test -p fr-native --features linux-desktop --test viewer_window_x11 --locked -- --test-threads=1
 ```
 
-`--control` and `--clipboard` end to end are exercised by the namespace suite, not by these commands.
+`--control`, `--clipboard` and `--audio` end to end are exercised by the namespace suite, not by these commands.
 Build the real binaries and the test executable, then pass that executable to
 `scripts/test_linux_serial_lifecycle.sh` (set `FR_NS_SUDO=1` where unprivileged
 user namespaces are restricted). It runs the ignored namespace suite serially,
-including the `real_control::` and `real_clipboard::` tests of
+including the `real_control::`, `real_clipboard::` and `real_audio::` tests of
 `crates/frd/tests/native_host_linux_serial.rs`:
 
 ```sh
-cargo build -p fr-native --features linux-desktop,linux-displays,linux-input,linux-clipboard \
+cargo build -p fr-native --features linux-desktop,linux-displays,linux-input,linux-clipboard,linux-audio \
   --bin fr --bin fr-media-worker --bin fr-input-agent --locked
 cargo build -p frd --bin frd --locked
 cargo test -p frd --test native_host_linux_serial --no-run --locked
 ```
+
+The `real_audio::` tests of the same suite start two private PulseAudio daemons
+with null sinks (one per side) inside the namespace. An independent
+libpulse-simple player writes a tone into the host sink; `frd run --audio`
+captures its monitor through the real `fr-media-worker --audio` child; the shipped
+`fr connect --view-only --audio` plays into the client daemon, where an
+independent recorder detects the tone with a Goertzel filter, measures the delay
+of a frequency change and requires it sustained for two seconds. They also cover
+a host without `--audio` (typed absence, no tone) and a missing monitor (typed
+stop, video continues). Private null sinks are not a desktop PipeWire session,
+speakers or audibility evidence, and any printed delay is only for that scope.
 
 They start two Xvfb servers, the production `frd run` composition with the
 real `fr-input-agent`, and the shipped `fr connect --control`. A python/Xlib

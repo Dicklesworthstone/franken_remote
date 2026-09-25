@@ -1,11 +1,13 @@
 //! Nonblocking local `PulseAudio` playback with explicit selection and bounded queues.
 //!
-//! Run on a supervised audio worker, never the input-authority thread or realtime
-//! callback. The native mainloop is driven a bounded number of nonblocking turns;
-//! it creates no Rust runtime or application thread. Native calls still require
-//! process supervision for hangs. This is an output adapter, not audio permission.
-//! Call only after local enable and observation approval. No capture/microphone,
-//! automatic device selection, TCP server, reconnect or format fallback exists.
+//! Run on a supervised audio worker or a view-only session thread, never the
+//! input-authority thread or realtime callback. The native mainloop is driven a
+//! bounded number of nonblocking turns; it creates no Rust runtime or application
+//! thread. Native calls still require process supervision for hangs. This is an
+//! output adapter, not audio permission. Call only after local enable and
+//! observation approval. No microphone, TCP server, reconnect or format fallback
+//! exists. With `linux-audio`, `capture`/`source` add playback-MONITOR recording
+//! for the host's separate audio worker process only.
 
 mod driver;
 mod ffi;
@@ -13,6 +15,13 @@ mod output;
 
 /// Real wire-to-codec-to-device receive owner.
 pub mod playout;
+
+/// Host playback-monitor RECORD stream (audio worker only).
+#[cfg(feature = "linux-audio")]
+pub mod capture;
+/// Monitor capture plus real Opus encode into bounded packet batches.
+#[cfg(feature = "linux-audio")]
+pub mod source;
 
 use fr_client::{
     audio::playout::{AudioSubmission, PlayoutClock},
@@ -64,7 +73,8 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// Locally chosen UNIX server and named output. Neither value comes from the
-/// peer. No default sink aliases, server lists, TCP addresses or autospawn.
+/// peer. No server lists, TCP addresses or autospawn; the only alias is the
+/// local user's own default output via [`Selection::default_output`].
 /// Debug intentionally omits local paths and device names.
 pub struct Selection {
     server: CString,
@@ -89,6 +99,15 @@ impl Selection {
             server: CString::new(format!("unix:{socket}")).map_err(|_| Error::Selection)?,
             sink: CString::new(sink).map_err(|_| Error::Selection)?,
         })
+    }
+    /// The local server's CURRENT default output, resolved once by the server
+    /// at stream connect and pinned there (`DONT_MOVE`): a later default change
+    /// retires the stream instead of following it. This is the local user's
+    /// own default, never a peer choice. Same socket rules as [`Self::new`].
+    pub fn default_output(server_socket: &Path) -> Result<Self, Error> {
+        let mut selection = Self::new(server_socket, "default")?;
+        selection.sink = CString::from(c"@DEFAULT_SINK@");
+        Ok(selection)
     }
 }
 impl std::fmt::Debug for Selection {

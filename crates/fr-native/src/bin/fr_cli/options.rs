@@ -91,6 +91,18 @@ pub struct Connection {
     /// `--clipboard` (with `--control` only): let the UTF-8 text clipboard
     /// follow the control lease, both directions, when the host enables it too.
     pub clipboard: bool,
+    /// `--audio`: explicitly ask for host playback audio (view-only only).
+    /// `None` offers no audio capability at all.
+    pub audio: Option<AudioRequest>,
+}
+/// Local playback choices; never a peer value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioRequest {
+    /// Absolute local `PulseAudio` socket; `None` resolves `PULSE_SERVER`,
+    /// then `$XDG_RUNTIME_DIR/pulse/native`, at connect time.
+    pub server: Option<PathBuf>,
+    /// Output sink; `None` is the local server's default output.
+    pub sink: Option<String>,
 }
 /// Explicit policies only. `Only` refuses ambiguity; it is never "first" or an
 /// invented primary display. Both policies are reevaluated on each live catalog.
@@ -528,6 +540,7 @@ fn parse_command(
     let (mut json, mut socket, mut by_name, mut view_only, mut experimental, mut ipv6) =
         (false, None, false, false, false, false);
     let (mut control, mut clipboard) = (false, false);
+    let (mut audio, mut audio_server, mut audio_sink) = (false, None, None);
     let (mut display, mut worker, mut roots, mut x_display) = (None, None, None, None);
     let (mut port, mut attempts) = (8443_u16, 5_u8);
     let mut fit_window = None;
@@ -544,6 +557,11 @@ fn parse_command(
             "--view-only" if connect => view_only = true,
             "--control" if connect => control = true,
             "--clipboard" if connect => clipboard = true,
+            "--audio" if connect => audio = true,
+            "--audio-server" if connect => audio_server = Some(next_path(args, &mut index)?),
+            "--audio-sink" if connect => {
+                audio_sink = Some(next_arg(args, &mut index)?.to_string());
+            }
             "--experimental-native" if remote => experimental = true,
             "--ipv6" if remote => ipv6 = true,
             "--display" if connect => {
@@ -584,6 +602,16 @@ fn parse_command(
                 2,
             ));
         }
+        if !audio && (audio_server.is_some() || audio_sink.is_some()) {
+            return Err(usage());
+        }
+        if audio && control {
+            return Err(Failure::new(
+                "audio_control_unsupported",
+                "Host audio is view-only in this build: its in-process decode never shares the controlling session. Use --view-only --audio, or --control without --audio.",
+                2,
+            ));
+        }
         if !experimental {
             return Err(Failure::new(
                 "native_transport_unqualified",
@@ -616,6 +644,10 @@ fn parse_command(
                 fit_window,
                 control,
                 clipboard,
+                audio: audio.then_some(AudioRequest {
+                    server: audio_server,
+                    sink: audio_sink,
+                }),
             })
         }
     } else if doctor {
@@ -706,6 +738,53 @@ mod tests {
             "displays n-host --experimental-native --clipboard".into(),
             "doctor --clipboard".into(),
             "hosts --clipboard".into(),
+        ] {
+            assert_eq!(
+                options(&refused).err().unwrap().code,
+                "invalid_arguments",
+                "{refused}"
+            );
+        }
+    }
+    #[test]
+    fn audio_is_an_explicit_view_only_request_with_local_selection() {
+        let base = "n-host --experimental-native --worker /opt/fr/worker --display only";
+        let Command::Connect(plain) = options(&format!("connect {base} --view-only"))
+            .unwrap()
+            .command
+        else {
+            unreachable!("connection required");
+        };
+        assert_eq!(plain.audio, None);
+        let Command::Connect(c) = options(&format!(
+            "connect {base} --view-only --audio --audio-server /run/user/7/pulse/native --audio-sink speakers"
+        ))
+        .unwrap()
+        .command
+        else {
+            unreachable!("connection required");
+        };
+        assert_eq!(
+            c.audio,
+            Some(AudioRequest {
+                server: Some(PathBuf::from("/run/user/7/pulse/native")),
+                sink: Some("speakers".into()),
+            })
+        );
+        // Audio never rides a controlling session in this build.
+        assert_eq!(
+            options(&format!("connect {base} --control --audio"))
+                .err()
+                .unwrap()
+                .code,
+            "audio_control_unsupported"
+        );
+        for refused in [
+            format!("connect {base} --view-only --audio-sink speakers"),
+            format!("connect {base} --view-only --audio-server /run/native"),
+            format!("connect {base} --view-only --audio --audio"),
+            "displays n-host --experimental-native --audio".into(),
+            "hosts --audio".into(),
         ] {
             assert_eq!(
                 options(&refused).err().unwrap().code,

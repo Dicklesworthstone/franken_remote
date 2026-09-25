@@ -296,6 +296,43 @@ impl Worker {
         let body = configuration.encode()?;
         Self::start_with_body(cx, launch, configuration, body, Kind::Configure, deadline).await
     }
+    /// Start the separate audio role: the worker connects the locally
+    /// selected playback monitor and configures real Opus before echoing the
+    /// exact configuration. `Unsupported` is a typed unavailable source.
+    pub async fn start_audio(
+        cx: &Cx,
+        launch: Launch,
+        capture: &worker::audio::Capture,
+        deadline: Deadline,
+    ) -> Result<Self, Error> {
+        // Role and profile are refused before any runtime or process work.
+        if launch.role != Role::Audio {
+            return Err(Error::Protocol(worker::Error::WrongRole));
+        }
+        let body = capture.encode()?;
+        runtime_ready(cx)?;
+        if now(cx)? >= deadline.0 {
+            return Err(Error::Deadline);
+        }
+        let mut worker = Self::spawn(launch, ProtocolLimits::ABSOLUTE)?;
+        match worker
+            .exchange(cx, Kind::ConfigureAudio, body.clone(), deadline)
+            .await
+        {
+            Ok(reply) if reply.header.kind == Kind::AudioReady && reply.body() == body => {
+                worker.state = State::Running;
+                Ok(worker)
+            }
+            Ok(_) => {
+                worker.abort();
+                Err(Error::Protocol(worker::Error::WrongState))
+            }
+            Err(error) => {
+                worker.abort();
+                Err(error)
+            }
+        }
+    }
     /// Configure a real presentation decoder with exact admitted parameter sets.
     /// The private echo confirms API setup only, never decode or visibility.
     pub async fn start_decoder(
@@ -378,6 +415,7 @@ impl Worker {
             .arg(match role {
                 Role::Capture => "--capture",
                 Role::Present => "--present",
+                Role::Audio => "--audio",
             })
             .arg("--parent-pid")
             .arg(std::process::id().to_string())
@@ -496,7 +534,9 @@ impl Worker {
             ) | (
                 Role::Present,
                 Kind::Present | Kind::Decode | Kind::CursorOverlay
-            ) | (_, Kind::Poll | Kind::Stop)
+            ) | (Role::Audio, Kind::ReadAudio)
+                | (Role::Capture | Role::Present, Kind::Poll)
+                | (_, Kind::Stop)
         ) {
             return Err(Error::Protocol(worker::Error::WrongRole));
         }
@@ -743,6 +783,9 @@ fn allowed_reply(request: Kind, reply: Kind) -> bool {
             // one reply kind; NeedInput means the pointer moved mid-query.
             Kind::ReadCursor => matches!(reply, Kind::CursorSnapshot | Kind::NeedInput),
             Kind::CursorOverlay => reply == Kind::CursorOverlayApplied,
+            Kind::ConfigureAudio => reply == Kind::AudioReady,
+            // Zero packets is an ordinary AudioPackets reply, never NeedInput.
+            Kind::ReadAudio => reply == Kind::AudioPackets,
             _ => false,
         }
 }
@@ -755,6 +798,69 @@ mod tests {
         time::{TimerDriverHandle, VirtualClock},
     };
     use std::sync::Arc;
+
+    #[test]
+    fn audio_packets_answer_only_audio_pulls_and_never_other_roles() {
+        assert!(allowed_reply(Kind::ReadAudio, Kind::AudioPackets));
+        assert!(allowed_reply(Kind::ConfigureAudio, Kind::AudioReady));
+        for (request, reply) in [
+            (Kind::ReadAudio, Kind::NeedInput),
+            (Kind::ReadAudio, Kind::Unit),
+            (Kind::Capture, Kind::AudioPackets),
+            (Kind::Poll, Kind::AudioPackets),
+            (Kind::ReadCursor, Kind::AudioPackets),
+            (Kind::Configure, Kind::AudioReady),
+        ] {
+            assert!(!allowed_reply(request, reply), "{request:?} {reply:?}");
+        }
+        // Only the audio role may pull audio, and it has no video requests.
+        let launch = |role| {
+            Launch::new(
+                std::path::Path::new("/usr/bin/fr-media-worker"),
+                ":0",
+                None,
+                role,
+                7,
+            )
+            .unwrap()
+        };
+        assert_eq!(launch(Role::Audio).role, Role::Audio);
+        let runtime = RuntimeBuilder::current_thread()
+            .with_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::new(
+                VirtualClock::new(),
+            )))
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let deadline = Deadline::after(&cx, Duration::from_secs(1)).unwrap();
+            let capture = worker::audio::Capture {
+                generation: fr_core::audio::AudioGeneration::from_raw(1),
+                channels: fr_core::audio::AudioChannels::Stereo,
+                frame_duration_ms: 20,
+                bitrate: 96_000,
+                max_packet_bytes: 1000,
+                server: "/run/user/1000/pulse/native".into(),
+                monitor: worker::audio::Monitor::DefaultSink,
+            };
+            // A capture/present launch can never start the audio role, and
+            // a hostile profile refuses before any spawn.
+            for role in [Role::Capture, Role::Present] {
+                assert!(matches!(
+                    Worker::start_audio(&cx, launch(role), &capture, deadline).await,
+                    Err(Error::Protocol(worker::Error::WrongRole))
+                ));
+            }
+            let hostile = worker::audio::Capture {
+                server: "relative/native".into(),
+                ..capture
+            };
+            assert!(matches!(
+                Worker::start_audio(&cx, launch(Role::Audio), &hostile, deadline).await,
+                Err(Error::Protocol(worker::Error::Malformed))
+            ));
+        });
+    }
 
     #[test]
     fn unchanged_is_only_a_reply_to_an_explicit_conditional_capture() {

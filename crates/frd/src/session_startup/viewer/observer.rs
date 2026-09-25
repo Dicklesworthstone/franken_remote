@@ -148,6 +148,20 @@ impl NativeObserver {
     /// independently permitted and never received from the peer. Clipboard starts
     /// automatically only after the ORIGINAL input grant and bilateral readiness;
     /// merely observing a desktop never opens or reads a clipboard.
+    /// Host playback audio for this observer: install the native client's
+    /// local output, once, before serving. `Err(())` is typed absence: the
+    /// host did not select audio-down (not locally enabled there, or this is
+    /// a controlled session) or no channel attached.
+    pub fn configure_audio(
+        &mut self,
+        output: Box<dyn super::streaming::audio::AudioOutput>,
+    ) -> Result<(), super::streaming::audio::Unavailable> {
+        self.viewer.configure_audio(output)
+    }
+    /// Content-free packet counters; `None` when audio-down is absent.
+    pub fn audio_statistics(&self) -> Option<super::streaming::audio::AudioStatistics> {
+        self.viewer.audio_statistics()
+    }
     pub fn configure_clipboard(
         &mut self,
         config: crate::native_clipboard::Configuration,
@@ -667,13 +681,17 @@ async fn receive_record(
     budget.remaining()?;
     Ok(())
 }
-fn role_index(role: MediaRole, controlled: bool) -> Result<usize, Error> {
+fn role_index(role: MediaRole, controlled: bool, audio: bool) -> Result<usize, Error> {
     match role {
         MediaRole::Configuration => Ok(0),
         MediaRole::Recovery => Ok(1),
         MediaRole::Video => Ok(2),
         MediaRole::Input if controlled => Ok(3),
-        MediaRole::Input | MediaRole::Clipboard | MediaRole::Files => Err(Error::Order),
+        // Only a positively selected observer expects the audio-down channel.
+        MediaRole::AudioDown if audio && !controlled => Ok(4),
+        MediaRole::Input | MediaRole::Clipboard | MediaRole::Files | MediaRole::AudioDown => {
+            Err(Error::Order)
+        }
     }
 }
 async fn attach_media(
@@ -682,13 +700,14 @@ async fn attach_media(
     selected: &SelectedDisplay,
     controlled: bool,
 ) -> Result<(NegotiatedMedia, Route, Option<NegotiatedInput>), Error> {
-    let mut channels: [Option<MediaChannel>; 4] = std::array::from_fn(|_| None);
+    let mut channels: [Option<MediaChannel>; 5] = std::array::from_fn(|_| None);
     let mut slot = RecordSlot::new(
         attachment::BINDING_RECORD_BYTES,
         Route::Stream(session.routes.inbound),
         Kind::StreamBinding,
     )?;
-    for _ in 0..if controlled { 4 } else { 3 } {
+    let audio = !controlled && native_control::audio_selected(&session.opened.selection);
+    for _ in 0..3 + usize::from(controlled) + usize::from(audio) {
         receive_record(session, budget, &mut slot).await?;
         let Message::Binding(descriptor) = attachment::decode(
             &slot.bytes[..slot.len],
@@ -702,7 +721,7 @@ async fn attach_media(
         else {
             return Err(Error::Order);
         };
-        let index = role_index(descriptor.role, controlled)?;
+        let index = role_index(descriptor.role, controlled, audio)?;
         if channels[index].is_some() {
             return Err(Error::Order);
         }
@@ -736,7 +755,14 @@ async fn attach_media(
         }
         channels[index] = Some(channel);
     }
-    let [Some(configuration), Some(recovery), Some(video), input] = channels else {
+    let [
+        Some(configuration),
+        Some(recovery),
+        Some(video),
+        input,
+        audio_channel,
+    ] = channels
+    else {
         return Err(Error::Order);
     };
     let selection = session.opened.selection.clone();
@@ -747,8 +773,11 @@ async fn attach_media(
             .map_err(Error::Transport)?
             .inbound,
     );
-    let media = NegotiatedMedia::new(q, &selection, &configuration, &recovery, &video)
+    let mut media = NegotiatedMedia::new(q, &selection, &configuration, &recovery, &video)
         .map_err(Error::Media)?;
+    if let Some(channel) = audio_channel {
+        media.attach_audio(q, &channel).map_err(Error::Media)?;
+    }
     let input = input
         .map(|input| {
             NegotiatedInput::new(q, &selection, &configuration, input).map_err(Error::Input)

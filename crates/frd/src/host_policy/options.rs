@@ -42,6 +42,13 @@ pub struct RunOptions {
     /// Let that controller's text clipboard follow its lease (needs
     /// `input_agent`; the caller refuses it alone before any I/O).
     pub clipboard: bool,
+    /// Local enable of host playback audio (off by default). Only an admitted
+    /// observer that selected audio-down receives it; see `frd run --help`.
+    pub audio: bool,
+    /// Absolute local `PulseAudio` server socket for playback capture.
+    pub audio_server: Option<PathBuf>,
+    /// Sink whose monitor is captured; default: the server's default sink.
+    pub audio_sink: Option<String>,
 }
 impl RunOptions {
     /// Arguments after `run`. Unknown, duplicate or valueless options refuse
@@ -86,6 +93,13 @@ impl RunOptions {
                 options.clipboard = true;
                 continue;
             }
+            if flag == "--audio" {
+                if options.audio {
+                    return Err(Error::InvalidArgument);
+                }
+                options.audio = true;
+                continue;
+            }
             let value = value(&mut iter)?;
             match flag.as_str() {
                 "--port" => {
@@ -104,8 +118,14 @@ impl RunOptions {
                 "--interface" => set(&mut options.interface, value.to_owned())?,
                 "--trust-roots" => set(&mut options.trust_roots, PathBuf::from(value))?,
                 "--input-agent" => set(&mut options.input_agent, PathBuf::from(value))?,
+                "--audio-server" => set(&mut options.audio_server, PathBuf::from(value))?,
+                "--audio-sink" => set(&mut options.audio_sink, value.to_owned())?,
                 _ => return Err(Error::InvalidArgument),
             }
+        }
+        // Audio selection flags without the enable are a typo, never a default.
+        if !options.audio && (options.audio_server.is_some() || options.audio_sink.is_some()) {
+            return Err(Error::InvalidArgument);
         }
         Ok(options)
     }
@@ -213,6 +233,37 @@ mod tests {
             &["--clipboard", "--clipboard"][..],
             &["--clipboard=yes"][..],
             &["--input-agent", "--clipboard"][..],
+        ] {
+            assert!(
+                matches!(parse(refused), Err(Error::InvalidArgument)),
+                "{refused:?}"
+            );
+        }
+    }
+    #[test]
+    fn audio_is_an_explicit_local_enable_with_optional_local_selection() {
+        let off = parse(&["--software-explicit"]).unwrap();
+        assert!(!off.audio && off.audio_server.is_none() && off.audio_sink.is_none());
+        let on = parse(&[
+            "--audio",
+            "--audio-server",
+            "/run/user/1000/pulse/native",
+            "--audio-sink",
+            "speakers",
+        ])
+        .unwrap();
+        assert!(on.audio);
+        assert_eq!(
+            on.audio_server,
+            Some(PathBuf::from("/run/user/1000/pulse/native"))
+        );
+        assert_eq!(on.audio_sink.as_deref(), Some("speakers"));
+        for refused in [
+            &["--audio", "--audio"][..],
+            &["--audio-server", "/run/native"][..],
+            &["--audio-sink", "speakers"][..],
+            &["--audio", "--audio-sink"][..],
+            &["--audio", "--audio-server", "/a", "--audio-server", "/b"][..],
         ] {
             assert!(
                 matches!(parse(refused), Err(Error::InvalidArgument)),

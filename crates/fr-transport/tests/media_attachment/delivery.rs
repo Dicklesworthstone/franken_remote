@@ -1,7 +1,7 @@
 use super::*;
 use fr_wire::attachment::MediaRole;
 
-fn enable(l: &mut Link) {
+pub(super) fn enable(l: &mut Link) {
     l.selection.capabilities.push(Capability {
         name: attachment::DELIVERY_CAPABILITY.into(),
         version: attachment::DELIVERY_VERSION,
@@ -26,7 +26,7 @@ fn offer(l: &mut Link, cx: &Cx, role: MediaRole, id: u32) -> MediaChannel {
     )
     .unwrap()
 }
-async fn attach(
+pub(super) async fn attach(
     l: &mut Link,
     cx: &Cx,
     role: MediaRole,
@@ -42,7 +42,7 @@ async fn attach(
 }
 // Payload semantics belong to the actual media codecs. These independent
 // FRD0 envelopes isolate route, direction, length and retained-storage checks.
-fn record(kind: u16, binding: u32, len: usize) -> Vec<u8> {
+pub(super) fn record(kind: u16, binding: u32, len: usize) -> Vec<u8> {
     assert!(len >= fr_wire::HEADER_BYTES);
     let mut b = vec![0; len];
     b[..4].copy_from_slice(b"FRD0");
@@ -51,7 +51,14 @@ fn record(kind: u16, binding: u32, len: usize) -> Vec<u8> {
     b[16..20].copy_from_slice(&binding.to_be_bytes());
     b
 }
-async fn transfer(l: &mut Link, cx: &Cx, host: bool, send: Route, receive: Route, bytes: &[u8]) {
+pub(super) async fn transfer(
+    l: &mut Link,
+    cx: &Cx,
+    host: bool,
+    send: Route,
+    receive: Route,
+    bytes: &[u8],
+) {
     let until = clock(cx) + 1_000_000;
     loop {
         let q = if host { &mut l.h } else { &mut l.c };

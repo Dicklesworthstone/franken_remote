@@ -443,6 +443,18 @@ revocation invalidates old samples; silence/gaps are explicit. Endpoint-wide
 playback capture scope is disclosed and locally approved. Remote messages
 cannot enable host audio globally or install a virtual device/driver.
 
+The native profile's downlink is the optional capability `native-audio-down`
+v1 (offered by the host only with its local enable, by the client only on an
+explicit request) and one `ChannelAttach` role `AudioDown` (7) per connection,
+observers only: a reliable pair (host: 0x0060/0x0063; viewer: 0x0061/0x0063) and
+one `AudioPacket` (0x0062) datagram route; role 8 is reserved for `audio-up` and
+refuses as unsupported. The wire generation is the viewer lane's own epoch,
+strictly increasing per connection; the host starts a new epoch after a source
+restart or after the viewer's `AudioStop` with `DeviceChanged` (a local output
+reset, bounded per connection). No packet is sent before the matching
+`AudioConfigured`, and only audio captured after it; stale audio is dropped at
+the host rather than sent late.
+
 File messages are an authorization/stream envelope for **existing ATP**;
 they do not define a competing chunk-repair, hashing, resumption, or sync
 algorithm. The exact upstream ATP revision/profile and codecs must be selected

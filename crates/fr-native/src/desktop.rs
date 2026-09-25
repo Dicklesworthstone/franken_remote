@@ -102,6 +102,8 @@ pub enum Error {
     ),
     CaptureAlreadyStarted,
     LayoutMismatch,
+    /// Typed absence of host playback audio for this session.
+    Audio(frd::session_startup::ViewerAudioUnavailable),
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -233,6 +235,28 @@ impl Desktop {
             .ok_or(Error::NotViewing)?
             .configure_clipboard(configuration)
             .map_err(Error::Clipboard)
+    }
+    /// Install the local playback output for this observer's attached
+    /// audio-down lane, before serving. `Audio(NotSelected)` is typed absence:
+    /// the host did not enable/offer audio, or this is a controlled session.
+    pub fn configure_audio(
+        &mut self,
+        output: Box<dyn frd::session_startup::ViewerAudioOutput>,
+    ) -> Result<(), Error> {
+        if self.state() != State::Viewing {
+            return Err(Error::NotViewing);
+        }
+        self.observer
+            .as_mut()
+            .ok_or(Error::NotViewing)?
+            .configure_audio(output)
+            .map_err(Error::Audio)
+    }
+    /// Content-free viewer audio counters; `None` when audio-down is absent.
+    pub fn audio_statistics(&self) -> Option<frd::session_startup::ViewerAudioStatistics> {
+        self.observer
+            .as_ref()
+            .and_then(NativeObserver::audio_statistics)
     }
     /// Preserve the existing bounded terminal clipboard receipt after service or
     /// close. Neither this call nor cleanup creates another clipboard owner.

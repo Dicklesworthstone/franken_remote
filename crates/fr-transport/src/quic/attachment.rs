@@ -218,6 +218,16 @@ fn validate_role(scope: &ChannelScope<'_>, role: MediaRole) -> Result<(), Error>
             }
             (attachment::INPUT_CAPABILITY, attachment::INPUT_VERSION)
         }
+        // Playback audio serves an admitted read-only viewer (PROTOCOL.md §6).
+        // This first slice refuses it on a control selection: the native
+        // client does not isolate its in-process playback decode from input
+        // authority, so a controller never receives an audio channel.
+        MediaRole::AudioDown => {
+            if scope.selection.role != fr_wire::negotiation::Role::Observe {
+                return Err(Error::WrongRoute);
+            }
+            (fr_wire::audio::CAPABILITY, fr_wire::audio::VERSION)
+        }
     };
     if !scope
         .selection
@@ -230,7 +240,20 @@ fn validate_role(scope: &ChannelScope<'_>, role: MediaRole) -> Result<(), Error>
     Ok(())
 }
 fn has_datagram(role: MediaRole) -> bool {
-    matches!(role, MediaRole::Video | MediaRole::Input)
+    datagram_route(role, true).is_some()
+}
+/// The one record kind (and direction) each datagram-bearing role admits.
+/// Exhaustive, so a new role cannot silently inherit the video fragment route.
+fn datagram_route(role: MediaRole, host: bool) -> Option<(u16, bool)> {
+    match role {
+        MediaRole::Video => Some((0x0034, host)),
+        MediaRole::Input => Some((0x0042, !host)),
+        MediaRole::AudioDown => Some((0x0062, host)),
+        MediaRole::Configuration
+        | MediaRole::Recovery
+        | MediaRole::Clipboard
+        | MediaRole::Files => None,
+    }
 }
 
 fn priority(role: MediaRole, host_direction: bool) -> Priority {
@@ -254,6 +277,8 @@ fn messages(role: MediaRole, host_direction: bool) -> Messages {
         (MediaRole::Input, false) => Messages::InputActions,
         (MediaRole::Clipboard, _) => Messages::Clipboard,
         (MediaRole::Files, _) => Messages::Files,
+        (MediaRole::AudioDown, true) => Messages::AudioControl,
+        (MediaRole::AudioDown, false) => Messages::AudioReplies,
     }
 }
 impl QuicRecords {
@@ -266,9 +291,12 @@ impl QuicRecords {
             MediaRole::Recovery | MediaRole::Clipboard | MediaRole::Files => {
                 base.min(self.policy.retained_send_bytes as u64)
             }
-            // The same advertised cap bounds progress, repairs AND video.
+            // The same advertised cap bounds progress, repairs AND video; for
+            // audio-down, its packet datagrams and small reliable records.
             // A smaller peer/record ceiling cannot be bypassed via DATAGRAM.
-            MediaRole::Video => base.min(self.policy.datagram_record_bytes as u64),
+            MediaRole::Video | MediaRole::AudioDown => {
+                base.min(self.policy.datagram_record_bytes as u64)
+            }
             MediaRole::Input => base.min(fr_wire::input::MAX_INPUT_RECORD_BYTES as u64),
         }
     }
@@ -354,6 +382,17 @@ impl QuicRecords {
                 || !self.attachments.iter().any(|r| {
                     r.role == MediaRole::Input && r.state.load(Ordering::Acquire) == ACTIVE
                 }))
+        {
+            return Err(Error::WrongRoute);
+        }
+        // One audio-down stream per connection: a second would be a parallel
+        // generation domain. Retired reservations are not reusable either.
+        if d.role == MediaRole::AudioDown
+            && (self.attachments.iter().any(|r| r.role == d.role)
+                || self
+                    .streams
+                    .iter()
+                    .any(|r| r.messages == Messages::AudioControl))
         {
             return Err(Error::WrongRoute);
         }
@@ -982,12 +1021,14 @@ impl MediaChannel {
                 maximum,
                 ..self.pair.inbound
             };
-            let input = self.descriptor.role == MediaRole::Input;
-            let datagram = has_datagram(self.descriptor.role).then_some(DatagramRoute {
-                binding: self.descriptor.binding.parent.id,
-                kind: if input { 0x42 } else { 0x34 },
-                outbound: if input { !self.host } else { self.host },
-            });
+            let datagram =
+                datagram_route(self.descriptor.role, self.host).map(|(kind, outbound)| {
+                    DatagramRoute {
+                        binding: self.descriptor.binding.parent.id,
+                        kind,
+                        outbound,
+                    }
+                });
             if datagram.is_some() && q.datagrams.len() >= MAX_DATAGRAMS {
                 return Err(Error::Backpressure);
             }

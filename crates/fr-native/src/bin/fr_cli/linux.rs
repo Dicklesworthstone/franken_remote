@@ -1,4 +1,7 @@
 #[cfg(feature = "linux-desktop")]
+#[path = "linux/audio.rs"]
+mod audio;
+#[cfg(feature = "linux-desktop")]
 #[path = "linux/control.rs"]
 mod control;
 #[path = "linux/displays.rs"]
@@ -260,6 +263,7 @@ fn connect(
         ));
     }
     let configuration = desktop_configuration(cx, connection)?;
+    let audio_output = audio::resolve(connection.audio.as_ref())?;
     let state = Rc::new(RefCell::new(Progress {
         control: connection.control.then(|| control::Counters {
             clipboard: connection
@@ -267,6 +271,9 @@ fn connect(
                 .then(control::ClipboardCounters::default),
             ..control::Counters::default()
         }),
+        audio: audio_output
+            .as_ref()
+            .map(|_| Rc::new(RefCell::new(audio::Report::default()))),
         ..Progress::default()
     }));
     let clipboard = if connection.clipboard {
@@ -291,6 +298,7 @@ fn connect(
             progress: state.clone(),
             attempt: None,
             clipboard,
+            audio: audio_output,
         },
     );
     let selector = if connection.target.by_name {
@@ -328,7 +336,7 @@ fn connect(
             runtime.handle(),
             selector,
             cfg,
-            offer(),
+            audio::observation_offer(connection.audio.is_some()),
             policy,
             &mut application,
         );
@@ -507,6 +515,8 @@ struct Progress {
     window: Option<WindowControl>,
     /// Some only for `--control`: content-free request/grant/result tallies.
     control: Option<control::Counters>,
+    /// Some only for `--audio`: content-free playback outcome.
+    audio: Option<Rc<RefCell<audio::Report>>>,
 }
 #[cfg(feature = "linux-desktop")]
 impl Progress {
@@ -538,6 +548,8 @@ struct Interface {
     attempt: Option<control::Attempt>,
     /// Some only with `--clipboard`: configured afresh on every attempt.
     clipboard: Option<control::Clipboard>,
+    /// `--audio`: the resolved local server and request (view-only).
+    audio: Option<(std::path::PathBuf, super::options::AudioRequest)>,
 }
 #[cfg(feature = "linux-desktop")]
 impl Ui for Interface {
@@ -568,6 +580,9 @@ impl Ui for Interface {
                 attempt.configure_clipboard(desktop, local, clipboard);
             }
             self.attempt = Some(attempt);
+        }
+        if let (Some((server, request)), Some(report)) = (&self.audio, &p.audio) {
+            install_audio(desktop, server, request, report);
         }
         Ok(())
     }
@@ -626,22 +641,68 @@ impl Ui for Interface {
         Ok(())
     }
 }
+/// Install this attempt's local output. Absence is typed, never fatal.
+#[cfg(feature = "linux-desktop")]
+fn install_audio(
+    desktop: &mut Desktop,
+    server: &Path,
+    request: &super::options::AudioRequest,
+    report: &Rc<RefCell<audio::Report>>,
+) {
+    #[cfg(feature = "linux-audio")]
+    match desktop.configure_audio(audio::output(server.to_path_buf(), request, report)) {
+        Ok(()) => {}
+        Err(fr_native::desktop::Error::Audio(
+            frd::session_startup::ViewerAudioUnavailable::NotSelected,
+        )) => report.borrow_mut().absent("host_did_not_offer"),
+        Err(_) => report.borrow_mut().absent("audio_setup_refused"),
+    }
+    #[cfg(not(feature = "linux-audio"))]
+    {
+        let _ = (desktop, server, request);
+        report.borrow_mut().absent("audio_unavailable_in_build");
+    }
+}
 #[cfg(feature = "linux-desktop")]
 fn completion(progress: &Progress, json: bool) -> String {
     if let Some(control) = progress.control {
         return control_completion(progress, control, json);
     }
+    let audio = progress.audio.as_ref().map(|report| report.borrow());
+    let (requested, active, played, resets, absence) =
+        audio.as_ref().map_or((false, false, 0, 0, None), |report| {
+            (
+                true,
+                report.active(),
+                report.submitted,
+                report.resets,
+                report.absence,
+            )
+        });
     if json {
         format!(
-            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"observe\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false}}\n",
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"observe\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"audio_requested\":{},\"audio_active\":{},\"audio_frames_submitted\":{},\"audio_output_resets\":{},\"audio_absence\":{},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false,\"audibility_proven\":false}}\n",
             output::timestamp(),
             progress.attempts,
             progress.opened,
-            progress.presented
+            progress.presented,
+            requested,
+            active,
+            played,
+            resets,
+            absence.map_or_else(|| "null".to_owned(), |a| format!("\"{a}\"")),
         )
     } else {
+        let audio = match (requested, active, absence) {
+            (false, ..) => String::new(),
+            (true, true, _) => format!(
+                " Host audio: {played} decoded frame(s) submitted to the local audio server (not audibility proof)."
+            ),
+            (true, false, Some(reason)) => format!(" Host audio absent: {reason}."),
+            (true, false, None) => " Host audio: configured but nothing played.".to_owned(),
+        };
         format!(
-            "View-only session stopped; {} attempt(s), {} opened session(s), cleanup confirmed. Native transport/hardware remain unqualified.\n",
+            "View-only session stopped; {} attempt(s), {} opened session(s), cleanup confirmed.{audio} Native transport/hardware remain unqualified.\n",
             progress.attempts, progress.opened
         )
     }
@@ -752,6 +813,7 @@ mod tests {
                 progress: Rc::new(RefCell::new(Progress::default())),
                 attempt: None,
                 clipboard: None,
+                audio: None,
             };
             // Real wire catalog constructor also validates the selected display.
             let display = fr_wire::display::Display {
@@ -782,6 +844,7 @@ mod tests {
                     progress: Rc::new(RefCell::new(Progress::default())),
                     attempt: None,
                     clipboard: None,
+                    audio: None,
                 },
             )
         }
@@ -893,6 +956,7 @@ mod tests {
                 progress: Rc::new(RefCell::new(control())),
                 attempt: None,
                 clipboard: None,
+                audio: None,
             };
             // No request yet: the ordinary reconnect policy still applies.
             assert_eq!(
@@ -1073,6 +1137,7 @@ mod tests {
             fit_window: None,
             control: false,
             clipboard: false,
+            audio: None,
         };
         let runtime = RuntimeBuilder::current_thread()
             .enable_platform_reactor(true)

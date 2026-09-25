@@ -29,7 +29,9 @@ use std::{
 mod admission_refresh;
 mod clipboard;
 mod native_control;
-pub use native_control::{CLIPBOARD_CAPABILITIES, host_offer, host_offer_with};
+pub use native_control::{
+    CLIPBOARD_CAPABILITIES, host_offer, host_offer_with, host_offer_with_audio,
+};
 mod opening;
 mod running;
 pub use running::controlled::files::{Cleanup as FileReceiveCleanup, Error as FileReceiveError};
@@ -49,6 +51,11 @@ pub use fr_files::sender::{
 pub use viewer::controlled::events as viewer_events;
 pub use viewer::controlled::{ControlledViewer, Error as ControlledViewerError, ViewerControl};
 pub use viewer::observer::{Error as ObserverError, NativeObserver, Policy as ObserverPolicy};
+pub use viewer::streaming::audio::{
+    AudioEnd as ViewerAudioEnd, AudioOutput as ViewerAudioOutput,
+    AudioStatistics as ViewerAudioStatistics, OutputRefused as ViewerAudioRefused,
+    Unavailable as ViewerAudioUnavailable,
+};
 pub use viewer::streaming::{
     ControlState as ViewerControlState, Error as StreamingViewerError,
     InteractiveState as InteractiveViewerState, PendingControl as PendingViewerControl,

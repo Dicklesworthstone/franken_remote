@@ -126,6 +126,23 @@ unsafe extern "C" {
         offset: i64,
         seek: c_int,
     ) -> c_int;
+    #[cfg(feature = "linux-audio")]
+    pub(super) fn pa_stream_connect_record(
+        stream: *mut c_void,
+        device: *const c_char,
+        attr: *const BufferAttr,
+        flags: c_int,
+    ) -> c_int;
+    #[cfg(feature = "linux-audio")]
+    pub(super) fn pa_stream_peek(
+        stream: *mut c_void,
+        data: *mut *const c_void,
+        bytes: *mut usize,
+    ) -> c_int;
+    #[cfg(feature = "linux-audio")]
+    pub(super) fn pa_stream_drop(stream: *mut c_void) -> c_int;
+    #[cfg(feature = "linux-audio")]
+    pub(super) fn pa_stream_readable_size(stream: *const c_void) -> usize;
     pub(super) fn pa_stream_disconnect(stream: *mut c_void) -> c_int;
     pub(super) fn pa_stream_unref(stream: *mut c_void);
     pub(super) fn pa_operation_get_state(operation: *const c_void) -> c_int;

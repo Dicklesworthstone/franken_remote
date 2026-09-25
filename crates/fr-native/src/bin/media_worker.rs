@@ -86,6 +86,7 @@ mod linux {
         let limits = configuration.limits()?;
         let config = configuration.codec()?;
         Ok(match role {
+            Role::Audio => return Err(Error::WrongRole),
             Role::Capture => {
                 let surface = X11Surface::capture(None, limits).map_err(native)?;
                 capture_media(surface, configuration)?
@@ -352,6 +353,9 @@ mod linux {
             }
             return discover(sequence, identity, input, output);
         }
+        if role == Role::Audio {
+            return Err(Error::WrongRole);
+        }
         let (configuration, media, ready) = match (role, first.header.kind) {
             (Role::Capture, Kind::Configure) => {
                 let c = Configuration::decode(first.body())?;
@@ -512,6 +516,7 @@ mod linux {
         let role = match args.next().as_deref() {
             Some("--capture") => Role::Capture,
             Some("--present") => Role::Present,
+            Some("--audio") => Role::Audio,
             _ => return Err(Error::WrongRole),
         };
         if args.next().as_deref() != Some("--parent-pid") {
@@ -542,6 +547,10 @@ mod linux {
         let mut identity = first.header.identity;
         let mut sequence = Sequence::new(identity.epoch)?;
         sequence.accept(first.header)?;
+        if role == Role::Audio {
+            // A separate role and process: no X11 surface, codec or input here.
+            return crate::audio::serve(first, sequence, &mut input, &mut output);
+        }
         let initialized = initialize(
             first,
             role,
@@ -598,6 +607,135 @@ mod linux {
         }
         // Parent death/pipe closure drops all native owners, even without Stop.
         Ok(())
+    }
+}
+/// The audio role: one locally selected playback monitor, real Opus encode,
+/// packets returned only to the parent's pulls. Built with `linux-audio`.
+#[cfg(all(target_os = "linux", feature = "linux-audio"))]
+mod audio {
+    use fr_core::limits::ProtocolLimits;
+    use fr_media::worker::{
+        self, Error, Kind, Record, Sequence,
+        audio::{Capture, encode_batch},
+    };
+    use fr_native::pulse::{Error as PulseError, source::PlaybackSource};
+    use std::{io, time::Instant};
+
+    fn typed(error: PulseError) -> Error {
+        match error {
+            // Missing server/monitor, a removed sink or a stream that never
+            // started: a typed unavailable source, never a retry loop.
+            PulseError::Selection
+            | PulseError::Unavailable
+            | PulseError::Expired
+            | PulseError::DeviceChanged
+            | PulseError::Suspended => Error::Unsupported,
+            PulseError::Configuration => Error::Malformed,
+            PulseError::Allocation => Error::Allocation,
+            _ => Error::NativeFailure,
+        }
+    }
+    fn refuse(
+        output: &mut impl io::Write,
+        identity: worker::Identity,
+        error: Error,
+    ) -> Result<(), Error> {
+        let limits = ProtocolLimits::ABSOLUTE;
+        Record::new(
+            Kind::Refused,
+            identity,
+            (error as u16).to_be_bytes().to_vec(),
+            &limits,
+        )?
+        .write(output, &limits)?;
+        Err(error)
+    }
+    fn micros(origin: Instant) -> u64 {
+        u64::try_from(origin.elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
+    fn start(body: &[u8], origin: Instant) -> Result<PlaybackSource, Error> {
+        let capture = Capture::decode(body)?;
+        let mut source = PlaybackSource::connect(capture, micros(origin)).map_err(typed)?;
+        // Blocking is confined to this worker process; the parent's own
+        // deadline supervises it. Native startup has its own 2 s bound.
+        while !source.poll_ready(micros(origin)).map_err(typed)? {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        Ok(source)
+    }
+    pub fn serve(
+        first: Record,
+        mut sequence: Sequence,
+        input: &mut impl io::Read,
+        output: &mut impl io::Write,
+    ) -> Result<(), Error> {
+        let limits = ProtocolLimits::ABSOLUTE;
+        let origin = Instant::now();
+        let identity = first.header.identity;
+        if first.header.kind != Kind::ConfigureAudio {
+            return refuse(output, identity, Error::WrongState);
+        }
+        let mut source = match start(first.body(), origin) {
+            Ok(source) => source,
+            Err(error) => return refuse(output, identity, error),
+        };
+        Record::new(Kind::AudioReady, identity, first.into_body(), &limits)?
+            .write(output, &limits)?;
+        while let Some(request) = Record::read(input, &limits)? {
+            let identity = request.header.identity;
+            sequence.accept(request.header)?;
+            match request.header.kind {
+                Kind::Stop => {
+                    source.disconnect();
+                    return Record::new(Kind::Stopped, identity, Vec::new(), &limits)?
+                        .write(output, &limits);
+                }
+                Kind::ReadAudio => {
+                    let result = source.pull(micros(origin)).map_err(typed).and_then(
+                        |(packets, counters)| encode_batch(&packets, counters, source.capture()),
+                    );
+                    match result {
+                        Ok(body) => Record::new(Kind::AudioPackets, identity, body, &limits)?
+                            .write(output, &limits)?,
+                        Err(error) => {
+                            source.disconnect();
+                            return refuse(output, identity, error);
+                        }
+                    }
+                }
+                _ => {
+                    source.disconnect();
+                    return refuse(output, identity, Error::WrongState);
+                }
+            }
+        }
+        // Parent death/pipe closure: the stream and encoder die with us.
+        source.disconnect();
+        Ok(())
+    }
+}
+/// Without the audio build this role is a typed refusal, never a silent stub.
+#[cfg(all(target_os = "linux", not(feature = "linux-audio")))]
+mod audio {
+    use fr_core::limits::ProtocolLimits;
+    use fr_media::worker::{Error, Kind, Record, Sequence};
+    use std::io;
+    #[allow(clippy::needless_pass_by_value)] // Same signature as the real role.
+    pub fn serve(
+        first: Record,
+        _: Sequence,
+        _: &mut impl io::Read,
+        output: &mut impl io::Write,
+    ) -> Result<(), Error> {
+        let limits = ProtocolLimits::ABSOLUTE;
+        Record::new(
+            Kind::Refused,
+            first.header.identity,
+            (Error::Unsupported as u16).to_be_bytes().to_vec(),
+            &limits,
+        )?
+        .write(output, &limits)?;
+        Err(Error::Unsupported)
     }
 }
 fn main() {

@@ -280,3 +280,43 @@ fn observation_only_host_refuses_control_intent_as_a_typed_capability_error() {
     );
     assert_eq!(startup.tick(3), Err(Error::Closed));
 }
+
+#[test]
+fn audio_offer_adds_only_the_optional_downlink_and_negotiates_both_ways() {
+    let offer = fr_client::native::observation_offer_with_audio();
+    offer.validate().unwrap();
+    assert_eq!(offer.role, Role::Observe);
+    let observation = observation_offer();
+    let added: Vec<_> = offer
+        .capabilities
+        .iter()
+        .filter(|c| !observation.capabilities.contains(c))
+        .collect();
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].name, fr_wire::audio::CAPABILITY);
+    assert_eq!(added[0].version, fr_wire::audio::VERSION);
+    assert!(!added[0].required);
+    assert_eq!(offer.capabilities.len(), observation.capabilities.len() + 1);
+    // No microphone/uplink, input or clipboard capability is implied.
+    assert!(offer.capabilities.iter().all(|c| !c.name.contains("-up")
+        && !c.name.contains("input")
+        && !c.name.contains("clipboard")));
+    // A host without audio simply omits it: the selection carries none.
+    let without = observation.intersect(&offer).unwrap();
+    assert!(offer.check_host(&without).is_ok());
+    assert!(
+        without
+            .select()
+            .unwrap()
+            .capabilities
+            .iter()
+            .all(|c| c.name != fr_wire::audio::CAPABILITY)
+    );
+    // A host that offers it selects it, optional on both sides.
+    let with = offer.intersect(&offer).unwrap().select().unwrap();
+    assert!(
+        with.capabilities
+            .iter()
+            .any(|c| c.name == fr_wire::audio::CAPABILITY && !c.required)
+    );
+}

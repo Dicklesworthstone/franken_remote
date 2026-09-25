@@ -65,6 +65,7 @@ impl Worker {
             .arg(match role {
                 Role::Capture => "--capture",
                 Role::Present => "--present",
+                Role::Audio => "--audio",
             });
         cmd.arg("--parent-pid").arg(std::process::id().to_string());
         if role == Role::Present {

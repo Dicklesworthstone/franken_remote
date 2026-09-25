@@ -106,6 +106,7 @@ fn options(api: &fixture::Api, tools: &Tools, worker: PathBuf) -> Options {
         handle_signals: false,
         input_agent: None,
         clipboard: false,
+        audio: None,
     }
 }
 
@@ -219,21 +220,8 @@ fn frd_run_stops_on_consecutive_source_failures_with_a_typed_error() {
     fs::write(&worker, "#!/bin/sh\nexit 3\n").unwrap();
     fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
     let options = Options {
-        socket: Some(api.path.clone()),
-        port: address().port(),
-        interface: "fr-fixture".into(),
-        worker,
-        display: ":0".into(),
-        xauthority: None,
-        trust_roots: fixture::pki().join("ca.pem"),
-        sharing: fr_tailnet::Scope::OwnUser,
-        fps: 30,
-        bitrate: 2_000_000,
-        ingress_tools: Some((tools.0.join("nft"), tools.0.join("ip"))),
         once: false,
-        handle_signals: false,
-        input_agent: None,
-        clipboard: false,
+        ..options(&api, &tools, worker)
     };
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();

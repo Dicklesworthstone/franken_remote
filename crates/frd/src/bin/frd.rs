@@ -58,6 +58,14 @@ OPTIONS:
     --clipboard     With --input-agent: the controller's UTF-8 text clipboard
                     follows its lease, both directions (the agent's per-lane
                     --clipboard child owns X11 CLIPBOARD). Off by default
+    --audio         Locally enable host playback audio (off by default): an admitted
+                    view-only viewer that asks for audio gets the monitor of the
+                    selected output, Opus-encoded by the worker. Endpoint-wide:
+                    every application playing to that output is captured
+    --audio-server P  Absolute PulseAudio socket (default: $PULSE_SERVER, then
+                    $XDG_RUNTIME_DIR/pulse/native); requires --audio
+    --audio-sink N  Sink whose monitor is captured (default: the server's default
+                    sink, pinned when capture starts); requires --audio
     --interface IF  Tailscale interface for ingress enforcement (default: tailscale0)
     --trust-roots P PEM CA bundle for the host certificate chain (default: system)
     --once          Serve one sharing session, then exit
@@ -447,6 +455,10 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         Ok(agent) => agent,
         Err(code) => return code,
     };
+    let audio = match audio(&options, json) {
+        Ok(audio) => audio,
+        Err(code) => return code,
+    };
     let run_options = Options {
         socket: options.socket.clone(),
         port: effective.port,
@@ -472,6 +484,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         handle_signals: true,
         input_agent,
         clipboard: options.clipboard,
+        audio,
     };
     let report: Reporter = Arc::new(move |event: Event| print_event(json, &event));
     let stop = Arc::new(host_run::StopHandle::default());
@@ -506,6 +519,42 @@ fn input_agent(
         )),
         agent => Ok(agent.clone()),
     }
+}
+
+/// The optional LOCAL playback-audio enable. The server socket is local
+/// configuration (flag, then `PULSE_SERVER`, then the user runtime dir); a
+/// missing socket is a typed refusal before anything is bound.
+#[cfg(target_os = "linux")]
+fn audio(
+    options: &frd::host_policy::options::RunOptions,
+    json: bool,
+) -> Result<Option<frd::host_run::AudioOptions>, ExitCode> {
+    if !options.audio {
+        return Ok(None);
+    }
+    let server = options.audio_server.clone().or_else(|| {
+        std::env::var("PULSE_SERVER")
+            .ok()
+            .map(|v| PathBuf::from(v.strip_prefix("unix:").unwrap_or(&v)))
+            .or_else(|| {
+                std::env::var_os("XDG_RUNTIME_DIR")
+                    .map(|dir| PathBuf::from(dir).join("pulse").join("native"))
+            })
+    });
+    let Some(server) = server.filter(|p| p.is_absolute() && p.exists()) else {
+        return Err(run_refusal(
+            json,
+            "audio_server_unavailable",
+            "--audio needs the local PulseAudio server socket: pass --audio-server \
+             /absolute/path/native (or set PULSE_SERVER / XDG_RUNTIME_DIR); omit --audio \
+             to share without audio",
+            2,
+        ));
+    };
+    Ok(Some(frd::host_run::AudioOptions {
+        server,
+        sink: options.audio_sink.clone(),
+    }))
 }
 
 #[cfg(not(target_os = "linux"))]

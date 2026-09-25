@@ -1,6 +1,7 @@
 //! Join completed native attachments to the actual media owners. This is not
 //! admission: the containing session still selects the view and services consent,
 //! observation renewal, revocation and input cleanup independently of the codec.
+mod audio;
 mod cursor;
 mod handoff;
 pub mod replacement;
@@ -9,6 +10,7 @@ use crate::{
     media::{ObservationControl, Subscription, decoder_startup::Setup},
     media_egress::Egress,
 };
+pub use audio::AudioLanes;
 pub(crate) use cursor::CursorLanes;
 use fr_media::delivery::{MediaBindings, MediaEpoch, ReceiveConfig, ReceivePolicy, SendPolicy};
 use fr_transport::quic::{
@@ -31,6 +33,8 @@ pub struct NegotiatedMedia {
     selection: Selection,
     bindings: MediaBindings,
     limits: MediaLimits,
+    /// The optional `audio-down` attachment, joined after the media set.
+    audio: Option<Box<AttachedChannel>>,
 }
 impl std::fmt::Debug for NegotiatedMedia {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -116,6 +120,7 @@ impl NegotiatedMedia {
             selection: selection.clone(),
             bindings,
             limits,
+            audio: None,
         };
         this.check(q)?;
         // Also enforce the existing decoder capability and exact route contract.
@@ -161,6 +166,7 @@ impl NegotiatedMedia {
         {
             return Err(Error::InvalidRoutes);
         }
+        // Audio lane failure never ends video: `audio_lanes` checks it alone.
         Ok(())
     }
     /// Preserve only the original dispatch map after reference failure. The

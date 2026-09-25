@@ -379,6 +379,10 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> Services for SharedServi
                 .map_err(|_| ())?;
             self.statistics.feedback_reports = feedback.accepted;
             Ok(Disposition::Consumed)
+        } else if let Some(disposition) =
+            self.subscriber.audio_record(route, bytes).map_err(|_| ())?
+        {
+            Ok(disposition)
         } else if route == *self.repair {
             Ok(Disposition::Blocked)
         } else {

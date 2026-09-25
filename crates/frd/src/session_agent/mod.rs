@@ -111,6 +111,9 @@ pub struct SessionAgent {
     /// Opt-in remote-control profile; None keeps the agent observation-only.
     #[cfg(target_os = "linux")]
     control: Option<source::desktop::ControlProfile>,
+    /// Local playback-audio enable (`frd run --audio`); None keeps it off.
+    #[cfg(target_os = "linux")]
+    audio: Option<crate::media::shared_publisher::AudioProfile>,
 }
 
 impl SessionAgent {
@@ -150,6 +153,8 @@ impl SessionAgent {
             sources,
             #[cfg(target_os = "linux")]
             control: None,
+            #[cfg(target_os = "linux")]
+            audio: None,
             approval: ApprovalManager::new(approval_mode),
             indicator,
             held_state: RemoteHeldTracker::new(),

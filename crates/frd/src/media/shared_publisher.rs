@@ -59,12 +59,16 @@ struct Entry {
     join: Option<join::PendingJoin>,
     starting: Option<pending::Starting>,
     cursor: cursor::EntryCursor,
+    /// Present only in effect when this viewer selected audio-down.
+    audio: audio::EntryAudio,
 }
 impl Entry {
     fn close(&mut self, error: Error) {
         // Fence the exact subscriber BEFORE dropping its retained media. This
         // never revokes the OS source or another remote session's authority.
         self.control.revoke();
+        // Fence audio with the viewer: nothing queued may follow departure.
+        self.audio.close();
         if let Some(mut starting) = self.starting.take() {
             starting.host.close();
         }
@@ -88,6 +92,8 @@ struct Members {
     last: u64,
     /// The source's bounded serial→wire-ID map and latest cursor target.
     cursor: fr_media::cursor::HostCursor,
+    /// The share's ONE bounded playback-audio packet ring (count and bytes).
+    audio: fr_media::audio_delivery::AudioRing,
 }
 impl Members {
     fn selected_view(&self, view: Binding) -> bool {
@@ -219,6 +225,7 @@ impl Publisher {
                 until,
                 last: now,
                 cursor: fr_media::cursor::HostCursor::new(),
+                audio: fr_media::audio_delivery::AudioRing::new(),
             })),
         })
     }
@@ -293,6 +300,7 @@ impl Publisher {
             join: None,
             starting: None,
             cursor: cursor::EntryCursor::default(),
+            audio: audio::EntryAudio::default(),
         });
         Ok(Subscriber {
             members: Arc::downgrade(&self.members),
@@ -317,6 +325,11 @@ impl Publisher {
     }
     pub fn physical_usage(&self) -> BudgetUsage {
         self.pool.usage()
+    }
+    /// The demand/ring handle for this share's optional audio source. It
+    /// holds no strong reference: a closed publication ends the source.
+    pub fn audio_feed(&self) -> AudioFeed {
+        AudioFeed::new(Arc::downgrade(&self.members))
     }
     pub fn worker_id(&self) -> Option<u32> {
         self.source.worker_id()
@@ -565,6 +578,7 @@ impl Subscriber {
         let Members {
             entries,
             cursor: host_cursor,
+            audio: audio_ring,
             ..
         } = &mut *members;
         let entry = entries[self.slot].as_mut().ok_or(Error::Closed)?;
@@ -622,6 +636,8 @@ impl Subscriber {
             }
             // Bounded: at most one reliable shape and one position datagram.
             entry.service_cursor(cx, transport, host_cursor, &owner, &mut report)?;
+            // Bounded: at most a few audio records; never a video failure.
+            entry.service_audio(cx, transport, audio_ring, &owner, &mut report)?;
             Ok(report)
         })();
         if let Err(error) = result {
@@ -632,6 +648,23 @@ impl Subscriber {
         }
         members.stop_if_empty();
         result
+    }
+    /// One record on this viewer's audio-down reply lane (`AudioConfigured`
+    /// or the viewer's `AudioStop`). `None`: not an audio record of this
+    /// subscriber. Decoding and generation checks happen before any effect.
+    pub fn audio_record(
+        &mut self,
+        route: Route,
+        bytes: &[u8],
+    ) -> Result<Option<fr_transport::quic::Disposition>, Error> {
+        let shared = self.members.upgrade().ok_or(Error::Closed)?;
+        let mut members = shared.lock().map_err(|_| Error::Poisoned)?;
+        let Members { entries, audio, .. } = &mut *members;
+        let entry = entries[self.slot].as_mut().ok_or(Error::Closed)?;
+        if let Some(error) = entry.failure {
+            return Err(error);
+        }
+        Ok(entry.audio_record(audio, route, bytes))
     }
     /// Consume only this subscriber's actual repair route. Other control records
     /// remain with the original session, including renewal and recovery policy.
@@ -727,11 +760,13 @@ impl Subscription {
     }
 }
 
+mod audio;
 mod cursor;
 mod join;
 mod pending;
 mod service;
 mod session;
+pub use audio::{AudioFeed, AudioProfile, AudioSource};
 pub use join::JoinQueue;
 
 pub(crate) mod consent;

@@ -41,7 +41,8 @@ fr displays NODE_ID --experimental-native [--trust-roots /absolute/ca-roots.pem]
 fr connect NODE_ID --view-only|--control --experimental-native
     --display HANDLE|only|choose [--worker /absolute/fr-media-worker] [--trust-roots /absolute/ca-roots.pem]
     [--by-name] [--x-display :0] [--socket /absolute/tailscaled.sock]
-    [--port 8443] [--ipv6] [--attempts 1..32] [--fit WIDTHxHEIGHT] [--clipboard] [--json]
+    [--port 8443] [--ipv6] [--attempts 1..32] [--fit WIDTHxHEIGHT] [--clipboard]
+    [--audio [--audio-server /absolute/pulse/native] [--audio-sink NAME]] [--json]
 fr robot session open NODE_ID [--role view|control] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
 fr robot session close NODE_ID [--lease LEASE] [--socket /absolute/tailscaled.sock] [--json]
 fr robot observe NODE_ID [--display N] [--screenshot /path/screen.png] [--evidence-level decoded|submitted_to_compositor|instrumentally_observed] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
@@ -67,6 +68,12 @@ retried or reacquired: after a request, fr does not reconnect.
 --clipboard (with --control; build with linux-clipboard) lets the UTF-8 text
 CLIPBOARD follow the control lease both ways, when the host runs frd run
 --clipboard too; otherwise the completion reports clipboard absence by type.
+--audio (with --view-only only) asks for host playback audio; without it no audio
+capability is offered. The host must run frd run --audio. Output goes to the local
+PulseAudio server (--audio-server, else PULSE_SERVER, else
+$XDG_RUNTIME_DIR/pulse/native) and its default sink unless --audio-sink names one.
+A host without audio is reported as typed absence, not an error; video continues.
+Builds without the linux-audio feature refuse --audio.
 Native transport/media remain unqualified. Set XAUTHORITY in the local environment
 when the window and worker require it. Close the window or use Ctrl-C to stop.
 ";

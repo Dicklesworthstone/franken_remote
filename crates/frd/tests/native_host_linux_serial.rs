@@ -642,6 +642,8 @@ mod shipped_client;
 #[path = "native_host_linux_serial/real_media.rs"]
 mod real_media;
 
+#[path = "native_host_linux_serial/real_audio.rs"]
+mod real_audio;
 #[path = "native_host_linux_serial/real_clipboard.rs"]
 mod real_clipboard;
 #[path = "native_host_linux_serial/real_control.rs"]

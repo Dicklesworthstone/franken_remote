@@ -51,7 +51,15 @@ pub enum MediaRole {
     Input = 4,
     Clipboard = 5,
     Files = 6,
+    /// Host playback audio (`audio-down`): a reliable Opus configuration/stop
+    /// lane plus `AudioPacket` datagrams. Requires positive selection of
+    /// `fr_wire::audio::CAPABILITY`; attachment is not a local audio enable.
+    AudioDown = 7,
 }
+/// Wire value reserved for the client-microphone `audio-up` channel. It is a
+/// typed refusal (`UnsupportedKind`) until a qualified virtual microphone
+/// endpoint exists; it never decodes as another role.
+pub const AUDIO_UP_RESERVED_ROLE: u8 = 8;
 impl MediaRole {
     /// Wire direction: 1 = host-to-viewer, 2 = viewer-to-host. This describes
     /// application data, not the fixed directions of the attachment handshake.
@@ -70,6 +78,8 @@ impl MediaRole {
             4 => Ok(Self::Input),
             5 => Ok(Self::Clipboard),
             6 => Ok(Self::Files),
+            7 => Ok(Self::AudioDown),
+            AUDIO_UP_RESERVED_ROLE => Err(WireError::UnsupportedKind),
             _ => Err(WireError::InvalidValue),
         }
     }

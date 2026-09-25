@@ -8,11 +8,13 @@ use asupersync::bytes::Bytes;
 const CLIPBOARD_RETIRED: u64 = 0x4652_4350;
 const FILES_RETIRED: u64 = 0x4652_4649;
 const MEDIA_RETIRED: u64 = 0x4652_4d44;
+const AUDIO_RETIRED: u64 = 0x4652_4144;
 
 fn retirement_code(role: MediaRole) -> Option<u64> {
     match role {
         MediaRole::Clipboard => Some(CLIPBOARD_RETIRED),
         MediaRole::Files => Some(FILES_RETIRED),
+        MediaRole::AudioDown => Some(AUDIO_RETIRED),
         MediaRole::Configuration | MediaRole::Recovery | MediaRole::Video => Some(MEDIA_RETIRED),
         // Input has one ordering/authority domain for the connection lifetime.
         MediaRole::Input => None,

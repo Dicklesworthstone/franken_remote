@@ -156,6 +156,15 @@ impl SessionAgent {
     pub fn control_profile(&self) -> Option<&ControlProfile> {
         self.control.as_ref()
     }
+    /// The operator's LOCAL playback-audio enable. It only arms a demand-
+    /// driven source: capture starts when an admitted observer that selected
+    /// audio-down is streaming, and stops when no such viewer remains. The
+    /// controlled share never carries audio in this slice.
+    #[must_use]
+    pub fn with_audio(mut self, profile: crate::media::shared_publisher::AudioProfile) -> Self {
+        self.audio = Some(profile);
+        self
+    }
 }
 
 /// The controlled share's original publication (capture child, session and

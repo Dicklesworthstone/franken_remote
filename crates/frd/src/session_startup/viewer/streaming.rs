@@ -1,6 +1,7 @@
 //! Continuous native receiving without lending the connection to a codec.
 //! One owned picture stays charged while QUIC, repairs and control keep moving.
 mod acquisition;
+pub(crate) mod audio;
 mod continuation;
 mod cursor;
 mod interactive;
@@ -50,6 +51,7 @@ pub enum Error {
     Freshness(fr_media::freshness::Error),
     /// A malformed or hostile remote cursor record (typed, no pixels).
     Cursor(cursor::Fault),
+    Wire(fr_wire::WireError),
     Application,
     RequestAlreadyStarted,
     Closed,
@@ -253,6 +255,8 @@ pub struct StreamingViewer {
     presentation: Option<ViewerPresentation>,
     /// Present only when the host selected `remote-cursor`.
     cursor: Option<cursor::ViewerCursor>,
+    /// Present only when this observer selected audio-down and it attached.
+    audio: Option<audio::ViewerAudio>,
     control: StreamingViewerControl,
     statistics: Statistics,
     served: bool,
@@ -397,9 +401,10 @@ impl StreamingViewer {
                 None
             };
             let cursor = cursor::ViewerCursor::attach(media, &session.transport)?;
-            Ok((feedback, presentation, recovery, cursor))
+            let audio = audio::ViewerAudio::attach(media, &session.transport)?;
+            Ok((feedback, presentation, recovery, cursor, audio))
         })();
-        let (feedback, presentation, recovery, cursor) = match setup {
+        let (feedback, presentation, recovery, cursor, audio) = match setup {
             Ok(owners) => owners,
             Err(error) => {
                 peer.close();
@@ -419,11 +424,30 @@ impl StreamingViewer {
             feedback,
             presentation,
             cursor,
+            audio,
             control: StreamingViewerControl { cx, input },
             statistics: Statistics::default(),
             served: false,
             initial: None,
         })
+    }
+    /// Install the native client's local output for an ATTACHED audio-down
+    /// lane, once, before serving. `Err(())`: audio was not selected/attached
+    /// (typed absence) or an output is already installed.
+    pub(crate) fn configure_audio(
+        &mut self,
+        output: Box<dyn audio::AudioOutput>,
+    ) -> Result<(), audio::Unavailable> {
+        if self.served {
+            return Err(audio::Unavailable::AlreadyConfigured);
+        }
+        self.audio
+            .as_mut()
+            .ok_or(audio::Unavailable::NotSelected)?
+            .configure(output)
+    }
+    pub(crate) fn audio_statistics(&self) -> Option<audio::AudioStatistics> {
+        self.audio.as_ref().map(audio::ViewerAudio::statistics)
     }
     pub(crate) fn configure_clipboard(
         &mut self,
@@ -688,6 +712,7 @@ impl StreamingViewer {
                     self.feedback.as_mut(),
                     self.presentation.as_mut(),
                     self.cursor.as_mut(),
+                    self.audio.as_mut(),
                     cx,
                     result,
                     other,
@@ -716,6 +741,7 @@ impl StreamingViewer {
                             self.feedback.as_mut(),
                             self.presentation.as_mut(),
                             self.cursor.as_mut(),
+                            self.audio.as_mut(),
                             cx,
                             result,
                             other,
@@ -878,7 +904,7 @@ impl Repair {
         Ok(())
     }
 }
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn network(
     peer: &mut Peer,
     clipboard: Option<&mut crate::native_clipboard::Application>,
@@ -889,6 +915,7 @@ async fn network(
     mut feedback: Option<&mut ViewerFeedback>,
     presentation: Option<&mut ViewerPresentation>,
     mut cursor: Option<&mut cursor::ViewerCursor>,
+    mut audio: Option<&mut audio::ViewerAudio>,
     cx: &Cx,
     result: &mut impl FnMut(ResultEvent),
     other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
@@ -925,6 +952,13 @@ async fn network(
             Err(e) => return Err(Error::Transport(e)),
         }
     }
+    if let Some(audio) = audio.as_deref_mut() {
+        // Bounded local output progress and its one acknowledgement/stop.
+        let current = now(cx).map_err(Error::Session)?;
+        audio.service(&mut session.transport, cx, current, &mut || {
+            cx.checkpoint().is_ok()
+        })?;
+    }
     let allow_recovery = recovery.is_some() && matches!(peer, Peer::Observe { .. });
     let mut failure = None;
     let driven = peer
@@ -946,6 +980,11 @@ async fn network(
                 cursor.receive(route, bytes).map_err(|e| {
                     failure = Some(Error::Cursor(e));
                 })?;
+                Ok(Disposition::Consumed)
+            } else if let Some(audio) = audio.as_deref_mut().filter(|a| a.owns(route, bytes)) {
+                // Audio is never media progress, decode or freshness evidence;
+                // its datagrams are always consumed (dropped when not active).
+                audio.receive(route, bytes, &mut || cx.checkpoint().is_ok());
                 Ok(Disposition::Consumed)
             } else if let Some((_, channel)) = routes.iter().find(|(r, _)| *r == route) {
                 let current = now(cx).map_err(|e| {

@@ -23,6 +23,17 @@ pub fn observation_offer() -> Offer {
     offer(Role::Observe, &[])
 }
 
+/// The observation profile plus the OPTIONAL host playback downlink. Only an
+/// explicit local request (`fr connect --audio`) uses this offer; the host
+/// still decides (its own local enable) and a host without audio simply omits
+/// it. It never offers or implies a microphone (uplink).
+pub fn observation_offer_with_audio() -> Offer {
+    offer(
+        Role::Observe,
+        &[(fr_wire::audio::CAPABILITY, fr_wire::audio::VERSION, false)],
+    )
+}
+
 /// The observation profile plus the four boundaries the host's explicit
 /// control bootstrap requires: the input attachment, the one-use control
 /// grant, clock correlation and presented-state proof, all mandatory. Asking

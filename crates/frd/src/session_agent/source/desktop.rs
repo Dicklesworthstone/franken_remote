@@ -94,6 +94,11 @@ impl SessionAgent {
             .register_original_source(publisher)
             .map_err(Error::Consent)?;
         let admission = hub.admissions();
+        // Only the operator's local enable arms the demand-driven source.
+        let audio = self.audio.clone().map(|profile| {
+            Box::pin(shared_publisher::AudioSource::new(profile, publisher.audio_feed()).serve())
+                as Service<'a, (), shared_publisher::Error>
+        });
         Ok(Running {
             agent: self,
             source,
@@ -103,6 +108,7 @@ impl SessionAgent {
             local: Box::new(local),
             network: Some(Box::pin(hub.serve())),
             capture: Some(Box::pin(publisher.serve(capture_interval, |_| {}))),
+            audio,
             timer: Wake {
                 driver,
                 handle: None,
@@ -123,6 +129,8 @@ struct Running<'a, L> {
     local: Box<L>,
     network: Option<Service<'a, shared_viewers::Statistics, shared_viewers::Error>>,
     capture: Option<Service<'a, (), shared_publisher::Error>>,
+    /// The optional playback-audio source; its end never ends the share.
+    audio: Option<Service<'a, (), shared_publisher::Error>>,
     timer: Wake,
     source_renewals: u64,
     finished: bool,
@@ -136,6 +144,9 @@ impl<L> Running<'_, L> {
             self.admission.fence();
             self.registration.close();
             drop(self.network.take());
+            // Audio first: its lanes are already fenced with the viewers; this
+            // kills the audio child before the capture child is released.
+            drop(self.audio.take());
             drop(self.capture.take());
             self.timer.cancel();
         }
@@ -200,6 +211,13 @@ where
                     Err(e) => Err(Error::Capture(e)),
                     Ok(()) => Ok(self.report(self.admission.statistics().map_err(Error::Viewers)?)),
                 });
+            }
+            // Same source clock; a finished/failed audio source is typed
+            // per-viewer absence, never the share's result.
+            if let Some(audio) = self.audio.as_mut()
+                && audio.as_mut().poll(task).is_ready()
+            {
+                self.audio = None;
             }
         }
         self.registration

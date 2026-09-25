@@ -83,6 +83,7 @@ async fn pair(c: &Cx, h: &Cx) -> Ready {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn normal_network_loop_reports_lost_reference_and_keeps_original_observation_renewing() {
     run(|c, h| async move {
         let (mut host, mut peer, mut receiver, mut watcher, media) = Box::pin(pair(&c, &h)).await;
@@ -152,6 +153,7 @@ fn normal_network_loop_reports_lost_reference_and_keeps_original_observation_ren
                     Some(&mut vf),
                     None,
                     None,
+                    None,
                     &c,
                     &mut |_| {},
                     &mut block,
@@ -207,6 +209,7 @@ fn malformed_receiver_remains_terminal_without_emitting_a_recovery_record() {
             None,
             None,
             None,
+            None,
             &c,
             &mut |_| {},
             &mut block,
@@ -248,6 +251,7 @@ fn omitted_recovery_owner_preserves_the_original_terminal_failure() {
                 &mut Repair::default(),
                 None,
                 &mut Statistics::default(),
+                None,
                 None,
                 None,
                 None,

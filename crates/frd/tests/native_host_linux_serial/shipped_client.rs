@@ -189,6 +189,7 @@ fn shipped_fr_displays_negotiates_with_frd_run() {
         handle_signals: false,
         input_agent: None,
         clipboard: false,
+        audio: None,
     };
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();
@@ -362,6 +363,7 @@ fn frd_run_keeps_serving_sequential_viewers_and_departing_inspections() {
         handle_signals: false,
         input_agent: None,
         clipboard: false,
+        audio: None,
     };
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();
@@ -469,6 +471,7 @@ fn frd_run_expires_a_connected_viewer_that_stops_answering_renewal() {
         handle_signals: false,
         input_agent: None,
         clipboard: false,
+        audio: None,
     };
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();

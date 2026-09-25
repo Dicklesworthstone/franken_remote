@@ -205,13 +205,33 @@ async fn select_media(
     )
     .await?;
     let video = attach(&mut host, &mut selected, MediaRole::Video, budget, entropy).await?;
+    // The host offered audio-down only because it was locally enabled; an
+    // observer that selected it gets its channel after the media set, still
+    // inside the same admitted, approved session and absolute budget.
+    let audio = if native_control::audio_selected(host.selection()) {
+        Some(
+            attach(
+                &mut host,
+                &mut selected,
+                MediaRole::AudioDown,
+                budget,
+                entropy,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     budget.remaining()?;
     let selection = host.selection().clone();
     let q = host.io().map_err(Error::Session)?.0;
     selected
         .revalidate(q, &queue.selected_catalog().map_err(Error::Shared)?)
         .map_err(Error::Display)?;
-    let media = NegotiatedMedia::new(q, &selection, &configuration, &recovery, &video)
+    let mut media = NegotiatedMedia::new(q, &selection, &configuration, &recovery, &video)
         .map_err(Error::Routes)?;
+    if let Some(audio) = audio {
+        media.attach_audio(q, &audio).map_err(Error::Routes)?;
+    }
     Ok((host, selected, media))
 }

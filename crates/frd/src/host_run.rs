@@ -12,7 +12,9 @@
 //! process exists, and the encoder is the explicit software HEVC profile. The
 //! controller's text clipboard is a further, separate operator opt-in
 //! (`clipboard`, requires the input agent); it follows the controller's lease.
+pub mod audio;
 pub mod policy;
+pub use audio::AudioOptions;
 
 use crate::{
     input_agent::Seat,
@@ -29,7 +31,7 @@ use crate::{
             prepare::Setup,
         },
     },
-    session_startup::{Configuration, host_offer_with, shared_viewers},
+    session_startup::{Configuration, host_offer_with_audio, shared_viewers},
     worker::{Deadline, Launch, Retirement},
 };
 use asupersync::{
@@ -94,6 +96,9 @@ pub struct Options {
     /// Let that controller's text clipboard follow its lease, through the
     /// input agent image's per-lane `--clipboard` child. Requires `input_agent`.
     pub clipboard: bool,
+    /// `--audio`: local playback-audio enable. `None` keeps audio off and the
+    /// capability unoffered.
+    pub audio: Option<AudioOptions>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -197,8 +202,8 @@ fn random_nonzero_u32() -> Result<u32, Error> {
 /// requires, plus (only with an input agent) the optional control boundaries
 /// and (only with the clipboard enable too) the optional clipboard ones.
 /// Optional client capabilities outside this set are dropped by negotiation.
-fn offer(control: bool, clipboard: bool) -> Offer {
-    host_offer_with(control, clipboard)
+fn offer(control: bool, clipboard: bool, audio: bool) -> Offer {
+    host_offer_with_audio(control, clipboard, audio)
 }
 /// Native operations a controller may request in this X11 slice. Discrete
 /// wheel input uses bounded `XTest` press/release pairs, not pixel-scroll emulation.
@@ -217,6 +222,7 @@ fn request(
     os_session: u32,
     scope: Scope,
     (control, clipboard): (bool, bool),
+    audio: bool,
 ) -> Result<Request, serial::Error> {
     let fresh = |_| serial::Error::Configuration;
     Ok(Request {
@@ -227,7 +233,7 @@ fn request(
             ..GrantPolicy::default()
         },
         session: Configuration {
-            offer: offer(control, clipboard),
+            offer: offer(control, clipboard, audio),
             binding: ControlBinding {
                 id: u32::try_from(attempt % u64::from(u32::MAX))
                     .unwrap_or(1)
@@ -470,7 +476,7 @@ fn check(options: &Options) -> Result<(), Error> {
     {
         return Err(Error::Configuration);
     }
-    Ok(())
+    audio::check(options)
 }
 
 fn signals(
@@ -602,7 +608,12 @@ impl Share<'_> {
             .map_err(|e| Error::Listener(Box::new(e)))
     }
 
-    fn driver(&self, source: &Cx, os_session: u32) -> Result<dispatch::Driver, Error> {
+    fn driver(
+        &self,
+        source: &Cx,
+        os_session: u32,
+        audio_retired: &Arc<Mutex<Option<Retirement>>>,
+    ) -> Result<dispatch::Driver, Error> {
         let fps = self.options.fps;
         let mut agent = SessionAgent::new(
             ApprovalMode::Unattended,
@@ -633,6 +644,13 @@ impl Share<'_> {
             } else {
                 profile
             });
+        }
+        if let Some(options) = &self.options.audio {
+            agent = agent.with_audio(audio::profile(
+                self.options,
+                options,
+                audio_retired.clone(),
+            )?);
         }
         let entropy: shared_viewers::Entropy = Arc::new(|| random_nonzero_u128().map_err(|_| ()));
         agent
@@ -694,6 +712,7 @@ impl Share<'_> {
         &self,
         driver: &mut dispatch::Driver,
         retirement: &Mutex<Option<Retirement>>,
+        audio_retired: &Mutex<Option<Retirement>>,
         linux: &mut LinuxServer,
     ) -> Result<(), Error> {
         let cleanup = self.cx()?;
@@ -710,6 +729,14 @@ impl Share<'_> {
         {
             (self.report)(Event::CleanupFailed { stage: "launch" });
             failure.get_or_insert(Error::Cleanup("launch"));
+        }
+        // The share's last audio child (already killed with the share).
+        let pending = audio_retired.lock().ok().and_then(|mut slot| slot.take());
+        if let Some(mut retirement) = pending
+            && retirement.reap(&cleanup, deadline).await.is_err()
+        {
+            (self.report)(Event::CleanupFailed { stage: "audio" });
+            failure.get_or_insert(Error::Cleanup("audio"));
         }
         if linux.stop(&cleanup).await.is_err() {
             (self.report)(Event::CleanupFailed { stage: "ingress" });
@@ -737,12 +764,14 @@ impl Share<'_> {
             supervisor.cancel_fast(CancelKind::User);
         }
         let os_session = random_nonzero_u32()?;
-        let mut driver = self.driver(&source, os_session)?;
+        let audio_retired = Arc::new(Mutex::new(None));
+        let mut driver = self.driver(&source, os_session, &audio_retired)?;
         let retirement = Arc::new(Mutex::new(None));
         let factory = self.factory(source, retirement.clone());
         let (fps, bitrate) = (self.options.fps, self.options.bitrate);
         let (host_boot, scope) = (self.host_boot, self.options.sharing);
         let control = (self.options.input_agent.is_some(), self.options.clipboard);
+        let audio = self.options.audio.is_some();
         let report = self.report.clone();
         let stop = self.stop.clone();
         let source_epoch = epoch.clone();
@@ -753,7 +782,9 @@ impl Share<'_> {
                 self.runtime.clone(),
                 serial::Policy::default(),
                 Connections {
-                    request: move |attempt| request(attempt, host_boot, os_session, scope, control),
+                    request: move |attempt| {
+                        request(attempt, host_boot, os_session, scope, control, audio)
+                    },
                     // require_approval is false: no notification is ever delivered.
                     approval: |_, _| Err(()),
                     completed: move |stats: serial::Statistics, outcome: PeerResult| {
@@ -799,7 +830,8 @@ impl Share<'_> {
         if let Ok(mut slot) = self.active.lock() {
             *slot = None;
         }
-        self.cleanup(&mut driver, &retirement, &mut linux).await?;
+        self.cleanup(&mut driver, &retirement, &audio_retired, &mut linux)
+            .await?;
         if let Some(epoch) = epoch {
             match epoch.check() {
                 Err(crate::host_policy::live::Error::Changed) => return Ok(Ended::PolicyChanged),
@@ -823,7 +855,7 @@ mod tests {
     #[test]
     fn host_offer_matches_the_native_viewer_bootstrap_capabilities() {
         use fr_wire::{attachment, decoder, display, negotiation::Role};
-        let observe = offer(false, false);
+        let observe = offer(false, false, false);
         assert_eq!(observe.role, Role::Observe);
         let names: Vec<_> = observe
             .capabilities
@@ -846,15 +878,33 @@ mod tests {
                 .all(|c| c.required != (c.name == fr_wire::cursor::CAPABILITY))
         );
         // Control boundaries are offered only with an input agent, optionally.
-        let control = offer(true, false);
+        let control = offer(true, false, false);
         assert_eq!(control.capabilities.len(), 9);
+        // Audio-down is offered only with the local enable, and optionally.
+        for control_offer in [false, true] {
+            let without = offer(control_offer, false, false);
+            assert!(
+                without
+                    .capabilities
+                    .iter()
+                    .all(|c| c.name != fr_wire::audio::CAPABILITY)
+            );
+            let with = offer(control_offer, false, true);
+            assert_eq!(with.capabilities.len(), without.capabilities.len() + 1);
+            assert!(with.capabilities.iter().any(|c| {
+                c.name == fr_wire::audio::CAPABILITY
+                    && c.version == fr_wire::audio::VERSION
+                    && !c.required
+            }));
+            assert!(with.validate().is_ok());
+        }
         assert_eq!(
             control.capabilities.iter().filter(|c| c.required).count(),
             4
         );
         // The clipboard enable adds three optional boundaries, only with control.
-        assert_eq!(offer(false, true), observe);
-        let clipboard = offer(true, true);
+        assert_eq!(offer(false, true, false), observe);
+        let clipboard = offer(true, true, false);
         assert_eq!(clipboard.capabilities.len(), 12);
         assert_eq!(
             clipboard.capabilities.iter().filter(|c| c.required).count(),
@@ -881,9 +931,10 @@ mod tests {
     #[test]
     fn every_request_allocates_fresh_unpredictable_identifiers() {
         let boot = HostBootId::from_raw(9);
-        let a = request(1, boot, 5, Scope::OwnUser, (false, false)).unwrap();
-        let b = request(2, boot, 5, Scope::OwnUser, (true, false)).unwrap();
-        let c = request(3, boot, 5, Scope::OwnUser, (true, true)).unwrap();
+        let a = request(1, boot, 5, Scope::OwnUser, (false, false), false).unwrap();
+        let b = request(2, boot, 5, Scope::OwnUser, (true, false), false).unwrap();
+        let c = request(3, boot, 5, Scope::OwnUser, (true, true), false).unwrap();
+        let d = request(4, boot, 5, Scope::OwnUser, (false, false), true).unwrap();
         assert_ne!(
             a.session.binding.remote_session,
             b.session.binding.remote_session
@@ -892,9 +943,10 @@ mod tests {
         assert_eq!(a.session.binding.os_session.as_raw(), 5);
         assert!(!a.session.require_approval);
         assert_eq!(a.admission.scope, Scope::OwnUser);
-        assert_eq!(a.session.offer, offer(false, false));
-        assert_eq!(b.session.offer, offer(true, false));
-        assert_eq!(c.session.offer, offer(true, true));
+        assert_eq!(a.session.offer, offer(false, false, false));
+        assert_eq!(b.session.offer, offer(true, false, false));
+        assert_eq!(c.session.offer, offer(true, true, false));
+        assert_eq!(d.session.offer, offer(false, false, true));
     }
 
     #[test]
@@ -915,6 +967,7 @@ mod tests {
             handle_signals: false,
             input_agent: None,
             clipboard: false,
+            audio: None,
         };
         let report: Reporter = Arc::new(|_| {});
         let stop = Arc::new(StopHandle::default());
@@ -934,10 +987,24 @@ mod tests {
             run(&clipboard_only, &report, &stop),
             Err(Error::Configuration)
         );
-        let mut empty = options;
+        let mut empty = options.clone();
         empty.worker = PathBuf::from("/usr/bin/fr-media-worker");
         empty.display = String::new();
         assert_eq!(run(&empty, &report, &stop), Err(Error::Configuration));
+        // A relative audio server or a hostile sink name refuses before I/O.
+        for (server, sink) in [
+            ("run/user/1000/pulse/native", None),
+            ("/run/user/1000/pulse/native", Some("bad sink")),
+            ("/run/user/1000/pulse/native", Some("@DEFAULT_SINK@")),
+        ] {
+            let mut audio = options.clone();
+            audio.worker = PathBuf::from("/usr/bin/fr-media-worker");
+            audio.audio = Some(AudioOptions {
+                server: PathBuf::from(server),
+                sink: sink.map(str::to_owned),
+            });
+            assert_eq!(run(&audio, &report, &stop), Err(Error::Configuration));
+        }
     }
 
     #[test]

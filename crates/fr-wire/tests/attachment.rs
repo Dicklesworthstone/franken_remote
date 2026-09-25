@@ -337,3 +337,46 @@ fn input_tickets_keep_the_exact_role_and_original_handshake_directions() {
         assert!(decode(&bytes, parent(), channel, &L, wrong, T::Reliable).is_err());
     }
 }
+
+#[test]
+fn audio_down_role_has_its_own_golden_byte_and_audio_up_stays_reserved() {
+    let d = Descriptor {
+        role: MediaRole::AudioDown,
+        ..descriptor()
+    };
+    let mut expected = header(0x1b, 118, 7);
+    expected.extend(8u32.to_be_bytes());
+    for n in [11u128, 12, 13, 14] {
+        expected.extend(n.to_be_bytes());
+    }
+    expected.extend([0; 32]);
+    // Role 7, host-to-viewer application data.
+    expected.extend([7, 1]);
+    expected.extend(7u64.to_be_bytes());
+    expected.extend(6u64.to_be_bytes());
+    assert_eq!(encoded(Message::Binding(d)), expected);
+    assert_eq!(
+        decode(&expected, parent(), 7, &L, D::HostToViewer, T::Reliable),
+        Ok(Message::Binding(d))
+    );
+    // The direction byte cannot claim viewer-to-host audio data.
+    let mut wrong = expected.clone();
+    wrong[125] = 2;
+    assert!(decode(&wrong, parent(), 7, &L, D::HostToViewer, T::Reliable).is_err());
+    // The reserved audio-up role is a typed refusal, never another role.
+    for direction in [1, 2] {
+        let mut up = expected.clone();
+        up[124] = AUDIO_UP_RESERVED_ROLE;
+        up[125] = direction;
+        assert_eq!(
+            decode(&up, parent(), 7, &L, D::HostToViewer, T::Reliable),
+            Err(fr_wire::WireError::UnsupportedKind)
+        );
+    }
+    let mut unknown = expected;
+    unknown[124] = 9;
+    assert_eq!(
+        decode(&unknown, parent(), 7, &L, D::HostToViewer, T::Reliable),
+        Err(fr_wire::WireError::InvalidValue)
+    );
+}

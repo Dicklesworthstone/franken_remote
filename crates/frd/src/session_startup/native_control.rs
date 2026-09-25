@@ -43,6 +43,13 @@ pub const CLIPBOARD_CAPABILITIES: [(&str, u16); 3] = [
 /// the host still needs its own configured owner, and the lane attaches only
 /// under the controller's active input attachment.
 pub fn host_offer_with(control: bool, clipboard: bool) -> Offer {
+    host_offer_with_audio(control, clipboard, false)
+}
+/// [`host_offer_with`] plus, only when the operator LOCALLY enabled playback
+/// capture, the optional audio-down capability. Offering it is not an
+/// approval: audio still waits for this session's admitted observation, and a
+/// viewer that does not offer it receives no audio record.
+pub fn host_offer_with_audio(control: bool, clipboard: bool, audio: bool) -> Offer {
     let observation = [
         (fr_wire::display::CAPABILITY, 1),
         (decoder::CAPABILITY, 1),
@@ -73,6 +80,11 @@ pub fn host_offer_with(control: bool, clipboard: bool) -> Offer {
                 .filter(|_| control && clipboard)
                 .map(|&(name, version)| (name, version, false)),
         )
+        .chain(
+            [(fr_wire::audio::CAPABILITY, fr_wire::audio::VERSION, false)]
+                .into_iter()
+                .filter(|_| audio),
+        )
         .map(|(name, version, required)| Capability {
             name: name.into(),
             version,
@@ -88,6 +100,17 @@ pub fn host_offer_with(control: bool, clipboard: bool) -> Offer {
         limits: ProtocolLimits::ABSOLUTE,
         capabilities,
     }
+}
+
+/// Positive audio-down selection by an OBSERVER: both peers offered it, so
+/// the host locally enabled playback capture. A controller never gets audio
+/// in this slice (the transport also refuses the attachment for it).
+pub(crate) fn audio_selected(selection: &Selection) -> bool {
+    selection.role == Role::Observe
+        && selection
+            .capabilities
+            .iter()
+            .any(|c| c.name == fr_wire::audio::CAPABILITY && c.version == fr_wire::audio::VERSION)
 }
 
 pub(super) fn profile(selection: &Selection, control: bool) -> bool {

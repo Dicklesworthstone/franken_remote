@@ -18,6 +18,7 @@ use std::io::{self, Read, Write};
 pub const HEADER_BYTES: usize = 36;
 pub const UNIT_PREFIX_BYTES: usize = 40;
 const CONFIG_BYTES: usize = 28;
+pub mod audio;
 pub mod capture;
 pub mod cursor;
 pub mod overlay;
@@ -44,6 +45,11 @@ pub enum Kind {
     ReadCursor = 16,
     /// Presenter-only: replace the client-rendered remote cursor overlay.
     CursorOverlay = 17,
+    /// Audio-role bootstrap: the locally selected playback monitor and the
+    /// Opus profile. Never a peer value; see [`audio::Capture`].
+    ConfigureAudio = 18,
+    /// Audio-role pull of already encoded packets; empty body.
+    ReadAudio = 19,
     Ready = 257,
     Unit = 258,
     NeedInput = 259,
@@ -65,6 +71,11 @@ pub enum Kind {
     /// The overlay state was installed (and re-presented if a picture exists).
     /// Not a decode, presentation or visibility receipt.
     CursorOverlayApplied = 275,
+    /// The capture stream is recording and the encoder is configured; echoes
+    /// the configuration body. Not audibility or freshness evidence.
+    AudioReady = 276,
+    /// Zero or more encoded packets plus content-free gap/overrun counters.
+    AudioPackets = 277,
 }
 impl Kind {
     fn parse(n: u16) -> Result<Self, Error> {
@@ -86,6 +97,8 @@ impl Kind {
             15 => Self::ConfigureFittedPresentation,
             16 => Self::ReadCursor,
             17 => Self::CursorOverlay,
+            18 => Self::ConfigureAudio,
+            19 => Self::ReadAudio,
             257 => Self::Ready,
             258 => Self::Unit,
             259 => Self::NeedInput,
@@ -105,6 +118,8 @@ impl Kind {
             273 => Self::FittedPresentationReady,
             274 => Self::CursorSnapshot,
             275 => Self::CursorOverlayApplied,
+            276 => Self::AudioReady,
+            277 => Self::AudioPackets,
             _ => return Err(Error::Malformed),
         })
     }
@@ -119,7 +134,10 @@ impl Kind {
                 (1 + capture::SCREEN_BYTES..=capture::MAX_CATALOG_BYTES).contains(&length)
                     && (length - 1).is_multiple_of(capture::SCREEN_BYTES)
             }
-            Self::ReadCursor
+            Self::ConfigureAudio | Self::AudioReady => audio::accepts_configuration_length(length),
+            Self::AudioPackets => audio::accepts_batch_length(length),
+            Self::ReadAudio
+            | Self::ReadCursor
             | Self::DiscoverCapture
             | Self::DiscoverMonitors
             | Self::CheckMonitor
@@ -338,6 +356,9 @@ pub enum Backend {
 pub enum Role {
     Capture,
     Present,
+    /// Playback-monitor capture plus Opus encode, in its own process: the
+    /// parent never links the audio server library or the codec.
+    Audio,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Configuration {

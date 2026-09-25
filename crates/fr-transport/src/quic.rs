@@ -98,6 +98,12 @@ pub enum Messages {
     /// and, only after `remote-cursor` selection, `CursorShape`. The session
     /// still refuses a shape the peer did not negotiate.
     MediaConfiguration,
+    /// The host's reliable `audio-down` lane: `AudioConfiguration` and
+    /// `AudioStop` only. `AudioPacket` never enters a reliable stream.
+    AudioControl,
+    /// The viewer's reliable `audio-down` reply lane: `AudioConfigured` and a
+    /// receiver-side `AudioStop`. Neither can enable the other direction.
+    AudioReplies,
     /// Initial native control only, before the host installs a binding.
     Negotiation,
     /// Bound connection control. The session codec still checks kind/state.
@@ -113,6 +119,8 @@ impl Messages {
             Self::Files => matches!(kind, 0x0070..=0x0074),
             Self::DecoderReplies => matches!(kind, 0x0031 | 0x0033),
             Self::MediaConfiguration => matches!(kind, 0x0030 | 0x0038),
+            Self::AudioControl => matches!(kind, 0x0060 | 0x0063),
+            Self::AudioReplies => matches!(kind, 0x0061 | 0x0063),
             Self::Negotiation => matches!(kind, 0x0001..=0x0004 | 0x0010 | 0x0011),
             Self::SessionControl => {
                 matches!(

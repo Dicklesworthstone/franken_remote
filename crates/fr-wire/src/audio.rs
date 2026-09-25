@@ -18,6 +18,16 @@ use fr_core::{
     ids::AudioGeneration,
 };
 
+/// Optional host-playback downlink (plan §15.4; PROTOCOL.md `audio-down`).
+/// Positive selection by BOTH peers attaches one `MediaRole::AudioDown`
+/// channel: reliable `AudioConfiguration`/`AudioStop` host-to-viewer,
+/// `AudioConfigured`/`AudioStop` viewer-to-host, and `AudioPacket` datagrams.
+/// Selection is never the host's local enable, never observation approval and
+/// never a microphone (uplink) grant; a peer that did not select it gets no
+/// audio record and nothing else changes.
+pub const CAPABILITY: &str = "native-audio-down";
+pub const VERSION: u16 = 1;
+
 pub const AUDIO_CONFIGURATION_PAYLOAD_BYTES: usize = 28;
 pub const AUDIO_CONFIGURATION_RECORD_BYTES: usize =
     HEADER_BYTES + AUDIO_CONFIGURATION_PAYLOAD_BYTES;
@@ -30,6 +40,22 @@ pub const AUDIO_PACKET_OVERHEAD: usize = HEADER_BYTES + AUDIO_PACKET_HEADER_BYTE
 
 pub const AUDIO_STOP_PAYLOAD_BYTES: usize = 16;
 pub const AUDIO_STOP_RECORD_BYTES: usize = HEADER_BYTES + AUDIO_STOP_PAYLOAD_BYTES;
+
+/// Complete `AudioPacket` record bytes for an Opus payload of `payload` bytes.
+/// `None` when the payload is empty or above the absolute Opus bound.
+pub const fn packet_record_bytes(payload: usize) -> Option<usize> {
+    if payload == 0 || payload > MAX_OPUS_PAYLOAD_BYTES {
+        None
+    } else {
+        Some(AUDIO_PACKET_OVERHEAD + payload)
+    }
+}
+
+/// Record kind of a complete FRD0 record, read from its fixed header without
+/// validating or allocating anything. Callers still fully decode the record.
+pub fn record_kind(bytes: &[u8]) -> Option<u16> {
+    bytes.get(6..8).map(|k| u16::from_be_bytes([k[0], k[1]]))
+}
 
 /// Stream configuration offer / request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -425,6 +451,102 @@ mod tests {
 
         let decoded = decode_stop(&buf[..len], 42).unwrap();
         assert_eq!(decoded, stop);
+    }
+
+    #[test]
+    fn hostile_packet_records_refuse_before_any_payload_use() {
+        let opus = [0x78_u8; 40];
+        let packet = AudioPacket {
+            direction: AudioDirection::Downlink,
+            generation: AudioGeneration::from_raw(3),
+            sequence: 9,
+            timestamp_samples: 960,
+            duration_samples: 960,
+            payload: &opus,
+        };
+        let mut buf = [0u8; 256];
+        let len = encode_packet(&packet, 42, &mut buf).unwrap();
+        // A declared Opus length larger than the record body cannot borrow
+        // past the record, and a smaller one leaves refused trailing bytes.
+        for declared in [41_u32, 40_000, u32::MAX, 39] {
+            let mut forged = buf[..len].to_vec();
+            forged[HEADER_BYTES + 4..HEADER_BYTES + 8].copy_from_slice(&declared.to_be_bytes());
+            assert!(decode_packet(&forged, 42).is_err(), "{declared}");
+        }
+        // Oversized complete records refuse on length alone, before parsing.
+        let oversized = vec![0_u8; AUDIO_PACKET_OVERHEAD + MAX_OPUS_PAYLOAD_BYTES + 1];
+        assert_eq!(decode_packet(&oversized, 42), Err(WireError::ResourceLimit));
+        // Zero or oversized decoded-sample claims refuse.
+        for duration in [0_u16, u16::MAX] {
+            let mut forged = buf[..len].to_vec();
+            forged[HEADER_BYTES + 2..HEADER_BYTES + 4].copy_from_slice(&duration.to_be_bytes());
+            assert!(decode_packet(&forged, 42).is_err(), "{duration}");
+        }
+        // Wrong binding and every truncation refuse.
+        assert_eq!(
+            decode_packet(&buf[..len], 7),
+            Err(WireError::InvalidBinding)
+        );
+        for end in 0..len {
+            assert!(decode_packet(&buf[..end], 42).is_err());
+        }
+        assert_eq!(packet_record_bytes(0), None);
+        assert_eq!(packet_record_bytes(MAX_OPUS_PAYLOAD_BYTES + 1), None);
+        assert_eq!(packet_record_bytes(40), Some(len));
+        assert_eq!(record_kind(&buf[..len]), Some(Kind::AudioPacket as u16));
+    }
+
+    #[test]
+    fn hostile_configuration_budgets_refuse() {
+        let cfg = AudioConfiguration {
+            direction: AudioDirection::Downlink,
+            generation: AudioGeneration::from_raw(4),
+            channels: AudioChannels::Stereo,
+            sample_rate: 48_000,
+            frame_duration_ms: 20,
+            max_packet_bytes: 1000,
+            max_decoded_samples: 960,
+            jitter_target_ms: 40,
+        };
+        let mut buf = [0u8; 128];
+        let len = encode_configuration(&cfg, 42, &mut buf).unwrap();
+        let payload = HEADER_BYTES;
+        // sample rate (offset 8), max_packet_bytes (12), max_decoded_samples (16).
+        for (offset, value, error) in [
+            (12, 1276_u32, WireError::ResourceLimit),
+            (12, 0, WireError::ResourceLimit),
+            (16, MAX_DECODED_SAMPLES + 1, WireError::ResourceLimit),
+            (8, 44_100, WireError::InvalidValue),
+        ] {
+            let mut forged = buf[..len].to_vec();
+            forged[payload + offset..payload + offset + 4].copy_from_slice(&value.to_be_bytes());
+            assert_eq!(decode_configuration(&forged, 42), Err(error), "{offset}");
+        }
+        let mut forged = buf[..len].to_vec();
+        forged[payload + 1] = 3; // three channels
+        assert_eq!(
+            decode_configuration(&forged, 42),
+            Err(WireError::InvalidValue)
+        );
+        let mut ack = [0u8; 64];
+        let n = encode_configured(
+            &AudioConfigured {
+                direction: AudioDirection::Downlink,
+                generation: AudioGeneration::from_raw(4),
+                accepted: true,
+                actual_channels: AudioChannels::Stereo,
+                actual_sample_rate: 48_000,
+                actual_frame_duration_ms: 20,
+            },
+            42,
+            &mut ack,
+        )
+        .unwrap();
+        ack[HEADER_BYTES + 1] = 2; // neither accepted nor refused
+        assert_eq!(
+            decode_configured(&ack[..n], 42),
+            Err(WireError::InvalidValue)
+        );
     }
 
     #[test]

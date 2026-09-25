@@ -419,6 +419,7 @@ impl Daemon {
             handle_signals: false,
             input_agent,
             clipboard,
+            audio: None,
         };
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = events.clone();

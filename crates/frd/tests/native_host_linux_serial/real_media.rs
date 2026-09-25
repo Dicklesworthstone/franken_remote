@@ -30,7 +30,7 @@ pub(super) fn sibling(name: &str) -> PathBuf {
         .find(|path| path.is_file())
         .unwrap_or_else(|| {
             panic!(
-                "build {name} first: cargo build -p fr-native --features linux-desktop,linux-displays,linux-input,linux-clipboard --bin fr --bin fr-media-worker --bin fr-input-agent --locked (and cargo build -p frd --bin frd for the control e2e)"
+                "build {name} first: cargo build -p fr-native --features linux-desktop,linux-displays,linux-input,linux-clipboard,linux-audio --bin fr --bin fr-media-worker --bin fr-input-agent --locked (and cargo build -p frd --bin frd for the control e2e)"
             )
         })
 }
@@ -75,7 +75,7 @@ impl Drop for Xvfb {
 
 /// (window, centre pixel 0xRRGGBB) of every viewable top-level window, read by
 /// an independent Xlib client.
-fn window_pixels(display: &str) -> Vec<(u64, u32)> {
+pub(super) fn window_pixels(display: &str) -> Vec<(u64, u32)> {
     const PEER: &str = r#"
 import ctypes as c, sys
 x = c.CDLL("libX11.so.6")
@@ -282,6 +282,7 @@ fn fr_connect_presents_real_host_pixels_through_frd_run() {
         handle_signals: false,
         input_agent: None,
         clipboard: false,
+        audio: None,
     };
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();

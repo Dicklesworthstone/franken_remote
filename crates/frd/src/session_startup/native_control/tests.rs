@@ -534,3 +534,48 @@ mod interactive;
 mod clipboard;
 
 mod sharing;
+
+#[test]
+fn host_audio_is_offered_only_with_the_local_enable_and_only_optionally() {
+    use fr_client::native::{control_offer, observation_offer, observation_offer_with_audio};
+    for control in [false, true] {
+        let off = host_offer_with_audio(control, false, false);
+        assert_eq!(off, host_offer(control));
+        let on = host_offer_with_audio(control, false, true);
+        assert!(on.validate().is_ok());
+        assert_eq!(on.capabilities.len(), off.capabilities.len() + 1);
+        assert!(
+            on.capabilities
+                .iter()
+                .any(|c| c.name == fr_wire::audio::CAPABILITY
+                    && c.version == fr_wire::audio::VERSION
+                    && !c.required)
+        );
+        // A viewer that did not ask never selects audio.
+        let plain = on
+            .intersect(&observation_offer())
+            .unwrap()
+            .select()
+            .unwrap();
+        assert!(!audio_selected(&plain));
+        // An observer that asked selects it; a controller never gets audio.
+        let asked = on
+            .intersect(&observation_offer_with_audio())
+            .unwrap()
+            .select()
+            .unwrap();
+        assert!(audio_selected(&asked));
+        assert!(profile(&asked, false));
+        if control {
+            let controller = on.intersect(&control_offer()).unwrap().select().unwrap();
+            assert!(!audio_selected(&controller));
+        }
+    }
+    // A host without the local enable cannot be talked into audio.
+    let refused = host_offer_with_audio(false, false, false)
+        .intersect(&observation_offer_with_audio())
+        .unwrap()
+        .select()
+        .unwrap();
+    assert!(!audio_selected(&refused));
+}

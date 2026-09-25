@@ -199,6 +199,7 @@ fn options(
         handle_signals: false,
         input_agent: None,
         clipboard: false,
+        audio: None,
     }
 }
 
