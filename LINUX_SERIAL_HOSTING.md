@@ -78,7 +78,17 @@ the initial authority lease, then stop runs the fixed cleanup order.
 viewers and departing inspections without counting them as host failures, and
 expires a connected viewer that stops answering renewal.
 
+This suite runs as (namespace) root, so `bind_linux` uses direct enforcement
+with the fixture tools. `frd run` without `CAP_NET_ADMIN` instead selects the root
+`frd ingress-helper` (`Enforcement::detect`). That unprivileged path is qualified
+with real nftables, a TUN and a veth pair by
+`scripts/test_ingress_helper_namespace.sh`. It runs the production `Boundary` as
+an unprivileged uid against the real helper role, and covers `SO_PEERCRED`
+refusal, removal on broker SIGKILL and helper-crash reclaim (see
+[LINUX_NATIVE_INGRESS.md](LINUX_NATIVE_INGRESS.md)).
+
 Actual TUN/nftables behavior still requires the separate
-`qualify_linux_ingress` executable and installed-tailnet testing. These tests do
+`qualify_linux_ingress` and `qualify_ingress_helper` executables and
+installed-tailnet testing. These tests do
 not claim actual desktop media, hardware encode or a live-tailnet run.
 Simultaneous multi-client UDP dispatch remains separate unfinished work.

@@ -10,6 +10,7 @@
 //! - `frd install [--user | --system] [--dry-run] [--port 8443]`
 //! - `frd uninstall [--user | --system] [--dry-run]`
 //! - `frd service-status [--user | --system] [--json]`
+//! - `frd ingress-helper [--config PATH] [--json]`: root-only ingress rule owner
 //!
 //! Matches plan §§5.1, 18.1, 20.3 and beads `fr-p2-doctor-diagnostics-bo4` and `fr-p2-service-install-aw3`.
 
@@ -29,16 +30,19 @@ USAGE:
     frd install [--user | --system] [--dry-run] [--port PORT]
     frd uninstall [--user | --system] [--dry-run]
     frd service-status [--user | --system] [--json]
+    frd ingress-helper [--config PATH] [--json]
     frd --help
 
 COMMANDS:
-    run             Share this desktop view-only over the tailnet (foreground; needs root for ingress)
+    run             Share this desktop view-only over the tailnet (foreground; needs root or the ingress helper)
     status          Report host daemon health, capabilities, sessions, and restrictions
     approval        Inspect or update local operator approval policy
     sharing         Inspect or update tailnet sharing admission scope
     install         Install frd as an idempotent background service (systemd / launchd)
     uninstall       Remove installed service and unit files cleanly
     service-status  Check whether background service is registered and active
+    ingress-helper  Root-only: own the nftables ingress rule for an unprivileged frd run
+                    (config default /etc/frankenremote/ingress-helper.json)
 
 OPTIONS:
     --port PORT     Ingress port for QUIC and HTTPS (default: 8443)
@@ -99,6 +103,8 @@ fn main() -> ExitCode {
         "install" => local_install::execute(&args, json),
         "uninstall" => execute_uninstall(&args, json),
         "service-status" => execute_service_status(&args, json),
+        #[cfg(target_os = "linux")]
+        "ingress-helper" => frd::ingress_helper::execute(&args, json),
         other => {
             eprintln!("Unknown command '{other}'. Run 'frd --help' for usage.");
             ExitCode::from(2)

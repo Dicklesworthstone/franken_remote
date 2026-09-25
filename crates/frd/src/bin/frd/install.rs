@@ -24,6 +24,15 @@ pub fn execute(args: &[String], json: bool) -> ExitCode {
 
     match service_install::install(&options) {
         Ok(report) => {
+            // Rendered, never written: these need root and are not activation.
+            let helper = report.ingress_helper.as_ref().map(|helper| {
+                serde_json::json!({
+                    "requires_root": true, "written": false,
+                    "unit_path": helper.unit_path, "unit_content": helper.unit_content,
+                    "config_path": helper.config_path, "config_content": helper.config_content,
+                    "exec_path": helper.exec_path, "copy_from": helper.copy_from,
+                })
+            });
             if json {
                 println!(
                     "{}",
@@ -33,6 +42,7 @@ pub fn execute(args: &[String], json: bool) -> ExitCode {
                         "dry_run": report.dry_run, "started": false,
                         "unit_content": report.dry_run.then_some(&report.unit_content),
                         "next_steps": report.next_steps,
+                        "ingress_helper": helper,
                     })
                 );
             } else {
@@ -51,6 +61,18 @@ pub fn execute(args: &[String], json: bool) -> ExitCode {
                 }
                 if report.dry_run {
                     println!("\n{}", report.unit_content);
+                }
+                if let Some(helper) = &report.ingress_helper {
+                    println!(
+                        "\n[root] Helper configuration for {} (not written by this install):\n{}",
+                        helper.config_path.display(),
+                        helper.config_content
+                    );
+                    println!(
+                        "[root] Helper unit for {} (not written by this install):\n{}",
+                        helper.unit_path.display(),
+                        helper.unit_content
+                    );
                 }
             }
             ExitCode::SUCCESS

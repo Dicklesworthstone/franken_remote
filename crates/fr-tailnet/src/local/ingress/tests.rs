@@ -30,6 +30,7 @@ fn valid(value: &Value, addr: SocketAddr) -> Result<(), Error> {
         &serde_json::to_vec(value).unwrap(),
         "frd_fixture",
         addr,
+        Protocols::UDP,
         42,
         "tailscale0",
     )
@@ -58,7 +59,7 @@ fn configuration_refuses_wildcards_and_script_or_path_injection() {
 }
 #[test]
 fn transaction_only_adds_an_exact_drop_rule() {
-    let script = install_script("frd_fixture", address(), 42);
+    let script = install_script("frd_fixture", address(), Protocols::UDP, 42);
     assert_eq!(
         script,
         "create table inet frd_fixture\nadd chain inet frd_fixture input { type filter hook input priority -310; policy accept; }\nadd rule inet frd_fixture input ip daddr 100.64.0.1 udp dport 4710 meta iif != 42 drop\n"
@@ -66,9 +67,69 @@ fn transaction_only_adds_an_exact_drop_rule() {
     let v6 = install_script(
         "frd_fixture",
         "[fd7a:115c:a1e0::1]:4710".parse().unwrap(),
+        Protocols::UDP,
         43,
     );
     assert!(v6.contains("ip6 daddr fd7a:115c:a1e0::1 udp dport 4710 meta iif != 43 drop"));
+}
+#[test]
+fn a_protocol_set_adds_exactly_one_drop_rule_per_protocol() {
+    let both = install_script("frd_fixture", address(), Protocols::UDP_TCP, 42);
+    assert_eq!(
+        both,
+        "create table inet frd_fixture\nadd chain inet frd_fixture input { type filter hook input priority -310; policy accept; }\nadd rule inet frd_fixture input ip daddr 100.64.0.1 udp dport 4710 meta iif != 42 drop\nadd rule inet frd_fixture input ip daddr 100.64.0.1 tcp dport 4710 meta iif != 42 drop\n"
+    );
+    let tcp = install_script("frd_fixture", address(), Protocols::TCP, 42);
+    assert!(tcp.contains("tcp dport 4710 meta iif != 42 drop") && !tcp.contains("udp"));
+    assert_eq!(Protocols::from_bits(0), None);
+    assert_eq!(Protocols::from_bits(4), None);
+    assert_eq!(Protocols::from_bits(3), Some(Protocols::UDP_TCP));
+}
+fn tcp_rule(udp: &Value) -> Value {
+    let mut tcp = udp.clone();
+    tcp["rule"]["expr"][1]["match"]["left"]["payload"]["protocol"] = json!("tcp");
+    tcp
+}
+/// Read-back must show exactly the requested protocol set: a missing, extra,
+/// duplicated or substituted protocol rule refuses.
+#[test]
+fn readback_must_cover_exactly_the_requested_protocols() {
+    let check = |value: &Value, protocols| {
+        validate_rule(
+            &serde_json::to_vec(value).unwrap(),
+            "frd_fixture",
+            address(),
+            protocols,
+            42,
+            "tailscale0",
+        )
+    };
+    let udp_only = rule(address());
+    let udp = udp_only["nftables"][3].clone();
+    let mut both = udp_only.clone();
+    both["nftables"]
+        .as_array_mut()
+        .unwrap()
+        .push(tcp_rule(&udp));
+    assert_eq!(check(&both, Protocols::UDP_TCP), Ok(()));
+    let mut tcp_only = udp_only.clone();
+    tcp_only["nftables"][3] = tcp_rule(&udp);
+    assert_eq!(check(&tcp_only, Protocols::TCP), Ok(()));
+    for (value, protocols) in [
+        (&udp_only, Protocols::UDP_TCP),
+        (&tcp_only, Protocols::UDP_TCP),
+        (&tcp_only, Protocols::UDP),
+        (&both, Protocols::UDP),
+        (&both, Protocols::TCP),
+    ] {
+        assert_eq!(check(value, protocols), Err(Error::FirewallMismatch));
+    }
+    let mut duplicated = both.clone();
+    duplicated["nftables"][3] = tcp_rule(&udp);
+    assert_eq!(
+        check(&duplicated, Protocols::UDP_TCP),
+        Err(Error::FirewallMismatch)
+    );
 }
 #[test]
 fn only_exact_ipv4_and_ipv6_readback_is_accepted() {
@@ -121,7 +182,14 @@ fn installed_nftables_prints_the_qualified_interface_by_name() {
     assert_eq!(valid(&real, address()), Ok(()));
     let bytes = serde_json::to_vec(&real).unwrap();
     assert_eq!(
-        validate_rule(&bytes, "frd_fixture", address(), 42, "tailscale1"),
+        validate_rule(
+            &bytes,
+            "frd_fixture",
+            address(),
+            Protocols::UDP,
+            42,
+            "tailscale1"
+        ),
         Err(Error::FirewallMismatch)
     );
 }
@@ -140,7 +208,14 @@ fn extra_rules_and_unknown_objects_never_pass_readback() {
     data["nftables"].as_array_mut().unwrap().pop();
     assert_eq!(valid(&data, address()), Err(Error::FirewallMismatch));
     assert_eq!(
-        validate_rule(b"not json", "frd_fixture", address(), 42, "tailscale0"),
+        validate_rule(
+            b"not json",
+            "frd_fixture",
+            address(),
+            Protocols::UDP,
+            42,
+            "tailscale0"
+        ),
         Err(Error::FirewallMismatch)
     );
 }
@@ -167,6 +242,46 @@ fn absence_is_only_accepted_from_a_well_formed_table_inventory() {
             Err(Error::FirewallMismatch)
         );
     }
+}
+#[test]
+fn enforcement_follows_the_effective_capability_not_the_user_id() {
+    let status = |caps: &str| format!("Name:\tfrd\nUid:\t0\t0\t0\t0\nCapEff:\t{caps}\n");
+    assert!(effective_net_admin(&status("000001ffffffffff")));
+    assert!(effective_net_admin(&status("0000000000001000")));
+    // Root without CAP_NET_ADMIN (e.g. a bounded service) is not administrative.
+    assert!(!effective_net_admin(&status("0000000000000000")));
+    assert!(!effective_net_admin(&status("0000000000002fff")));
+    assert!(!effective_net_admin("Name:\tfrd\n"));
+    assert!(!effective_net_admin("CapEff:\tnot-hex\n"));
+    let helper = Path::new("/run/frankenremote-ingress/helper.sock");
+    assert_eq!(
+        Enforcement::detect(helper),
+        if net_admin() {
+            Enforcement::Direct
+        } else {
+            Enforcement::Helper(helper.to_path_buf())
+        }
+    );
+    let config = Configuration::new(address(), "tailscale0").unwrap();
+    assert_eq!(config.enforcement_mode(), &Enforcement::Direct);
+    for bad in ["relative.sock", "/run/../tmp/helper.sock"] {
+        assert_eq!(
+            config
+                .clone()
+                .enforcement(Enforcement::Helper(PathBuf::from(bad)))
+                .err(),
+            Some(Error::InvalidConfiguration)
+        );
+    }
+    assert_eq!(
+        Error::HelperUnavailable.refusal_code(),
+        "ingress_helper_unavailable"
+    );
+    assert_eq!(
+        Error::HelperRefused(helper::Refusal::AddressNotAssigned).refusal_code(),
+        "ingress_unenforced"
+    );
+    assert_eq!(Error::FirewallMismatch.refusal_code(), "ingress_unenforced");
 }
 #[test]
 fn ordinary_interfaces_and_unprotected_executables_refuse() {
@@ -229,11 +344,13 @@ async fn fixture(cx: &Cx) -> Boundary {
             state: Arc::new(Mutex::new(State {
                 node: Arc::new(node),
                 active: true,
+                keepalive: None,
             })),
         },
         config: Configuration::new(address(), "fixture-tun").unwrap(),
         index: 42,
         table: "not-an-installed-rule".into(),
+        backend: Backend::Direct,
         cleaned: false,
     }
 }

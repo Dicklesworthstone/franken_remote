@@ -38,6 +38,39 @@ Aligned with the plan's threat model (§19) and security test matrix (§24.3):
 
 No production support window or security SLA exists before an implementation release. Nodes inside the locally selected sharing scope (the host user's own devices by default; the whole tailnet only by explicit local choice) are deliberately trusted with desktop control; a compromised in-scope device has that authority until revoked. The selected desktop user, host OS, installed Tailscale authority, and GPU/media stack are explicit trust limits. Process separation is crash isolation, not a sandbox, unless a specific enforced OS sandbox is documented for that target.
 
+## Privileged ingress helper and residual trust
+
+Per plan §5.2 and §19.2 and [`LINUX_NATIVE_INGRESS.md`](LINUX_NATIVE_INGRESS.md):
+
+- **Least-privilege split, not a sandbox.** An unprivileged `frd run` (for example
+  a systemd user unit) does not administer nftables. The root `frd ingress-helper`
+  does, and its entire API is `install`, `renew` and `remove` of one drop-only,
+  exact-destination rule per connection. The rule covers the configured tailnet
+  interface, an address the kernel reports on it, a nonzero port and a protocol
+  set within {udp, tcp}. No caller-supplied nft text, table name or interface index is
+  accepted. Frames are fixed binary and bounded. There is one request in flight
+  per connection, at most 8 connections, and rate limits on accepts, requests and
+  refusal logging.
+- **Local IPC forgery.** Every connection is checked with `SO_PEERCRED` against
+  `allowed_uids` in a root-owned configuration, never against anything the
+  caller sends. The broker requires a root-only socket path and a uid 0 peer.
+  Generations fence renew/remove per connection. A rule lives exactly as long as
+  its connection, which the broker's leases hold, so broker exit (including
+  SIGKILL) removes it. A dead helper's `frdh_` tables are reclaimed at its next
+  start; no other table is touched.
+- **Residual trust, stated.** The helper, the kernel, root-owned `nft`/`ip`, the
+  configured TUN and the root configuration are trusted. The unprivileged broker
+  cannot read the kernel ruleset. It validates the **helper's** read-back with
+  the same `validate_rule` as the direct path, which is trust in the helper
+  rather than independent kernel evidence. It independently re-reads the TUN
+  index, the address assignment and LocalAPI identity. Any process running as an admitted uid
+  can request drop-only rules (denying non-tailnet traffic to a port on a tailnet
+  address); it cannot accept traffic or touch another connection's rule. A
+  helper crash or restart removes protection from a live broker until that
+  broker's next renewal (at most about 500 ms), the same periodic limit as the
+  direct path. Qualified with real nftables only in a private network namespace;
+  a live tailnet host and the emitted systemd unit are not yet qualified.
+
 ## Media-worker sandboxing and residual trust
 
 Per plan §5.4, §19.1, §19.2, and [`WORKER_SANDBOX.md`](WORKER_SANDBOX.md):

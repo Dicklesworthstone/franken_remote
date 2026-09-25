@@ -60,6 +60,27 @@ service account, not just the account invoking the installer.
 
 `frd install --dry-run` now prints the actual generated definition. JSON preview
 output includes `unit_content` and `next_steps`, with `started: false`. Writing a
-unit is not evidence that the daemon is running. Invalid/duplicate flags, invalid
+unit is not evidence that the daemon is running.
+
+A **user** unit runs `frd run` without `CAP_NET_ADMIN`, so it cannot install its
+nftables ingress rule. It asks the root `frd ingress-helper` instead, and refuses
+with `ingress_helper_unavailable` until that helper runs. `frd install --user`
+therefore also renders the helper's system unit
+(`/etc/systemd/system/frd-ingress-helper.service`) and its root-owned
+configuration (`/etc/frankenremote/ingress-helper.json`, admitting the installing
+uid). It never writes either one, because both need root. Human output prints
+both files, and JSON output includes them under `ingress_helper` with
+`requires_root: true` and `written: false`. Each next step is labelled with the
+account it needs:
+
+- `[user]`: reload and enable the user unit;
+- `[root]`: copy `frd` to a root-only path when the installing binary is
+  user-writable, write the config and unit, then `systemctl enable --now
+  frd-ingress-helper`.
+
+A `--system` unit runs as root and installs its rule directly; no helper is
+rendered. The helper's API, bounds and residual trust are in
+[LINUX_NATIVE_INGRESS.md](LINUX_NATIVE_INGRESS.md). The rendered unit has not been
+exercised under a live systemd. Invalid/duplicate flags, invalid
 ports and unsafe argument encodings refuse before installation. Service paths
 are encoded for systemd or XML rather than interpolated as commands/markup.

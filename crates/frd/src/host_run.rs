@@ -120,8 +120,13 @@ impl Error {
             Self::Trust(_) => "trust_roots_unavailable",
             Self::Tailnet(fr_tailnet::Error::LocalApiDenied) => "tailscale_permission_denied",
             Self::Tailnet(_) => "tailscale_unavailable",
-            Self::Ingress(_) => "ingress_unenforced",
-            Self::Listener(_) => "listener_failed",
+            // `ingress_unenforced` / `ingress_helper_unavailable`; the Debug
+            // detail carries the specific (typed helper) reason.
+            Self::Ingress(error) => error.refusal_code(),
+            Self::Listener(error) => match **error {
+                LinuxError::Ingress(error) => error.refusal_code(),
+                _ => "listener_failed",
+            },
             Self::Desktop(_) => "desktop_failed",
             Self::NoTailnetAddress => "no_tailnet_addresses",
         }
@@ -567,6 +572,11 @@ impl Share<'_> {
         if let Some((nft, ip)) = &self.options.ingress_tools {
             ingress = ingress.executables(nft, ip).map_err(Error::Ingress)?;
         }
+        // Without CAP_NET_ADMIN the root `frd ingress-helper` owns the rule.
+        let helper = std::path::Path::new(ingress::helper::DEFAULT_SOCKET);
+        ingress = ingress
+            .enforcement(ingress::Enforcement::detect(helper))
+            .map_err(Error::Ingress)?;
         let mut server = Server::new(self.api.clone(), self.identity.clone());
         if let Some(policy) = self.policy {
             server = server.with_live_policy(policy.clone());

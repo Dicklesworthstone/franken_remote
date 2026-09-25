@@ -181,6 +181,138 @@ pub struct InstallReport {
     pub unit_content: String,
     /// Setup instructions or next steps for the operator.
     pub next_steps: Vec<String>,
+    /// Root-side ingress helper files a user-unit `frd run` needs. They are
+    /// rendered for the administrator, never written by an unprivileged install.
+    pub ingress_helper: Option<IngressHelperArtifacts>,
+}
+
+/// Must equal `fr_tailnet::ingress::helper::DEFAULT_CONFIG` (checked by a test).
+pub const INGRESS_HELPER_CONFIG: &str = "/etc/frankenremote/ingress-helper.json";
+pub const INGRESS_HELPER_UNIT: &str = "/etc/systemd/system/frd-ingress-helper.service";
+/// Where the helper's root-only copy of `frd` goes when the installing binary
+/// lives in a user-writable tree (a root service must never run such a file).
+pub const INGRESS_HELPER_EXEC: &str = "/usr/local/bin/frd";
+
+/// The root half of an unprivileged Linux install: a system unit running
+/// `frd ingress-helper`, and the root-owned configuration admitting the uid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngressHelperArtifacts {
+    pub unit_path: PathBuf,
+    pub unit_content: String,
+    pub config_path: PathBuf,
+    pub config_content: String,
+    /// The binary the unit runs; `copy_from` is set when it must first be
+    /// installed there from the (not root-only) installing executable.
+    pub exec_path: PathBuf,
+    pub copy_from: Option<PathBuf>,
+}
+
+/// Whether `path` and every ancestor are root-owned and not group/other-writable.
+#[cfg(unix)]
+fn root_only(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    path.is_absolute()
+        && path.canonicalize().is_ok_and(|path| {
+            path.ancestors().all(|part| {
+                fs::symlink_metadata(part).is_ok_and(|m| m.uid() == 0 && m.mode() & 0o022 == 0)
+            })
+        })
+}
+#[cfg(not(unix))]
+fn root_only(_: &std::path::Path) -> bool {
+    false
+}
+
+/// Render the helper's system unit and configuration for local account `uid`.
+#[must_use]
+pub fn render_ingress_helper(options: &InstallOptions, uid: u32) -> IngressHelperArtifacts {
+    let (exec_path, copy_from) = if root_only(&options.exec_path) {
+        (options.exec_path.clone(), None)
+    } else {
+        (
+            PathBuf::from(INGRESS_HELPER_EXEC),
+            Some(options.exec_path.clone()),
+        )
+    };
+    let unit_content = format!(
+        r"[Unit]
+Description=FrankenRemote ingress helper (root owner of frd's nftables ingress rule)
+Documentation=https://github.com/Dicklesworthstone/franken_remote
+After=network.target tailscaled.service
+
+[Service]
+Type=simple
+ExecStart=:{} ingress-helper --config {INGRESS_HELPER_CONFIG}
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=frankenremote-ingress
+RuntimeDirectoryMode=0755
+UMask=0022
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+",
+        quoting::systemd(&exec_path.to_string_lossy()),
+    );
+    IngressHelperArtifacts {
+        unit_path: PathBuf::from(INGRESS_HELPER_UNIT),
+        unit_content,
+        config_path: PathBuf::from(INGRESS_HELPER_CONFIG),
+        config_content: format!("{{\"interface\":\"tailscale0\",\"allowed_uids\":[{uid}]}}\n"),
+        exec_path,
+        copy_from,
+    }
+}
+
+/// Operator steps for the helper, each labelled with the account it needs.
+fn ingress_helper_steps(helper: &IngressHelperArtifacts) -> Vec<String> {
+    let mut steps = vec![
+        "Ingress enforcement needs root once: this user service has no CAP_NET_ADMIN, so \
+         'frd run' asks the root ingress helper for its nftables rule and refuses \
+         (ingress_helper_unavailable) until the helper runs."
+            .to_owned(),
+    ];
+    if let Some(source) = &helper.copy_from {
+        steps.push(format!(
+            "[root] sudo install -o root -g root -m 0755 {} {} (a root service must not run a user-writable binary)",
+            source.display(),
+            helper.exec_path.display()
+        ));
+    }
+    steps.push(format!(
+        "[root] Write {} (owner root, mode 0644) with the helper configuration shown below.",
+        helper.config_path.display()
+    ));
+    steps.push(format!(
+        "[root] Write {} with the helper unit shown below.",
+        helper.unit_path.display()
+    ));
+    steps.push(
+        "[root] Run 'sudo systemctl daemon-reload && sudo systemctl enable --now frd-ingress-helper'."
+            .to_owned(),
+    );
+    steps
+}
+
+/// The installing account's real uid, from the kernel's status file.
+#[cfg(target_os = "linux")]
+fn current_uid() -> Option<u32> {
+    fs::read_to_string("/proc/self/status").ok().and_then(|s| {
+        s.lines()
+            .find_map(|line| line.strip_prefix("Uid:"))
+            .and_then(|ids| ids.split_whitespace().next()?.parse().ok())
+    })
+}
+#[cfg(not(target_os = "linux"))]
+fn current_uid() -> Option<u32> {
+    None
 }
 
 /// Report generated after an uninstallation operation.
@@ -454,15 +586,22 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport, ServiceError> 
 
         match options.kind {
             ServiceKind::SystemdUser => {
-                next_steps
-                    .push("Run 'systemctl --user daemon-reload' to load the new unit.".into());
-                next_steps
-                    .push("Run 'systemctl --user enable --now frd' to start the service.".into());
+                next_steps.push(
+                    "[user] Run 'systemctl --user daemon-reload' to load the new unit.".into(),
+                );
+                next_steps.push(
+                    "[user] Run 'systemctl --user enable --now frd' to start the service.".into(),
+                );
             }
             ServiceKind::SystemdSystem => {
                 next_steps.push("Run 'sudo systemctl daemon-reload' to load the new unit.".into());
                 next_steps
                     .push("Run 'sudo systemctl enable --now frd' to start the service.".into());
+                next_steps.push(
+                    "This system unit runs frd as root, which installs its ingress rule \
+                     directly; no ingress helper is needed."
+                        .into(),
+                );
             }
             ServiceKind::LaunchdAgent => {
                 next_steps.push(format!(
@@ -484,12 +623,24 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport, ServiceError> 
         }
     }
 
+    // A user unit cannot administer nftables; the root half is rendered for
+    // the administrator (a root user's own unit installs its rule directly).
+    let ingress_helper = (options.kind == ServiceKind::SystemdUser)
+        .then(current_uid)
+        .flatten()
+        .filter(|uid| *uid != 0)
+        .map(|uid| render_ingress_helper(options, uid));
+    if let Some(helper) = &ingress_helper {
+        next_steps.extend(ingress_helper_steps(helper));
+    }
+
     Ok(InstallReport {
         kind: options.kind,
         unit_path,
         dry_run: options.dry_run,
         unit_content,
         next_steps,
+        ingress_helper,
     })
 }
 
@@ -595,6 +746,84 @@ mod tests {
         assert!(!un_report2.existed);
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn a_user_unit_install_renders_the_root_ingress_helper_without_writing_it() {
+        let options = InstallOptions {
+            kind: ServiceKind::SystemdUser,
+            exec_path: PathBuf::from("/home/someone/.cargo/bin/frd"),
+            dry_run: true,
+            software_explicit: true,
+            approval_mode: "none".into(),
+            ..InstallOptions::default()
+        };
+        let helper = render_ingress_helper(&options, 1000);
+        assert_eq!(
+            helper.config_content,
+            "{\"interface\":\"tailscale0\",\"allowed_uids\":[1000]}\n"
+        );
+        // A user-writable installer binary is never what the root unit runs.
+        assert_eq!(helper.copy_from, Some(options.exec_path.clone()));
+        for line in [
+            "ExecStart=:/usr/local/bin/frd ingress-helper --config /etc/frankenremote/ingress-helper.json",
+            "RuntimeDirectory=frankenremote-ingress",
+            "RuntimeDirectoryMode=0755",
+            "CapabilityBoundingSet=CAP_NET_ADMIN",
+            "NoNewPrivileges=yes",
+            "RestartSec=2",
+            "WantedBy=multi-user.target",
+        ] {
+            assert!(helper.unit_content.lines().any(|l| l == line), "{line}");
+        }
+        #[cfg(unix)]
+        {
+            let root = InstallOptions {
+                exec_path: PathBuf::from("/usr/bin/env"),
+                ..options.clone()
+            };
+            let direct = render_ingress_helper(&root, 1000);
+            assert_eq!(direct.copy_from, None);
+            assert!(
+                direct
+                    .unit_content
+                    .contains("ExecStart=:/usr/bin/env ingress-helper")
+            );
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use fr_tailnet::ingress::helper;
+            let settings = helper::Settings::parse(helper.config_content.as_bytes()).unwrap();
+            assert!(settings.allows(1000) && !settings.allows(1001));
+            assert_eq!(helper::DEFAULT_CONFIG, INGRESS_HELPER_CONFIG);
+            assert_eq!(
+                settings.socket().parent(),
+                Some(std::path::Path::new("/run/frankenremote-ingress"))
+            );
+        }
+        let report = install(&options).unwrap();
+        if current_uid().is_some_and(|uid| uid != 0) {
+            let rendered = report.ingress_helper.as_ref().unwrap();
+            assert_eq!(rendered.unit_path, PathBuf::from(INGRESS_HELPER_UNIT));
+            let root_steps = report
+                .next_steps
+                .iter()
+                .filter(|s| s.starts_with("[root]"))
+                .count();
+            assert_eq!(root_steps, 4, "{:?}", report.next_steps);
+            assert!(
+                report
+                    .next_steps
+                    .iter()
+                    .any(|s| s.contains("ingress_helper_unavailable"))
+            );
+        }
+        let system = install(&InstallOptions {
+            kind: ServiceKind::SystemdSystem,
+            ..options
+        })
+        .unwrap();
+        assert_eq!(system.ingress_helper, None);
     }
 
     #[test]

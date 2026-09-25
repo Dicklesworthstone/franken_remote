@@ -1,4 +1,4 @@
-//! Linux kernel-TUN ingress for one exact UDP destination (plan section 6.1).
+//! Linux kernel-TUN ingress for one exact destination (plan section 6.1).
 //! Install a drop-only nftables transaction BEFORE binding. Address ownership is
 //! independently read from the installed `LocalAPI`; a tailnet-looking prefix is
 //! neither interface evidence nor peer authorization. No accept rule is added.
@@ -8,6 +8,9 @@
 //! periodically revalidated; per-I/O leases expire if that service stops. A
 //! retired lease never becomes live again. Dropping leaves a restrictive rule;
 //! explicit cleanup cannot remove it while any connection still holds a lease.
+//!
+//! A broker without `CAP_NET_ADMIN` asks the root [`helper`] instead; its rule
+//! lives exactly as long as the helper connection, which every lease retains.
 use super::{LocalApi, NodeIdentity, bounded};
 use crate::Error as IdentityError;
 use asupersync::{
@@ -28,6 +31,7 @@ use std::{
     task::Poll,
     time::Duration,
 };
+pub mod helper;
 const COMMAND_LIMIT: usize = 16 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
 const REFRESH_INTERVAL: Duration = Duration::from_millis(500);
@@ -48,6 +52,11 @@ pub enum Error {
     ResidualRuleLimit,
     InUse,
     Closed,
+    /// The root ingress helper is absent, unprotected, not root, or its
+    /// connection (and therefore its rule) was lost.
+    HelperUnavailable,
+    /// The helper answered with this typed refusal; no rule is held for it.
+    HelperRefused(helper::Refusal),
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -60,6 +69,73 @@ impl From<IdentityError> for Error {
         Self::Identity(error)
     }
 }
+impl Error {
+    /// Stable operator refusal code; the Debug form carries the specific reason.
+    pub const fn refusal_code(self) -> &'static str {
+        match self {
+            Self::HelperUnavailable => "ingress_helper_unavailable",
+            _ => "ingress_unenforced",
+        }
+    }
+}
+/// Transport protocols one exact-destination drop rule covers: a nonempty
+/// subset of {udp, tcp}. QUIC needs UDP; HTTPS/WSS ingress will need TCP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Protocols(u8);
+impl Protocols {
+    pub const UDP: Self = Self(1);
+    pub const TCP: Self = Self(2);
+    pub const UDP_TCP: Self = Self(3);
+    const NAMES: [(u8, &'static str); 2] = [(1, "udp"), (2, "tcp")];
+    pub const fn from_bits(bits: u8) -> Option<Self> {
+        match bits {
+            1..=3 => Some(Self(bits)),
+            _ => None,
+        }
+    }
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+    fn names(self) -> impl Iterator<Item = &'static str> {
+        Self::NAMES
+            .into_iter()
+            .filter(move |(bit, _)| self.0 & bit != 0)
+            .map(|(_, name)| name)
+    }
+}
+/// Who administers the rule. Neither choice is peer-selectable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Enforcement {
+    /// This process runs the root-owned nft/ip tools itself (root or
+    /// `CAP_NET_ADMIN`).
+    Direct,
+    /// The root `frd ingress-helper` at this protected socket owns the rule for
+    /// exactly the lifetime of the connection this process keeps open.
+    Helper(PathBuf),
+}
+impl Enforcement {
+    /// Direct when this process holds effective `CAP_NET_ADMIN`; otherwise the
+    /// least-privilege helper. Unknown capability state selects the helper.
+    pub fn detect(helper: &Path) -> Self {
+        if net_admin() {
+            Self::Direct
+        } else {
+            Self::Helper(helper.to_path_buf())
+        }
+    }
+}
+/// Effective `CAP_NET_ADMIN` (bit 12) of this process, from the kernel's own
+/// status file. Nothing is inferred from the user id.
+pub fn net_admin() -> bool {
+    fs::read_to_string("/proc/self/status").is_ok_and(|status| effective_net_admin(&status))
+}
+fn effective_net_admin(status: &str) -> bool {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("CapEff:"))
+        .and_then(|value| u64::from_str_radix(value.trim(), 16).ok())
+        .is_some_and(|caps| caps & (1 << 12) != 0)
+}
 /// Local administrator choices only. A peer cannot select an interface, port,
 /// executable, or firewall script. Installed tools must be root-write-only.
 #[derive(Clone)]
@@ -68,6 +144,8 @@ pub struct Configuration {
     ip: PathBuf,
     interface: String,
     address: SocketAddr,
+    protocols: Protocols,
+    enforcement: Enforcement,
 }
 impl fmt::Debug for Configuration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -88,6 +166,8 @@ impl Configuration {
             ip: PathBuf::from("/usr/sbin/ip"),
             interface: interface.to_owned(),
             address,
+            protocols: Protocols::UDP,
+            enforcement: Enforcement::Direct,
         })
     }
     pub fn executables(mut self, nft: &Path, ip: &Path) -> Result<Self, Error> {
@@ -95,8 +175,27 @@ impl Configuration {
         self.ip = protected_executable(ip)?;
         Ok(self)
     }
+    /// Protocols the rule must cover (default: UDP, the QUIC listener).
+    #[must_use]
+    pub const fn protocols(mut self, protocols: Protocols) -> Self {
+        self.protocols = protocols;
+        self
+    }
+    /// Select direct administration or the helper socket (default: direct).
+    pub fn enforcement(mut self, enforcement: Enforcement) -> Result<Self, Error> {
+        if let Enforcement::Helper(path) = &enforcement {
+            helper::socket_path_valid(path)
+                .then_some(())
+                .ok_or(Error::InvalidConfiguration)?;
+        }
+        self.enforcement = enforcement;
+        Ok(self)
+    }
     pub const fn address(&self) -> SocketAddr {
         self.address
+    }
+    pub const fn enforcement_mode(&self) -> &Enforcement {
+        &self.enforcement
     }
 }
 fn interface_valid(name: &str) -> bool {
@@ -112,27 +211,43 @@ fn address_valid(ip: IpAddr) -> bool {
         && !ip.is_loopback()
         && !matches!(ip, IpAddr::V6(v) if v.to_ipv4_mapped().is_some())
 }
-fn protected_executable(path: &Path) -> Result<PathBuf, Error> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Leaf {
+    Executable,
+    File,
+    Directory,
+    /// A socket's own mode is not its access control (`SO_PEERCRED` is).
+    Socket,
+}
+/// After resolving symlinks, every ancestor is a root-owned directory that only
+/// root can write, and the leaf is root-owned and of the expected type.
+fn protected(path: &Path, leaf: Leaf) -> Option<PathBuf> {
+    use std::os::unix::fs::FileTypeExt;
     if !path.is_absolute() {
-        return Err(Error::UntrustedExecutable);
+        return None;
     }
-    let path = path
-        .canonicalize()
-        .map_err(|_| Error::UntrustedExecutable)?;
+    let path = path.canonicalize().ok()?;
     for (index, part) in path.ancestors().enumerate() {
-        let m = fs::symlink_metadata(part).map_err(|_| Error::UntrustedExecutable)?;
-        if m.uid() != 0
-            || m.mode() & 0o022 != 0
-            || if index == 0 {
-                !m.is_file() || m.mode() & 0o111 == 0
-            } else {
-                !m.is_dir()
+        let m = fs::symlink_metadata(part).ok()?;
+        let kind = if index > 0 {
+            m.is_dir()
+        } else {
+            match leaf {
+                Leaf::Executable => m.is_file() && m.mode() & 0o111 != 0,
+                Leaf::File => m.is_file(),
+                Leaf::Directory => m.is_dir(),
+                Leaf::Socket => m.file_type().is_socket(),
             }
-        {
-            return Err(Error::UntrustedExecutable);
+        };
+        let writable = m.mode() & 0o022 != 0 && !(index == 0 && leaf == Leaf::Socket);
+        if m.uid() != 0 || !kind || writable {
+            return None;
         }
     }
-    Ok(path)
+    Some(path)
+}
+fn protected_executable(path: &Path) -> Result<PathBuf, Error> {
+    protected(path, Leaf::Executable).ok_or(Error::UntrustedExecutable)
 }
 fn sys_value(interface: &str, field: &str) -> Result<u32, Error> {
     let path = Path::new("/sys/class/net").join(interface).join(field);
@@ -216,54 +331,77 @@ async fn command(cx: &Cx, image: &Path, args: &[&str], input: &[u8]) -> Result<V
             _ => Error::CommandUncertain,
         })
 }
-async fn qualified_interface(cx: &Cx, config: &Configuration) -> Result<u32, Error> {
-    let index = interface_index(&config.interface)?;
-    let bytes = command(
-        cx,
-        &config.ip,
-        &["-j", "address", "show", "dev", &config.interface],
-        b"",
-    )
-    .await?;
+/// Kernel view of one interface: its qualified TUN index and the unprivileged
+/// `ip -j address show` report. Neither value comes from a caller.
+async fn observe(cx: &Cx, ip: &Path, interface: &str) -> Result<(u32, Vec<u8>), Error> {
+    let index = interface_index(interface)?;
+    let bytes = command(cx, ip, &["-j", "address", "show", "dev", interface], b"").await?;
+    Ok((index, bytes))
+}
+/// `Ok(false)`: the report is exactly this interface but lacks a usable
+/// (non-tentative, DAD-passed) `address`. `Err`: not that interface's report.
+fn address_assigned(
+    bytes: &[u8],
+    index: u32,
+    interface: &str,
+    address: IpAddr,
+) -> Result<bool, Error> {
     let v: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(|_| Error::UnqualifiedInterface)?;
+        serde_json::from_slice(bytes).map_err(|_| Error::UnqualifiedInterface)?;
     let rows = v.as_array().ok_or(Error::UnqualifiedInterface)?;
     if rows.len() != 1
         || rows[0]["ifindex"].as_u64() != Some(u64::from(index))
-        || rows[0]["ifname"].as_str() != Some(&config.interface)
+        || rows[0]["ifname"].as_str() != Some(interface)
     {
         return Err(Error::UnqualifiedInterface);
     }
     let addresses = rows[0]["addr_info"]
         .as_array()
         .ok_or(Error::UnqualifiedInterface)?;
-    if addresses.len() > 64
-        || !addresses.iter().any(|a| {
-            a["local"].as_str().and_then(|v| v.parse::<IpAddr>().ok()) == Some(config.address.ip())
-                && a["tentative"].as_bool() != Some(true)
-                && a["dadfailed"].as_bool() != Some(true)
-        })
+    if addresses.len() > 64 {
+        return Err(Error::UnqualifiedInterface);
+    }
+    Ok(addresses.iter().any(|a| {
+        a["local"].as_str().and_then(|v| v.parse::<IpAddr>().ok()) == Some(address)
+            && a["tentative"].as_bool() != Some(true)
+            && a["dadfailed"].as_bool() != Some(true)
+    }))
+}
+async fn qualified_interface(cx: &Cx, config: &Configuration) -> Result<u32, Error> {
+    let (index, bytes) = observe(cx, &config.ip, &config.interface).await?;
+    if !address_assigned(&bytes, index, &config.interface, config.address.ip())?
         || interface_index(&config.interface)? != index
     {
         return Err(Error::UnqualifiedInterface);
     }
     Ok(index)
 }
-fn install_script(table: &str, addr: SocketAddr, index: u32) -> String {
+/// One exact drop rule per requested protocol, in one atomic transaction.
+fn install_script(table: &str, addr: SocketAddr, protocols: Protocols, index: u32) -> String {
+    use std::fmt::Write as _;
     let family = if addr.is_ipv4() { "ip" } else { "ip6" };
-    format!(
-        "create table inet {table}\nadd chain inet {table} input {{ type filter hook input priority -310; policy accept; }}\nadd rule inet {table} input {family} daddr {} udp dport {} meta iif != {index} drop\n",
-        addr.ip(),
-        addr.port()
-    )
+    let mut script = format!(
+        "create table inet {table}\nadd chain inet {table} input {{ type filter hook input priority -310; policy accept; }}\n"
+    );
+    for protocol in protocols.names() {
+        let _ = writeln!(
+            script,
+            "add rule inet {table} input {family} daddr {} {protocol} dport {} meta iif != {index} drop",
+            addr.ip(),
+            addr.port()
+        );
+    }
+    script
 }
 /// nftables stores `meta iif` as an index but prints it back by the interface's
 /// current name (1.1.6 does so even with `-n`), or as the number when it has no
 /// name. Either must identify the interface already qualified by that index.
+/// Exactly one rule per requested protocol and nothing else is accepted.
 fn validate_rule(
     bytes: &[u8],
     table: &str,
     addr: SocketAddr,
+    protocols: Protocols,
     index: u32,
     interface: &str,
 ) -> Result<(), Error> {
@@ -273,17 +411,27 @@ fn validate_rule(
     let rows = value["nftables"]
         .as_array()
         .ok_or(Error::FirewallMismatch)?;
-    let (mut tables, mut chains, mut rules) = (0, 0, 0);
+    let (mut tables, mut chains, mut seen) = (0, 0, 0_u8);
     let family = if addr.is_ipv4() { "ip" } else { "ip6" };
-    let expected = |iif: serde_json::Value| {
+    let expected = |protocol: &str, iif: serde_json::Value| {
         json!([
             {"match":{"op":"==","left":{"payload":{"protocol":family,"field":"daddr"}},"right":addr.ip().to_string()}},
-            {"match":{"op":"==","left":{"payload":{"protocol":"udp","field":"dport"}},"right":addr.port()}},
+            {"match":{"op":"==","left":{"payload":{"protocol":protocol,"field":"dport"}},"right":addr.port()}},
             {"match":{"op":"!=","left":{"meta":{"key":"iif"}},"right":iif}},
             {"drop":null}
         ])
     };
-    let (by_index, by_name) = (expected(json!(index)), expected(json!(interface)));
+    let wanted: Vec<_> = Protocols::NAMES
+        .into_iter()
+        .filter(|(bit, _)| protocols.0 & bit != 0)
+        .map(|(bit, name)| {
+            (
+                bit,
+                expected(name, json!(index)),
+                expected(name, json!(interface)),
+            )
+        })
+        .collect();
     for row in rows {
         if let Some(t) = row.get("table") {
             tables += 1;
@@ -307,32 +455,41 @@ fn validate_rule(
                 return Err(Error::FirewallMismatch);
             }
         } else if let Some(r) = row.get("rule") {
-            rules += 1;
+            // Each requested protocol exactly once; duplicates and extras fail.
+            let bit = wanted
+                .iter()
+                .find(|(_, by_index, by_name)| r["expr"] == *by_index || r["expr"] == *by_name)
+                .map(|(bit, _, _)| *bit);
             if r["family"] != "inet"
                 || r["table"] != table
                 || r["chain"] != "input"
-                || (r["expr"] != by_index && r["expr"] != by_name)
+                || bit.is_none_or(|bit| seen & bit != 0)
             {
                 return Err(Error::FirewallMismatch);
             }
+            seen |= bit.unwrap_or(0);
         } else if row.get("metainfo").is_none() {
             return Err(Error::FirewallMismatch);
         }
     }
-    if (tables, chains, rules) != (1, 1, 1) {
+    if (tables, chains, seen) != (1, 1, protocols.0) {
         return Err(Error::FirewallMismatch);
     }
     Ok(())
 }
+async fn read_back(cx: &Cx, nft: &Path, table: &str) -> Result<Vec<u8>, Error> {
+    command(cx, nft, &["-j", "-n", "list", "table", "inet", table], b"").await
+}
 async fn read_rule(cx: &Cx, config: &Configuration, table: &str, index: u32) -> Result<(), Error> {
-    let bytes = command(
-        cx,
-        &config.nft,
-        &["-j", "-n", "list", "table", "inet", table],
-        b"",
+    let bytes = read_back(cx, &config.nft, table).await?;
+    validate_rule(
+        &bytes,
+        table,
+        config.address,
+        config.protocols,
+        index,
+        &config.interface,
     )
-    .await?;
-    validate_rule(&bytes, table, config.address, index, &config.interface)
 }
 async fn residue_budget(cx: &Cx, config: &Configuration) -> Result<(), Error> {
     let bytes = command(cx, &config.nft, &["-j", "list", "tables", "inet"], b"").await?;
@@ -355,17 +512,24 @@ async fn residue_budget(cx: &Cx, config: &Configuration) -> Result<(), Error> {
     }
     Ok(())
 }
-fn new_table() -> Result<String, Error> {
+fn new_table(prefix: &str) -> Result<String, Error> {
     let mut bytes = [0_u8; 16];
     File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut bytes))
         .map_err(|_| Error::CommandFailed)?;
-    Ok(format!("frd_{:032x}", u128::from_ne_bytes(bytes)))
+    Ok(format!("{prefix}{:032x}", u128::from_ne_bytes(bytes)))
 }
 
 struct State {
     node: Arc<NodeIdentity>,
     active: bool,
+    /// A duplicate of the helper connection: the helper keeps the rule until
+    /// the LAST lease and the owner are gone, never while a transport lives.
+    keepalive: Option<std::os::unix::net::UnixStream>,
+}
+enum Backend {
+    Direct,
+    Helper(helper::Link),
 }
 /// Cloneable liveness evidence for a rule already installed by Boundary. This
 /// is not peer identity or permission. Retain it in the ORIGINAL transport's I/O
@@ -408,12 +572,14 @@ impl Lease {
 /// Owns one exact-address/port drop rule. This type deliberately owns no socket:
 /// the native host binds only after install succeeds and holds a Lease across
 /// its canonical TLS/session owner. Cleanup refuses while those leases exist.
-/// No async work, hidden retry, or rule deletion occurs in Drop.
+/// No async work, hidden retry, or rule deletion occurs in Drop. (A helper-held
+/// rule is released by the helper only once every lease has also been dropped.)
 pub struct Boundary {
     lease: Lease,
     config: Configuration,
     index: u32,
     table: String,
+    backend: Backend,
     cleaned: bool,
 }
 impl fmt::Debug for Boundary {
@@ -427,6 +593,8 @@ impl Boundary {
     /// Install and read back a single atomic drop-only transaction. The caller
     /// obtains the `NodeIdentity` from THIS `LocalApi` before calling. Uncertain
     /// installation may leave a restrictive frd_* table but never binds a socket.
+    /// With [`Enforcement::Helper`] the root helper installs it; its read-back
+    /// is validated here with the same `validate_rule` as the direct path.
     pub async fn install(
         cx: &Cx,
         api: LocalApi,
@@ -445,15 +613,28 @@ impl Boundary {
         };
         let index = qualified_interface(cx, &config).await?;
         api.check_node(cx, &node)?;
-        residue_budget(cx, &config).await?;
-        let table = new_table()?;
-        command(
-            cx,
-            &config.nft,
-            &["-f", "-"],
-            install_script(&table, config.address, index).as_bytes(),
-        )
-        .await?;
+        let (table, backend, keepalive) = match &config.enforcement {
+            Enforcement::Direct => {
+                residue_budget(cx, &config).await?;
+                let table = new_table("frd_")?;
+                command(
+                    cx,
+                    &config.nft,
+                    &["-f", "-"],
+                    install_script(&table, config.address, config.protocols, index).as_bytes(),
+                )
+                .await?;
+                (table, Backend::Direct, None)
+            }
+            Enforcement::Helper(socket) => {
+                let (link, keepalive) = helper::Link::install(cx, socket, &config, index).await?;
+                (
+                    link.table().to_owned(),
+                    Backend::Helper(link),
+                    Some(keepalive),
+                )
+            }
+        };
         let mut owner = Self {
             lease: Lease {
                 api,
@@ -462,11 +643,13 @@ impl Boundary {
                 state: Arc::new(Mutex::new(State {
                     node: Arc::new(node),
                     active: true,
+                    keepalive,
                 })),
             },
             config,
             index,
             table,
+            backend,
             cleaned: false,
         };
         // Recheck both sides of the transaction before callers can obtain a
@@ -522,7 +705,24 @@ impl Boundary {
             if index != owner.index {
                 return Err(Error::InterfaceChanged);
             }
-            read_rule(&owner.lease.cx, &owner.config, &owner.table, index).await?;
+            match &mut owner.backend {
+                Backend::Direct => {
+                    read_rule(&owner.lease.cx, &owner.config, &owner.table, index).await?;
+                }
+                // The helper re-qualifies the interface/address and reads the
+                // kernel ruleset as root; its read-back must pass the same check.
+                Backend::Helper(link) => {
+                    let bytes = link.renew(&owner.lease.cx).await?;
+                    validate_rule(
+                        &bytes,
+                        &owner.table,
+                        owner.config.address,
+                        owner.config.protocols,
+                        index,
+                        &owner.config.interface,
+                    )?;
+                }
+            }
             owner.lease.check(owner.address())?;
             owner.lease.api.check_node(&owner.lease.cx, &node)?;
             let mut state = owner.lease.state.lock().map_err(|_| Error::Closed)?;
@@ -600,28 +800,36 @@ impl Boundary {
             if Arc::strong_count(&self.lease.state) != 1 {
                 return Err(Error::InUse);
             }
-            // Read existence first so a prior uncertain deletion is retryable.
-            let bytes = command(
-                cleanup,
-                &self.config.nft,
-                &["-j", "list", "tables", "inet"],
-                b"",
-            )
-            .await?;
-            let exists = table_exists(&bytes, &self.table)?;
-            if exists {
-                command(
-                    cleanup,
-                    &self.config.nft,
-                    &["-f", "-"],
-                    format!("delete table inet {}\n", self.table).as_bytes(),
-                )
-                .await?;
+            match &mut self.backend {
+                Backend::Direct => delete_table(cleanup, &self.config.nft, &self.table).await?,
+                // Acknowledged removal by generation; a lost connection is not
+                // reported as verified cleanup (the helper reclaims on its own).
+                Backend::Helper(link) => {
+                    link.remove(cleanup).await?;
+                    if let Ok(mut state) = self.lease.state.lock() {
+                        state.keepalive = None;
+                    }
+                }
             }
             self.cleaned = true;
             Ok(())
         }
     }
+}
+/// Remove one owned table if present. Existence is read first so a prior
+/// uncertain deletion is retryable; absence needs a well-formed inventory.
+async fn delete_table(cx: &Cx, nft: &Path, table: &str) -> Result<(), Error> {
+    let bytes = command(cx, nft, &["-j", "list", "tables", "inet"], b"").await?;
+    if table_exists(&bytes, table)? {
+        command(
+            cx,
+            nft,
+            &["-f", "-"],
+            format!("delete table inet {table}\n").as_bytes(),
+        )
+        .await?;
+    }
+    Ok(())
 }
 impl Drop for Boundary {
     fn drop(&mut self) {
