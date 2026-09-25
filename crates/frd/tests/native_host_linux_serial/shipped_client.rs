@@ -34,14 +34,14 @@ fn client_status() -> Vec<u8> {
     .unwrap()
 }
 
-struct ClientApi {
-    path: PathBuf,
+pub(super) struct ClientApi {
+    pub(super) path: PathBuf,
     requests: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 impl ClientApi {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let path = fixture::pki().join("client-api");
         let listener = UnixListener::bind(&path).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -106,7 +106,7 @@ impl Drop for ClientApi {
     }
 }
 
-fn shipped_client() -> PathBuf {
+pub(super) fn shipped_client() -> PathBuf {
     // The profile directory (target/debug) holds both `fr` and, some levels
     // down, this test executable.
     std::env::current_exe()
@@ -117,7 +117,7 @@ fn shipped_client() -> PathBuf {
         .expect("build the shipped client first: cargo build -p fr-native --bin fr --locked")
 }
 
-fn wait_for(child: std::process::Child, limit: Duration) -> std::process::Output {
+pub(super) fn wait_for(child: std::process::Child, limit: Duration) -> std::process::Output {
     let mut child = child;
     let until = Instant::now() + limit;
     while child.try_wait().unwrap().is_none() {
@@ -130,7 +130,11 @@ fn wait_for(child: std::process::Child, limit: Duration) -> std::process::Output
     child.wait_with_output().unwrap()
 }
 
-fn wait_for_event(events: &Mutex<Vec<Event>>, limit: Duration, want: fn(&Event) -> bool) -> bool {
+pub(super) fn wait_for_event(
+    events: &Mutex<Vec<Event>>,
+    limit: Duration,
+    want: fn(&Event) -> bool,
+) -> bool {
     let until = Instant::now() + limit;
     while !events.lock().unwrap().iter().any(want) {
         if Instant::now() >= until {

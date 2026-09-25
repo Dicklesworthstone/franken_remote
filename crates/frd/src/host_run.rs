@@ -304,6 +304,16 @@ enum Ended {
     Failed(dispatch::Error),
 }
 
+/// Capture pacing: at most 20 captures per second, and never shorter than one
+/// encoded frame (the shared publisher refuses a cadence above the codec fps).
+fn capture_interval(fps: u16) -> Option<Duration> {
+    if fps == 0 {
+        return None;
+    }
+    let frame = 1_000_000_u64.div_ceil(u64::from(fps));
+    Some(Duration::from_micros(frame.max(50_000)))
+}
+
 /// 1s, 2s, 4s ... capped at 30s; wakes early when stop is requested.
 async fn backoff(cx: &Cx, stop: &StopHandle, failures: u32) {
     let delay = Duration::from_secs(1u64 << failures.min(5)).min(Duration::from_secs(30));
@@ -567,7 +577,7 @@ impl Share<'_> {
             .map_err(|e| Error::Listener(Box::new(e)))
     }
 
-    fn driver(source: &Cx, os_session: u32) -> Result<dispatch::Driver, Error> {
+    fn driver(source: &Cx, os_session: u32, fps: u16) -> Result<dispatch::Driver, Error> {
         let mut agent = SessionAgent::new(
             ApprovalMode::Unattended,
             PlatformKind::LinuxX11,
@@ -585,7 +595,7 @@ impl Share<'_> {
             .native_incoming(
                 source.clone(),
                 shared_viewers::Policy::default(),
-                Duration::from_millis(50),
+                capture_interval(fps).ok_or(Error::Configuration)?,
                 entropy,
             )
             .map(|(_, driver)| driver)
@@ -683,7 +693,7 @@ impl Share<'_> {
             supervisor.cancel_fast(CancelKind::User);
         }
         let os_session = random_nonzero_u32()?;
-        let mut driver = Self::driver(&source, os_session)?;
+        let mut driver = Self::driver(&source, os_session, self.options.fps)?;
         let retirement = Arc::new(Mutex::new(None));
         let factory = self.factory(source, retirement.clone());
         let (fps, bitrate) = (self.options.fps, self.options.bitrate);
@@ -903,6 +913,14 @@ mod tests {
         ));
         assert_eq!(stopped, None);
         assert!(!polled.get());
+    }
+
+    #[test]
+    fn capture_pacing_never_outruns_the_encoder_frame_rate() {
+        assert_eq!(capture_interval(30), Some(Duration::from_millis(50)));
+        assert_eq!(capture_interval(15), Some(Duration::from_micros(66_667)));
+        assert_eq!(capture_interval(1), Some(Duration::from_secs(1)));
+        assert_eq!(capture_interval(0), None);
     }
 
     #[test]

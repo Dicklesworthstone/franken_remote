@@ -414,7 +414,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         return run_refusal(
             json,
             "worker_unavailable",
-            "fr-media-worker not found; build fr-native with --features linux-media and pass \
+            "fr-media-worker not found; build fr-native with --features linux-displays (host display discovery; implies linux-media) and pass \
              --worker /absolute/path/fr-media-worker",
             2,
         );

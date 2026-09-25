@@ -638,3 +638,6 @@ mod host_run;
 
 #[path = "native_host_linux_serial/shipped_client.rs"]
 mod shipped_client;
+
+#[path = "native_host_linux_serial/real_media.rs"]
+mod real_media;
