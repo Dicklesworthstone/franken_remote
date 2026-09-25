@@ -1,4 +1,4 @@
-//! Preserve authenticated, content-free host startup refusals at the CLI edge.
+//! Preserve authenticated host startup refusals and terminal control reports.
 //! No Debug-string classification, remote text reflection, fallback role or retry.
 use super::{Failure, failure};
 use fr_wire::{
@@ -7,7 +7,7 @@ use fr_wire::{
 };
 use frd::{
     native_connection,
-    session_startup::{self, ObserverError, StreamingViewerError},
+    session_startup::{self, ControlledViewerError, ObserverError, StreamingViewerError},
 };
 
 fn message(message: Refused) -> Option<Failure> {
@@ -100,6 +100,9 @@ pub(super) fn observation(error: ObserverError) -> Option<Failure> {
     match error {
         ObserverError::Session(error)
         | ObserverError::Streaming(StreamingViewerError::Session(error)) => session(error),
+        ObserverError::Streaming(StreamingViewerError::Control(
+            ControlledViewerError::LeaseRevoked(report),
+        )) => Some(crate::terminal::failure(report)),
         _ => None,
     }
 }
@@ -227,6 +230,48 @@ mod tests {
                 }),
                 None
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod terminal_tests {
+    use super::*;
+    use fr_core::ids::InputLeaseId;
+    use fr_wire::lease_revoked::{CleanupStage, EffectStage, Reason as EndReason, Revoked};
+
+    #[test]
+    fn authenticated_revocation_survives_the_actual_reconnect_error_wrappers() {
+        let report = Revoked {
+            lease: InputLeaseId::from_raw(19),
+            reason: EndReason::LocalRevoke,
+            cleanup: CleanupStage::Fenced,
+            effects: EffectStage::Unknown,
+        };
+        let error = ObserverError::Streaming(StreamingViewerError::Control(
+            ControlledViewerError::LeaseRevoked(report),
+        ));
+        let wrapped = native_connection::reconnect::Failure::Observation(error);
+        let expected = crate::terminal::failure(report);
+        assert_eq!(observation(error), Some(expected));
+        assert_eq!(reconnect(wrapped), Some(expected));
+        assert!(!native_connection::reconnect::retryable(wrapped));
+    }
+
+    #[test]
+    fn local_closure_and_cleanup_errors_are_not_inferred_host_reports() {
+        assert_eq!(
+            observation(ObserverError::Streaming(StreamingViewerError::Control(
+                ControlledViewerError::Closed,
+            ))),
+            None
+        );
+        for error in [
+            native_connection::reconnect::Failure::Cleanup,
+            native_connection::reconnect::Failure::CleanupExpired,
+            native_connection::reconnect::Failure::Cancelled,
+        ] {
+            assert_eq!(reconnect(error), None);
         }
     }
 }

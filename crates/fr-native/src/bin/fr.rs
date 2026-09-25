@@ -7,6 +7,8 @@ mod linux;
 mod options;
 #[path = "fr_cli/output.rs"]
 mod output;
+#[path = "fr_cli/terminal.rs"]
+mod terminal;
 use std::process::ExitCode;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,10 +16,16 @@ struct Failure {
     code: &'static str,
     next: &'static str,
     exit: u8,
+    revocation: Option<terminal::Report>,
 }
 impl Failure {
     const fn new(code: &'static str, next: &'static str, exit: u8) -> Self {
-        Self { code, next, exit }
+        Self {
+            code,
+            next,
+            exit,
+            revocation: None,
+        }
     }
 }
 const HELP: &str = "\
@@ -52,8 +60,9 @@ Connect uses fresh installed-tailnet identity and strict TLS on every attempt.
 --by-name selects an exact canonical tailnet FQDN, never arbitrary DNS or URLs.
 Connect needs exactly one role. --view-only never requests control.
 --control requests input control ONCE, after the window shows a fresh frame; the
-host must run frd run --input-agent. Keys, buttons and absolute pointer only (no
-text, scroll, clipboard, audio or files). Lost or refused control is never
+host must run frd run --input-agent. Keys, buttons, absolute pointer and discrete
+line-wheel scrolling are available (no text, pixel-scroll, clipboard, audio or files).
+Lost or refused control is never
 retried or reacquired: after a request, fr does not reconnect.
 Native transport/media remain unqualified. Set XAUTHORITY in the local environment
 when the window and worker require it. Close the window or use Ctrl-C to stop.
@@ -109,7 +118,7 @@ fn main() -> ExitCode {
 fn finish(result: Result<String, Failure>, json: bool) -> ExitCode {
     let (text, code) = match result {
         Ok(text) => (text, 0),
-        Err(failure) => (output::failure(failure, json), failure.exit),
+        Err(failure) => (terminal::output(failure, json), failure.exit),
     };
     if output::write(&text).is_err() {
         ExitCode::from(74)
