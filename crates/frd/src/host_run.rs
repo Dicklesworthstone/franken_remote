@@ -5,13 +5,15 @@
 //! A viewer leaving, before or after its share is up, is a reported peer outcome
 //! that ends only that share; only host faults count toward stopping the service.
 //!
-//! Profile limits, stated rather than faked: observation only (no input is
-//! admitted, so the agent's input bounds are the protocol ceiling), local
-//! approval is refused until the separate session-agent process exists, and the
-//! encoder is the explicit software HEVC profile.
+//! Profile limits, stated rather than faked: observation only unless the
+//! operator passes an input agent (then a first viewer may take the exclusive
+//! controlled share, unattended by that choice, with the child's mandatory
+//! indicator), local approval is refused until the separate session-agent
+//! process exists, and the encoder is the explicit software HEVC profile.
 pub mod policy;
 
 use crate::{
+    input_agent::Seat,
     media::{ObservationControl, host_now},
     native_connection::host::{
         LinuxError, LinuxServer, Request, Server,
@@ -21,11 +23,11 @@ use crate::{
     session_agent::{
         ApprovalMode, PermissionKind, PermissionStatus, PlatformKind, SessionAgent,
         source::{
-            desktop::{LocalAction, dispatch},
+            desktop::{ControlProfile, LocalAction, dispatch},
             prepare::Setup,
         },
     },
-    session_startup::{Configuration, shared_viewers},
+    session_startup::{Configuration, host_offer, shared_viewers},
     worker::{Deadline, Launch, Retirement},
 };
 use asupersync::{
@@ -39,6 +41,7 @@ use fr_core::{
     authority::{AuthorityPolicy, SessionAuthority},
     ids::{CodecConfigurationGeneration, HostBootId, OsSessionId, RemoteSessionId},
     input::{DesktopPoint, InputBounds},
+    input_submission::{Capabilities, Capability},
     limits::ProtocolLimits,
 };
 use fr_media::{
@@ -48,9 +51,8 @@ use fr_media::{
 use fr_tailnet::{CertificatePolicy, GrantPolicy, LocalApi, Scope, ingress, trust::TrustError};
 use fr_transport::native_accept;
 use fr_wire::{
-    attachment, decoder,
-    display::{self, Catalog, Select},
-    negotiation::{Capability, ControlBinding, Offer, Role},
+    display::{Catalog, Select},
+    negotiation::{ControlBinding, Offer},
 };
 use std::{
     fmt,
@@ -84,6 +86,9 @@ pub struct Options {
     /// Serve one OS-share lifetime, then stop (tests and one-shot sharing).
     pub once: bool,
     pub handle_signals: bool,
+    /// Absolute `fr-input-agent` image. `None` keeps the host observation-only;
+    /// `Some` lets a first viewer take the exclusive controlled share.
+    pub input_agent: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,32 +188,19 @@ fn random_nonzero_u32() -> Result<u32, Error> {
     }
 }
 
-/// The host's observation offer: the four bootstrap capabilities the native
-/// viewer requires. Optional client capabilities outside this set are dropped
-/// by negotiation rather than silently assumed.
-fn offer() -> Offer {
-    let mut capabilities: Vec<_> = [
-        display::CAPABILITY,
-        decoder::CAPABILITY,
-        attachment::CAPABILITY,
-        attachment::DELIVERY_CAPABILITY,
-    ]
-    .into_iter()
-    .map(|name| Capability {
-        name: name.into(),
-        version: 1,
-        required: true,
-    })
-    .collect();
-    capabilities.sort_by(|a, b| a.name.cmp(&b.name));
-    Offer {
-        versions: vec![0],
-        profile: 1,
-        profile_version: 0,
-        role: Role::Observe,
-        limits: ProtocolLimits::ABSOLUTE,
-        capabilities,
-    }
+/// The host's offer: the four bootstrap capabilities the native viewer
+/// requires, plus (only with an input agent) the optional control boundaries.
+/// Optional client capabilities outside this set are dropped by negotiation.
+fn offer(control: bool) -> Offer {
+    host_offer(control)
+}
+/// Native operations a controller may request in this X11 slice.
+fn control_capabilities() -> Capabilities {
+    Capabilities::default()
+        .with(Capability::Keys)
+        .with(Capability::Repeat)
+        .with(Capability::Absolute)
+        .with(Capability::Buttons)
 }
 
 fn request(
@@ -216,6 +208,7 @@ fn request(
     host_boot: HostBootId,
     os_session: u32,
     scope: Scope,
+    control: bool,
 ) -> Result<Request, serial::Error> {
     let fresh = |_| serial::Error::Configuration;
     Ok(Request {
@@ -226,7 +219,7 @@ fn request(
             ..GrantPolicy::default()
         },
         session: Configuration {
-            offer: offer(),
+            offer: offer(control),
             binding: ControlBinding {
                 id: u32::try_from(attempt % u64::from(u32::MAX))
                     .unwrap_or(1)
@@ -354,13 +347,9 @@ fn run_inner(
     stop: &Arc<StopHandle>,
     policy: Option<policy::Configuration>,
 ) -> Result<(), Error> {
-    if !options.worker.is_absolute()
-        || options.display.is_empty()
-        || options.fps == 0
-        || options.bitrate == 0
-    {
-        return Err(Error::Configuration);
-    }
+    check(options)?;
+    // One Seat per run: an uncertain release keeps later control refused.
+    let seat = Seat::default();
     let runtime = RuntimeBuilder::new()
         .worker_threads(2)
         .enable_platform_reactor(true)
@@ -410,6 +399,7 @@ fn run_inner(
                         stop: stop.clone(),
                         active: active.clone(),
                         report,
+                        seat: seat.clone(),
                     };
                     match share.serve(&broker).await? {
                         Ended::Served => failures = 0,
@@ -457,6 +447,21 @@ fn run_inner(
         // A failed stop must remain visible even when service already failed.
         cleanup.and(result)
     })
+}
+
+fn check(options: &Options) -> Result<(), Error> {
+    if !options.worker.is_absolute()
+        || options.display.is_empty()
+        || options.fps == 0
+        || options.bitrate == 0
+        || options
+            .input_agent
+            .as_ref()
+            .is_some_and(|p| !p.is_absolute())
+    {
+        return Err(Error::Configuration);
+    }
+    Ok(())
 }
 
 fn signals(
@@ -545,6 +550,7 @@ struct Share<'a> {
     stop: Arc<StopHandle>,
     active: Arc<Mutex<Option<Cx>>>,
     report: &'a Reporter,
+    seat: Seat,
 }
 impl Share<'_> {
     fn cx(&self) -> Result<Cx, Error> {
@@ -587,7 +593,8 @@ impl Share<'_> {
             .map_err(|e| Error::Listener(Box::new(e)))
     }
 
-    fn driver(source: &Cx, os_session: u32, fps: u16) -> Result<dispatch::Driver, Error> {
+    fn driver(&self, source: &Cx, os_session: u32) -> Result<dispatch::Driver, Error> {
+        let fps = self.options.fps;
         let mut agent = SessionAgent::new(
             ApprovalMode::Unattended,
             PlatformKind::LinuxX11,
@@ -600,6 +607,21 @@ impl Share<'_> {
         agent
             .permissions_mut()
             .set_permission(PermissionKind::ScreenCapture, PermissionStatus::Granted);
+        if let Some(input_agent) = &self.options.input_agent {
+            agent = agent.with_control(
+                ControlProfile::new(
+                    input_agent,
+                    &self.options.display,
+                    self.options.xauthority.as_deref(),
+                    self.seat.clone(),
+                    control_capabilities(),
+                    fps,
+                    self.options.bitrate,
+                    Backend::SoftwareExplicit,
+                )
+                .map_err(|_| Error::Configuration)?,
+            );
+        }
         let entropy: shared_viewers::Entropy = Arc::new(|| random_nonzero_u128().map_err(|_| ()));
         agent
             .native_incoming(
@@ -703,11 +725,12 @@ impl Share<'_> {
             supervisor.cancel_fast(CancelKind::User);
         }
         let os_session = random_nonzero_u32()?;
-        let mut driver = Self::driver(&source, os_session, self.options.fps)?;
+        let mut driver = self.driver(&source, os_session)?;
         let retirement = Arc::new(Mutex::new(None));
         let factory = self.factory(source, retirement.clone());
         let (fps, bitrate) = (self.options.fps, self.options.bitrate);
         let (host_boot, scope) = (self.host_boot, self.options.sharing);
+        let control = self.options.input_agent.is_some();
         let report = self.report.clone();
         let stop = self.stop.clone();
         let source_epoch = epoch.clone();
@@ -718,7 +741,7 @@ impl Share<'_> {
                 self.runtime.clone(),
                 serial::Policy::default(),
                 Connections {
-                    request: move |attempt| request(attempt, host_boot, os_session, scope),
+                    request: move |attempt| request(attempt, host_boot, os_session, scope, control),
                     // require_approval is false: no notification is ever delivered.
                     approval: |_, _| Err(()),
                     completed: move |stats: serial::Statistics, outcome: PeerResult| {
@@ -787,9 +810,14 @@ mod tests {
 
     #[test]
     fn host_offer_matches_the_native_viewer_bootstrap_capabilities() {
-        let offer = offer();
-        assert_eq!(offer.role, Role::Observe);
-        let names: Vec<_> = offer.capabilities.iter().map(|c| c.name.clone()).collect();
+        use fr_wire::{attachment, decoder, display, negotiation::Role};
+        let observe = offer(false);
+        assert_eq!(observe.role, Role::Observe);
+        let names: Vec<_> = observe
+            .capabilities
+            .iter()
+            .map(|c| c.name.clone())
+            .collect();
         for required in [
             display::CAPABILITY,
             decoder::CAPABILITY,
@@ -798,14 +826,23 @@ mod tests {
         ] {
             assert!(names.iter().any(|n| n == required), "{required}");
         }
-        assert!(offer.capabilities.iter().all(|c| c.required));
+        assert!(observe.capabilities.iter().all(|c| c.required));
+        // Control boundaries are offered only with an input agent, optionally.
+        let control = offer(true);
+        assert_eq!(control.capabilities.len(), 8);
+        assert_eq!(
+            control.capabilities.iter().filter(|c| c.required).count(),
+            4
+        );
+        assert!(control_capabilities().contains(Capability::Keys));
+        assert!(!control_capabilities().contains(Capability::Text));
     }
 
     #[test]
     fn every_request_allocates_fresh_unpredictable_identifiers() {
         let boot = HostBootId::from_raw(9);
-        let a = request(1, boot, 5, Scope::OwnUser).unwrap();
-        let b = request(2, boot, 5, Scope::OwnUser).unwrap();
+        let a = request(1, boot, 5, Scope::OwnUser, false).unwrap();
+        let b = request(2, boot, 5, Scope::OwnUser, true).unwrap();
         assert_ne!(
             a.session.binding.remote_session,
             b.session.binding.remote_session
@@ -814,6 +851,8 @@ mod tests {
         assert_eq!(a.session.binding.os_session.as_raw(), 5);
         assert!(!a.session.require_approval);
         assert_eq!(a.admission.scope, Scope::OwnUser);
+        assert_eq!(a.session.offer, offer(false));
+        assert_eq!(b.session.offer, offer(true));
     }
 
     #[test]
@@ -832,10 +871,18 @@ mod tests {
             ingress_tools: None,
             once: true,
             handle_signals: false,
+            input_agent: None,
         };
         let report: Reporter = Arc::new(|_| {});
         let stop = Arc::new(StopHandle::default());
         assert_eq!(run(&options, &report, &stop), Err(Error::Configuration));
+        let mut relative_agent = options.clone();
+        relative_agent.worker = PathBuf::from("/usr/bin/fr-media-worker");
+        relative_agent.input_agent = Some(PathBuf::from("fr-input-agent"));
+        assert_eq!(
+            run(&relative_agent, &report, &stop),
+            Err(Error::Configuration)
+        );
         let mut empty = options;
         empty.worker = PathBuf::from("/usr/bin/fr-media-worker");
         empty.display = String::new();

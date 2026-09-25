@@ -31,6 +31,7 @@ impl Hosted {
             ingress_tools: Some((tools.0.join("nft"), tools.0.join("ip"))),
             once: false,
             handle_signals: false,
+            input_agent: None,
         };
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = events.clone();

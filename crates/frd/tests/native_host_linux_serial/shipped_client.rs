@@ -187,6 +187,7 @@ fn shipped_fr_displays_negotiates_with_frd_run() {
         ingress_tools: Some((tools.0.join("nft"), tools.0.join("ip"))),
         once: true,
         handle_signals: false,
+        input_agent: None,
     };
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();
@@ -358,6 +359,7 @@ fn frd_run_keeps_serving_sequential_viewers_and_departing_inspections() {
         ingress_tools: Some((tools.0.join("nft"), tools.0.join("ip"))),
         once: false,
         handle_signals: false,
+        input_agent: None,
     };
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();
@@ -463,6 +465,7 @@ fn frd_run_expires_a_connected_viewer_that_stops_answering_renewal() {
         ingress_tools: Some((tools.0.join("nft"), tools.0.join("ip"))),
         once: false,
         handle_signals: false,
+        input_agent: None,
     };
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();

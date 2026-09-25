@@ -34,7 +34,7 @@ USAGE:
     frd --help
 
 COMMANDS:
-    run             Share this desktop view-only over the tailnet (foreground; needs root or the ingress helper)
+    run             Share this desktop over the tailnet, view-only unless --input-agent (foreground; needs root or the ingress helper)
     status          Report host daemon health, capabilities, sessions, and restrictions
     approval        Inspect or update local operator approval policy
     sharing         Inspect or update tailnet sharing admission scope
@@ -52,6 +52,9 @@ OPTIONS:
     --headless      Share a private headless Xvfb display (cookie-authenticated)
     --display :N    X11 display to share (default: $DISPLAY)
     --worker PATH   Absolute fr-media-worker path (default: next to frd)
+    --input-agent PATH  Absolute fr-input-agent path: lets the first viewer take
+                    exclusive, unattended control (requires approval none; the
+                    agent shows a mandatory local indicator). Absent: view-only
     --interface IF  Tailscale interface for ingress enforcement (default: tailscale0)
     --trust-roots P PEM CA bundle for the host certificate chain (default: system)
     --once          Serve one sharing session, then exit
@@ -425,6 +428,10 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
             2,
         );
     };
+    let input_agent = match input_agent(&options, json) {
+        Ok(agent) => agent,
+        Err(code) => return code,
+    };
     let run_options = Options {
         socket: options.socket.clone(),
         port: effective.port,
@@ -448,6 +455,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         ingress_tools: None,
         once: options.once,
         handle_signals: true,
+        input_agent,
     };
     let report: Reporter = Arc::new(move |event: Event| print_event(json, &event));
     let stop = Arc::new(host_run::StopHandle::default());
@@ -463,6 +471,24 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
             let detail = error.to_string();
             run_refusal(json, error.code(), &detail, 1)
         }
+    }
+}
+
+/// The optional control opt-in: an installed absolute `fr-input-agent`.
+#[cfg(target_os = "linux")]
+fn input_agent(
+    options: &frd::host_policy::options::RunOptions,
+    json: bool,
+) -> Result<Option<PathBuf>, ExitCode> {
+    match &options.input_agent {
+        Some(agent) if !(agent.is_absolute() && agent.is_file()) => Err(run_refusal(
+            json,
+            "input_agent_unavailable",
+            "--input-agent must name the absolute path of an installed fr-input-agent (build \
+             fr-native with --features linux-input); omit it to share view-only",
+            2,
+        )),
+        agent => Ok(agent.clone()),
     }
 }
 

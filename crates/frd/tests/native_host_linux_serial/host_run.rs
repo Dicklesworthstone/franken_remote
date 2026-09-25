@@ -104,6 +104,7 @@ fn options(api: &fixture::Api, tools: &Tools, worker: PathBuf) -> Options {
         ingress_tools: Some((tools.0.join("nft"), tools.0.join("ip"))),
         once: true,
         handle_signals: false,
+        input_agent: None,
     }
 }
 
@@ -230,6 +231,7 @@ fn frd_run_stops_on_consecutive_source_failures_with_a_typed_error() {
         ingress_tools: Some((tools.0.join("nft"), tools.0.join("ip"))),
         once: false,
         handle_signals: false,
+        input_agent: None,
     };
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();

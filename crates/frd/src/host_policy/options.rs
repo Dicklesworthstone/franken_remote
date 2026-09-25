@@ -34,6 +34,9 @@ pub struct RunOptions {
     /// Opt into the CPU software HEVC developer profile (ADR 0004); frd run
     /// has no hardware encoder selection yet and refuses without it.
     pub software_explicit: bool,
+    /// Absolute `fr-input-agent` path. Absent: observation only (unchanged).
+    /// Present: a first viewer may take the exclusive controlled share.
+    pub input_agent: Option<PathBuf>,
 }
 impl RunOptions {
     /// Arguments after `run`. Unknown, duplicate or valueless options refuse
@@ -88,6 +91,7 @@ impl RunOptions {
                 "--display" => set(&mut options.display, value.to_owned())?,
                 "--interface" => set(&mut options.interface, value.to_owned())?,
                 "--trust-roots" => set(&mut options.trust_roots, PathBuf::from(value))?,
+                "--input-agent" => set(&mut options.input_agent, PathBuf::from(value))?,
                 _ => return Err(Error::InvalidArgument),
             }
         }
@@ -161,4 +165,31 @@ fn value<'a>(iter: &mut std::slice::Iter<'a, String>) -> Result<&'a str, Error> 
         .map(String::as_str)
         .filter(|s| !s.is_empty() && !s.starts_with('-'))
         .ok_or(Error::InvalidArgument)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn parse(args: &[&str]) -> Result<RunOptions, Error> {
+        RunOptions::parse(&args.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>())
+    }
+    #[test]
+    fn input_agent_is_opt_in_single_and_never_valueless() {
+        assert_eq!(parse(&["--software-explicit"]).unwrap().input_agent, None);
+        let options = parse(&["--input-agent", "/usr/libexec/fr-input-agent"]).unwrap();
+        assert_eq!(
+            options.input_agent,
+            Some(PathBuf::from("/usr/libexec/fr-input-agent"))
+        );
+        for refused in [
+            &["--input-agent"][..],
+            &["--input-agent", "--once"][..],
+            &["--input-agent", "/a", "--input-agent", "/b"][..],
+        ] {
+            assert!(
+                matches!(parse(refused), Err(Error::InvalidArgument)),
+                "{refused:?}"
+            );
+        }
+    }
 }
