@@ -581,27 +581,6 @@ name = "fr-core"
 version = "0.1.0"
 
 [[package]]
-name = "fr-e2e"
-version = "0.1.0"
-dependencies = [
- "asupersync",
- "fr-client",
- "fr-core",
- "fr-wire",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "fr-ffi"
-version = "0.1.0"
-dependencies = [
- "cc",
- "fr-core",
- "fr-media",
-]
-
-[[package]]
 name = "fr-files"
 version = "0.1.0"
 dependencies = [
@@ -666,17 +645,6 @@ dependencies = [
  "fr-core",
  "fr-media",
  "fr-wire",
-]
-
-[[package]]
-name = "fr-web"
-version = "0.1.0"
-dependencies = [
- "fr-client",
- "fr-core",
- "fr-wire",
- "serde",
- "serde_json",
 ]
 
 [[package]]

@@ -13,8 +13,6 @@ pub mod media;
 #[cfg(target_os = "linux")]
 pub mod linux;
 
-pub mod windows;
-
 pub mod input_watchdog;
 
 pub mod input_agent;

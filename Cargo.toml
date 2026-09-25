@@ -37,13 +37,10 @@ fr-transport = { path = "crates/fr-transport" }
 fr-native = { path = "crates/fr-native" }
 frd = { path = "crates/frd" }
 fr-client = { path = "crates/fr-client" }
-fr-e2e = { path = "crates/fr-e2e" }
-fr-ffi = { path = "crates/fr-ffi" }
-fr-web = { path = "crates/fr-web" }
 
 [workspace.lints.rust]
 # Protocol/policy/authority code is safe Rust (AGENTS.md section 3.2). The
-# named FFI boundary crates (fr-ffi, platform adapters) will opt out of this
+# named FFI boundary crates (fr-native, platform adapters) opt out of this
 # single lint deliberately and document why; nothing else may.
 unsafe_code = "forbid"
 

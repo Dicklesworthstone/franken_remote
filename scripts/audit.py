@@ -4,7 +4,7 @@
 Enforces architecture and security contracts per AGENTS.md Sections 3.1, 3.2, 3.5:
 1. Memory-safety boundary:
    - All protocol, policy, admission, scheduling, session code uses #![forbid(unsafe_code)].
-   - Unsafe code is confined strictly to named boundary crates (fr-ffi, fr-native).
+   - Unsafe code is confined strictly to named boundary crates (fr-native).
 2. One runtime:
    - Asupersync is the sole async runtime.
    - Forbidden: tokio, async-std, smol, libwebrtc, electron, chromium, web application frameworks.
@@ -24,7 +24,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-BOUNDARY_CRATES = {"fr-native", "fr-ffi"}
+BOUNDARY_CRATES = {"fr-native"}
 
 FORBIDDEN_DEPENDENCIES = {
     "tokio",
