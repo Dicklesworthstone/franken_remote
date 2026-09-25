@@ -31,8 +31,10 @@ pub struct PresentationMaintenance {
     /// An exposed drawable was resubmitted from the last presented image.
     /// This does not assert that the image became visible or became fresh.
     pub repainted: bool,
-    /// Owned pixel bytes: zero before first presentation, otherwise exactly
-    /// width * height * 4. One fixed-size `XImage` header is additional metadata.
+    /// Owned pixel bytes: exactly width * height * 4 when allocated. Ordinary
+    /// presenters allocate on first picture; confined decoders reserve before
+    /// entering seccomp. Reservation alone never paints a frame. One fixed-size
+    /// native image/transfer header is additional metadata.
     pub retained_bytes: usize,
 }
 

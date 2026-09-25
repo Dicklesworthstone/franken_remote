@@ -204,7 +204,7 @@ typedef struct {
     int screen,w,h,presenter,invalid,exposed;
     /* Exactly one owned, tightly packed submitted picture, never a decoder
        surface. It survives idle periods, not a window lifetime transition. */
-    XImage *front;
+    FrXImageTransfer *front;
     FrXImageTransfer *capture;
     FrXImageStats retired_transfer;
 } FrX11;
@@ -215,7 +215,11 @@ static int fr_x11_retire(FrX11 *x) {
         x->retired_transfer.retained_bytes=0;
         fr_ximage_free(x->capture); x->capture=NULL;
     }
-    if (x->front) { XDestroyImage(x->front); x->front=NULL; }
+    if (x->front) {
+        fr_ximage_stats(x->front,&x->retired_transfer);
+        x->retired_transfer.retained_bytes=0;
+        fr_ximage_free(x->front); x->front=NULL;
+    }
     /* Retire the private presentation connection, not the UI-owned parent.
        Default DestroyAll removes the child even after an UnmapNotify preceded
        destruction. No request is sent to a potentially dead window ID. Capture
@@ -334,7 +338,7 @@ int fr_x11_validate(FrX11 *x) {
 void fr_x11_free(FrX11 *x) {
     if (!x) return;
     fr_ximage_free(x->capture);
-    if (x->front) XDestroyImage(x->front);
+    fr_ximage_free(x->front);
     /* XCloseDisplay's default DestroyAll releases our own window, even when
        UnmapNotify retired us before a queued DestroyNotify could be consumed.
        Do not address a potentially destroyed XID during cleanup. Borrowed UI
@@ -441,35 +445,31 @@ int fr_x11_capture(FrX11 *x,uint8_t *out,size_t len) {
     return fr_x11_geometry(x);
 }
 void fr_x11_transfer_stats(FrX11 *x,FrXImageStats *out) {
-    if (x && !x->capture && out) *out=x->retired_transfer;
-    else fr_ximage_stats(x ? x->capture : NULL,out);
+    FrXImageTransfer *transfer=x ? (x->presenter ? x->front : x->capture) : NULL;
+    if (x && !transfer && out) *out=x->retired_transfer;
+    else fr_ximage_stats(transfer,out);
 }
-/* Reuse a single exact-size image. The XImage metadata is fixed-size; no
-   decoder/reference picture or history queue is retained here. */
+/* Reuse one exact-size image. Decoder setup calls this before seccomp; ordinary
+   presenters still allocate lazily. Allocation does not imply a painted frame. */
 static int fr_x11_front(FrX11 *x,size_t len) {
-    if (x->front) return FR_OK;
-    XImage *im=XCreateImage(x->display,DefaultVisual(x->display,x->screen),24,
-                           ZPixmap,0,NULL,x->w,x->h,32,0);
-    if (!im) return FR_MEMORY;
-    if (im->bits_per_pixel!=32 || im->byte_order!=LSBFirst || im->bytes_per_line!=x->w*4) {
-        XDestroyImage(im); return FR_UNAVAILABLE;
-    }
-    im->data=calloc(1,len);
-    if (!im->data) { XDestroyImage(im); return FR_MEMORY; }
-    x->front=im; return FR_OK;
+    if (x->front) return len==x->front->length ? FR_OK : FR_INVALID;
+    if (!bgra_buffer(x->w,x->h,len)) return FR_INVALID;
+    return fr_ximage_new(x->display,DefaultVisual(x->display,x->screen),24,
+                         x->w,x->h,0,&x->front);
 }
 static int fr_x11_draw_front(FrX11 *x) {
     /* Clear before submission: later expose events remain pending. Never raise
        a borrowed window, or an idle window merely because it needs repaint. */
     x->exposed=0;
-    XPutImage(x->display,x->canvas?x->canvas:x->window,x->gc,x->front,0,0,0,0,x->w,x->h);
+    int code=fr_ximage_draw(x->front,x->canvas?x->canvas:x->window,x->gc);
+    if (code!=FR_OK) { fr_x11_retire(x); return code; }
     return fr_x11_geometry(x);
 }
 int fr_x11_present(FrX11 *x,const uint8_t *bgra,size_t len) {
     if (!x || !x->presenter || !bgra || !bgra_buffer(x->w,x->h,len)) return FR_INVALID;
     int code=fr_x11_geometry(x); if (code!=FR_OK) return code;
     code=fr_x11_front(x,len); if (code!=FR_OK) return code;
-    memcpy(x->front->data,bgra,len);
+    code=fr_ximage_store(x->front,bgra,len); if (code!=FR_OK) return code;
     if (x->presenter==1) XRaiseWindow(x->display,x->window);
     return fr_x11_draw_front(x);
 }
@@ -477,7 +477,8 @@ int fr_x11_maintain_presentation(FrX11 *x,int *repainted,size_t *retained_bytes)
     if (!x || !x->presenter || !repainted || !retained_bytes) return FR_INVALID;
     *repainted=0; *retained_bytes=0;
     int code=fr_x11_geometry(x); if (code!=FR_OK) return code;
-    if (!x->front) { x->exposed=0; return FR_OK; }
+    if (x->front) *retained_bytes=x->front->length;
+    if (!fr_ximage_ready(x->front)) { x->exposed=0; return FR_OK; }
     if (x->exposed) {
         code=fr_x11_draw_front(x); if (code!=FR_OK) return code;
         *repainted=1;

@@ -39,16 +39,38 @@ All blocking X-server work remains inside the supervised media boundary; it is
 not made wall-clock cancellable by this optimization. The selected user and X
 server remain trusted, as before. The decoder seccomp allowlist is unchanged.
 
+## Presentation
+
+Owned and UI-attached X11 presenters use the same bounded native image owner.
+New submitted pictures replace its bytes; expose repair resubmits the retained
+picture without a second copy, encode, decode, frame identity, or freshness
+observation. Checked MIT-SHM PutImage completion precedes every buffer reuse,
+detach and unmap. The socket fallback retains its XPutImage/XSync completion
+barrier. This is server-side request completion, not compositor/scanout proof.
+
+The worker's existing private child drawable remains the only holder of remote
+pixels. Unmap, destruction, resize-away-and-back and event-flood retirement still
+free its backing storage before closing the connection. Idle maintenance never
+paints a merely allocated buffer. Ordinary presenters allocate on first picture;
+software decoder confinement reserves/attaches one buffer **before** installing
+the unchanged seccomp BPF filter. This is part of local resource setup before
+host-supplied HEVC data. No memfd, file-backed mmap, new socket or other syscall
+permission is added after confinement. Both SHM and socket presentation keep
+exactly one packed image, not the former image plus another transfer copy.
+
 ## Explicit path and copy accounting
 
-`transfer_statistics()` on root/selected capture and `ChangeAwareCapture`
+`transfer_statistics()` on root/selected capture, presenters and `ChangeAwareCapture`
 returns the original native owner's selected path and bounded counters. A path
 is `NotInitialized`, `SharedMemory`, or `Socket` with a specific reason:
 extension unavailable, descriptor transport unavailable, shared allocation
 unavailable, or attachment refused. Selection is sticky, not periodically retried.
 
 Counters report completed image transfers, explicit BGRA-copy bytes, pixel bytes
-returned through the X socket, and retained image backing bytes. They exclude
+transferred through the X socket, and retained image backing bytes. Presenter
+image counts include idle repaint; its copy count advances only for new
+submitted pictures. Explicit snapshot instrumentation is not included in a
+presenter's transfer counters. The counters exclude
 codec/GPU/server-internal copies, protocol headers, allocation initialization,
 and alpha initialization; they must not be presented as total memory bandwidth.
 Counters saturate at `u64::MAX`, never wrap. Root retirement releases backing
@@ -94,3 +116,19 @@ a guaranteed speedup. Both modes still copy 8,294,400 BGRA bytes into Rust per
 frame. The shared path reports zero X-socket pixel payload bytes per frame versus
 8,294,400 for the socket path. Real-X-server, hardware, optical and two-machine
 measurements are not tested here; the broader bead remains open.
+
+Presentation checkpoint evidence: two additional Rust tests pass, for 18 total
+in the same focused X11 validation scope. They independently read back changing
+pictures and expose repair, verify one-buffer retention and retirement, and run
+the production presenter inside a real seccomp-confined subprocess. The confined
+child presents and repairs pixels and completes native detach/cleanup; new file
+and socket operations still fail with EPERM. The unchanged six escape probes
+also pass. Full codec/worker qualification remains untested, not inferred.
+
+The C boundary tests additionally cover before-picture refusal, repeated frame
+replacement, independent full-image pixel comparisons, replay without recopy,
+real descriptor-allocation fallback for presentation, and terminal checked
+server errors. In one 300-frame warm Xvfb measurement, new-picture copy plus
+server submission had median/p95 640/846 microseconds via SHM and 1,546/2,212
+via socket. This excludes decode, network, presentation visibility and real
+hardware; it is not a guaranteed application-latency or throughput improvement.

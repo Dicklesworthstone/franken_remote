@@ -28,7 +28,7 @@ struct FrXImageTransfer {
     XImage *image;
     xcb_connection_t *connection;
     uint32_t segment;
-    int capture, failed;
+    int capture, failed, ready;
     size_t length;
     FrXImageStats stats;
 };
@@ -133,6 +133,11 @@ int fr_ximage_new(Display *display, Visual *visual, int depth, int width, int he
     if (t->connection && xcb_connection_has_error(t->connection)) {
         fr_ximage_free(t); return IMAGE_DISPLAY;
     }
+    if (!capture && !t->image->data) {
+        t->image->data = calloc(1, t->length);
+        if (!t->image->data) { fr_ximage_free(t); return IMAGE_MEMORY; }
+        t->stats.retained_bytes = t->length;
+    }
     *out = t;
     return IMAGE_OK;
 }
@@ -195,6 +200,47 @@ int fr_ximage_capture(FrXImageTransfer *t, Drawable drawable, int x, int y,
     if (!t->segment) XDestroyImage(image);
     fr_image_count(&t->stats.images, 1);
     fr_image_count(&t->stats.copied_bytes, length);
+    return IMAGE_OK;
+}
+/* Only new pictures copy into the one owned buffer. Idle expose repair draws
+   it again without another copy or any source/decode freshness assertion. */
+int fr_ximage_store(FrXImageTransfer *t, const uint8_t *pixels, size_t length) {
+    if (!t || t->capture || t->failed || !pixels || length != t->length ||
+        !t->image->data) return IMAGE_INVALID;
+    memcpy(t->image->data, pixels, length);
+    t->ready = 1;
+    fr_image_count(&t->stats.copied_bytes, length);
+    return IMAGE_OK;
+}
+int fr_ximage_ready(const FrXImageTransfer *t) {
+    return t && !t->capture && !t->failed && t->ready;
+}
+int fr_ximage_draw(FrXImageTransfer *t, Drawable drawable, GC gc) {
+    if (!fr_ximage_ready(t) || !gc) return IMAGE_INVALID;
+    XImage *image = t->image;
+    XFlushGC(t->display, gc);
+    XFlush(t->display);
+    if (t->segment) {
+        xShmPutImageReq request = {0};
+        request.drawable = (uint32_t)drawable;
+        request.gc = (uint32_t)XGContextFromGC(gc);
+        request.totalWidth = request.srcWidth = (uint16_t)image->width;
+        request.totalHeight = request.srcHeight = (uint16_t)image->height;
+        request.depth = 24; request.format = ZPixmap;
+        request.shmseg = t->segment;
+        if (!fr_shm_checked(t->connection, fr_shm_request(t->connection,
+                X_ShmPutImage, 1, &request, sizeof(request), -1))) {
+            t->failed = 1; return IMAGE_DISPLAY;
+        }
+    } else {
+        XPutImage(t->display, drawable, gc, image, 0, 0, 0, 0, image->width, image->height);
+        XSync(t->display, False);
+        fr_image_count(&t->stats.socket_pixel_bytes, t->length);
+    }
+    /* Checked request completion (or the socket path's XSync) precedes every
+       reuse, idle repaint, detach and unmap. Never overwrite an in-flight image.
+       This is server submission completion, not compositor/scanout visibility. */
+    fr_image_count(&t->stats.images, 1);
     return IMAGE_OK;
 }
 void fr_ximage_stats(const FrXImageTransfer *t, FrXImageStats *out) {

@@ -17,5 +17,8 @@ int fr_ximage_new(Display *, Visual *, int depth, int width, int height,
                   int capture, FrXImageTransfer **);
 void fr_ximage_free(FrXImageTransfer *);
 int fr_ximage_capture(FrXImageTransfer *, Drawable, int x, int y, uint8_t *, size_t);
+int fr_ximage_store(FrXImageTransfer *, const uint8_t *, size_t);
+int fr_ximage_ready(const FrXImageTransfer *);
+int fr_ximage_draw(FrXImageTransfer *, Drawable, GC);
 void fr_ximage_stats(const FrXImageTransfer *, FrXImageStats *);
 #endif

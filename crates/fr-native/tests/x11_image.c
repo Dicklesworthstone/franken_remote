@@ -26,6 +26,71 @@ static int descriptors(void) {
     closedir(dir);
     return n;
 }
+static void presentation(Display *d, Window root, Visual *visual, GC gc, int shared) {
+    const int w=1920,h=1080;
+    const size_t len=(size_t)w*h*4;
+    FrXImageTransfer *t=NULL;
+    assert(fr_ximage_new(d,visual,24,w,h,0,&t)==0);
+    assert(!fr_ximage_ready(t));
+    assert(fr_ximage_draw(t,root,gc)==-1);
+    uint8_t *pixels=malloc(len); assert(pixels);
+    FrXImageStats stats;
+    for (int pass=1;pass<=3;pass++) {
+        memset(pixels,pass*37,len);
+        assert(fr_ximage_store(t,pixels,len-1)==-1);
+        assert(fr_ximage_capture(t,root,0,0,pixels,len)==-1);
+        assert(fr_ximage_store(t,pixels,len)==0);
+        assert(fr_ximage_ready(t));
+        assert(fr_ximage_draw(t,root,gc)==0);
+        XImage *reference=XGetImage(d,root,0,0,w,h,AllPlanes,ZPixmap); assert(reference);
+        unsigned long expected=(unsigned long)(pass*37)*0x010101;
+        for (int y=0;y<h;y++) for (int x=0;x<w;x++)
+            assert(XGetPixel(reference,x,y)==expected);
+        XDestroyImage(reference);
+    }
+    uint64_t samples[300];
+    for (int i=0;i<300;i++) {
+        uint64_t begin=micros();
+        assert(fr_ximage_store(t,pixels,len)==0);
+        assert(fr_ximage_draw(t,root,gc)==0);
+        samples[i]=micros()-begin;
+    }
+    fr_ximage_stats(t,&stats);
+    assert(stats.path==(shared?1u:2u) && stats.retained_bytes==len);
+    assert(stats.images==303 && stats.copied_bytes==303*len);
+    assert(stats.socket_pixel_bytes==(shared?0:303*len));
+    XSetForeground(d,gc,0); XFillRectangle(d,root,gc,0,0,w,h); XSync(d,False);
+    assert(fr_ximage_draw(t,root,gc)==0); /* Idle replay: no new pixel copy. */
+    fr_ximage_stats(t,&stats);
+    assert(stats.images==304 && stats.copied_bytes==303*len);
+    XImage *reference=XGetImage(d,root,0,0,w,h,AllPlanes,ZPixmap); assert(reference);
+    assert(XGetPixel(reference,w-1,h-1)==0x6f6f6f);
+    XDestroyImage(reference);
+    qsort(samples,300,sizeof(samples[0]),compare);
+    printf("{\"operation\":\"present\",\"path\":\"%s\",\"frames\":300,\"width\":1920,\"height\":1080,\"p50_us\":%llu,\"p95_us\":%llu,\"copy_bytes_per_frame\":%zu,\"socket_pixel_bytes_per_frame\":%zu}\n",
+           shared?"shared":"socket",(unsigned long long)samples[150],
+           (unsigned long long)samples[285],len,shared?0:len);
+    if (shared) {
+        assert(fr_ximage_draw(t,0,gc)==-6);
+        assert(!fr_ximage_ready(t));
+        assert(fr_ximage_store(t,pixels,len)==-1);
+    }
+    fr_ximage_free(t);
+    if (shared) {
+        struct rlimit old, limited;
+        assert(getrlimit(RLIMIT_NOFILE,&old)==0);
+        limited=old; limited.rlim_cur=(rlim_t)ConnectionNumber(d)+1;
+        assert(setrlimit(RLIMIT_NOFILE,&limited)==0);
+        int opened=fr_ximage_new(d,visual,24,w,h,0,&t);
+        assert(setrlimit(RLIMIT_NOFILE,&old)==0);
+        assert(opened==0);
+        fr_ximage_stats(t,&stats);
+        assert(stats.path==2 && stats.fallback==3 && stats.retained_bytes==len);
+        assert(fr_ximage_store(t,pixels,len)==0 && fr_ximage_draw(t,root,gc)==0);
+        fr_ximage_free(t);
+    }
+    free(pixels);
+}
 int main(int argc, char **argv) {
     assert(argc==2 && (!strcmp(argv[1],"shared") || !strcmp(argv[1],"socket")));
     int shared=strcmp(argv[1],"shared")==0;
@@ -116,6 +181,8 @@ int main(int argc, char **argv) {
         assert(fr_ximage_capture(t,root,100,40,pixels,64*64*4)==0);
         fr_ximage_free(t);
     }
+    assert(descriptors()==original_fds);
+    presentation(d,root,visual,gc,shared);
     assert(descriptors()==original_fds);
     free(pixels); XFreeGC(d,gc); XCloseDisplay(d);
     return 0;

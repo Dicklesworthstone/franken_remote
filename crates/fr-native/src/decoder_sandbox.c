@@ -121,5 +121,10 @@ static int fr_decoder_sandbox_enter(int input,int output,int diagnostic,int xfd)
 int fr_x11_confine_decoder(FrX11 *x,int input,int output,int diagnostic) {
     if (!x || !x->display || !x->presenter || x->invalid) return 0;
     if (fr_x11_geometry(x)!=FR_OK) return 0;
+    /* Allocate/attach exactly one presentation buffer BEFORE the existing
+       sandbox forbids new descriptors and file-backed mappings. No extra
+       syscall is allowed after confinement; an uninitialized image is never
+       painted. The buffer remains inside this independently supervised child. */
+    if (fr_x11_front(x,(size_t)x->w*(size_t)x->h*4)!=FR_OK) return 0;
     return fr_decoder_sandbox_enter(input,output,diagnostic,ConnectionNumber(x->display));
 }
