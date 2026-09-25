@@ -64,6 +64,7 @@ impl Desktop {
     }
     /// The window's on-screen BGRA pixels, read by an independent X client
     /// that creates no canvas of its own.
+    #[cfg(feature = "linux-media")]
     fn dump(&self, id: u32, width: u32, height: u32) -> Vec<u8> {
         let result = Command::new("python3")
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/viewer_window/peer.py"))

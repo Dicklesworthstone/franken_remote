@@ -53,7 +53,7 @@ jobs:
         run: |
           rustup show active-toolchain
           sudo apt-get update
-          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 pkg-config xvfb xauth openssl
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 libxi6 libxdamage1 libxrandr2 libxfixes3 libx11-xcb1 libopus0 libpulse0 pkg-config xvfb xauth openssl
       - name: Verify workspace and actual selected capture source
         run: |
           ./scripts/verify.sh fast
