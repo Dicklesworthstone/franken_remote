@@ -31,6 +31,7 @@ macos-media = []
 linux-media = []
 # Opt-in read-only systemd/logind lifecycle evidence; no alternate runtime.
 linux-logind = []
+linux-session-monitor = ["linux-logind", "dep:frd"]
 linux-session-events = ["linux-logind", "dep:frd", "dep:asupersync"]
 # Opt-in native libopus ABI; independent of HEVC, GUI and async dependencies.
 linux-opus = []
@@ -73,3 +74,8 @@ required-features = ["linux-media"]
 name = "fr"
 path = "src/bin/fr.rs"
 required-features = ["cli"]
+
+[[bin]]
+name = "fr-session-monitor"
+path = "src/bin/session_monitor.rs"
+required-features = ["linux-session-monitor"]

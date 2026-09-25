@@ -59,3 +59,6 @@ pub mod host_policy;
 // `frd run`: the installed host service composed from the modules above.
 #[cfg(target_os = "linux")]
 pub mod host_run;
+
+#[cfg(target_os = "linux")]
+pub mod session_monitor;

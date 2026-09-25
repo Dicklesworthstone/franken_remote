@@ -146,8 +146,8 @@ impl Shared {
     fn wake(&self) {
         // Never invoke an arbitrary executor waker while holding our mutex.
         let wake = self.waker.lock().ok().and_then(|mut w| w.take());
-        if let Some(w) = wake {
-            w.wake();
+        if let Some(wake) = wake {
+            wake.wake();
         }
     }
     fn status(&self, now: Result<u64, StopReason>) -> Status {
@@ -207,6 +207,13 @@ impl Control {
     }
     pub fn status(&self) -> Status {
         self.0.status(bus::boottime())
+    }
+    /// Original positive-read deadline on `CLOCK_BOOTTIME`. Intended for the
+    /// same-kernel inherited-pipe monitor; IPC must never start a new lifetime.
+    /// This is lifecycle evidence, not consent, capture permission or input authority.
+    pub fn evidence_deadline_ns(&self) -> Option<u64> {
+        let until = self.0.deadline.load(Ordering::Acquire);
+        (self.status() == Status::Active).then_some(until)
     }
     pub fn stop(&self) {
         self.0.stop(StopReason::OwnerStopped);
@@ -349,3 +356,7 @@ fn run(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, feature = "linux-session-monitor"))]
+#[path = "logind/tests/process.rs"]
+mod process_tests;

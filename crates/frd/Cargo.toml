@@ -21,7 +21,7 @@ fr-tailnet.workspace = true
 fr-files.workspace = true
 serde = { workspace = true, features = ["derive"] }
 getrandom = "=0.4.3"
-rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process", "time"] }
 
 # Reuse the cryptographic packages already in the pinned TLS/runtime graph.
 ring = { version = "=0.17.14", default-features = false }
