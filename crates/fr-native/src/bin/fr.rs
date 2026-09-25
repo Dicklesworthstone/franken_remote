@@ -30,8 +30,8 @@ fr inspect NODE_ID [--by-name] [--port 8443] [--socket /absolute/tailscaled.sock
 fr disconnect NODE_ID [--socket /absolute/tailscaled.sock] [--json]
 fr displays NODE_ID --experimental-native [--trust-roots /absolute/ca-roots.pem]
     [--by-name] [--socket /absolute/tailscaled.sock] [--port 8443] [--ipv6] [--json]
-fr connect NODE_ID --view-only --experimental-native --display HANDLE|only|choose
-    [--worker /absolute/fr-media-worker] [--trust-roots /absolute/ca-roots.pem]
+fr connect NODE_ID --view-only|--control --experimental-native
+    --display HANDLE|only|choose [--worker /absolute/fr-media-worker] [--trust-roots /absolute/ca-roots.pem]
     [--by-name] [--x-display :0] [--socket /absolute/tailscaled.sock]
     [--port 8443] [--ipv6] [--attempts 1..32] [--fit WIDTHxHEIGHT] [--json]
 fr robot session open NODE_ID [--role view|control] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
@@ -50,8 +50,12 @@ Displays requires host approval when configured; it starts no decoder or input.
 aspect fitting; the remote display is not resized. Omit it for native pixels.
 Connect uses fresh installed-tailnet identity and strict TLS on every attempt.
 --by-name selects an exact canonical tailnet FQDN, never arbitrary DNS or URLs.
-Native transport/media remain unqualified. Control, clipboard, audio and files
-are NOT enabled by this view-only command. Set XAUTHORITY in the local environment
+Connect needs exactly one role. --view-only never requests control.
+--control requests input control ONCE, after the window shows a fresh frame; the
+host must run frd run --input-agent. Keys, buttons and absolute pointer only (no
+text, scroll, clipboard, audio or files). Lost or refused control is never
+retried or reacquired: after a request, fr does not reconnect.
+Native transport/media remain unqualified. Set XAUTHORITY in the local environment
 when the window and worker require it. Close the window or use Ctrl-C to stop.
 ";
 

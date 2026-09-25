@@ -1,3 +1,6 @@
+#[cfg(feature = "linux-desktop")]
+#[path = "linux/control.rs"]
+mod control;
 #[path = "linux/displays.rs"]
 mod displays;
 #[path = "linux/doctor.rs"]
@@ -34,7 +37,7 @@ use fr_wire::negotiation::Offer;
 #[cfg(feature = "linux-desktop")]
 use frd::{
     native_connection::reconnect::{self, CallbackError, Status},
-    session_startup::Presentation,
+    session_startup::{InteractiveViewerState, Presentation, viewer_events::Layout},
 };
 use frd::{
     native_connection::{
@@ -248,6 +251,75 @@ fn connect(
             "Verify the locally provisioned trust store and native connection policy.",
         )
     })?;
+    let configuration = desktop_configuration(cx, connection)?;
+    let state = Rc::new(RefCell::new(Progress {
+        control: connection.control.then(control::Counters::default),
+        ..Progress::default()
+    }));
+    let mode = if connection.control {
+        Mode::ControlCapable(control::policy())
+    } else {
+        Mode::Observe
+    };
+    let mut application = Session::new(
+        configuration,
+        ObserverPolicy::default(),
+        mode,
+        Interface {
+            display: connection.display,
+            progress: state.clone(),
+            attempt: None,
+        },
+    );
+    let selector = if connection.target.by_name {
+        PeerSelector::Name(&connection.target.node)
+    } else {
+        PeerSelector::StableId(&connection.target.node)
+    };
+    let cfg = Configuration {
+        port: connection.target.port,
+        family: if connection.target.ipv6 {
+            AddressFamily::Ipv6
+        } else {
+            AddressFamily::Ipv4
+        },
+        ..Default::default()
+    };
+    let policy = reconnect::Policy {
+        max_attempts: connection.attempts,
+        ..Default::default()
+    };
+    let result = if connection.control {
+        let operation = client.run_control_capable(
+            cx.clone(),
+            runtime.handle(),
+            selector,
+            cfg,
+            control::offer(),
+            policy,
+            &mut application,
+        );
+        runtime.block_on(shutdown.run(cx, stopped, operation))
+    } else {
+        let operation = client.run_observing(
+            cx.clone(),
+            runtime.handle(),
+            selector,
+            cfg,
+            offer(),
+            policy,
+            &mut application,
+        );
+        runtime.block_on(shutdown.run(cx, stopped, operation))
+    };
+    completed(&application, result, stopped.get(), &state.borrow(), json)
+}
+/// Local window/worker settings only; no network, peer or credential input.
+#[cfg(feature = "linux-desktop")]
+fn desktop_configuration(
+    cx: &Cx,
+    connection: &Connection,
+) -> Result<DesktopConfiguration, Failure> {
     let x_display = connection
         .x_display
         .clone()
@@ -279,50 +351,11 @@ fn connect(
             })?,
         None => configuration,
     };
-    let configuration = if connection.display == DisplayChoice::Choose {
+    Ok(if connection.display == DisplayChoice::Choose {
         configuration.with_display_picker()
     } else {
         configuration
-    };
-    let state = Rc::new(RefCell::new(Progress::default()));
-    let mut application = Session::new(
-        configuration,
-        ObserverPolicy::default(),
-        Mode::Observe,
-        Interface {
-            display: connection.display,
-            progress: state.clone(),
-        },
-    );
-    let selector = if connection.target.by_name {
-        PeerSelector::Name(&connection.target.node)
-    } else {
-        PeerSelector::StableId(&connection.target.node)
-    };
-    let cfg = Configuration {
-        port: connection.target.port,
-        family: if connection.target.ipv6 {
-            AddressFamily::Ipv6
-        } else {
-            AddressFamily::Ipv4
-        },
-        ..Default::default()
-    };
-    let policy = reconnect::Policy {
-        max_attempts: connection.attempts,
-        ..Default::default()
-    };
-    let operation = client.run_observing(
-        cx.clone(),
-        runtime.handle(),
-        selector,
-        cfg,
-        offer(),
-        policy,
-        &mut application,
-    );
-    let result = runtime.block_on(shutdown.run(cx, stopped, operation));
-    completed(&application, result, stopped.get(), &state.borrow(), json)
+    })
 }
 #[cfg(feature = "linux-desktop")]
 fn completed(
@@ -332,6 +365,12 @@ fn completed(
     progress: &Progress,
     json: bool,
 ) -> Result<String, Failure> {
+    // A control attempt's cleanup notice deliberately ended reconnection;
+    // classify that attempt's ORIGINAL outcome, never the notice itself.
+    let result = match (result, progress.control.and_then(|c| c.ended)) {
+        (Err(reconnect::Failure::Notification), Some(original)) => original,
+        (result, _) => result,
+    };
     // A signal or UI close never conceals unsuccessful native cleanup.
     if application.cleanup_failure().is_some()
         || application.desktop().is_some()
@@ -348,7 +387,11 @@ fn completed(
     if stopped {
         return Err(Failure::new(
             "cancelled",
-            "Session stopped and the supervisor completed cleanup; no control/input was requested.",
+            if progress.control.is_some() {
+                "Session stopped and the supervisor completed cleanup; no input is replayed or retried."
+            } else {
+                "Session stopped and the supervisor completed cleanup; no control/input was requested."
+            },
             130,
         ));
     }
@@ -435,6 +478,8 @@ struct Progress {
     missing_display: bool,
     user_closed: bool,
     window: Option<WindowControl>,
+    /// Some only for `--control`: content-free request/grant/result tallies.
+    control: Option<control::Counters>,
 }
 #[cfg(feature = "linux-desktop")]
 impl Progress {
@@ -462,6 +507,8 @@ impl Progress {
 struct Interface {
     display: DisplayChoice,
     progress: Rc<RefCell<Progress>>,
+    /// The current opened `--control` attempt; never carried to the next one.
+    attempt: Option<control::Attempt>,
 }
 #[cfg(feature = "linux-desktop")]
 impl Ui for Interface {
@@ -486,7 +533,30 @@ impl Ui for Interface {
         p.opened = p.opened.saturating_add(1);
         p.approval_pending = false;
         p.window = desktop.window();
+        if p.control.is_some() {
+            self.attempt = Some(control::Attempt::new(desktop).ok_or(CallbackError)?);
+        }
         Ok(())
+    }
+    fn interactive(
+        &mut self,
+        _: u8,
+        state: InteractiveViewerState<'_>,
+        frame: Option<Presentation>,
+    ) -> Result<Option<Layout>, CallbackError> {
+        let mut progress = self.progress.borrow_mut();
+        if frame.is_some() {
+            progress.presented = progress.presented.saturating_add(1);
+        }
+        match (self.attempt.as_mut(), progress.control.as_mut()) {
+            (Some(attempt), Some(counters)) => attempt.turn(state, frame, counters),
+            _ => Err(CallbackError),
+        }
+    }
+    fn input_result(&mut self, _: u8, result: fr_client::input::ResultEvent) {
+        if let Some(counters) = self.progress.borrow_mut().control.as_mut() {
+            counters.result(&result);
+        }
     }
     fn frame(&mut self, _: u8, frame: Option<Presentation>) -> Result<(), CallbackError> {
         if frame.is_some() {
@@ -498,10 +568,19 @@ impl Ui for Interface {
     fn status(&mut self, status: Status) -> Result<(), CallbackError> {
         let mut progress = self.progress.borrow_mut();
         match status {
-            Status::Connecting { attempt } => progress.begin(attempt),
-            Status::Cleaning { .. } => {
+            Status::Connecting { attempt } => {
+                progress.begin(attempt);
+                self.attempt = None;
+            }
+            Status::Cleaning { failure, .. } => {
+                self.attempt = None;
                 let window = progress.window.as_ref().map(WindowControl::status);
-                return progress.before_cleanup(window);
+                let closed = progress.before_cleanup(window);
+                let control = progress
+                    .control
+                    .as_mut()
+                    .map_or(Ok(()), |counters| counters.cleaning(failure));
+                return closed.and(control);
             }
             _ => {}
         }
@@ -510,6 +589,9 @@ impl Ui for Interface {
 }
 #[cfg(feature = "linux-desktop")]
 fn completion(progress: &Progress, json: bool) -> String {
+    if let Some(control) = progress.control {
+        return control_completion(progress, control, json);
+    }
     if json {
         format!(
             "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"observe\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false}}\n",
@@ -522,6 +604,37 @@ fn completion(progress: &Progress, json: bool) -> String {
         format!(
             "View-only session stopped; {} attempt(s), {} opened session(s), cleanup confirmed. Native transport/hardware remain unqualified.\n",
             progress.attempts, progress.opened
+        )
+    }
+}
+/// Counts are host-reported stages, not local effect proof; visibility stays
+/// the X11 submission witness described in `control.rs`, never optical proof.
+#[cfg(feature = "linux-desktop")]
+fn control_completion(progress: &Progress, control: control::Counters, json: bool) -> String {
+    if json {
+        format!(
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"control_requested\":{},\"control_granted\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false}}\n",
+            output::timestamp(),
+            progress.attempts,
+            progress.opened,
+            progress.presented,
+            control.requested,
+            control.granted,
+            control.results,
+            control.submitted
+        )
+    } else {
+        format!(
+            "Control session stopped; {} attempt(s), {} opened session(s), control {}, {} host input result(s) ({} submitted to the host OS), cleanup confirmed. Native transport/hardware remain unqualified.\n",
+            progress.attempts,
+            progress.opened,
+            match (control.requested, control.granted) {
+                (_, true) => "granted",
+                (true, false) => "requested but not granted",
+                (false, false) => "not requested",
+            },
+            control.results,
+            control.submitted
         )
     }
 }
@@ -578,6 +691,7 @@ mod tests {
             let mut ui = Interface {
                 display: DisplayChoice::Handle(99),
                 progress: Rc::new(RefCell::new(Progress::default())),
+                attempt: None,
             };
             // Real wire catalog constructor also validates the selected display.
             let display = fr_wire::display::Display {
@@ -606,6 +720,7 @@ mod tests {
                 Interface {
                     display: DisplayChoice::Handle(9),
                     progress: Rc::new(RefCell::new(Progress::default())),
+                    attempt: None,
                 },
             )
         }
@@ -707,6 +822,91 @@ mod tests {
         }
 
         #[test]
+        fn a_control_attempt_ends_reconnection_but_reports_its_original_outcome() {
+            let control = || Progress {
+                control: Some(control::Counters::default()),
+                ..Progress::default()
+            };
+            let mut ui = Interface {
+                display: DisplayChoice::Only,
+                progress: Rc::new(RefCell::new(control())),
+                attempt: None,
+            };
+            // No request yet: the ordinary reconnect policy still applies.
+            assert_eq!(
+                ui.status(Status::Cleaning {
+                    attempt: 1,
+                    failure: Some(reconnect::Failure::Cancelled)
+                }),
+                Ok(())
+            );
+            ui.progress.borrow_mut().control.as_mut().unwrap().requested = true;
+            let refusal = reconnect::Failure::Connection(frd::native_connection::Error::Tailnet(
+                TailnetError::LocalApiUnavailable,
+            ));
+            assert_eq!(
+                ui.status(Status::Cleaning {
+                    attempt: 1,
+                    failure: Some(refusal)
+                }),
+                Err(CallbackError)
+            );
+            let progress = ui.progress.borrow();
+            // The supervisor reports only its notice failure; the CLI keeps the
+            // attempt's own disposition instead of a generic session failure.
+            assert_eq!(
+                completed(
+                    &unused_session(),
+                    Err(reconnect::Failure::Notification),
+                    false,
+                    &progress,
+                    true
+                )
+                .unwrap_err()
+                .code,
+                "tailscale_unavailable"
+            );
+            let mut ended = control();
+            let counters = ended.control.as_mut().unwrap();
+            counters.requested = true;
+            counters.granted = true;
+            counters.results = 3;
+            counters.submitted = 2;
+            counters.ended = Some(Ok(()));
+            let done = completed(
+                &unused_session(),
+                Err(reconnect::Failure::Notification),
+                false,
+                &ended,
+                true,
+            )
+            .unwrap();
+            for field in [
+                "\"role\":\"control\"",
+                "\"control_requested\":true",
+                "\"control_granted\":true",
+                "\"input_results\":3",
+                "\"input_submitted_to_os\":2",
+                "\"physical_visibility_proven\":false",
+            ] {
+                assert!(done.contains(field), "{field}");
+            }
+            // The notice alone, without a recorded control end, stays a failure.
+            assert!(
+                completed(
+                    &unused_session(),
+                    Err(reconnect::Failure::Notification),
+                    false,
+                    &control(),
+                    true
+                )
+                .is_err()
+            );
+            let text = completion(&ended, false);
+            assert!(text.starts_with("Control session stopped;") && text.contains("granted"));
+        }
+
+        #[test]
         fn supervisor_cleanup_failure_cannot_be_masked_by_a_user_close_or_signal() {
             let mut progress = Progress::default();
             let _ = progress.before_cleanup(Some(WindowStatus::Stopped(StopReason::User)));
@@ -742,6 +942,7 @@ mod tests {
             x_display: None,
             attempts: 1,
             fit_window: None,
+            control: false,
         };
         let runtime = RuntimeBuilder::current_thread()
             .enable_platform_reactor(true)

@@ -1,9 +1,10 @@
 # Native client executable (`fr`)
 
 The `fr-native` package now includes a Linux `fr` binary behind `linux-desktop`.
-It provides machine and approved display discovery plus an explicitly experimental,
-view-only native connection through the existing installed-tailnet client and composed desktop
-owner. Installing or running it never enables hosting. This is not an installable
+It provides machine and approved display discovery plus an explicitly experimental
+native connection, view-only or with one explicit control request, through the
+existing installed-tailnet client and composed desktop owner. Installing or
+running it never enables hosting. This is not an installable
 remote-workstation release or a qualified transport/hardware support claim.
 
 ## Build and discover
@@ -90,12 +91,47 @@ attempt repeats the existing target validation, strict TLS and shared startup.
 The host's admission scope and local approval still apply; none can be changed
 by this executable.
 
-`--view-only` is mandatory. Without it the command refuses with
-`control_ui_unavailable`; it never silently downgrades a request for control.
-The offered capability set contains only display selection, decoder startup,
-media attachment and media delivery. No input, clipboard, microphone, playback,
-file-transfer or semantic-access capability is requested. No UI mapping,
-visibility witness or input grant is fabricated from a decode or map event.
+Exactly one role is mandatory: `--view-only` or `--control`. Neither, or both,
+refuses with `connection_role_required` before any I/O; the command never
+silently requests control or downgrades a control request to viewing. With
+`--view-only` the offered capability set contains only display selection,
+decoder startup, media attachment and media delivery. No input, clipboard,
+microphone, playback, file-transfer or semantic-access capability is requested.
+No UI mapping, visibility witness or input grant is fabricated from a decode or
+map event.
+
+### Request control (`--control`)
+
+```sh
+./target/debug/fr connect NODE_ID \
+  --control --experimental-native --display only
+```
+
+The host must run `frd run --input-agent PATH`; a host without it refuses with
+`host_control_unavailable`, never a silent view-only session. The connection
+offers the control role plus the input attachment, grant, clock and
+presented-state capabilities, and first *views* exactly as `--view-only` does.
+Passing `--control` is the local user's decision: once the window is mapped and
+shows an X11-submitted frame, the client confirms that window's coordinate
+mapping, reports the frame, and sends ONE control request when the session
+itself reports current view evidence. After the host's grant, it supplies the
+single layout (native pixels 1:1, or the `--fit` rectangle) that attaches X11
+input capture to this window. Keys (with repeat), absolute pointer and buttons
+are captured; text, scrolling, relative pointer, clipboard, audio and files are
+not.
+
+The visibility witness is stated, not overclaimed: a frame counts as visible
+when the presenter completed `SubmittedToCompositor` into the still-mapped
+window (unmapping stops the session). Occlusion by another local window is not
+detected, and `physical_visibility_proven` stays `false`.
+
+Control is requested at most once per invocation. A refused, expired or lost
+grant is never retried or reacquired: after a request, cleanup runs and the
+command does not reconnect, reporting that attempt's original outcome. A new
+grant needs a new `fr connect --control`. The completion record has
+`role: "control"`, `control_requested`, `control_granted`, and content-free
+counts of host input results (`input_results`, `input_submitted_to_os`); these
+are host-reported stages, not local proof of an effect.
 
 `--experimental-native` is also mandatory because the native transport remains
 unqualified. It is a development opt-in, not a change to any protocol, admission

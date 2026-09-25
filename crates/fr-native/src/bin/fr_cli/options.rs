@@ -85,6 +85,9 @@ pub struct Connection {
     pub x_display: Option<String>,
     pub attempts: u8,
     pub fit_window: Option<(u32, u32)>,
+    /// `--control`: request input control once, after fresh local evidence.
+    /// False only with the explicit `--view-only`; never a silent default.
+    pub control: bool,
 }
 /// Explicit policies only. `Only` refuses ambiguity; it is never "first" or an
 /// invented primary display. Both policies are reevaluated on each live catalog.
@@ -462,8 +465,8 @@ fn parse_robot(args: &[String]) -> Result<Options, Failure> {
 }
 
 /// Bounded argument grammar, no shell, URL, credential, arbitrary-command or
-/// remote-policy option. `connect` without explicit view-only refuses; it never
-/// silently substitutes viewing for the product's requested control behavior.
+/// remote-policy option. `connect` requires exactly one explicit role,
+/// `--view-only` or `--control`; it never silently substitutes one for the other.
 pub fn parse(args: &[String]) -> Result<Options, Failure> {
     if args.len() > 32
         || args
@@ -521,6 +524,7 @@ fn parse_command(
     let mut seen = BTreeSet::new();
     let (mut json, mut socket, mut by_name, mut view_only, mut experimental, mut ipv6) =
         (false, None, false, false, false, false);
+    let mut control = false;
     let (mut display, mut worker, mut roots, mut x_display) = (None, None, None, None);
     let (mut port, mut attempts) = (8443_u16, 5_u8);
     let mut fit_window = None;
@@ -535,6 +539,7 @@ fn parse_command(
             "--socket" => socket = Some(next_path(args, &mut index)?),
             "--by-name" if remote => by_name = true,
             "--view-only" if connect => view_only = true,
+            "--control" if connect => control = true,
             "--experimental-native" if remote => experimental = true,
             "--ipv6" if remote => ipv6 = true,
             "--display" if connect => {
@@ -561,10 +566,10 @@ fn parse_command(
         }
     }
     let command = if let Some(node) = node {
-        if connect && !view_only {
+        if connect && view_only == control {
             return Err(Failure::new(
-                "control_ui_unavailable",
-                "This client currently requires --view-only; no control is silently granted or requested.",
+                "connection_role_required",
+                "Choose exactly one of --view-only or --control; control is never silently requested or downgraded to viewing.",
                 2,
             ));
         }
@@ -598,6 +603,7 @@ fn parse_command(
                 x_display,
                 attempts,
                 fit_window,
+                control,
             })
         }
     } else if doctor {
@@ -622,15 +628,47 @@ mod tests {
     }
     #[test]
     fn refuses_implicit_control_or_unqualified_transport_before_any_io() {
-        assert_eq!(
-            options("connect n-host").err().unwrap().code,
-            "control_ui_unavailable"
-        );
-        assert_eq!(
-            options("connect n-host --view-only").err().unwrap().code,
-            "native_transport_unqualified"
-        );
-        assert!(options("connect n-host --view-only --experimental-native").is_err());
+        for implicit in ["connect n-host", "connect n-host --view-only --control"] {
+            assert_eq!(
+                options(implicit).err().unwrap().code,
+                "connection_role_required",
+                "{implicit}"
+            );
+        }
+        for role in ["--view-only", "--control"] {
+            assert_eq!(
+                options(&format!("connect n-host {role}"))
+                    .err()
+                    .unwrap()
+                    .code,
+                "native_transport_unqualified"
+            );
+            // A role and transport opt-in still need an explicit display policy.
+            assert!(options(&format!("connect n-host {role} --experimental-native")).is_err());
+        }
+    }
+    #[test]
+    fn control_is_an_explicit_connection_role_exclusive_with_view_only() {
+        let base = "n-host --experimental-native --worker /opt/fr/worker --display only";
+        for (role, control) in [("--control", true), ("--view-only", false)] {
+            let Command::Connect(c) = options(&format!("connect {base} {role}")).unwrap().command
+            else {
+                unreachable!("connection required");
+            };
+            assert_eq!(c.control, control, "{role}");
+        }
+        for refused in [
+            format!("connect {base} --control --control"),
+            "displays n-host --experimental-native --control".into(),
+            "doctor --control".into(),
+            "hosts --control".into(),
+        ] {
+            assert_eq!(
+                options(&refused).err().unwrap().code,
+                "invalid_arguments",
+                "{refused}"
+            );
+        }
     }
     #[test]
     fn parses_only_explicit_bounded_connection_settings() {
@@ -833,7 +871,7 @@ mod fit_tests {
         }
         assert_eq!(
             options("connect n-peer --fit 960x540").err().unwrap().code,
-            "control_ui_unavailable"
+            "connection_role_required"
         );
     }
     #[test]

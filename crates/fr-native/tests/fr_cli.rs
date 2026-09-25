@@ -84,6 +84,7 @@ fn help_is_usable_without_a_display_daemon_or_credentials() {
     assert!(
         help.contains("fr hosts")
             && help.contains("--view-only")
+            && help.contains("--control")
             && help.contains("--experimental-native")
     );
 }
@@ -92,10 +93,18 @@ fn argument_refusals_are_machine_readable_and_never_echo_secrets() {
     for (args, code) in [
         (
             &["connect", "n-private", "--json"][..],
-            "control_ui_unavailable",
+            "connection_role_required",
+        ),
+        (
+            &["connect", "n-private", "--view-only", "--control", "--json"],
+            "connection_role_required",
         ),
         (
             &["connect", "n-private", "--view-only", "--json"],
+            "native_transport_unqualified",
+        ),
+        (
+            &["connect", "n-private", "--control", "--json"],
             "native_transport_unqualified",
         ),
         (
@@ -426,7 +435,7 @@ fn display_picker_command_keeps_trust_and_view_only_checks_before_native_work() 
     assert_eq!(output.status.code(), Some(2));
     json(
         &output,
-        "assert x['error']['code']=='control_ui_unavailable'",
+        "assert x['error']['code']=='connection_role_required'",
     );
 }
 
