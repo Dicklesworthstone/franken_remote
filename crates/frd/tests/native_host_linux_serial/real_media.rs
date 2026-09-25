@@ -22,7 +22,7 @@ const CHANGED: (i32, i32, i32) = (0xb4, 0x5a, 0x31);
 const TOLERANCE: i32 = 24;
 
 /// A binary from the same cargo profile directory as this test executable.
-fn sibling(name: &str) -> PathBuf {
+pub(super) fn sibling(name: &str) -> PathBuf {
     std::env::current_exe()
         .unwrap()
         .ancestors()
@@ -30,17 +30,17 @@ fn sibling(name: &str) -> PathBuf {
         .find(|path| path.is_file())
         .unwrap_or_else(|| {
             panic!(
-                "build {name} first: cargo build -p fr-native --features linux-desktop,linux-displays --bin fr --bin fr-media-worker --locked"
+                "build {name} first: cargo build -p fr-native --features linux-desktop,linux-displays,linux-input --bin fr --bin fr-media-worker --bin fr-input-agent --locked (and cargo build -p frd --bin frd for the control e2e)"
             )
         })
 }
 
-struct Xvfb {
+pub(super) struct Xvfb {
     child: Child,
-    display: String,
+    pub(super) display: String,
 }
 impl Xvfb {
-    fn start(size: &str) -> Self {
+    pub(super) fn start(size: &str) -> Self {
         let mut child = Command::new("/usr/bin/Xvfb")
             .args([
                 "-displayfd",
@@ -123,7 +123,7 @@ for i in range(n.value):
 }
 
 /// Ask the window to close as a window manager would (`WM_DELETE_WINDOW`).
-fn close_window(display: &str, window: u64) {
+pub(super) fn close_window(display: &str, window: u64) {
     const CLOSE: &str = r#"
 import ctypes as c, sys
 x = c.CDLL("libX11.so.6")

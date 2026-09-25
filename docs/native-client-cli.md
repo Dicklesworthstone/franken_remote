@@ -195,6 +195,29 @@ cargo test -p fr-native --features linux-desktop --test fr_cli --locked -- --tes
 cargo test -p fr-native --features linux-desktop --test viewer_window_x11 --locked -- --test-threads=1
 ```
 
+`--control` end to end is exercised by the namespace suite, not by these commands.
+Build the real binaries and the test executable, then pass that executable to
+`scripts/test_linux_serial_lifecycle.sh` (set `FR_NS_SUDO=1` where unprivileged
+user namespaces are restricted). It runs the ignored namespace suite serially,
+including the `real_control::` tests of `crates/frd/tests/native_host_linux_serial.rs`:
+
+```sh
+cargo build -p fr-native --features linux-desktop,linux-displays,linux-input \
+  --bin fr --bin fr-media-worker --bin fr-input-agent --locked
+cargo build -p frd --bin frd --locked
+cargo test -p frd --test native_host_linux_serial --no-run --locked
+```
+
+They start two Xvfb servers, the production `frd run` composition with the
+real `fr-input-agent`, and the shipped `fr connect --control`. A python/Xlib
+harness on the viewer display focuses the new window (as a window manager
+would) and types and clicks with XTest; an independent python/Xlib client on the
+host display observes the pointer position and the delivered Key/Button events.
+Planted negatives freeze the client past its lease, click the host indicator
+with XTest, and connect to a host without an input agent. The tailnet
+`LocalAPI`, CA and firewall are namespace fixtures; this is not live-tailnet,
+physical-device or hardware evidence.
+
 The CLI tests execute real child processes, parse output independently with
 Python's JSON parser, and check refusals, output errors, trust-store bounds and
 SIGINT during an actual stalled Unix/HTTP lookup. Display inspection process
