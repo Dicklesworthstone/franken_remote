@@ -1,0 +1,6 @@
+[env]
+# Many tests drive real UDP/TLS sessions with 1-3 s leases on the wall clock.
+# One test thread per core on a large, busy host (64 threads here) makes ~90 of
+# frd's unit tests miss those deadlines, while 4 threads matches the CI runners.
+# An explicit RUST_TEST_THREADS in the environment still takes precedence.
+RUST_TEST_THREADS = { value = "4", force = false }
