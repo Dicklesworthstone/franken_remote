@@ -26,7 +26,7 @@ use std::{
 };
 
 /// Shared python3/ctypes Xlib prelude for both harnesses.
-const PRELUDE: &str = r#"
+pub(super) const PRELUDE: &str = r#"
 import ctypes as c, os, select, sys, time
 x = c.CDLL("libX11.so.6")
 t = c.CDLL("libXtst.so.6")
@@ -211,14 +211,14 @@ serve(event, command)
 
 /// One persistent independent Xlib client with a line protocol. `EV` and
 /// `FOCUSED` lines are asynchronous notices; everything else answers a command.
-struct Harness {
+pub(super) struct Harness {
     child: Child,
     stdin: ChildStdin,
     lines: mpsc::Receiver<String>,
     notices: Vec<String>,
 }
 impl Harness {
-    fn start(body: &str, display: &str, ready: &str) -> Self {
+    pub(super) fn start(body: &str, display: &str, ready: &str) -> Self {
         let mut child = Command::new("python3")
             .args(["-u", "-c", &format!("{PRELUDE}{body}"), display])
             .stdin(Stdio::piped())
@@ -262,7 +262,7 @@ impl Harness {
             }
         }
     }
-    fn ask(&mut self, command: &str) -> Vec<String> {
+    pub(super) fn ask(&mut self, command: &str) -> Vec<String> {
         writeln!(self.stdin, "{command}").unwrap();
         self.stdin.flush().unwrap();
         self.answer(Duration::from_secs(20))
@@ -307,7 +307,7 @@ fn host_pointer(observer: &mut Harness) -> (Point, u32) {
     )
 }
 /// The executor's mapped indicator on the host: (window, x, y).
-fn indicator(observer: &mut Harness) -> Option<(u64, i32, i32)> {
+pub(super) fn indicator(observer: &mut Harness) -> Option<(u64, i32, i32)> {
     let answer = observer.ask("indicator");
     assert_eq!(answer[0], "IND", "{answer:?}");
     (answer[1] != "none").then(|| {
@@ -333,7 +333,7 @@ fn host_events(observer: &mut Harness) -> Vec<(u32, u32, Point, bool)> {
         })
         .collect()
 }
-fn eventually(limit: Duration, mut condition: impl FnMut() -> bool) -> bool {
+pub(super) fn eventually(limit: Duration, mut condition: impl FnMut() -> bool) -> bool {
     let until = Instant::now() + limit;
     loop {
         if condition() {
@@ -345,7 +345,7 @@ fn eventually(limit: Duration, mut condition: impl FnMut() -> bool) -> bool {
         thread::sleep(Duration::from_millis(50));
     }
 }
-fn signal(child: &Child, name: &str) {
+pub(super) fn signal(child: &Child, name: &str) {
     assert!(
         Command::new("kill")
             .args([name, &child.id().to_string()])
@@ -362,10 +362,18 @@ fn linked(image: &Path) -> String {
 }
 
 /// The shipped client with an explicit role on the given local display.
-fn connect(fr: &Path, api: &Path, roots: &Path, display: &str, worker: &Path) -> Child {
+fn connect(
+    fr: &Path,
+    api: &Path,
+    roots: &Path,
+    display: &str,
+    worker: &Path,
+    clipboard: bool,
+) -> Child {
     let port = address().port().to_string();
     Command::new(fr)
         .args(["connect", "n-host", "--control", "--experimental-native"])
+        .args(clipboard.then_some("--clipboard"))
         .args(["--display", "only", "--attempts", "1", "--json"])
         .arg("--socket")
         .arg(api)
@@ -384,7 +392,7 @@ fn connect(fr: &Path, api: &Path, roots: &Path, display: &str, worker: &Path) ->
 }
 
 /// `frd run` (in process, the production composition) on the host display.
-struct Daemon {
+pub(super) struct Daemon {
     events: Arc<Mutex<Vec<Event>>>,
     stop: Arc<StopHandle>,
     thread: Option<JoinHandle<Result<(), host_run::Error>>>,
@@ -392,7 +400,7 @@ struct Daemon {
     _tools: Tools,
 }
 impl Daemon {
-    fn start(display: &str, worker: &Path, input_agent: Option<PathBuf>) -> Self {
+    fn start(display: &str, worker: &Path, input_agent: Option<PathBuf>, clipboard: bool) -> Self {
         let api = fixture::Api::new();
         let tools = Tools::new();
         let options = Options {
@@ -410,7 +418,7 @@ impl Daemon {
             once: false,
             handle_signals: false,
             input_agent,
-            clipboard: false,
+            clipboard,
         };
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = events.clone();
@@ -435,11 +443,11 @@ impl Daemon {
         );
         daemon
     }
-    fn dump(&self) -> String {
+    pub(super) fn dump(&self) -> String {
         format!("{:?}", self.events.lock().unwrap())
     }
     /// Stop, then require a clean, typed end: no cleanup failure, `Stopped`.
-    fn finish(mut self) {
+    pub(super) fn finish(mut self) {
         self.stop.request();
         let result = self.thread.take().unwrap().join().unwrap();
         assert_eq!(result, Ok(()), "{}", self.dump());
@@ -459,18 +467,22 @@ impl Daemon {
 /// harnesses, `frd run --input-agent`, the shipped client, the host pointer
 /// following viewer motion, and the executor's indicator shown on the host.
 /// Fields drop in order: the X clients (harnesses) end before their servers.
-struct Controlled {
-    observer: Harness,
+pub(super) struct Controlled {
+    pub(super) observer: Harness,
     driver: Harness,
-    daemon: Daemon,
-    client: Child,
-    window: (u64, Point),
+    pub(super) daemon: Daemon,
+    pub(super) client: Child,
+    pub(super) window: (u64, Point),
     _client_api: ClientApi,
-    viewer: Xvfb,
-    _host: Xvfb,
+    pub(super) viewer: Xvfb,
+    pub(super) host: Xvfb,
 }
 impl Controlled {
     fn start() -> Self {
+        Self::start_with(false, false)
+    }
+    /// `frd run --input-agent [--clipboard]` and `fr connect --control [--clipboard]`.
+    pub(super) fn start_with(host_clipboard: bool, client_clipboard: bool) -> Self {
         let (fr, worker, agent) = (
             sibling("fr"),
             sibling("fr-media-worker"),
@@ -480,12 +492,19 @@ impl Controlled {
         let viewer = Xvfb::start("800x600x24");
         let mut observer = Harness::start(HOST_OBSERVER, &host.display, "READY");
         let driver = Harness::start(VIEWER_DRIVER, &viewer.display, "WATCHING");
-        let daemon = Daemon::start(&host.display, &worker, Some(agent));
+        let daemon = Daemon::start(&host.display, &worker, Some(agent), host_clipboard);
         // No viewer, no lease: the executor (and its indicator) is per lease.
         assert_eq!(indicator(&mut observer), None);
         let client_api = ClientApi::new();
         let roots = fixture::pki().join("ca.pem");
-        let client = connect(&fr, &client_api.path, &roots, &viewer.display, &worker);
+        let client = connect(
+            &fr,
+            &client_api.path,
+            &roots,
+            &viewer.display,
+            &worker,
+            client_clipboard,
+        );
         let mut session = Self {
             observer,
             driver,
@@ -494,7 +513,7 @@ impl Controlled {
             window: (0, (0, 0)),
             _client_api: client_api,
             viewer,
-            _host: host,
+            host,
         };
         session.window = session.viewer_window();
         session.await_control();
@@ -582,7 +601,7 @@ impl Controlled {
         );
     }
     /// Viewer motion reaches exactly this host point (1:1 mapping, origin 0,0).
-    fn pointer_follows(&mut self, local: Point, limit: Duration) -> bool {
+    pub(super) fn pointer_follows(&mut self, local: Point, limit: Duration) -> bool {
         let observer = &mut self.observer;
         let driver = &mut self.driver;
         let (_, (wx, wy)) = self.window;
@@ -765,10 +784,10 @@ fn a_stopped_controller_loses_its_lease_and_later_input_has_no_host_effect() {
 fn a_host_without_an_input_agent_refuses_fr_connect_control_by_type() {
     let (fr, worker) = (sibling("fr"), sibling("fr-media-worker"));
     let host = Xvfb::start("640x480x24");
-    let daemon = Daemon::start(&host.display, &worker, None);
+    let daemon = Daemon::start(&host.display, &worker, None, false);
     let client_api = ClientApi::new();
     let roots = fixture::pki().join("ca.pem");
-    let client = connect(&fr, &client_api.path, &roots, &host.display, &worker);
+    let client = connect(&fr, &client_api.path, &roots, &host.display, &worker, false);
     let output = wait_for(client, Duration::from_secs(60));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let report: serde_json::Value = serde_json::from_str(stdout.trim())

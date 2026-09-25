@@ -130,8 +130,8 @@ mapping, reports the frame, and sends ONE control request when the session
 itself reports current view evidence. After the host's grant, it supplies the
 single layout (native pixels 1:1, or the `--fit` rectangle) that attaches X11
 input capture to this window. Keys (with repeat), absolute pointer and buttons
-are captured; text, scrolling, relative pointer, clipboard, audio and files are
-not.
+are captured; text, scrolling, relative pointer, audio and files are not. The
+clipboard is a separate opt-in, described next.
 
 The visibility witness is stated, not overclaimed: a frame counts as visible
 when the presenter completed `SubmittedToCompositor` into the still-mapped
@@ -148,6 +148,55 @@ are host-reported stages, not local proof of an effect.
 
 The controlled share does not forward the remote cursor yet: while
 controlling, the only pointer shown over the viewer window is the local one.
+
+### Clipboard (`--clipboard`, with `--control`)
+
+```sh
+./target/debug/fr connect NODE_ID \
+  --control --clipboard --experimental-native --display only
+```
+
+Build `fr` with `--features linux-clipboard` (otherwise `--clipboard` refuses
+with `clipboard_unavailable` before any I/O); `--clipboard` without `--control`
+refuses with `clipboard_requires_control`. The connection additionally offers
+the three clipboard capabilities, all OPTIONAL: a host that does not offer them
+still grants control. The host opts in separately with `frd run --input-agent
+PATH --clipboard` (`--clipboard` alone refuses with
+`clipboard_requires_input_agent`).
+
+The clipboard follows the controller's input lease. Nothing opens before the
+grant: the host offers the clipboard lane afterwards, the transport attaches it
+only under the active input attachment, and both sides exchange readiness
+before either opens its X11 CLIPBOARD owner. Revocation, expiry or the end of
+the session fences it with the lease; a later copy crosses neither way. Only
+complete UTF-8 items of at most 1 MiB travel, on the bounded
+begin/chunk/commit records, and are published only after whole-item validation
+and a fresh authority check. Setting a clipboard is not a paste: no keystroke
+is injected. Echoes of an item back to its sender are suppressed by provenance,
+never by comparing text.
+
+On the client the X11 owner runs on a worker thread of `fr` (a separate XCB
+connection to `--x-display`). On the host, `frd` never loads X11: the owner is a
+per-lane child of the same `fr-input-agent` image started with `--clipboard`,
+with a cleared environment, bounded frames and payloads checked before
+allocation, and the lease's publication deadline re-checked in the child
+immediately before it takes selection ownership. A hung or malformed child is
+killed and retires the clipboard only; control continues.
+
+The completion record adds content-free fields: `clipboard_requested`,
+`clipboard_active` (the lane completed bilateral readiness and this side's
+clipboard worker started; it is not proof that either native owner opened),
+`clipboard_received` (host items committed to this display's CLIPBOARD) and
+`clipboard_absence`: `null` when active, otherwise a typed code such as
+`host_clipboard_unavailable` (the host did not enable it),
+`host_clipboard_refused`, `local_clipboard_unavailable`, `clipboard_not_started`
+(for example, control never granted) or `not_requested`. Clipboard text never
+appears in output, errors or logs.
+
+Evidence is the namespace e2e with real X11 selections on two Xvfb displays
+(`crates/frd/tests/native_host_linux_serial/real_clipboard.rs`), described
+below. It is not a desktop clipboard manager (no history, no PRIMARY), not
+Wayland, not images, and not a live tailnet.
 
 `--experimental-native` is also mandatory because the native transport remains
 unqualified. It is a development opt-in, not a change to any protocol, admission
@@ -211,14 +260,15 @@ cargo test -p fr-native --features linux-desktop --test fr_cli --locked -- --tes
 cargo test -p fr-native --features linux-desktop --test viewer_window_x11 --locked -- --test-threads=1
 ```
 
-`--control` end to end is exercised by the namespace suite, not by these commands.
+`--control` and `--clipboard` end to end are exercised by the namespace suite, not by these commands.
 Build the real binaries and the test executable, then pass that executable to
 `scripts/test_linux_serial_lifecycle.sh` (set `FR_NS_SUDO=1` where unprivileged
 user namespaces are restricted). It runs the ignored namespace suite serially,
-including the `real_control::` tests of `crates/frd/tests/native_host_linux_serial.rs`:
+including the `real_control::` and `real_clipboard::` tests of
+`crates/frd/tests/native_host_linux_serial.rs`:
 
 ```sh
-cargo build -p fr-native --features linux-desktop,linux-displays,linux-input \
+cargo build -p fr-native --features linux-desktop,linux-displays,linux-input,linux-clipboard \
   --bin fr --bin fr-media-worker --bin fr-input-agent --locked
 cargo build -p frd --bin frd --locked
 cargo test -p frd --test native_host_linux_serial --no-run --locked
@@ -230,7 +280,13 @@ harness on the viewer display focuses the new window (as a window manager
 would) and types and clicks with XTest; an independent python/Xlib client on the
 host display observes the pointer position and the delivered Key/Button events.
 Planted negatives freeze the client past its lease, click the host indicator
-with XTest, and connect to a host without an input agent. The tailnet
+with XTest, and connect to a host without an input agent. The `real_clipboard::`
+tests add one independent python/Xlib application per display that copies
+(owns CLIPBOARD with a real server timestamp) or pastes (`XConvertSelection`
+of `UTF8_STRING`): a unique non-ASCII text copied on the viewer is pasted on
+the host, then the reverse; a host without `--clipboard` keeps control and
+reports `host_clipboard_unavailable`; and a client frozen past its lease loses
+the clipboard child, after which copies cross neither way. The tailnet
 `LocalAPI`, CA and firewall are namespace fixtures; this is not live-tailnet,
 physical-device or hardware evidence.
 
