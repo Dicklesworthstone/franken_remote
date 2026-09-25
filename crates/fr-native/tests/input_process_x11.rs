@@ -22,7 +22,7 @@ use fr_core::{
 use fr_native::input::{X11Pointer, emergency};
 use fr_wire::input::{InputDelivery, InputDirection, MAX_INPUT_RECORD_BYTES, encode_input};
 use frd::{
-    input_agent::{Agent, Driver, Error as AgentError, Reply, Route, Seat, Shutdown},
+    input_agent::{Agent, Driver, Error as AgentError, Phase, Reply, Route, Seat, Shutdown},
     input_process::{Fence, ProcessLaunch, RemoteSink, factory},
     input_watchdog::{StopReason, host_now},
 };
@@ -752,4 +752,373 @@ fn emergency_path_releases_held_input_on_panic_xlib_error_and_io_error() {
         assert!(!o.down(a), "{fault}: key left held");
         assert_eq!(o.pointer().2, 0, "{fault}: button left held");
     }
+}
+
+// ---- The executor's remote-control indicator (plan 15.2; bead
+// fr-rc-sec-approval-synthetic-input-t2r) -----------------------------------
+const INDICATOR: &str = "FrankenRemote - Stop remote control";
+#[repr(C)]
+struct WindowAttributes {
+    x: c_int,
+    y: c_int,
+    width: c_int,
+    height: c_int,
+    border_width: c_int,
+    depth: c_int,
+    visual: *mut c_void,
+    root: c_ulong,
+    class: c_int,
+    bit_gravity: c_int,
+    win_gravity: c_int,
+    backing_store: c_int,
+    backing_planes: c_ulong,
+    backing_pixel: c_ulong,
+    save_under: c_int,
+    colormap: c_ulong,
+    map_installed: c_int,
+    map_state: c_int,
+    all_event_masks: c_long,
+    your_event_mask: c_long,
+    do_not_propagate_mask: c_long,
+    override_redirect: c_int,
+    screen: *mut c_void,
+}
+#[repr(C)]
+struct DeviceInfo {
+    id: c_ulong,
+    kind: c_ulong,
+    name: *const c_char,
+    num_classes: c_int,
+    usage: c_int,
+    classes: *mut c_void,
+}
+#[link(name = "X11")]
+unsafe extern "C" {
+    fn XQueryTree(
+        d: *mut c_void,
+        w: c_ulong,
+        root: *mut c_ulong,
+        parent: *mut c_ulong,
+        children: *mut *mut c_ulong,
+        n: *mut c_uint,
+    ) -> c_int;
+    fn XFetchName(d: *mut c_void, w: c_ulong, name: *mut *mut c_char) -> c_int;
+    fn XFree(data: *mut c_void) -> c_int;
+    fn XGetWindowAttributes(d: *mut c_void, w: c_ulong, a: *mut WindowAttributes) -> c_int;
+    fn XSendEvent(
+        d: *mut c_void,
+        w: c_ulong,
+        propagate: c_int,
+        mask: c_long,
+        event: *mut Event,
+    ) -> c_int;
+}
+#[link(name = "libXtst.so.6", kind = "dylib", modifiers = "+verbatim")]
+unsafe extern "C" {
+    fn XTestFakeMotionEvent(
+        d: *mut c_void,
+        screen: c_int,
+        x: c_int,
+        y: c_int,
+        delay: c_ulong,
+    ) -> c_int;
+    fn XTestFakeDeviceButtonEvent(
+        d: *mut c_void,
+        device: *mut c_void,
+        button: c_uint,
+        pressed: c_int,
+        axes: *const c_int,
+        count: c_int,
+        delay: c_ulong,
+    ) -> c_int;
+    fn XTestFakeDeviceKeyEvent(
+        d: *mut c_void,
+        device: *mut c_void,
+        code: c_uint,
+        pressed: c_int,
+        axes: *const c_int,
+        count: c_int,
+        delay: c_ulong,
+    ) -> c_int;
+}
+#[link(name = "libXi.so.6", kind = "dylib", modifiers = "+verbatim")]
+unsafe extern "C" {
+    fn XListInputDevices(d: *mut c_void, count: *mut c_int) -> *mut DeviceInfo;
+    fn XFreeDeviceList(list: *mut DeviceInfo);
+    fn XOpenDevice(d: *mut c_void, id: c_ulong) -> *mut c_void;
+    fn XCloseDevice(d: *mut c_void, device: *mut c_void) -> c_int;
+}
+impl Observer {
+    /// The executor's mapped indicator (top-level window, by its fixed title).
+    fn indicator(&self) -> Option<(c_ulong, i32, i32)> {
+        let (mut root, mut parent, mut children, mut n) = (0, 0, std::ptr::null_mut(), 0);
+        // SAFETY: live connection; XQueryTree/XFetchName outputs are freed here.
+        unsafe {
+            XSync(self.d, 0);
+            if XQueryTree(
+                self.d,
+                self.root,
+                &raw mut root,
+                &raw mut parent,
+                &raw mut children,
+                &raw mut n,
+            ) == 0
+            {
+                return None;
+            }
+            let windows = if children.is_null() {
+                &[][..]
+            } else {
+                std::slice::from_raw_parts(children, n as usize)
+            };
+            let mut found = None;
+            for &window in windows {
+                let mut name = std::ptr::null_mut();
+                if XFetchName(self.d, window, &raw mut name) != 0 && !name.is_null() {
+                    let title = std::ffi::CStr::from_ptr(name).to_bytes() == INDICATOR.as_bytes();
+                    XFree(name.cast());
+                    let mut a: WindowAttributes = std::mem::zeroed();
+                    if title
+                        && XGetWindowAttributes(self.d, window, &raw mut a) != 0
+                        && a.map_state == 2
+                    {
+                        found = Some((window, a.x, a.y));
+                    }
+                }
+            }
+            if !children.is_null() {
+                XFree(children.cast());
+            }
+            found
+        }
+    }
+    fn xtest_click(&self, x: i32, y: i32) {
+        // SAFETY: private server; core XTest input exactly like the controller's.
+        unsafe {
+            XTestFakeMotionEvent(self.d, 0, x, y, 0);
+            XTestFakeButtonEvent(self.d, 1, 1, 0);
+            XTestFakeButtonEvent(self.d, 1, 0, 0);
+            XSync(self.d, 0);
+        }
+    }
+    fn focus(&self, window: c_ulong) {
+        // SAFETY: private server; RevertToParent focus on an existing window.
+        unsafe {
+            XSetInputFocus(self.d, window, 2, 0);
+            XSync(self.d, 0);
+        }
+    }
+    fn xtest_key(&self, code: u8) {
+        // SAFETY: private server; core XTest key press/release.
+        unsafe {
+            XTestFakeKeyEvent(self.d, c_uint::from(code), 1, 0);
+            XTestFakeKeyEvent(self.d, c_uint::from(code), 0, 0);
+            XSync(self.d, 0);
+        }
+    }
+    /// A legacy `SendEvent` `ButtonPress` aimed at the indicator's creator.
+    fn send_event_click(&self, window: c_ulong) {
+        // SAFETY: XSendEvent copies one fully initialized padded XEvent.
+        unsafe {
+            let mut event = Event { padding: [0; 24] };
+            event.input = InputEventRecord {
+                kind: 4,
+                serial: 0,
+                send_event: 1,
+                display: self.d,
+                window,
+                root: self.root,
+                subwindow: 0,
+                time: 0,
+                x: 50,
+                y: 95,
+                x_root: 50,
+                y_root: 95,
+                state: 0,
+                detail: 1,
+                same_screen: 1,
+            };
+            XSendEvent(self.d, window, 0, 0, &raw mut event);
+            XSync(self.d, 0);
+        }
+    }
+    /// Xvfb has no physical devices. `XTest`'s DEVICE request attributes this
+    /// event to the named non-XTEST slave ("Xvfb mouse"/"Xvfb keyboard"),
+    /// standing in for local hardware: it exercises the source-device filter,
+    /// not a physical device.
+    fn device(&self, name: &str) -> *mut c_void {
+        let mut count = 0;
+        // SAFETY: the device list is read, then freed; the device is closed by
+        // the caller through `close_device`.
+        unsafe {
+            let list = XListInputDevices(self.d, &raw mut count);
+            assert!(!list.is_null());
+            let devices = std::slice::from_raw_parts(list, usize::try_from(count).unwrap());
+            let id = devices
+                .iter()
+                .find(|d| std::ffi::CStr::from_ptr(d.name).to_bytes() == name.as_bytes())
+                .map(|d| d.id);
+            XFreeDeviceList(list);
+            let device = XOpenDevice(self.d, id.expect("Xvfb provides its core slave devices"));
+            assert!(!device.is_null());
+            device
+        }
+    }
+    fn close_device(&self, device: *mut c_void) {
+        // SAFETY: opened by `device` on this connection, closed once.
+        unsafe {
+            XCloseDevice(self.d, device);
+        }
+    }
+    fn device_click(&self, x: i32, y: i32) {
+        let mouse = self.device("Xvfb mouse");
+        // SAFETY: positioned by core motion, then a press/release attributed
+        // to the non-XTEST mouse slave; no axes.
+        unsafe {
+            XTestFakeMotionEvent(self.d, 0, x, y, 0);
+            XTestFakeDeviceButtonEvent(self.d, mouse, 1, 1, std::ptr::null(), 0, 0);
+            XTestFakeDeviceButtonEvent(self.d, mouse, 1, 0, std::ptr::null(), 0, 0);
+            XSync(self.d, 0);
+        }
+        self.close_device(mouse);
+    }
+    fn device_key(&self, code: u8) {
+        let keyboard = self.device("Xvfb keyboard");
+        // SAFETY: as above, for the non-XTEST keyboard slave.
+        unsafe {
+            XTestFakeDeviceKeyEvent(
+                self.d,
+                keyboard,
+                c_uint::from(code),
+                1,
+                std::ptr::null(),
+                0,
+                0,
+            );
+            XTestFakeDeviceKeyEvent(
+                self.d,
+                keyboard,
+                c_uint::from(code),
+                0,
+                std::ptr::null(),
+                0,
+                0,
+            );
+            XSync(self.d, 0);
+        }
+        self.close_device(keyboard);
+    }
+}
+fn still_controlling(agent: &mut Agent, o: &Observer, x: i32, sequence: u64) {
+    thread::sleep(Duration::from_millis(250));
+    assert!(
+        !agent.control().is_stopped(),
+        "synthetic input revoked control"
+    );
+    let moved = send(
+        agent,
+        sequence,
+        InputEvent::Pointer {
+            position: DesktopPoint { x, y: 300 },
+        },
+    );
+    assert_eq!(moved.outcome, InputOutcome::SubmittedToOs);
+    eventually("control still live", || o.pointer() == (x, 300, 0));
+}
+
+#[test]
+fn indicator_is_shown_for_the_lease_and_only_a_real_device_click_stops_control() {
+    let server = Server::start();
+    let o = Observer::new(&server.display);
+    let escape = o.code(0xff1b);
+    let seat = Seat::default();
+    let (mut agent, running) = start(&server, &seat, 3_000_000);
+    // The native owner runs only after the child's Ready, and Ready is only
+    // sent once the indicator is mapped.
+    eventually("executor ready", || agent.status().phase == Phase::Running);
+    let (window, x, y) = o.indicator().expect("indicator mapped before any input");
+    let (stop_x, stop_y) = (x + 50, y + 95);
+    // Planted negatives: the controller's own XTest click and Esc on the
+    // indicator, and a legacy SendEvent click, do NOT revoke.
+    o.xtest_click(stop_x, stop_y);
+    still_controlling(&mut agent, &o, 300, 0);
+    o.focus(window);
+    o.xtest_key(escape);
+    still_controlling(&mut agent, &o, 310, 1);
+    o.send_event_click(window);
+    still_controlling(&mut agent, &o, 320, 2);
+    assert!(o.indicator().is_some(), "shown for the whole lease");
+    // A click from a non-XTEST source device is the local user's revoke.
+    o.device_click(stop_x, stop_y);
+    let shutdown = running.finish();
+    assert_eq!(shutdown.reason, StopReason::LocalRevoke);
+    assert!(shutdown.handoff_safe(), "{shutdown:?}");
+    assert!(!seat.is_occupied());
+    assert_eq!(
+        agent.submit(
+            &bytes(
+                3,
+                InputEvent::Pointer {
+                    position: DesktopPoint { x: 330, y: 300 },
+                },
+            ),
+            InputDelivery::Reliable,
+        ),
+        Err(AgentError::Stopped)
+    );
+    eventually("indicator removed with its lease", || {
+        o.indicator().is_none()
+    });
+}
+
+#[test]
+fn a_real_device_accelerator_on_the_indicator_revokes_and_releases_held_input() {
+    let server = Server::start();
+    let o = Observer::new(&server.display);
+    let escape = o.code(0xff1b);
+    let seat = Seat::default();
+    let (mut agent, running) = start(&server, &seat, 3_000_000);
+    eventually("executor ready", || agent.status().phase == Phase::Running);
+    let (window, _, _) = o.indicator().expect("indicator mapped");
+    send(&mut agent, 0, button(true, 400, 300));
+    eventually("button held", || o.pointer() == (400, 300, BUTTON1));
+    o.focus(window);
+    o.device_key(escape);
+    // Local revoke fences first, then the held button is released.
+    eventually("revoked button released", || o.pointer() == (400, 300, 0));
+    let shutdown = running.finish();
+    assert_eq!(shutdown.reason, StopReason::LocalRevoke);
+    assert!(shutdown.handoff_safe(), "{shutdown:?}");
+    assert!(!seat.is_occupied());
+}
+
+#[test]
+fn local_indicator_failures_always_revoke_their_owner() {
+    use fr_native::sharing_indicator::{Error, Status, StopReason as IndicatorStop, start_with};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = || {
+        let calls = calls.clone();
+        move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+        }
+    };
+    for display in ["", "host:0", ":0.1.2", ":0\0"] {
+        assert_eq!(
+            start_with(display, counted()).err(),
+            Some(Error::InvalidDisplay)
+        );
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 4, "refusal revokes first");
+    // No X server behind this display: the UI thread fails closed.
+    let mut missing = start_with(":59998", counted()).unwrap();
+    eventually("native failure", || missing.finish().is_some());
+    assert_eq!(
+        missing.control().status(),
+        Status::Stopped(IndicatorStop::NativeFailure)
+    );
+    assert!(calls.load(Ordering::SeqCst) >= 5);
 }

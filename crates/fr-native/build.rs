@@ -205,7 +205,9 @@ fn build_clipboard() {
 
 fn build_indicator() {
     println!("cargo:rerun-if-changed=src/sharing_indicator.c");
-    if env::var_os("CARGO_FEATURE_LINUX_SESSION_UI").is_none()
+    // The input executor (linux-input) shows the remote-control indicator.
+    if (env::var_os("CARGO_FEATURE_LINUX_SESSION_UI").is_none()
+        && env::var_os("CARGO_FEATURE_LINUX_INPUT").is_none())
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux")
     {
         return;

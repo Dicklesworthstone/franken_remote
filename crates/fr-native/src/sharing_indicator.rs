@@ -1,9 +1,13 @@
-//! A real X11 sharing indicator backed by the ORIGINAL observation owner.
+//! Real X11 indicators, each backed by the ORIGINAL owner it can revoke: the
+//! host's observation owner (`SharingIndicator`), or a per-lease input
+//! executor's local revoke callback (`start_with` / `LocalIndicator`).
 //!
 //! This is a revocation-only surface, never an approval mechanism. The selected
 //! desktop user, X server and window manager remain trusted. A mapped X11 window
 //! is not proof of physical visibility under a compositor. No input grab, global
-//! hotkey, arbitrary callback, clipboard text or peer-supplied label is installed.
+//! hotkey, clipboard text or peer-supplied label is installed; the only callback
+//! is the local owner's own nonblocking revoke.
+#[cfg(feature = "linux-session-ui")]
 use frd::media::ObservationControl;
 use std::{
     ffi::{CString, c_char, c_int, c_void},
@@ -22,7 +26,9 @@ const TURN: Duration = Duration::from_millis(10);
 const MAP_TIMEOUT: Duration = Duration::from_secs(2);
 
 unsafe extern "C" {
+    #[cfg(feature = "linux-session-ui")]
     fn fr_indicator_open(display: *const c_char, window: *mut u32) -> *mut c_void;
+    fn fr_indicator_open_control(display: *const c_char, window: *mut u32) -> *mut c_void;
     fn fr_indicator_close(handle: *mut c_void);
     fn fr_indicator_next(handle: *mut c_void, kind: *mut u32) -> c_int;
     fn fr_indicator_draw(handle: *mut c_void) -> c_int;
@@ -69,8 +75,42 @@ pub enum Error {
     /// The original indicator/source lifetime stopped while awaiting mapping.
     Stopped(StopReason),
 }
+/// The one owner an indicator revokes, FIRST, on every stop.
+enum Owner {
+    #[cfg(feature = "linux-session-ui")]
+    Observation(ObservationControl),
+    /// A local executor's revoke. It must be idempotent, nonblocking and must
+    /// not call back into the indicator.
+    Local(Box<dyn Fn() + Send + Sync>),
+}
+impl Owner {
+    fn revoke(&self) {
+        match self {
+            #[cfg(feature = "linux-session-ui")]
+            Self::Observation(observation) => observation.revoke(),
+            Self::Local(revoke) => revoke(),
+        }
+    }
+    fn live(&self) -> bool {
+        match self {
+            #[cfg(feature = "linux-session-ui")]
+            Self::Observation(observation) => observation.check().is_ok(),
+            // The executor's lease is enforced by its broker, not here.
+            Self::Local(_) => true,
+        }
+    }
+}
+#[derive(Clone, Copy)]
+enum Mode {
+    /// Host observation indicator (core X11 input, unchanged behavior).
+    #[cfg(feature = "linux-session-ui")]
+    Sharing,
+    /// Remote-control indicator: only `XInput2` events from non-XTEST source
+    /// devices can stop it; the remote controller injects through `XTest`.
+    Control,
+}
 struct Shared {
-    observation: ObservationControl,
+    owner: Owner,
     state: AtomicU8,
     window: AtomicU32,
 }
@@ -78,7 +118,7 @@ impl Shared {
     fn stop(&self, reason: StopReason) {
         // Fence the actual session/input owner FIRST, without a native/UI lock.
         // Status becoming terminal is never proof that native cleanup finished.
-        self.observation.revoke();
+        self.owner.revoke();
         let _ = self
             .state
             .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
@@ -89,7 +129,7 @@ impl Shared {
         if self.state.load(Ordering::Acquire) >= 2 {
             return false;
         }
-        if self.observation.check().is_err() {
+        if !self.owner.live() {
             self.stop(StopReason::AuthorityEnded);
             return false;
         }
@@ -127,14 +167,64 @@ impl fmt::Debug for IndicatorControl {
             .finish()
     }
 }
+/// Spawn the dedicated UI thread for one owner. Every failure revokes it.
+fn launch(
+    display: &str,
+    owner: Owner,
+    mode: Mode,
+) -> Result<(IndicatorControl, JoinHandle<()>), Error> {
+    if !local_display(display) {
+        owner.revoke();
+        return Err(Error::InvalidDisplay);
+    }
+    let Ok(display) = CString::new(display) else {
+        owner.revoke();
+        return Err(Error::InvalidDisplay);
+    };
+    let control = IndicatorControl(Arc::new(Shared {
+        owner,
+        state: AtomicU8::new(0),
+        window: AtomicU32::new(0),
+    }));
+    let shared = control.0.clone();
+    let started = Instant::now();
+    let task = thread::Builder::new()
+        .name("fr-sharing-indicator".into())
+        .spawn(move || {
+            let _fence = Fence(shared.clone());
+            run(&shared, &display, started, mode);
+        })
+        .map_err(|_| {
+            control.0.stop(StopReason::NativeFailure);
+            Error::ThreadUnavailable
+        })?;
+    Ok((control, task))
+}
+/// Nonblocking, idempotent cleanup collection shared by both indicators.
+fn collect(control: &IndicatorControl, task: &mut Option<JoinHandle<()>>) -> Option<StopReason> {
+    if task.as_ref().is_some_and(|task| !task.is_finished()) {
+        return None;
+    }
+    if let Some(task) = task.take()
+        && task.join().is_err()
+    {
+        control.0.stop(StopReason::NativeFailure);
+    }
+    StopReason::from_state(control.0.state.load(Ordering::Acquire))
+}
+
 /// Explicit native thread owner. Keep it until `finish` returns Some when cleanup
 /// must be proven. Drop immediately revokes but cannot kill/join a hung X server
 /// call. That foreign-call limitation is NOT hidden behind an async timeout.
+#[cfg(feature = "linux-session-ui")]
 #[must_use]
 pub struct SharingIndicator {
     control: IndicatorControl,
     task: Option<JoinHandle<()>>,
+    /// The same original owner, retained for identity checks by the host.
+    observation: ObservationControl,
 }
+#[cfg(feature = "linux-session-ui")]
 impl SharingIndicator {
     /// Start on the LOCAL selected user's X server. No ambient DISPLAY or TCP
     /// display is accepted. Supply the original `HostSession::observation()`
@@ -150,27 +240,15 @@ impl SharingIndicator {
             observation.revoke();
             return Err(Error::AuthorityEnded);
         }
-        let display = CString::new(display).map_err(|_| Error::InvalidDisplay)?;
-        let control = IndicatorControl(Arc::new(Shared {
-            observation,
-            state: AtomicU8::new(0),
-            window: AtomicU32::new(0),
-        }));
-        let shared = control.0.clone();
-        let started = Instant::now();
-        let task = thread::Builder::new()
-            .name("fr-sharing-indicator".into())
-            .spawn(move || {
-                let _fence = Fence(shared.clone());
-                run(&shared, &display, started);
-            })
-            .map_err(|_| {
-                control.0.stop(StopReason::NativeFailure);
-                Error::ThreadUnavailable
-            })?;
+        let (control, task) = launch(
+            display,
+            Owner::Observation(observation.clone()),
+            Mode::Sharing,
+        )?;
         Ok(Self {
             control,
             task: Some(task),
+            observation,
         })
     }
     pub fn control(&self) -> IndicatorControl {
@@ -180,30 +258,74 @@ impl SharingIndicator {
     /// thread ended and its own X resources were released. It says nothing about
     /// release of remote-held keys or reaping another native worker.
     pub fn finish(&mut self) -> Option<StopReason> {
-        if self.task.as_ref().is_some_and(|task| !task.is_finished()) {
-            return None;
-        }
-        if let Some(task) = self.task.take()
-            && task.join().is_err()
-        {
-            self.control.0.stop(StopReason::NativeFailure);
-        }
-        StopReason::from_state(self.control.0.state.load(Ordering::Acquire))
+        collect(&self.control, &mut self.task)
     }
 }
+#[cfg(feature = "linux-session-ui")]
 impl fmt::Debug for SharingIndicator {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // The observation owner is identity, not diagnostic content.
         f.debug_struct("SharingIndicator")
             .field("control", &self.control)
             .field("cleanup_collected", &self.task.is_none())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
+#[cfg(feature = "linux-session-ui")]
 impl Drop for SharingIndicator {
     fn drop(&mut self) {
         self.control.0.stop(StopReason::OwnerDropped);
     }
 }
+
+/// Start the remote-CONTROL indicator for a local input executor that holds
+/// no observation owner (`fr-input-agent`). Every stop (a real-device click on
+/// STOP CONTROL or Esc/Enter/Space, closing, hiding, resizing, destruction,
+/// mapping timeout, native failure or owner drop) calls `on_revoke` first.
+/// Clicks and keys whose `XInput2` source is an XTEST device are ignored, so the
+/// remote controller cannot operate it through the input it injects (bead
+/// fr-rc-sec-approval-synthetic-input-t2r); a window-manager close cannot be
+/// attributed and still stops (removal only). Without `XInput` 2 it fails to
+/// open (`NativeFailure`), which the executor reports as a refused launch.
+pub fn start_with(
+    display: &str,
+    on_revoke: impl Fn() + Send + Sync + 'static,
+) -> Result<LocalIndicator, Error> {
+    let (control, task) = launch(display, Owner::Local(Box::new(on_revoke)), Mode::Control)?;
+    Ok(LocalIndicator {
+        control,
+        task: Some(task),
+    })
+}
+/// The executor's indicator owner; shown for the whole lease. Same explicit
+/// cleanup contract as `SharingIndicator`.
+#[must_use]
+pub struct LocalIndicator {
+    control: IndicatorControl,
+    task: Option<JoinHandle<()>>,
+}
+impl LocalIndicator {
+    pub fn control(&self) -> IndicatorControl {
+        self.control.clone()
+    }
+    pub fn finish(&mut self) -> Option<StopReason> {
+        collect(&self.control, &mut self.task)
+    }
+}
+impl fmt::Debug for LocalIndicator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocalIndicator")
+            .field("control", &self.control)
+            .field("cleanup_collected", &self.task.is_none())
+            .finish()
+    }
+}
+impl Drop for LocalIndicator {
+    fn drop(&mut self) {
+        self.control.0.stop(StopReason::OwnerDropped);
+    }
+}
+
 struct Fence(Arc<Shared>);
 impl Drop for Fence {
     fn drop(&mut self) {
@@ -227,16 +349,21 @@ fn local_display(display: &str) -> bool {
     let valid = |s: &str| !s.is_empty() && s.len() <= 5 && s.bytes().all(|b| b.is_ascii_digit());
     pieces.next().is_some_and(valid) && pieces.next().is_none_or(valid) && pieces.next().is_none()
 }
-fn run(shared: &Shared, display: &CString, started: Instant) {
+fn run(shared: &Shared, display: &CString, started: Instant, mode: Mode) {
     if !shared.live() {
         return;
     }
     let mut window = 0;
     // SAFETY: NUL-terminated display and writable scalar live throughout call.
     // C retains neither pointer. Handle is created/used/dropped on this thread.
-    let Some(handle) =
-        NonNull::new(unsafe { fr_indicator_open(display.as_ptr(), &raw mut window) })
-    else {
+    let handle = unsafe {
+        match mode {
+            #[cfg(feature = "linux-session-ui")]
+            Mode::Sharing => fr_indicator_open(display.as_ptr(), &raw mut window),
+            Mode::Control => fr_indicator_open_control(display.as_ptr(), &raw mut window),
+        }
+    };
+    let Some(handle) = NonNull::new(handle) else {
         shared.stop(StopReason::NativeFailure);
         return;
     };
@@ -313,9 +440,10 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
 
 /// The host can retain this native owner throughout bootstrap/control promotion.
 /// Waiting for Ready never grants observation or proves compositor visibility.
+#[cfg(feature = "linux-session-ui")]
 impl frd::local_sharing::Surface for SharingIndicator {
     fn original(&self) -> &ObservationControl {
-        &self.control.0.observation
+        &self.observation
     }
     fn state(&self) -> frd::local_sharing::State {
         use frd::local_sharing::State;
@@ -333,4 +461,5 @@ impl frd::local_sharing::Surface for SharingIndicator {
     }
 }
 
+#[cfg(feature = "linux-session-ui")]
 mod mapping;

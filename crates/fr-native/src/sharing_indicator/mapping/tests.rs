@@ -1,6 +1,6 @@
 //! Deterministic lifecycle fixtures. Real mapping is covered in the Xvfb suite.
 use super::*;
-use crate::sharing_indicator::{IndicatorControl, Shared};
+use crate::sharing_indicator::{IndicatorControl, Owner, Shared};
 use asupersync::{
     runtime::{Runtime, RuntimeBuilder},
     time::{TimerDriverHandle, VirtualClock},
@@ -52,10 +52,11 @@ fn fixture(
                 Status::Mapped => 1,
                 Status::Stopped(reason) => reason as u8,
             }),
-            observation: observation.clone(),
+            owner: Owner::Observation(observation.clone()),
             window: AtomicU32::new(0),
         })),
         task: None,
+        observation: observation.clone(),
     };
     (rt, clock, cx, indicator, observation)
 }

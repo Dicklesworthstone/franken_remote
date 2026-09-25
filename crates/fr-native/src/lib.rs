@@ -60,7 +60,10 @@ pub mod clipboard;
 #[cfg(all(target_os = "linux", feature = "linux-clipboard"))]
 pub mod clipboard_observation;
 
-#[cfg(all(target_os = "linux", feature = "linux-session-ui"))]
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "linux-session-ui", feature = "linux-input")
+))]
 pub mod sharing_indicator;
 
 #[cfg(all(

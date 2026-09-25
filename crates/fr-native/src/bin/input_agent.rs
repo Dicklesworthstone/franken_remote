@@ -9,10 +9,14 @@
 //! `InputSession` performs every authority check and sends only a derived
 //! `CLOCK_MONOTONIC` deadline.
 //!
-//! Immediately before every native call it re-checks that no fence arrived and
-//! that its own clock is strictly before that deadline; otherwise it reports
-//! Fenced/Expired and makes no call. After a fence only release-only cleanup,
-//! Cleanup and Stop are accepted. On EOF, Stop or a protocol violation it
+//! For the whole lease it shows the remote-CONTROL sharing indicator (plan
+//! 15.2); only a real-device (non-XTEST) click or key on it, or closing/hiding
+//! it, is a LOCAL revoke, reported to frd as a `LocalRevoke` datagram.
+//! Immediately before every native call it re-checks that no fence arrived,
+//! that the indicator was not used and that its own clock is strictly before
+//! that deadline; otherwise it reports Fenced/Expired and makes no call. After
+//! a fence or local revoke only release-only cleanup, Cleanup and Stop are
+//! accepted. On EOF, Stop or a protocol violation it
 //! releases and restores through `X11Pointer`'s own teardown before exiting; a
 //! panic or Xlib error releases through the dedicated emergency connection.
 //! It writes nothing but reply frames and signal datagrams, and logs no input.
@@ -20,11 +24,12 @@
 mod linux {
     use fr_core::input_submission::{
         InputSink, Operation, PlatformError, Submission,
-        process::{self, Reply, Request},
+        process::{self, Reply, Request, Signal},
     };
     use fr_native::{
         bind_parent, clock,
         input::{NativeHeld, X11Pointer, emergency},
+        sharing_indicator::{self, LocalIndicator, Status},
     };
     use std::{
         io::{self, Read, Write},
@@ -32,10 +37,17 @@ mod linux {
             fd::AsFd,
             unix::net::{UnixDatagram, UnixStream},
         },
-        time::Duration,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread,
+        time::{Duration, Instant},
     };
 
     const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+    /// The indicator's own mapping deadline is 2s; this only bounds the poll.
+    const INDICATOR_WAIT: Duration = Duration::from_millis(2_500);
     const SIGNALS_PER_CHECK: usize = 8;
     const EXIT_USAGE: i32 = 64;
     const EXIT_PROTOCOL: i32 = 65;
@@ -92,8 +104,45 @@ mod linux {
         }
     }
 
+    /// The indicator must be mapped before Ready; any stop is a local revoke
+    /// that sends exactly one `LocalRevoke` datagram to frd.
+    fn show_indicator(
+        display: &str,
+        signals: &UnixDatagram,
+        revoked: &Arc<AtomicBool>,
+    ) -> Result<LocalIndicator, PlatformError> {
+        let notify = signals
+            .try_clone()
+            .map_err(|_| PlatformError::Unavailable)?;
+        let flag = revoked.clone();
+        let indicator = sharing_indicator::start_with(display, move || {
+            if !flag.swap(true, Ordering::AcqRel) {
+                let _ = notify.send(&process::encode_signal(Signal::LocalRevoke));
+            }
+        })
+        .map_err(|error| match error {
+            sharing_indicator::Error::InvalidDisplay => PlatformError::Unsupported,
+            _ => PlatformError::Unavailable,
+        })?;
+        let until = Instant::now() + INDICATOR_WAIT;
+        loop {
+            match indicator.control().status() {
+                Status::Mapped => return Ok(indicator),
+                Status::Stopped(_) => return Err(PlatformError::Unavailable),
+                Status::Opening if Instant::now() >= until => {
+                    return Err(PlatformError::Unavailable);
+                }
+                Status::Opening => thread::sleep(Duration::from_millis(1)),
+            }
+        }
+    }
+
+    // Field order is teardown order: the X11 owner releases and restores
+    // while the indicator is still shown.
     struct Executor {
         pointer: Option<X11Pointer>,
+        indicator: Option<LocalIndicator>,
+        revoked: Arc<AtomicBool>,
         command: UnixStream,
         signals: UnixDatagram,
         expected: u64,
@@ -118,18 +167,20 @@ mod linux {
                 return Err(EXIT_PROTOCOL);
             };
             command.set_read_timeout(None).map_err(|_| EXIT_CHANNEL)?;
+            let revoked = Arc::new(AtomicBool::new(false));
             let opened = std::env::var("DISPLAY")
                 .map_err(|_| PlatformError::Unsupported)
                 .and_then(|display| {
                     // Same exact bounds/capability revalidation as the
-                    // in-process factory, then the emergency release path,
-                    // both before any input can be accepted.
+                    // in-process factory, the emergency release path and a
+                    // mapped indicator, all before any input can be accepted.
                     let pointer = X11Pointer::open_exact(&display, bounds, required)?;
                     emergency::install(&display)?;
-                    Ok(pointer)
+                    let indicator = show_indicator(&display, &signals, &revoked)?;
+                    Ok((pointer, indicator))
                 });
-            let pointer = match opened {
-                Ok(pointer) => pointer,
+            let (pointer, indicator) = match opened {
+                Ok(opened) => opened,
                 Err(error) => {
                     let _ = send(&mut command, 1, Reply::Refused(error));
                     return Err(EXIT_REFUSED);
@@ -143,6 +194,8 @@ mod linux {
             };
             let mut executor = Self {
                 pointer: Some(pointer),
+                indicator: Some(indicator),
+                revoked,
                 command,
                 signals,
                 expected: 2,
@@ -150,7 +203,7 @@ mod linux {
                 fenced: false,
             };
             executor.drain_signals();
-            if executor.fenced {
+            if executor.revoked() {
                 let _ = send(
                     &mut executor.command,
                     1,
@@ -200,6 +253,7 @@ mod linux {
                         self.prepared = None;
                         drop(self.pointer.take());
                         emergency::record(NativeHeld::default());
+                        drop(self.indicator.take());
                         let _ = send(&mut self.command, sequence, Reply::Stopped);
                         return 0;
                     }
@@ -237,7 +291,7 @@ mod linux {
             }
         }
         fn revoked(&self) -> bool {
-            self.fenced
+            self.fenced || self.revoked.load(Ordering::Acquire)
         }
         fn prepare(&mut self, operation: Operation) -> Reply {
             self.cancel();

@@ -1,8 +1,13 @@
 /* XCB-only representation boundary for the revocation-only local indicator.
  * Owns its connection/window/font/GC, never authority or Rust pointers. No
  * callbacks, grabs, ambient DISPLAY, user strings, input injection or Xlib
- * global error handlers. See X11 protocol events and EWMH window properties. */
+ * global error handlers. See X11 protocol events and EWMH window properties.
+ * The remote-CONTROL indicator (mode 3) additionally attributes every click
+ * and key to its XInput2 source device and ignores XTEST slave devices: the
+ * controlling peer injects through XTest and must not operate this surface. */
 #include <xcb/xcb.h>
+#include <xcb/xcbext.h>
+#include <sys/uio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,7 +21,15 @@ struct fr_indicator {
     xcb_atom_t protocols, close;
     uint8_t escape, enter, space;
     uint8_t mode, mapped, allow_pressed;
+    uint8_t xi_opcode; /* nonzero only for the XI2-attributed control mode */
 };
+enum { MODE_SHARING = 0, MODE_CONTROL = 3 };
+/* XI2 wire constants (XI2.h / XI2proto.h). Requests are sent raw through
+ * xcbext so no libxcb-xinput dependency is added. */
+enum { XI_QUERY_VERSION = 47, XI_SELECT_EVENTS = 46, XI_QUERY_DEVICE = 48 };
+enum { XI_KEY_PRESS = 2, XI_BUTTON_PRESS = 4, XI_BUTTON_RELEASE = 5 };
+enum { XI_ALL_MASTER_DEVICES = 1 };
+static xcb_extension_t xinput = { "XInputExtension", 0 };
 /* One returned event accounts for one consumed XCB event, including ignored
  * events. Rust imposes the turn limit and checks authority between events. */
 enum { IGNORE, REDRAW, MAPPED, HIDDEN, LOST, STOP, ALLOW };
@@ -36,6 +49,69 @@ static int property(struct fr_indicator *h, xcb_atom_t name, xcb_atom_t type,
                     uint8_t format, uint32_t count, const void *data) {
     return name && checked(h, xcb_change_property_checked(h->c,
         XCB_PROP_MODE_REPLACE, h->window, name, type, format, count, data));
+}
+/* One raw XI2 request with a reply. Returns the malloc'd reply or NULL. */
+static uint8_t *xi_request(struct fr_indicator *h, uint8_t opcode, void *body, size_t len) {
+    struct iovec parts[3];
+    parts[2].iov_base = body;
+    parts[2].iov_len = len;
+    xcb_protocol_request_t request = { 1, &xinput, opcode, 0 };
+    unsigned int seq = xcb_send_request(h->c, XCB_REQUEST_CHECKED, parts + 2, &request);
+    if (!seq) return NULL;
+    xcb_generic_error_t *e = NULL;
+    uint8_t *reply = xcb_wait_for_reply(h->c, seq, &e);
+    if (e) { free(e); free(reply); return NULL; }
+    return reply;
+}
+/* XInput 2.0 with button/key selection on this window for all master devices.
+ * Core button/key events are NOT selected in this mode. */
+static int xi_setup(struct fr_indicator *h) {
+    const xcb_query_extension_reply_t *ext = xcb_get_extension_data(h->c, &xinput);
+    if (!ext || !ext->present) return 0;
+    struct { uint8_t major, minor; uint16_t length, want_major, want_minor; } version =
+        { 0, 0, 0, 2, 0 };
+    uint8_t *reply = xi_request(h, XI_QUERY_VERSION, &version, sizeof(version));
+    uint16_t major = 0;
+    if (reply) memcpy(&major, reply + 8, 2);
+    free(reply);
+    if (major < 2) return 0;
+    struct {
+        uint8_t major, minor; uint16_t length; uint32_t window;
+        uint16_t num_masks, pad, deviceid, mask_len; uint32_t mask;
+    } select = { 0, 0, 0, h->window, 1, 0, XI_ALL_MASTER_DEVICES, 1,
+                 (1u << XI_KEY_PRESS) | (1u << XI_BUTTON_PRESS) | (1u << XI_BUTTON_RELEASE) };
+    struct iovec parts[3];
+    parts[2].iov_base = &select;
+    parts[2].iov_len = sizeof(select);
+    xcb_protocol_request_t request = { 1, &xinput, XI_SELECT_EVENTS, 1 };
+    xcb_void_cookie_t cookie = { xcb_send_request(h->c, XCB_REQUEST_CHECKED, parts + 2, &request) };
+    if (!cookie.sequence || !checked(h, cookie)) return 0;
+    h->xi_opcode = ext->major_opcode;
+    return 1;
+}
+/* 0 only for a known non-XTEST source device; XTEST slaves and anything that
+ * cannot be attributed (-1) are treated as synthetic and ignored. */
+static int xi_synthetic(struct fr_indicator *h, uint16_t source) {
+    struct { uint8_t major, minor; uint16_t length, deviceid, pad; } query =
+        { 0, 0, 0, source, 0 };
+    uint8_t *reply = xi_request(h, XI_QUERY_DEVICE, &query, sizeof(query));
+    if (!reply) return -1;
+    uint32_t words; uint16_t count, id, name_len;
+    memcpy(&words, reply + 4, 4);
+    memcpy(&count, reply + 8, 2);
+    size_t total = 32 + (size_t)words * 4;
+    int result = -1;
+    if (count >= 1 && total >= 44) {
+        memcpy(&id, reply + 32, 2);
+        memcpy(&name_len, reply + 40, 2);
+        if (id == source && 44 + (size_t)name_len <= total) {
+            result = 0;
+            for (size_t i = 0; i + 5 <= name_len; ++i)
+                if (memcmp(reply + 44 + i, "XTEST", 5) == 0) { result = 1; break; }
+        }
+    }
+    free(reply);
+    return result;
 }
 void fr_indicator_close(struct fr_indicator *h) {
     if (!h) return;
@@ -84,8 +160,10 @@ static struct fr_indicator *open_window(const char *display, uint32_t *window, u
     h->window = xcb_generate_id(h->c);
     uint32_t values[] = { it.data->white_pixel,
         XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_STRUCTURE_NOTIFY |
-        XCB_EVENT_MASK_VISIBILITY_CHANGE | XCB_EVENT_MASK_BUTTON_PRESS |
-        XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE };
+        XCB_EVENT_MASK_VISIBILITY_CHANGE };
+    if (mode != MODE_CONTROL)
+        values[1] |= XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_KEY_PRESS |
+                     XCB_EVENT_MASK_BUTTON_RELEASE;
     if (!checked(h, xcb_create_window_checked(h->c, XCB_COPY_FROM_PARENT,
         h->window, it.data->root, 0, 0, WIDTH, HEIGHT, 2,
         XCB_WINDOW_CLASS_INPUT_OUTPUT, it.data->root_visual,
@@ -101,7 +179,8 @@ static struct fr_indicator *open_window(const char *display, uint32_t *window, u
     h->close = atom(h, "WM_DELETE_WINDOW");
     xcb_atom_t utf8 = atom(h, "UTF8_STRING");
     xcb_atom_t above = atom(h, "_NET_WM_STATE_ABOVE");
-    const char *title = mode ? "FrankenRemote - Local approval" : "FrankenRemote - Stop sharing";
+    const char *title = mode == MODE_CONTROL ? "FrankenRemote - Stop remote control"
+        : mode ? "FrankenRemote - Local approval" : "FrankenRemote - Stop sharing";
     const char class[] = "franken-remote\0FrankenRemote\0";
     uint32_t size[18] = {0};
     size[0] = (1u << 4) | (1u << 5); /* ICCCM PMinSize | PMaxSize */
@@ -113,13 +192,18 @@ static struct fr_indicator *open_window(const char *display, uint32_t *window, u
         !property(h, XCB_ATOM_WM_CLASS, XCB_ATOM_STRING, 8, sizeof(class)-1, class) ||
         !property(h, XCB_ATOM_WM_NORMAL_HINTS, XCB_ATOM_WM_SIZE_HINTS, 32, 18, size) ||
         !property(h, atom(h, "_NET_WM_STATE"), XCB_ATOM_ATOM, 32, 1, &above) ||
-        !keys(h) || !checked(h, xcb_map_window_checked(h->c, h->window))) goto fail;
+        !keys(h) || (mode == MODE_CONTROL && !xi_setup(h)) ||
+        !checked(h, xcb_map_window_checked(h->c, h->window))) goto fail;
     *window = h->window; return h;
 fail:
     fr_indicator_close(h); return NULL;
 }
 struct fr_indicator *fr_indicator_open(const char *display, uint32_t *window) {
-    return open_window(display, window, 0);
+    return open_window(display, window, MODE_SHARING);
+}
+/* Remote-control indicator for the input executor: fails (NULL) without XI2. */
+struct fr_indicator *fr_indicator_open_control(const char *display, uint32_t *window) {
+    return open_window(display, window, MODE_CONTROL);
 }
 /* Role comes from Rust's original one-use Approval, never a remote UI string. */
 struct fr_indicator *fr_approval_open(const char *display, uint32_t role, uint32_t *window) {
@@ -129,7 +213,7 @@ struct fr_indicator *fr_approval_open(const char *display, uint32_t role, uint32
 int fr_indicator_draw(struct fr_indicator *h) {
     if (!h || xcb_connection_has_error(h->c)) return 0;
     xcb_clear_area(h->c, 0, h->window, 0, 0, WIDTH, HEIGHT);
-    if (h->mode) {
+    if (h->mode && h->mode != MODE_CONTROL) {
         const char *lines[] = {
             h->mode == 1 ? "Verified peer requests desktop viewing" : "Verified peer requests desktop CONTROL",
             "Only this request; no approval of future peers.",
@@ -143,9 +227,13 @@ int fr_indicator_draw(struct fr_indicator *h) {
                              x[i], y[i], lines[i]);
         return xcb_flush(h->c) > 0;
     }
-    const char *lines[] = {"FrankenRemote sharing is authorized",
+    const char *sharing[] = {"FrankenRemote sharing is authorized",
         "Closing or hiding this window stops sharing.",
         "STOP SHARING", "Esc / Enter / Space: stop sharing"};
+    const char *control[] = {"A remote peer is CONTROLLING this desktop",
+        "Closing or hiding this window stops control.",
+        "STOP CONTROL", "Esc / Enter / Space: stop control"};
+    const char **lines = h->mode == MODE_CONTROL ? control : sharing;
     const int16_t x[] = {16, 16, 204, 16}, y[] = {27, 53, 103, 138};
     xcb_rectangle_t border = {16, 73, 448, 46};
     xcb_poly_rectangle(h->c, h->window, h->gc, 1, &border);
@@ -162,6 +250,40 @@ int fr_indicator_next(struct fr_indicator *h, uint32_t *kind) {
     uint8_t type = e->response_type & 0x7f;
     int synthetic = (e->response_type & 0x80) != 0;
     if (!type) { free(e); return -1; }
+    if (h->mode == MODE_CONTROL) {
+        /* Only XI2 events from a real (non-XTEST) source may stop control.
+         * Core button/key events (e.g. SendEvent to the creator) are ignored.
+         * WM close (ClientMessage) and hiding still stop: removal only. */
+        if (type == XCB_BUTTON_PRESS || type == XCB_BUTTON_RELEASE || type == XCB_KEY_PRESS) {
+            free(e); return 1;
+        }
+        if (type == XCB_GE_GENERIC) {
+            const uint8_t *b = (const uint8_t *)e;
+            uint32_t words;
+            memcpy(&words, b + 4, 4);
+            /* Device events carry >= 60 wire bytes; XCB stores wire byte 32+
+             * after its 4-byte full_sequence, i.e. at buffer offset 36+. */
+            if (b[1] == h->xi_opcode && (size_t)words * 4 + 32 >= 60) {
+                uint16_t evtype, source;
+                uint32_t detail, event;
+                int32_t fx, fy;
+                memcpy(&evtype, b + 8, 2);
+                memcpy(&detail, b + 16, 4);
+                memcpy(&event, b + 24, 4);
+                memcpy(&fx, b + 44, 4);
+                memcpy(&fy, b + 48, 4);
+                memcpy(&source, b + 56, 2);
+                int32_t x = fx / 65536, y = fy / 65536;
+                int press = evtype == XI_BUTTON_PRESS && detail == 1 &&
+                    x >= 16 && x < 464 && y >= 73 && y < 119;
+                int key = evtype == XI_KEY_PRESS && (detail == h->escape ||
+                    detail == h->enter || detail == h->space);
+                if (event == h->window && (press || key) && xi_synthetic(h, source) == 0)
+                    *kind = STOP;
+            }
+            free(e); return 1;
+        }
+    }
     switch (type) {
     case XCB_EXPOSE:
         if (((xcb_expose_event_t *)e)->window == h->window) *kind = REDRAW;
