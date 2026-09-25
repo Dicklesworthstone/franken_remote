@@ -50,7 +50,7 @@ jobs:
       # fr-native links libXtst/Xdamage/Xrandr/Xfixes/X11-xcb/opus/pulse by exact
       # soname (#[link(..., modifiers = "+verbatim")]); each must be installed.
       - name: Install Linux native media SDKs
-        run: sudo apt-get update && sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxcb1-dev libxtst6 libxi6 libxdamage1 libxrandr2 libxfixes3 libx11-xcb1 libopus0 libpulse0 pkg-config xvfb xauth xfonts-base
+        run: sudo apt-get update && sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxcb1-dev libxtst6 libxi6 libxdamage1 libxrandr2 libxfixes3 libx11-xcb1 libopus0 libpulse0 pulseaudio pkg-config xvfb xauth xfonts-base
       - name: Format
         id: fmt
         continue-on-error: true
