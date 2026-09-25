@@ -3,6 +3,7 @@
 use super::{Error, HostSession, ObservationControl, Services};
 mod clipboard;
 pub(crate) mod files;
+mod revocation;
 use crate::{
     input_agent::{InputReply, Reply, Status},
     input_quic::{self, Progress, QuicInput, Routes, control::ControlRenewal},
@@ -26,6 +27,7 @@ pub struct ControlledHost {
     clipboard: Option<crate::clipboard_quic::Bridge>,
     clipboard_setup: crate::session_startup::clipboard::Setup,
     files: files::Slot,
+    terminal_report: Option<Result<(), fr_transport::quic::Error>>,
 }
 impl std::fmt::Debug for ControlledHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -66,6 +68,7 @@ impl HostSession {
             clipboard: None,
             clipboard_setup: crate::session_startup::clipboard::Setup::default(),
             files: files::Slot::default(),
+            terminal_report: None,
         })
     }
 }
@@ -132,6 +135,19 @@ impl ControlledHost {
         fresh_ticket: &mut impl FnMut() -> Option<InputTicketId>,
         other: &mut impl Services,
     ) -> Result<(), Error> {
+        // A synchronous watchdog/local fence must win over normal transport
+        // checks, which would otherwise drop the socket before reporting it.
+        if self.input.control().is_stopped() {
+            let reason = self
+                .input
+                .control()
+                .reason()
+                .unwrap_or(StopReason::AuthorityEnded);
+            // Delivery is separately retained by revocation_delivery. Whether
+            // acknowledged or lost, this service's outcome is terminal closure.
+            let _ = self.revoke_and_close(reason).await;
+            return Err(Error::Closed);
+        }
         let mut services = InputServices {
             input: &mut self.input,
             files: &mut self.files,

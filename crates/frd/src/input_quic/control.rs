@@ -136,6 +136,15 @@ impl QuicInput {
     }
 }
 impl ControlRenewal {
+    /// Immutable identity only; reading it cannot renew a stopped lease.
+    pub(crate) fn lease_id(&self) -> fr_core::ids::InputLeaseId {
+        self.lease.lease()
+    }
+    /// Retained object identity from attachment, not a later replacement socket.
+    pub(crate) const fn original_connection(&self) -> &ConnectionBinding {
+        &self.connection
+    }
+
     pub fn stop(&mut self) {
         self.control.stop(StopReason::ClientDisconnected);
         self.lease.stop();

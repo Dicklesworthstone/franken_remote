@@ -2,6 +2,7 @@
 //! Native effects and codec output here are explicit fixtures, not pixel claims.
 use super::*;
 
+mod host_revocation;
 mod revocation;
 
 #[test]
