@@ -138,8 +138,16 @@ impl SessionAgent {
 /// The controlled share's original publication (capture child, session and
 /// input attachment). Keep it through `reap`; closing fences the session.
 pub struct ControlledDesktop {
-    publisher: NativePublisher,
+    media: Media,
     profile: ControlProfile,
+}
+/// Unlike a shared source, this publisher OWNS the viewer's connection: no
+/// separate peer service holds it. It is dropped only after its capture child
+/// is proven reaped, which also releases that transport's ingress lease (the
+/// listener's `stop` refuses while any transport still holds one).
+enum Media {
+    Live(Box<NativePublisher>),
+    Reaped(asupersync::process::ExitStatus),
 }
 impl fmt::Debug for ControlledDesktop {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -148,19 +156,31 @@ impl fmt::Debug for ControlledDesktop {
 }
 impl ControlledDesktop {
     pub fn worker_id(&self) -> Option<u32> {
-        self.publisher.worker_id()
+        match &self.media {
+            Media::Live(publisher) => publisher.worker_id(),
+            Media::Reaped(_) => None,
+        }
     }
     pub fn close(&mut self) {
-        self.publisher.close();
+        if let Media::Live(publisher) = &mut self.media {
+            publisher.close();
+        }
     }
-    /// Fence at call time, then observe the exact capture child. Input cleanup
-    /// is reported by `serve`; its Seat is released only by the native owner.
+    /// Fence at call time, then observe the exact capture child. Only a proven
+    /// exit releases the connection; a failed reap retains every owner. Input
+    /// cleanup is reported by `serve`; its Seat is released by the native owner.
     pub async fn reap(
         &mut self,
         cleanup: &Cx,
         deadline: Deadline,
     ) -> Result<asupersync::process::ExitStatus, crate::worker::Error> {
-        self.publisher.reap_media(cleanup, deadline).await
+        let status = match &mut self.media {
+            Media::Reaped(status) => return Ok(*status),
+            Media::Live(publisher) => publisher.reap_media(cleanup, deadline).await?,
+        };
+        // Dropping the (already fenced) publisher closes the viewer transport.
+        self.media = Media::Reaped(status);
+        Ok(status)
     }
 
     /// Serve the managed control session until it ends. Local events run first
@@ -178,7 +198,6 @@ impl ControlledDesktop {
     where
         L: FnMut(&mut SessionAgent, &mut Context<'_>) -> Result<LocalAction, ()> + Send + 'a,
     {
-        let observation = self.publisher.control();
         let permitted = Arc::new(AtomicBool::new(input_permitted(agent)));
         let mut decider = Decider {
             profile: self.profile.clone(),
@@ -188,13 +207,22 @@ impl ControlledDesktop {
             approved: None,
         };
         let (nonce, ticket) = (entropy.clone(), entropy);
-        let service = self.publisher.serve_managed_control(
-            self.profile.seat.clone(),
-            move |state| decider.turn(state),
-            move || nonce(),
-            move || ticket().ok().map(InputTicketId::from_raw),
-        );
+        let seat = self.profile.seat.clone();
+        // The managed service takes its attachment at CALL time, as before.
+        let prepared = match &mut self.media {
+            Media::Live(publisher) => Ok((
+                publisher.control(),
+                publisher.serve_managed_control(
+                    seat,
+                    move |state| decider.turn(state),
+                    move || nonce(),
+                    move || ticket().ok().map(InputTicketId::from_raw),
+                ),
+            )),
+            Media::Reaped(_) => Err(Error::Closed),
+        };
         async move {
+            let (observation, service) = prepared?;
             let mut service = pin!(service);
             let mut timer = Wake {
                 driver: cx.timer_driver().ok_or(Error::Clock)?,
@@ -381,7 +409,10 @@ where
         publishing.await.map_err(Error::Publication)
     })
     .await?;
-    Ok(ControlledDesktop { publisher, profile })
+    Ok(ControlledDesktop {
+        media: Media::Live(Box::new(publisher)),
+        profile,
+    })
 }
 
 #[cfg(test)]

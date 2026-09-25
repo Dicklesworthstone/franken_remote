@@ -280,15 +280,26 @@ fn a_controlling_first_viewer_gets_the_exclusive_share_and_its_input_reaches_the
         assert!(fenced < released, "{lines:?}");
         assert_eq!(lines.last().map(String::as_str), Some("STOP"));
         assert!(!seat.is_occupied(), "confirmed cleanup releases the Seat");
-        assert!(
+        let reaped = driver
+            .reap(
+                &cleanup,
+                Deadline::after(&cleanup, Duration::from_secs(1)).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(reaped.is_some());
+        // The proven exit released the publisher and with it the viewer's
+        // connection; a later reap reports that same exit, never a new child.
+        assert!(driver.worker_id().is_none());
+        assert_eq!(
             driver
                 .reap(
                     &cleanup,
                     Deadline::after(&cleanup, Duration::from_secs(1)).unwrap()
                 )
                 .await
-                .unwrap()
-                .is_some()
+                .unwrap(),
+            reaped
         );
     }));
 }
