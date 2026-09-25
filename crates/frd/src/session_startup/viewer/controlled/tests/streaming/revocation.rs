@@ -66,11 +66,14 @@ fn revoked_record_stops_the_real_viewer_without_fabricating_action_receipts() {
             // Deliver the prepared report through the original actual UDP/TLS
             // connection. Do not run the host action handler for this fixture.
             let (host_result, viewer_result) = Box::pin(support::both(
-                fixture.host.io().unwrap().0.drive(
-                    &h,
-                    Duration::from_millis(1),
-                    || now(&h).is_ok_and(|at| at < until),
-                ),
+                fixture
+                    .host
+                    .io()
+                    .unwrap()
+                    .0
+                    .drive(&h, Duration::from_millis(1), || {
+                        now(&h).is_ok_and(|at| at < until)
+                    }),
                 fixture
                     .viewer
                     .drive(Duration::from_millis(1), |_| receipts += 1, block),
