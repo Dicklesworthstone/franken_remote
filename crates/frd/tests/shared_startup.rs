@@ -356,7 +356,7 @@ fn a_delayed_configured_reply_cannot_renew_the_original_shared_frame_deadline() 
         configuration_bytes(&mut al, &am, &mut ah, &cx).await;
         sleep(cx.now(), Duration::from_millis(110)).await;
         reply(&mut al, &am, &cx, decoder::Message::Configured).await;
-        al.drive(&cx).await;
+        al.drive_past_deadline(&cx).await;
         assert!(matches!(ah.dispatch(&mut al.h), Err(Error::Expired)));
         assert_eq!(ah.deadline_us(), until);
         assert!(ah.take_shared_recovery().is_err());

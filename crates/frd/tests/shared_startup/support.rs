@@ -93,6 +93,23 @@ impl Link {
         a.unwrap();
         b.unwrap();
     }
+    /// After a deadline has deliberately passed, the transport may itself report
+    /// the expired records before the session does; nothing else is tolerated.
+    pub(super) async fn drive_past_deadline(&mut self, cx: &Cx) {
+        let (a, b) = Box::pin(net::both(
+            self.h.drive(cx, Duration::from_millis(1), || true),
+            self.c.drive(cx, Duration::from_millis(1), || true),
+        ))
+        .await;
+        for result in [a, b] {
+            if let Err(error) = result {
+                assert!(
+                    matches!(error, fr_transport::quic::Error::Expired),
+                    "{error:?}"
+                );
+            }
+        }
+    }
     async fn attach(&mut self, cx: &Cx, role: MediaRole, id: u32) -> (MediaChannel, MediaChannel) {
         let until = net::clock(cx) + 1_500_000;
         let mut h = self
