@@ -95,6 +95,7 @@ impl Link {
     }
     /// After a deadline has deliberately passed, the transport may itself report
     /// the expired records before the session does; nothing else is tolerated.
+    #[allow(dead_code)] // pending_shared_startup compiles this module too
     pub(super) async fn drive_past_deadline(&mut self, cx: &Cx) {
         let (a, b) = Box::pin(net::both(
             self.h.drive(cx, Duration::from_millis(1), || true),
