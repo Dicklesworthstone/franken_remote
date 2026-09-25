@@ -30,7 +30,7 @@ pub(super) fn sibling(name: &str) -> PathBuf {
         .find(|path| path.is_file())
         .unwrap_or_else(|| {
             panic!(
-                "build {name} first: cargo build -p fr-native --features linux-desktop,linux-displays,linux-input --bin fr --bin fr-media-worker --bin fr-input-agent --locked (and cargo build -p frd --bin frd for the control e2e)"
+                "build {name} first: cargo build -p fr-native --features linux-desktop,linux-displays,linux-input,linux-clipboard --bin fr --bin fr-media-worker --bin fr-input-agent --locked (and cargo build -p frd --bin frd for the control e2e)"
             )
         })
 }
@@ -281,6 +281,7 @@ fn fr_connect_presents_real_host_pixels_through_frd_run() {
         once: false,
         handle_signals: false,
         input_agent: None,
+        clipboard: false,
     };
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();

@@ -88,6 +88,9 @@ pub struct Connection {
     /// `--control`: request input control once, after fresh local evidence.
     /// False only with the explicit `--view-only`; never a silent default.
     pub control: bool,
+    /// `--clipboard` (with `--control` only): let the UTF-8 text clipboard
+    /// follow the control lease, both directions, when the host enables it too.
+    pub clipboard: bool,
 }
 /// Explicit policies only. `Only` refuses ambiguity; it is never "first" or an
 /// invented primary display. Both policies are reevaluated on each live catalog.
@@ -524,7 +527,7 @@ fn parse_command(
     let mut seen = BTreeSet::new();
     let (mut json, mut socket, mut by_name, mut view_only, mut experimental, mut ipv6) =
         (false, None, false, false, false, false);
-    let mut control = false;
+    let (mut control, mut clipboard) = (false, false);
     let (mut display, mut worker, mut roots, mut x_display) = (None, None, None, None);
     let (mut port, mut attempts) = (8443_u16, 5_u8);
     let mut fit_window = None;
@@ -540,6 +543,7 @@ fn parse_command(
             "--by-name" if remote => by_name = true,
             "--view-only" if connect => view_only = true,
             "--control" if connect => control = true,
+            "--clipboard" if connect => clipboard = true,
             "--experimental-native" if remote => experimental = true,
             "--ipv6" if remote => ipv6 = true,
             "--display" if connect => {
@@ -570,6 +574,13 @@ fn parse_command(
             return Err(Failure::new(
                 "connection_role_required",
                 "Choose exactly one of --view-only or --control; control is never silently requested or downgraded to viewing.",
+                2,
+            ));
+        }
+        if clipboard && !control {
+            return Err(Failure::new(
+                "clipboard_requires_control",
+                "The clipboard follows a control lease; pass --control with --clipboard. A view-only session never exposes either clipboard.",
                 2,
             ));
         }
@@ -604,6 +615,7 @@ fn parse_command(
                 attempts,
                 fit_window,
                 control,
+                clipboard,
             })
         }
     } else if doctor {
@@ -662,6 +674,38 @@ mod tests {
             "displays n-host --experimental-native --control".into(),
             "doctor --control".into(),
             "hosts --control".into(),
+        ] {
+            assert_eq!(
+                options(&refused).err().unwrap().code,
+                "invalid_arguments",
+                "{refused}"
+            );
+        }
+    }
+    #[test]
+    fn clipboard_is_an_explicit_opt_in_that_needs_control() {
+        let base = "n-host --experimental-native --worker /opt/fr/worker --display only";
+        for (flags, clipboard) in [("--control", false), ("--control --clipboard", true)] {
+            let Command::Connect(c) = options(&format!("connect {base} {flags}")).unwrap().command
+            else {
+                unreachable!("connection required");
+            };
+            assert!(c.control);
+            assert_eq!(c.clipboard, clipboard, "{flags}");
+        }
+        // Never with viewing only: a typed refusal before any I/O.
+        assert_eq!(
+            options(&format!("connect {base} --view-only --clipboard"))
+                .err()
+                .unwrap()
+                .code,
+            "clipboard_requires_control"
+        );
+        for refused in [
+            format!("connect {base} --control --clipboard --clipboard"),
+            "displays n-host --experimental-native --clipboard".into(),
+            "doctor --clipboard".into(),
+            "hosts --clipboard".into(),
         ] {
             assert_eq!(
                 options(&refused).err().unwrap().code,

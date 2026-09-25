@@ -22,6 +22,27 @@ use fr_wire::{
 /// The role of the host's own offer is not negotiated (the intersection
 /// carries the peer's role).
 pub fn host_offer(control: bool) -> Offer {
+    host_offer_with(control, false)
+}
+/// The three boundaries of the optional text clipboard (its attachment role,
+/// record codec and bilateral readiness). Offered OPTIONAL by both sides, so
+/// either side's absence drops them and control still negotiates.
+pub const CLIPBOARD_CAPABILITIES: [(&str, u16); 3] = [
+    (
+        attachment::CLIPBOARD_CAPABILITY,
+        attachment::CLIPBOARD_VERSION,
+    ),
+    (fr_wire::clipboard::CAPABILITY, fr_wire::clipboard::VERSION),
+    (
+        fr_wire::clipboard::startup::CAPABILITY,
+        fr_wire::clipboard::startup::VERSION,
+    ),
+];
+/// `host_offer`, plus (only with `control` AND the operator's local clipboard
+/// enable) the optional clipboard boundaries. Selecting them is never consent:
+/// the host still needs its own configured owner, and the lane attaches only
+/// under the controller's active input attachment.
+pub fn host_offer_with(control: bool, clipboard: bool) -> Offer {
     let observation = [
         (fr_wire::display::CAPABILITY, 1),
         (decoder::CAPABILITY, 1),
@@ -46,6 +67,12 @@ pub fn host_offer(control: bool) -> Offer {
         // Remote-cursor forwarding is optional in both modes: an older viewer
         // omits it and receives no cursor records.
         .chain([(fr_wire::cursor::CAPABILITY, fr_wire::cursor::VERSION, false)])
+        .chain(
+            CLIPBOARD_CAPABILITIES
+                .iter()
+                .filter(|_| control && clipboard)
+                .map(|&(name, version)| (name, version, false)),
+        )
         .map(|(name, version, required)| Capability {
             name: name.into(),
             version,

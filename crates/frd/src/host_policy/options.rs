@@ -13,6 +13,8 @@ pub struct Effective {
     pub port: u16,
 }
 
+// Independent, individually validated command-line switches, not a state machine.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Default)]
 pub struct RunOptions {
     pub port: Option<u16>,
@@ -37,6 +39,9 @@ pub struct RunOptions {
     /// Absolute `fr-input-agent` path. Absent: observation only (unchanged).
     /// Present: a first viewer may take the exclusive controlled share.
     pub input_agent: Option<PathBuf>,
+    /// Let that controller's text clipboard follow its lease (needs
+    /// `input_agent`; the caller refuses it alone before any I/O).
+    pub clipboard: bool,
 }
 impl RunOptions {
     /// Arguments after `run`. Unknown, duplicate or valueless options refuse
@@ -72,6 +77,13 @@ impl RunOptions {
                     return Err(Error::InvalidArgument);
                 }
                 options.once = true;
+                continue;
+            }
+            if flag == "--clipboard" {
+                if options.clipboard {
+                    return Err(Error::InvalidArgument);
+                }
+                options.clipboard = true;
                 continue;
             }
             let value = value(&mut iter)?;
@@ -185,6 +197,22 @@ mod tests {
             &["--input-agent"][..],
             &["--input-agent", "--once"][..],
             &["--input-agent", "/a", "--input-agent", "/b"][..],
+        ] {
+            assert!(
+                matches!(parse(refused), Err(Error::InvalidArgument)),
+                "{refused:?}"
+            );
+        }
+    }
+    #[test]
+    fn clipboard_is_an_opt_in_flag_given_at_most_once() {
+        assert!(!parse(&["--software-explicit"]).unwrap().clipboard);
+        let options = parse(&["--input-agent", "/a", "--clipboard"]).unwrap();
+        assert!(options.clipboard);
+        for refused in [
+            &["--clipboard", "--clipboard"][..],
+            &["--clipboard=yes"][..],
+            &["--input-agent", "--clipboard"][..],
         ] {
             assert!(
                 matches!(parse(refused), Err(Error::InvalidArgument)),

@@ -41,7 +41,7 @@ fr displays NODE_ID --experimental-native [--trust-roots /absolute/ca-roots.pem]
 fr connect NODE_ID --view-only|--control --experimental-native
     --display HANDLE|only|choose [--worker /absolute/fr-media-worker] [--trust-roots /absolute/ca-roots.pem]
     [--by-name] [--x-display :0] [--socket /absolute/tailscaled.sock]
-    [--port 8443] [--ipv6] [--attempts 1..32] [--fit WIDTHxHEIGHT] [--json]
+    [--port 8443] [--ipv6] [--attempts 1..32] [--fit WIDTHxHEIGHT] [--clipboard] [--json]
 fr robot session open NODE_ID [--role view|control] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
 fr robot session close NODE_ID [--lease LEASE] [--socket /absolute/tailscaled.sock] [--json]
 fr robot observe NODE_ID [--display N] [--screenshot /path/screen.png] [--evidence-level decoded|submitted_to_compositor|instrumentally_observed] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
@@ -61,9 +61,12 @@ Connect uses fresh installed-tailnet identity and strict TLS on every attempt.
 Connect needs exactly one role. --view-only never requests control.
 --control requests input control ONCE, after the window shows a fresh frame; the
 host must run frd run --input-agent. Keys, buttons, absolute pointer and discrete
-line-wheel scrolling are available (no text, pixel-scroll, clipboard, audio or files).
+line-wheel scrolling are available (no text, pixel-scroll, audio or files).
 Lost or refused control is never
 retried or reacquired: after a request, fr does not reconnect.
+--clipboard (with --control; build with linux-clipboard) lets the UTF-8 text
+CLIPBOARD follow the control lease both ways, when the host runs frd run
+--clipboard too; otherwise the completion reports clipboard absence by type.
 Native transport/media remain unqualified. Set XAUTHORITY in the local environment
 when the window and worker require it. Close the window or use Ctrl-C to stop.
 ";

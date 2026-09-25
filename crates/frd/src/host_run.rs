@@ -9,7 +9,9 @@
 //! operator passes an input agent (then a first viewer may take the exclusive
 //! controlled share, unattended by that choice, with the child's mandatory
 //! indicator), local approval is refused until the separate session-agent
-//! process exists, and the encoder is the explicit software HEVC profile.
+//! process exists, and the encoder is the explicit software HEVC profile. The
+//! controller's text clipboard is a further, separate operator opt-in
+//! (`clipboard`, requires the input agent); it follows the controller's lease.
 pub mod policy;
 
 use crate::{
@@ -27,7 +29,7 @@ use crate::{
             prepare::Setup,
         },
     },
-    session_startup::{Configuration, host_offer, shared_viewers},
+    session_startup::{Configuration, host_offer_with, shared_viewers},
     worker::{Deadline, Launch, Retirement},
 };
 use asupersync::{
@@ -89,6 +91,9 @@ pub struct Options {
     /// Absolute `fr-input-agent` image. `None` keeps the host observation-only;
     /// `Some` lets a first viewer take the exclusive controlled share.
     pub input_agent: Option<PathBuf>,
+    /// Let that controller's text clipboard follow its lease, through the
+    /// input agent image's per-lane `--clipboard` child. Requires `input_agent`.
+    pub clipboard: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,10 +194,11 @@ fn random_nonzero_u32() -> Result<u32, Error> {
 }
 
 /// The host's offer: the four bootstrap capabilities the native viewer
-/// requires, plus (only with an input agent) the optional control boundaries.
+/// requires, plus (only with an input agent) the optional control boundaries
+/// and (only with the clipboard enable too) the optional clipboard ones.
 /// Optional client capabilities outside this set are dropped by negotiation.
-fn offer(control: bool) -> Offer {
-    host_offer(control)
+fn offer(control: bool, clipboard: bool) -> Offer {
+    host_offer_with(control, clipboard)
 }
 /// Native operations a controller may request in this X11 slice. Discrete
 /// wheel input uses bounded `XTest` press/release pairs, not pixel-scroll emulation.
@@ -210,7 +216,7 @@ fn request(
     host_boot: HostBootId,
     os_session: u32,
     scope: Scope,
-    control: bool,
+    (control, clipboard): (bool, bool),
 ) -> Result<Request, serial::Error> {
     let fresh = |_| serial::Error::Configuration;
     Ok(Request {
@@ -221,7 +227,7 @@ fn request(
             ..GrantPolicy::default()
         },
         session: Configuration {
-            offer: offer(control),
+            offer: offer(control, clipboard),
             binding: ControlBinding {
                 id: u32::try_from(attempt % u64::from(u32::MAX))
                     .unwrap_or(1)
@@ -460,6 +466,7 @@ fn check(options: &Options) -> Result<(), Error> {
             .input_agent
             .as_ref()
             .is_some_and(|p| !p.is_absolute())
+        || (options.clipboard && options.input_agent.is_none())
     {
         return Err(Error::Configuration);
     }
@@ -610,19 +617,22 @@ impl Share<'_> {
             .permissions_mut()
             .set_permission(PermissionKind::ScreenCapture, PermissionStatus::Granted);
         if let Some(input_agent) = &self.options.input_agent {
-            agent = agent.with_control(
-                ControlProfile::new(
-                    input_agent,
-                    &self.options.display,
-                    self.options.xauthority.as_deref(),
-                    self.seat.clone(),
-                    control_capabilities(),
-                    fps,
-                    self.options.bitrate,
-                    Backend::SoftwareExplicit,
-                )
-                .map_err(|_| Error::Configuration)?,
-            );
+            let profile = ControlProfile::new(
+                input_agent,
+                &self.options.display,
+                self.options.xauthority.as_deref(),
+                self.seat.clone(),
+                control_capabilities(),
+                fps,
+                self.options.bitrate,
+                Backend::SoftwareExplicit,
+            )
+            .map_err(|_| Error::Configuration)?;
+            agent = agent.with_control(if self.options.clipboard {
+                profile.with_clipboard()
+            } else {
+                profile
+            });
         }
         let entropy: shared_viewers::Entropy = Arc::new(|| random_nonzero_u128().map_err(|_| ()));
         agent
@@ -732,7 +742,7 @@ impl Share<'_> {
         let factory = self.factory(source, retirement.clone());
         let (fps, bitrate) = (self.options.fps, self.options.bitrate);
         let (host_boot, scope) = (self.host_boot, self.options.sharing);
-        let control = self.options.input_agent.is_some();
+        let control = (self.options.input_agent.is_some(), self.options.clipboard);
         let report = self.report.clone();
         let stop = self.stop.clone();
         let source_epoch = epoch.clone();
@@ -813,7 +823,7 @@ mod tests {
     #[test]
     fn host_offer_matches_the_native_viewer_bootstrap_capabilities() {
         use fr_wire::{attachment, decoder, display, negotiation::Role};
-        let observe = offer(false);
+        let observe = offer(false, false);
         assert_eq!(observe.role, Role::Observe);
         let names: Vec<_> = observe
             .capabilities
@@ -836,10 +846,18 @@ mod tests {
                 .all(|c| c.required != (c.name == fr_wire::cursor::CAPABILITY))
         );
         // Control boundaries are offered only with an input agent, optionally.
-        let control = offer(true);
+        let control = offer(true, false);
         assert_eq!(control.capabilities.len(), 9);
         assert_eq!(
             control.capabilities.iter().filter(|c| c.required).count(),
+            4
+        );
+        // The clipboard enable adds three optional boundaries, only with control.
+        assert_eq!(offer(false, true), observe);
+        let clipboard = offer(true, true);
+        assert_eq!(clipboard.capabilities.len(), 12);
+        assert_eq!(
+            clipboard.capabilities.iter().filter(|c| c.required).count(),
             4
         );
         for allowed in [
@@ -863,8 +881,9 @@ mod tests {
     #[test]
     fn every_request_allocates_fresh_unpredictable_identifiers() {
         let boot = HostBootId::from_raw(9);
-        let a = request(1, boot, 5, Scope::OwnUser, false).unwrap();
-        let b = request(2, boot, 5, Scope::OwnUser, true).unwrap();
+        let a = request(1, boot, 5, Scope::OwnUser, (false, false)).unwrap();
+        let b = request(2, boot, 5, Scope::OwnUser, (true, false)).unwrap();
+        let c = request(3, boot, 5, Scope::OwnUser, (true, true)).unwrap();
         assert_ne!(
             a.session.binding.remote_session,
             b.session.binding.remote_session
@@ -873,8 +892,9 @@ mod tests {
         assert_eq!(a.session.binding.os_session.as_raw(), 5);
         assert!(!a.session.require_approval);
         assert_eq!(a.admission.scope, Scope::OwnUser);
-        assert_eq!(a.session.offer, offer(false));
-        assert_eq!(b.session.offer, offer(true));
+        assert_eq!(a.session.offer, offer(false, false));
+        assert_eq!(b.session.offer, offer(true, false));
+        assert_eq!(c.session.offer, offer(true, true));
     }
 
     #[test]
@@ -894,6 +914,7 @@ mod tests {
             once: true,
             handle_signals: false,
             input_agent: None,
+            clipboard: false,
         };
         let report: Reporter = Arc::new(|_| {});
         let stop = Arc::new(StopHandle::default());
@@ -903,6 +924,14 @@ mod tests {
         relative_agent.input_agent = Some(PathBuf::from("fr-input-agent"));
         assert_eq!(
             run(&relative_agent, &report, &stop),
+            Err(Error::Configuration)
+        );
+        // The clipboard enable alone (no input agent, so no lease) is refused.
+        let mut clipboard_only = options.clone();
+        clipboard_only.worker = PathBuf::from("/usr/bin/fr-media-worker");
+        clipboard_only.clipboard = true;
+        assert_eq!(
+            run(&clipboard_only, &report, &stop),
             Err(Error::Configuration)
         );
         let mut empty = options;

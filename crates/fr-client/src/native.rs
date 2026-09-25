@@ -45,6 +45,42 @@ pub fn control_offer() -> Offer {
     )
 }
 
+/// `control_offer` plus the three OPTIONAL text-clipboard boundaries (the
+/// clipboard attachment role, its record codec and bilateral readiness). A
+/// host without clipboard drops them and control still negotiates; the
+/// client then reports that absence. Selecting them opens nothing: the lane
+/// attaches only under the granted input attachment, after local consent.
+pub fn control_offer_with_clipboard() -> Offer {
+    offer(
+        Role::RequestControl,
+        &[
+            (
+                attachment::INPUT_CAPABILITY,
+                attachment::INPUT_VERSION,
+                true,
+            ),
+            (control::GRANT_CAPABILITY, 1, true),
+            (clock::CAPABILITY, clock::VERSION, true),
+            (presented::CAPABILITY, presented::VERSION, true),
+            (
+                attachment::CLIPBOARD_CAPABILITY,
+                attachment::CLIPBOARD_VERSION,
+                false,
+            ),
+            (
+                fr_wire::clipboard::CAPABILITY,
+                fr_wire::clipboard::VERSION,
+                false,
+            ),
+            (
+                fr_wire::clipboard::startup::CAPABILITY,
+                fr_wire::clipboard::startup::VERSION,
+                false,
+            ),
+        ],
+    )
+}
+
 fn offer(role: Role, extra: &[(&str, u16, bool)]) -> Offer {
     let mut capabilities: Vec<_> = [
         (display::CAPABILITY, 1, true),

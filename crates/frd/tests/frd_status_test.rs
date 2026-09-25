@@ -705,6 +705,29 @@ fn frd_run_refuses_software_encoding_without_explicit_opt_in() {
     );
     let help = wait_for_child(frd_command(&["--help"]).spawn().unwrap());
     assert!(String::from_utf8_lossy(&help.stdout).contains("--software-explicit"));
+    // The clipboard enable without an input agent (no lease to follow) is a
+    // typed refusal before any display, worker or network I/O.
+    let output = wait_for_child(
+        frd_command(&[
+            "run",
+            "--socket",
+            socket.to_str().unwrap(),
+            "--config",
+            config.to_str().unwrap(),
+            "--software-explicit",
+            "--clipboard",
+            "--json",
+        ])
+        .spawn()
+        .unwrap(),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    let json_text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        json_text.contains("\"code\":\"clipboard_requires_input_agent\""),
+        "{json_text}"
+    );
+    assert!(String::from_utf8_lossy(&help.stdout).contains("--clipboard"));
 }
 
 #[test]

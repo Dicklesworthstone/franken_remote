@@ -198,6 +198,7 @@ fn options(
         once: false,
         handle_signals: false,
         input_agent: None,
+        clipboard: false,
     }
 }
 

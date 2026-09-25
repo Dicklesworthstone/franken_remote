@@ -32,6 +32,7 @@ impl Hosted {
             once: false,
             handle_signals: false,
             input_agent: None,
+            clipboard: false,
         };
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = events.clone();

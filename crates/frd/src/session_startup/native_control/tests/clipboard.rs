@@ -11,13 +11,13 @@ use fr_wire::clipboard::session::synchronize::{
 
 #[derive(Default)]
 #[allow(clippy::struct_excessive_bools)] // Independent fixture lifecycle and blocking controls.
-struct Os {
+pub(super) struct Os {
     revision: u64,
     text: Option<String>,
     origin: Option<Stamp>,
-    published: Vec<String>,
-    opened: bool,
-    closed: bool,
+    pub(super) published: Vec<String>,
+    pub(super) opened: bool,
+    pub(super) closed: bool,
     block: bool,
     entered: bool,
     release: bool,
@@ -29,7 +29,7 @@ impl Drop for Release {
     }
 }
 
-fn copy(os: &Arc<Mutex<Os>>, text: &str) {
+pub(super) fn copy(os: &Arc<Mutex<Os>>, text: &str) {
     let mut os = os.lock().unwrap();
     os.revision += 1;
     os.text = Some(text.into());
@@ -149,7 +149,11 @@ fn caps() -> Vec<WireCapability> {
     caps.sort_by(|a, b| a.name.cmp(&b.name));
     caps
 }
-fn configured(os: &Arc<Mutex<Os>>, consent: bool, failure: Option<bool>) -> ClipboardConfiguration {
+pub(super) fn configured(
+    os: &Arc<Mutex<Os>>,
+    consent: bool,
+    failure: Option<bool>,
+) -> ClipboardConfiguration {
     let os = os.clone();
     let mut id = 0u128;
     ClipboardConfiguration::new(

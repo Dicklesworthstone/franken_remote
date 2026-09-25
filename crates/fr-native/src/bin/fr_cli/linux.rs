@@ -251,11 +251,32 @@ fn connect(
             "Verify the locally provisioned trust store and native connection policy.",
         )
     })?;
+    #[cfg(not(feature = "linux-clipboard"))]
+    if connection.clipboard {
+        return Err(Failure::new(
+            "clipboard_unavailable",
+            "This fr was built without linux-clipboard; rebuild fr-native with --features linux-clipboard, or omit --clipboard.",
+            2,
+        ));
+    }
     let configuration = desktop_configuration(cx, connection)?;
     let state = Rc::new(RefCell::new(Progress {
-        control: connection.control.then(control::Counters::default),
+        control: connection.control.then(|| control::Counters {
+            clipboard: connection
+                .clipboard
+                .then(control::ClipboardCounters::default),
+            ..control::Counters::default()
+        }),
         ..Progress::default()
     }));
+    let clipboard = if connection.clipboard {
+        Some(control::Clipboard {
+            display: x_display(connection)?,
+            cx: cx.clone(),
+        })
+    } else {
+        None
+    };
     let mode = if connection.control {
         Mode::ControlCapable(control::policy())
     } else {
@@ -269,6 +290,7 @@ fn connect(
             display: connection.display,
             progress: state.clone(),
             attempt: None,
+            clipboard,
         },
     );
     let selector = if connection.target.by_name {
@@ -295,7 +317,7 @@ fn connect(
             runtime.handle(),
             selector,
             cfg,
-            control::offer(),
+            control::offer(connection.clipboard),
             policy,
             &mut application,
         );
@@ -314,13 +336,10 @@ fn connect(
     };
     completed(&application, result, stopped.get(), &state.borrow(), json)
 }
-/// Local window/worker settings only; no network, peer or credential input.
+/// The existing local X11 session: `--x-display`, else DISPLAY.
 #[cfg(feature = "linux-desktop")]
-fn desktop_configuration(
-    cx: &Cx,
-    connection: &Connection,
-) -> Result<DesktopConfiguration, Failure> {
-    let x_display = connection
+fn x_display(connection: &Connection) -> Result<String, Failure> {
+    connection
         .x_display
         .clone()
         .or_else(|| std::env::var("DISPLAY").ok())
@@ -329,7 +348,15 @@ fn desktop_configuration(
                 "display_unavailable",
                 "Set DISPLAY or --x-display for your existing local X11 session.",
             )
-        })?;
+        })
+}
+/// Local window/worker settings only; no network, peer or credential input.
+#[cfg(feature = "linux-desktop")]
+fn desktop_configuration(
+    cx: &Cx,
+    connection: &Connection,
+) -> Result<DesktopConfiguration, Failure> {
+    let x_display = x_display(connection)?;
     let xauthority = std::env::var_os("XAUTHORITY").map(std::path::PathBuf::from);
     let mut epoch = [0_u8; 16];
     cx.random_bytes(&mut epoch);
@@ -509,6 +536,8 @@ struct Interface {
     progress: Rc<RefCell<Progress>>,
     /// The current opened `--control` attempt; never carried to the next one.
     attempt: Option<control::Attempt>,
+    /// Some only with `--clipboard`: configured afresh on every attempt.
+    clipboard: Option<control::Clipboard>,
 }
 #[cfg(feature = "linux-desktop")]
 impl Ui for Interface {
@@ -533,8 +562,12 @@ impl Ui for Interface {
         p.opened = p.opened.saturating_add(1);
         p.approval_pending = false;
         p.window = desktop.window();
-        if p.control.is_some() {
-            self.attempt = Some(control::Attempt::new(desktop).ok_or(CallbackError)?);
+        if let Some(counters) = p.control.as_mut() {
+            let mut attempt = control::Attempt::new(desktop).ok_or(CallbackError)?;
+            if let (Some(local), Some(clipboard)) = (&self.clipboard, counters.clipboard.as_mut()) {
+                attempt.configure_clipboard(desktop, local, clipboard);
+            }
+            self.attempt = Some(attempt);
         }
         Ok(())
     }
@@ -573,7 +606,13 @@ impl Ui for Interface {
                 self.attempt = None;
             }
             Status::Cleaning { failure, .. } => {
-                self.attempt = None;
+                // Last content-free clipboard sample before the attempt's handle goes.
+                if let (Some(attempt), Some(counters)) = (
+                    self.attempt.take(),
+                    progress.control.as_mut().and_then(|c| c.clipboard.as_mut()),
+                ) {
+                    attempt.clipboard_turn(counters);
+                }
                 let window = progress.window.as_ref().map(WindowControl::status);
                 let closed = progress.before_cleanup(window);
                 let control = progress
@@ -609,11 +648,18 @@ fn completion(progress: &Progress, json: bool) -> String {
 }
 /// Counts are host-reported stages, not local effect proof; visibility stays
 /// the X11 submission witness described in `control.rs`, never optical proof.
+/// Clipboard fields are content-free: requested, became active, host items
+/// committed to the local CLIPBOARD, or the typed reason it never became active.
 #[cfg(feature = "linux-desktop")]
 fn control_completion(progress: &Progress, control: control::Counters, json: bool) -> String {
+    let clipboard = control.clipboard.unwrap_or_default();
+    let absence = control
+        .clipboard
+        .and_then(|c| c.absence())
+        .unwrap_or("not_requested");
     if json {
         format!(
-            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"control_requested\":{},\"control_granted\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false}}\n",
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"control_requested\":{},\"control_granted\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false}}\n",
             output::timestamp(),
             progress.attempts,
             progress.opened,
@@ -621,11 +667,19 @@ fn control_completion(progress: &Progress, control: control::Counters, json: boo
             control.requested,
             control.granted,
             control.results,
-            control.submitted
+            control.submitted,
+            control.clipboard.is_some(),
+            clipboard.active,
+            clipboard.received,
+            if clipboard.active {
+                "null".to_owned()
+            } else {
+                format!("\"{absence}\"")
+            }
         )
     } else {
         format!(
-            "Control session stopped; {} attempt(s), {} opened session(s), control {}, {} host input result(s) ({} submitted to the host OS), cleanup confirmed. Native transport/hardware remain unqualified.\n",
+            "Control session stopped; {} attempt(s), {} opened session(s), control {}, {} host input result(s) ({} submitted to the host OS), clipboard {}, cleanup confirmed. Native transport/hardware remain unqualified.\n",
             progress.attempts,
             progress.opened,
             match (control.requested, control.granted) {
@@ -634,7 +688,12 @@ fn control_completion(progress: &Progress, control: control::Counters, json: boo
                 (false, false) => "not requested",
             },
             control.results,
-            control.submitted
+            control.submitted,
+            if clipboard.active {
+                format!("active ({} host item(s) received)", clipboard.received)
+            } else {
+                format!("absent: {absence}")
+            }
         )
     }
 }
@@ -692,6 +751,7 @@ mod tests {
                 display: DisplayChoice::Handle(99),
                 progress: Rc::new(RefCell::new(Progress::default())),
                 attempt: None,
+                clipboard: None,
             };
             // Real wire catalog constructor also validates the selected display.
             let display = fr_wire::display::Display {
@@ -721,6 +781,7 @@ mod tests {
                     display: DisplayChoice::Handle(9),
                     progress: Rc::new(RefCell::new(Progress::default())),
                     attempt: None,
+                    clipboard: None,
                 },
             )
         }
@@ -831,6 +892,7 @@ mod tests {
                 display: DisplayChoice::Only,
                 progress: Rc::new(RefCell::new(control())),
                 attempt: None,
+                clipboard: None,
             };
             // No request yet: the ordinary reconnect policy still applies.
             assert_eq!(
@@ -907,6 +969,73 @@ mod tests {
         }
 
         #[test]
+        fn control_completion_reports_the_clipboard_by_type_and_count_only() {
+            let with = |clipboard| Progress {
+                control: Some(control::Counters {
+                    requested: true,
+                    granted: true,
+                    clipboard,
+                    ..control::Counters::default()
+                }),
+                ..Progress::default()
+            };
+            let cases = [
+                (
+                    with(None),
+                    [
+                        "\"clipboard_requested\":false",
+                        "\"clipboard_active\":false",
+                        "\"clipboard_received\":0",
+                        "\"clipboard_absence\":\"not_requested\"",
+                    ],
+                ),
+                (
+                    with(Some(control::ClipboardCounters {
+                        absence: Some("host_clipboard_unavailable"),
+                        ..control::ClipboardCounters::default()
+                    })),
+                    [
+                        "\"clipboard_requested\":true",
+                        "\"clipboard_active\":false",
+                        "\"clipboard_received\":0",
+                        "\"clipboard_absence\":\"host_clipboard_unavailable\"",
+                    ],
+                ),
+                (
+                    with(Some(control::ClipboardCounters {
+                        active: true,
+                        received: 2,
+                        absence: None,
+                    })),
+                    [
+                        "\"clipboard_requested\":true",
+                        "\"clipboard_active\":true",
+                        "\"clipboard_received\":2",
+                        "\"clipboard_absence\":null",
+                    ],
+                ),
+            ];
+            for (progress, fields) in cases {
+                let json = completion(&progress, true);
+                serde_json::from_str::<serde_json::Value>(json.trim()).unwrap();
+                for field in fields {
+                    assert!(json.contains(field), "{field}: {json}");
+                }
+            }
+            let text = completion(
+                &with(Some(control::ClipboardCounters {
+                    active: true,
+                    received: 2,
+                    absence: None,
+                })),
+                false,
+            );
+            assert!(
+                text.contains("clipboard active (2 host item(s) received)"),
+                "{text}"
+            );
+        }
+        #[test]
         fn supervisor_cleanup_failure_cannot_be_masked_by_a_user_close_or_signal() {
             let mut progress = Progress::default();
             let _ = progress.before_cleanup(Some(WindowStatus::Stopped(StopReason::User)));
@@ -943,6 +1072,7 @@ mod tests {
             attempts: 1,
             fit_window: None,
             control: false,
+            clipboard: false,
         };
         let runtime = RuntimeBuilder::current_thread()
             .enable_platform_reactor(true)

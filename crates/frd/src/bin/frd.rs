@@ -55,6 +55,9 @@ OPTIONS:
     --input-agent PATH  Absolute fr-input-agent path: lets the first viewer take
                     exclusive, unattended control (requires approval none; the
                     agent shows a mandatory local indicator). Absent: view-only
+    --clipboard     With --input-agent: the controller's UTF-8 text clipboard
+                    follows its lease, both directions (the agent's per-lane
+                    --clipboard child owns X11 CLIPBOARD). Off by default
     --interface IF  Tailscale interface for ingress enforcement (default: tailscale0)
     --trust-roots P PEM CA bundle for the host certificate chain (default: system)
     --once          Serve one sharing session, then exit
@@ -363,7 +366,10 @@ fn select_desktop(
     }
 }
 
+// One linear, ordered refusal sequence (each typed refusal before any I/O it
+// guards), then the run; splitting it would hide that order.
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_lines)]
 fn execute_run(args: &[String], json: bool) -> ExitCode {
     use frd::host_policy::{Approval, Sharing, options::RunOptions};
     use frd::host_run::{self, Event, Options, Reporter};
@@ -405,6 +411,15 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
             "hardware_hevc_unavailable",
             "frd run has no hardware HEVC encoder selection yet; pass --software-explicit to \
              share with the CPU software profile (docs/decisions/0004-software-encoder-profile.md)",
+            2,
+        );
+    }
+    if options.clipboard && options.input_agent.is_none() {
+        return run_refusal(
+            json,
+            "clipboard_requires_input_agent",
+            "--clipboard shares the controller's clipboard for the life of its input lease; \
+             it needs --input-agent (a view-only share never exposes the clipboard)",
             2,
         );
     }
@@ -456,6 +471,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         once: options.once,
         handle_signals: true,
         input_agent,
+        clipboard: options.clipboard,
     };
     let report: Reporter = Arc::new(move |event: Event| print_event(json, &event));
     let stop = Arc::new(host_run::StopHandle::default());

@@ -156,6 +156,40 @@ fn host_offer_makes_control_optional_and_never_upgrades_an_observer() {
     );
 }
 #[test]
+fn clipboard_is_offered_optionally_only_with_control_and_the_local_enable() {
+    use crate::session_startup::clipboard::selected;
+    use fr_client::native::{control_offer, control_offer_with_clipboard};
+    // Unchanged without the operator's enable, and never on an observe-only host.
+    assert_eq!(host_offer_with(true, false), host_offer(true));
+    assert_eq!(host_offer_with(false, true), host_offer(false));
+    let host = host_offer_with(true, true);
+    assert!(host.validate().is_ok());
+    assert_eq!(host.capabilities.len(), 12);
+    assert_eq!(host.capabilities.iter().filter(|c| c.required).count(), 4);
+    let client = control_offer_with_clipboard();
+    assert!(client.validate().is_ok());
+    // Both enabled: the selection carries the whole clipboard profile.
+    let both = host.intersect(&client).unwrap();
+    client.check_host(&both).unwrap();
+    let both = both.select().unwrap();
+    assert!(profile(&both, true));
+    assert!(selected(&both).is_ok());
+    // A host without the enable: control still negotiates; clipboard is absent
+    // by type (NotNegotiated), never a refused connection.
+    let absent = host_offer(true).intersect(&client).unwrap();
+    client.check_host(&absent).unwrap();
+    let absent = absent.select().unwrap();
+    assert!(profile(&absent, true));
+    assert_eq!(
+        selected(&absent),
+        Err(crate::clipboard_quic::Error::NotNegotiated)
+    );
+    // A client that did not ask: the host's optional offer is simply dropped.
+    let unasked = host.intersect(&control_offer()).unwrap().select().unwrap();
+    assert!(profile(&unasked, true));
+    assert!(selected(&unasked).is_err());
+}
+#[test]
 fn shipped_client_control_offer_selects_exactly_the_host_control_profile() {
     use fr_client::native::{control_offer, observation_offer};
     let control = control_offer()

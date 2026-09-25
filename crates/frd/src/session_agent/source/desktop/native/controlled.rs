@@ -13,9 +13,16 @@
 //! evidence makes the view ready. `XTest` runs in a per-lease `fr-input-agent`
 //! child (never in frd) that shows the mandatory sharing indicator for the whole
 //! lease; its fence is installed before any input can queue.
+//!
+//! With the operator's separate clipboard enable (`frd run --clipboard`), the
+//! controller's text clipboard follows the same lease: the lane is offered only
+//! after the grant and attaches only under the active input attachment; its X11
+//! owner is another per-lane child of the same image (`--clipboard` role, see
+//! `clipboard_process`). Revocation or expiry fences it with the lease.
 use super::super::{Error, LocalAction, Report, Wake};
 use super::{SessionAgent, Setup, Startup, local_stage};
 use crate::{
+    clipboard_process, clipboard_quic,
     input_agent::Seat,
     input_process::{self, Fence, InvalidLaunch, ProcessLaunch, RemoteSink},
     input_quic::grant::Error as GrantError,
@@ -62,6 +69,7 @@ pub struct ControlProfile {
     fps: u16,
     bitrate: u32,
     backend: Backend,
+    clipboard: bool,
 }
 impl ControlProfile {
     /// `input_agent` is the locally installed `fr-input-agent` image, `display`
@@ -93,7 +101,21 @@ impl ControlProfile {
             fps,
             bitrate,
             backend,
+            clipboard: false,
         })
+    }
+    /// The operator's separate local enable for the controller's text
+    /// clipboard (`frd run --clipboard`). Under the explicit `approval none`
+    /// profile this IS the local clipboard consent for this OS share; it grants
+    /// nothing by itself: the lane still needs the controller's own opt-in, the
+    /// active lease and bilateral readiness.
+    #[must_use]
+    pub const fn with_clipboard(mut self) -> Self {
+        self.clipboard = true;
+        self
+    }
+    pub const fn clipboard(&self) -> bool {
+        self.clipboard
     }
     pub const fn capabilities(&self) -> Capabilities {
         self.capabilities
@@ -118,6 +140,7 @@ impl fmt::Debug for ControlProfile {
         // No paths or display names in diagnostics.
         f.debug_struct("ControlProfile")
             .field("capabilities", &self.capabilities)
+            .field("clipboard", &self.clipboard)
             .finish_non_exhaustive()
     }
 }
@@ -176,7 +199,16 @@ impl ControlledDesktop {
     ) -> Result<asupersync::process::ExitStatus, crate::worker::Error> {
         let status = match &mut self.media {
             Media::Reaped(status) => return Ok(*status),
-            Media::Live(publisher) => publisher.reap_media(cleanup, deadline).await?,
+            Media::Live(publisher) => {
+                // The clipboard owner first (fenced by `close` already): its
+                // worker thread ends only after its X11 child was stopped and
+                // reaped. A timeout keeps every owner for a later reap.
+                publisher
+                    .reap_clipboard(cleanup, deadline)
+                    .await
+                    .map_err(clipboard_cleanup)?;
+                publisher.reap_media(cleanup, deadline).await?
+            }
         };
         // Dropping the (already fenced) publisher closes the viewer transport.
         self.media = Media::Reaped(status);
@@ -206,11 +238,15 @@ impl ControlledDesktop {
             permitted: permitted.clone(),
             approved: None,
         };
-        let (nonce, ticket) = (entropy.clone(), entropy);
+        let (nonce, ticket, ids) = (entropy.clone(), entropy.clone(), entropy);
         let seat = self.profile.seat.clone();
         // The managed service takes its attachment at CALL time, as before.
         let prepared = match &mut self.media {
             Media::Live(publisher) => Ok((
+                self.profile
+                    .clipboard
+                    .then(|| configure_clipboard(publisher, &self.profile, &cx, ids))
+                    .flatten(),
                 publisher.control(),
                 publisher.serve_managed_control(
                     seat,
@@ -222,7 +258,7 @@ impl ControlledDesktop {
             Media::Reaped(_) => Err(Error::Closed),
         };
         async move {
-            let (observation, service) = prepared?;
+            let (clipboard, observation, service) = prepared?;
             let mut service = pin!(service);
             let mut timer = Wake {
                 driver: cx.timer_driver().ok_or(Error::Clock)?,
@@ -243,6 +279,11 @@ impl ControlledDesktop {
                 }
                 if let Poll::Ready(report) = service.as_mut().poll(task) {
                     return Poll::Ready(report);
+                }
+                // Free the bounded receipt slots (at most two, content-free);
+                // a full slot would otherwise defer the next incoming item.
+                if let Some(clipboard) = &clipboard {
+                    while clipboard.take_received().is_some() {}
                 }
                 let next = timer.driver.now().as_nanos().saturating_add(10_000_000);
                 timer.arm(Time::from_nanos(next), task);
@@ -273,6 +314,40 @@ pub(super) fn served(failed: bool) -> Report {
             finished: u64::from(!failed),
             failed: u64::from(failed),
         },
+    }
+}
+/// Configure the controller-only clipboard on this publication before its
+/// managed service starts. Nothing opens now: the native factory runs on the
+/// clipboard worker only after the grant and bilateral readiness, and spawns
+/// the image's `--clipboard` role. `None` when the controller did not select
+/// clipboard (typed absence on its side), or when setup was refused.
+fn configure_clipboard(
+    publisher: &mut NativePublisher,
+    profile: &ControlProfile,
+    cx: &Cx,
+    ids: Entropy,
+) -> Option<crate::native_clipboard::Control> {
+    let launch = ProcessLaunch::new(
+        &profile.input_agent,
+        &profile.display,
+        profile.xauthority.as_deref(),
+        ids().ok()?,
+    )
+    .ok()?;
+    let configuration = crate::native_clipboard::Configuration::new(
+        true,
+        Duration::from_secs(2),
+        clipboard_process::factory(launch, cx.clone()),
+        move || ids().map_err(|()| fr_wire::clipboard::session::synchronize::IdentifierFailure),
+    )
+    .ok()?;
+    publisher.configure_clipboard(configuration).ok()
+}
+const fn clipboard_cleanup(error: clipboard_quic::Error) -> crate::worker::Error {
+    match error {
+        clipboard_quic::Error::Cancelled => crate::worker::Error::Cancelled,
+        clipboard_quic::Error::Clock => crate::worker::Error::MissingRuntime,
+        _ => crate::worker::Error::Deadline,
     }
 }
 fn input_permitted(agent: &SessionAgent) -> bool {

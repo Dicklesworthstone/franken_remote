@@ -105,6 +105,7 @@ fn options(api: &fixture::Api, tools: &Tools, worker: PathBuf) -> Options {
         once: true,
         handle_signals: false,
         input_agent: None,
+        clipboard: false,
     }
 }
 
@@ -232,6 +233,7 @@ fn frd_run_stops_on_consecutive_source_failures_with_a_typed_error() {
         once: false,
         handle_signals: false,
         input_agent: None,
+        clipboard: false,
     };
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();
