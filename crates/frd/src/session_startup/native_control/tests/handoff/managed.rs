@@ -14,6 +14,8 @@ enum Mode {
     FactoryStall,
     CallbackFails,
     Abandoned,
+    /// Out-of-process executor (protocol fixture child) via `approve_fenced`.
+    Fenced,
 }
 struct Unblock(Arc<AtomicBool>);
 impl Drop for Unblock {
@@ -47,6 +49,7 @@ async fn managed(c: Cx, h: Cx, mode: Mode) {
     let released = Arc::new(AtomicU64::new(0));
     let factories = Arc::new(AtomicUsize::new(0));
     let gate = Unblock(Arc::new(AtomicBool::new(mode != Mode::FactoryStall)));
+    let (agent_image, agent_log) = crate::input_process::tests::fixture("normal");
     let receipts = Cell::new(0);
     let mut granted = false;
     let mut action_sent = false;
@@ -72,25 +75,49 @@ async fn managed(c: Cx, h: Cx, mode: Mode) {
                         let calls = factories.clone();
                         let unblocked = gate.0.clone();
                         let cx = h.clone();
-                        pending.approve(
-                            target,
-                            || Some((InputLeaseId::from_raw(219), InputTicketId::from_raw(223))),
-                            move || {
-                                calls.fetch_add(1, Ordering::Release);
-                                while !unblocked.load(Ordering::Acquire) {
-                                    std::thread::sleep(Duration::from_millis(1));
-                                }
-                                if mode == Mode::FactoryFails {
-                                    return Err(PlatformError::Unavailable);
-                                }
-                                Ok(Sink {
-                                    effects,
-                                    release_at,
-                                    cx,
-                                })
-                            },
-                            |_| true,
-                        )?;
+                        let fresh =
+                            || Some((InputLeaseId::from_raw(219), InputTicketId::from_raw(223)));
+                        if mode == Mode::Fenced {
+                            use crate::input_process::{Fence, ProcessLaunch, RemoteSink, factory};
+                            let fence = Fence::default();
+                            let make = factory(
+                                ProcessLaunch::new(&agent_image, ":0", None, 0x51).unwrap(),
+                                cx,
+                                target.bounds,
+                                target.capabilities,
+                                fence.clone(),
+                            );
+                            pending.approve_fenced(
+                                target,
+                                fresh,
+                                move || {
+                                    calls.fetch_add(1, Ordering::Release);
+                                    make()
+                                },
+                                RemoteSink::native_cleanup,
+                                &fence,
+                            )?;
+                        } else {
+                            pending.approve(
+                                target,
+                                fresh,
+                                move || {
+                                    calls.fetch_add(1, Ordering::Release);
+                                    while !unblocked.load(Ordering::Acquire) {
+                                        std::thread::sleep(Duration::from_millis(1));
+                                    }
+                                    if mode == Mode::FactoryFails {
+                                        return Err(PlatformError::Unavailable);
+                                    }
+                                    Ok(Sink {
+                                        effects,
+                                        release_at,
+                                        cx,
+                                    })
+                                },
+                                |_| true,
+                            )?;
+                        }
                         approval_count += 1;
                         if mode == Mode::CallbackFails {
                             return Err(crate::input_quic::grant::Error::TargetChanged);
@@ -145,7 +172,10 @@ async fn managed(c: Cx, h: Cx, mode: Mode) {
                                 granted = true;
                                 assert!(matches!(
                                     mode,
-                                    Mode::Renewing | Mode::CaptureStall | Mode::Abandoned
+                                    Mode::Renewing
+                                        | Mode::CaptureStall
+                                        | Mode::Abandoned
+                                        | Mode::Fenced
                                 ));
                                 if let Some(p) = frame {
                                     input.visible(p.frame.as_raw()).unwrap();
@@ -157,7 +187,7 @@ async fn managed(c: Cx, h: Cx, mode: Mode) {
                                 }
                                 // No release action: final destruction must release
                                 // the held key without manufacturing a second receipt.
-                                if mode == Mode::Renewing
+                                if matches!(mode, Mode::Renewing | Mode::Fenced)
                                     && receipts.get() == 1
                                     && now(&c).unwrap() >= at + 3_100_000
                                 {
@@ -227,7 +257,34 @@ async fn managed(c: Cx, h: Cx, mode: Mode) {
         "{mode:?}: {report:?} {vr:?}"
     );
     assert!(stop.check().is_err());
-    if matches!(mode, Mode::Renewing | Mode::CaptureStall | Mode::Abandoned) {
+    if mode == Mode::Fenced {
+        use crate::input_process::tests::transcript;
+        assert!(granted && action_sent);
+        assert_eq!(approval_count, 1);
+        assert_eq!(factories.load(Ordering::Acquire), 1);
+        assert_eq!(receipts.get(), 1);
+        assert!(effects.lock().unwrap().is_empty(), "no in-process sink");
+        assert!(report.input.unwrap().handoff_safe(), "{report:?}");
+        assert!(!seat.is_occupied());
+        let lines = transcript(&agent_log);
+        let native: Vec<_> = lines
+            .iter()
+            .filter(|l| l.contains("EFFECT"))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(native, ["EFFECT KEY", "CLEANUP-EFFECT KEY RELEASE"]);
+        // The fence installed by approve_fenced reached the child before the
+        // first cleanup release; the child then stopped in order.
+        let fenced = lines.iter().position(|l| l == "FENCE").expect("fenced");
+        let released = lines
+            .iter()
+            .position(|l| l.starts_with("CLEANUP-EFFECT"))
+            .unwrap();
+        assert!(fenced < released, "{lines:?}");
+        assert_eq!(lines.last().map(String::as_str), Some("STOP"));
+        assert!(host.presentation_reports() > 3);
+        assert!(viewer.presentation_reports() > 3);
+    } else if matches!(mode, Mode::Renewing | Mode::CaptureStall | Mode::Abandoned) {
         assert!(granted && action_sent);
         assert_eq!(approval_count, 1);
         assert_eq!(factories.load(Ordering::Acquire), 1);
@@ -316,6 +373,10 @@ async fn managed(c: Cx, h: Cx, mode: Mode) {
 #[test]
 fn managed_publication_renews_and_drains_held_input_without_an_external_driver_task() {
     run(|c, h| managed(c, h, Mode::Renewing));
+}
+#[test]
+fn approve_fenced_installs_the_executor_fence_before_any_cleanup_release() {
+    run(|c, h| managed(c, h, Mode::Fenced));
 }
 #[test]
 fn managed_driver_releases_held_key_while_capture_is_stalled() {

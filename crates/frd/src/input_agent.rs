@@ -855,6 +855,14 @@ fn native_loop<S: InputSink, F: FnOnce() -> Result<S, PlatformError>, C: FnMut(&
             shared.control.stop(StopReason::ClockRegression);
         }
         last = Some(now);
+        // An out-of-process executor's local indicator or loss ends control
+        // here, before the authority check, so the stop names its real cause.
+        if sink.locally_revoked() {
+            shared.control.stop(StopReason::LocalRevoke);
+        }
+        if sink.native_failed() {
+            shared.control.stop(StopReason::NativeFailure);
+        }
         if session.monitor().deadline(now).is_err() {
             shared.control.stop(StopReason::AuthorityEnded);
         }
@@ -871,6 +879,10 @@ fn native_loop<S: InputSink, F: FnOnce() -> Result<S, PlatformError>, C: FnMut(&
             thread::park_timeout(NATIVE_POLL);
         }
     }
+    // Teardown order: every exit path goes through Control::stop (first reason
+    // kept) so an installed executor fence precedes the first release, even
+    // when the monitor was revoked directly rather than through this Control.
+    shared.control.stop(StopReason::AuthorityEnded);
     session.revoke();
     shared.lock().phase = Phase::Cleaning;
     loop {

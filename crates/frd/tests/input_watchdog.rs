@@ -266,3 +266,45 @@ fn control_is_content_free_and_thread_safe() {
         "InputControl { stopped: false, reason: None, .. }"
     );
 }
+#[test]
+fn installed_executor_fence_runs_after_revocation_and_never_twice_installed() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let r = runtime();
+    let cx = r.request_cx_with_budget(Budget::INFINITE);
+    let owner = session(&cx, 3_000_000);
+    let monitor = owner.monitor();
+    let watchdog = Watchdog::new(cx, owner.monitor()).unwrap();
+    let control = watchdog.control();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (seen, observed) = (calls.clone(), monitor.clone());
+    // The fence observes the input monitor ALREADY revoked when it runs.
+    assert!(control.install_fence(Box::new(move || {
+        assert!(observed.is_revoked());
+        seen.fetch_add(1, Ordering::SeqCst);
+    })));
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "installing never fences");
+    // One lease, one executor: a second fence is refused and runs at once.
+    let second = Arc::new(AtomicUsize::new(0));
+    let refused = second.clone();
+    assert!(!control.install_fence(Box::new(move || {
+        refused.fetch_add(1, Ordering::SeqCst);
+    })));
+    assert_eq!(second.load(Ordering::SeqCst), 1);
+    control.stop(StopReason::LocalRevoke);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(control.reason(), Some(StopReason::LocalRevoke));
+    // Late installation on an already stopped lease fences immediately.
+    let owner = session(&r.request_cx_with_budget(Budget::INFINITE), 3_000_000);
+    let late_watchdog =
+        Watchdog::new(r.request_cx_with_budget(Budget::INFINITE), owner.monitor()).unwrap();
+    let late = late_watchdog.control();
+    late.stop(StopReason::AuthorityEnded);
+    let fenced = Arc::new(AtomicUsize::new(0));
+    let count = fenced.clone();
+    assert!(late.install_fence(Box::new(move || {
+        count.fetch_add(1, Ordering::SeqCst);
+    })));
+    assert_eq!(fenced.load(Ordering::SeqCst), 1);
+    assert_eq!(late.reason(), Some(StopReason::AuthorityEnded));
+    drop((watchdog, late_watchdog));
+}

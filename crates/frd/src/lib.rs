@@ -17,6 +17,9 @@ pub mod input_watchdog;
 
 pub mod input_agent;
 
+#[cfg(target_os = "linux")]
+pub mod input_process;
+
 pub mod session_agent;
 
 pub mod status;

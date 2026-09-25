@@ -58,10 +58,14 @@ pub enum Error {
     MissingTimer,
     AlreadyStopped,
 }
+/// A synchronous, nonblocking executor fence (e.g. `input_process::Fence`).
+/// It must not call back into `Control` or wait for native work.
+pub type FenceFn = Box<dyn Fn() + Send + Sync>;
 struct Signal {
     monitor: InputMonitor,
     reason: AtomicU8,
     waker: Mutex<Option<Waker>>,
+    fence: Mutex<Option<FenceFn>>,
 }
 /// Local, revoke-only handle. Clones neither extend deadlines nor grant input.
 /// The authority fence happens before waking any task or acquiring a wake lock.
@@ -70,6 +74,17 @@ pub struct Control(Arc<Signal>);
 impl Control {
     pub fn stop(&self, reason: StopReason) {
         self.0.monitor.revoke();
+        // Then fence an out-of-process executor, still before any wake, lock
+        // wait on native work, or cleanup. The fence itself never blocks.
+        if let Some(fence) = self
+            .0
+            .fence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            fence();
+        }
         let _ =
             self.0
                 .reason
@@ -86,6 +101,36 @@ impl Control {
     }
     pub fn is_stopped(&self) -> bool {
         self.0.monitor.is_revoked()
+    }
+    /// Install the one executor fence for this lease. It runs on every later
+    /// `stop`, and immediately if the lease is already stopped. A second fence
+    /// is refused and invoked at once (fail closed): one lease has one child.
+    pub fn install_fence(&self, fence: FenceFn) -> bool {
+        let mut slot = self
+            .0
+            .fence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.is_some() {
+            drop(slot);
+            fence();
+            return false;
+        }
+        *slot = Some(fence);
+        drop(slot);
+        // Installed before this check: a concurrent stop either found the slot
+        // filled or revoked before this read, so the fence is never missed.
+        if self.is_stopped()
+            && let Some(fence) = self
+                .0
+                .fence
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+        {
+            fence();
+        }
+        true
     }
     pub fn reason(&self) -> Option<StopReason> {
         StopReason::from_raw(self.0.reason.load(Ordering::Acquire))
@@ -146,6 +191,7 @@ impl Watchdog {
                 monitor,
                 reason: AtomicU8::new(0),
                 waker: Mutex::new(None),
+                fence: Mutex::new(None),
             })),
             done: None,
         })

@@ -4,6 +4,7 @@
 use super::{Error, NativePublisher};
 use crate::{
     input_agent::{Driver, Seat, Shutdown, Status},
+    input_process::Fence,
     input_quic::grant::Error as GrantError,
     input_watchdog::{Control, StopReason},
     media::ObservationControl,
@@ -71,6 +72,44 @@ impl ManagedPendingControl<'_> {
         let driver = self.pending.approve(target, fresh, factory, cleanup)?;
         // Only this synchronous local callback can install a driver. The outer
         // future polls it only before/after the callback returns, never during it.
+        let mut native = lock(self.native);
+        native.started = true;
+        native.driver = Some(driver);
+        Ok(())
+    }
+    /// `approve` for an out-of-process executor: the lease's `Fence` is
+    /// installed on its Control inside this same synchronous callback, before
+    /// the outer service can poll any network turn that could queue input, so
+    /// every later stop fences the child first. Any refusal signals the fence,
+    /// so a factory that has not spawned yet refuses and one that has is fenced.
+    pub fn approve_fenced<S, F, C>(
+        &mut self,
+        target: Target,
+        fresh: impl FnOnce() -> Option<(InputLeaseId, InputTicketId)>,
+        factory: F,
+        cleanup: C,
+        fence: &Fence,
+    ) -> Result<(), GrantError>
+    where
+        S: InputSink + 'static,
+        F: FnOnce() -> Result<S, PlatformError> + Send + 'static,
+        C: FnMut(&mut S) -> bool + Send + 'static,
+    {
+        if lock(self.native).started {
+            fence.signal();
+            return Err(GrantError::AlreadyGranted);
+        }
+        let driver = match self.pending.approve(target, fresh, factory, cleanup) {
+            Ok(driver) => driver,
+            Err(error) => {
+                fence.signal();
+                return Err(error);
+            }
+        };
+        let signal = fence.clone();
+        driver
+            .control()
+            .install_fence(Box::new(move || signal.signal()));
         let mut native = lock(self.native);
         native.started = true;
         native.driver = Some(driver);
