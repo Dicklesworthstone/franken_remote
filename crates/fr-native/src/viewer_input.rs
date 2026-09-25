@@ -15,7 +15,7 @@ mod tests;
 mod timing;
 use fr_core::{
     input::{KeyTransition, PointerButton, ScrollUnit},
-    input_submission::{Capabilities, Capability},
+    input_submission::{Capabilities, Capability, scroll::LINE},
 };
 use frd::session_startup::{
     ViewerControl,
@@ -555,16 +555,18 @@ impl Decoder {
     fn button(&mut self, event: Raw, layout: &Layout) -> Result<Option<Event>, StopReason> {
         let down = event.kind == 3;
         let action = match event.detail {
+            // Native wheel buttons are discrete notches; the protocol uses
+            // signed 16.16 distances. Never emit fractional 1/65536-line input.
             4..=7 if down && self.caps.contains(Capability::LineScroll) => {
                 PositionedAction::Scroll {
                     x: match event.detail {
-                        6 => -1,
-                        7 => 1,
+                        6 => -LINE,
+                        7 => LINE,
                         _ => 0,
                     },
                     y: match event.detail {
-                        4 => -1,
-                        5 => 1,
+                        4 => -LINE,
+                        5 => LINE,
                         _ => 0,
                     },
                     unit: ScrollUnit::Lines,

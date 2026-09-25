@@ -241,7 +241,7 @@ fn physical_keys_pointer_buttons_and_wheel_preserve_native_order_and_original_la
                 action:
                     PositionedAction::Scroll {
                         x: 0,
-                        y: -1,
+                        y: -65_536,
                         unit: ScrollUnit::Lines,
                     },
                 ..
@@ -443,3 +443,5 @@ fn native_flood_is_bounded_before_queue_admission() {
 mod held;
 
 mod escape;
+
+mod wheel;
