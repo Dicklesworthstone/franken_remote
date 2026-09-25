@@ -90,7 +90,9 @@ fn normal_network_loop_reports_lost_reference_and_keeps_original_observation_ren
         let parent = host.binding();
         let mut bound = media.binding();
         bound.parent = parent;
-        let (cfg, descriptor, route, initial) = announce_loss(&mut host, &mut peer, &media, &h);
+        let (cfg, descriptor, route, initial, loss) =
+            announce_loss(&mut host, &mut peer, &media, &h);
+        let mut announced = false;
         let control_in = Route::Stream(host.io().unwrap().1.inbound);
         let repair_in = Route::Stream(media.repair_stream(host.io().unwrap().0).unwrap());
         let mut repairs = Repair::default();
@@ -101,6 +103,7 @@ fn normal_network_loop_reports_lost_reference_and_keeps_original_observation_ren
         let mut obsolete_sent = false;
         let end = initial + 3_250_000;
         while now(&c).unwrap() < end {
+            announced = announced || announce(&h, &mut host, route, &loss, initial);
             hf.service(host.io().unwrap().0, &h, now(&h).unwrap())
                 .unwrap();
             let (a, b) = Box::pin(support::both(
@@ -168,6 +171,7 @@ fn normal_network_loop_reports_lost_reference_and_keeps_original_observation_ren
                 }
             }
         }
+        assert!(announced);
         assert_eq!(reports, 1);
         assert!(hf.accepted > 15);
         assert!(vf.sent >= hf.accepted);
@@ -306,12 +310,15 @@ fn telemetry(host: &mut HostSession, peer: &mut Peer) -> (feedback::HostFeedback
     )
 }
 
+/// The progress record announcing frame 1, whose picture is never sent. The
+/// caller sends it with `announce` from its drive loop, so earlier writes can
+/// drain on a loaded host instead of failing the first send.
 fn announce_loss(
     host: &mut HostSession,
     peer: &mut Peer,
     media: &NegotiatedMedia,
     h: &Cx,
-) -> (ReceiveConfig, FrameDescriptor, Route, u64) {
+) -> (ReceiveConfig, FrameDescriptor, Route, u64, Vec<u8>) {
     let initial = now(h).unwrap();
     let (session, vm) = peer.parts().unwrap();
     let cfg = vm
@@ -319,12 +326,22 @@ fn announce_loss(
         .unwrap();
     let (descriptor, bytes) = progress(cfg, initial);
     let route = Route::Stream(media.progress_for_test(host.io().unwrap().0));
-    host.io()
+    (cfg, descriptor, route, initial, bytes)
+}
+
+/// True once the announcement is admitted; false on Backpressure, which
+/// admitted no bytes and asks for the same record again.
+fn announce(h: &Cx, host: &mut HostSession, route: Route, bytes: &[u8], initial: u64) -> bool {
+    match host
+        .io()
         .unwrap()
         .0
-        .send(h, route, &bytes, initial + 2_000_000, || true)
-        .unwrap();
-    (cfg, descriptor, route, initial)
+        .send(h, route, bytes, initial + 2_000_000, || true)
+    {
+        Ok(()) => true,
+        Err(quic::Error::Backpressure) => false,
+        Err(error) => panic!("loss announcement refused: {error:?}"),
+    }
 }
 
 mod completion;
