@@ -17,10 +17,28 @@ fn policy_save_and_read_report_unknown_running_activation() {
     let file = path.join("policy.json");
     for (args, approval, sharing, revision, changed) in [
         (vec!["approval", "get"], "unattended", "own-user", 0, false),
-        (vec!["approval", "set", "local"], "local", "own-user", 1, true),
+        (
+            vec!["approval", "set", "local"],
+            "local",
+            "own-user",
+            1,
+            true,
+        ),
         (vec!["approval", "get"], "local", "own-user", 1, false),
-        (vec!["approval", "set", "local"], "local", "own-user", 1, false),
-        (vec!["sharing", "set", "tailnet"], "local", "tailnet", 2, true),
+        (
+            vec!["approval", "set", "local"],
+            "local",
+            "own-user",
+            1,
+            false,
+        ),
+        (
+            vec!["sharing", "set", "tailnet"],
+            "local",
+            "tailnet",
+            2,
+            true,
+        ),
         (vec!["sharing", "get"], "local", "tailnet", 2, false),
     ] {
         let writing = args.get(1) == Some(&"set");
