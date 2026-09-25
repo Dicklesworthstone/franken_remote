@@ -140,7 +140,7 @@ fn pre_negotiation_viewer_entrypoint_preserves_distinct_observation_approval() {
     });
 }
 
-fn keys() -> Capabilities {
+pub(super) fn keys() -> Capabilities {
     Capabilities::default().with(Capability::Keys)
 }
 fn display() -> Display {
@@ -169,7 +169,7 @@ fn fixture_config(d: Display) -> Configuration {
         generation: CodecConfigurationGeneration::INITIAL,
     }
 }
-fn fixture_launch(role: WorkerRole, mode: &str) -> Launch {
+pub(super) fn fixture_launch(role: WorkerRole, mode: &str) -> Launch {
     static NEXT: AtomicUsize = AtomicUsize::new(1);
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
@@ -302,7 +302,7 @@ enum Case {
     WrongLocalTarget,
     CaptureStall,
 }
-fn key(down: bool) -> Action<'static> {
+pub(super) fn key(down: bool) -> Action<'static> {
     Action::Key {
         key: PhysicalKey::new(4).unwrap(),
         transition: if down {

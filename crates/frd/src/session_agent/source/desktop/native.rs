@@ -12,6 +12,7 @@ use asupersync::{
     cx::Cx,
     types::{CancelKind, Time},
 };
+use controlled::{ControlProfile, ControlledDesktop};
 use fr_media::worker::Configuration;
 use fr_transport::quic::Disposition;
 use fr_wire::{
@@ -64,6 +65,40 @@ impl NativeDesktop {
 impl Drop for NativeDesktop {
     fn drop(&mut self) {
         self.close();
+    }
+}
+
+/// What the first viewer's negotiated role opened: the observation-only shared
+/// source with its viewer hub, or (only with an agent control profile) the
+/// exclusive controlled share. Neither is a visibility or input grant.
+#[derive(Debug)]
+pub enum Opened {
+    Shared(Box<NativeDesktop>),
+    Controlled(Box<ControlledDesktop>),
+}
+impl Opened {
+    pub fn worker_id(&self) -> Option<u32> {
+        match self {
+            Self::Shared(desktop) => desktop.worker_id(),
+            Self::Controlled(desktop) => desktop.worker_id(),
+        }
+    }
+    pub fn close(&mut self) {
+        match self {
+            Self::Shared(desktop) => desktop.close(),
+            Self::Controlled(desktop) => desktop.close(),
+        }
+    }
+    /// Fence at call time, then observe the exact capture child.
+    pub async fn reap(
+        &mut self,
+        cleanup: &Cx,
+        deadline: crate::worker::Deadline,
+    ) -> Result<asupersync::process::ExitStatus, crate::worker::Error> {
+        match self {
+            Self::Shared(desktop) => desktop.reap(cleanup, deadline).await,
+            Self::Controlled(desktop) => desktop.reap(cleanup, deadline).await,
+        }
     }
 }
 
@@ -127,16 +162,16 @@ impl SessionAgent {
     /// receipts. Dropping a pending factory is not proof of foreign-worker exit.
     /// Canonical source preparation takes ownership only after reservation; a
     /// foreign registered source must not be revoked by a rejected handoff.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     pub fn open_native_shared_desktop_async<'a, F, P, S, N, L>(
         &'a mut self,
-        mut first: Host,
+        first: Host,
         factory: F,
         select: S,
         policy: Policy,
         entropy: Entropy,
         notify: N,
-        mut local: L,
+        local: L,
     ) -> Result<
         impl Future<Output = Result<NativeDesktop, Error>> + Send + use<'a, F, P, S, N, L>,
         Error,
@@ -148,9 +183,81 @@ impl SessionAgent {
         N: FnMut(Approval, Role) -> Result<(), ()> + Send + 'a,
         L: FnMut(&mut SessionAgent, &mut Context<'_>) -> Result<LocalAction, ()> + Send + 'a,
     {
+        // This public opener is observation-only whatever the agent profile.
+        let opening =
+            self.open_native(first, factory, select, policy, entropy, notify, local, None)?;
+        Ok(async move {
+            match opening.await? {
+                Opened::Shared(desktop) => Ok(*desktop),
+                Opened::Controlled(mut desktop) => {
+                    desktop.close();
+                    Err(Error::Closed)
+                }
+            }
+        })
+    }
+
+    /// As `open_native_shared_desktop_async`, but a first viewer that
+    /// negotiates `RequestControl` opens the exclusive controlled share when,
+    /// and only when, this agent carries a `ControlProfile`. Without one the
+    /// Host is restricted to observation before `ClientHello`, and a
+    /// controller is refused as `ControlUnavailable`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_native_desktop_async<'a, F, P, S, N, L>(
+        &'a mut self,
+        first: Host,
+        factory: F,
+        select: S,
+        policy: Policy,
+        entropy: Entropy,
+        notify: N,
+        local: L,
+        capture_interval: Duration,
+    ) -> Result<impl Future<Output = Result<Opened, Error>> + Send + use<'a, F, P, S, N, L>, Error>
+    where
+        F: FnOnce() -> P + Send + 'a,
+        P: Future<Output = Result<Setup, ()>> + Send + 'a,
+        S: FnOnce(&Catalog) -> Result<(Select, Configuration), ()> + Send + 'a,
+        N: FnMut(Approval, Role) -> Result<(), ()> + Send + 'a,
+        L: FnMut(&mut SessionAgent, &mut Context<'_>) -> Result<LocalAction, ()> + Send + 'a,
+    {
+        let control = self
+            .control_profile()
+            .cloned()
+            .map(|profile| (profile, capture_interval));
+        self.open_native(
+            first, factory, select, policy, entropy, notify, local, control,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_native<'a, F, P, S, N, L>(
+        &'a mut self,
+        mut first: Host,
+        factory: F,
+        select: S,
+        policy: Policy,
+        entropy: Entropy,
+        notify: N,
+        mut local: L,
+        control: Option<(ControlProfile, Duration)>,
+    ) -> Result<Opening<'a>, Error>
+    where
+        F: FnOnce() -> P + Send + 'a,
+        P: Future<Output = Result<Setup, ()>> + Send + 'a,
+        S: FnOnce(&Catalog) -> Result<(Select, Configuration), ()> + Send + 'a,
+        N: FnMut(Approval, Role) -> Result<(), ()> + Send + 'a,
+        L: FnMut(&mut SessionAgent, &mut Context<'_>) -> Result<LocalAction, ()> + Send + 'a,
+    {
         let mut fence = Fence(Some(first.cancellation_context()));
         policy.validate().map_err(Error::Viewers)?;
-        let (peer, binding, until) = first.restrict_shared_observer().map_err(Error::Startup)?;
+        // Only a control-enabled first viewer may negotiate a controller.
+        let (peer, binding, until) = if control.is_some() {
+            first.shared_open_context()
+        } else {
+            first.restrict_shared_observer()
+        }
+        .map_err(Error::Startup)?;
         let os = self.permissions().os_session_id();
         if binding.os_session.as_raw() != u128::from(os) {
             return Err(Error::Consent(ConsentError::SessionChanged));
@@ -165,49 +272,36 @@ impl SessionAgent {
             until,
         };
         let inner = Box::pin(async move {
-            let mut session = local_stage(self, &deadline, &mut local, None, &entropy, async {
+            let session = local_stage(self, &deadline, &mut local, None, &entropy, async {
                 first
                     .open(Duration::from_millis(5), notify)
                     .await
                     .map_err(Error::Startup)
             })
             .await?;
-            session.require_shared_profile().map_err(Error::Startup)?;
-            let mut prepared = prepare_during_session(
+            if session.selection().role != Role::Observe {
+                // Unreachable without a profile: the Host was restricted above.
+                let (profile, interval) =
+                    control.ok_or(Error::Startup(crate::session_startup::Error::Order))?;
+                return controlled::open(
+                    self, session, &deadline, &mut local, &entropy, factory, profile, interval,
+                )
+                .await
+                .map(|desktop| Opened::Controlled(Box::new(desktop)));
+            }
+            continue_shared(
                 self,
-                &mut session,
+                session,
                 &deadline,
                 &entropy,
                 &owned,
                 async { factory().await },
                 select,
                 &mut local,
+                policy,
             )
-            .await?;
-            deadline.check()?;
-            let registration = self
-                .register_original_source(&prepared.publisher)
-                .map_err(Error::Consent)?;
-            let random = entropy.clone();
-            let opening = session.start_shared_display_capped(
-                &mut prepared.publisher,
-                &prepared.initial,
-                policy.join_timeout,
-                until,
-                policy.send,
-                move || random(),
-            );
-            let shared = local_stage(
-                self,
-                &deadline,
-                &mut local,
-                Some(&registration),
-                &entropy,
-                async { opening.await.map_err(Error::Publication) },
-            )
-            .await?;
-            let hub = Hub::new(shared, policy, entropy).map_err(Error::Viewers)?;
-            Ok(NativeDesktop { hub, prepared })
+            .await
+            .map(|desktop| Opened::Shared(Box::new(desktop)))
         });
         fence.0 = None;
         Ok(Opening {
@@ -217,6 +311,64 @@ impl SessionAgent {
             finished: false,
         })
     }
+}
+
+/// The observation-only continuation after a first viewer negotiated Observe:
+/// prepare the original source while the session stays driven, register it,
+/// publish the first viewer and create its hub, all within the Host deadline.
+#[allow(clippy::too_many_arguments)]
+async fn continue_shared<P, S, L>(
+    agent: &mut SessionAgent,
+    mut session: HostSession,
+    deadline: &Startup,
+    entropy: &Entropy,
+    owned: &Source,
+    factory: P,
+    select: S,
+    local: &mut L,
+    policy: Policy,
+) -> Result<NativeDesktop, Error>
+where
+    P: Future<Output = Result<Setup, ()>> + Send,
+    S: FnOnce(&Catalog) -> Result<(Select, Configuration), ()> + Send,
+    L: FnMut(&mut SessionAgent, &mut Context<'_>) -> Result<LocalAction, ()> + Send,
+{
+    session.require_shared_profile().map_err(Error::Startup)?;
+    let mut prepared = prepare_during_session(
+        agent,
+        &mut session,
+        deadline,
+        entropy,
+        owned,
+        factory,
+        select,
+        local,
+    )
+    .await?;
+    deadline.check()?;
+    let registration = agent
+        .register_original_source(&prepared.publisher)
+        .map_err(Error::Consent)?;
+    let random = entropy.clone();
+    let opening = session.start_shared_display_capped(
+        &mut prepared.publisher,
+        &prepared.initial,
+        policy.join_timeout,
+        deadline.until,
+        policy.send,
+        move || random(),
+    );
+    let shared = local_stage(
+        agent,
+        deadline,
+        local,
+        Some(&registration),
+        entropy,
+        async { opening.await.map_err(Error::Publication) },
+    )
+    .await?;
+    let hub = Hub::new(shared, policy, entropy.clone()).map_err(Error::Viewers)?;
+    Ok(NativeDesktop { hub, prepared })
 }
 
 struct Startup {
@@ -404,8 +556,8 @@ impl Drop for Fence {
 }
 
 type Source = Arc<Mutex<Option<ObservationControl>>>;
-type Work<'a> = Pin<Box<dyn Future<Output = Result<NativeDesktop, Error>> + Send + 'a>>;
-struct Opening<'a> {
+type Work<'a> = Pin<Box<dyn Future<Output = Result<Opened, Error>> + Send + 'a>>;
+pub(crate) struct Opening<'a> {
     peer: Cx,
     source: Source,
     inner: Option<Work<'a>>,
@@ -429,7 +581,7 @@ impl Opening<'_> {
     }
 }
 impl Future for Opening<'_> {
-    type Output = Result<NativeDesktop, Error>;
+    type Output = Result<Opened, Error>;
     fn poll(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Self::Output> {
         let mut guard = Turn {
             opening: self.get_mut(),
@@ -473,6 +625,7 @@ impl Drop for Opening<'_> {
     }
 }
 
+pub mod controlled;
 mod handoff;
 mod run;
 

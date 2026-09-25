@@ -161,3 +161,6 @@ mod handoff;
 
 #[path = "native_dispatch.rs"]
 mod native_dispatch;
+
+#[path = "native_control_routing.rs"]
+mod native_control_routing;

@@ -33,6 +33,11 @@ pub enum Error {
     LocalEvent,
     Closed,
     Clock,
+    /// The controlled share needs input-injection permission (and no lock).
+    NoInputPermission,
+    /// A controlled lease ended without confirmed release of its held input;
+    /// the Seat stays occupied and later control is refused until restart.
+    InputCleanup,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -284,4 +289,8 @@ mod startup;
 mod launch;
 
 mod native;
-pub use native::{NativeDesktop, dispatch};
+pub use native::{
+    NativeDesktop, Opened,
+    controlled::{ControlProfile, ControlledDesktop},
+    dispatch,
+};

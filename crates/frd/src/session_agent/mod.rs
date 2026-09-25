@@ -108,6 +108,9 @@ pub struct SessionAgent {
     revoked: Arc<AtomicBool>,
     #[cfg(target_os = "linux")]
     sources: Arc<std::sync::Mutex<source::Sources>>,
+    /// Opt-in remote-control profile; None keeps the agent observation-only.
+    #[cfg(target_os = "linux")]
+    control: Option<source::desktop::ControlProfile>,
 }
 
 impl SessionAgent {
@@ -145,6 +148,8 @@ impl SessionAgent {
         Self {
             #[cfg(target_os = "linux")]
             sources,
+            #[cfg(target_os = "linux")]
+            control: None,
             approval: ApprovalManager::new(approval_mode),
             indicator,
             held_state: RemoteHeldTracker::new(),

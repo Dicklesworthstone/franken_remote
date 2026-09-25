@@ -153,4 +153,18 @@ impl HostSession {
         }
         Ok(())
     }
+    // The exclusive controlled share requires the complete explicit control
+    // profile (input attachment, grant, clock, presentation proof) before any
+    // native factory, discovery or capture. Negotiating the role is not a grant.
+    // The host offers those capabilities optionally, so a controller that did
+    // not select them is the PEER's missing requirement, not a host fault.
+    pub(crate) fn require_controlled_profile(&mut self) -> Result<(), Error> {
+        self.check()?;
+        if !super::native_control::profile(self.selection(), true) {
+            return Err(Error::Protocol(
+                fr_wire::negotiation::Error::RequiredCapability,
+            ));
+        }
+        Ok(())
+    }
 }

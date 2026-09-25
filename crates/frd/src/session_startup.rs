@@ -29,6 +29,7 @@ use std::{
 mod admission_refresh;
 mod clipboard;
 mod native_control;
+pub use native_control::host_offer;
 mod opening;
 mod running;
 pub use running::controlled::files::{Cleanup as FileReceiveCleanup, Error as FileReceiveError};

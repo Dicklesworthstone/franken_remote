@@ -1,7 +1,7 @@
 //! Cold/warm routing of authenticated Hosts to one independent OS-share owner.
 //! One cold slot; warm peers use the existing bounded hub, never another queue.
 use super::super::{LocalAction, Report, Wake};
-use super::{NativeDesktop, SessionAgent, Setup};
+use super::{Opened, SessionAgent, Setup};
 use crate::session_startup::{
     Approval, Host,
     shared_viewers::{Admission, Entropy, HostService, Policy},
@@ -70,7 +70,9 @@ impl Error {
                 | super::super::Error::Capture(_)
                 | super::super::Error::LocalEvent
                 | super::super::Error::Closed
-                | super::super::Error::Clock => false,
+                | super::super::Error::Clock
+                | super::super::Error::NoInputPermission
+                | super::super::Error::InputCleanup => false,
             },
             Self::Closed | Self::Clock => false,
         }
@@ -138,7 +140,14 @@ type Notify = Box<dyn FnMut(Approval, Role) -> Result<(), ()> + Send>;
 struct First {
     host: Host,
     notify: Notify,
-    reply: oneshot::Sender<HostService>,
+    reply: oneshot::Sender<FirstService>,
+}
+/// What the first viewer's own connection scope awaits: its shared-viewer
+/// service, or the end of the exclusive controlled share (sender dropped),
+/// which the independent Driver serves on this same Host session.
+enum FirstService {
+    Shared(HostService),
+    Controlled(oneshot::Receiver<()>),
 }
 enum Route {
     Cold(oneshot::Sender<First>),
@@ -149,6 +158,9 @@ enum Route {
 struct Shared {
     route: Mutex<Route>,
     os_session: u32,
+    // The agent carries a ControlProfile: only its cold first viewer may
+    // negotiate control. Warm joins always go through the observer hub.
+    control: bool,
 }
 impl Shared {
     fn close(&self) {
@@ -191,7 +203,16 @@ impl Incoming {
     {
         let cx = host.cancellation_context();
         let mut fence = PeerFence(Some(cx.clone()));
-        let (_, binding, until) = host.restrict_shared_observer().map_err(Error::Startup)?;
+        // Without control every Host is restricted to observation before its
+        // ClientHello. With control only a cold first viewer stays unrestricted
+        // (the opener decides by its negotiated role); a warm join is restricted
+        // by the hub, and a Starting route refuses Busy before any negotiation.
+        let (_, binding, until) = if self.0.control {
+            host.shared_open_context()
+        } else {
+            host.restrict_shared_observer()
+        }
+        .map_err(Error::Startup)?;
         if binding.os_session.as_raw() != u128::from(self.0.os_session) {
             return Err(Error::WrongSession);
         }
@@ -232,7 +253,15 @@ impl Incoming {
                     .await
                     .map_err(|_| Error::Startup(crate::session_startup::Error::Expired))?
                     .map_err(|_| Error::Closed)?;
-                    service.await.map_err(Error::Viewers)
+                    match service {
+                        FirstService::Shared(service) => service.await.map_err(Error::Viewers),
+                        // The Driver owns and reports the controlled share; this
+                        // scope only keeps the connection until it has ended.
+                        FirstService::Controlled(mut ended) => {
+                            let _ = ended.recv(&clock).await;
+                            Ok(())
+                        }
+                    }
                 })
             }
             Route::Warm(admission, _) => {
@@ -259,7 +288,7 @@ pub struct Driver {
     first: Option<oneshot::Receiver<First>>,
     cx: Cx,
     agent: SessionAgent,
-    desktop: Option<NativeDesktop>,
+    desktop: Option<Opened>,
     policy: Policy,
     interval: Duration,
     entropy: Entropy,
@@ -292,6 +321,7 @@ impl SessionAgent {
         let shared = Arc::new(Shared {
             route: Mutex::new(Route::Cold(send)),
             os_session: self.permissions().os_session_id(),
+            control: self.control_profile().is_some(),
         });
         Ok((
             Incoming(shared.clone()),
@@ -423,9 +453,9 @@ impl Driver {
                     notify,
                     reply,
                 } = first;
-                let desktop = this
+                let opened = this
                     .agent
-                    .open_native_shared_desktop_async(
+                    .open_native_desktop_async(
                         host,
                         factory,
                         select,
@@ -433,12 +463,36 @@ impl Driver {
                         this.entropy.clone(),
                         notify,
                         &mut local,
+                        this.interval,
                     )
                     .map_err(Error::from)?
                     .await
                     .map_err(Error::from)?;
-                this.desktop = Some(desktop);
-                let desktop = this.desktop.as_mut().ok_or(Error::Closed)?;
+                this.desktop = Some(opened);
+                let desktop = match this.desktop.as_mut().ok_or(Error::Closed)? {
+                    Opened::Shared(desktop) => desktop,
+                    Opened::Controlled(desktop) => {
+                        // Exclusive: the route stays Starting, so every later
+                        // viewer is refused Busy until this share has ended.
+                        let (ended, waiting) = oneshot::channel();
+                        if reply
+                            .send(&this.cx, FirstService::Controlled(waiting))
+                            .is_err()
+                        {
+                            return Err(Error::Closed);
+                        }
+                        let result = desktop
+                            .serve(
+                                &mut this.agent,
+                                this.cx.clone(),
+                                this.entropy.clone(),
+                                local,
+                            )
+                            .await;
+                        drop(ended);
+                        return controlled_outcome(result);
+                    }
+                };
                 let service = desktop.first().into_service().map_err(Error::Viewers)?;
                 let admission = desktop.admissions();
                 let source = desktop
@@ -460,7 +514,7 @@ impl Driver {
                 }
                 // Only the first peer's connection scope receives its own service.
                 // A dropped first peer must not keep a newly created source alive.
-                if reply.send(&this.cx, service).is_err() {
+                if reply.send(&this.cx, FirstService::Shared(service)).is_err() {
                     return Err(Error::Closed);
                 }
                 running.await.map_err(Error::from)
@@ -494,7 +548,18 @@ impl Driver {
         drop(self.first.take());
     }
     pub fn worker_id(&self) -> Option<u32> {
-        self.desktop.as_ref().and_then(NativeDesktop::worker_id)
+        self.desktop.as_ref().and_then(Opened::worker_id)
+    }
+}
+/// A running controlled share ends like a shared one: its viewer's own ending
+/// (departure, protocol, deadline, its lease ending) is the served viewer's
+/// recorded outcome, while capture, consent, local and input-cleanup failures
+/// remain host faults. Opening failures never reach here.
+fn controlled_outcome(result: Result<Report, super::super::Error>) -> Result<Report, Error> {
+    match result.map_err(Error::from) {
+        Ok(report) => Ok(report),
+        Err(error) if error.is_peer_outcome() => Ok(super::controlled::served(true)),
+        Err(error) => Err(error),
     }
 }
 impl Drop for Driver {
@@ -613,6 +678,24 @@ mod tests {
             Error::Startup(Session::Protocol(fr_wire::negotiation::Error::Version)),
         ] {
             assert!(error.is_peer_outcome(), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn a_running_controlled_share_records_its_viewers_ending_but_not_host_faults() {
+        let peer = super::controlled_outcome(Err(Desktop::Publication(Publication::Session(
+            Session::Transport(quic::Error::Expired),
+        ))))
+        .unwrap();
+        assert_eq!((peer.viewers.admitted, peer.viewers.failed), (1, 1));
+        for fault in [
+            Desktop::InputCleanup,
+            Desktop::NoInputPermission,
+            Desktop::LocalEvent,
+            Desktop::Publication(Publication::Shared(shared_publisher::Error::Closed)),
+        ] {
+            let error = super::controlled_outcome(Err(fault)).unwrap_err();
+            assert!(!error.is_peer_outcome(), "{error:?}");
         }
     }
 

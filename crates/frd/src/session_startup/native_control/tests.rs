@@ -111,6 +111,45 @@ fn explicit_control_profile_never_upgrades_or_omits_a_required_boundary() {
     assert!(!profile(&observer, true));
 }
 #[test]
+fn host_offer_makes_control_optional_and_never_upgrades_an_observer() {
+    use fr_client::native::{control_offer, observation_offer};
+    let observe_only = host_offer(false);
+    assert!(observe_only.validate().is_ok());
+    assert_eq!(observe_only.capabilities.len(), 4);
+    assert!(observe_only.capabilities.iter().all(|c| c.required));
+    // Without control, a controller is a typed required-capability refusal.
+    assert!(matches!(
+        observe_only.intersect(&control_offer()),
+        Err(fr_wire::negotiation::Error::RequiredCapability)
+    ));
+    let control = host_offer(true);
+    assert!(control.validate().is_ok());
+    assert_eq!(control.capabilities.len(), 8);
+    assert_eq!(
+        control.capabilities.iter().filter(|c| c.required).count(),
+        4
+    );
+    let controller = control
+        .intersect(&control_offer())
+        .unwrap()
+        .select()
+        .unwrap();
+    assert!(profile(&controller, true));
+    let observer = control
+        .intersect(&observation_offer())
+        .unwrap()
+        .select()
+        .unwrap();
+    assert!(profile(&observer, false));
+    assert!(!profile(&observer, true));
+    assert!(
+        observer
+            .capabilities
+            .iter()
+            .all(|c| c.name != attachment::INPUT_CAPABILITY)
+    );
+}
+#[test]
 fn shipped_client_control_offer_selects_exactly_the_host_control_profile() {
     use fr_client::native::{control_offer, observation_offer};
     let control = control_offer()
@@ -448,6 +487,7 @@ fn public_control_bootstrap_never_substitutes_presentation_for_consent() {
     run3(|c, h, cleanup| exercise(c, h, cleanup, false, true));
 }
 
+mod dispatch;
 mod handoff;
 mod interactive;
 
