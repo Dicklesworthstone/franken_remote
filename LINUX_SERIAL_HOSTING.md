@@ -50,13 +50,14 @@ Build the integration test and the shipped client with the repository's pinned
 compiler, then run every ignored test in a fresh namespace:
 
 ```sh
-cargo build -p fr-native --bin fr --locked
+cargo build -p fr-native --features linux-desktop,linux-displays --bin fr --bin fr-media-worker --locked
 cargo test -p frd --test native_host_linux_serial --no-run --locked
 scripts/test_linux_serial_lifecycle.sh /absolute/path/to/native_host_linux_serial-TEST_HASH
 ```
 
-`shipped_client` finds `fr` in the same cargo profile directory as the test
-executable. Hosts that restrict unprivileged user namespaces (Ubuntu's AppArmor
+`shipped_client` and `real_media` find `fr` and `fr-media-worker` in the same
+cargo profile directory as the test executable; `real_media` also needs Xvfb and
+`xsetroot` and runs the real capture/encode/decode/present path. Hosts that restrict unprivileged user namespaces (Ubuntu's AppArmor
 default) can run the same fresh mount/network namespaces as real root with
 `FR_NS_SUDO=1`.
 
