@@ -253,8 +253,18 @@ fn actual_selected_drawable_receives_pixels_and_outlives_its_borrowed_presenter(
     presenter.present(&frame).unwrap();
     assert_eq!(desktop.peer(id, "pixel"), 0xb4_72_31u32.to_string());
     drop(presenter);
+    // The UI window outlives its borrowed presenter, but the remote pixels
+    // must not: they live in a child canvas owned by the presenter's X
+    // connection, which the server destroys when that connection closes.
     assert_eq!(desktop.peer(id, "exists"), "1");
-    assert_eq!(desktop.peer(id, "pixel"), 0xb4_72_31u32.to_string());
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    while desktop.peer(id, "pixel") != "0" {
+        assert!(
+            std::time::Instant::now() < until,
+            "remote pixels outlived the presenter"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert!(!session.control().is_stopped());
     control.stop();
     finish(&mut window, StopReason::User);
