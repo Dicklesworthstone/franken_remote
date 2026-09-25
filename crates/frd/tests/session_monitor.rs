@@ -5,6 +5,7 @@ use frd::session_monitor::{
     protocol::{self, Reply},
 };
 use std::{
+    os::unix::fs::PermissionsExt,
     path::PathBuf,
     process::Command,
     sync::{Mutex, OnceLock},
@@ -33,6 +34,9 @@ fn image() -> PathBuf {
                     .unwrap()
                     .success()
             );
+            // The monitor refuses group/other-writable images; cc honours the
+            // caller's umask (002 on many desktops gives 0775), so fix the mode.
+            std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o755)).unwrap();
             image
         })
         .clone()
@@ -171,7 +175,7 @@ fn dropping_owner_stops_escaped_handle_and_eventually_reaps_original_process() {
 }
 #[test]
 fn symlink_and_writable_image_refuse_without_reusing_a_previous_live_epoch() {
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::fs::symlink;
     let _serial = SERIAL.lock().unwrap();
     let original = image();
     let link = original.with_file_name("symlink-image");
