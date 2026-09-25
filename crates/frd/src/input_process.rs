@@ -55,10 +55,10 @@ pub struct InvalidLaunch;
 /// this from a peer path, argv or environment. The environment is cleared; the
 /// child gets only DISPLAY, optional XAUTHORITY and `--parent-pid`.
 pub struct ProcessLaunch {
-    image: PathBuf,
-    display: String,
-    xauthority: Option<PathBuf>,
-    epoch: u128,
+    pub(crate) image: PathBuf,
+    pub(crate) display: String,
+    pub(crate) xauthority: Option<PathBuf>,
+    pub(crate) epoch: u128,
 }
 impl ProcessLaunch {
     pub fn new(
@@ -538,7 +538,7 @@ fn read_frame(
     }
     Ok(frame)
 }
-fn kill_group(child: &Child) {
+pub(crate) fn kill_group(child: &Child) {
     if let Some(pid) = i32::try_from(child.id())
         .ok()
         .and_then(rustix::process::Pid::from_raw)
@@ -547,7 +547,7 @@ fn kill_group(child: &Child) {
     }
 }
 /// Raw `CLOCK_MONOTONIC` nanoseconds, the same clock the child checks.
-fn monotonic_ns() -> Option<u64> {
+pub(crate) fn monotonic_ns() -> Option<u64> {
     let now = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
     u64::try_from(now.tv_sec)
         .ok()?

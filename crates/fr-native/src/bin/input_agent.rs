@@ -20,6 +20,12 @@
 //! releases and restores through `X11Pointer`'s own teardown before exiting; a
 //! panic or Xlib error releases through the dedicated emergency connection.
 //! It writes nothing but reply frames and signal datagrams, and logs no input.
+//!
+//! `--clipboard --parent-pid PID` selects a different, separately launched
+//! role: the per-lease X11 CLIPBOARD owner for frd's `clipboard_process`
+//! (see `input_agent/clipboard.rs`; built with `linux-clipboard`, otherwise it
+//! refuses typed). The same locally installed image, launch validation and
+//! trust limit apply; the two roles never share a process or a channel.
 #[cfg(target_os = "linux")]
 mod linux {
     use fr_core::input_submission::{
@@ -50,19 +56,28 @@ mod linux {
     const INDICATOR_WAIT: Duration = Duration::from_millis(2_500);
     const SIGNALS_PER_CHECK: usize = 8;
     const EXIT_USAGE: i32 = 64;
-    const EXIT_PROTOCOL: i32 = 65;
-    const EXIT_REFUSED: i32 = 66;
-    const EXIT_CHANNEL: i32 = 67;
+    pub(crate) const EXIT_PROTOCOL: i32 = 65;
+    pub(crate) const EXIT_REFUSED: i32 = 66;
+    pub(crate) const EXIT_CHANNEL: i32 = 67;
 
     pub fn run() -> i32 {
         let mut args = std::env::args().skip(1);
-        let parent = match (args.next().as_deref(), args.next(), args.next()) {
+        let mut first = args.next();
+        // `--clipboard` selects the per-lease clipboard owner role instead.
+        let clipboard = first.as_deref() == Some("--clipboard");
+        if clipboard {
+            first = args.next();
+        }
+        let parent = match (first.as_deref(), args.next(), args.next()) {
             (Some("--parent-pid"), Some(pid), None) => pid.parse::<u32>().ok(),
             _ => None,
         };
         // Refuse an already reparented launch before touching X11.
         if parent.is_none_or(|pid| bind_parent(pid).is_err()) {
             return EXIT_USAGE;
+        }
+        if clipboard {
+            return command_channel().map_or(EXIT_USAGE, crate::clipboard::run);
         }
         let (Ok(command), Ok(signals)) = (command_channel(), signal_channel()) else {
             return EXIT_USAGE;
@@ -335,6 +350,11 @@ mod linux {
         }
     }
 }
+
+// The clipboard owner role (`--clipboard`); no input or indicator in it.
+#[cfg(target_os = "linux")]
+#[path = "input_agent/clipboard.rs"]
+mod clipboard;
 
 fn main() {
     #[cfg(target_os = "linux")]

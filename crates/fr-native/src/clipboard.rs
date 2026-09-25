@@ -409,6 +409,18 @@ impl ClipboardSink for X11Clipboard {
         Err(PlatformError::Unavailable)
     }
     fn publish(&mut self, _text: &str, stamp: Stamp) -> Publication {
+        self.publish_checked(stamp, || true)
+    }
+    fn cancel_prepared(&mut self) {
+        self.prepared = None;
+    }
+}
+impl X11Clipboard {
+    /// `publish` with a caller's final gate (e.g. an out-of-process owner's
+    /// deadline) evaluated after every local step and immediately before the
+    /// X11 ownership call. A false gate submits nothing and drops the prepared
+    /// item; it never touches the current selection.
+    pub fn publish_checked(&mut self, stamp: Stamp, gate: impl FnOnce() -> bool) -> Publication {
         self.cancel_read();
         let Some(prepared) = self.prepared.take() else {
             return Publication::NotSubmitted(PlatformError::Unavailable);
@@ -419,6 +431,9 @@ impl ClipboardSink for X11Clipboard {
         let Ok(handle) = self.handle() else {
             return Publication::NotSubmitted(PlatformError::Unavailable);
         };
+        if !gate() {
+            return Publication::NotSubmitted(PlatformError::Unavailable);
+        }
         // SAFETY: final external operation uses the previously prepared server
         // timestamp, never CurrentTime. All text allocation happened beforehand.
         if unsafe { ffi::fr_clip_publish(handle, prepared.time) } != 0 {
@@ -437,9 +452,6 @@ impl ClipboardSink for X11Clipboard {
         }
         self.current = Some(prepared);
         Publication::SubmittedToOs
-    }
-    fn cancel_prepared(&mut self) {
-        self.prepared = None;
     }
 }
 impl Drop for X11Clipboard {

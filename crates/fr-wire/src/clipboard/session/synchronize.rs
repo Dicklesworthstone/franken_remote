@@ -522,6 +522,21 @@ impl<N: NativeClipboard> ClipboardSink for PublicationGuard<'_, N> {
         }
         self.native.publish(text, stamp)
     }
+    /// Same pure revision check, then the deadline travels to the native owner
+    /// (an out-of-process owner re-checks it immediately before its OS call).
+    fn publish_until(
+        &mut self,
+        text: &str,
+        stamp: Stamp,
+        until: HostInstant,
+    ) -> fr_core::clipboard::Publication {
+        if self.native.revision() != self.revision {
+            return fr_core::clipboard::Publication::NotSubmitted(
+                fr_core::clipboard::PlatformError::LocalChanged,
+            );
+        }
+        self.native.publish_until(text, stamp, until)
+    }
     fn cancel_prepared(&mut self) {
         self.native.cancel_prepared();
     }

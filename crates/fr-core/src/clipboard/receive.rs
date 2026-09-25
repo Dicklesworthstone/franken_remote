@@ -142,11 +142,13 @@ impl ClipboardSession {
         let prepared = Prepared(sink);
         prepared.0.prepare(text, stamp).map_err(Error::Platform)?;
         let now = clock();
-        self.check(now)?;
+        let authority = self.check(now)?;
         if now >= transfer.deadline {
             return Err(Error::Expired);
         }
-        let publication = prepared.0.publish(text, stamp);
+        let publication = prepared
+            .0
+            .publish_until(text, stamp, transfer.deadline.min(authority));
         let receipt = Receipt { stamp, publication };
         // In particular UnknownEffect is retained, not reclassified as safe to
         // retry. Setting the clipboard says nothing about application paste.

@@ -23,6 +23,8 @@ use authority::Monitor;
 
 pub mod image;
 
+pub mod process;
+
 mod receive;
 
 /// Fixed metadata ceiling, independent of the payload byte limit.
@@ -167,6 +169,15 @@ pub struct Receipt {
 pub trait ClipboardSink {
     fn prepare(&mut self, text: &str, stamp: Stamp) -> Result<(), PlatformError>;
     fn publish(&mut self, text: &str, stamp: Stamp) -> Publication;
+    /// The owner's final call, with the exclusive deadline its last authority
+    /// check derived (the item's deadline, bounded by the controller's lease).
+    /// An in-process sink publishes immediately after that check; one whose
+    /// OS call happens elsewhere (another process) must re-check `until` there
+    /// immediately before the native call, and report `NotSubmitted` when late.
+    fn publish_until(&mut self, text: &str, stamp: Stamp, until: HostInstant) -> Publication {
+        let _ = until;
+        self.publish(text, stamp)
+    }
     fn cancel_prepared(&mut self) {}
 }
 
