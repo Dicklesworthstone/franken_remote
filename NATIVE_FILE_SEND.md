@@ -178,3 +178,21 @@ second controller or authorize a new drop root. The native interactive callback
 can use this owner directly. Running-controller tests exercise tree publication,
 permission refusal and cancellation with real files, ATP, TLS and UDP; local
 consent and the OS input sink remain explicit fixtures.
+
+## Command-line integration (`fr connect --send`, `frd run --files`)
+
+The drop-directory scope above is now reachable from the shipped binaries.
+`frd run --input-agent PATH --files DIR` validates and pins the operator's
+directory at startup (`frd::native_files::Directory`) and offers the three file
+capabilities only with control. `fr connect --control --send PATH...` classifies
+each path by type before connecting and hands one attempt's duplicated
+descriptors to the batch sender (`native_files::Selection`). The viewer installs
+`expect_file_drop` at the start of its first controlled turn; the host calls
+`offer_file_drop` only after the controller's first lease renewal, so the one-use
+offer never reaches a viewer that is not expecting it. Clipboard and files are
+never set up on the same session in this slice. The host's disk worker is reaped
+with the controlled share. The CLI completion reports content-free per-index
+outcomes. Evidence: `crates/frd/tests/native_host_linux_serial/real_files.rs`
+(namespace e2e with real files, including a SIGSTOP mid-transfer and two planted
+negatives) and the unit tests in `crates/frd/src/native_files/tests.rs`. Not a
+live tailnet, picker, drag-and-drop, download, directory or resumption path.

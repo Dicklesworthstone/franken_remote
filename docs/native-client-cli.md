@@ -174,8 +174,8 @@ mapping, reports the frame, and sends ONE control request when the session
 itself reports current view evidence. After the host's grant, it supplies the
 single layout (native pixels 1:1, or the `--fit` rectangle) that attaches X11
 input capture to this window. Keys (with repeat), absolute pointer and buttons
-are captured; text, scrolling, relative pointer, audio and files are not. The
-clipboard is a separate opt-in, described next.
+are captured; text, scrolling, relative pointer and audio are not. The
+clipboard and file sending are separate opt-ins, described next.
 
 The visibility witness is stated, not overclaimed: a frame counts as visible
 when the presenter completed `SubmittedToCompositor` into the still-mapped
@@ -259,6 +259,81 @@ Evidence is the namespace e2e with real X11 selections on two Xvfb displays
 below. It is not a desktop clipboard manager (no history, no PRIMARY), not
 Wayland, not images, and not a live tailnet.
 
+### Send files (`--send PATH`, with `--control`)
+
+```sh
+./target/debug/fr connect NODE_ID \
+  --control --send /home/me/report.pdf [--send /home/me/photo.jpg]... \
+  --experimental-native --display only
+```
+
+`--send` names a regular file to send into the host's drop directory after
+control is granted. It is repeatable, at most 8 times, with absolute paths
+(no `..`). Every path is classified by type before any network I/O and the
+whole command refuses (exit 2) on the first problem, naming only the 1-based
+position: `send_symlink`, `send_directory`, `send_special_file` (device, FIFO,
+socket), `send_missing`, `send_unreadable`, `send_name_not_portable`,
+`send_duplicate_name`, `send_changed` or `send_too_many`. `--send` without
+`--control` refuses with `send_requires_control`; with `--clipboard`, with
+`send_with_clipboard_unsupported` (this build never sets up both lanes on one
+session). Files are opened with `O_NOFOLLOW | O_NONBLOCK` and must be the same
+regular file that was classified; nothing is read before the grant.
+
+The host opts in separately with `frd run --input-agent PATH --files DIR`
+(`--files` alone refuses with `files_requires_input_agent`). `DIR` must be an
+existing absolute directory owned by the user running `frd`, not group- or
+other-writable, reached without symbolic links; otherwise `frd` refuses before
+any display, worker or network I/O (`files_directory_missing`,
+`files_directory_not_directory`, `files_directory_symlink`,
+`files_directory_not_owned`, `files_directory_writable_by_others`,
+`files_directory_relative`), naming no path. The directory is pinned by
+descriptor: renaming or replacing the path later never redirects writes.
+`--files-max-file-bytes N` (default 268435456) bounds each file and
+`--files-max-session-bytes N` (default 1073741824) bounds the cumulative
+declared bytes of one controlled session, refused offers included; both refuse
+an offer before its staging file exists. At most one file is staged at a time
+and 64 transfer attempts are admitted per session. There is no daemon-lifetime
+total: sessions are sequential (one controller at a time) and each has its own
+budget, so free disk space and `--once` remain the operator's outer bound.
+
+With `--send` the connection additionally offers three OPTIONAL capabilities
+(`native-file-receive`, `file-atp-full`, `file-channel-scope`); a host without
+`--files` drops them and control proceeds. Otherwise the client installs its
+drop expectation at the start of its first controlled turn, and the host offers
+the one-use lane only after the controller's first lease renewal, on the same
+connection, under the active input attachment. The attachment's own binding
+names the host's directory: the client never sends a host path. The selected
+files then travel in order on the existing batch sender (ATP full-object
+profile, hashed and read on the sender's bounded disk thread, rate-limited on
+both sides). The host's bounded disk worker re-checks the controller's input
+lease and its file permission before every write and immediately before
+publication, verifies the ATP digest, stages under a private `.fr-part-*` name
+and publishes with an atomic no-replace rename. The host name is the file's
+final path component, unchanged (a non-portable name is refused locally, never
+rewritten). A name the host already holds is refused (`host_conflict`) and the
+selection stops there; nothing is overwritten. (PROTOCOL.md's general "conflicts
+keep both" is NOT what this slice does: `fr-files` has a keep-both policy as an
+explicit local choice, but `frd run --files` keeps the drop directory's existing
+default, refusal; choosing between them is an open decision.) Revocation or expiry of the
+lease fences an in-flight transfer: its staging file is removed and nothing
+appears under the final name.
+
+The completion record adds `files_requested`, `files_sent` (per index: the
+host-reported published `bytes` and whether publication was `durable`),
+`files_refused` (per index: the local `bytes` and a typed `reason` such as
+`host_conflict`, `host_limit`, `host_expired`, `publication_unknown`,
+`interrupted_expired`, `not_started` or `not_sent`) and `files_absence`: `null`
+when the lane carried the selection, otherwise a typed code such as
+`host_files_unavailable` (the host did not enable it), `control_not_granted`,
+`files_setup_failed` or `not_requested`. Every requested index appears exactly
+once. File names, paths and contents never appear in output, errors or logs.
+A host-reported publication is not an independent observation of the host's
+disk; an uncertain publication is reported as such and never resent.
+
+Evidence is the namespace e2e (`crates/frd/tests/native_host_linux_serial/real_files.rs`),
+described below. This is viewer to host only: no downloads, directories,
+resumption, synchronization, picker or drag-and-drop UI, and not a live tailnet.
+
 `--experimental-native` is also mandatory because the native transport remains
 unqualified. It is a development opt-in, not a change to any protocol, admission
 or release gate. There is no alternate QUIC stack, runtime or codec fallback.
@@ -321,11 +396,11 @@ cargo test -p fr-native --features linux-desktop --test fr_cli --locked -- --tes
 cargo test -p fr-native --features linux-desktop --test viewer_window_x11 --locked -- --test-threads=1
 ```
 
-`--control`, `--clipboard` and `--audio` end to end are exercised by the namespace suite, not by these commands.
+`--control`, `--clipboard`, `--send` and `--audio` end to end are exercised by the namespace suite, not by these commands.
 Build the real binaries and the test executable, then pass that executable to
 `scripts/test_linux_serial_lifecycle.sh` (set `FR_NS_SUDO=1` where unprivileged
 user namespaces are restricted). It runs the ignored namespace suite serially,
-including the `real_control::`, `real_clipboard::` and `real_audio::` tests of
+including the `real_control::`, `real_clipboard::`, `real_files::` and `real_audio::` tests of
 `crates/frd/tests/native_host_linux_serial.rs`:
 
 ```sh
@@ -358,7 +433,17 @@ tests add one independent python/Xlib application per display that copies
 of `UTF8_STRING`): a unique non-ASCII text copied on the viewer is pasted on
 the host, then the reverse; a host without `--clipboard` keeps control and
 reports `host_clipboard_unavailable`; and a client frozen past its lease loses
-the clipboard child, after which copies cross neither way. The tailnet
+the clipboard child, after which copies cross neither way. The `real_files::`
+tests run the production `frd run --input-agent --files DIR` with a private drop
+directory and the shipped `fr connect --control --send`, and observe the drop
+directory directly: a 3 MiB random file with a non-ASCII name lands under exactly
+that name with an identical SHA-256 (the completion reports it sent, by index
+and size); a second file whose name the host already holds is refused
+`host_conflict` with the original bytes unchanged; a client frozen (SIGSTOP)
+mid-transfer past its lease leaves no staging file and nothing under the final
+name; and a host without `--files` keeps control and reports
+`host_files_unavailable`. A host that writes zeros and a client that never starts
+the transfer were planted and both fail the first test. The tailnet
 `LocalAPI`, CA and firewall are namespace fixtures; this is not live-tailnet,
 physical-device or hardware evidence.
 
