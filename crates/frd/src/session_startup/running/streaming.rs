@@ -203,6 +203,29 @@ impl StreamingHost {
         }
         Ok(())
     }
+    pub(super) fn enable_revocation_reporting(
+        &mut self,
+        cleanup: &Cx,
+    ) -> Result<fr_transport::quic::RevocationReport, Error> {
+        if self.stream.served || !matches!(self.host, Host::Observe(_)) {
+            return Err(Error::Order);
+        }
+        cleanup.checkpoint().map_err(|_| Error::Cancelled)?;
+        if cleanup.timer_driver().is_none() {
+            return Err(Error::Clock);
+        }
+        let session = self.host.session()?;
+        session.check()?;
+        if session.revocation_reporting.is_some() {
+            return Err(Error::Order);
+        }
+        let report = fr_transport::quic::RevocationReport::default();
+        session.revocation_reporting = Some(super::controlled::revocation::Configuration {
+            cleanup: cleanup.clone(),
+            registration: report.registration(),
+        });
+        Ok(report)
+    }
     pub fn statistics(&self) -> Statistics {
         self.stream.statistics()
     }
@@ -379,16 +402,25 @@ impl StreamingHost {
         });
         // Neither successful capture nor a ready refresh wins a cancellation
         // race with an in-flight QUIC drive. Only terminal failure exits the join.
+        let mut producer_end = None;
         poll_fn(|task| {
-            if let Poll::Ready(result) = producer.as_mut().poll(task) {
+            if producer_end.is_none()
+                && let Poll::Ready(result) = producer.as_mut().poll(task)
+            {
                 fence.stop();
-                return Poll::Ready(result);
+                producer_end = Some(result);
             }
-            let result = network.as_mut().poll(task);
-            if result.is_ready() {
-                fence.stop();
+            // A failed/cancelled producer fences FIRST, then lets the original
+            // network future observe cancellation. Dropping that pending future
+            // here would destroy its socket before terminal-only reporting can
+            // take custody. Its existing I/O/deadline checks still bound this.
+            match network.as_mut().poll(task) {
+                Poll::Ready(result) => {
+                    fence.stop();
+                    Poll::Ready(producer_end.take().unwrap_or(result))
+                }
+                Poll::Pending => Poll::Pending,
             }
-            result
         })
         .await
     }

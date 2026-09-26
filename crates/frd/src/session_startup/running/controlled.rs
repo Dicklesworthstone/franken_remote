@@ -3,7 +3,7 @@
 use super::{Error, HostSession, ObservationControl, Services};
 mod clipboard;
 pub(crate) mod files;
-mod revocation;
+pub(super) mod revocation;
 use crate::{
     input_agent::{InputReply, Reply, Status},
     input_quic::{self, Progress, QuicInput, Routes, control::ControlRenewal},
@@ -28,6 +28,7 @@ pub struct ControlledHost {
     clipboard_setup: crate::session_startup::clipboard::Setup,
     files: files::Slot,
     terminal_report: Option<Result<(), fr_transport::quic::Error>>,
+    terminal_registered: bool,
 }
 impl std::fmt::Debug for ControlledHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -59,7 +60,8 @@ impl HostSession {
                 self.opened.routes,
             )
             .map_err(Error::ControlRenewal)?;
-        Ok(ControlledHost {
+        let reporting = self.revocation_reporting.take();
+        let mut host = ControlledHost {
             session: self,
             input,
             renewal,
@@ -69,7 +71,12 @@ impl HostSession {
             clipboard_setup: crate::session_startup::clipboard::Setup::default(),
             files: files::Slot::default(),
             terminal_report: None,
-        })
+            terminal_registered: false,
+        };
+        if let Some(reporting) = reporting {
+            host.arm_revocation_reporting(reporting)?;
+        }
+        Ok(host)
     }
 }
 impl ControlledHost {
@@ -138,6 +145,10 @@ impl ControlledHost {
         // A synchronous watchdog/local fence must win over normal transport
         // checks, which would otherwise drop the socket before reporting it.
         if self.input.control().is_stopped() {
+            if self.terminal_registered {
+                self.close();
+                return Err(Error::Closed);
+            }
             let reason = self
                 .input
                 .control()

@@ -257,7 +257,8 @@ impl ControlledDesktop {
                     .then(|| configure_clipboard(publisher, &self.profile, &cx, ids))
                     .flatten(),
                 publisher.control(),
-                publisher.serve_managed_control(
+                publisher.serve_managed_control_with_cleanup(
+                    &cx,
                     seat,
                     move |state| decider.turn(state),
                     move || nonce(),
@@ -299,7 +300,7 @@ impl ControlledDesktop {
                 Poll::Pending
             })
             .await;
-            let ManagedControlReport { session, input } = report;
+            let ManagedControlReport { session, input, .. } = report;
             if input.is_some_and(|shutdown| !shutdown.handoff_safe()) {
                 return Err(Error::InputCleanup);
             }

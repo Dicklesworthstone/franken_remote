@@ -91,3 +91,40 @@ impl Drop for Closing<'_> {
         self.0.close();
     }
 }
+
+/// Prepared by the enclosing service before borrowing its publisher. Neither
+/// this weak registration nor the cleanup context grants input or observation.
+pub(in crate::session_startup::running) struct Configuration {
+    pub cleanup: asupersync::cx::Cx,
+    pub registration: quic::RevocationRegistration,
+}
+impl ControlledHost {
+    pub(super) fn arm_revocation_reporting(
+        &mut self,
+        reporting: Configuration,
+    ) -> Result<(), super::Error> {
+        let control = self.input.control();
+        self.session
+            .opened
+            .transport
+            .arm_revocation_report(
+                &reporting.cleanup,
+                self.renewal.original_connection(),
+                self.session.opened.routes.outbound,
+                Binding {
+                    channel: self.session.opened.binding.id,
+                    session: self.session.opened.binding.remote_session,
+                },
+                self.renewal.lease_id(),
+                reporting.registration,
+                move || {
+                    // Preserve a watchdog/platform/local reason which already won.
+                    control.stop(StopReason::ClientDisconnected);
+                    wire_reason(control.reason().unwrap_or(StopReason::ClientDisconnected))
+                },
+            )
+            .map_err(super::Error::Transport)?;
+        self.terminal_registered = true;
+        Ok(())
+    }
+}

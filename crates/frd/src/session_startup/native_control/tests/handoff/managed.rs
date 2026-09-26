@@ -420,7 +420,7 @@ fn managed_future_is_send_and_unpolled_drop_fences_before_any_local_callback() {
         drop(service);
         assert!(control.check().is_err());
         assert!(!seat.is_occupied());
-        let ManagedControlReport { session, input } = host
+        let ManagedControlReport { session, input, .. } = host
             .serve_managed_control(
                 seat.clone(),
                 |_| panic!("reacquisition"),

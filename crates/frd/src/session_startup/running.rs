@@ -60,6 +60,7 @@ pub struct HostSession {
     opened: OpenedSession,
     renewal: ObservationRenewal,
     clock: Option<ClockSync>,
+    revocation_reporting: Option<controlled::revocation::Configuration>,
     pub(crate) sharing_surface: Option<Box<dyn crate::local_sharing::Surface>>,
 }
 impl OpenedSession {
@@ -78,6 +79,7 @@ impl OpenedSession {
             opened: self,
             renewal,
             clock: None,
+            revocation_reporting: None,
             sharing_surface: None,
         })
     }
