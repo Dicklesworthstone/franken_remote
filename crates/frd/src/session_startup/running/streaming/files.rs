@@ -15,6 +15,19 @@ use fr_files::quic::Configuration;
 use fr_transport::quic::ChannelRequest;
 use fr_wire::{attachment::Ticket, decoder::Binding, negotiation::ControlBinding};
 
+/// The streaming loop's between-turn hook: only a controlled session (after
+/// the grant) can carry the lane; observation never offers files.
+pub(super) fn between_turns(
+    lane: Option<&mut Lane>,
+    host: &mut super::Host,
+    view: Binding,
+    nonce: &mut impl FnMut() -> Result<u128, ()>,
+) {
+    if let (Some(lane), super::Host::Control(host)) = (lane, host) {
+        lane.host(host, view, nonce);
+    }
+}
+
 pub(in crate::session_startup) struct Lane {
     /// Taken by the one offer attempt; never re-offered after any outcome.
     configuration: Option<Configuration>,

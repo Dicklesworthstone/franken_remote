@@ -446,11 +446,7 @@ impl StreamingHost {
                     app.host(host, clipboard_view, nonce)
                         .map_err(Error::Clipboard)?;
                 }
-                if let Some(lane) = &mut self.files
-                    && let Host::Control(host) = &mut self.host
-                {
-                    lane.host(host, clipboard_view, nonce);
-                }
+                files::between_turns(self.files.as_mut(), &mut self.host, clipboard_view, nonce);
                 asupersync::runtime::yield_now().await;
             }
         });
