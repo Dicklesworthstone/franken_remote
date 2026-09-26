@@ -98,6 +98,7 @@ pub enum Error {
     Clock,
     ClockSynchronization,
     Cancelled,
+    RemoteClosed(fr_wire::closure::Closed),
     Closed,
 }
 impl fmt::Display for Error {

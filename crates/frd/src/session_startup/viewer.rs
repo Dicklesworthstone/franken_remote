@@ -2,6 +2,7 @@
 //! caller supplies a TLS-established QUIC connection and a session-local Cx.
 //! No windows, decoder, input grant, peer identity or alternative transport are
 //! invented here. Application dispatch is synchronous and bounded by `QuicRecords`.
+mod closure;
 pub(super) mod controlled;
 pub(super) mod observer;
 pub(super) mod streaming;
@@ -283,6 +284,7 @@ pub struct ViewerSession {
     last: u64,
     heard_until: u64,
     closed: bool,
+    remote_closed: Option<fr_wire::closure::Closed>,
 }
 impl ViewerSession {
     /// Retain the ORIGINAL session's terminal stop before native window/decoder
@@ -404,6 +406,7 @@ impl ViewerSession {
             last: current,
             heard_until,
             closed: false,
+            remote_closed: None,
         };
         this.check()?;
         Ok(this)
@@ -411,11 +414,20 @@ impl ViewerSession {
     pub fn metadata(&self) -> &Opened {
         &self.opened
     }
+    /// The original peer's validated final report, retained after local teardown.
+    /// This is reported cleanup, not independent native-effect confirmation.
+    /// No report remains None; closing a socket cannot invent successful cleanup.
+    pub const fn closed_report(&self) -> Option<fr_wire::closure::Closed> {
+        self.remote_closed
+    }
     pub fn is_closed(&self) -> bool {
         self.closed || self.transport.is_closed()
     }
     pub fn check(&mut self) -> Result<(), Error> {
         let result = (|| {
+            if let Some(report) = self.remote_closed {
+                return Err(Error::RemoteClosed(report));
+            }
             if self.closed
                 || !self.transport.is_bound_to(&self.connection)
                 || self.transport.is_closed()
@@ -494,11 +506,18 @@ impl ViewerSession {
         let old_until = *heard_until;
         let expired = Cell::new(None);
         let mut failure = None;
+        let terminal = &mut self.remote_closed;
         self.transport
             .receive(
                 cx,
                 || live_until(cx, old_until, &expired),
                 |route, bytes| {
+                    if let Some(error) =
+                        closure::receive(terminal, route, bytes, inbound, binding, &limits)
+                    {
+                        failure = Some(error);
+                        return Err(());
+                    }
                     if let Some(clock) = clock {
                         match clock.dispatch_record(route, bytes) {
                             Ok(Some(disposition)) => return Ok(disposition),

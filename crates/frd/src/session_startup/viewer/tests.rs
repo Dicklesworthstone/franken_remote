@@ -359,3 +359,5 @@ fn control_challenges_are_dispatched_without_observation_renewal_side_effects() 
         assert!(viewer.responder.response_deadline().is_none());
     });
 }
+
+mod closure;

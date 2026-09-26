@@ -123,3 +123,80 @@ The wire tests include this fixture and an independently specified known-effect
 fixture, every truncation/stream split, wrong roles/bindings, pre-admission
 refusal before allocation, extensions, canonical summaries and short output.
 This wire slice does not by itself send a report or prove native cleanup.
+
+## Terminal transport custody
+
+`QuicRecords::close_with_closed` uses the existing lease-revocation terminal
+drain, not an ordinary post-fence send. The caller must first fence authority
+and enter ordered teardown. Only typed Closed and LeaseRevoked records can use
+this drain. A matching original connection is closed synchronously even when the
+returned future is never polled. Foreign connection proofs are non-mutating.
+
+Unstaged application writes are discarded. Any native retained/retransmission
+payload, partial record, or queued outbound datagram refuses rather than flushing
+stale application bytes. The original immutable terminal security gate, cleanup
+context cancellation and 250-ms construction-time deadline remain enforced.
+A previously armed lease-revocation consumer takes precedence over a competing
+Closed report; it cannot be replaced or cause two detached drains. Transport ACK
+still means neither peer processing nor confirmed cleanup/effect accounting.
+
+The current terminal suite passes 24 actual UDP/TLS tests, including five new
+Closed cases and all nineteen existing immediate/deferred-revocation tests.
+The three changed transport/test sources pass strict pedantic Clippy. The native
+scope rebuilds first-party libraries using the pinned compiler and unchanged,
+compiler/lock-matched retained upstream CI libraries; this is not a cold upstream
+build, complete current workspace, native-input or installed-Tailscale claim.
+
+## Session owner and viewer dispatch
+
+`HostSession::close_with_report(cleanup, reason)` ends an observation-only
+session and prepares its one Closed report. At the method call, before the
+returned future is polled, the original observation authority is revoked,
+renewal is stopped, and the ordinary connection is closed. The independently
+provisioned cleanup context retains its own cancellation and the original clock;
+no cancelled session context is reset or reused as authority. The original
+native/publisher owner still performs and confirms its own ordered cleanup.
+
+This session owner always reports Unconfirmed cleanup and Unknown effects. It
+cannot certify a shared worker's exit or invent counts for missing input receipts.
+Control-intent sessions refuse this reporting path and retain their existing
+lease-specific shutdown owner. An armed revocation report takes precedence.
+A failed, cancelled or unpolled reporting attempt never reopens ordinary I/O.
+
+The ordinary viewer dispatcher consumes Closed on its exact reliable control
+route before processing another application record. It validates the original
+remote session and stops the receive batch immediately. The exact report is
+retained in `ViewerSession::closed_report()` through local teardown, and returned
+as `session_startup::Error::RemoteClosed(report)` rather than collapsed into a
+successful cleanup result. Existing cancellation, renewal-stop and native/input
+teardown guards still run. A malformed report closes without a retained success
+record; absence of a report remains None. Known uncertain effects remain uncertain even
+when the host reports completed cleanup. Per-action receipt ledgers are untouched.
+
+Five new session regressions exercise actual negotiated TLS/UDP host/viewer
+owners, call-time authority fencing, independent cleanup contexts, unknown and
+known summaries, malformed reports, post-terminal queued records, unpolled
+abandonment, and control-intent exclusion. All 23 selected session tests pass
+including 18 unchanged startup/renewal regressions. The complete core/wire suite
+passes 409 tests including doctests, and the terminal transport suite passes 24
+(456 unique tests across these scopes, including 15 added here). Selected session
+and terminal test targets and their production libraries pass strict pedantic
+Clippy; core/wire all-target/all-feature Clippy and changed-file formatting pass.
+
+The full daemon test-source Clippy check exceeded the local execution limit
+before producing results. The selected session harness uses a separate copy excluding
+unselected tests at registration; production code and selected assertions remain
+unchanged. Its new large test futures are explicitly boxed rather than silencing
+that lint. Native-scope builds use source-rebuilt first-party libraries with the
+pinned nightly-2026-08-31 and unchanged compiler/lock-matched retained upstream
+libraries. The executed baseline is checksum-verified 284b3d6 plus this work and
+reconciled transport reporting. Publication preserves the later audio, registry
+and managed-revocation changes by exact preimage hashes; the combined current
+workspace is not claimed freshly executed. Identity and cleanup are test fixtures,
+not installed-Tailscale, native-input release, HEVC/GPU or hardware qualification.
+
+Automatic Closed emission from every desktop/daemon teardown, a full
+CloseRequest-to-confirmed-cleanup handshake, and cleanup-owner-derived effect
+counts remain open. The explicit host API does not turn a transport ACK or absent
+report into completed native cleanup. The broader protocol closure bead remains
+open; this is not a release-gate closure.

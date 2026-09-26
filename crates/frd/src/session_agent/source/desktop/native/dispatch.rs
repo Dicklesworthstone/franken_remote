@@ -109,6 +109,7 @@ fn peer_session(error: &crate::session_startup::Error) -> bool {
         | E::Expired
         | E::ClockSynchronization
         | E::Cancelled
+        | E::RemoteClosed(_)
         | E::Closed => true,
     }
 }

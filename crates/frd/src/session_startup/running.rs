@@ -9,6 +9,7 @@ use fr_transport::quic::{ControlRoutes, Disposition, QuicRecords, Route};
 use fr_wire::negotiation::{ControlBinding, Selection};
 use std::{future::Future, pin::pin, task::Poll, time::Duration};
 
+mod closure;
 pub(super) mod controlled;
 pub use controlled::ControlledHost;
 pub(super) mod publisher;
