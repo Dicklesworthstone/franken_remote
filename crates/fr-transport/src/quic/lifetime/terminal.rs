@@ -21,8 +21,10 @@ use fr_wire::{
 use std::{future::Future, sync::Arc, time::Duration};
 
 mod deferred;
+mod exchange;
 pub(in crate::quic) use deferred::Armed;
 pub use deferred::{ClosedRegistration, ClosedReport, RevocationRegistration, RevocationReport};
+pub use exchange::CloseOutcome;
 
 const DRAIN_US: u64 = 250_000;
 const TURN: Duration = Duration::from_millis(10);
@@ -202,6 +204,24 @@ impl QuicRecords {
             return Err(Error::Unauthorized);
         }
         self.terminal_route(route, binding, report.byte_len())?;
+        let empty = self.terminal_sender(route)?;
+        let mut bytes = [0; REPORT_BYTES];
+        let byte_len = report.encode(binding, &mut bytes)?;
+        Ok(Drain {
+            native: self.native.take().ok_or(Error::Closed)?,
+            cx: cx.clone(),
+            gate: self.terminal_lifetime_check.clone(),
+            route,
+            binding,
+            empty,
+            streams: self.streams.len(),
+            last: started,
+            until,
+            bytes,
+            byte_len,
+        })
+    }
+    fn terminal_sender(&mut self, route: StreamRoute) -> Result<EmptySendState, Error> {
         let native = self.native.as_ref().ok_or(Error::Closed)?;
         let streams = native.connection().inner().streams();
         if streams.len() > self.streams.len()
@@ -233,21 +253,7 @@ impl QuicRecords {
                 .0
                 .clone(),
         );
-        let mut bytes = [0; REPORT_BYTES];
-        let byte_len = report.encode(binding, &mut bytes)?;
-        Ok(Drain {
-            native: self.native.take().ok_or(Error::Closed)?,
-            cx: cx.clone(),
-            gate: self.terminal_lifetime_check.clone(),
-            route,
-            binding,
-            empty,
-            streams: self.streams.len(),
-            last: started,
-            until,
-            bytes,
-            byte_len,
-        })
+        Ok(empty)
     }
 }
 

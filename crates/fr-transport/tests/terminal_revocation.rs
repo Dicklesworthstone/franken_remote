@@ -30,6 +30,7 @@ struct Pair {
     client: QuicRecords,
     server: QuicRecords,
     control: StreamRoute,
+    incoming: StreamRoute,
     bulk: StreamRoute,
     video: DatagramRoute,
 }
@@ -82,6 +83,7 @@ async fn pair(cx: &Cx) -> Pair {
         client,
         server,
         control,
+        incoming,
         bulk,
         video,
     }
@@ -405,3 +407,6 @@ mod closed;
 
 #[path = "terminal_revocation/closed_deferred.rs"]
 mod closed_deferred;
+
+#[path = "terminal_revocation/exchange.rs"]
+mod exchange;

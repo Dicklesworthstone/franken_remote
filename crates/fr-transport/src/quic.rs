@@ -21,7 +21,7 @@ use std::{
 
 mod lifetime;
 pub use lifetime::terminal::{
-    ClosedRegistration, ClosedReport, RevocationRegistration, RevocationReport,
+    CloseOutcome, ClosedRegistration, ClosedReport, RevocationRegistration, RevocationReport,
 };
 
 pub mod budget;
