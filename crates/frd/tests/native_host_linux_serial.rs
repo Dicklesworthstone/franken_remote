@@ -652,3 +652,5 @@ mod real_control;
 mod real_control_cursor;
 #[path = "native_host_linux_serial/real_cursor.rs"]
 mod real_cursor;
+#[path = "native_host_linux_serial/real_files.rs"]
+mod real_files;

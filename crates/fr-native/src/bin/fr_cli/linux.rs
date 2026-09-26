@@ -8,6 +8,9 @@ mod control;
 mod displays;
 #[path = "linux/doctor.rs"]
 mod doctor;
+#[cfg(feature = "linux-desktop")]
+#[path = "linux/files.rs"]
+mod files;
 #[path = "linux/refusal.rs"]
 mod refusal;
 #[path = "linux/robot.rs"]
@@ -262,6 +265,8 @@ fn connect(
             2,
         ));
     }
+    // Classify every --send path by type before any network I/O.
+    let sends = files::select(&connection.send)?;
     let configuration = desktop_configuration(cx, connection)?;
     let audio_output = audio::resolve(connection.audio.as_ref())?;
     let state = Rc::new(RefCell::new(Progress {
@@ -274,6 +279,7 @@ fn connect(
         audio: audio_output
             .as_ref()
             .map(|_| Rc::new(RefCell::new(audio::Report::default()))),
+        files: sends,
         ..Progress::default()
     }));
     let clipboard = if connection.clipboard {
@@ -325,7 +331,7 @@ fn connect(
             runtime.handle(),
             selector,
             cfg,
-            control::offer(connection.clipboard),
+            files::offer(connection.clipboard, !connection.send.is_empty()),
             policy,
             &mut application,
         );
@@ -517,6 +523,8 @@ struct Progress {
     control: Option<control::Counters>,
     /// Some only for `--audio`: content-free playback outcome.
     audio: Option<Rc<RefCell<audio::Report>>>,
+    /// Some only with `--send`: the explicit selection and its outcome.
+    files: Option<files::Local>,
 }
 #[cfg(feature = "linux-desktop")]
 impl Progress {
@@ -580,6 +588,9 @@ impl Ui for Interface {
                 attempt.configure_clipboard(desktop, local, clipboard);
             }
             self.attempt = Some(attempt);
+        }
+        if let Some(files) = p.files.as_mut() {
+            files.configure(desktop);
         }
         if let (Some((server, request)), Some(report)) = (&self.audio, &p.audio) {
             install_audio(desktop, server, request, report);
@@ -713,6 +724,10 @@ fn completion(progress: &Progress, json: bool) -> String {
 /// committed to the local CLIPBOARD, or the typed reason it never became active.
 #[cfg(feature = "linux-desktop")]
 fn control_completion(progress: &Progress, control: control::Counters, json: bool) -> String {
+    let files = progress
+        .files
+        .as_ref()
+        .map_or_else(files::Summary::not_requested, files::Local::summary);
     let clipboard = control.clipboard.unwrap_or_default();
     let absence = control
         .clipboard
@@ -720,7 +735,7 @@ fn control_completion(progress: &Progress, control: control::Counters, json: boo
         .unwrap_or("not_requested");
     if json {
         format!(
-            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"control_requested\":{},\"control_granted\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false}}\n",
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"control_requested\":{},\"control_granted\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{}{},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false}}\n",
             output::timestamp(),
             progress.attempts,
             progress.opened,
@@ -736,11 +751,12 @@ fn control_completion(progress: &Progress, control: control::Counters, json: boo
                 "null".to_owned()
             } else {
                 format!("\"{absence}\"")
-            }
+            },
+            files.json(),
         )
     } else {
         format!(
-            "Control session stopped; {} attempt(s), {} opened session(s), control {}, {} host input result(s) ({} submitted to the host OS), clipboard {}, cleanup confirmed. Native transport/hardware remain unqualified.\n",
+            "Control session stopped; {} attempt(s), {} opened session(s), control {}, {} host input result(s) ({} submitted to the host OS), clipboard {}, cleanup confirmed.{} Native transport/hardware remain unqualified.\n",
             progress.attempts,
             progress.opened,
             match (control.requested, control.granted) {
@@ -754,7 +770,8 @@ fn control_completion(progress: &Progress, control: control::Counters, json: boo
                 format!("active ({} host item(s) received)", clipboard.received)
             } else {
                 format!("absent: {absence}")
-            }
+            },
+            files.text(),
         )
     }
 }
@@ -1138,6 +1155,7 @@ mod tests {
             control: false,
             clipboard: false,
             audio: None,
+            send: Vec::new(),
         };
         let runtime = RuntimeBuilder::current_thread()
             .enable_platform_reactor(true)

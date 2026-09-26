@@ -728,6 +728,75 @@ fn frd_run_refuses_software_encoding_without_explicit_opt_in() {
         "{json_text}"
     );
     assert!(String::from_utf8_lossy(&help.stdout).contains("--clipboard"));
+    // A drop directory without an input agent, then unusable directories
+    // (by type), all refuse before any display, worker or network I/O, and
+    // no refusal echoes the operator's path.
+    let base = [
+        "run",
+        "--socket",
+        socket.to_str().unwrap(),
+        "--config",
+        config.to_str().unwrap(),
+        "--software-explicit",
+        "--json",
+    ];
+    let open = directory.0.join("drop-open");
+    fs::DirBuilder::new().mode(0o777).create(&open).unwrap();
+    fs::set_permissions(&open, std::os::unix::fs::PermissionsExt::from_mode(0o777)).unwrap();
+    let private = directory.0.join("drop-private");
+    fs::DirBuilder::new().mode(0o700).create(&private).unwrap();
+    let missing = directory.0.join("drop-missing");
+    let agent = ["--input-agent", "/nonexistent/fr-input-agent"];
+    for (extra, code) in [
+        (
+            vec!["--files", private.to_str().unwrap()],
+            "files_requires_input_agent",
+        ),
+        (
+            [&agent[..], &["--files", open.to_str().unwrap()]].concat(),
+            "files_directory_writable_by_others",
+        ),
+        (
+            [&agent[..], &["--files", missing.to_str().unwrap()]].concat(),
+            "files_directory_missing",
+        ),
+        (
+            [&agent[..], &["--files", "relative/drop"]].concat(),
+            "files_directory_relative",
+        ),
+        (
+            [
+                &agent[..],
+                &[
+                    "--files",
+                    private.to_str().unwrap(),
+                    "--files-max-file-bytes",
+                    "10",
+                    "--files-max-session-bytes",
+                    "9",
+                ],
+            ]
+            .concat(),
+            "files_limits_invalid",
+        ),
+    ] {
+        let output = wait_for_child(
+            frd_command(&[&base[..], &extra[..]].concat())
+                .spawn()
+                .unwrap(),
+        );
+        assert_eq!(output.status.code(), Some(2), "{code}");
+        let json_text = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            json_text.contains(&format!("\"code\":\"{code}\"")),
+            "{json_text}"
+        );
+        assert!(
+            !json_text.contains("drop-") && !json_text.contains("relative/drop"),
+            "{json_text}"
+        );
+    }
+    assert!(String::from_utf8_lossy(&help.stdout).contains("--files DIR"));
 }
 
 #[test]

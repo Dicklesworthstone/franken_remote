@@ -200,6 +200,7 @@ fn options(
         input_agent: None,
         clipboard: false,
         audio: None,
+        files: None,
     }
 }
 

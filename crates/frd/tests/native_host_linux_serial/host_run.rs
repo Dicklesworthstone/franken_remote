@@ -107,6 +107,7 @@ fn options(api: &fixture::Api, tools: &Tools, worker: PathBuf) -> Options {
         input_agent: None,
         clipboard: false,
         audio: None,
+        files: None,
     }
 }
 

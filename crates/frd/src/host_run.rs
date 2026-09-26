@@ -12,6 +12,8 @@
 //! process exists, and the encoder is the explicit software HEVC profile. The
 //! controller's text clipboard is a further, separate operator opt-in
 //! (`clipboard`, requires the input agent); it follows the controller's lease.
+//! So is the controller's drop directory (`files`, requires the input agent):
+//! explicit viewer-to-host file sends land there only under the live lease.
 pub mod audio;
 pub mod policy;
 pub use audio::AudioOptions;
@@ -31,7 +33,7 @@ use crate::{
             prepare::Setup,
         },
     },
-    session_startup::{Configuration, host_offer_with_audio, shared_viewers},
+    session_startup::{Configuration, host_offer_with_files, shared_viewers},
     worker::{Deadline, Launch, Retirement},
 };
 use asupersync::{
@@ -99,6 +101,10 @@ pub struct Options {
     /// `--audio`: local playback-audio enable. `None` keeps audio off and the
     /// capability unoffered.
     pub audio: Option<AudioOptions>,
+    /// `--files DIR`: the operator's pinned, validated drop directory for the
+    /// controller's explicit sends. Requires `input_agent`. `None` keeps the
+    /// file capabilities unoffered (a controller asking gets typed absence).
+    pub files: Option<crate::native_files::Directory>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,10 +206,13 @@ fn random_nonzero_u32() -> Result<u32, Error> {
 
 /// The host's offer: the four bootstrap capabilities the native viewer
 /// requires, plus (only with an input agent) the optional control boundaries
-/// and (only with the clipboard enable too) the optional clipboard ones.
+/// and (only with the clipboard enable too) the optional clipboard ones, and
+/// (only with a drop directory too) the optional file ones.
 /// Optional client capabilities outside this set are dropped by negotiation.
-fn offer(control: bool, clipboard: bool, audio: bool) -> Offer {
-    host_offer_with_audio(control, clipboard, audio)
+// Independent operator opt-ins, each one plain capability switch.
+#[allow(clippy::fn_params_excessive_bools)]
+fn offer(control: bool, clipboard: bool, audio: bool, files: bool) -> Offer {
+    host_offer_with_files(control, clipboard, audio, files)
 }
 /// Native operations a controller may request in this X11 slice. Discrete
 /// wheel input uses bounded `XTest` press/release pairs, not pixel-scroll emulation.
@@ -221,7 +230,7 @@ fn request(
     host_boot: HostBootId,
     os_session: u32,
     scope: Scope,
-    (control, clipboard): (bool, bool),
+    (control, clipboard, files): (bool, bool, bool),
     audio: bool,
 ) -> Result<Request, serial::Error> {
     let fresh = |_| serial::Error::Configuration;
@@ -233,7 +242,7 @@ fn request(
             ..GrantPolicy::default()
         },
         session: Configuration {
-            offer: offer(control, clipboard, audio),
+            offer: offer(control, clipboard, audio, files),
             binding: ControlBinding {
                 id: u32::try_from(attempt % u64::from(u32::MAX))
                     .unwrap_or(1)
@@ -473,6 +482,7 @@ fn check(options: &Options) -> Result<(), Error> {
             .as_ref()
             .is_some_and(|p| !p.is_absolute())
         || (options.clipboard && options.input_agent.is_none())
+        || (options.files.is_some() && options.input_agent.is_none())
     {
         return Err(Error::Configuration);
     }
@@ -639,10 +649,14 @@ impl Share<'_> {
                 Backend::SoftwareExplicit,
             )
             .map_err(|_| Error::Configuration)?;
-            agent = agent.with_control(if self.options.clipboard {
+            let profile = if self.options.clipboard {
                 profile.with_clipboard()
             } else {
                 profile
+            };
+            agent = agent.with_control(match &self.options.files {
+                Some(directory) => profile.with_files(directory.clone()),
+                None => profile,
             });
         }
         if let Some(options) = &self.options.audio {
@@ -770,7 +784,11 @@ impl Share<'_> {
         let factory = self.factory(source, retirement.clone());
         let (fps, bitrate) = (self.options.fps, self.options.bitrate);
         let (host_boot, scope) = (self.host_boot, self.options.sharing);
-        let control = (self.options.input_agent.is_some(), self.options.clipboard);
+        let control = (
+            self.options.input_agent.is_some(),
+            self.options.clipboard,
+            self.options.files.is_some(),
+        );
         let audio = self.options.audio.is_some();
         let report = self.report.clone();
         let stop = self.stop.clone();
@@ -856,7 +874,7 @@ mod tests {
     #[test]
     fn host_offer_matches_the_native_viewer_bootstrap_capabilities() {
         use fr_wire::{attachment, decoder, display, negotiation::Role};
-        let observe = offer(false, false, false);
+        let observe = offer(false, false, false, false);
         assert_eq!(observe.role, Role::Observe);
         let names: Vec<_> = observe
             .capabilities
@@ -879,18 +897,18 @@ mod tests {
                 .all(|c| c.required != (c.name == fr_wire::cursor::CAPABILITY))
         );
         // Control boundaries are offered only with an input agent, optionally.
-        let control = offer(true, false, false);
+        let control = offer(true, false, false, false);
         assert_eq!(control.capabilities.len(), 9);
         // Audio-down is offered only with the local enable, and optionally.
         for control_offer in [false, true] {
-            let without = offer(control_offer, false, false);
+            let without = offer(control_offer, false, false, false);
             assert!(
                 without
                     .capabilities
                     .iter()
                     .all(|c| c.name != fr_wire::audio::CAPABILITY)
             );
-            let with = offer(control_offer, false, true);
+            let with = offer(control_offer, false, true, false);
             assert_eq!(with.capabilities.len(), without.capabilities.len() + 1);
             assert!(with.capabilities.iter().any(|c| {
                 c.name == fr_wire::audio::CAPABILITY
@@ -904,13 +922,29 @@ mod tests {
             4
         );
         // The clipboard enable adds three optional boundaries, only with control.
-        assert_eq!(offer(false, true, false), observe);
-        let clipboard = offer(true, true, false);
+        assert_eq!(offer(false, true, false, false), observe);
+        let clipboard = offer(true, true, false, false);
         assert_eq!(clipboard.capabilities.len(), 12);
         assert_eq!(
             clipboard.capabilities.iter().filter(|c| c.required).count(),
             4
         );
+        // The drop directory adds three optional file boundaries, only with
+        // control; the required set never changes.
+        assert_eq!(offer(false, false, false, true), observe);
+        let files = offer(true, false, false, true);
+        assert_eq!(files.capabilities.len(), control.capabilities.len() + 3);
+        assert_eq!(files.capabilities.iter().filter(|c| c.required).count(), 4);
+        for (name, version) in crate::session_startup::FILE_CAPABILITIES {
+            assert!(
+                files
+                    .capabilities
+                    .iter()
+                    .any(|c| c.name == name && c.version == version && !c.required),
+                "{name}"
+            );
+        }
+        assert!(files.validate().is_ok());
         for allowed in [
             Capability::Keys,
             Capability::Repeat,
@@ -932,10 +966,12 @@ mod tests {
     #[test]
     fn every_request_allocates_fresh_unpredictable_identifiers() {
         let boot = HostBootId::from_raw(9);
-        let a = request(1, boot, 5, Scope::OwnUser, (false, false), false).unwrap();
-        let b = request(2, boot, 5, Scope::OwnUser, (true, false), false).unwrap();
-        let c = request(3, boot, 5, Scope::OwnUser, (true, true), false).unwrap();
-        let d = request(4, boot, 5, Scope::OwnUser, (false, false), true).unwrap();
+        let a = request(1, boot, 5, Scope::OwnUser, (false, false, false), false).unwrap();
+        let b = request(2, boot, 5, Scope::OwnUser, (true, false, false), false).unwrap();
+        let c = request(3, boot, 5, Scope::OwnUser, (true, true, false), false).unwrap();
+        let d = request(4, boot, 5, Scope::OwnUser, (false, false, false), true).unwrap();
+        let files = request(5, boot, 5, Scope::OwnUser, (true, false, true), false).unwrap();
+        assert_eq!(files.session.offer, offer(true, false, false, true));
         assert_ne!(
             a.session.binding.remote_session,
             b.session.binding.remote_session
@@ -944,10 +980,10 @@ mod tests {
         assert_eq!(a.session.binding.os_session.as_raw(), 5);
         assert!(!a.session.require_approval);
         assert_eq!(a.admission.scope, Scope::OwnUser);
-        assert_eq!(a.session.offer, offer(false, false, false));
-        assert_eq!(b.session.offer, offer(true, false, false));
-        assert_eq!(c.session.offer, offer(true, true, false));
-        assert_eq!(d.session.offer, offer(false, false, true));
+        assert_eq!(a.session.offer, offer(false, false, false, false));
+        assert_eq!(b.session.offer, offer(true, false, false, false));
+        assert_eq!(c.session.offer, offer(true, true, false, false));
+        assert_eq!(d.session.offer, offer(false, false, true, false));
     }
 
     #[test]
@@ -969,6 +1005,7 @@ mod tests {
             input_agent: None,
             clipboard: false,
             audio: None,
+            files: None,
         };
         let report: Reporter = Arc::new(|_| {});
         let stop = Arc::new(StopHandle::default());
@@ -980,6 +1017,23 @@ mod tests {
             run(&relative_agent, &report, &stop),
             Err(Error::Configuration)
         );
+        // A drop directory alone (no input agent, so no lease) is refused.
+        let private =
+            std::env::temp_dir().join(format!("fr-host-run-files-{}", std::process::id()));
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::set_permissions(
+            &private,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        let mut files_only = options.clone();
+        files_only.worker = PathBuf::from("/usr/bin/fr-media-worker");
+        files_only.files = Some(
+            crate::native_files::Directory::open(&private, crate::native_files::Limits::default())
+                .unwrap(),
+        );
+        assert_eq!(run(&files_only, &report, &stop), Err(Error::Configuration));
+        let _ = std::fs::remove_dir(&private);
         // The clipboard enable alone (no input agent, so no lease) is refused.
         let mut clipboard_only = options.clone();
         clipboard_only.worker = PathBuf::from("/usr/bin/fr-media-worker");

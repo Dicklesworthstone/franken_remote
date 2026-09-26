@@ -92,6 +92,39 @@ pub fn control_offer_with_clipboard() -> Offer {
     )
 }
 
+/// `control_offer` plus the three OPTIONAL drop-lane boundaries (the file
+/// attachment role, the ATP full-object envelope and channel-derived scope).
+/// A host without a drop directory drops them and control still negotiates;
+/// the client then reports that absence. Selecting them sends nothing: the
+/// lane is the host's one-use offer under the granted input attachment, and
+/// only files the local user explicitly selected are ever read.
+pub fn control_offer_with_files() -> Offer {
+    offer(
+        Role::RequestControl,
+        &[
+            (
+                attachment::INPUT_CAPABILITY,
+                attachment::INPUT_VERSION,
+                true,
+            ),
+            (control::GRANT_CAPABILITY, 1, true),
+            (clock::CAPABILITY, clock::VERSION, true),
+            (presented::CAPABILITY, presented::VERSION, true),
+            (
+                attachment::FILES_CAPABILITY,
+                attachment::FILES_VERSION,
+                false,
+            ),
+            (fr_wire::files::CAPABILITY, fr_wire::files::VERSION, false),
+            (
+                fr_wire::files::CHANNEL_SCOPE_CAPABILITY,
+                fr_wire::files::CHANNEL_SCOPE_VERSION,
+                false,
+            ),
+        ],
+    )
+}
+
 fn offer(role: Role, extra: &[(&str, u16, bool)]) -> Offer {
     let mut capabilities: Vec<_> = [
         (display::CAPABILITY, 1, true),

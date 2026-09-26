@@ -207,6 +207,27 @@ impl NativePublisher {
     ) -> Result<crate::native_clipboard::Cleanup, crate::clipboard_quic::Error> {
         self.host.reap_clipboard(cleanup, deadline).await
     }
+    /// Configure the controller's drop lane once, before serving control.
+    /// The directory is local; nothing opens before the grant (see
+    /// `StreamingHost::configure_files`). Typed absence when not selected.
+    pub fn configure_files(
+        &mut self,
+        directory: &crate::native_files::Directory,
+    ) -> Result<(), crate::native_files::Absence> {
+        if self.input.is_none() {
+            return Err(crate::native_files::Absence::Unavailable);
+        }
+        self.host.configure_files(directory)
+    }
+    /// Observe the drop lane's disk worker joined; a timeout keeps it for a
+    /// later reap. Media/input/clipboard cleanup stay separate operations.
+    pub async fn reap_files(
+        &mut self,
+        cleanup: &Cx,
+        deadline: Deadline,
+    ) -> Result<super::controlled::files::Cleanup, super::controlled::files::Error> {
+        self.host.reap_files(cleanup, deadline).await
+    }
     pub const fn display(&self) -> Display {
         self.display
     }

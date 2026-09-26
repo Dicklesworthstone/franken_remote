@@ -19,6 +19,11 @@
 //! after the grant and attaches only under the active input attachment; its X11
 //! owner is another per-lane child of the same image (`--clipboard` role, see
 //! `clipboard_process`). Revocation or expiry fences it with the lease.
+//!
+//! With the operator's drop directory (`frd run --files DIR`), a controller
+//! that asked to send files gets the one-use file lane on the same session,
+//! after its grant and first lease renewal (`native_files`); its disk worker
+//! is reaped with the share and a fenced transfer never publishes.
 use super::super::{Error, LocalAction, Report, Wake};
 use super::{SessionAgent, Setup, Startup, local_stage};
 use crate::{
@@ -70,6 +75,8 @@ pub struct ControlProfile {
     bitrate: u32,
     backend: Backend,
     clipboard: bool,
+    /// `frd run --files DIR`: the operator's pinned drop directory.
+    files: Option<crate::native_files::Directory>,
 }
 impl ControlProfile {
     /// `input_agent` is the locally installed `fr-input-agent` image, `display`
@@ -102,7 +109,20 @@ impl ControlProfile {
             bitrate,
             backend,
             clipboard: false,
+            files: None,
         })
+    }
+    /// The operator's separate local drop directory (`frd run --files`). Under
+    /// the explicit `approval none` profile this IS the local file-receive
+    /// permission for this OS share; the lane still needs the controller's own
+    /// selection and is offered only under its live input lease.
+    #[must_use]
+    pub fn with_files(mut self, directory: crate::native_files::Directory) -> Self {
+        self.files = Some(directory);
+        self
+    }
+    pub const fn files(&self) -> bool {
+        self.files.is_some()
     }
     /// The operator's separate local enable for the controller's text
     /// clipboard (`frd run --clipboard`). Under the explicit `approval none`
@@ -141,6 +161,7 @@ impl fmt::Debug for ControlProfile {
         f.debug_struct("ControlProfile")
             .field("capabilities", &self.capabilities)
             .field("clipboard", &self.clipboard)
+            .field("files", &self.files.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -216,6 +237,9 @@ impl ControlledDesktop {
                     .reap_clipboard(cleanup, deadline)
                     .await
                     .map_err(clipboard_cleanup)?;
+                // Then the drop lane's disk worker: joined, or kept for a
+                // later reap (its staged file is removed by that worker).
+                files_cleanup(publisher.reap_files(cleanup, deadline).await)?;
                 publisher.reap_media(cleanup, deadline).await?
             }
         };
@@ -252,6 +276,12 @@ impl ControlledDesktop {
         // The managed service takes its attachment at CALL time, as before.
         let prepared = match &mut self.media {
             Media::Live(publisher) => Ok((
+                // The drop lane, when both the operator and this controller
+                // selected it; absence is typed on the controller's side.
+                self.profile
+                    .files
+                    .as_ref()
+                    .map(|directory| publisher.configure_files(directory)),
                 self.profile
                     .clipboard
                     .then(|| configure_clipboard(publisher, &self.profile, &cx, ids))
@@ -268,7 +298,7 @@ impl ControlledDesktop {
             Media::Reaped(_) => Err(Error::Closed),
         };
         async move {
-            let (clipboard, observation, service) = prepared?;
+            let (_files, clipboard, observation, service) = prepared?;
             let mut service = pin!(service);
             let mut timer = Wake {
                 driver: cx.timer_driver().ok_or(Error::Clock)?,
@@ -352,6 +382,28 @@ fn configure_clipboard(
     )
     .ok()?;
     publisher.configure_clipboard(configuration).ok()
+}
+/// Only a joined (or never started) disk worker is clean. `Finished(Err(..))`
+/// is the joined thread's own exit reason (the fenced lease or revoked file
+/// permission that ended it), not a cleanup failure; a panicked worker, a
+/// missed deadline or cancellation keeps the share's owners for later.
+fn files_cleanup(
+    result: Result<
+        crate::session_startup::FileReceiveCleanup,
+        crate::session_startup::FileReceiveError,
+    >,
+) -> Result<(), crate::worker::Error> {
+    use crate::session_startup::{FileReceiveCleanup as Cleanup, FileReceiveError as E};
+    match result {
+        Ok(Cleanup::Finished(Err(fr_files::worker::Error::Panicked))) => {
+            Err(crate::worker::Error::Unavailable)
+        }
+        Ok(Cleanup::NotStarted | Cleanup::Finished(_)) => Ok(()),
+        Ok(Cleanup::Pending) | Err(E::CleanupPending) => Err(crate::worker::Error::Deadline),
+        Err(E::Cancelled) => Err(crate::worker::Error::Cancelled),
+        Err(E::Clock) => Err(crate::worker::Error::ClockRegression),
+        Err(_) => Err(crate::worker::Error::Unavailable),
+    }
 }
 const fn clipboard_cleanup(error: clipboard_quic::Error) -> crate::worker::Error {
     match error {

@@ -283,6 +283,7 @@ fn fr_connect_presents_real_host_pixels_through_frd_run() {
         input_agent: None,
         clipboard: false,
         audio: None,
+        files: None,
     };
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();

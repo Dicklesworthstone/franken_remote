@@ -30,7 +30,8 @@ mod admission_refresh;
 mod clipboard;
 mod native_control;
 pub use native_control::{
-    CLIPBOARD_CAPABILITIES, host_offer, host_offer_with, host_offer_with_audio,
+    CLIPBOARD_CAPABILITIES, FILE_CAPABILITIES, host_offer, host_offer_with, host_offer_with_audio,
+    host_offer_with_files,
 };
 mod opening;
 mod running;

@@ -4,6 +4,7 @@
 //! other owner's maintenance. The native input Driver remains independent.
 pub(super) mod acquisition;
 mod cursor;
+pub(in crate::session_startup) mod files;
 mod recovery;
 use super::{ControlledHost, Error, HostSession, Services, now};
 use crate::{
@@ -82,6 +83,7 @@ pub struct StreamingHost {
     clipboard: Option<crate::native_clipboard::Application>,
     /// Present only when the viewer selected `remote-cursor` (plan §11.4).
     cursor: Option<Box<cursor::StreamCursor>>,
+    files: Option<files::Lane>,
 }
 impl HostSession {
     pub fn into_streaming(self, stream: Stream) -> Result<StreamingHost, Error> {
@@ -165,9 +167,43 @@ impl StreamingHost {
             feedback,
             presentation,
             clipboard: None,
+            files: None,
             recovery: None,
             cursor: None,
         })
+    }
+    /// Configure the controller's drop lane once, before service, only when
+    /// this session selected it (see `native_control::files_lane`). Nothing
+    /// opens now; the offer follows the grant and the first lease renewal.
+    pub(crate) fn configure_files(
+        &mut self,
+        directory: &crate::native_files::Directory,
+    ) -> Result<(), crate::native_files::Absence> {
+        use crate::native_files::Absence;
+        if self.stream.served || self.files.is_some() {
+            return Err(Absence::Unavailable);
+        }
+        let session = self.host.session().map_err(|_| Absence::Unavailable)?;
+        session.check().map_err(|_| Absence::Unavailable)?;
+        super::super::native_control::files_lane(&session.opened.selected)?;
+        self.files = Some(files::Lane::new(directory));
+        Ok(())
+    }
+    /// Fence at call time, then observe the ORIGINAL disk worker joined under
+    /// the caller's absolute deadline. An unfinished one-use exchange has no
+    /// disk worker yet; closing the session is its whole cleanup.
+    pub(crate) async fn reap_files(
+        &mut self,
+        cx: &Cx,
+        deadline: crate::worker::Deadline,
+    ) -> Result<super::controlled::files::Cleanup, super::controlled::files::Error> {
+        let Host::Control(host) = &mut self.host else {
+            return Ok(super::controlled::files::Cleanup::NotStarted);
+        };
+        if host.file_receive_negotiating() {
+            host.close();
+        }
+        host.reap_files(cx, deadline).await
     }
     pub(crate) fn configure_clipboard(
         &mut self,
@@ -409,6 +445,11 @@ impl StreamingHost {
                 {
                     app.host(host, clipboard_view, nonce)
                         .map_err(Error::Clipboard)?;
+                }
+                if let Some(lane) = &mut self.files
+                    && let Host::Control(host) = &mut self.host
+                {
+                    lane.host(host, clipboard_view, nonce);
                 }
                 asupersync::runtime::yield_now().await;
             }
