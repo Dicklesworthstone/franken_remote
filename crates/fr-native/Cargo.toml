@@ -42,7 +42,8 @@ linux-pulse-playback = ["linux-audio-playout"]
 # Host playback audio end to end: the worker's PulseAudio monitor-record +
 # Opus-encode role and `fr connect --audio` playback. Same libpulse/libopus
 # SONAMEs as above; frd itself never enables this feature or links either.
-linux-audio = ["linux-pulse-playback"]
+linux-opus-process = ["linux-opus", "dep:fr-client"]
+linux-audio = ["linux-pulse-playback", "linux-opus-process"]
 linux-displays = ["linux-media"]
 linux-input = []
 linux-clipboard = []
@@ -89,3 +90,9 @@ required-features = ["linux-session-monitor"]
 name = "fr-input-agent"
 path = "src/bin/input_agent.rs"
 required-features = ["linux-input"]
+
+# Host-provided Opus is decoded only in this restricted, per-epoch child.
+[[bin]]
+name = "fr-opus-worker"
+path = "src/bin/opus_worker.rs"
+required-features = ["linux-opus-process"]

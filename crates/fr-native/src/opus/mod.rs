@@ -11,6 +11,9 @@ mod decoder;
 mod encoder;
 mod ffi;
 
+#[cfg(feature = "linux-opus-process")]
+pub mod process;
+
 #[cfg(feature = "linux-audio-playout")]
 pub mod playout;
 

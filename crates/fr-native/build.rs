@@ -1,5 +1,6 @@
 use std::{env, path::PathBuf, process::Command};
 fn main() {
+    build_opus_process();
     build_keyboard();
     build_clipboard();
     build_indicator();
@@ -365,4 +366,48 @@ fn build_viewer_window() {
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=frviewerwindow");
     println!("cargo:rustc-link-lib=xcb");
+}
+
+fn build_opus_process() {
+    println!("cargo:rerun-if-changed=src/opus/process/sandbox.c");
+    if env::var_os("CARGO_FEATURE_LINUX_OPUS_PROCESS").is_none()
+        || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux")
+    {
+        return;
+    }
+    assert_eq!(
+        env::var("HOST").unwrap(),
+        env::var("TARGET").unwrap(),
+        "Opus process cross-builds need a qualified native sysroot"
+    );
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    assert!(
+        Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
+            .args([
+                "-std=c11",
+                "-O2",
+                "-fPIC",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-c",
+                "src/opus/process/sandbox.c",
+                "-o"
+            ])
+            .arg(out.join("opus_sandbox.o"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("ar")
+            .arg("crs")
+            .arg(out.join("libfropussandbox.a"))
+            .arg(out.join("opus_sandbox.o"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=fropussandbox");
 }

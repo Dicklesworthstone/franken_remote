@@ -24,14 +24,22 @@ pub mod image_transfer;
 
 #[cfg(all(
     target_os = "linux",
-    any(feature = "linux-media", feature = "linux-input")
+    any(
+        feature = "linux-media",
+        feature = "linux-input",
+        feature = "linux-opus-process"
+    )
 ))]
 mod parent;
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 pub use parent::bind_worker_parent;
 #[cfg(all(
     target_os = "linux",
-    any(feature = "linux-media", feature = "linux-input")
+    any(
+        feature = "linux-media",
+        feature = "linux-input",
+        feature = "linux-opus-process"
+    )
 ))]
 pub use parent::{ParentUnbound, bind_parent};
 
