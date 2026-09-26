@@ -1,4 +1,4 @@
-//! Existing Host callback -> bound UI -> actual `XTest` choice, no alternate grant.
+//! Existing Host callback -> bound UI -> attributed Xvfb-device choice, no alternate grant.
 use super::*;
 use crate::logind::{
     Selection, Status as SessionStatus, Watch,
@@ -178,7 +178,7 @@ fn notifications_require_original_retirement_collection_before_next_session() {
         assert!(
             attempt(rt, broker, ui.callback(), async |_| {
                 let c = mapped(broker, &ui).await;
-                interaction(broker, &display, c.window().unwrap(), "allow").await;
+                interaction(broker, &display, c.window().unwrap(), "device-allow").await;
             })
             .await
         );
@@ -201,7 +201,7 @@ fn notifications_require_original_retirement_collection_before_next_session() {
         assert!(
             attempt(rt, broker, ui.callback(), async |_| {
                 let c = mapped(broker, &ui).await;
-                interaction(broker, &display, c.window().unwrap(), "allow").await;
+                interaction(broker, &display, c.window().unwrap(), "device-allow").await;
             })
             .await
         );

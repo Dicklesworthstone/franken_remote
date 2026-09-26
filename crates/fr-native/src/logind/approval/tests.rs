@@ -179,21 +179,29 @@ fn exercise(action: Action, role: Role) {
                 assert_eq!(approval.check_pending(), Ok(()), "mapping is not consent");
                 let window = control.window().unwrap();
                 match action {
-                    Action::Allow => interaction(&broker, &display, window, "allow").await,
-                    Action::Deny => interaction(&broker, &display, window, "click").await,
+                    Action::Allow => interaction(&broker, &display, window, "device-allow").await,
+                    Action::Deny => interaction(&broker, &display, window, "device-click").await,
                     Action::Hide => interaction(&broker, &display, window, "unmap").await,
                     Action::Lock => login.emit(Event::LockUnlock),
                     Action::Cancel => control.cancel(),
                     Action::Drop => drop(prompt.lock().unwrap().take()),
                     Action::Expire => hc.cancel_fast(CancelKind::User),
                     Action::Synthetic => {
-                        for op in ["synthetic-allow", "release-allow", "drag-out"] {
+                        for op in [
+                            "allow",
+                            "click",
+                            "key",
+                            "synthetic-allow",
+                            "release-allow",
+                            "device-release-allow",
+                            "device-drag-out",
+                        ] {
                             interaction(&broker, &display, window, op).await;
                             sleep(broker.now(), Duration::from_millis(30)).await;
                             assert_eq!(control.status(), Status::Mapped, "{op} cannot approve");
                             assert_eq!(approval.check_pending(), Ok(()));
                         }
-                        interaction(&broker, &display, window, "allow").await;
+                        interaction(&broker, &display, window, "device-allow").await;
                     }
                     Action::Duplicate => {
                         assert!(matches!(

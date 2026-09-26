@@ -2,9 +2,9 @@
  * Owns its connection/window/font/GC, never authority or Rust pointers. No
  * callbacks, grabs, ambient DISPLAY, user strings, input injection or Xlib
  * global error handlers. See X11 protocol events and EWMH window properties.
- * The remote-CONTROL indicator (mode 3) additionally attributes every click
- * and key to its XInput2 source device and ignores XTEST slave devices: the
- * controlling peer injects through XTest and must not operate this surface. */
+ * All approval and indicator input is attributed to an enabled XInput2 slave.
+ * XTEST/core/SendEvent input cannot operate consent, including input injected
+ * by our own controller. This is not a sandbox against same-user X clients. */
 #include <xcb/xcb.h>
 #include <xcb/xcbext.h>
 #include <sys/uio.h>
@@ -21,13 +21,16 @@ struct fr_indicator {
     xcb_atom_t protocols, close;
     uint8_t escape, enter, space;
     uint8_t mode, mapped, allow_pressed;
-    uint8_t xi_opcode; /* nonzero only for the XI2-attributed control mode */
+    uint8_t xi_opcode;
+    uint16_t allow_source, allow_master;
+    uint32_t allow_time;
 };
 enum { MODE_SHARING = 0, MODE_CONTROL = 3 };
 /* XI2 wire constants (XI2.h / XI2proto.h). Requests are sent raw through
  * xcbext so no libxcb-xinput dependency is added. */
 enum { XI_QUERY_VERSION = 47, XI_SELECT_EVENTS = 46, XI_QUERY_DEVICE = 48 };
-enum { XI_KEY_PRESS = 2, XI_BUTTON_PRESS = 4, XI_BUTTON_RELEASE = 5 };
+enum { XI_DEVICE_CHANGED = 1, XI_KEY_PRESS = 2, XI_BUTTON_PRESS = 4,
+       XI_BUTTON_RELEASE = 5, XI_FOCUS_OUT = 10 };
 enum { XI_ALL_MASTER_DEVICES = 1 };
 static xcb_extension_t xinput = { "XInputExtension", 0 };
 /* One returned event accounts for one consumed XCB event, including ignored
@@ -64,7 +67,7 @@ static uint8_t *xi_request(struct fr_indicator *h, uint8_t opcode, void *body, s
     return reply;
 }
 /* XInput 2.0 with button/key selection on this window for all master devices.
- * Core button/key events are NOT selected in this mode. */
+ * There is no fallback to core button/key events for any consent surface. */
 static int xi_setup(struct fr_indicator *h) {
     const xcb_query_extension_reply_t *ext = xcb_get_extension_data(h->c, &xinput);
     if (!ext || !ext->present) return 0;
@@ -79,7 +82,8 @@ static int xi_setup(struct fr_indicator *h) {
         uint8_t major, minor; uint16_t length; uint32_t window;
         uint16_t num_masks, pad, deviceid, mask_len; uint32_t mask;
     } select = { 0, 0, 0, h->window, 1, 0, XI_ALL_MASTER_DEVICES, 1,
-                 (1u << XI_KEY_PRESS) | (1u << XI_BUTTON_PRESS) | (1u << XI_BUTTON_RELEASE) };
+                 (1u << XI_DEVICE_CHANGED) | (1u << XI_KEY_PRESS) |
+                 (1u << XI_BUTTON_PRESS) | (1u << XI_BUTTON_RELEASE) | (1u << XI_FOCUS_OUT) };
     struct iovec parts[3];
     parts[2].iov_base = &select;
     parts[2].iov_len = sizeof(select);
@@ -91,20 +95,28 @@ static int xi_setup(struct fr_indicator *h) {
 }
 /* 0 only for a known non-XTEST source device; XTEST slaves and anything that
  * cannot be attributed (-1) are treated as synthetic and ignored. */
-static int xi_synthetic(struct fr_indicator *h, uint16_t source) {
+static int xi_synthetic(struct fr_indicator *h, uint16_t source, uint16_t master,
+                        int keyboard) {
+    if (source <= XI_ALL_MASTER_DEVICES || master <= XI_ALL_MASTER_DEVICES) return -1;
     struct { uint8_t major, minor; uint16_t length, deviceid, pad; } query =
         { 0, 0, 0, source, 0 };
     uint8_t *reply = xi_request(h, XI_QUERY_DEVICE, &query, sizeof(query));
     if (!reply) return -1;
-    uint32_t words; uint16_t count, id, name_len;
+    uint32_t words; uint16_t count, id, name_len, use, attachment;
     memcpy(&words, reply + 4, 4);
     memcpy(&count, reply + 8, 2);
-    size_t total = 32 + (size_t)words * 4;
     int result = -1;
-    if (count >= 1 && total >= 44) {
+    /* One exact, enabled attached slave, never an aggregate/master or unknown
+     * source. Bound the reply/name arithmetic before inspecting variable data. */
+    if (count == 1 && words >= 3 && words <= 2048) {
+        size_t total = 32 + (size_t)words * 4;
         memcpy(&id, reply + 32, 2);
+        memcpy(&use, reply + 34, 2);
+        memcpy(&attachment, reply + 36, 2);
         memcpy(&name_len, reply + 40, 2);
-        if (id == source && 44 + (size_t)name_len <= total) {
+        if (id == source && attachment == master && use == (keyboard ? 4 : 3) &&
+            reply[42] == 1 && name_len > 0 && name_len <= 256 &&
+            44 + (size_t)name_len <= total) {
             result = 0;
             for (size_t i = 0; i + 5 <= name_len; ++i)
                 if (memcmp(reply + 44 + i, "XTEST", 5) == 0) { result = 1; break; }
@@ -161,9 +173,6 @@ static struct fr_indicator *open_window(const char *display, uint32_t *window, u
     uint32_t values[] = { it.data->white_pixel,
         XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_STRUCTURE_NOTIFY |
         XCB_EVENT_MASK_VISIBILITY_CHANGE };
-    if (mode != MODE_CONTROL)
-        values[1] |= XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_KEY_PRESS |
-                     XCB_EVENT_MASK_BUTTON_RELEASE;
     if (!checked(h, xcb_create_window_checked(h->c, XCB_COPY_FROM_PARENT,
         h->window, it.data->root, 0, 0, WIDTH, HEIGHT, 2,
         XCB_WINDOW_CLASS_INPUT_OUTPUT, it.data->root_visual,
@@ -192,7 +201,7 @@ static struct fr_indicator *open_window(const char *display, uint32_t *window, u
         !property(h, XCB_ATOM_WM_CLASS, XCB_ATOM_STRING, 8, sizeof(class)-1, class) ||
         !property(h, XCB_ATOM_WM_NORMAL_HINTS, XCB_ATOM_WM_SIZE_HINTS, 32, 18, size) ||
         !property(h, atom(h, "_NET_WM_STATE"), XCB_ATOM_ATOM, 32, 1, &above) ||
-        !keys(h) || (mode == MODE_CONTROL && !xi_setup(h)) ||
+        !keys(h) || !xi_setup(h) ||
         !checked(h, xcb_map_window_checked(h->c, h->window))) goto fail;
     *window = h->window; return h;
 fail:
@@ -242,6 +251,61 @@ int fr_indicator_draw(struct fr_indicator *h) {
                          x[i], y[i], lines[i]);
     return xcb_flush(h->c) > 0;
 }
+/* XCB inserts full_sequence at byte 32 of GenericEvents. These offsets name
+ * the complete 80-byte XI2 DeviceEvent, not a core event or a truncated prefix. */
+static void xi_input(struct fr_indicator *h, const xcb_generic_event_t *e, uint32_t *kind) {
+    const uint8_t *b = (const uint8_t *)e;
+    uint32_t words;
+    uint16_t evtype;
+    memcpy(&words, b + 4, 4);
+    memcpy(&evtype, b + 8, 2);
+    if ((e->response_type & 0x80) || b[1] != h->xi_opcode || !h->mapped ||
+        evtype == XI_DEVICE_CHANGED || evtype == XI_FOCUS_OUT) {
+        h->allow_pressed = 0; return;
+    }
+    if (evtype != XI_KEY_PRESS && evtype != XI_BUTTON_PRESS && evtype != XI_BUTTON_RELEASE)
+        return;
+    if (words < 12 || words > 2048) { h->allow_pressed = 0; return; }
+    uint16_t master, source;
+    uint32_t detail, event, time;
+    int32_t x, y;
+    memcpy(&master, b + 10, 2);
+    memcpy(&time, b + 12, 4);
+    memcpy(&detail, b + 16, 4);
+    memcpy(&event, b + 24, 4);
+    memcpy(&x, b + 44, 4);
+    memcpy(&y, b + 48, 4);
+    memcpy(&source, b + 56, 2);
+    if (event != h->window || xi_synthetic(h, source, master, evtype == XI_KEY_PRESS) != 0) {
+        h->allow_pressed = 0; return;
+    }
+    /* Compare in 16.16, without rounding points just outside a button inward. */
+    int inside = x >= 16 * 65536 && x < 464 * 65536 &&
+                 y >= 73 * 65536 && y < 119 * 65536;
+    int approval = h->mode == 1 || h->mode == 2;
+    if (evtype == XI_KEY_PRESS) {
+        h->allow_pressed = 0;
+        if (detail == h->escape || detail == h->enter || detail == h->space) *kind = STOP;
+    } else if (evtype == XI_BUTTON_PRESS) {
+        h->allow_pressed = 0;
+        if (detail != 1 || !inside) return;
+        if (!approval || x < 232 * 65536) *kind = STOP;
+        else if (x >= 248 * 65536) {
+            h->allow_pressed = 1;
+            h->allow_source = source;
+            h->allow_master = master;
+            h->allow_time = time;
+        }
+    } else {
+        /* Positive consent requires a complete recent primary click from the
+         * SAME slave and master. No mixed-device halves, stale hold, keyboard
+         * shortcut or synthetic release can complete an Allow gesture. */
+        if (approval && h->allow_pressed && detail == 1 && inside && x >= 248 * 65536 &&
+            source == h->allow_source && master == h->allow_master &&
+            (uint32_t)(time - h->allow_time) <= 2000) *kind = ALLOW;
+        h->allow_pressed = 0;
+    }
+}
 int fr_indicator_next(struct fr_indicator *h, uint32_t *kind) {
     if (!h || !kind || xcb_connection_has_error(h->c)) return -1;
     xcb_generic_event_t *e = xcb_poll_for_event(h->c);
@@ -250,39 +314,15 @@ int fr_indicator_next(struct fr_indicator *h, uint32_t *kind) {
     uint8_t type = e->response_type & 0x7f;
     int synthetic = (e->response_type & 0x80) != 0;
     if (!type) { free(e); return -1; }
-    if (h->mode == MODE_CONTROL) {
-        /* Only XI2 events from a real (non-XTEST) source may stop control.
-         * Core button/key events (e.g. SendEvent to the creator) are ignored.
-         * WM close (ClientMessage) and hiding still stop: removal only. */
-        if (type == XCB_BUTTON_PRESS || type == XCB_BUTTON_RELEASE || type == XCB_KEY_PRESS) {
-            free(e); return 1;
-        }
-        if (type == XCB_GE_GENERIC) {
-            const uint8_t *b = (const uint8_t *)e;
-            uint32_t words;
-            memcpy(&words, b + 4, 4);
-            /* Device events carry >= 60 wire bytes; XCB stores wire byte 32+
-             * after its 4-byte full_sequence, i.e. at buffer offset 36+. */
-            if (b[1] == h->xi_opcode && (size_t)words * 4 + 32 >= 60) {
-                uint16_t evtype, source;
-                uint32_t detail, event;
-                int32_t fx, fy;
-                memcpy(&evtype, b + 8, 2);
-                memcpy(&detail, b + 16, 4);
-                memcpy(&event, b + 24, 4);
-                memcpy(&fx, b + 44, 4);
-                memcpy(&fy, b + 48, 4);
-                memcpy(&source, b + 56, 2);
-                int32_t x = fx / 65536, y = fy / 65536;
-                int press = evtype == XI_BUTTON_PRESS && detail == 1 &&
-                    x >= 16 && x < 464 && y >= 73 && y < 119;
-                int key = evtype == XI_KEY_PRESS && (detail == h->escape ||
-                    detail == h->enter || detail == h->space);
-                if (event == h->window && (press || key) && xi_synthetic(h, source) == 0)
-                    *kind = STOP;
-            }
-            free(e); return 1;
-        }
+    /* Core events have no trustworthy source identity. A forged event may
+     * invalidate a partial gesture, but can never approve or press Stop. */
+    if (type == XCB_BUTTON_PRESS || type == XCB_BUTTON_RELEASE || type == XCB_KEY_PRESS) {
+        h->allow_pressed = 0;
+        free(e); return 1;
+    }
+    if (type == XCB_GE_GENERIC) {
+        xi_input(h, e, kind);
+        free(e); return 1;
     }
     switch (type) {
     case XCB_EXPOSE:
@@ -295,52 +335,27 @@ int fr_indicator_next(struct fr_indicator *h, uint32_t *kind) {
         break;
     case XCB_UNMAP_NOTIFY:
         if (((xcb_unmap_notify_event_t *)e)->window == h->window) {
-            h->mapped = 0; h->allow_pressed = 0; *kind = HIDDEN;
+            h->mapped = h->allow_pressed = 0; *kind = HIDDEN;
         }
         break;
     case XCB_DESTROY_NOTIFY:
-        if (((xcb_destroy_notify_event_t *)e)->window == h->window) *kind = LOST;
+        if (((xcb_destroy_notify_event_t *)e)->window == h->window) {
+            h->mapped = h->allow_pressed = 0; *kind = LOST;
+        }
         break;
     case XCB_VISIBILITY_NOTIFY: {
         xcb_visibility_notify_event_t *v = (xcb_visibility_notify_event_t *)e;
         if (v->window == h->window && v->state != XCB_VISIBILITY_UNOBSCURED) {
-            h->allow_pressed = 0; *kind = HIDDEN;
+            h->mapped = h->allow_pressed = 0; *kind = HIDDEN;
         }
         break;
     }
     case XCB_CONFIGURE_NOTIFY: {
         xcb_configure_notify_event_t *v = (xcb_configure_notify_event_t *)e;
-        if (v->window == h->window && (v->width != WIDTH || v->height != HEIGHT)) *kind = HIDDEN;
-        break;
-    }
-    case XCB_BUTTON_PRESS: {
-        h->allow_pressed = 0;
-        xcb_button_press_event_t *v = (xcb_button_press_event_t *)e;
-        if (v->event == h->window && v->detail == 1 && v->same_screen &&
-            v->event_x >= 16 && v->event_x < 464 &&
-            v->event_y >= 73 && v->event_y < 119) {
-            if (!h->mode || v->event_x < 232) *kind = STOP;
-            else if (!synthetic && h->mapped && v->event_x >= 248)
-                h->allow_pressed = 1;
-        } else h->allow_pressed = 0;
-        break;
-    }
-    case XCB_BUTTON_RELEASE: {
-        xcb_button_release_event_t *v = (xcb_button_release_event_t *)e;
-        /* A complete non-SendEvent primary click within Allow, after mapping.
-         * XTest is intentionally indistinguishable from the selected user's
-         * input: the local X server and same-user processes are trust boundaries. */
-        if (h->mode && h->allow_pressed && h->mapped && !synthetic &&
-            v->event == h->window && v->detail == 1 && v->same_screen &&
-            v->event_x >= 248 && v->event_x < 464 &&
-            v->event_y >= 73 && v->event_y < 119) *kind = ALLOW;
-        h->allow_pressed = 0;
-        break;
-    }
-    case XCB_KEY_PRESS: {
-        xcb_key_press_event_t *v = (xcb_key_press_event_t *)e;
-        if (v->event == h->window && (v->detail == h->escape ||
-            v->detail == h->enter || v->detail == h->space)) *kind = STOP;
+        if (v->window == h->window) {
+            h->allow_pressed = 0;
+            if (v->width != WIDTH || v->height != HEIGHT) { h->mapped = 0; *kind = HIDDEN; }
+        }
         break;
     }
     case XCB_CLIENT_MESSAGE: {
@@ -350,6 +365,7 @@ int fr_indicator_next(struct fr_indicator *h, uint32_t *kind) {
         break;
     }
     case XCB_MAPPING_NOTIFY:
+        h->allow_pressed = 0;
         if (((xcb_mapping_notify_event_t *)e)->request != XCB_MAPPING_POINTER) {
             if (!keys(h)) { free(e); return -1; }
         }

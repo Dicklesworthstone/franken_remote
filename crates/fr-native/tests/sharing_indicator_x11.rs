@@ -164,7 +164,7 @@ fn rendered_stop_button_revokes_original_input_and_observation_not_equal_id_fore
     assert_eq!(control.status(), Status::Mapped);
     assert!(observation.check().is_ok());
     assert!(!input.monitor().is_revoked());
-    peer(&display, &control, "click", &[]);
+    peer(&display, &control, "device-click", &[]);
     assert_eq!(finish(&mut panel), StopReason::User);
     assert!(observation.check().is_err());
     // Deadline consults the same closed authority, not just a separate UI flag.
@@ -187,7 +187,7 @@ fn keyboard_accelerators_revoke_without_network_or_media_progress() {
         let mut panel = SharingIndicator::start(&display, observation.clone()).unwrap();
         let control = mapped(&panel);
         // Deliberately no session driver, socket or native media worker running.
-        peer(&display, &control, "key", &[key]);
+        peer(&display, &control, "device-key", &[key]);
         assert_eq!(finish(&mut panel), StopReason::User);
         assert!(observation.check().is_err());
     }

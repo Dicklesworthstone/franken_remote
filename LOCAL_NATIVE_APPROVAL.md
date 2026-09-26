@@ -16,11 +16,21 @@ caller-provided notification label. Approval still consumes its original startup
 deadline and atomic one-use decision; mapping does not grant consent.
 
 The selected local user must complete a primary-button press/release inside the
-Allow button after the window is mapped/drawn. Deny, Escape, Enter, Space, window
+Allow button after the window is mapped/drawn. Both edges must be attributed to
+the same enabled non-XTEST XInput2 slave and attached master, no more than two
+seconds apart. Deny, Escape, Enter, Space, window
 close/hide, loss of fresh session evidence, expiry, cancellation and abandonment
-refuse the original request. XSendEvent cannot produce a positive decision.
-XTest and other same-user X11 clients remain inside the existing trusted local
-X-server/user boundary; this is not a secure-attention or hostile-desktop defense.
+refuse the original request. Core key/button events, XSendEvent and XTEST-source
+events cannot operate Allow or the button/key denial controls. Unknown, disabled,
+unattached or untyped devices are ignored. XI2 is mandatory for every mode;
+initialization fails closed without it, with no core-event fallback. Partial
+clicks are invalidated by synthetic input, focus/device changes, keyboard-map
+changes and window lifecycle changes. Keyboard accelerators can only deny.
+
+This blocks approval through FrankenRemote's own XTest input sink, not arbitrary
+malicious same-user X11 clients. The selected user and X server remain trusted; a
+client that can reconfigure devices or generate device-attributed test input is
+inside that boundary. This is not secure attention or proof of a physical user.
 The window uses fixed viewing/control labels and includes no untrusted peer text.
 Mapped/drawn status is not proof of physical visibility or that a person saw it.
 
@@ -68,3 +78,30 @@ Tailnet metadata, login1 service data and user actions are explicit fixtures.
 They do not establish installed-Tailscale, real desktop-locker, hardware or
 physical-display qualification. This adapter does not by itself wire `frd run`,
 provide simultaneous QUIC connections or grant unattended hosting.
+
+
+## Synthetic-input regression
+
+`local_consent_input` opens the production C approval boundary and uses the
+production `X11Pointer` sink to move, press and release over Allow. Against the
+original boundary this produced an Allow event for viewing. With source-device
+checks it cannot approve either viewing or control. The independent Xvfb helper
+keeps ordinary XTest actions as negatives and uses explicitly named
+`device-*` actions attributed to Xvfb's mouse/keyboard slaves for positives.
+Those positives are device-provenance fixtures, not physical-device evidence.
+The same helper drives the original real Host/Viewer approval tests; no approval,
+expiry, identity, one-use or cleanup assertions were removed.
+
+Executed scope: all five new native decision-boundary tests, the complete
+41-test native library target with input/session-ui/logind/local-approval features,
+six indicator integration tests and two mapping-owner tests passed (54 total,
+none ignored). C compiled with `-Wall -Wextra -Werror`; the new Rust target passed
+strict pedantic Clippy. Builds used pinned nightly-2026-08-31, rebuilt first-party
+source from verified 284b3d6 and unchanged matching external CI libraries. Changed
+preimages were checked against main; this is not a complete latest-workspace,
+installed-Tailscale, real desktop-locker or physical-input qualification.
+
+The broader `fr-rc-sec-approval-synthetic-input-t2r` bead remains open: independently
+fencing remote input against pending approval-window geometry is separate work.
+This change rejects the injected decision at the real native consent boundary;
+it does not claim to install that additional cross-owner injection fence.

@@ -29,16 +29,20 @@ is not a peer-extensible source of permission or an approval callback.
 `Mapped` means a server-authored map notification arrived and drawing requests
 were submitted, not that a human saw pixels. Native initialization, rendering and
 event processing use a dedicated thread and a separately owned XCB connection,
-never a network or media callback. The server must supply the core `6x13` font.
+never a network or media callback. The server must supply XInput 2.0 and the core
+`6x13` font; unavailable XI2 fails native initialization rather than falling back
+to core key/button input.
 No shell command or font downloader is used by the production implementation.
 
 Button activation, the accelerators, window-manager close, unmapping, obscuring,
 resizing, native failure, authority expiry, owner drop, and the independent
 `IndicatorControl::stop` all revoke the ORIGINAL observation owner. That closes
 the same shared authority consulted before input and media submission. It never
-looks up another session by numeric ID. The control is revocation-only: synthetic
-local events can remove authority but cannot establish map evidence, approve a
-session, re-enable clipboard, or grant control. Keyboard-map changes refresh only
+looks up another session by numeric ID. The control is revocation-only. Buttons and accelerators require an enabled,
+attached non-XTEST XI2 source device; core, XSendEvent and XTEST key/button events
+are ignored in both observation and control indicators. Window close/hide may
+still remove authority but cannot establish map evidence, approve a session,
+re-enable clipboard, or grant control. Keyboard-map changes refresh only
 the stop accelerators. No keyboard/pointer grab or global hotkey is installed.
 
 Each native turn handles at most 32 events, checks authority between events,
@@ -71,7 +75,7 @@ native shell. The application must keep it paired with its original session and
 must still supply independently approved observation, capture and control.
 
 The `sharing_indicator_x11` target renders the actual panel under Xvfb and uses
-an independent Xlib/XTest peer for pixels, clicks, keys, window hiding, covering,
+an independent Xlib/XTest peer for pixels, device-attributed clicks/keys, window hiding, covering,
 resizing and destruction. It tests the shared input/observation authority and a
 foreign owner with identical IDs, idle expiry, native-open failure and owner drop.
 Four additional public-bootstrap regressions use real UDP/TLS and supervised
@@ -91,3 +95,11 @@ FR_NATIVE_INDICATOR_REQUIRED=1 xvfb-run -a \
 
 This advances the sharing-indicator/local-revoke portion of `fr-p1-session-agent-iq3`
 and the native shell in `fr-p1-desktop-shell-1-1sq`; neither bead is closed.
+
+
+The shared consent-boundary regression in `local_consent_input` additionally
+checks both indicator modes: ordinary injected clicks/keys do not stop them,
+while the explicitly attributed Xvfb device fixture does. The same boundary
+protects both approval roles; details and remaining geometry-fence work are in
+`LOCAL_NATIVE_APPROVAL.md`. Device attribution from the trusted X server is not
+physical-user authentication or protection against arbitrary same-user X clients.

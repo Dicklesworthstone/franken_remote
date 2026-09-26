@@ -41,23 +41,52 @@ d = x.XOpenDisplay(sys.argv[1].encode("ascii"))
 if not d:
     raise SystemExit("test peer display unavailable")
 w, op = int(sys.argv[2]), sys.argv[3]
+# The explicit device-* operations attribute events to Xvfb's non-XTEST slave.
+# This is a fixture for local hardware, not protection against same-user X clients.
+device_input = op.startswith("device-")
+if device_input:
+    op = op.removeprefix("device-")
+    xi = c.CDLL("libXi.so.6")
+    class DeviceInfo(c.Structure):
+        _fields_ = [("id", W), ("type", W), ("name", c.c_char_p),
+                    ("classes", c.c_int), ("use", c.c_int), ("info", D)]
+    listed = signature(xi, "XListInputDevices", c.POINTER(DeviceInfo), D, c.POINTER(c.c_int))
+    free = signature(xi, "XFreeDeviceList", None, c.POINTER(DeviceInfo))
+    opened = signature(xi, "XOpenDevice", D, D, W)
+    closed = signature(xi, "XCloseDevice", c.c_int, D, D)
+    count = c.c_int()
+    devices = listed(d, c.byref(count))
+    assert devices and 0 < count.value <= 256
+    name = b"Xvfb keyboard" if op == "key" else b"Xvfb mouse"
+    ids = [devices[i].id for i in range(count.value) if devices[i].name == name]
+    free(devices)
+    assert len(ids) == 1, "explicit non-XTEST Xvfb device required"
+    device = opened(d, ids[0])
+    assert device
+    fake = signature(xt, "XTestFakeDeviceKeyEvent" if op == "key" else "XTestFakeDeviceButtonEvent",
+                     c.c_int, D, D, c.c_uint, c.c_int, c.POINTER(c.c_int), c.c_int, W)
+def button(code, pressed):
+    return fake(d, device, code, pressed, None, 0, 0) if device_input else xt.XTestFakeButtonEvent(d, code, pressed, 0)
+def key_event(code, pressed):
+    return fake(d, device, code, pressed, None, 0, 0) if device_input else xt.XTestFakeKeyEvent(d, code, pressed, 0)
 try:
     root = x.XDefaultRootWindow(d)
     px, py, child = c.c_int(), c.c_int(), W()
-    if op in ("click", "miss", "cover", "allow", "synthetic-allow", "release-allow", "drag-out"):
+    if op in ("click", "miss", "cover", "allow", "synthetic-allow", "release-allow", "drag-out", "press-allow"):
         assert x.XTranslateCoordinates(d, w, root, 0, 0, c.byref(px), c.byref(py), c.byref(child))
     if op in ("click", "miss"):
         dx, dy = (50, 95) if op == "click" else (6, 6)
         assert xt.XTestFakeMotionEvent(d, x.XDefaultScreen(d), px.value + dx, py.value + dy, 0)
-        assert xt.XTestFakeButtonEvent(d, 1, 1, 0)
-        assert xt.XTestFakeButtonEvent(d, 1, 0, 0)
-    elif op in ("allow", "release-allow", "drag-out"):
+        assert button(1, 1)
+        assert button(1, 0)
+    elif op in ("allow", "release-allow", "drag-out", "press-allow"):
         assert xt.XTestFakeMotionEvent(d, x.XDefaultScreen(d), px.value + 350, py.value + 95, 0)
         if op != "release-allow":
-            assert xt.XTestFakeButtonEvent(d, 1, 1, 0)
+            assert button(1, 1)
         if op == "drag-out":
             assert xt.XTestFakeMotionEvent(d, x.XDefaultScreen(d), px.value + 6, py.value + 6, 0)
-        assert xt.XTestFakeButtonEvent(d, 1, 0, 0)
+        if op != "press-allow":
+            assert button(1, 0)
     elif op == "synthetic-allow":
         class Button(c.Structure):
             _fields_ = [("type", c.c_int), ("serial", W), ("send_event", c.c_int),
@@ -72,14 +101,14 @@ try:
             event = Event()
             event.button = Button(kind, 0, 1, d, w, root, 0, 0, 350, 95,
                                   px.value + 350, py.value + 95, 0, 1, 1)
-            assert send(d, w, 0, mask, c.byref(event))
+            assert send(d, w, 0, 0, c.byref(event))  # deliver to creator even without core selection
     elif op == "key":
         key = int(sys.argv[4], 0) if len(sys.argv) > 4 else 0xff1b
         x.XSetInputFocus(d, w, 2, 0)
         code = x.XKeysymToKeycode(d, key)
         assert code
-        assert xt.XTestFakeKeyEvent(d, code, 1, 0)
-        assert xt.XTestFakeKeyEvent(d, code, 0, 0)
+        assert key_event(code, 1)
+        assert key_event(code, 0)
     elif op == "unmap":
         x.XUnmapWindow(d, w)
     elif op == "destroy":
@@ -113,4 +142,6 @@ try:
         raise SystemExit("unknown test operation")
     x.XSync(d, 0)
 finally:
+    if device_input:
+        closed(d, device)
     x.XCloseDisplay(d)
