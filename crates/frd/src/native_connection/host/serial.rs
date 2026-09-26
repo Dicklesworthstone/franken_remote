@@ -132,16 +132,24 @@ impl Server {
         let transport = listener.configuration();
         let clock = supervisor.clone();
         let identity = self.identity.clone();
+        let credential_clock = self
+            .credential_clock
+            .clone()
+            .unwrap_or_else(|| supervisor.clone());
         let boundary = ingress;
-        let check: Check = Arc::new(move || {
-            clock.checkpoint().map_err(|_| Error::Cancelled)?;
+        let security: Check = Arc::new(move || {
             if !boundary(address) {
                 return Err(Error::Host(HostError::IngressUnavailable));
             }
             identity
-                .status(&clock)
+                .status(&credential_clock)
                 .map_err(|e| Error::Host(HostError::Tailnet(e)))?;
             Ok(())
+        });
+        let ordinary_security = security.clone();
+        let check: Check = Arc::new(move || {
+            clock.checkpoint().map_err(|_| Error::Cancelled)?;
+            ordinary_security()
         });
         let inside = check.clone();
         let cx = supervisor.clone();
@@ -183,7 +191,13 @@ impl Server {
                     // The marker remains in the original transport after handoff.
                     let marker = Arc::new(());
                     let retained = marker.clone();
+                    // Both gates share ONE retained marker reference. Cloning
+                    // it separately would let two gates validate one another
+                    // after the listener's own marker had already disappeared.
+                    let original = Arc::new(move || Arc::strong_count(&retained) > 1);
+                    let terminal_original = original.clone();
                     let gate = inside.clone();
+                    let terminal_gate = security.clone();
                     let fence = super::PanicFence(&peer, false);
                     let socket = match listener.take() {
                         Some(socket) => socket,
@@ -193,15 +207,16 @@ impl Server {
                     };
                     inside()?;
                     let outcome = {
-                        let running = self.run_on_protected_listener(
+                        let running = self.run_on_protected_listener_gated(
                             &peer,
                             socket,
                             request,
                             Arc::new(move |bound| {
                                 // The check itself retains the transport-retirement marker.
-                                Arc::strong_count(&retained) > 1
-                                    && bound == address
-                                    && gate().is_ok()
+                                original() && bound == address && gate().is_ok()
+                            }),
+                            Arc::new(move |bound| {
+                                terminal_original() && bound == address && terminal_gate().is_ok()
                             }),
                             |host| application.serve(host),
                         );

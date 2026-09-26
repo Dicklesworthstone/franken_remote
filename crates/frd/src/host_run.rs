@@ -841,6 +841,7 @@ impl Share<'_> {
         }
         match end {
             End::Listener(Err(error)) => Err(Error::Listener(Box::new(error))),
+            End::DrainExpired => Err(Error::Cleanup("session")),
             End::Desktop(Err(error)) if error.is_peer_outcome() => Ok(Ended::Peer),
             End::Desktop(Err(error)) => Ok(Ended::Failed(error)),
             End::Desktop(Ok(_)) | End::Listener(Ok(_)) | End::Cancelled => Ok(Ended::Served),

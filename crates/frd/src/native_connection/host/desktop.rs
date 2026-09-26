@@ -1,6 +1,7 @@
 //! One protected listener and its independently owned native desktop service.
 //! The original TLS/LocalAPI/consent/media owners are composed, never replaced.
 use super::{LinuxError, LinuxServer, Request, serial};
+mod drain;
 use crate::{
     session_agent::{
         SessionAgent,
@@ -12,6 +13,7 @@ use crate::{
     session_startup::{Approval, Host},
 };
 use asupersync::{cx::Cx, runtime::RuntimeHandle, types::CancelKind};
+use drain::Budget as DrainBudget;
 use fr_wire::{
     display::{Catalog, Select},
     negotiation::Role,
@@ -45,14 +47,18 @@ pub struct Connections<R, N, C> {
     pub completed: C,
 }
 
-/// Which original service completed first. The other service is fenced and its
-/// pending future eagerly dropped, NOT reported as successful or OS-cleaned-up.
-/// Retain Driver and `LinuxServer` for explicit reap/stop after this result.
+/// Which original service completed first. Cancellation/listener termination
+/// fences both owners immediately, then lets the original desktop complete its
+/// bounded cleanup/terminal reporting. Never proof of native worker exit.
+/// Retain Driver and `LinuxServer` for explicit reap/stop after every result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum End {
     Desktop(Result<desktop::Report, dispatch::Error>),
     Listener(Result<serial::Statistics, LinuxError>),
     Cancelled,
+    /// The original desktop did not complete its cooperative drain within 2s.
+    /// Explicit reap is still required; never restart from an uncertain owner.
+    DrainExpired,
 }
 
 // Track only the original admitted application's completion, not a new task or
@@ -122,11 +128,14 @@ impl LinuxServer {
     /// No source is automatically recreated or old session resumed. A new share
     /// requires new explicit owners and observed cleanup of the previous source.
     ///
-    /// Completion, cancellation, panic and even unpolled abandonment fence BOTH
-    /// original services before eagerly dropping their work. Retain Driver for
-    /// reap, the factory's `Launch::retain_cleanup` for abandoned preparation, and
-    /// this `LinuxServer` for stop. A terminal future is not proof of child exit or
-    /// permission to remove a rule while a transport still holds its ingress lease.
+    /// Cancellation/listener termination fences BOTH original services before
+    /// polling the existing desktop through a fixed, at-most-two-second drain.
+    /// The listener stays owned but is not polled during that drain: no new
+    /// admission, callback or ingress retirement can race terminal reporting.
+    /// Panic or abandonment still drops both owners immediately after fencing.
+    /// Retain Driver for reap, the factory's `Launch::retain_cleanup` for abandoned
+    /// preparation, and this `LinuxServer` for stop. Completion never proves child
+    /// exit or permits removing a rule while a transport holds its ingress lease.
     #[allow(clippy::too_many_arguments)]
     pub fn serve_desktop<'a, R, N, C, F, P, S, L>(
         &'a mut self,
@@ -176,6 +185,7 @@ impl LinuxServer {
             desktop: Some(Box::pin(desktop)),
             listener: Some(Box::pin(listener)),
             result: None,
+            ending: None,
         }
     }
 }
@@ -209,11 +219,14 @@ struct Run<D, N> {
     desktop: Option<Pin<Box<D>>>,
     listener: Option<Pin<Box<N>>>,
     result: Option<End>,
+    ending: Option<(End, DrainBudget)>,
 }
 impl<D, N> Run<D, N> {
     fn stop(&mut self) {
         self.completion.ending.store(true, Ordering::Release);
         self.fence.stop();
+        self.ending = None;
+        self.result.get_or_insert(End::Cancelled);
         // Release the desktop's hub-owned transport before listener cleanup.
         drop(self.desktop.take());
         drop(self.listener.take());
@@ -233,8 +246,13 @@ where
         let this = &mut *turn.owner;
         let result = if let Some(result) = &this.result {
             Poll::Ready(result.clone())
+        } else if this.ending.is_some() {
+            this.poll_drain(task)
         } else if this.fence.supervisor.is_cancel_requested() {
-            Poll::Ready(End::Cancelled)
+            match this.begin_drain(End::Cancelled) {
+                Ok(()) => this.poll_drain(task),
+                Err(error) => Poll::Ready(End::Desktop(Err(error))),
+            }
         } else {
             match this
                 .desktop
@@ -269,13 +287,19 @@ where
                     };
                     Poll::Ready(end)
                 }
-                Poll::Pending => this
+                Poll::Pending => match this
                     .listener
                     .as_mut()
                     .expect("active listener")
                     .as_mut()
                     .poll(task)
-                    .map(End::Listener),
+                {
+                    Poll::Ready(result) => match this.begin_drain(End::Listener(result)) {
+                        Ok(()) => this.poll_drain(task),
+                        Err(error) => Poll::Ready(End::Desktop(Err(error))),
+                    },
+                    Poll::Pending => Poll::Pending,
+                },
             }
         };
         if let Poll::Ready(value) = &result {
@@ -284,6 +308,42 @@ where
         }
         turn.complete = true;
         result
+    }
+}
+impl<D, N> Run<D, N>
+where
+    D: Future<Output = Result<desktop::Report, dispatch::Error>>,
+{
+    fn begin_drain(&mut self, end: End) -> Result<(), dispatch::Error> {
+        self.completion.ending.store(true, Ordering::Release);
+        self.fence.stop();
+        let budget =
+            DrainBudget::new(&self.fence.supervisor).map_err(|()| dispatch::Error::Clock)?;
+        self.ending = Some((end, budget));
+        Ok(())
+    }
+    fn poll_drain(&mut self, task: &mut Context<'_>) -> Poll<End> {
+        let (end, budget) = self.ending.as_mut().expect("fixed drain budget");
+        match budget.expired(task) {
+            Ok(true) => return Poll::Ready(End::DrainExpired),
+            Err(()) => return Poll::Ready(End::Desktop(Err(dispatch::Error::Clock))),
+            Ok(false) => {}
+        }
+        if let Some(desktop) = &mut self.desktop {
+            let Poll::Ready(result) = desktop.as_mut().poll(task) else {
+                return Poll::Pending;
+            };
+            // A requested stop must not conceal the canonical native owner's
+            // explicit uncertain-cleanup result. Other errors retain the first
+            // listener/cancellation outcome; no second session was attempted.
+            if let Err(error @ dispatch::Error::Desktop(_)) = result
+                && matches!(&error, dispatch::Error::Desktop(cause)
+                    if **cause == desktop::Error::InputCleanup)
+            {
+                return Poll::Ready(End::Desktop(Err(error)));
+            }
+        }
+        Poll::Ready(end.clone())
     }
 }
 struct Turn<'a, D, N> {
@@ -302,3 +362,6 @@ impl<D, N> Drop for Run<D, N> {
         self.stop();
     }
 }
+
+#[cfg(test)]
+mod tests;

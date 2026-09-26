@@ -66,6 +66,9 @@ pub struct Server {
     api: LocalApi,
     identity: NativeServerIdentity,
     live_policy: Option<live::Handle>,
+    // Set only by the locally enforced bind path, before accepting a peer.
+    // It observes the original credential lifetime after a session is cancelled.
+    credential_clock: Option<Cx>,
 }
 impl fmt::Debug for Server {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -83,6 +86,7 @@ impl Server {
             api,
             identity,
             live_policy: None,
+            credential_clock: None,
         }
     }
 
@@ -124,8 +128,34 @@ impl Server {
         &'a mut self,
         cx: &'a Cx,
         listener: Listener,
+        request: Request,
+        ingress: IngressCheck,
+        application: A,
+    ) -> impl Future<Output = Result<T, Error>> + 'a
+    where
+        F: Future<Output = T> + 'a,
+        A: FnOnce(Host) -> F + 'a,
+    {
+        self.run_on_protected_listener_gated(
+            cx,
+            listener,
+            request,
+            ingress.clone(),
+            ingress,
+            application,
+        )
+    }
+
+    // Separate ordinary cancellation from the independently enforced transport
+    // boundary at construction, never by swapping checks after revocation.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn run_on_protected_listener_gated<'a, T: 'a, F, A>(
+        &'a mut self,
+        cx: &'a Cx,
+        listener: Listener,
         mut request: Request,
         ingress: IngressCheck,
+        terminal_ingress: IngressCheck,
         application: A,
     ) -> impl Future<Output = Result<T, Error>> + 'a
     where
@@ -156,6 +186,23 @@ impl Server {
                 }
                 Ok(lease)
             });
+        let terminal_clock = self.credential_clock.clone().unwrap_or_else(|| cx.clone());
+        let terminal_identity = identity.clone();
+        let terminal_policy = policy.clone();
+        let terminal_check: Check = Arc::new(move || {
+            // Policy and credentials are the ORIGINAL owners/epoch. Their
+            // revocation, expiry or broker cancellation still refuses the report.
+            if let Some(lease) = terminal_policy.as_ref().map_err(|error| *error)? {
+                lease.check().map_err(Error::Policy)?;
+            }
+            if !terminal_ingress(address) {
+                return Err(Error::IngressUnavailable);
+            }
+            terminal_identity
+                .status(&terminal_clock)
+                .map_err(Error::Tailnet)?;
+            Ok(())
+        });
         let check: Check = Arc::new(move || {
             clock.checkpoint().map_err(|_| Error::Cancelled)?;
             if let Some(lease) = policy.as_ref().map_err(|error| *error)? {
@@ -252,13 +299,16 @@ impl Server {
                     .map_err(Error::Session)?;
                 let gate = inside.clone();
                 let stop = cx.clone();
-                host.retain_connection_check(Arc::new(move || {
-                    if gate().is_err() {
-                        stop.cancel_fast(CancelKind::User);
-                        return false;
-                    }
-                    true
-                }))
+                host.retain_connection_checks(
+                    Arc::new(move || {
+                        if gate().is_err() {
+                            stop.cancel_fast(CancelKind::User);
+                            return false;
+                        }
+                        true
+                    }),
+                    Arc::new(move || terminal_check().is_ok()),
+                )
                 .map_err(Error::Session)?;
                 inside()?;
                 Ok(application(host).await)

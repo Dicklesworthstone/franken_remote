@@ -131,14 +131,15 @@ impl super::Configuration {
     }
 }
 impl Host {
-    pub(crate) fn retain_connection_check(
+    pub(crate) fn retain_connection_checks(
         &mut self,
         check: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+        terminal: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> Result<(), Error> {
         self.transport
             .as_mut()
             .ok_or(Error::Closed)?
-            .retain_lifetime_check(&self.cx, check)
+            .retain_lifetime_checks(&self.cx, check, terminal)
             .map_err(Error::from)
     }
 }

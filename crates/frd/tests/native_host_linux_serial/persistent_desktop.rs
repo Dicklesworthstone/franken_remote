@@ -823,3 +823,6 @@ fn departed_cold_observer_reports_completion_without_accepting_another_peer() {
         assert_eq!(tools.state()["deleted"], 1);
     });
 }
+
+#[path = "persistent_desktop/terminal_control.rs"]
+mod terminal_control;

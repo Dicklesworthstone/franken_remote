@@ -45,7 +45,7 @@ impl Server {
     /// Start run promptly: an unsupervised node snapshot expires rather than
     /// silently extending permission across idle time. run services renewal.
     pub async fn bind_linux(
-        self,
+        mut self,
         broker: &Cx,
         configuration: ingress::Configuration,
         transport: native_accept::Configuration,
@@ -69,6 +69,10 @@ impl Server {
         self.identity
             .status(broker)
             .map_err(|e| Error::Host(super::Error::Tailnet(e)))?;
+        // This context predates every listener/session cancellation and already
+        // owns the enforced boundary and the credential checks. Retaining it is
+        // not a new permission or an un-cancelled copy of a peer's context.
+        self.credential_clock = Some(broker.clone());
         Ok(LinuxServer {
             server: self,
             boundary,
