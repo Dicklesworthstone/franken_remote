@@ -650,3 +650,6 @@ fn await_response_and_watchdog_together_on_the_real_runtime() {
     }));
     assert!(shutdown.handoff_safe());
 }
+
+#[path = "input_agent/inhibition.rs"]
+mod inhibition;

@@ -11,8 +11,11 @@
 //! cleanup layers and native destruction finish. The platform process supervisor
 //! must handle process death; this module never claims release after a crash.
 mod result;
+mod seat;
 use result::ResultContext;
 pub use result::{InputReply, InputResponse};
+pub(crate) use seat::SeatReservation;
+pub use seat::{Inhibition, Seat};
 
 use crate::input_watchdog::{self, Control, StopReason, Watchdog};
 use asupersync::{
@@ -35,10 +38,7 @@ use fr_wire::{
 use std::{
     future::Future,
     pin::Pin,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
     task::{Context, Poll, Waker},
     thread::{self, Thread},
     time::Duration,
@@ -47,40 +47,7 @@ use std::{
 const NATIVE_POLL: Duration = Duration::from_millis(10);
 const DRAIN_POLL_NS: u64 = 10_000_000;
 
-/// Synchronous broker reservation, kept private so an idle peer cannot hold it.
-/// Before native launch, dropping it releases the slot. After launch only the
-/// native finalizer may release it, after cleanup AND destructor completion.
-pub(crate) struct SeatReservation {
-    seat: Seat,
-    owned: bool,
-}
-impl Drop for SeatReservation {
-    fn drop(&mut self) {
-        if self.owned {
-            self.seat.0.store(false, Ordering::Release);
-        }
-    }
-}
-
-/// The containing OS share-session owner must share this same seat with ALL
-/// contenders. A fresh seat is not a way to bypass uncertain prior cleanup.
-#[derive(Clone, Default)]
-pub struct Seat(Arc<AtomicBool>);
 impl Seat {
-    pub fn is_occupied(&self) -> bool {
-        self.0.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn reserve(&self) -> Result<SeatReservation, Error> {
-        self.0
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| Error::SeatBusy)?;
-        Ok(SeatReservation {
-            seat: self.clone(),
-            owned: true,
-        })
-    }
-
     /// Takes ownership of an already locally admitted session. `factory` must
     /// not inject input during initialization and must construct the exact
     /// locally probed display/capabilities used to grant `session`. It executes
@@ -162,6 +129,9 @@ impl SeatReservation {
             }
         };
         let control = watchdog.control();
+        // Register before spawning: an approval barrier either sees and fences
+        // this exact owner or invalidates its pre-existing reservation.
+        self.seat.install(self.epoch, &control)?;
         #[cfg(target_os = "linux")]
         let input_scope = {
             // Only the immutable session/view are retained. This does not issue
@@ -217,7 +187,7 @@ impl SeatReservation {
                     // Release exactly once, while publishing the terminal state.
                     // A previous owner must never clear a successor's reservation.
                     if exit.handoff_safe() {
-                        seat.0.store(false, Ordering::Release);
+                        seat.release();
                     }
                     (m.reply_waker.take(), m.driver_waker.take())
                 };
@@ -278,6 +248,8 @@ impl Route {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     SeatBusy,
+    /// Local consent is pending, or this reservation predates its barrier.
+    SeatInhibited,
     ThreadSpawn,
     Stopped,
     Backpressure,
@@ -1046,15 +1018,86 @@ mod reservation_tests {
     #[test]
     fn failed_or_panicking_preparation_releases_only_its_own_reservation() {
         let seat = Seat::default();
-        let failed = std::panic::catch_unwind(|| {
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _reserved = seat.reserve().unwrap();
             panic!("test-only broker preparation failure");
-        });
+        }));
         assert!(failed.is_err());
         assert!(!seat.is_occupied());
         let successor = seat.reserve().unwrap();
         assert!(matches!(seat.reserve(), Err(Error::SeatBusy)));
         drop(successor);
         assert!(!seat.is_occupied());
+    }
+
+    #[test]
+    fn consent_invalidates_a_prepared_grant_even_after_the_prompt_is_gone() {
+        use fr_core::{
+            authority::{AuthorityPolicy, SessionAuthority},
+            ids::{InputLeaseId, RemoteSessionId},
+            input::{DesktopPoint, InputBounds, InputCredentials, InputView},
+            input_submission::{Capabilities, Operation, Submission},
+        };
+        struct NeverStarted;
+        impl InputSink for NeverStarted {
+            fn prepare(&mut self, _: Operation) -> Result<(), PlatformError> {
+                panic!("old reservation must not acquire a sink");
+            }
+            fn submit(&mut self, _: Operation) -> Submission {
+                panic!("old reservation must not submit");
+            }
+        }
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        let cx = runtime.request_cx_with_budget(asupersync::types::Budget::INFINITE);
+        let now = input_watchdog::host_now(&cx).unwrap();
+        let credentials = InputCredentials {
+            session: RemoteSessionId::from_raw(1),
+            lease: InputLeaseId::from_raw(2),
+            ticket: InputTicketId::from_raw(3),
+            view: InputView {
+                geometry: fr_core::ids::DisplayGeometryGeneration::INITIAL,
+                viewport: fr_core::ids::ViewportMappingGeneration::INITIAL,
+                configuration: fr_core::ids::CodecConfigurationGeneration::INITIAL,
+                recovery: fr_core::ids::RecoveryGeneration::INITIAL,
+            },
+        };
+        let mut authority =
+            SessionAuthority::new(credentials.session, AuthorityPolicy::plan_defaults());
+        authority.mark_capabilities_checked().unwrap();
+        authority.authorize_observation(now).unwrap();
+        authority.mark_view_ready(now).unwrap();
+        authority.grant_lease(credentials.lease, now).unwrap();
+        authority
+            .issue_input_ticket(credentials.lease, credentials.ticket, now)
+            .unwrap();
+        let input = InputSession::new(
+            authority,
+            credentials,
+            InputBounds::new(DesktopPoint { x: 0, y: 0 }, 320, 240).unwrap(),
+            Capabilities::default(),
+            now,
+        )
+        .unwrap();
+        let seat = Seat::default();
+        let reserved = seat.reserve().unwrap();
+        let guard = seat.inhibit().unwrap();
+        assert!(!guard.is_ready(), "the broker still owns a reservation");
+        drop(guard);
+        let attempt = reserved.start(
+            cx,
+            input,
+            Route::new(7, ProtocolLimits::ABSOLUTE),
+            || -> Result<NeverStarted, PlatformError> { panic!("stale grant factory ran") },
+            |_| true,
+            AdmissionGate::default(),
+        );
+        assert!(matches!(attempt, Err(Error::SeatInhibited)));
+        assert!(!seat.is_occupied());
+        assert!(
+            seat.reserve().is_ok(),
+            "only a fresh reservation may proceed"
+        );
     }
 }
