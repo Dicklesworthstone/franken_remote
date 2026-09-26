@@ -9,8 +9,8 @@ use fr_core::{
     limits::ProtocolLimits,
 };
 use fr_media::delivery::{
-    DeliveryMode, MediaBindings, MediaBudget, MediaEpoch, ReceiveConfig, ReceivePipeline,
-    ReceivePolicy, SendCache, SendPolicy,
+    DeliveryMode, MediaBindings, MediaBudget, MediaEpoch, PacketOffer, ReceiveConfig,
+    ReceivePipeline, ReceivePolicy, SendCache, SendPolicy,
 };
 use fr_transport::quic::*;
 use fr_wire::{
@@ -395,6 +395,141 @@ fn production_media_packetizer_and_receiver_run_over_native_quic() {
         }
         assert_eq!(delivered, 12);
         assert_eq!(recv.budget_usage().pictures, 0);
+    });
+}
+/// The host egress half of one turn: admit prepared records until the
+/// connection refuses one. Returns how many datagrams were admitted.
+fn admit_until_refused(
+    cx: &Cx,
+    p: &mut support::Pair,
+    send: &mut SendCache,
+    out: &mut [u8; 1150],
+    pending: &mut Option<PacketOffer>,
+) -> usize {
+    let mut datagrams = 0;
+    while let Some(offer) = pending.as_ref() {
+        let route = match offer.channel() {
+            Channel::Video => Route::Datagram(p.video),
+            Channel::Recovery => Route::Stream(p.host_routes[1]),
+            Channel::MediaConfig => Route::Stream(p.host_routes[0]),
+            Channel::Control => panic!("host original control"),
+        };
+        match p.server.send(
+            cx,
+            route,
+            &out[..offer.byte_len()],
+            offer.send_by_micros(),
+            || true,
+        ) {
+            Ok(()) => {
+                datagrams += usize::from(offer.channel() == Channel::Video);
+                *pending = send.next_packet(clock(cx), out).unwrap();
+            }
+            Err(Error::Backpressure) => break,
+            Err(e) => panic!("send failed: {e:?}"),
+        }
+    }
+    datagrams
+}
+fn captured(frame: u64, bytes: usize, limits: &MediaLimits, now: u64) -> Progress {
+    Progress {
+        descriptor: FrameDescriptor {
+            frame,
+            total_bytes: u32::try_from(bytes).unwrap(),
+            stride: limits.fragment_stride(),
+            capture_micros: now,
+            reference: frame.checked_sub(1),
+        },
+        observed_micros: now,
+        observation: SourceObservation::Captured,
+        pipeline: PipelineState::Running,
+    }
+}
+/// A turn as the host's media egress runs it: admit prepared records until the
+/// connection refuses one, then one `drive`, whose receive wait is the turn's
+/// idle time. A multi-fragment picture must leave at the connection's pace, not
+/// one idle wait per few fragments: the receiver's 50 ms display budget starts
+/// at its FIRST fragment. The 23-fragment picture below is the size of the
+/// periodic 640x480 IDR that the namespace control e2e runs lost to that budget
+/// (`QueueExpired`, then `ViewStale` on the static desktop) when only four
+/// datagrams could wait for each drive. Congestion control still decides what
+/// is sent; this bounds only local queueing.
+#[test]
+fn a_multi_fragment_picture_is_admitted_within_two_sender_turns() {
+    run_test!(cx, {
+        let mut p = pair(&cx, Policy::default()).await;
+        let limits = MediaLimits::new(ProtocolLimits::ABSOLUTE, 1150, 16384, 64).unwrap();
+        let bindings = MediaBindings::new(1, 2, 3, 4).unwrap();
+        let epoch = MediaEpoch {
+            configuration: CodecConfigurationGeneration::INITIAL,
+            recovery: RecoveryGeneration::INITIAL,
+        };
+        let mut send = SendCache::new(limits, bindings, epoch, SendPolicy::default()).unwrap();
+        let mut recv = ReceivePipeline::new(
+            ReceiveConfig {
+                limits,
+                bindings,
+                epoch,
+                policy: ReceivePolicy::default(),
+            },
+            MediaBudget::new(limits.protocol()).unwrap(),
+        )
+        .unwrap();
+        recv.decoder_configured(clock(&cx)).unwrap();
+        let mut out = [0; 1150];
+        // Frames 0 and 1 open the congestion window as a live session's first
+        // pictures do; frame 2 (24 000 bytes, 23 fragments) is measured.
+        for (frame, size) in [(0_u64, 4000_usize), (1, 64_000), (2, 24_000)] {
+            let data: Vec<_> = (0_u8..=255).cycle().take(size).collect();
+            let now = clock(&cx);
+            let mode = if frame == 0 {
+                DeliveryMode::Recovery
+            } else {
+                DeliveryMode::Datagrams
+            };
+            send.push(captured(frame, size, &limits, now), data.clone(), mode, now)
+                .unwrap();
+            let mut pending = send.next_packet(clock(&cx), &mut out).unwrap();
+            let (mut turns, mut most_datagrams, mut delivered) = (0, 0, false);
+            for _ in 0..500 {
+                turns += usize::from(pending.is_some());
+                let admitted = admit_until_refused(&cx, &mut p, &mut send, &mut out, &mut pending);
+                most_datagrams = most_datagrams.max(admitted);
+                drive(&cx, &mut p).await;
+                p.client
+                    .receive(
+                        &cx,
+                        || true,
+                        |route, bytes| {
+                            recv.receive(channel(route), bytes, clock(&cx)).unwrap();
+                            Ok(Disposition::Consumed)
+                        },
+                    )
+                    .unwrap();
+                if let Some(picture) = recv.take_decodable(clock(&cx)).unwrap() {
+                    assert_eq!(picture.descriptor().frame, frame);
+                    assert_eq!(picture.bytes(), data);
+                    recv.acknowledge_decode(&picture, true, clock(&cx)).unwrap();
+                    delivered = true;
+                }
+                if delivered && pending.is_none() {
+                    break;
+                }
+            }
+            assert!(
+                delivered && pending.is_none(),
+                "frame {frame} not delivered"
+            );
+            // Local queueing stays bounded: at most one turn's records wait.
+            assert!(most_datagrams <= 16, "{most_datagrams} datagrams queued");
+            if frame == 2 {
+                assert!(turns <= 2, "a 23-fragment picture took {turns} turns");
+            }
+            // Let acknowledgements reach the sender before the next picture.
+            for _ in 0..20 {
+                drive(&cx, &mut p).await;
+            }
+        }
     });
 }
 #[test]

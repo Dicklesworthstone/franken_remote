@@ -58,7 +58,14 @@ or input injection; these already have separately owned native workers.
 
 Default bounds are 64 KiB per native stream receive window, 512 KiB native
 connection receive credit, 128 KiB/128 records of admitted reliable sender
-storage, four pending outgoing datagrams, and two-second partial-record lifetime.
+storage, sixteen pending outgoing datagrams (at most 1,150 bytes each, and only
+while congestion credit covers them), and two-second partial-record lifetime.
+Senders refill that queue only between `drive` calls, and each drive waits for
+ingress after flushing it, so the bound is one turn's worth of records: a
+multi-fragment picture leaves in about `fragments / 16` turns rather than one
+receive wait per four fragments. With four, a 23-fragment periodic IDR spent
+about 40 ms in transit on a loaded host and missed the receiver's 50 ms display
+budget, which starts at the first fragment.
 The explicit receive-framer capacity and retained read remainders are reported
 separately. Native packet/reassembly metadata and Asupersync's bounded incoming
 datagram queue are additional resources; the containing broker must account for

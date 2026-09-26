@@ -37,8 +37,17 @@ pub use startup::ControlRoutes;
 
 pub const ALPN: &[u8] = b"fr-remote/0";
 const MAX_STREAMS: usize = 16;
+/// Datagram ROUTES per connection (not queued records).
 const MAX_DATAGRAMS: usize = 4;
 const TURN_RECORDS: usize = 16;
+/// Outgoing datagram records that may wait in the native queue for the next
+/// `drive` flush: one turn's records, as for incoming records. Senders refill
+/// this queue only between drives, and each drive then waits for ingress, so a
+/// smaller bound spreads one multi-fragment picture over one receive wait per
+/// few fragments (4 let 23 fragments take ~40 ms and miss the receiver's 50 ms
+/// display budget, which starts at the first fragment). Congestion credit still
+/// gates every admission.
+const MAX_QUEUED_DATAGRAMS: usize = TURN_RECORDS;
 /// Keep a turn bounded while allowing queued bulk records to use available
 /// congestion credit without one idle receive timeout per 900-byte prefix.
 const TURN_SEND_PREFIXES: usize = 8;
@@ -655,7 +664,7 @@ impl QuicRecords {
                 let available = path
                     .congestion_window_bytes
                     .saturating_sub(path.bytes_in_flight);
-                if queued >= MAX_DATAGRAMS || available < (queued as u64 + 2) * 1200 {
+                if queued >= MAX_QUEUED_DATAGRAMS || available < (queued as u64 + 2) * 1200 {
                     return Err(Error::Backpressure);
                 }
             }
