@@ -953,7 +953,8 @@ impl QuicRecords {
         Ok(Some(priority))
     }
     /// Drain at most 16 borrowed records per turn, alternating streams with
-    /// datagrams. A blocked handler keeps its complete record (one per route).
+    /// datagrams, one record per lane per round; idle or blocked lanes do not
+    /// spend that budget. A blocked handler keeps its complete record (one per route).
     /// Native receive windows plus these explicitly reported buffers must be
     /// included in the parent process's admission budget.
     pub fn receive(
@@ -1047,10 +1048,16 @@ impl QuicRecords {
     ) -> Result<usize, Error> {
         let mut count = 0;
         let lanes = self.inbound.len() + 1;
-        for _ in 0..TURN_RECORDS {
+        // The budget is RECORDS, not lane visits: each lane still yields at
+        // most one record per round, and a full round in which no lane yields
+        // one ends the turn. Spending a slot per visit let a few idle streams
+        // hold a burst of video fragments to two per turn.
+        let mut idle = 0;
+        while count < TURN_RECORDS && idle < lanes {
             let current = self.check(cx, authorize)?;
             let which = self.cursor % lanes;
             self.cursor = (self.cursor + 1) % lanes;
+            let before = count;
             if which == self.inbound.len() {
                 count += self.receive_datagram(current, &mut |route, bytes| {
                     if ready(route) {
@@ -1060,56 +1067,9 @@ impl QuicRecords {
                     }
                 })?;
             } else {
-                let s = &mut self.inbound[which];
-                if s.fin
-                    || !ready(Route::Stream(s.route))
-                    || self
-                        .attachments
-                        .iter()
-                        .any(|r| r.inbound == s.route.stream && !r.readable())
-                {
-                    continue;
-                }
-                if s.framing.frame(current)?.is_none() {
-                    if s.remainder.is_empty() {
-                        s.remainder = self
-                            .native
-                            .as_mut()
-                            .ok_or(Error::Closed)?
-                            .connection_mut()
-                            .read_stream(cx, s.route.stream, s.route.maximum)
-                            .map_err(|_| Error::Native)?;
-                        self.read_bytes = self
-                            .read_bytes
-                            .checked_add(s.remainder.len() as u64)
-                            .ok_or(Error::Clock)?;
-                    }
-                    let n = s.framing.push(&s.remainder, current)?;
-                    s.remainder = s.remainder.slice(n..);
-                }
-                if let Some(bytes) = s.framing.frame(current)? {
-                    validate_record(bytes, s.route.maximum, s.route.binding, s.route.messages)?;
-                    if handler(Route::Stream(s.route), bytes).map_err(|()| Error::Handler)?
-                        == Disposition::Consumed
-                    {
-                        s.framing.consume(current)?;
-                        count += 1;
-                    }
-                }
-                if s.remainder.is_empty()
-                    && s.framing.frame(current)?.is_none()
-                    && self
-                        .native
-                        .as_ref()
-                        .ok_or(Error::Closed)?
-                        .connection()
-                        .is_stream_eof(s.route.stream)
-                        .map_err(|_| Error::Native)?
-                {
-                    s.framing.finish(current)?;
-                    s.fin = true;
-                }
+                count += self.receive_stream(which, current, cx, ready, handler)?;
             }
+            idle = if count == before { idle + 1 } else { 0 };
         }
         // QUIC connection flow control counts all reliable application bytes.
         // Advance from actual drained bytes, not arrival, ACK, or decode reports.
@@ -1125,6 +1085,67 @@ impl QuicRecords {
                 .advertise_connection_receive_limit(cx, limit)
                 .map_err(|_| Error::Native)?;
             self.advertised_limit = limit;
+        }
+        Ok(count)
+    }
+    /// One visit to inbound stream lane `which`: at most one complete record.
+    fn receive_stream(
+        &mut self,
+        which: usize,
+        current: u64,
+        cx: &Cx,
+        ready: &mut impl FnMut(Route) -> bool,
+        handler: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+    ) -> Result<usize, Error> {
+        let mut count = 0;
+        let s = &mut self.inbound[which];
+        if s.fin
+            || !ready(Route::Stream(s.route))
+            || self
+                .attachments
+                .iter()
+                .any(|r| r.inbound == s.route.stream && !r.readable())
+        {
+            return Ok(0);
+        }
+        if s.framing.frame(current)?.is_none() {
+            if s.remainder.is_empty() {
+                s.remainder = self
+                    .native
+                    .as_mut()
+                    .ok_or(Error::Closed)?
+                    .connection_mut()
+                    .read_stream(cx, s.route.stream, s.route.maximum)
+                    .map_err(|_| Error::Native)?;
+                self.read_bytes = self
+                    .read_bytes
+                    .checked_add(s.remainder.len() as u64)
+                    .ok_or(Error::Clock)?;
+            }
+            let n = s.framing.push(&s.remainder, current)?;
+            s.remainder = s.remainder.slice(n..);
+        }
+        if let Some(bytes) = s.framing.frame(current)? {
+            validate_record(bytes, s.route.maximum, s.route.binding, s.route.messages)?;
+            if handler(Route::Stream(s.route), bytes).map_err(|()| Error::Handler)?
+                == Disposition::Consumed
+            {
+                s.framing.consume(current)?;
+                count += 1;
+            }
+        }
+        if s.remainder.is_empty()
+            && s.framing.frame(current)?.is_none()
+            && self
+                .native
+                .as_ref()
+                .ok_or(Error::Closed)?
+                .connection()
+                .is_stream_eof(s.route.stream)
+                .map_err(|_| Error::Native)?
+        {
+            s.framing.finish(current)?;
+            s.fin = true;
         }
         Ok(count)
     }

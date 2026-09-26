@@ -532,6 +532,80 @@ fn a_multi_fragment_picture_is_admitted_within_two_sender_turns() {
         }
     });
 }
+/// The receive half of the same budget: one `receive` turn may drain sixteen
+/// records, and idle stream lanes must not spend it. With one visit per lane
+/// per slot, a controlled viewer's several quiet streams left a burst of video
+/// fragments two per call, spreading one picture over ~20-30 ms of turns.
+#[test]
+fn one_receive_turn_drains_a_datagram_burst_past_idle_stream_lanes() {
+    run_test!(cx, {
+        let mut p = pair(&cx, Policy::default()).await;
+        let limits = MediaLimits::new(ProtocolLimits::ABSOLUTE, 1150, 16384, 64).unwrap();
+        let data = vec![19; 1077];
+        let fragments = 20_u32;
+        let mut sent = 0;
+        for _ in 0..500 {
+            while sent < fragments {
+                let mut bytes = vec![0; 1150];
+                fr_wire::encode_fragment(
+                    fr_wire::Fragment {
+                        descriptor: FrameDescriptor {
+                            frame: 1,
+                            reference: Some(0),
+                            total_bytes: 1077 * fragments,
+                            stride: 1077,
+                            capture_micros: 0,
+                        },
+                        index: sent,
+                        bytes: &data,
+                    },
+                    1,
+                    &limits,
+                    &mut bytes,
+                )
+                .unwrap();
+                let until = clock(&cx) + 1_000_000;
+                match p
+                    .server
+                    .send(&cx, Route::Datagram(p.video), &bytes, until, || true)
+                {
+                    Ok(()) => sent += 1,
+                    Err(Error::Backpressure) => break,
+                    Err(e) => panic!("send failed: {e:?}"),
+                }
+            }
+            // Arrival only: the client application reads nothing yet.
+            drive(&cx, &mut p).await;
+            if sent == fragments {
+                break;
+            }
+        }
+        assert_eq!(sent, fragments);
+        for _ in 0..20 {
+            drive(&cx, &mut p).await;
+        }
+        let mut turns = vec![];
+        for _ in 0..3 {
+            let mut datagrams = 0;
+            let count = p
+                .client
+                .receive(
+                    &cx,
+                    || true,
+                    |route, _| {
+                        assert!(matches!(route, Route::Datagram(_)), "{route:?}");
+                        datagrams += 1;
+                        Ok(Disposition::Consumed)
+                    },
+                )
+                .unwrap();
+            assert_eq!(count, datagrams);
+            turns.push(datagrams);
+        }
+        // Two stream lanes stay idle throughout; the budget is records.
+        assert_eq!(turns, [16, 4, 0]);
+    });
+}
 #[test]
 fn datagram_cap_rejects_before_native_fatal_path_and_delivers_exact_boundary() {
     run_test!(cx, {
