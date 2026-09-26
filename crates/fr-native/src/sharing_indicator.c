@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include "input_gate.h"
 
 enum { WIDTH = 480, HEIGHT = 148 };
 struct fr_indicator {
@@ -24,6 +25,7 @@ struct fr_indicator {
     uint8_t xi_opcode;
     uint16_t allow_source, allow_master;
     uint32_t allow_time;
+    int input_gate;
 };
 enum { MODE_SHARING = 0, MODE_CONTROL = 3 };
 /* XI2 wire constants (XI2.h / XI2proto.h). Requests are sent raw through
@@ -129,7 +131,13 @@ void fr_indicator_close(struct fr_indicator *h) {
     if (!h) return;
     /* Disconnect destroys only this connection's resources. No foreign window
      * operation or clipboard selection change is part of UI cleanup. */
-    if (h->c) xcb_disconnect(h->c);
+    if (h->c) {
+        /* Retire the positive-consent surface before releasing exclusion. */
+        if (h->input_gate >= 0 && h->window)
+            (void)checked(h, xcb_destroy_window_checked(h->c, h->window));
+        xcb_disconnect(h->c);
+    }
+    fr_input_gate_close(h->input_gate);
     free(h);
 }
 static int keys(struct fr_indicator *h) {
@@ -154,14 +162,21 @@ static int keys(struct fr_indicator *h) {
         if (symbol == 0xff0d) h->enter = code;
         if (symbol == 0x20) h->space = code;
     }
-    free(r); free(e);
-    return h->escape && h->enter && h->space;
+    free(r); free(e); return h->escape && h->enter && h->space;
 }
 static struct fr_indicator *open_window(const char *display, uint32_t *window, uint8_t mode) {
     if (!display || !window) return NULL;
     struct fr_indicator *h = calloc(1, sizeof(*h));
     if (!h) return NULL;
+    h->input_gate = -1;
     h->mode = mode;
+    /* Whole-display exclusion is stronger than a race-prone geometry snapshot.
+     * A prepared/in-flight native input operation makes this prompt refuse
+     * BEFORE it creates or maps a window. No polling/retry or X server grab. */
+    if (mode == 1 || mode == 2) {
+        h->input_gate = fr_input_gate_open(display);
+        if (h->input_gate < 0 || fr_input_gate_lock(h->input_gate, 1) != 1) goto fail;
+    }
     int screen = 0;
     h->c = xcb_connect(display, &screen);
     if (!h->c || xcb_connection_has_error(h->c)) goto fail;

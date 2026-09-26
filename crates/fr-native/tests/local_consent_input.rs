@@ -3,8 +3,8 @@
 //! are explicit source-attribution fixtures, never evidence of physical input.
 #![cfg(all(target_os = "linux", feature = "linux-input"))]
 use fr_core::{
-    input::{DesktopPoint, PointerButton},
-    input_submission::{InputSink, Operation, Submission},
+    input::DesktopPoint,
+    input_submission::{InputSink, Operation, PlatformError},
 };
 use fr_native::input::X11Pointer;
 use std::{
@@ -134,34 +134,21 @@ impl Drop for Panel {
         }
     }
 }
-fn submit(sink: &mut X11Pointer, operation: Operation) {
-    sink.prepare(operation).unwrap();
-    assert_eq!(sink.submit(operation), Submission::Submitted);
-}
-fn injected_click(display: &str) {
+fn injection_refused(display: &str) {
     // The same production native sink used by the per-lease input executor.
-    // No network/authority is invented here; this isolates the UI boundary.
+    // Consent exclusion now rejects even preparation, before an XTest request.
     let mut sink = X11Pointer::open(display).unwrap();
-    submit(
-        &mut sink,
-        Operation::Absolute(DesktopPoint { x: 352, y: 97 }),
-    );
-    for pressed in [true, false] {
-        submit(
-            &mut sink,
-            Operation::Button {
-                button: PointerButton::Primary,
-                pressed,
-            },
-        );
-    }
+    let result = sink.prepare(Operation::Absolute(DesktopPoint { x: 352, y: 97 }));
+    sink.cancel_prepared();
+    assert_eq!(result, Err(PlatformError::Permission));
+    assert!(sink.locally_revoked());
 }
 #[test]
 fn production_injected_click_cannot_approve_either_role() {
     let server = Server::start();
     for role in [1, 2] {
         let mut panel = Panel::open(&server.display, role);
-        injected_click(&server.display);
+        injection_refused(&server.display);
         let events = panel.events();
         assert!(
             !events.contains(&ALLOW),
@@ -171,6 +158,11 @@ fn production_injected_click_cannot_approve_either_role() {
             !events.contains(&STOP),
             "injected input operated consent UI"
         );
+        // Keep the first defense independently covered: an arbitrary same-user
+        // XTest peer is outside our cooperative gate, but still cannot approve.
+        let injected = panel.peer(&server.display, "allow");
+        assert!(!injected.contains(&ALLOW));
+        assert!(!injected.contains(&STOP));
         assert!(panel.peer(&server.display, "device-allow").contains(&ALLOW));
     }
 }

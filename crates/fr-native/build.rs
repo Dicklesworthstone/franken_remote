@@ -205,6 +205,8 @@ fn build_clipboard() {
 
 fn build_indicator() {
     println!("cargo:rerun-if-changed=src/sharing_indicator.c");
+    println!("cargo:rerun-if-changed=src/input_gate.c");
+    println!("cargo:rerun-if-changed=src/input_gate.h");
     // The input executor (linux-input) shows the remote-control indicator.
     if (env::var_os("CARGO_FEATURE_LINUX_SESSION_UI").is_none()
         && env::var_os("CARGO_FEATURE_LINUX_INPUT").is_none())
@@ -218,30 +220,28 @@ fn build_indicator() {
         "session UI cross-builds require a qualified native sysroot"
     );
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    assert!(
-        Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
-            .args([
-                "-std=c11",
-                "-O2",
-                "-fPIC",
-                "-Wall",
-                "-Wextra",
-                "-Werror",
-                "-c",
-                "src/sharing_indicator.c",
-                "-o"
-            ])
-            .arg(out.join("indicator.o"))
-            .status()
-            .expect("native C compiler")
-            .success(),
-        "install XCB development headers (libxcb1-dev)"
-    );
+    for (source, object) in [
+        ("src/sharing_indicator.c", "indicator.o"),
+        ("src/input_gate.c", "input_gate.o"),
+    ] {
+        assert!(
+            Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
+                .args([
+                    "-std=c11", "-O2", "-fPIC", "-Wall", "-Wextra", "-Werror", "-c", source, "-o"
+                ])
+                .arg(out.join(object))
+                .status()
+                .expect("native C compiler")
+                .success(),
+            "install XCB development headers (libxcb1-dev)"
+        );
+    }
     assert!(
         Command::new("ar")
             .arg("crs")
             .arg(out.join("libfrindicator.a"))
             .arg(out.join("indicator.o"))
+            .arg(out.join("input_gate.o"))
             .status()
             .unwrap()
             .success()

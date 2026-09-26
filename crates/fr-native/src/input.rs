@@ -4,6 +4,7 @@
 //! This is not a Wayland permission fallback or an X11 security sandbox.
 use crate::keyboard::Keyboard;
 pub mod emergency;
+mod gate;
 mod scroll;
 use core::{
     ffi::{c_char, c_int, c_uint, c_ulong, c_void},
@@ -108,6 +109,7 @@ pub struct X11Pointer {
     line_scroll: bool,
     wheel: WheelState,
     prepared: Option<Operation>,
+    approval: gate::Gate,
     xtest: Option<MutexGuard<'static, ()>>,
     keyboard: Keyboard,
     buttons: [Option<u8>; 5],
@@ -123,6 +125,7 @@ impl X11Pointer {
         }
         crate::xlib::initialize_threads().map_err(|_| PlatformError::Unavailable)?;
         let name = CString::new(name).map_err(|_| PlatformError::Unsupported)?;
+        let approval = gate::Gate::open(&name)?;
         // SAFETY: NUL-terminated name lives through call; returned context is
         // uniquely owned and used only on its creating thread until Drop.
         let display = NonNull::new(unsafe { XOpenDisplay(name.as_ptr()) })
@@ -139,6 +142,7 @@ impl X11Pointer {
             line_scroll: false,
             wheel: WheelState::default(),
             prepared: None,
+            approval,
             xtest: None,
             keyboard: Keyboard::new(display),
             buttons: [None; 5],
@@ -386,9 +390,8 @@ impl X11Pointer {
         Ok((DesktopPoint { x, y }, mask))
     }
 }
-impl InputSink for X11Pointer {
-    fn prepare(&mut self, op: Operation) -> Result<(), PlatformError> {
-        self.cancel_prepared();
+impl X11Pointer {
+    fn prepare_native(&mut self, op: Operation) -> Result<(), PlatformError> {
         match op {
             Operation::Key { key, transition } => {
                 if transition != KeyTransition::Release && self.geometry()? != self.dimensions {
@@ -434,7 +437,7 @@ impl InputSink for X11Pointer {
         self.xtest = Some(access);
         Ok(())
     }
-    fn submit(&mut self, op: Operation) -> Submission {
+    fn submit_native(&mut self, op: Operation) -> Submission {
         let access = self.xtest.take();
         if self.prepared.take() != Some(op) || access.is_none() {
             return Submission::NotSubmitted(PlatformError::Unsupported);
@@ -490,12 +493,48 @@ impl InputSink for X11Pointer {
         }
         Submission::Submitted
     }
+}
+impl InputSink for X11Pointer {
+    fn prepare(&mut self, op: Operation) -> Result<(), PlatformError> {
+        self.cancel_prepared();
+        // The gate covers preflight AND the actual server submission. A prompt
+        // cannot map in the gap between the final authority check and XTest.
+        // Release-only cleanup remains possible while consent is pending.
+        if !op.is_release() {
+            self.approval.enter()?;
+        }
+        let result = self.prepare_native(op);
+        if result.is_err() {
+            self.cancel_prepared();
+        }
+        result
+    }
+    fn submit(&mut self, op: Operation) -> Submission {
+        let result = self.submit_native(op);
+        if self.approval.is_held() {
+            // SAFETY: live thread-confined display. This barriers prior XTest
+            // requests BEFORE allowing a prompt to map on another connection.
+            // It is server-processing order, not proof of application effects.
+            unsafe {
+                XSync(self.display.as_ptr(), 0);
+            }
+        }
+        self.approval.leave();
+        result
+    }
+    fn locally_revoked(&mut self) -> bool {
+        self.approval.revoked()
+    }
+    fn native_failed(&mut self) -> bool {
+        self.approval.failed()
+    }
     fn cancel_prepared(&mut self) {
         self.prepared = None;
         self.prepared_button = None;
         self.wheel.prepared = None;
         self.keyboard.cancel_prepared();
         self.xtest = None;
+        self.approval.leave();
     }
     fn repeat_requires_pair(&self) -> bool {
         true
