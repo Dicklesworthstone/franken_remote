@@ -14,6 +14,7 @@ use asupersync::{
 use fr_core::limits::ProtocolLimits;
 use fr_wire::{
     authority::Binding,
+    closure::{self, CLOSED_BYTES, Closed},
     input::{InputDelivery, InputDirection},
     lease_revoked::{self, REVOKED_BYTES, Revoked},
 };
@@ -25,6 +26,40 @@ pub use deferred::{RevocationRegistration, RevocationReport};
 
 const DRAIN_US: u64 = 250_000;
 const TURN: Duration = Duration::from_millis(10);
+const REPORT_BYTES: usize = if CLOSED_BYTES > REVOKED_BYTES {
+    CLOSED_BYTES
+} else {
+    REVOKED_BYTES
+};
+
+// Only these two typed terminal records can acquire a detached socket. This is
+// not a byte-oriented escape hatch for ordinary application writes after fencing.
+enum Report {
+    Revoked(Revoked),
+    Closed(Closed),
+}
+impl Report {
+    const fn byte_len(&self) -> usize {
+        match self {
+            Self::Revoked(_) => REVOKED_BYTES,
+            Self::Closed(_) => CLOSED_BYTES,
+        }
+    }
+    fn encode(self, binding: Binding, out: &mut [u8]) -> Result<usize, Error> {
+        let limits = &ProtocolLimits::ABSOLUTE;
+        let direction = InputDirection::HostToViewer;
+        let delivery = InputDelivery::Reliable;
+        match self {
+            Self::Revoked(report) => {
+                lease_revoked::encode(report, binding, limits, out, direction, delivery)
+            }
+            Self::Closed(report) => {
+                closure::encode_closed(report, binding, limits, out, direction, delivery)
+            }
+        }
+        .map_err(|_| Error::Malformed)
+    }
+}
 
 struct Drain {
     native: NativeQuicUdpConnection,
@@ -35,7 +70,8 @@ struct Drain {
     streams: usize,
     last: u64,
     until: u64,
-    bytes: [u8; REVOKED_BYTES],
+    bytes: [u8; REPORT_BYTES],
+    byte_len: usize,
 }
 
 impl QuicRecords {
@@ -80,7 +116,49 @@ impl QuicRecords {
         async move { prepared?.run().await }
     }
 
+    /// Fence and enter ordered session teardown BEFORE calling this method.
+    /// Attempt one typed `Closed` report on the original host control stream.
+    /// Its cleanup/effect stages must come from the original owner; this method
+    /// neither performs native cleanup nor converts absent receipts to zero.
+    ///
+    /// The same terminal-only drain as `close_with_revocation` closes ordinary
+    /// I/O synchronously, discards unstaged writes, refuses retained native data,
+    /// preserves the immutable security gate and starts its 250-ms budget now.
+    /// A pre-registered lease-revocation report takes precedence: refuse this
+    /// competing report rather than creating a second post-fence send path.
+    /// `Ok` is a transport acknowledgement, not confirmation of remote cleanup.
+    pub fn close_with_closed(
+        &mut self,
+        cx: &Cx,
+        original: &ConnectionBinding,
+        route: StreamRoute,
+        binding: Binding,
+        report: Closed,
+    ) -> impl Future<Output = Result<(), Error>> + use<> {
+        let prepared = if self.is_bound_to(original) {
+            let prepared = if self.deferred_revocation.is_some() {
+                Err(Error::InvalidPolicy)
+            } else {
+                self.prepare_report(cx, route, binding, Report::Closed(report))
+            };
+            self.close();
+            prepared
+        } else {
+            Err(Error::WrongRoute)
+        };
+        async move { prepared?.run().await }
+    }
+
     fn revocation_route(&self, route: StreamRoute, binding: Binding) -> Result<(), Error> {
+        self.terminal_route(route, binding, REVOKED_BYTES)
+    }
+
+    fn terminal_route(
+        &self,
+        route: StreamRoute,
+        binding: Binding,
+        minimum: usize,
+    ) -> Result<(), Error> {
         let native = self.native.as_ref().ok_or(Error::Closed)?;
         if native.connection().role() != StreamRole::Server
             || native.connection().state() != QuicConnectionState::Established
@@ -88,7 +166,7 @@ impl QuicRecords {
             || route.messages != Messages::SessionControl
             || route.priority != Priority::Critical
             || route.binding != binding.channel
-            || route.maximum < REVOKED_BYTES
+            || route.maximum < minimum
             || !self.has_route(Route::Stream(route))
         {
             return Err(Error::WrongRoute);
@@ -103,6 +181,16 @@ impl QuicRecords {
         binding: Binding,
         report: Revoked,
     ) -> Result<Drain, Error> {
+        self.prepare_report(cx, route, binding, Report::Revoked(report))
+    }
+
+    fn prepare_report(
+        &mut self,
+        cx: &Cx,
+        route: StreamRoute,
+        binding: Binding,
+        report: Report,
+    ) -> Result<Drain, Error> {
         cx.checkpoint().map_err(|_| Error::Cancelled)?;
         let started = now(cx)?;
         let until = started.checked_add(DRAIN_US).ok_or(Error::Clock)?;
@@ -116,7 +204,7 @@ impl QuicRecords {
         {
             return Err(Error::Unauthorized);
         }
-        self.revocation_route(route, binding)?;
+        self.terminal_route(route, binding, report.byte_len())?;
         let native = self.native.as_ref().ok_or(Error::Closed)?;
         let streams = native.connection().inner().streams();
         if streams.len() > self.streams.len()
@@ -148,16 +236,8 @@ impl QuicRecords {
                 .0
                 .clone(),
         );
-        let mut bytes = [0; REVOKED_BYTES];
-        lease_revoked::encode(
-            report,
-            binding,
-            &ProtocolLimits::ABSOLUTE,
-            &mut bytes,
-            InputDirection::HostToViewer,
-            InputDelivery::Reliable,
-        )
-        .map_err(|_| Error::Malformed)?;
+        let mut bytes = [0; REPORT_BYTES];
+        let byte_len = report.encode(binding, &mut bytes)?;
         Ok(Drain {
             native: self.native.take().ok_or(Error::Closed)?,
             cx: cx.clone(),
@@ -168,6 +248,7 @@ impl QuicRecords {
             last: started,
             until,
             bytes,
+            byte_len,
         })
     }
 }
@@ -215,13 +296,13 @@ impl Drain {
                 return Ok(());
             }
             if !queued
-                && streams.connection_send_remaining() >= REVOKED_BYTES as u64
+                && streams.connection_send_remaining() >= self.byte_len as u64
                 && self
                     .native
                     .connection()
                     .inner()
                     .stream_send_credit_remaining(self.route.stream)
-                    >= REVOKED_BYTES as u64
+                    >= self.byte_len as u64
             {
                 // The one fixed record is smaller than the native protected
                 // packet allowance. No FIN: it could hide the terminal record
@@ -231,7 +312,7 @@ impl Drain {
                     .write_stream(
                         &self.cx,
                         self.route.stream,
-                        Bytes::copy_from_slice(&self.bytes),
+                        Bytes::copy_from_slice(&self.bytes[..self.byte_len]),
                         false,
                     )
                     .map_err(|_| Error::Native)?;

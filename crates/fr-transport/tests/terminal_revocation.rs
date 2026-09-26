@@ -399,3 +399,6 @@ fn native_queued_datagram_is_refused_without_a_post_fence_flush() {
 
 #[path = "terminal_revocation/deferred.rs"]
 mod deferred;
+
+#[path = "terminal_revocation/closed.rs"]
+mod closed;
