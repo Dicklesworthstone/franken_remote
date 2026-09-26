@@ -5,7 +5,10 @@
 use super::{CodecLimits, Decoder};
 use fr_client::audio::{
     AudioVolumeControl,
-    playout::{AudioPlayout, AudioSubmission, PlayoutClock, PlayoutError, PlayoutResult},
+    playout::{
+        AudioPlayout, AudioSubmission, PlayoutClock, PlayoutError, PlayoutResult,
+        decoder::PolledDecoder,
+    },
 };
 use fr_core::audio::{AudioStopReason, AudioStreamConfig};
 use fr_media::audio::{AudioAccessUnit, AudioMediaError, AudioPcmFrame};
@@ -35,21 +38,34 @@ pub enum ReceiveResult {
     Stopped(AudioStopReason),
 }
 
-/// One admitted channel binding, direction and epoch. !Send/!Sync because the
-/// real native decoder is thread-confined. No PCM/packet dump, decoder escape,
+/// One admitted channel binding, direction and epoch. The default synchronous
+/// decoder is thread-confined; the process adapter holds no foreign codec state.
+/// No PCM/packet dump, decoder escape,
 /// dynamic library path, implicit microphone enable or output-device claim.
 /// On stop/reconnect, retire this owner and negotiate a strictly newer epoch in
 /// the containing session; remote records cannot reconfigure or reopen it.
-pub struct OpusPlayout {
+pub struct OpusPlayout<D: PolledDecoder = Decoder> {
     binding: u32,
     offer: AudioConfiguration,
-    owner: AudioPlayout<Decoder>,
+    owner: AudioPlayout<D>,
 }
-impl OpusPlayout {
+impl OpusPlayout<Decoder> {
     pub fn new(
         binding: u32,
         offer: AudioConfiguration,
         clock: PlayoutClock,
+    ) -> Result<Self, Error> {
+        Self::with_decoder(binding, offer, clock, Decoder::with_limits(limits(offer)?))
+    }
+}
+impl<D: PolledDecoder> OpusPlayout<D> {
+    /// Select a supervised decoder without changing this record, epoch, jitter
+    /// or output owner. No codec readiness or playback authority is assumed.
+    pub fn with_decoder(
+        binding: u32,
+        offer: AudioConfiguration,
+        clock: PlayoutClock,
+        decoder: D,
     ) -> Result<Self, Error> {
         if binding == 0 {
             return Err(Error::Binding);
@@ -67,18 +83,16 @@ impl OpusPlayout {
         if config.expected_samples_per_frame() > offer.max_decoded_samples {
             return Err(Error::Configuration);
         }
-        let limits = CodecLimits::new(
-            usize::try_from(offer.max_packet_bytes).map_err(|_| Error::Configuration)?,
-            offer.max_decoded_samples,
-        )
-        .map_err(Error::Media)?;
-        let owner = AudioPlayout::new(config, Decoder::with_limits(limits), clock)
-            .map_err(Error::Playout)?;
+        limits(offer)?;
+        let owner = AudioPlayout::new(config, decoder, clock).map_err(Error::Playout)?;
         Ok(Self {
             binding,
             offer,
             owner,
         })
+    }
+    pub fn poll_configured(&mut self, clock: PlayoutClock) -> Result<bool, Error> {
+        self.owner.poll_configured(clock).map_err(Error::Playout)
     }
     pub const fn configuration(&self) -> AudioConfiguration {
         self.offer
@@ -158,4 +172,14 @@ impl OpusPlayout {
             .render(checkpoint, submit)
             .map_err(Error::Playout)
     }
+}
+
+/// The negotiated codec resource bounds, before native construction.
+pub(crate) fn limits(offer: AudioConfiguration) -> Result<CodecLimits, Error> {
+    offer.validate().map_err(Error::Wire)?;
+    CodecLimits::new(
+        usize::try_from(offer.max_packet_bytes).map_err(|_| Error::Configuration)?,
+        offer.max_decoded_samples,
+    )
+    .map_err(Error::Media)
 }

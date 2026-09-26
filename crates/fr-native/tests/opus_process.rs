@@ -1,6 +1,7 @@
 #![cfg(all(target_os = "linux", feature = "linux-opus-process"))]
 //! Actual restricted child and real libopus. Tones and local clocks are fixtures.
 mod opus_support;
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 use fr_client::{
     audio::playout::{
         AudioPlayout, PlayoutClock, PlayoutError, PlayoutResult, decoder::PolledDecoder,
@@ -89,6 +90,7 @@ fn signal(r: &Retirement, name: &str) {
 }
 #[test]
 fn restricted_process_matches_native_decode_and_plc_for_all_profiles() {
+    let _serial = SERIAL.lock().unwrap();
     for channels in [AudioChannels::Mono, AudioChannels::Stereo] {
         for duration in [5, 10, 20, 40, 60] {
             let c = config(channels, AudioDirection::Downlink, duration);
@@ -123,6 +125,7 @@ fn restricted_process_matches_native_decode_and_plc_for_all_profiles() {
 }
 #[test]
 fn frozen_decoder_never_blocks_the_playout_thread_or_retimes_pcm() {
+    let _serial = SERIAL.lock().unwrap();
     let c = config(AudioChannels::Mono, AudioDirection::Downlink, 10);
     let (d, r) = ProcessDecoder::new(&image(), CodecLimits::ABSOLUTE).unwrap();
     let clk = |t, s| PlayoutClock {
@@ -154,6 +157,7 @@ fn frozen_decoder_never_blocks_the_playout_thread_or_retimes_pcm() {
 }
 #[test]
 fn a_crashed_child_retires_and_never_restarts_itself() {
+    let _serial = SERIAL.lock().unwrap();
     let c = config(AudioChannels::Stereo, AudioDirection::Downlink, 10);
     let (mut d, r) = make(c);
     signal(&r, "-KILL");
@@ -173,6 +177,7 @@ fn a_crashed_child_retires_and_never_restarts_itself() {
 }
 #[test]
 fn uncollected_work_cannot_queue_another_packet_and_stop_reaps_the_original() {
+    let _serial = SERIAL.lock().unwrap();
     let c = config(AudioChannels::Mono, AudioDirection::Downlink, 20);
     let (mut d, r) = make(c);
     signal(&r, "-STOP");
@@ -190,6 +195,7 @@ fn uncollected_work_cannot_queue_another_packet_and_stop_reaps_the_original() {
 }
 #[test]
 fn real_codec_rejects_hostile_payload_without_returning_pcm() {
+    let _serial = SERIAL.lock().unwrap();
     let c = config(AudioChannels::Mono, AudioDirection::Downlink, 10);
     let (mut d, r) = make(c);
     let p = AudioAccessUnit::new(
@@ -218,6 +224,7 @@ fn real_codec_rejects_hostile_payload_without_returning_pcm() {
 }
 #[test]
 fn construction_does_not_start_a_child_and_relative_images_refuse() {
+    let _serial = SERIAL.lock().unwrap();
     assert!(
         ProcessDecoder::new(
             std::path::Path::new("fr-opus-worker"),
@@ -234,6 +241,7 @@ fn construction_does_not_start_a_child_and_relative_images_refuse() {
 #[test]
 fn confinement_forbids_files_sockets_and_new_processes() {
     const FLAG: &str = "FR_OPUS_SANDBOX_TEST_CHILD";
+    let _serial = SERIAL.lock().unwrap();
     if std::env::var_os(FLAG).is_some() {
         fr_native::bind_parent(
             std::env::var("FR_OPUS_TEST_PARENT")
@@ -287,6 +295,7 @@ fn confinement_forbids_files_sockets_and_new_processes() {
 
 #[test]
 fn decoder_watchdog_reaps_a_stalled_child_without_another_client_poll() {
+    let _serial = SERIAL.lock().unwrap();
     let c = config(AudioChannels::Mono, AudioDirection::Downlink, 10);
     let (mut d, r) = make(c);
     signal(&r, "-STOP");
@@ -298,6 +307,7 @@ fn decoder_watchdog_reaps_a_stalled_child_without_another_client_poll() {
 }
 #[test]
 fn admission_and_retirement_are_bounded_and_cancelled_configuration_never_starts() {
+    let _serial = SERIAL.lock().unwrap();
     let c = config(AudioChannels::Mono, AudioDirection::Downlink, 10);
     let (mut cancelled, r) = ProcessDecoder::new(&image(), CodecLimits::ABSOLUTE).unwrap();
     r.stop();
@@ -317,6 +327,7 @@ fn admission_and_retirement_are_bounded_and_cancelled_configuration_never_starts
 }
 #[test]
 fn failed_spawn_is_terminal_and_does_not_consume_a_retirement_slot() {
+    let _serial = SERIAL.lock().unwrap();
     let c = config(AudioChannels::Mono, AudioDirection::Downlink, 10);
     let (mut d, r) =
         ProcessDecoder::new(std::path::Path::new("/etc/hosts"), CodecLimits::ABSOLUTE).unwrap();

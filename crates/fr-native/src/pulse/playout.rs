@@ -2,11 +2,14 @@
 //! The bound native Opus receiver and selected output share one retiring owner.
 //! No public mutable device/decoder escape, reconnect, or implicit audio enable.
 use super::{Error as DeviceError, PlaybackDevice, State, StopOutcome, Submission};
-use crate::opus::playout::{Error as ReceiveError, OpusPlayout, ReceiveResult};
+use crate::opus::{
+    Decoder,
+    playout::{self, Error as ReceiveError, OpusPlayout, ReceiveResult},
+};
 use fr_client::{
     audio::{
         AudioVolumeControl,
-        playout::{PlayoutClock, PlayoutError, PlayoutResult},
+        playout::{PlayoutClock, PlayoutError, PlayoutResult, decoder::PolledDecoder},
     },
     input::ClientInstant,
 };
@@ -19,6 +22,7 @@ pub enum Error {
     Configuration,
     Closed,
     NotAcknowledged,
+    DecoderNotReady,
     AlreadyAcknowledged,
     AcknowledgementUnknown,
     Device(DeviceError),
@@ -42,21 +46,35 @@ pub enum RenderResult {
 /// session owns admission, audio enable/approval and persistent epoch retirement.
 /// The checkpoint must recheck that original permission and return fresh LOCAL
 /// monotonic time. It is invoked before/after decode and at the OS-facing write.
-pub struct PulsePlayout {
+pub struct PulsePlayout<D: PolledDecoder = Decoder> {
     binding: u32,
-    receiver: OpusPlayout,
+    receiver: OpusPlayout<D>,
     device: PlaybackDevice,
     error: Option<Error>,
     stopping: bool,
     acknowledged: bool,
     setup_until: ClientInstant,
 }
-impl PulsePlayout {
+impl PulsePlayout<Decoder> {
     pub fn new(
+        binding: u32,
+        offer: AudioConfiguration,
+        device: PlaybackDevice,
+        checkpoint: impl FnMut() -> Result<ClientInstant, DeviceError>,
+    ) -> Result<Self, Error> {
+        let decoder = Decoder::with_limits(playout::limits(offer).map_err(Error::Receiver)?);
+        Self::with_decoder(binding, offer, device, checkpoint, decoder)
+    }
+}
+impl<D: PolledDecoder> PulsePlayout<D> {
+    /// Use the existing device and all of its permission/deadline checks with
+    /// a nonblocking process decoder; this never substitutes an output device.
+    pub fn with_decoder(
         binding: u32,
         offer: AudioConfiguration,
         mut device: PlaybackDevice,
         mut checkpoint: impl FnMut() -> Result<ClientInstant, DeviceError>,
+        decoder: D,
     ) -> Result<Self, Error> {
         let config = AudioStreamConfig::new(
             offer.direction,
@@ -80,7 +98,8 @@ impl PulsePlayout {
                 .checked_add(super::STARTUP_US)
                 .ok_or(Error::Device(DeviceError::Clock))?,
         );
-        let receiver = OpusPlayout::new(binding, offer, clock).map_err(Error::Receiver)?;
+        let receiver =
+            OpusPlayout::with_decoder(binding, offer, clock, decoder).map_err(Error::Receiver)?;
         // Native codec creation may be slow or permission may change during it.
         // No authority is invented from successful allocation or a ready device.
         device_clock(&mut device, &mut checkpoint).map_err(Error::Device)?;
@@ -92,6 +111,23 @@ impl PulsePlayout {
             stopping: false,
             acknowledged: false,
             setup_until,
+        })
+    }
+    /// Poll actual decoder configuration under the original setup deadline.
+    /// False is pending, never permission to acknowledge or admit audio packets.
+    pub fn poll_ready(
+        &mut self,
+        mut checkpoint: impl FnMut() -> Result<ClientInstant, DeviceError>,
+    ) -> Result<bool, Error> {
+        self.check()?;
+        self.operation(|this| {
+            let clock = device_clock(&mut this.device, &mut checkpoint).map_err(Error::Device)?;
+            if clock.now.0 >= this.setup_until.0 {
+                return Err(Error::Device(DeviceError::Expired));
+            }
+            this.receiver
+                .poll_configured(clock)
+                .map_err(Error::Receiver)
         })
     }
     /// Publish `AudioConfigured` only after BOTH the actual device and native
@@ -112,6 +148,13 @@ impl PulsePlayout {
             let clock = device_clock(&mut this.device, &mut checkpoint).map_err(Error::Device)?;
             if clock.now.0 >= this.setup_until.0 {
                 return Err(Error::Device(DeviceError::Expired));
+            }
+            if !this
+                .receiver
+                .poll_configured(clock)
+                .map_err(Error::Receiver)?
+            {
+                return Err(Error::DecoderNotReady);
             }
             let config = this.device.configuration();
             let mut record = [0; audio::AUDIO_CONFIGURED_RECORD_BYTES];
@@ -305,16 +348,16 @@ impl PulsePlayout {
         result
     }
 }
-impl Drop for PulsePlayout {
+impl<D: PolledDecoder> Drop for PulsePlayout<D> {
     fn drop(&mut self) {
         self.disconnect();
     }
 }
-struct Guard<'a> {
-    owner: &'a mut PulsePlayout,
+struct Guard<'a, D: PolledDecoder> {
+    owner: &'a mut PulsePlayout<D>,
     completed: bool,
 }
-impl Drop for Guard<'_> {
+impl<D: PolledDecoder> Drop for Guard<'_, D> {
     fn drop(&mut self) {
         if !self.completed {
             self.owner.disconnect();

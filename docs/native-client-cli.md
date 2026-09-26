@@ -116,7 +116,7 @@ as a small built-in crosshair.
 ### Host playback audio (`--audio`)
 
 ```sh
-cargo build -p fr-native --features linux-desktop,linux-audio --bin fr --locked
+cargo build -p fr-native --features linux-desktop,linux-audio --bin fr --bin fr-opus-worker --locked
 ./target/debug/fr connect NODE_ID \
   --view-only --audio --experimental-native --display only \
   [--audio-server /run/user/1000/pulse/native] [--audio-sink NAME]
@@ -128,28 +128,34 @@ capability at all. With it, the view-only offer adds the OPTIONAL
 local enable); a host without it simply omits the capability, the session
 continues with video only, and the completion record reports
 `audio_absence: "host_did_not_offer"`. `--audio` with `--control` is refused
-before any connection (`audio_control_unsupported`): the client decodes audio in
-its own session thread, and this slice never runs that decode in a controlling
-session. Builds without the `linux-audio` feature refuse `--audio`
+before any connection (`audio_control_unsupported`): audio on controlled shares
+remains a separate integration. Builds without the `linux-audio` feature refuse `--audio`
 (`audio_unavailable_in_build`).
 
 The attached `audio-down` channel carries `AudioConfiguration`/`AudioStop` on a
 reliable lane and `AudioPacket` datagrams (Opus, 48 kHz stereo, 20 ms). Every
 record is validated, including the negotiated packet/sample bounds, before the
-real libopus decoder sees it. The client configures its local PulseAudio output
+real libopus decoder in the restricted per-epoch child sees it. The client configures its local PulseAudio output
 (the server from `--audio-server`, else `PULSE_SERVER`, else
 `$XDG_RUNTIME_DIR/pulse/native`; the server's default sink, pinned at stream
-start, unless `--audio-sink` names one), answers `AudioConfigured`, and only then
-receives packets. A host `AudioStop` fences queued audio at once. A local playout
+start, unless `--audio-sink` names one), and waits for both that output and the
+actual child decoder configuration reply before answering `AudioConfigured`.
+Only then does it receive packets. A host `AudioStop` fences queued audio at once. A local playout
 failure (for example a missed device slot) drops that stream without flushing old
 samples into the next one and asks the host for a fresh audio epoch, at most
 eight times per session. Audio never feeds video presentation or freshness.
 
-Residual trust, stated: unlike video, whose HEVC decoder runs in a
-seccomp-sandboxed worker process, the Opus decoder runs inside the `fr` process
-on its view-only session thread. Host-generated Opus reaches libopus only after
-the bounds checks above, but without process isolation, so a libopus defect is
-exposed to the host's packets. See [`SECURITY.md`](../SECURITY.md).
+Install the matching `fr-opus-worker` beside `fr`; a missing image is the
+pre-connection refusal `audio_decoder_unavailable`. The child requires Linux
+x86-64 syscall confinement before reading a configuration or packet, and receives
+no PulseAudio/X11 connection, session credentials or input authority. Unsupported
+architectures and confinement failures refuse audio without an in-process
+fallback. The session thread polls a single pending result and never calls
+libopus or waits for process I/O. Late PCM keeps its original arrival deadline
+and device slot: it is discarded, not retimed. A reset cannot overlap a previous
+unreaped decoder. Native packages, loader and kernel remain trusted. See
+[`NATIVE_OPUS_PROCESS.md`](../NATIVE_OPUS_PROCESS.md) and
+[`SECURITY.md`](../SECURITY.md).
 
 The completion record adds `audio_requested`, `audio_active` (at least one decoded
 frame was accepted by the local audio server), `audio_frames_submitted`,
@@ -405,7 +411,7 @@ including the `real_control::`, `real_clipboard::`, `real_files::` and `real_aud
 
 ```sh
 cargo build -p fr-native --features linux-desktop,linux-displays,linux-input,linux-clipboard,linux-audio \
-  --bin fr --bin fr-media-worker --bin fr-input-agent --locked
+  --bin fr --bin fr-media-worker --bin fr-input-agent --bin fr-opus-worker --locked
 cargo build -p frd --bin frd --locked
 cargo test -p frd --test native_host_linux_serial --no-run --locked
 ```
@@ -496,3 +502,27 @@ This is the existing bounded XCB shell, not a new toolkit or browser. It needs a
 local X11 display large enough for its fixed 560-pixel-wide menu. Wayland, scaled
 UI/accessibility, physical scanout, hardware codecs and a complete installed-
 Tailscale-to-FFmpeg desktop remain separate qualification work.
+
+## Restricted audio-decoder verification
+
+The process-decoder integration adds four explicitly selected CLI tests using
+the actual output owner, private PulseAudio null sink, real Opus child and an
+independent native audio monitor. They verify played sound, no acknowledgement
+or fallback after child startup failure, bounded handling of a frozen decoder,
+and retirement before an output reset creates its next child. These tests use
+local protocol/permission fixtures; they do not rerun the two-machine namespace
+scenario described above. Invoke them explicitly after building both binaries:
+
+```sh
+cargo test -p fr-native --features linux-desktop,linux-audio --bin fr -- --ignored --test-threads=1 linux::audio::output::tests
+```
+
+In the implementation environment all four passed, as did 52 ordinary CLI
+tests, six existing native Opus playout tests and all 13 existing PulseAudio
+playout/device tests. The earlier core playout and process-codec tests remain
+separate evidence. This used verified `bd177a8` first-party source plus the
+changed audio paths, the pinned compiler and matching retained CI libraries.
+Unchanged viewer C archives were reused because local XCB RENDER headers were
+absent; the new sandbox C was rebuilt. All modified preimages matched current
+main. A cold dependency build, complete latest-workspace run, physical audio
+device, desktop PipeWire session and live-tailnet qualification remain untested.

@@ -1,10 +1,8 @@
-//! `fr connect --view-only --audio`: host playback audio into the local
-//! `PulseAudio` server. frd validates every record before this output sees it;
-//! here the real libopus decoder and the selected local output run in the
-//! viewer's own session thread (view-only: no input authority exists in this
-//! process). The decode is in-process, NOT a sandboxed worker; its bounds are
-//! the negotiated packet/sample limits checked before the decoder.
-//! A receipt means the local audio server accepted PCM, never audibility.
+//! `fr connect --view-only --audio`: host playback into the selected local
+//! `PulseAudio` output. Host Opus is decoded only in the restricted per-epoch
+//! fr-opus-worker, never on the session thread or by an in-process fallback.
+//! Configuration acknowledgement waits for BOTH real native owners. PCM replies
+//! retain their original arrival/device deadlines; a receipt is not audibility.
 use super::super::{Failure, options::AudioRequest};
 use std::path::PathBuf;
 
@@ -53,7 +51,17 @@ pub(super) fn resolve(
             2,
         ));
     }
+    decoder_image()?;
     Ok(Some((server(request)?, request.clone())))
+}
+
+/// The codec image is installed beside fr, never selected by a host record,
+/// environment search path or downloaded on demand. Missing is a typed refusal.
+fn decoder_image() -> Result<PathBuf, Failure> {
+    std::env::current_exe().ok().and_then(|exe| exe.parent().map(|p| p.join("fr-opus-worker")))
+        .filter(|p| p.is_absolute() && p.is_file())
+        .ok_or_else(|| Failure::new("audio_decoder_unavailable",
+            "--audio requires the matching fr-opus-worker installed beside fr; build it with --features linux-opus-process. No in-process decoder fallback was selected.", 2))
 }
 
 /// Resolve the local server socket once, before dialing: flag, then
@@ -86,7 +94,11 @@ mod output {
     use super::Report;
     use fr_client::input::ClientInstant;
     use fr_core::audio::{AudioStopReason, AudioStreamConfig};
-    use fr_native::opus::playout::ReceiveResult;
+    use fr_native::opus::{
+        CodecLimits,
+        playout::ReceiveResult,
+        process::{ProcessDecoder, Retirement},
+    };
     use fr_native::pulse::{
         Error as DeviceError, PlaybackDevice, Selection, State,
         playout::{PulsePlayout, RenderResult},
@@ -105,11 +117,14 @@ mod output {
             offer: AudioConfiguration,
             binding: u32,
         },
-        Playing(PulsePlayout),
-        Stopping(PulsePlayout),
+        Configuring(PulsePlayout<ProcessDecoder>),
+        Playing(PulsePlayout<ProcessDecoder>),
+        Stopping(PulsePlayout<ProcessDecoder>),
         Done,
     }
     pub struct Output {
+        image: Option<PathBuf>,
+        retirement: Option<Retirement>,
         server: PathBuf,
         sink: Option<String>,
         origin: Instant,
@@ -119,6 +134,8 @@ mod output {
     impl Output {
         pub fn new(server: PathBuf, sink: Option<String>, report: Rc<RefCell<Report>>) -> Self {
             Self {
+                image: super::decoder_image().ok(),
+                retirement: None,
                 server,
                 sink,
                 origin: Instant::now(),
@@ -147,7 +164,10 @@ mod output {
             binding: u32,
             offer: AudioConfiguration,
         ) -> Result<(), ViewerAudioRefused> {
-            if !matches!(self.stage, Stage::Idle) {
+            if !matches!(self.stage, Stage::Idle)
+                || self.retirement.as_ref().is_some_and(|r| !r.is_complete())
+                || self.image.is_none()
+            {
                 return Err(ViewerAudioRefused);
             }
             let config = AudioStreamConfig::new(
@@ -202,8 +222,35 @@ mod output {
                         };
                         return Ok(());
                     }
-                    let mut playout = PulsePlayout::new(binding, offer, device, &mut checkpoint)
-                        .map_err(|_| ViewerAudioRefused)?;
+                    let limits = CodecLimits::new(
+                        usize::try_from(offer.max_packet_bytes).map_err(|_| ViewerAudioRefused)?,
+                        offer.max_decoded_samples,
+                    )
+                    .map_err(|_| ViewerAudioRefused)?;
+                    let (decoder, retirement) = ProcessDecoder::new(
+                        self.image.as_deref().ok_or(ViewerAudioRefused)?,
+                        limits,
+                    )
+                    .map_err(|_| ViewerAudioRefused)?;
+                    self.retirement = Some(retirement);
+                    let playout = PulsePlayout::with_decoder(
+                        binding,
+                        offer,
+                        device,
+                        &mut checkpoint,
+                        decoder,
+                    )
+                    .map_err(|_| ViewerAudioRefused)?;
+                    self.stage = Stage::Configuring(playout);
+                }
+                Stage::Configuring(mut playout) => {
+                    if !playout
+                        .poll_ready(&mut checkpoint)
+                        .map_err(|_| ViewerAudioRefused)?
+                    {
+                        self.stage = Stage::Configuring(playout);
+                        return Ok(());
+                    }
                     playout
                         .acknowledge(&mut checkpoint, |record| {
                             acknowledge(record).map_err(|_| ())
@@ -233,7 +280,9 @@ mod output {
                 Stage::Stopping(mut playout) => {
                     let origin = self.origin;
                     // Cleanup only: fresh local time, not a renewed grant.
-                    if playout.poll_stop(|| Ok(now(origin))).ok() != Some(State::Closed) {
+                    if playout.poll_stop(|| Ok(now(origin))).ok() != Some(State::Closed)
+                        || self.retirement.as_ref().is_some_and(|r| !r.is_complete())
+                    {
                         self.stage = Stage::Stopping(playout);
                     }
                 }
@@ -266,6 +315,9 @@ mod output {
                         }
                     }
                 }
+                Stage::Configuring(mut playout) => {
+                    playout.disconnect();
+                }
                 Stage::Starting { mut device, .. } => {
                     // Only a matching stop reaches us before acknowledgement.
                     device.disconnect();
@@ -275,7 +327,11 @@ mod output {
             Ok(())
         }
         fn reset(&mut self) {
-            // Drop (disconnect) the failed device/decoder without a flush.
+            // Retain the exact retirement until proven complete. A new epoch
+            // cannot overlap its failed decoder, even if negotiation restarts.
+            if let Some(retirement) = &self.retirement {
+                retirement.stop();
+            }
             self.stage = Stage::Idle;
             let mut report = self.report.borrow_mut();
             report.resets = report.resets.saturating_add(1);
@@ -283,13 +339,23 @@ mod output {
         fn ended(&mut self, end: ViewerAudioEnd) {
             self.report.borrow_mut().absent(end_reason(end));
             match std::mem::replace(&mut self.stage, Stage::Done) {
-                Stage::Playing(mut playout) => {
+                Stage::Playing(mut playout) | Stage::Configuring(mut playout) => {
                     if playout.stop(now(self.origin)).is_ok() {
                         self.stage = Stage::Stopping(playout);
                     }
                 }
                 Stage::Starting { mut device, .. } => device.disconnect(),
                 stage => self.stage = stage,
+            }
+        }
+    }
+    #[cfg(test)]
+    mod tests;
+
+    impl Drop for Output {
+        fn drop(&mut self) {
+            if let Some(retirement) = &self.retirement {
+                retirement.stop();
             }
         }
     }

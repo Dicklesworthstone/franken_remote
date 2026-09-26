@@ -55,10 +55,42 @@ Tests used pinned nightly-2026-08-31, rebuilt first-party source from verified
 `bd177a8` plus this slice, and matching retained external CI libraries. Strict
 pedantic Clippy passed for the affected library and selected test targets. This
 is not a cold dependency build, latest-workspace run, acoustic measurement,
-PulseAudio device qualification or live-tailnet test. The separate client CLI
-integration must select this decoder before its old in-process path is removed.
+physical audio-device qualification or live-tailnet test. The CLI integration
+below selects this decoder instead of its former in-process path.
 
 ```sh
 cargo build -p fr-native --no-default-features --features linux-opus-process --bin fr-opus-worker
 cargo test -p fr-native --no-default-features --features linux-opus-process --test opus_process -- --test-threads=1
 ```
+
+## Installed client integration
+
+`fr connect --view-only --audio` now uses the process-backed decoder in its
+existing Opus/Pulse playout owner. Build `fr-opus-worker` with `linux-opus-process`
+(or `linux-audio`) and install the matching executable beside `fr`. A missing
+image refuses before dialing as `audio_decoder_unavailable`; confinement/setup
+failure is a local audio refusal, never permission to select the old decoder.
+Both the original output device and the actual decoder must acknowledge native
+configuration before the client emits `AudioConfigured`. The former synchronous
+adapter remains for explicitly worker-confined library use and its tests, not
+as a CLI fallback. Control-mode audio remains unsupported independently.
+
+The output owner retains decoder retirement separately from output cork/flush.
+On reset it stops the old child and refuses a replacement until actual reaping;
+no old PCM, decoder history or pending operation crosses the epoch. The existing
+output permission, packet bounds, jitter, device clocks and final submission
+checks remain in force. A frozen child returns no PCM and cannot hold the CLI.
+
+The complete CLI test binary passed 52 ordinary cases; four additional ignored-by-
+default native cases were explicitly executed and passed with the actual private
+PulseAudio server, restricted worker and independent monitor. Six unchanged
+Opus-playout cases and all 13 existing PulseAudio device/playout cases also passed.
+The process target passed both serially and with four test threads; its tests
+serialize shared admission-capacity assertions without changing production limits.
+Strict pedantic Clippy passed for the integrated native library and complete CLI.
+
+These are scoped codec/device/CLI-owner tests, not a newly executed full remote
+workstation or acoustic qualification. Identical source preimages were checked
+against main. Rebuilt first-party Rust uses the pinned compiler and matching
+retained external libraries; unchanged viewer native archives came from that
+same verified source because the local RENDER header is unavailable.
