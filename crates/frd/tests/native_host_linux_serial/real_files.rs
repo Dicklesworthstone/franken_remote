@@ -49,6 +49,23 @@ impl Drop for Dir {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
+/// The client's own outcome if it already ended (failure diagnostics only).
+fn client_state(client: &mut std::process::Child) -> String {
+    use std::io::Read;
+    match client.try_wait() {
+        Ok(Some(status)) => {
+            let (mut out, mut err) = (String::new(), String::new());
+            if let Some(stdout) = client.stdout.as_mut() {
+                let _ = stdout.read_to_string(&mut out);
+            }
+            if let Some(stderr) = client.stderr.as_mut() {
+                let _ = stderr.read_to_string(&mut err);
+            }
+            format!("fr exited ({status}): {out} {err}")
+        }
+        _ => "fr still running".to_owned(),
+    }
+}
 fn random(len: usize) -> Vec<u8> {
     let mut bytes = vec![0; len];
     getrandom::fill(&mut bytes).unwrap();
@@ -93,8 +110,9 @@ fn fr_connect_send_publishes_identical_bytes_into_frd_run_files() {
     let published = eventually(Duration::from_secs(60), || drop_dir.entries() == [name]);
     assert!(
         published,
-        "drop directory {:?}; host: {}",
+        "drop directory {:?}; {}; host: {}",
         drop_dir.entries(),
+        client_state(&mut s.client),
         s.daemon.dump()
     );
     let received = fs::read(drop_dir.0.join(name)).unwrap();
@@ -152,7 +170,7 @@ fn fr_connect_send_never_overwrites_a_name_the_host_already_holds() {
     fs::write(source.0.join("fresh.bin"), &fresh).unwrap();
     let replacement = b"client notes that must not land on the host\n".to_vec();
     fs::write(source.0.join("notes.txt"), &replacement).unwrap();
-    let s = Controlled::start_full(
+    let mut s = Controlled::start_full(
         false,
         false,
         Some(drop_dir.directory()),
@@ -164,8 +182,9 @@ fn fr_connect_send_never_overwrites_a_name_the_host_already_holds() {
     });
     assert!(
         published,
-        "drop directory {:?}; host: {}",
+        "drop directory {:?}; {}; host: {}",
         drop_dir.entries(),
+        client_state(&mut s.client),
         s.daemon.dump()
     );
     // The second file is staged, verified, then refused at the no-replace
@@ -234,8 +253,9 @@ fn a_frozen_controller_leaves_no_partial_file_under_its_final_name() {
         }
         assert!(
             Instant::now() < until,
-            "no staged transfer: {:?}; host: {}",
+            "no staged transfer: {:?}; {}; host: {}",
             drop_dir.entries(),
+            client_state(&mut s.client),
             s.daemon.dump()
         );
         thread::sleep(Duration::from_millis(10));
