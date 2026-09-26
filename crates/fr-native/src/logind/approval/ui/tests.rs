@@ -321,3 +321,6 @@ fn closing_ui_denies_pending_request_and_keeps_native_cleanup_collectable() {
         assert!(!attempt(rt, broker, ui.callback(), async |_| {}).await);
     });
 }
+
+#[cfg(feature = "linux-input")]
+mod inhibition;

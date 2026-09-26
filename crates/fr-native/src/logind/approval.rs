@@ -6,6 +6,7 @@
 use super::{Control, Status as SessionStatus};
 use fr_wire::negotiation::Role;
 use frd::{
+    input_agent::{Inhibition, Seat},
     session_agent::AgentIdentity,
     session_startup::{Approval, Error as ApprovalError},
 };
@@ -45,6 +46,9 @@ pub enum Error {
     ThreadUnavailable,
     NativeFailure,
     MappingExpired,
+    InputInhibited,
+    WrongInputSeat,
+    InputCleanupExpired,
     Hidden,
     OwnerDropped,
     Cancelled,
@@ -180,14 +184,29 @@ impl Prompt {
     /// The display and UID come only from the explicitly selected logind owner.
     /// Fresh positive evidence is required; it is NOT itself capture permission.
     /// Role text comes from the original Approval, not the notification argument.
-    /// Rejected prompts deny only their supplied original request.
+    /// Rejected prompts deny only their supplied original request. This unscoped
+    /// constructor is for shares with NO input owners; a control-capable share
+    /// must use `start_with_input_seat` or the agent-bound `ApprovalUi`.
     pub fn start(session: Control, approval: Approval) -> Result<Self, Error> {
-        Self::start_scoped(session, approval, None)
+        Self::start_scoped(session, approval, None, None)
+    }
+    /// Protect consent against an already running input owner. Supply the SAME
+    /// OS-share Seat used by every controller, never a new seat for this prompt.
+    /// The old lease is fenced before return, then its native cleanup must finish
+    /// before a window may be created. The original two-second mapping budget
+    /// includes that wait. Closing consent never resumes the old lease.
+    pub fn start_with_input_seat(
+        session: Control,
+        approval: Approval,
+        seat: &Seat,
+    ) -> Result<Self, Error> {
+        Self::start_scoped(session, approval, None, Some(seat))
     }
     fn start_scoped(
         session: Control,
         approval: Approval,
         agent: Option<AgentIdentity>,
+        seat: Option<&Seat>,
     ) -> Result<Self, Error> {
         let mut denial = Denial(Some(approval.clone()));
         if agent.as_ref().is_some_and(AgentIdentity::is_revoked) {
@@ -206,6 +225,14 @@ impl Prompt {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| Error::Busy)?;
         let permit = Permit;
+        let started = Instant::now();
+        // Negative authority only, before native work. Drop is transferred to
+        // the native thread so an abandoned Prompt cannot prematurely admit a
+        // successor while the old consent window is still mapped or retiring.
+        let inhibition = seat
+            .map(Seat::inhibit)
+            .transpose()
+            .map_err(|_| Error::InputInhibited)?;
         let control = PromptControl(Arc::new(Shared {
             approval,
             session,
@@ -214,13 +241,18 @@ impl Prompt {
             window: AtomicU32::new(0),
         }));
         let shared = control.0.clone();
-        let started = Instant::now();
         let worker = thread::Builder::new()
             .name("fr-local-approval".into())
             .spawn(move || {
                 let _permit = permit;
+                let inhibition = inhibition;
                 let _denial = Denial(Some(shared.approval.clone()));
-                run(&shared, &display, started);
+                if await_input_cleanup(&shared, inhibition.as_ref(), started) {
+                    run(&shared, &display, started);
+                }
+                // run() has already destroyed the native window. A stuck X
+                // call keeps this guard owned instead of releasing input early.
+                drop(inhibition);
                 shared.refuse(Error::NativeFailure);
             })
             .map_err(|_| Error::ThreadUnavailable)?;
@@ -298,6 +330,25 @@ fn local_display(display: &str) -> bool {
     let mut parts = number.split('.');
     let valid = |s: &str| !s.is_empty() && s.len() <= 5 && s.bytes().all(|b| b.is_ascii_digit());
     parts.next().is_some_and(valid) && parts.next().is_none_or(valid) && parts.next().is_none()
+}
+/// Poll only native-retirement evidence, never native input or session renewal.
+/// No X window exists yet, so earlier submitted releases cannot click consent.
+fn await_input_cleanup(shared: &Shared, inhibition: Option<&Inhibition>, started: Instant) -> bool {
+    while shared.live() {
+        if started.elapsed() >= MAP_LIMIT {
+            shared.refuse(if inhibition.is_some() {
+                Error::InputCleanupExpired
+            } else {
+                Error::MappingExpired
+            });
+            return false;
+        }
+        if inhibition.is_none_or(Inhibition::is_ready) {
+            return true;
+        }
+        thread::park_timeout(TURN);
+    }
+    false
 }
 fn run(shared: &Shared, display: &CString, started: Instant) {
     if !shared.live() {
