@@ -113,3 +113,45 @@ fn served_reports_one_viewer_with_its_own_ending() {
         (1, 0, 1)
     );
 }
+#[test]
+fn a_joined_file_worker_is_clean_whatever_fenced_it_but_a_pending_one_is_not() {
+    use crate::session_startup::{FileReceiveCleanup as Cleanup, FileReceiveError as E};
+    use fr_files::{session::Error as SessionError, worker::Error as WorkerError};
+    // The joined thread's exit reason is how it was fenced, not a failure.
+    for joined in [
+        Ok(Cleanup::NotStarted),
+        Ok(Cleanup::Finished(Ok(()))),
+        Ok(Cleanup::Finished(Err(WorkerError::Session(
+            SessionError::Permission,
+        )))),
+        Ok(Cleanup::Finished(Err(WorkerError::Session(
+            SessionError::Closed,
+        )))),
+    ] {
+        assert_eq!(files_cleanup(joined), Ok(()));
+    }
+    for (kept, error) in [
+        (
+            Ok(Cleanup::Finished(Err(WorkerError::Panicked))),
+            crate::worker::Error::Unavailable,
+        ),
+        (Ok(Cleanup::Pending), crate::worker::Error::Deadline),
+        (Err(E::CleanupPending), crate::worker::Error::Deadline),
+        (Err(E::Cancelled), crate::worker::Error::Cancelled),
+        (Err(E::Clock), crate::worker::Error::ClockRegression),
+    ] {
+        assert_eq!(files_cleanup(kept), Err(error));
+    }
+    // The drop directory is a separate operator choice on the profile.
+    let dir = std::env::temp_dir().join(format!("fr-profile-files-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    let base = profile("/usr/libexec/fr-input-agent", ":0", None, 30).unwrap();
+    assert!(!base.files());
+    let with = base.with_files(
+        crate::native_files::Directory::open(&dir, crate::native_files::Limits::default()).unwrap(),
+    );
+    assert!(with.files() && !with.clipboard());
+    assert!(!format!("{with:?}").contains("fr-profile-files"));
+    let _ = std::fs::remove_dir(&dir);
+}

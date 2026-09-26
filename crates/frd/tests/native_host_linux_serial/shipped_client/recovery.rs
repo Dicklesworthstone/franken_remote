@@ -34,6 +34,7 @@ impl Hosted {
             input_agent: None,
             clipboard: false,
             audio: None,
+            files: None,
         };
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = events.clone();

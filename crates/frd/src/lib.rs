@@ -54,6 +54,10 @@ pub mod native_clipboard;
 #[cfg(target_os = "linux")]
 pub mod clipboard_process;
 
+// Explicit viewer-to-host file sending into an operator-approved drop directory.
+#[cfg(target_os = "linux")]
+pub mod native_files;
+
 #[cfg(target_os = "linux")]
 pub mod local_sharing;
 

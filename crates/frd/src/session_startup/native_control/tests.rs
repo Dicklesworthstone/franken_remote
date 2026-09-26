@@ -579,3 +579,54 @@ fn host_audio_is_offered_only_with_the_local_enable_and_only_optionally() {
         .unwrap();
     assert!(!audio_selected(&refused));
 }
+
+#[test]
+fn the_drop_lane_needs_both_sides_and_never_rides_with_the_clipboard() {
+    use crate::native_files::Absence;
+    let select = |host: Offer, client: &Offer| host.intersect(client).unwrap().select().unwrap();
+    let files = fr_client::native::control_offer_with_files();
+    assert!(files.validate().is_ok());
+    // Both sides offer the three optional boundaries: the lane is selected.
+    let both = select(host_offer_with_files(true, false, false, true), &files);
+    assert_eq!(files_lane(&both), Ok(()));
+    assert!(
+        both.capabilities
+            .iter()
+            .filter(|c| FILE_CAPABILITIES.iter().any(|(n, _)| *n == c.name))
+            .all(|c| !c.required)
+    );
+    // A host without --files: typed absence, and control still negotiates.
+    let absent = select(host_offer_with_files(true, false, false, false), &files);
+    assert_eq!(absent.role, Role::RequestControl);
+    assert!(profile(&absent, true));
+    assert_eq!(files_lane(&absent), Err(Absence::NotNegotiated));
+    // A controller that asked for no files.
+    let plain = select(
+        host_offer_with_files(true, false, false, true),
+        &fr_client::native::control_offer(),
+    );
+    assert_eq!(files_lane(&plain), Err(Absence::NotNegotiated));
+    // An observation-only host never offers the file boundaries.
+    assert_eq!(
+        host_offer_with_files(false, false, false, true),
+        host_offer(false)
+    );
+    // The shipped client cannot even offer both: 14 + 3 exceeds the offer's
+    // capability bound, so `fr connect` refuses the combination up front.
+    let mut both_lanes = fr_client::native::control_offer_with_clipboard();
+    both_lanes.capabilities.extend(
+        files
+            .capabilities
+            .iter()
+            .filter(|c| FILE_CAPABILITIES.iter().any(|(n, _)| *n == c.name))
+            .cloned(),
+    );
+    both_lanes.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    assert!(both_lanes.validate().is_err());
+    // Another controller selecting clipboard AND files (here: exactly the
+    // host's own set): this slice never sets up both lanes, on either side.
+    let mut minimal = host_offer_with_files(true, true, false, true);
+    minimal.role = Role::RequestControl;
+    let clipboard = select(host_offer_with_files(true, true, false, true), &minimal);
+    assert_eq!(files_lane(&clipboard), Err(Absence::WithClipboard));
+}

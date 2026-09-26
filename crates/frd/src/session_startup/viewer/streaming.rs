@@ -4,6 +4,7 @@ mod acquisition;
 pub(crate) mod audio;
 mod continuation;
 mod cursor;
+pub(in crate::session_startup) mod files;
 mod interactive;
 mod recovery;
 use super::{
@@ -246,6 +247,8 @@ impl Peer {
 /// or additional queue is spawned, and UI callbacks remain bounded/nonblocking.
 pub struct StreamingViewer {
     clipboard: Option<crate::native_clipboard::Application>,
+    /// `--send`: this attempt's explicit selection for the drop lane.
+    files: Option<files::Lane>,
     peer: Peer,
     presenter: Presenter,
     receiver: ReceivePipeline,
@@ -416,6 +419,7 @@ impl StreamingViewer {
         let input = peer.controlled().map(|v| v.control());
         Ok(Self {
             clipboard: None,
+            files: None,
             peer,
             presenter,
             receiver,
@@ -463,6 +467,26 @@ impl StreamingViewer {
         let app = crate::native_clipboard::Application::new(config);
         let control = app.control();
         self.clipboard = Some(app);
+        Ok(control)
+    }
+    /// Hand ONE attempt's explicit selection to the controller's drop lane,
+    /// once, before service. Typed absence unless this session selected the
+    /// lane (host `--files`, no clipboard). Nothing opens or reads now: the
+    /// expectation is set on the first controlled turn and the batch starts
+    /// only on the established lane.
+    pub(crate) fn configure_file_send(
+        &mut self,
+        request: crate::native_files::SendRequest,
+    ) -> Result<crate::native_files::SendControl, crate::native_files::Absence> {
+        use crate::native_files::Absence;
+        if self.served || self.files.is_some() {
+            return Err(Absence::Unavailable);
+        }
+        let (session, _) = self.peer.parts().map_err(|_| Absence::Unavailable)?;
+        session.check().map_err(|_| Absence::Unavailable)?;
+        super::super::native_control::files_lane(&session.opened.selection)?;
+        let control = crate::native_files::SendControl::new();
+        self.files = Some(files::Lane::new(request, control.clone()));
         Ok(control)
     }
     pub(crate) async fn reap_clipboard(
@@ -524,10 +548,15 @@ impl StreamingViewer {
     ) -> impl Future<Output = Result<(), fr_files::sender::Error>> + 'a {
         self.close();
         async move {
-            match self.peer.controlled() {
-                Some(viewer) => viewer.reap_files(cleanup, deadline).await,
-                None => Ok(()),
+            let Some(viewer) = self.peer.controlled() else {
+                return Ok(());
+            };
+            let result = viewer.reap_files(cleanup, deadline).await;
+            // The final ordered receipts, now that the source was joined.
+            if let Some(lane) = &self.files {
+                lane.observe(viewer);
             }
+            result
         }
     }
     pub fn worker_id(&self) -> Option<u32> {
@@ -705,6 +734,7 @@ impl StreamingViewer {
                 network(
                     &mut self.peer,
                     self.clipboard.as_mut(),
+                    self.files.as_mut(),
                     &mut self.receiver,
                     &mut self.repair,
                     self.recovery.as_deref_mut(),
@@ -734,6 +764,7 @@ impl StreamingViewer {
                         let turn = network(
                             &mut self.peer,
                             self.clipboard.as_mut(),
+                            self.files.as_mut(),
                             &mut self.receiver,
                             &mut self.repair,
                             self.recovery.as_deref_mut(),
@@ -908,6 +939,7 @@ impl Repair {
 async fn network(
     peer: &mut Peer,
     clipboard: Option<&mut crate::native_clipboard::Application>,
+    files: Option<&mut files::Lane>,
     receiver: &mut ReceivePipeline,
     repair: &mut Repair,
     mut recovery: Option<&mut recovery_control::Receiver>,
@@ -924,6 +956,12 @@ async fn network(
         && let Some(viewer) = peer.controlled()
     {
         app.viewer(viewer).map_err(Error::Clipboard)?;
+    }
+    // Before this controller's drive: see `files` for why the order matters.
+    if let Some(lane) = files
+        && let Some(viewer) = peer.controlled()
+    {
+        lane.viewer(viewer);
     }
     recovery::prepare(peer, recovery.as_deref_mut(), receiver, repair, cx)?;
     let (session, media) = peer.parts()?;

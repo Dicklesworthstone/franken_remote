@@ -274,6 +274,7 @@ fn lost_final_picture(ack_stall: Duration) {
                 network(
                     &mut peer,
                     None,
+                    None,
                     &mut receiver,
                     &mut repair,
                     None,

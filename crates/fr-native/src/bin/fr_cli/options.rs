@@ -94,7 +94,13 @@ pub struct Connection {
     /// `--audio`: explicitly ask for host playback audio (view-only only).
     /// `None` offers no audio capability at all.
     pub audio: Option<AudioRequest>,
+    /// `--send PATH` (repeatable, with `--control` only): regular files the
+    /// user explicitly selected, sent in order into the host's drop directory
+    /// after control is granted. Empty offers no file capability at all.
+    pub send: Vec<PathBuf>,
 }
+/// At most this many `--send` files per connection (frd's native bound).
+pub const MAX_SENDS: usize = 8;
 /// Local playback choices; never a peer value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioRequest {
@@ -544,10 +550,12 @@ fn parse_command(
     let (mut display, mut worker, mut roots, mut x_display) = (None, None, None, None);
     let (mut port, mut attempts) = (8443_u16, 5_u8);
     let mut fit_window = None;
+    let mut send = Vec::new();
     while index < args.len() {
         let flag = args[index].as_str();
         index += 1;
-        if !seen.insert(flag) {
+        // `--send` is the one repeatable flag; its count is bounded below.
+        if flag != "--send" && !seen.insert(flag) {
             return Err(usage());
         }
         match flag {
@@ -584,6 +592,7 @@ fn parse_command(
             "--x-display" if connect => x_display = Some(next_arg(args, &mut index)?.to_string()),
             "--port" if remote || doctor => port = next_port(args, &mut index)?,
             "--attempts" if connect => attempts = next_parsed(args, &mut index)?,
+            "--send" if connect => send.push(next_path(args, &mut index)?),
             _ => return Err(usage()),
         }
     }
@@ -604,6 +613,27 @@ fn parse_command(
         }
         if !audio && (audio_server.is_some() || audio_sink.is_some()) {
             return Err(usage());
+        }
+        if !send.is_empty() && !control {
+            return Err(Failure::new(
+                "send_requires_control",
+                "Files are sent only on your own control lease; pass --control with --send. A view-only session never sends files.",
+                2,
+            ));
+        }
+        if !send.is_empty() && clipboard {
+            return Err(Failure::new(
+                "send_with_clipboard_unsupported",
+                "This build sets up either the clipboard or the file lane on one control session, not both; drop --clipboard or --send.",
+                2,
+            ));
+        }
+        if send.len() > MAX_SENDS {
+            return Err(Failure::new(
+                "send_too_many",
+                "At most 8 --send files per connection; send the rest in another connection.",
+                2,
+            ));
         }
         if audio && control {
             return Err(Failure::new(
@@ -648,6 +678,7 @@ fn parse_command(
                     server: audio_server,
                     sink: audio_sink,
                 }),
+                send,
             })
         }
     } else if doctor {
@@ -791,6 +822,62 @@ mod tests {
                 "invalid_arguments",
                 "{refused}"
             );
+        }
+    }
+    #[test]
+    fn send_is_a_repeatable_bounded_control_only_selection() {
+        let base = "n-host --experimental-native --worker /opt/fr/worker --display only";
+        let Command::Connect(plain) = options(&format!("connect {base} --control"))
+            .unwrap()
+            .command
+        else {
+            unreachable!("connection required");
+        };
+        assert_eq!(plain.send, Vec::<PathBuf>::new());
+        let Command::Connect(c) = options(&format!(
+            "connect {base} --control --send /home/u/a.bin --send /home/u/données.txt"
+        ))
+        .unwrap()
+        .command
+        else {
+            unreachable!("connection required");
+        };
+        assert_eq!(
+            c.send,
+            [
+                PathBuf::from("/home/u/a.bin"),
+                PathBuf::from("/home/u/données.txt")
+            ]
+        );
+        for (flags, code) in [
+            ("--view-only --send /a", "send_requires_control"),
+            (
+                "--control --clipboard --send /a",
+                "send_with_clipboard_unsupported",
+            ),
+            (
+                "--control --send /1 --send /2 --send /3 --send /4 --send /5 --send /6 --send /7 --send /8 --send /9",
+                "send_too_many",
+            ),
+            // Absolute, no parent components, never valueless.
+            ("--control --send relative.txt", "invalid_arguments"),
+            ("--control --send /a/../b", "invalid_arguments"),
+            ("--control --send", "invalid_arguments"),
+        ] {
+            assert_eq!(
+                options(&format!("connect {base} {flags}"))
+                    .err()
+                    .unwrap()
+                    .code,
+                code,
+                "{flags}"
+            );
+        }
+        for refused in [
+            "displays n-host --experimental-native --send /a",
+            "hosts --send /a",
+        ] {
+            assert_eq!(options(refused).err().unwrap().code, "invalid_arguments");
         }
     }
     #[test]

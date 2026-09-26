@@ -49,6 +49,13 @@ pub struct RunOptions {
     pub audio_server: Option<PathBuf>,
     /// Sink whose monitor is captured; default: the server's default sink.
     pub audio_sink: Option<String>,
+    /// `--files DIR`: the controller's drop directory (needs `input_agent`;
+    /// the caller validates it by type before any I/O).
+    pub files: Option<PathBuf>,
+    /// Per-file byte limit for `--files` (default in `native_files`).
+    pub files_max_file_bytes: Option<u64>,
+    /// Per-controlled-session cumulative byte limit for `--files`.
+    pub files_max_session_bytes: Option<u64>,
 }
 impl RunOptions {
     /// Arguments after `run`. Unknown, duplicate or valueless options refuse
@@ -120,11 +127,22 @@ impl RunOptions {
                 "--input-agent" => set(&mut options.input_agent, PathBuf::from(value))?,
                 "--audio-server" => set(&mut options.audio_server, PathBuf::from(value))?,
                 "--audio-sink" => set(&mut options.audio_sink, value.to_owned())?,
+                "--files" => set(&mut options.files, PathBuf::from(value))?,
+                "--files-max-file-bytes" => set(&mut options.files_max_file_bytes, bytes(value)?)?,
+                "--files-max-session-bytes" => {
+                    set(&mut options.files_max_session_bytes, bytes(value)?)?;
+                }
                 _ => return Err(Error::InvalidArgument),
             }
         }
         // Audio selection flags without the enable are a typo, never a default.
         if !options.audio && (options.audio_server.is_some() || options.audio_sink.is_some()) {
+            return Err(Error::InvalidArgument);
+        }
+        // So are file limits without a drop directory.
+        if options.files.is_none()
+            && (options.files_max_file_bytes.is_some() || options.files_max_session_bytes.is_some())
+        {
             return Err(Error::InvalidArgument);
         }
         Ok(options)
@@ -191,6 +209,16 @@ fn set<T>(slot: &mut Option<T>, value: T) -> Result<(), Error> {
     }
     *slot = Some(value);
     Ok(())
+}
+/// A positive decimal byte count; no units, signs or separators.
+fn bytes(value: &str) -> Result<u64, Error> {
+    if !value.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(Error::InvalidArgument);
+    }
+    match value.parse::<u64>() {
+        Ok(0) | Err(_) => Err(Error::InvalidArgument),
+        Ok(n) => Ok(n),
+    }
 }
 fn value<'a>(iter: &mut std::slice::Iter<'a, String>) -> Result<&'a str, Error> {
     iter.next()
@@ -264,6 +292,39 @@ mod tests {
             &["--audio-sink", "speakers"][..],
             &["--audio", "--audio-sink"][..],
             &["--audio", "--audio-server", "/a", "--audio-server", "/b"][..],
+        ] {
+            assert!(
+                matches!(parse(refused), Err(Error::InvalidArgument)),
+                "{refused:?}"
+            );
+        }
+    }
+    #[test]
+    fn files_is_an_explicit_local_directory_with_optional_byte_limits() {
+        let off = parse(&["--software-explicit"]).unwrap();
+        assert!(off.files.is_none() && off.files_max_file_bytes.is_none());
+        let on = parse(&[
+            "--input-agent",
+            "/a",
+            "--files",
+            "/srv/drop",
+            "--files-max-file-bytes",
+            "1048576",
+            "--files-max-session-bytes",
+            "4194304",
+        ])
+        .unwrap();
+        assert_eq!(on.files, Some(PathBuf::from("/srv/drop")));
+        assert_eq!(on.files_max_file_bytes, Some(1_048_576));
+        assert_eq!(on.files_max_session_bytes, Some(4_194_304));
+        for refused in [
+            &["--files"][..],
+            &["--files", "/a", "--files", "/b"][..],
+            &["--files-max-file-bytes", "10"][..],
+            &["--files-max-session-bytes", "10"][..],
+            &["--files", "/a", "--files-max-file-bytes", "0"][..],
+            &["--files", "/a", "--files-max-file-bytes", "1MiB"][..],
+            &["--files", "/a", "--files-max-session-bytes", "+5"][..],
         ] {
             assert!(
                 matches!(parse(refused), Err(Error::InvalidArgument)),

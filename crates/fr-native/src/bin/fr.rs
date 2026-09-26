@@ -42,7 +42,7 @@ fr connect NODE_ID --view-only|--control --experimental-native
     --display HANDLE|only|choose [--worker /absolute/fr-media-worker] [--trust-roots /absolute/ca-roots.pem]
     [--by-name] [--x-display :0] [--socket /absolute/tailscaled.sock]
     [--port 8443] [--ipv6] [--attempts 1..32] [--fit WIDTHxHEIGHT] [--clipboard]
-    [--audio [--audio-server /absolute/pulse/native] [--audio-sink NAME]] [--json]
+    [--send /absolute/file]... [--audio [--audio-server /absolute/pulse/native] [--audio-sink NAME]] [--json]
 fr robot session open NODE_ID [--role view|control] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
 fr robot session close NODE_ID [--lease LEASE] [--socket /absolute/tailscaled.sock] [--json]
 fr robot observe NODE_ID [--display N] [--screenshot /path/screen.png] [--evidence-level decoded|submitted_to_compositor|instrumentally_observed] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
@@ -62,12 +62,18 @@ Connect uses fresh installed-tailnet identity and strict TLS on every attempt.
 Connect needs exactly one role. --view-only never requests control.
 --control requests input control ONCE, after the window shows a fresh frame; the
 host must run frd run --input-agent. Keys, buttons, absolute pointer and discrete
-line-wheel scrolling are available (no text, pixel-scroll, audio or files).
+line-wheel scrolling are available (no text, pixel-scroll or audio).
 Lost or refused control is never
 retried or reacquired: after a request, fr does not reconnect.
 --clipboard (with --control; build with linux-clipboard) lets the UTF-8 text
 CLIPBOARD follow the control lease both ways, when the host runs frd run
 --clipboard too; otherwise the completion reports clipboard absence by type.
+--send PATH (with --control, repeatable up to 8) sends those regular files, in
+order, into the host's drop directory after control is granted, when the host
+runs frd run --files DIR; symlinks, directories and special files are refused
+before connecting. The host never overwrites: a taken name is refused. The
+completion reports each file by index and size only (host-reported outcome), or
+the typed reason nothing was sent. Not together with --clipboard in this build.
 --audio (with --view-only only) asks for host playback audio; without it no audio
 capability is offered. The host must run frd run --audio. Output goes to the local
 PulseAudio server (--audio-server, else PULSE_SERVER, else

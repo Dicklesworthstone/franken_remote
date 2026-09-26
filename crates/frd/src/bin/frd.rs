@@ -58,6 +58,15 @@ OPTIONS:
     --clipboard     With --input-agent: the controller's UTF-8 text clipboard
                     follows its lease, both directions (the agent's per-lane
                     --clipboard child owns X11 CLIPBOARD). Off by default
+    --files DIR     With --input-agent: the controller may send regular files
+                    (fr connect --control --send) into DIR, an existing absolute
+                    directory owned by this user and not group/other-writable,
+                    reached without symlinks. Only under the live input lease;
+                    never overwrites (a taken name is refused); staged privately
+                    and published atomically. Off by default
+    --files-max-file-bytes N     Largest accepted file (default 268435456)
+    --files-max-session-bytes N  Total declared bytes per controlled session,
+                    refused offers included (default 1073741824)
     --audio         Locally enable host playback audio (off by default): an admitted
                     view-only viewer that asks for audio gets the monitor of the
                     selected output, Opus-encoded by the worker. Endpoint-wide:
@@ -431,6 +440,19 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
             2,
         );
     }
+    if options.files.is_some() && options.input_agent.is_none() {
+        return run_refusal(
+            json,
+            "files_requires_input_agent",
+            "--files receives the controller's explicit sends for the life of its input lease; \
+             it needs --input-agent (a view-only share never receives files)",
+            2,
+        );
+    }
+    let files = match files(&options, json) {
+        Ok(files) => files,
+        Err(code) => return code,
+    };
     // Keep the Xvfb owner alive for the whole run; dropping it stops the server
     // and removes its private cookie.
     let (display, xauthority, headless) = match select_desktop(&options, json) {
@@ -485,6 +507,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         input_agent,
         clipboard: options.clipboard,
         audio,
+        files,
     };
     let report: Reporter = Arc::new(move |event: Event| print_event(json, &event));
     let stop = Arc::new(host_run::StopHandle::default());
@@ -519,6 +542,47 @@ fn input_agent(
         )),
         agent => Ok(agent.clone()),
     }
+}
+
+/// The optional drop directory: validated by type and pinned by descriptor
+/// before any display, worker or network I/O. The refusal names no path.
+#[cfg(target_os = "linux")]
+fn files(
+    options: &frd::host_policy::options::RunOptions,
+    json: bool,
+) -> Result<Option<frd::native_files::Directory>, ExitCode> {
+    use frd::native_files::{Directory, DirectoryRefusal, Limits};
+    let Some(path) = &options.files else {
+        return Ok(None);
+    };
+    let defaults = Limits::default();
+    let limits = Limits {
+        max_file_bytes: options
+            .files_max_file_bytes
+            .unwrap_or(defaults.max_file_bytes),
+        max_session_bytes: options
+            .files_max_session_bytes
+            .unwrap_or(defaults.max_session_bytes),
+    };
+    Directory::open(path, limits).map(Some).map_err(|refusal| {
+        let detail = match refusal {
+            DirectoryRefusal::Relative => "--files needs an absolute directory path",
+            DirectoryRefusal::Missing => "--files names no existing directory; create it first",
+            DirectoryRefusal::NotDirectory => "--files names something that is not a directory",
+            DirectoryRefusal::Symlink => {
+                "--files must be reached without symbolic links (the directory or a parent is one)"
+            }
+            DirectoryRefusal::NotOwned => "--files must be owned by the user running frd",
+            DirectoryRefusal::WritableByOthers => {
+                "--files must not be group- or other-writable (chmod go-w)"
+            }
+            DirectoryRefusal::Limits => {
+                "--files-max-session-bytes must be at least --files-max-file-bytes"
+            }
+            DirectoryRefusal::Unavailable => "--files could not be opened as a private directory",
+        };
+        run_refusal(json, refusal.code(), detail, 2)
+    })
 }
 
 /// The optional LOCAL playback-audio enable. The server socket is local

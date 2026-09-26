@@ -50,6 +50,26 @@ pub fn host_offer_with(control: bool, clipboard: bool) -> Offer {
 /// approval: audio still waits for this session's admitted observation, and a
 /// viewer that does not offer it receives no audio record.
 pub fn host_offer_with_audio(control: bool, clipboard: bool, audio: bool) -> Offer {
+    host_offer_with_files(control, clipboard, audio, false)
+}
+/// The three boundaries of the optional viewer-to-host drop lane: its
+/// attachment role, the ATP full-object envelope and channel-derived scope
+/// (no out-of-band handle, no host path). Offered OPTIONAL by both sides.
+pub const FILE_CAPABILITIES: [(&str, u16); 3] = [
+    (attachment::FILES_CAPABILITY, attachment::FILES_VERSION),
+    (fr_wire::files::CAPABILITY, fr_wire::files::VERSION),
+    (
+        fr_wire::files::CHANNEL_SCOPE_CAPABILITY,
+        fr_wire::files::CHANNEL_SCOPE_VERSION,
+    ),
+];
+/// [`host_offer_with_audio`] plus, only with `control` AND the operator's
+/// local `--files` drop directory, the optional file boundaries. Selecting
+/// them is not a transfer: the lane is offered only on the controller's own
+/// session after its grant, and attaches only under its active input lease.
+// Independent operator opt-ins, each one plain capability switch.
+#[allow(clippy::fn_params_excessive_bools)]
+pub fn host_offer_with_files(control: bool, clipboard: bool, audio: bool, files: bool) -> Offer {
     let observation = [
         (fr_wire::display::CAPABILITY, 1),
         (decoder::CAPABILITY, 1),
@@ -85,6 +105,12 @@ pub fn host_offer_with_audio(control: bool, clipboard: bool, audio: bool) -> Off
                 .into_iter()
                 .filter(|_| audio),
         )
+        .chain(
+            FILE_CAPABILITIES
+                .iter()
+                .filter(|_| control && files)
+                .map(|&(name, version)| (name, version, false)),
+        )
         .map(|(name, version, required)| Capability {
             name: name.into(),
             version,
@@ -111,6 +137,26 @@ pub(crate) fn audio_selected(selection: &Selection) -> bool {
             .capabilities
             .iter()
             .any(|c| c.name == fr_wire::audio::CAPABILITY && c.version == fr_wire::audio::VERSION)
+}
+
+/// Whether this session sets up the drop lane: control and all three file
+/// boundaries selected, and NOT the clipboard. A selected clipboard always
+/// runs its own (consenting or declining) exchange on the same serialized
+/// control-route handshake, and this slice never races the two; both peers
+/// evaluate this same predicate on the same selection.
+pub(crate) fn files_lane(selection: &Selection) -> Result<(), crate::native_files::Absence> {
+    use crate::native_files::Absence;
+    if selection.role != Role::RequestControl
+        || !FILE_CAPABILITIES
+            .iter()
+            .all(|&(name, version)| selected(selection, name, version))
+    {
+        return Err(Absence::NotNegotiated);
+    }
+    if super::clipboard::selected(selection).is_ok() {
+        return Err(Absence::WithClipboard);
+    }
+    Ok(())
 }
 
 pub(super) fn profile(selection: &Selection, control: bool) -> bool {

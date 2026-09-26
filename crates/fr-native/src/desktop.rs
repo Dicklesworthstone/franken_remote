@@ -104,6 +104,8 @@ pub enum Error {
     LayoutMismatch,
     /// Typed absence of host playback audio for this session.
     Audio(frd::session_startup::ViewerAudioUnavailable),
+    /// Typed absence of the controller's drop lane for this session.
+    Files(frd::native_files::Absence),
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -235,6 +237,22 @@ impl Desktop {
             .ok_or(Error::NotViewing)?
             .configure_clipboard(configuration)
             .map_err(Error::Clipboard)
+    }
+    /// `fr connect --control --send`: hand this attempt's explicit local
+    /// selection to the controller's drop lane before service. Nothing is read
+    /// here; no source starts before the grant and the host's one-use offer.
+    pub fn configure_file_send(
+        &mut self,
+        request: frd::native_files::SendRequest,
+    ) -> Result<frd::native_files::SendControl, Error> {
+        if self.state() != State::Viewing {
+            return Err(Error::NotViewing);
+        }
+        self.observer
+            .as_mut()
+            .ok_or(Error::NotViewing)?
+            .configure_file_send(request)
+            .map_err(Error::Files)
     }
     /// Install the local playback output for this observer's attached
     /// audio-down lane, before serving. `Audio(NotSelected)` is typed absence:

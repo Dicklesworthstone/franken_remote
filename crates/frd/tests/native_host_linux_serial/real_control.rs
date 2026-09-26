@@ -369,11 +369,16 @@ fn connect(
     display: &str,
     worker: &Path,
     clipboard: bool,
+    send: &[PathBuf],
 ) -> Child {
     let port = address().port().to_string();
     Command::new(fr)
         .args(["connect", "n-host", "--control", "--experimental-native"])
         .args(clipboard.then_some("--clipboard"))
+        .args(
+            send.iter()
+                .flat_map(|path| [std::ffi::OsStr::new("--send"), path.as_os_str()]),
+        )
         .args(["--display", "only", "--attempts", "1", "--json"])
         .arg("--socket")
         .arg(api)
@@ -400,7 +405,13 @@ pub(super) struct Daemon {
     _tools: Tools,
 }
 impl Daemon {
-    fn start(display: &str, worker: &Path, input_agent: Option<PathBuf>, clipboard: bool) -> Self {
+    fn start(
+        display: &str,
+        worker: &Path,
+        input_agent: Option<PathBuf>,
+        clipboard: bool,
+        files: Option<frd::native_files::Directory>,
+    ) -> Self {
         let api = fixture::Api::new();
         let tools = Tools::new();
         let options = Options {
@@ -420,6 +431,7 @@ impl Daemon {
             input_agent,
             clipboard,
             audio: None,
+            files,
         };
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = events.clone();
@@ -484,6 +496,15 @@ impl Controlled {
     }
     /// `frd run --input-agent [--clipboard]` and `fr connect --control [--clipboard]`.
     pub(super) fn start_with(host_clipboard: bool, client_clipboard: bool) -> Self {
+        Self::start_full(host_clipboard, client_clipboard, None, &[])
+    }
+    /// Also `frd run --files DIR` (a pinned `Directory`) and `--send PATH...`.
+    pub(super) fn start_full(
+        host_clipboard: bool,
+        client_clipboard: bool,
+        files: Option<frd::native_files::Directory>,
+        send: &[PathBuf],
+    ) -> Self {
         let (fr, worker, agent) = (
             sibling("fr"),
             sibling("fr-media-worker"),
@@ -493,7 +514,7 @@ impl Controlled {
         let viewer = Xvfb::start("800x600x24");
         let mut observer = Harness::start(HOST_OBSERVER, &host.display, "READY");
         let driver = Harness::start(VIEWER_DRIVER, &viewer.display, "WATCHING");
-        let daemon = Daemon::start(&host.display, &worker, Some(agent), host_clipboard);
+        let daemon = Daemon::start(&host.display, &worker, Some(agent), host_clipboard, files);
         // No viewer, no lease: the executor (and its indicator) is per lease.
         assert_eq!(indicator(&mut observer), None);
         let client_api = ClientApi::new();
@@ -505,6 +526,7 @@ impl Controlled {
             &viewer.display,
             &worker,
             client_clipboard,
+            send,
         );
         let mut session = Self {
             observer,
@@ -785,10 +807,18 @@ fn a_stopped_controller_loses_its_lease_and_later_input_has_no_host_effect() {
 fn a_host_without_an_input_agent_refuses_fr_connect_control_by_type() {
     let (fr, worker) = (sibling("fr"), sibling("fr-media-worker"));
     let host = Xvfb::start("640x480x24");
-    let daemon = Daemon::start(&host.display, &worker, None, false);
+    let daemon = Daemon::start(&host.display, &worker, None, false, None);
     let client_api = ClientApi::new();
     let roots = fixture::pki().join("ca.pem");
-    let client = connect(&fr, &client_api.path, &roots, &host.display, &worker, false);
+    let client = connect(
+        &fr,
+        &client_api.path,
+        &roots,
+        &host.display,
+        &worker,
+        false,
+        &[],
+    );
     let output = wait_for(client, Duration::from_secs(60));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let report: serde_json::Value = serde_json::from_str(stdout.trim())

@@ -146,6 +146,7 @@ fn normal_network_loop_reports_lost_reference_and_keeps_original_observation_ren
                 network(
                     &mut peer,
                     None,
+                    None,
                     &mut receiver,
                     &mut repairs,
                     Some(&mut watcher),
@@ -202,6 +203,7 @@ fn malformed_receiver_remains_terminal_without_emitting_a_recovery_record() {
         let result = network(
             &mut peer,
             None,
+            None,
             &mut receiver,
             &mut Repair::default(),
             Some(&mut watcher),
@@ -246,6 +248,7 @@ fn omitted_recovery_owner_preserves_the_original_terminal_failure() {
         assert_eq!(
             network(
                 &mut peer,
+                None,
                 None,
                 &mut receiver,
                 &mut Repair::default(),
