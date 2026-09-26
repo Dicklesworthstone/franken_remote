@@ -20,7 +20,9 @@ use std::{
 };
 
 mod lifetime;
-pub use lifetime::terminal::{RevocationRegistration, RevocationReport};
+pub use lifetime::terminal::{
+    ClosedRegistration, ClosedReport, RevocationRegistration, RevocationReport,
+};
 
 pub mod budget;
 pub mod clipboard;

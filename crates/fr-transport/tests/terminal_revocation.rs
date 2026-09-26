@@ -402,3 +402,6 @@ mod deferred;
 
 #[path = "terminal_revocation/closed.rs"]
 mod closed;
+
+#[path = "terminal_revocation/closed_deferred.rs"]
+mod closed_deferred;

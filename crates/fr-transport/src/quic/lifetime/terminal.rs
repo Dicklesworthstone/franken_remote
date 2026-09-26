@@ -22,7 +22,7 @@ use std::{future::Future, sync::Arc, time::Duration};
 
 mod deferred;
 pub(in crate::quic) use deferred::Armed;
-pub use deferred::{RevocationRegistration, RevocationReport};
+pub use deferred::{ClosedRegistration, ClosedReport, RevocationRegistration, RevocationReport};
 
 const DRAIN_US: u64 = 250_000;
 const TURN: Duration = Duration::from_millis(10);
@@ -66,6 +66,7 @@ struct Drain {
     cx: Cx,
     gate: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     route: StreamRoute,
+    binding: Binding,
     empty: EmptySendState,
     streams: usize,
     last: u64,
@@ -147,10 +148,6 @@ impl QuicRecords {
             Err(Error::WrongRoute)
         };
         async move { prepared?.run().await }
-    }
-
-    fn revocation_route(&self, route: StreamRoute, binding: Binding) -> Result<(), Error> {
-        self.terminal_route(route, binding, REVOKED_BYTES)
     }
 
     fn terminal_route(
@@ -243,6 +240,7 @@ impl QuicRecords {
             cx: cx.clone(),
             gate: self.terminal_lifetime_check.clone(),
             route,
+            binding,
             empty,
             streams: self.streams.len(),
             last: started,

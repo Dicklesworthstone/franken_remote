@@ -1,10 +1,13 @@
 //! One-use custody transfer on ordinary connection closure. This is not another
 //! send mode: the consumer can only run the existing bounded terminal drain.
-use super::{Binding, Drain, Error, QuicRecords, Revoked, StreamRoute};
+use super::{Binding, Closed, Drain, Error, QuicRecords, Report, Revoked, StreamRoute};
 use crate::quic::ConnectionBinding;
 use asupersync::cx::Cx;
 use fr_core::ids::InputLeaseId;
-use fr_wire::lease_revoked::{CleanupStage, EffectStage, Reason};
+use fr_wire::{
+    closure::{CLOSED_BYTES, Cleanup, ClosedReason, OutstandingEffects},
+    lease_revoked::{CleanupStage, EffectStage, REVOKED_BYTES, Reason},
+};
 use std::{
     future::Future,
     sync::{Arc, Mutex, Weak},
@@ -40,22 +43,94 @@ impl RevocationReport {
     /// before closure cannot be recovered; its outcome is `Some(Err(Closed))`.
     /// The drain's fixed deadline was set at closure and is never restarted.
     pub fn finish(self) -> impl Future<Output = Option<Result<(), Error>>> + use<> {
-        let prepared = {
-            let mut state = self
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match std::mem::replace(&mut *state, State::Finished) {
-                State::Unarmed => None,
-                State::Ready(result) => Some(result),
-                State::Armed | State::Finished => Some(Err(Error::Closed)),
-            }
-        };
-        async move {
-            match prepared {
-                None => None,
-                Some(Err(error)) => Some(Err(error)),
-                Some(Ok(drain)) => Some(drain.run().await),
+        finish(self.take())
+    }
+    fn take(self) -> Option<Result<Box<Drain>, Error>> {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match std::mem::replace(&mut *state, State::Finished) {
+            State::Unarmed => None,
+            State::Ready(result) => Some(result),
+            State::Armed | State::Finished => Some(Err(Error::Closed)),
+        }
+    }
+}
+
+/// One session-closure consumer, distinct from lease-revocation reporting. Its
+/// owner supplies the actual outcome only AFTER fencing and ordered teardown.
+/// Capturing a socket never invents completed cleanup or zero outstanding effects.
+/// There is at most one terminal registration of either kind per connection.
+#[derive(Default)]
+pub struct ClosedReport(RevocationReport);
+
+/// Weak one-use session-closure registration. It grants neither normal traffic
+/// nor cleanup success, and cannot replace an armed lease-revocation consumer.
+#[derive(Clone)]
+pub struct ClosedRegistration(RevocationRegistration);
+
+impl ClosedReport {
+    pub fn registration(&self) -> ClosedRegistration {
+        ClosedRegistration(self.0.registration())
+    }
+    /// Freeze the terminal outcome at CALL time, not on first poll. `report`
+    /// must describe this session's original owners; transport cannot derive
+    /// native cleanup or receipt counts. The original 250-ms closure deadline
+    /// includes time already spent cleaning up. Late completion cannot renew it.
+    /// No registered/captured socket means no report, never a reconnect or retry.
+    pub fn finish(self, report: Closed) -> impl Future<Output = Option<Result<(), Error>>> + use<> {
+        let prepared = self.0.take().map(|result| {
+            result.and_then(|mut drain| {
+                drain.byte_len = Report::Closed(report).encode(drain.binding, &mut drain.bytes)?;
+                Ok(drain)
+            })
+        });
+        finish(prepared)
+    }
+}
+
+async fn finish(prepared: Option<Result<Box<Drain>, Error>>) -> Option<Result<(), Error>> {
+    match prepared {
+        None => None,
+        Some(Err(error)) => Some(Err(error)),
+        Some(Ok(drain)) => Some(drain.run().await),
+    }
+}
+
+enum Fence {
+    Revocation {
+        lease: InputLeaseId,
+        stop: Box<dyn Fn() -> Reason + Send + Sync>,
+    },
+    Closed(Box<dyn Fn() + Send + Sync>),
+}
+impl Fence {
+    const fn byte_len(&self) -> usize {
+        match self {
+            Self::Revocation { .. } => REVOKED_BYTES,
+            Self::Closed(_) => CLOSED_BYTES,
+        }
+    }
+    fn run(self) -> Report {
+        match self {
+            Self::Revocation { lease, stop } => Report::Revoked(Revoked {
+                lease,
+                reason: stop(),
+                cleanup: CleanupStage::Fenced,
+                effects: EffectStage::Unknown,
+            }),
+            Self::Closed(stop) => {
+                stop();
+                // Private preparation only: no I/O occurs here. ClosedReport's
+                // consumer MUST replace this with its final typed outcome before
+                // the detached drain becomes runnable. An abandoned owner drops
+                // the socket, never publishes a guessed reason or success stage.
+                Report::Closed(Closed {
+                    reason: ClosedReason::HostFailure,
+                    cleanup: Cleanup::Unconfirmed,
+                    effects: OutstandingEffects::Unknown,
+                })
             }
         }
     }
@@ -65,16 +140,15 @@ pub(in crate::quic) struct Armed {
     cleanup: Cx,
     route: StreamRoute,
     binding: Binding,
-    lease: InputLeaseId,
     registration: RevocationRegistration,
-    fence: Option<Box<dyn Fn() -> Reason + Send + Sync>>,
+    fence: Option<Fence>,
 }
 impl Drop for Armed {
     fn drop(&mut self) {
-        // This field precedes the socket: abandonment also fences the lease
-        // before releasing transport custody. No I/O is performed in Drop.
+        // This field precedes the socket: abandonment also fences the lease or
+        // observation before releasing custody. No I/O is performed in Drop.
         if let Some(fence) = self.fence.take() {
-            let _ = fence();
+            let _ = fence.run();
         }
     }
 }
@@ -101,6 +175,57 @@ impl QuicRecords {
         registration: RevocationRegistration,
         fence: impl Fn() -> Reason + Send + Sync + 'static,
     ) -> Result<(), Error> {
+        if lease.as_raw() == 0 {
+            return Err(Error::Malformed);
+        }
+        self.arm_terminal(
+            cleanup,
+            original,
+            route,
+            binding,
+            registration,
+            Fence::Revocation {
+                lease,
+                stop: Box::new(fence),
+            },
+        )
+    }
+
+    /// Register ONE observation-session closure consumer before ordinary I/O
+    /// can close its socket. The owner must fence this exact observation in the
+    /// bounded callback, then finish the report AFTER its ordered teardown.
+    /// `cleanup` has the same independent-clock/security requirements as the
+    /// lease-specific registration. No callback executes native I/O or awaits.
+    /// A control-capable owner must retain lease-specific reporting instead.
+    #[allow(clippy::too_many_arguments)]
+    pub fn arm_closed_report(
+        &mut self,
+        cleanup: &Cx,
+        original: &ConnectionBinding,
+        route: StreamRoute,
+        binding: Binding,
+        registration: ClosedRegistration,
+        fence: impl Fn() + Send + Sync + 'static,
+    ) -> Result<(), Error> {
+        self.arm_terminal(
+            cleanup,
+            original,
+            route,
+            binding,
+            registration.0,
+            Fence::Closed(Box::new(fence)),
+        )
+    }
+
+    fn arm_terminal(
+        &mut self,
+        cleanup: &Cx,
+        original: &ConnectionBinding,
+        route: StreamRoute,
+        binding: Binding,
+        registration: RevocationRegistration,
+        fence: Fence,
+    ) -> Result<(), Error> {
         if !self.is_bound_to(original) {
             return Err(Error::WrongRoute);
         }
@@ -108,8 +233,8 @@ impl QuicRecords {
             return Err(Error::InvalidPolicy);
         }
         self.check(cleanup, &mut || true)?;
-        self.revocation_route(route, binding)?;
-        if binding.session.as_raw() == 0 || lease.as_raw() == 0 {
+        self.terminal_route(route, binding, fence.byte_len())?;
+        if binding.channel == 0 || binding.session.as_raw() == 0 {
             return Err(Error::Malformed);
         }
         let shared = registration.0.upgrade().ok_or(Error::Closed)?;
@@ -124,9 +249,8 @@ impl QuicRecords {
             cleanup: cleanup.clone(),
             route,
             binding,
-            lease,
             registration,
-            fence: Some(Box::new(fence)),
+            fence: Some(fence),
         }));
         Ok(())
     }
@@ -137,22 +261,16 @@ impl QuicRecords {
         };
         // No reporting lock while fencing authority or inspecting native state.
         // Nothing below drives native I/O or dispatches application records.
-        let reason = armed.fence.take().expect("one fence per registration")();
+        let report = armed
+            .fence
+            .take()
+            .expect("one fence per registration")
+            .run();
         let Some(shared) = armed.registration.0.upgrade() else {
             return;
         };
         let prepared = self
-            .prepare_revocation(
-                &armed.cleanup,
-                armed.route,
-                armed.binding,
-                Revoked {
-                    lease: armed.lease,
-                    reason,
-                    cleanup: CleanupStage::Fenced,
-                    effects: EffectStage::Unknown,
-                },
-            )
+            .prepare_report(&armed.cleanup, armed.route, armed.binding, report)
             .map(Box::new);
         let mut state = shared
             .lock()
