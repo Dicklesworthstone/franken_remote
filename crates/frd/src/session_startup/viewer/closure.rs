@@ -43,3 +43,81 @@ pub(super) fn receive(
         },
     )
 }
+
+impl super::ViewerSession {
+    /// End an observation-only session and request its original host's final
+    /// report. Ordinary I/O and renewal stop at CALL time, before polling this
+    /// future. No normal application dispatch runs during the closing exchange.
+    ///
+    /// Callers owning media must first stop presentation and other native work;
+    /// this control-session API does not claim to reap another owner's decoder.
+    /// Control-intent sessions refuse and close locally, retaining their existing
+    /// input-cleanup obligations instead of bypassing lease-specific teardown.
+    ///
+    /// Waiting uses the original session context (still externally cancellable)
+    /// and destination guard. It never resets cancellation or renews authority.
+    /// The existing 250-ms exchange budget is further capped by the ORIGINAL
+    /// silence and pending-response deadlines. Drop, refusal, timeout and success
+    /// all finish local teardown. There is no reconnect or retry on this owner.
+    ///
+    /// The outcome distinguishes request ACK, the exact optional host report and
+    /// transport failure. A received report survives even a failed final ACK and
+    /// remains accessible via `closed_report`; absent reports never become zero
+    /// effects or successful cleanup. Existing per-action receipts are unchanged.
+    pub fn disconnect(
+        &mut self,
+        reason: closure::Reason,
+    ) -> impl std::future::Future<Output = Result<quic::CloseOutcome, Error>> + '_ {
+        // Install before any preflight or transport callback: an unwinding
+        // preparation must fence this same session, not only an awaited future.
+        let ending = Disconnect(self);
+        let viewer = &mut *ending.0;
+        let ready = viewer.check().and_then(|()| {
+            if viewer.opened.selection.role != fr_wire::negotiation::Role::Observe {
+                return Err(Error::Order);
+            }
+            Ok(viewer
+                .responder
+                .response_deadline()
+                .map_or(viewer.heard_until, |at| at.0.min(viewer.heard_until)))
+        });
+        // Fence ordinary session methods without cancelling the context that
+        // still owns the one terminal exchange. The external stop handle and
+        // immutable transport guard continue to cancel that exchange normally.
+        viewer.closed = true;
+        viewer.responder.stop();
+        if let Some(clock) = &mut viewer.clock {
+            clock.stop();
+        }
+        let prepared = ready.map(|until| {
+            viewer.transport.close_with_request(
+                &viewer.cx,
+                &viewer.connection,
+                viewer.routes,
+                Binding {
+                    channel: viewer.opened.binding.id,
+                    session: viewer.opened.binding.remote_session,
+                },
+                closure::CloseRequest { reason },
+                until,
+            )
+        });
+        if prepared.is_err() {
+            viewer.close();
+        }
+        async move {
+            let outcome = prepared?.await;
+            if let Some(report) = outcome.report {
+                ending.0.remote_closed = Some(report);
+            }
+            drop(ending);
+            Ok(outcome)
+        }
+    }
+}
+struct Disconnect<'a>(&'a mut super::ViewerSession);
+impl Drop for Disconnect<'_> {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}

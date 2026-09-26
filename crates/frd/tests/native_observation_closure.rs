@@ -356,3 +356,6 @@ fn credential_revocation_after_capture_prevents_the_final_report() {
 fn control_intent_does_not_occupy_the_future_lease_reporters_slot() {
     run(async |b, h, c| Box::pin(scenario(b, h, c, Ending::ControlIntent)).await);
 }
+
+#[path = "native_observation_closure/disconnect.rs"]
+mod disconnect;
