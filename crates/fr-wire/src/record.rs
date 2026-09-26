@@ -111,6 +111,7 @@ pub enum Kind {
     StreamBinding = 0x001b,
     BindingAccepted = 0x001c,
     CloseRequest = 0x001d,
+    Closed = 0x001e,
     DisplayCatalog = 0x0020,
     SelectDisplay = 0x0022,
     DecoderConfiguration = 0x0030,
@@ -183,6 +184,7 @@ impl Kind {
             0x001b => Ok(Self::StreamBinding),
             0x001c => Ok(Self::BindingAccepted),
             0x001d => Ok(Self::CloseRequest),
+            0x001e => Ok(Self::Closed),
             0x0020 => Ok(Self::DisplayCatalog),
             0x0022 => Ok(Self::SelectDisplay),
             0x0030 => Ok(Self::DecoderConfiguration),
@@ -253,6 +255,7 @@ impl Kind {
             | Self::StreamBinding
             | Self::BindingAccepted
             | Self::CloseRequest
+            | Self::Closed
             | Self::DisplayCatalog
             | Self::RecoveryRequest
             | Self::SelectDisplay

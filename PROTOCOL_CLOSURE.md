@@ -2,8 +2,8 @@
 
 Implementation contract under [PROTOCOL.md](PROTOCOL.md) sections 4 and 6,
 bead `fr-rc-protocol-refusal-closure-5dx`. This slice implements the
-session-close scope of CloseRequest (0x001d), not control-release-only or
-Closed/LeaseRevoked reporting. It is not a platform qualification report.
+session-close scope of CloseRequest (0x001d) and the Closed (0x001e)
+codec, not control-release-only. LeaseRevoked has its separate contract. It is not a platform qualification report.
 
 ## CloseRequest
 
@@ -76,3 +76,50 @@ run for `ViewerSession::inspect_displays` on a caller-owned existing session:
 that caller might already have queued auxiliary work through its public I/O
 loan. Only fresh Viewer startup owned throughout the inspection is eligible;
 existing-session inspection retains its immediate local-close behavior.
+
+
+## Closed (0x001e)
+
+A final host-to-viewer session report on the ORIGINAL reliable control stream,
+with its installed nonzero compact binding and matching 128-bit remote session.
+Authority must be fenced and ordered teardown entered before reporting; the
+codec itself does not perform cleanup. No report is admitted before SessionOpened.
+The payload is exactly 28 bytes (52 including the FRD0 header):
+
+| Field | Bytes | Meaning |
+|---|---:|---|
+| remote_session | 16 | Original session, big-endian |
+| reason | 2 | Stable final reason below |
+| cleanup | 1 | 1 unconfirmed, 2 complete, 3 incomplete |
+| effects_known | 1 | 0 unknown, 1 counts supplied by the original input owner |
+| pending_actions | 4 | Actions still awaiting a final receipt |
+| uncertain_actions | 4 | Final receipts with unknown/partial external effects |
+
+Final reasons: 1 client requested, 2 host stopping, 3 authority expired,
+4 permission lost, 5 view invalidated, 6 protocol error, 7 host failure,
+8 session replaced. These codes are independent of CloseRequest's reasons.
+Unknown effects MUST encode both counters as zero; this is distinct from known
+zero counts. Unknown flags, reasons, cleanup values and noncanonical unknown
+counts refuse. The ordinary header-extension and negotiated-size rules apply.
+
+Cleanup completion does not roll back input or imply complete effect accounting;
+uncertain effects can remain after successful native cleanup. Individual
+InputResult receipts must remain available and cannot be replaced by these
+counts. A closed socket, absent report or transport ACK never supplies missing
+counts, confirms physical key release, or completes another viewer's shared
+worker. Unconfirmed/incomplete reports retain that distinction at the client.
+
+Independent fixture: binding 7, session 13, host stopping, cleanup unconfirmed,
+effects unknown (not captured from the encoder):
+
+```text
+46 52 44 30 00 00 00 1e 00 00 00 00 00 00 00 1c
+00 00 00 07 00 00 00 00
+00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 0d
+00 02 01 00 00 00 00 00 00 00 00 00
+```
+
+The wire tests include this fixture and an independently specified known-effect
+fixture, every truncation/stream split, wrong roles/bindings, pre-admission
+refusal before allocation, extensions, canonical summaries and short output.
+This wire slice does not by itself send a report or prove native cleanup.
