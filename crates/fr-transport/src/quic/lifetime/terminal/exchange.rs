@@ -47,6 +47,9 @@ struct Exchange {
     binding: Binding,
     empty: EmptySendState,
     streams: usize,
+    read_bytes: u64,
+    advertised_limit: u64,
+    connection_window: u64,
     last: u64,
     until: u64,
     bytes: [u8; REQUEST_BYTES],
@@ -170,6 +173,9 @@ impl QuicRecords {
             binding,
             empty,
             streams: self.streams.len(),
+            read_bytes: self.read_bytes,
+            advertised_limit: self.advertised_limit,
+            connection_window: self.policy.connection_window,
             last: started,
             until,
             bytes,
@@ -255,6 +261,10 @@ impl Exchange {
                         .connection_mut()
                         .read_stream(&self.cx, s.route.stream, s.route.maximum)
                         .map_err(|_| Error::Native)?;
+                    self.read_bytes = self
+                        .read_bytes
+                        .checked_add(s.remainder.len() as u64)
+                        .ok_or(Error::Clock)?;
                 }
                 let count = s.framing.push(&s.remainder, at)?;
                 s.remainder = s.remainder.slice(count..);
@@ -288,8 +298,24 @@ impl Exchange {
                     s.framing.finish(at)?;
                     return Err(Error::Closed);
                 }
-                return Ok(false);
+                break;
             }
+        }
+        // Consuming control bytes returns only that much connection credit.
+        // Preserve the original absolute offset and window across handoff: old
+        // traffic on any stream must not reset it, and unconsumed media does not
+        // buy more credit. Otherwise a final report behind valid old control
+        // records can stall forever at MAX_DATA despite their consumption.
+        let limit = self
+            .read_bytes
+            .checked_add(self.connection_window)
+            .ok_or(Error::Clock)?;
+        if limit > self.advertised_limit {
+            self.native
+                .connection_mut()
+                .advertise_connection_receive_limit(&self.cx, limit)
+                .map_err(|_| Error::Native)?;
+            self.advertised_limit = limit;
         }
         Ok(false)
     }
