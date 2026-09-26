@@ -54,6 +54,10 @@ while True:
         configured = True
         reply(h, 270, body)
         continue
+    # ReadCursor: no separate cursor exists here (typed Unsupported).
+    if kind == 16:
+        reply(h, 274, b"\x02")
+        continue
     assert configured and kind in (2, 7) and len(body) == 17
     frame, observed, force = struct.unpack(">QQB", body)
     if last is not None and kind == 7 and not force and MODE != "changing":

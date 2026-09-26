@@ -310,6 +310,16 @@ impl StreamingHost {
             }),
         }
     }
+    /// Before acquiring control: a selected but unconfigured clipboard is
+    /// declined rather than left pending.
+    fn decline_unconfigured_clipboard(&mut self) -> Result<(), Error> {
+        let session = self.host.session()?;
+        crate::native_clipboard::Application::decline_unconfigured(
+            &mut self.clipboard,
+            crate::session_startup::clipboard::selected(&session.opened.selected).is_ok(),
+        );
+        Ok(())
+    }
     async fn serve_inner(
         &mut self,
         nonce: &mut impl FnMut() -> Result<u128, ()>,
@@ -334,11 +344,7 @@ impl StreamingHost {
             return recovery::serve(self, nonce, ticket, other).await;
         }
         if acquisition.is_some() {
-            let session = self.host.session()?;
-            crate::native_clipboard::Application::decline_unconfigured(
-                &mut self.clipboard,
-                crate::session_startup::clipboard::selected(&session.opened.selected).is_ok(),
-            );
+            self.decline_unconfigured_clipboard()?;
         }
         let fence = Fence {
             control: self.stream.control.clone(),
