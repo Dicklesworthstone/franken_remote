@@ -19,7 +19,10 @@ use crate::input::ClientInstant;
 use fr_core::audio::{
     AudioDirection, AudioGeneration, AudioStreamConfig, MAX_JITTER_CEILING_MS, OPUS_SAMPLE_RATE,
 };
-use fr_media::audio::{AudioAccessUnit, AudioDecoder, AudioMediaError, AudioPcmFrame};
+use fr_media::audio::{AudioAccessUnit, AudioMediaError, AudioPcmFrame};
+
+pub mod decoder;
+use decoder::PolledDecoder;
 
 const MAX_AGE_US: u64 = MAX_JITTER_CEILING_MS as u64 * 1000;
 
@@ -77,11 +80,21 @@ struct Arrival {
     until: u64,
 }
 
+#[derive(Clone, Copy)]
+struct Pending {
+    sequence: u64,
+    at: u64,
+    concealed: bool,
+    until: u64,
+}
+
 /// One configured direction, one decoder and the existing 16-packet jitter
 /// bound. At most one decoded PCM frame is alive across the submission callback;
 /// there is no decoded FIFO or public mutable decoder escape.
-pub struct AudioPlayout<D: AudioDecoder> {
+pub struct AudioPlayout<D: PolledDecoder> {
     decoder: Option<D>,
+    configured: bool,
+    pending: Option<Pending>,
     config: AudioStreamConfig,
     floor: AudioGeneration,
     jitter: AudioJitterBuffer,
@@ -92,7 +105,7 @@ pub struct AudioPlayout<D: AudioDecoder> {
     progress_until: Option<u64>,
     error: Option<PlayoutError>,
 }
-impl<D: AudioDecoder> AudioPlayout<D> {
+impl<D: PolledDecoder> AudioPlayout<D> {
     pub fn new(
         config: AudioStreamConfig,
         mut decoder: D,
@@ -100,8 +113,11 @@ impl<D: AudioDecoder> AudioPlayout<D> {
     ) -> Result<Self, PlayoutError> {
         let jitter = Self::configured_jitter(config)?;
         decoder.configure(config).map_err(PlayoutError::Codec)?;
+        let configured = decoder.poll_configured().map_err(PlayoutError::Codec)?;
         Ok(Self {
             decoder: Some(decoder),
+            configured,
+            pending: None,
             config,
             floor: config.generation(),
             jitter,
@@ -119,6 +135,26 @@ impl<D: AudioDecoder> AudioPlayout<D> {
             return Err(PlayoutError::Configuration);
         }
         AudioJitterBuffer::with_config(config).map_err(PlayoutError::Jitter)
+    }
+    /// Nonblocking configuration progress. The containing output owner retains
+    /// its original setup deadline; readiness grants no playback permission.
+    pub fn poll_configured(&mut self, clock: PlayoutClock) -> Result<bool, PlayoutError> {
+        self.check(clock)?;
+        if !self.configured {
+            match self
+                .decoder
+                .as_mut()
+                .ok_or(PlayoutError::Stopped)?
+                .poll_configured()
+            {
+                Ok(ready) => self.configured = ready,
+                Err(error) => {
+                    self.retire(PlayoutError::Codec(error));
+                    return Err(PlayoutError::Codec(error));
+                }
+            }
+        }
+        Ok(self.configured)
     }
     pub const fn error(&self) -> Option<PlayoutError> {
         self.error
@@ -144,6 +180,8 @@ impl<D: AudioDecoder> AudioPlayout<D> {
         self.arrivals.fill(None);
         self.next_output = None;
         self.progress_until = None;
+        self.configured = false;
+        self.pending = None;
         self.decoder = None;
     }
 
@@ -167,6 +205,7 @@ impl<D: AudioDecoder> AudioPlayout<D> {
         }
         let jitter = Self::configured_jitter(config)?;
         decoder.configure(config).map_err(PlayoutError::Codec)?;
+        self.configured = decoder.poll_configured().map_err(PlayoutError::Codec)?;
         self.decoder = Some(decoder);
         self.config = config;
         self.jitter = jitter;
@@ -242,9 +281,10 @@ impl<D: AudioDecoder> AudioPlayout<D> {
         let error =
             if clock.now.0 < self.last.now.0 || clock.output_samples < self.last.output_samples {
                 Some(PlayoutError::ClockRegression)
-            } else if self
-                .progress_until
-                .is_some_and(|until| clock.now.0 >= until)
+            } else if self.pending.is_some_and(|p| clock.now.0 >= p.until)
+                || self
+                    .progress_until
+                    .is_some_and(|until| clock.now.0 >= until)
                 || self
                     .arrivals
                     .iter()
@@ -296,6 +336,55 @@ impl<D: AudioDecoder> AudioPlayout<D> {
                 == Some(self.config.expected_samples_per_frame())
             && pcm.timestamp_samples() == at
     }
+    fn begin_decode(&mut self) -> Result<Option<(Pending, Option<AudioPcmFrame>)>, PlayoutError> {
+        let missing_at = self.jitter.next_sample_timestamp();
+        let decoder = self.decoder.as_mut().ok_or(PlayoutError::Stopped)?;
+        match self
+            .jitter
+            .drain_for_playout()
+            .map_err(PlayoutError::Jitter)?
+        {
+            JitterDrainResult::Underrun => Ok(None),
+            JitterDrainResult::Packet(packet) => {
+                let entry = self
+                    .arrivals
+                    .iter_mut()
+                    .find(|a| a.is_some_and(|a| a.sequence == packet.sequence()))
+                    .ok_or(PlayoutError::CodecOutput)?;
+                let until = entry.take().ok_or(PlayoutError::CodecOutput)?.until;
+                decoder
+                    .submit_packet(&packet)
+                    .map_err(PlayoutError::Codec)?;
+                Ok(Some((
+                    Pending {
+                        sequence: packet.sequence(),
+                        at: packet.timestamp_samples(),
+                        concealed: false,
+                        until,
+                    },
+                    None,
+                )))
+            }
+            JitterDrainResult::Plc {
+                missing_sequence,
+                duration_samples,
+            } => {
+                let at = missing_at.ok_or(PlayoutError::CodecOutput)?;
+                let pcm = decoder
+                    .submit_plc(duration_samples)
+                    .map_err(PlayoutError::Codec)?;
+                Ok(Some((
+                    Pending {
+                        sequence: missing_sequence,
+                        at,
+                        concealed: true,
+                        until: self.progress_until.ok_or(PlayoutError::CodecOutput)?,
+                    },
+                    pcm,
+                )))
+            }
+        }
+    }
     fn render_inner(
         &mut self,
         checkpoint: &mut impl FnMut() -> Result<PlayoutClock, PlayoutError>,
@@ -315,53 +404,39 @@ impl<D: AudioDecoder> AudioPlayout<D> {
         if clock.output_samples >= next {
             return Err(PlayoutError::MissedDeviceSlot);
         }
-        let missing_at = self.jitter.next_sample_timestamp();
-        let decoder = self.decoder.as_mut().ok_or(PlayoutError::Stopped)?;
-        let (mut pcm, sequence, at, concealed, until) = match self
-            .jitter
-            .drain_for_playout()
-            .map_err(PlayoutError::Jitter)?
-        {
-            JitterDrainResult::Underrun => return Ok(PlayoutResult::Waiting),
-            JitterDrainResult::Packet(packet) => {
-                let entry = self
-                    .arrivals
-                    .iter_mut()
-                    .find(|a| a.is_some_and(|a| a.sequence == packet.sequence()))
-                    .ok_or(PlayoutError::CodecOutput)?;
-                let until = entry.take().ok_or(PlayoutError::CodecOutput)?.until;
-                decoder
-                    .submit_packet(&packet)
-                    .map_err(PlayoutError::Codec)?;
-                let pcm = decoder
-                    .poll_pcm()
-                    .map_err(PlayoutError::Codec)?
-                    .ok_or(PlayoutError::CodecOutput)?;
-                (
-                    Scrub(pcm),
-                    packet.sequence(),
-                    packet.timestamp_samples(),
-                    false,
-                    until,
-                )
-            }
-            JitterDrainResult::Plc {
-                missing_sequence,
-                duration_samples,
-            } => {
-                let at = missing_at.ok_or(PlayoutError::CodecOutput)?;
-                let pcm = decoder
-                    .decode_plc(duration_samples)
-                    .map_err(PlayoutError::Codec)?;
-                (
-                    Scrub(pcm),
-                    missing_sequence,
-                    at,
-                    true,
-                    self.progress_until.ok_or(PlayoutError::CodecOutput)?,
-                )
-            }
+        if !self.poll_configured(clock)? {
+            return Ok(PlayoutResult::Waiting);
+        }
+        // Keep one outstanding codec operation, with its ORIGINAL arrival
+        // deadline and device slot. Polling cannot admit another decode, replay
+        // a packet/PLC, or refresh work merely because the worker was slow.
+        let (pending, immediate) = if let Some(pending) = self.pending.take() {
+            (pending, None)
+        } else if let Some(started) = self.begin_decode()? {
+            started
+        } else {
+            return Ok(PlayoutResult::Waiting);
         };
+        let pcm = match immediate {
+            Some(pcm) => Some(pcm),
+            None => self
+                .decoder
+                .as_mut()
+                .ok_or(PlayoutError::Stopped)?
+                .poll_pcm()
+                .map_err(PlayoutError::Codec)?,
+        };
+        let Some(pcm) = pcm else {
+            self.pending = Some(pending);
+            return Ok(PlayoutResult::Waiting);
+        };
+        let mut pcm = Scrub(pcm);
+        let Pending {
+            sequence,
+            at,
+            concealed,
+            until,
+        } = pending;
         if !self.valid_pcm(&pcm.0, at) {
             return Err(PlayoutError::CodecOutput);
         }
@@ -400,16 +475,16 @@ impl<D: AudioDecoder> AudioPlayout<D> {
         Ok(PlayoutResult::Submitted(receipt))
     }
 }
-impl<D: AudioDecoder> Drop for AudioPlayout<D> {
+impl<D: PolledDecoder> Drop for AudioPlayout<D> {
     fn drop(&mut self) {
         self.stop();
     }
 }
-struct Operation<'a, D: AudioDecoder> {
+struct Operation<'a, D: PolledDecoder> {
     owner: &'a mut AudioPlayout<D>,
     completed: bool,
 }
-impl<D: AudioDecoder> Drop for Operation<'_, D> {
+impl<D: PolledDecoder> Drop for Operation<'_, D> {
     fn drop(&mut self) {
         if !self.completed {
             self.owner.retire(PlayoutError::Stopped);
