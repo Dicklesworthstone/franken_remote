@@ -43,3 +43,59 @@ CI artifact. No cold dependency build, full current workspace, hardware, or live
 Tailscale qualification is claimed. This first slice supplies transport custody;
 automatic observation-session orchestration and native-owner cleanup accounting
 remain separate integration. Ref: fr-rc-protocol-refusal-closure-5dx.
+
+## Automatic protected observation sessions
+
+The original protected-listener owner now provisions a Closed consumer before
+application startup, using the independent broker context already retained by
+`bind_linux`. `Host` arms it only after real binding admission and an observation
+role selection. Control-intent sessions leave that slot unarmed for their actual
+lease reporter. No report is fabricated before an observation grant. The raw
+`Server::new` listener path without that independently provisioned broker clock
+keeps its old immediate-close behavior rather than resetting a cancelled context.
+
+The existing observation-renewal parser records a client-requested cause only
+when the exact original CloseRequest successfully validates. A malformed close
+records ProtocolError; FIN and cancellation cannot masquerade as a request.
+Ordinary authority fencing and receive-batch termination happen immediately.
+After the original scoped application ends, the listener finalizes its captured
+socket outside that application's cancelled context. Existing immutable terminal
+credential/endpoint/ingress/policy checks still apply. The callback's original
+result is preserved; `Server::observation_closure` and the forwarding LinuxServer
+query retain report delivery separately. No user callback or ordinary media I/O
+is run during this bounded terminal attempt.
+
+The automatic session owner always emits Unconfirmed cleanup and Unknown effects.
+It cannot infer another task's native-release result or action receipt counts.
+Absent an exact close-request cause, the listener reports its own stop, permission
+failure, or host failure; it does not guess a lease-expiry cause. A competing
+explicit terminal report cannot replace the first registered consumer. Reporting
+is best effort: native backlog, lost credentials, abandoned I/O, dropped owners,
+and expired cleanup budgets still prevent delivery. A parent which discards an
+independently hosted application before it returns may have no captured socket;
+this is not a promise that every desktop shutdown produces a Closed record.
+
+Five additional tests exercise actual protected-listener ownership, TLS/UDP,
+LocalAPI credential checks and the ordinary Host/Viewer startup and renewal paths
+inside a disposable namespace. They cover automatic CloseRequest replies, normal
+observation shutdown, malformed requests, credential loss after capture, and
+control-intent exclusion. All five pass. The interface/firewall metadata, approval
+and identity are explicit fixtures, not real ingress or installed-Tailscale proof.
+Report collection keeps the original viewer transport driven to ACK the record;
+this does not claim a new shipped CLI close-handshake or native cleanup test.
+
+The final selected scope passes 62 unique runtime tests: 32 terminal transport,
+5 automatic-closure, 10 unchanged native-acceptance and 15 unchanged serial-host
+regressions. Strict production frd/transport Clippy and both new test targets pass.
+The complete daemon test-source metadata/Clippy attempt timed out without a result
+(first at 45 s, then at 120 s); no complete daemon or workspace test pass is claimed.
+Existing serial tests were rerun to completion after an aggregate command timeout;
+no assertion or test budget was weakened. All first-party libraries in the native
+scope were rebuilt with the pinned compiler and unchanged matched CI dependencies.
+The executed source is b623c55 plus these slices and exact current paired listener
+guards. Publication payloads preserve the newer main exports, closure variant and
+managed-revocation fields by preimage hashes, not a full-current-main rebuild.
+
+Confirmed native cleanup, cleanup-owner-derived effect counts, a complete active
+client CloseRequest/Closed handshake, and guaranteed reporting across every shared
+hub/global cancellation path remain open. No release gate or bead is closed here.

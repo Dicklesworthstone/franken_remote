@@ -3,6 +3,7 @@
 //! The kernel/interface restriction must be established by the local broker;
 //! neither source prefixes nor the callback below establish that restriction.
 mod shared;
+pub use crate::session_startup::closure_reporting::ObservationClosure;
 pub use shared::SharedObserver;
 
 use crate::{
@@ -69,6 +70,7 @@ pub struct Server {
     // Set only by the locally enforced bind path, before accepting a peer.
     // It observes the original credential lifetime after a session is cancelled.
     credential_clock: Option<Cx>,
+    last_observation_closure: Option<ObservationClosure>,
 }
 impl fmt::Debug for Server {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -87,7 +89,14 @@ impl Server {
             identity,
             live_policy: None,
             credential_clock: None,
+            last_observation_closure: None,
         }
+    }
+
+    /// Last completed observation report attempt, separately from the original
+    /// application's result. None includes no observation grant or abandonment.
+    pub const fn observation_closure(&self) -> Option<ObservationClosure> {
+        self.last_observation_closure
     }
 
     /// Opt in to the original local file monitor. Its observed policy overrides
@@ -163,6 +172,15 @@ impl Server {
         A: FnOnce(Host) -> F + 'a,
     {
         let mut creation_fence = PanicFence(cx, false);
+        self.last_observation_closure = None;
+        // Only the already-provisioned independent broker clock can outlive
+        // session cancellation. A raw listener without that clock stays silent.
+        let (reporting, registration) = self
+            .credential_clock
+            .as_ref()
+            .map(crate::session_startup::closure_reporting::Reporting::new)
+            .unzip();
+        let run_api = self.api.clone();
         let address = listener.local_addr();
         let identity = self.identity.clone();
         let clock = cx.clone();
@@ -270,8 +288,7 @@ impl Server {
                     .node
                     .take()
                     .ok_or(Error::Tailnet(fr_tailnet::Error::IdentityMismatch))?;
-                let current = self
-                    .api
+                let current = run_api
                     .revalidate_node(cx, &original)
                     .await
                     .map_err(Error::Tailnet)?;
@@ -283,18 +300,17 @@ impl Server {
                     return Err(Error::Tailnet(fr_tailnet::Error::AddressMismatch));
                 }
                 // No source-prefix, name-based, cached or capability fallback.
-                let proof = self
-                    .api
+                let proof = run_api
                     .authorize_membership(cx, addresses, request.admission)
                     .await
                     .map_err(Error::Tailnet)?;
-                self.api
+                run_api
                     .revalidate_node(cx, &current)
                     .await
                     .map_err(Error::Tailnet)?;
                 inside()?;
                 let admission =
-                    Admission::new(self.api.clone(), cx.clone(), proof).map_err(Error::Tailnet)?;
+                    Admission::new(run_api.clone(), cx.clone(), proof).map_err(Error::Tailnet)?;
                 let mut host = Host::from_admitted(native, admission, request.session)
                     .map_err(Error::Session)?;
                 let gate = inside.clone();
@@ -310,12 +326,32 @@ impl Server {
                     Arc::new(move || terminal_check().is_ok()),
                 )
                 .map_err(Error::Session)?;
+                if let Some(registration) = registration {
+                    host.retain_observation_reporting(registration)
+                        .map_err(Error::Session)?;
+                }
                 inside()?;
                 Ok(application(host).await)
             }),
         };
         creation_fence.1 = true;
-        operation
+        async move {
+            // Drop the ordinary Scoped owner before finishing. Its cancellation
+            // and the original session Drop/fence remain terminal. No callback
+            // or application traffic is serviced by the one-record drain.
+            let result = operation.await;
+            if let Some(reporting) = reporting {
+                let reason = match &result {
+                    Ok(_) | Err(Error::Cancelled) => fr_wire::closure::ClosedReason::HostStopping,
+                    Err(Error::IngressUnavailable | Error::Policy(_) | Error::Tailnet(_)) => {
+                        fr_wire::closure::ClosedReason::PermissionLost
+                    }
+                    Err(_) => fr_wire::closure::ClosedReason::HostFailure,
+                };
+                self.last_observation_closure = Box::pin(reporting.finish(reason)).await;
+            }
+            result
+        }
     }
 }
 

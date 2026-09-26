@@ -57,6 +57,7 @@ pub struct ObservationRenewal {
     pending: Option<Pending>,
     bytes: [u8; OBSERVATION_CHALLENGE_BYTES],
     renewed_until: Option<HostInstant>,
+    closure_reason: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>,
 }
 impl ObservationRenewal {
     /// Routes come from the already admitted/approved startup owner. Numeric
@@ -117,7 +118,19 @@ impl ObservationRenewal {
             pending: None,
             bytes: [0; OBSERVATION_CHALLENGE_BYTES],
             renewed_until: None,
+            closure_reason: None,
         })
+    }
+    pub(crate) fn retain_closure_reason(
+        &mut self,
+        reason: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>,
+    ) {
+        self.closure_reason = reason;
+    }
+    fn mark_closure_reason(&self, reason: fr_wire::closure::ClosedReason) {
+        if let Some(signal) = &self.closure_reason {
+            let _ = signal.compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire);
+        }
     }
     pub fn stop(&mut self) {
         self.control.revoke();
@@ -274,10 +287,18 @@ impl ObservationRenewal {
                             InputDelivery::Reliable,
                         ) {
                             Ok(_) => {
+                                self.mark_closure_reason(
+                                    fr_wire::closure::ClosedReason::ClientRequested,
+                                );
                                 self.stop();
                                 Error::PeerClosed
                             }
-                            Err(error) => Error::Wire(error),
+                            Err(error) => {
+                                self.mark_closure_reason(
+                                    fr_wire::closure::ClosedReason::ProtocolError,
+                                );
+                                Error::Wire(error)
+                            }
                         },
                     );
                     // A terminal result, not callback backpressure. The I/O guard

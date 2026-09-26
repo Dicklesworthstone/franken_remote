@@ -28,6 +28,7 @@ use std::{
 
 mod admission_refresh;
 mod clipboard;
+pub(crate) mod closure_reporting;
 mod native_control;
 pub use native_control::{
     CLIPBOARD_CAPABILITIES, FILE_CAPABILITIES, host_offer, host_offer_with, host_offer_with_audio,
@@ -356,6 +357,7 @@ pub struct Host {
     observation_only: bool,
     // Set only by the bounded shared-viewer ingress before ClientHello.
     shared_source: Option<crate::media::shared_publisher::JoinQueue>,
+    observation_reporting: Option<closure_reporting::Configuration>,
 }
 impl fmt::Debug for Host {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -412,6 +414,7 @@ impl Host {
             send_by: until,
             observation_until: None,
             shared_source: None,
+            observation_reporting: None,
             observation_only: false,
         })
     }
@@ -740,7 +743,7 @@ impl Host {
         let control = peer.observation(self.cx.clone(), authority)?;
         let transport = self.transport.take().ok_or(Error::Closed)?;
         let connection = transport.binding();
-        let result = OpenedSession {
+        let mut result = OpenedSession {
             cx: self.cx.clone(),
             peer: self.peer.take().ok_or(Error::Closed)?,
             transport,
@@ -750,7 +753,11 @@ impl Host {
             binding: self.config.binding,
             selected: self.selected.take().ok_or(Error::Order)?,
             closed: false,
+            closure_reason: None,
         };
+        if let Some(reporting) = self.observation_reporting.take() {
+            reporting.arm(&mut result)?;
+        }
         self.phase = Phase::Detached;
         self.approval.store(RETIRED, Ordering::Release);
         Ok(result)
@@ -805,6 +812,7 @@ pub struct OpenedSession {
     binding: ControlBinding,
     selected: Selection,
     closed: bool,
+    closure_reason: Option<Arc<AtomicU8>>,
 }
 impl OpenedSession {
     pub fn check(&mut self) -> Result<(), Error> {

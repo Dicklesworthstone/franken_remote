@@ -81,6 +81,11 @@ impl Server {
     }
 }
 impl LinuxServer {
+    /// Last completed observation-terminal attempt on the original protected
+    /// listener. This is transport delivery, never native cleanup confirmation.
+    pub fn observation_closure(&self) -> Option<super::ObservationClosure> {
+        self.server.observation_closure()
+    }
     pub fn address(&self) -> SocketAddr {
         self.boundary.address()
     }

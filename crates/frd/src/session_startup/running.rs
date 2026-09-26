@@ -69,13 +69,14 @@ impl OpenedSession {
     /// No new authority is minted and no existing expiration is extended here.
     pub fn into_running(mut self) -> Result<HostSession, Error> {
         self.check()?;
-        let renewal = ObservationRenewal::new(
+        let mut renewal = ObservationRenewal::new(
             self.control.clone(),
             &self.transport,
             self.routes,
             self.selected.limits,
         )
         .map_err(Error::Renewal)?;
+        renewal.retain_closure_reason(self.closure_reason.take());
         Ok(HostSession {
             opened: self,
             renewal,
