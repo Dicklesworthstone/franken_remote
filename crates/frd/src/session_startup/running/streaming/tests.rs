@@ -470,9 +470,16 @@ fn pending_admission_refresh_services_native_results_before_the_lookup_finishes(
             feedback: None,
             presentation: None,
             input_wake: super::super::input_wake::Wake::default(),
+            cursor: None,
             other: &mut other,
         };
-        let mut producer = pin!(produce(&mut stream.source, &control, requests, completed));
+        let mut producer = pin!(produce(
+            &mut stream.source,
+            &control,
+            None,
+            requests,
+            completed
+        ));
         let mut fresh_nonce = || nonce(&mut n);
         let mut refresh = pin!(pump_refresh(
             &mut host.renewal,

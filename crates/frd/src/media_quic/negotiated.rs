@@ -11,7 +11,7 @@ use crate::{
     media_egress::Egress,
 };
 pub use audio::AudioLanes;
-pub(crate) use cursor::CursorLanes;
+pub(crate) use cursor::{CursorLanes, HostLane};
 use fr_media::delivery::{MediaBindings, MediaEpoch, ReceiveConfig, ReceivePolicy, SendPolicy};
 use fr_transport::quic::{
     AttachedChannel, ConnectionBinding, Disposition, MediaChannel, QuicRecords, Route, StreamRoute,

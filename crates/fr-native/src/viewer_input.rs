@@ -174,6 +174,9 @@ impl fmt::Debug for CaptureControl {
 pub struct X11InputCapture {
     control: CaptureControl,
     task: Option<JoinHandle<()>>,
+    /// The local pointer image owner started with this attachment (optional:
+    /// its failure never affects input), joined with it.
+    cursor: Option<crate::viewer_cursor::X11WindowCursor>,
 }
 impl X11InputCapture {
     /// Consume the one-use Source from `ControlledViewer::capture_input`. The
@@ -217,6 +220,7 @@ impl X11InputCapture {
         Ok(Self {
             control,
             task: Some(task),
+            cursor: None,
         })
     }
     /// Attach to an already granted original viewer from its interactive UI
@@ -232,11 +236,26 @@ impl X11InputCapture {
         layout: Layout,
     ) -> Result<CaptureControl, frd::session_startup::viewer_events::CaptureStartError<Error>> {
         let mut control = None;
+        let mut local = None;
         viewer.capture_input_owned(&layout.clone(), |source| {
-            let capture = Self::start(display, window, source, layout)?;
+            let fence = source.control();
+            let mut capture = Self::start(display, window, source, layout)?;
             control = Some(capture.control());
+            // The remote cursor's local owner (plan §11.4) shares this
+            // attachment's lifetime; failing to start it only leaves the
+            // platform pointer unmanaged.
+            if let Ok((owner, handle)) =
+                crate::viewer_cursor::X11WindowCursor::start(display, window, fence)
+            {
+                capture.cursor = Some(owner);
+                local = Some(handle);
+            }
             Ok(capture)
         })?;
+        if let Some(handle) = local {
+            // A refused attachment stops the handle; control is unaffected.
+            let _ = viewer.attach_local_cursor(Box::new(handle));
+        }
         // The factory must have completed exactly once for attachment to succeed.
         Ok(control.expect("successful native capture factory"))
     }
@@ -249,6 +268,13 @@ impl X11InputCapture {
     pub fn finish(&mut self) -> Option<StopReason> {
         if self.task.as_ref().is_some_and(|task| !task.is_finished()) {
             return None;
+        }
+        if let Some(cursor) = &mut self.cursor {
+            // Stopped with the attachment; it restores the platform pointer.
+            cursor.stop();
+            if !cursor.finish() {
+                return None;
+            }
         }
         if let Some(task) = self.task.take()
             && task.join().is_err()
@@ -269,6 +295,9 @@ impl fmt::Debug for X11InputCapture {
 impl Drop for X11InputCapture {
     fn drop(&mut self) {
         self.control.stop();
+        if let Some(cursor) = &self.cursor {
+            cursor.stop();
+        }
     }
 }
 struct Fence(Arc<Shared>);
@@ -601,6 +630,9 @@ impl Decoder {
 impl frd::session_startup::viewer_events::NativeCapture for X11InputCapture {
     fn stop(&self) {
         self.control.stop();
+        if let Some(cursor) = &self.cursor {
+            cursor.stop();
+        }
     }
     fn try_reap(&mut self) -> bool {
         self.finish().is_some()

@@ -9,6 +9,13 @@
 //! - Suppresses local cursor rendering when the host video stream is host-composited (`SHAPE_FLAG_HOST_COMPOSITED`)
 //!   to prevent double-cursor artifacts.
 //! - Measures coordinate drift between predicted local motion and host-acknowledged state for diagnostics.
+//!
+//! [`owner`] selects the ONE renderer of the remote pointer while controlling.
+//! It does not reuse [`PredictedCursor`]'s single latest-vs-latest drift:
+//! during motion the confirmed position always trails the local one by a round
+//! trip, which is lag rather than divergence.
+
+pub mod owner;
 
 use fr_core::{
     ids::DisplayGeometryGeneration,

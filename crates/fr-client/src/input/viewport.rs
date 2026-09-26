@@ -211,6 +211,10 @@ impl Viewport {
         self.invalidate();
         self.stopped = true;
     }
+    /// The granted display's desktop bounds (coordinate metadata only).
+    pub const fn bounds(&self) -> InputBounds {
+        self.bounds
+    }
     fn current(&self, layout: &Layout) -> Result<(), Error> {
         if self.stopped {
             return Err(Error::Stopped);

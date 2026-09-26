@@ -37,7 +37,11 @@ impl StreamingHost {
     /// This is observation-only and requires positive capability negotiation.
     /// No new sender, native worker, input authority or connection is created.
     pub fn enable_reference_recovery(&mut self, media: NegotiatedMedia) -> Result<(), Error> {
-        if self.stream.served || self.recovery.is_some() || !matches!(self.host, Host::Observe(_)) {
+        if self.stream.served
+            || self.recovery.is_some()
+            || self.cursor.is_some()
+            || !matches!(self.host, Host::Observe(_))
+        {
             return Err(Error::Order);
         }
         let session = self.host.session()?;
@@ -145,9 +149,11 @@ async fn round(
             u64::try_from(stream.policy.capture_interval.as_micros()).map_err(|_| Error::Clock)?,
         )
         .ok_or(Error::Clock)?;
+    // Observation-only recovery owns its media: no cursor is forwarded here.
     let mut producer = pin!(produce(
         &mut stream.source,
         &stream.control,
+        None,
         requests,
         completed
     ));
@@ -173,6 +179,7 @@ async fn round(
             repair_turn: false,
             feedback: host.feedback.as_mut(),
             presentation: host.presentation.as_mut(),
+            cursor: None,
             other,
         },
     };

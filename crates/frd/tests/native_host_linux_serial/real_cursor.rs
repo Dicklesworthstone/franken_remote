@@ -25,14 +25,14 @@ use std::{
 
 /// Opaque cursor colours, distinct from the desktop colour and from the
 /// viewer's built-in black/white fallback crosshair.
-const MAGENTA: (i32, i32, i32) = (0xff, 0x00, 0xff);
+pub(super) const MAGENTA: (i32, i32, i32) = (0xff, 0x00, 0xff);
 const GREEN: (i32, i32, i32) = (0x00, 0xff, 0x00);
 /// Cursor image side in pixels; the hotspot is its top-left pixel.
 const SIZE: i32 = 16;
 
 /// An independent host-side X client owning the root cursor and the host's
 /// own pointer position. Commands are acknowledged after `XSync`.
-struct HostPointer {
+pub(super) struct HostPointer {
     child: Child,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
@@ -75,7 +75,7 @@ for line in sys.stdin:
     x.XSync(d, 0)
     print("ok", flush=True)
 "#;
-    fn start(display: &str) -> Self {
+    pub(super) fn start(display: &str) -> Self {
         let mut child = Command::new("python3")
             .args(["-u", "-c", Self::SCRIPT, display])
             .stdin(Stdio::piped())
@@ -96,10 +96,10 @@ for line in sys.stdin:
         self.output.read_line(&mut reply).unwrap();
         assert_eq!(reply.trim(), "ok", "host pointer helper failed: {line}");
     }
-    fn cursor(&mut self, (r, g, b): (i32, i32, i32)) {
+    pub(super) fn cursor(&mut self, (r, g, b): (i32, i32, i32)) {
         self.command(&format!("cursor ff{r:02x}{g:02x}{b:02x} {SIZE}"));
     }
-    fn warp(&mut self, x: i32, y: i32) {
+    pub(super) fn warp(&mut self, x: i32, y: i32) {
         self.command(&format!("warp {x} {y}"));
     }
 }
@@ -112,7 +112,7 @@ impl Drop for HostPointer {
 
 /// 0xRRGGBB pixels of `window` at window-relative points, read by an
 /// independent Xlib client (`None` when the read fails).
-fn pixels_at(display: &str, window: u64, points: &[(i32, i32)]) -> Vec<Option<u32>> {
+pub(super) fn pixels_at(display: &str, window: u64, points: &[(i32, i32)]) -> Vec<Option<u32>> {
     const PEER: &str = r#"
 import ctypes as c, sys
 x = c.CDLL("libX11.so.6")

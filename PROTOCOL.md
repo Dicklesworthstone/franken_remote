@@ -631,8 +631,13 @@ host re-sends a shape the viewer must have evicted. A shape is admitted to its
 reliable lane before any position references it; positions are one replaceable
 slot per viewer with strictly increasing sequences and the view's geometry
 generation. Only admitted, streaming viewers (not in decoder startup, late join
-or recovery) receive either kind. The viewer is the single rendering owner (the
-host capture excludes the pointer) and composites one overlay; a hidden position
-removes it. Cursor records are never source freshness, decode, presentation or
+or recovery) receive either kind; the controlled share's dedicated capture
+source samples and sends them with the same bounds, on the same capture credit.
+The viewer is the single rendering owner (the host capture excludes the pointer)
+and composites one overlay; a hidden position removes it. While a controller's
+local pointer drives the host, exactly one of the two renders it: the local
+pointer carrying the confirmed shape while confirmed positions match positions
+this client encoded, otherwise the overlay with the local pointer blanked first.
+Cursor records are never source freshness, decode, presentation or
 input evidence. `POSITION_FLAG_VISIBLE` means the X11 logical cursor is inside
 the shared view; XFIXES cannot observe `XFixesHideCursor`.

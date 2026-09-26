@@ -821,6 +821,11 @@ async fn bootstrap(
     {
         host.enable_reference_recovery(media)
             .map_err(|e| budget.fail(Error::Session(e)))?;
+    } else if controlled {
+        // The controller sees the host's confirmed pointer shape/position
+        // (typed absence when it did not select `remote-cursor`).
+        host.enable_cursor(media)
+            .map_err(|e| budget.fail(Error::Session(e)))?;
     }
     Ok(NativePublisher {
         selected,

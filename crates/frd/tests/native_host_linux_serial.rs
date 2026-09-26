@@ -648,5 +648,7 @@ mod real_audio;
 mod real_clipboard;
 #[path = "native_host_linux_serial/real_control.rs"]
 mod real_control;
+#[path = "native_host_linux_serial/real_control_cursor.rs"]
+mod real_control_cursor;
 #[path = "native_host_linux_serial/real_cursor.rs"]
 mod real_cursor;

@@ -1,7 +1,12 @@
 //! The viewer's remote cursor (plan §11.4): reliable shapes and replaceable
-//! positions feed ONE bounded tracker, and the single client-rendered overlay
-//! is installed on the presenter between decode jobs. The host capture
-//! excludes the pointer, so this is the only cursor drawn for the desktop.
+//! positions feed ONE bounded tracker, and exactly one renderer draws it.
+//!
+//! Observing, the presenter composites the single client-rendered overlay
+//! between decode jobs (the host capture excludes the pointer). Controlling,
+//! the local pointer also renders the remote pointer, so
+//! `fr_client::cursor::owner` hands rendering to EITHER the platform's local
+//! pointer (with the host's confirmed shape) OR the overlay at the confirmed
+//! position with the local pointer blanked, sequenced so both never draw.
 //!
 //! Cursor records are never media progress, freshness, decode or input
 //! evidence; they bypass the receive pipeline entirely. Records are accepted
@@ -9,14 +14,22 @@
 //! positively selected.
 use super::{Error, StreamingViewer};
 use crate::media_quic::{CursorLanes, NegotiatedMedia};
+use crate::session_startup::viewer::controlled::local_cursor::{Image, LocalCursor, Refused};
 use asupersync::cx::Cx;
+use fr_client::cursor::owner::{
+    At, Confirmed, Inputs, PointerHistory, Rendered, Step, WindowCursor, resolve,
+};
 use fr_media::{
-    cursor::Refusal,
-    pipeline::{CursorPipelineTracker, CursorRenderingOwner, PipelineError},
+    cursor::{FALLBACK_SHAPE_ID, Refusal},
+    pipeline::{CursorPipelineTracker, CursorRenderingOwner, PipelineError, StoredCursorShape},
     worker::overlay::Update,
 };
 use fr_transport::quic::{QuicRecords, Route};
 use fr_wire::{Kind, WireError, cursor as wire};
+
+/// Bounded work per call: every step is at most one presenter exchange or
+/// one nonblocking platform request.
+const MAX_STEPS: usize = 4;
 
 /// Typed cursor refusal from the authenticated host's records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,24 +38,24 @@ pub enum Fault {
     Shape(Refusal),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Shown {
-    Hidden,
-    At { shape: u32, x: i32, y: i32 },
-}
-
 pub(super) struct ViewerCursor {
-    tracker: CursorPipelineTracker,
     lanes: CursorLanes,
-    /// What the presenter currently composites; `None` is unknown (re-send).
-    shown: Option<Shown>,
+    remote: Remote,
+}
+/// The bounded confirmed state and its single rendering owner.
+struct Remote {
+    tracker: CursorPipelineTracker,
+    /// What the presenter and the platform owner have acknowledged.
+    rendered: Rendered,
     /// Shape ID whose image the presenter holds.
     installed: Option<u32>,
+    /// The platform owner stopped or refused: never managed again.
+    local_lost: bool,
 }
 impl std::fmt::Debug for ViewerCursor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ViewerCursor")
-            .field("cached", &self.tracker.usage())
+            .field("cached", &self.remote.tracker.usage())
             .finish_non_exhaustive()
     }
 }
@@ -53,14 +66,8 @@ impl ViewerCursor {
             return Ok(None);
         };
         Ok(Some(Self {
-            tracker: CursorPipelineTracker::new(
-                CursorRenderingOwner::ClientRendered,
-                lanes.view.geometry,
-            ),
+            remote: Remote::new(lanes.view.geometry),
             lanes,
-            // A freshly started presenter composites nothing.
-            shown: Some(Shown::Hidden),
-            installed: None,
         }))
     }
     /// Follow the current media. Fresh bindings (recovery) mean an empty cache
@@ -75,13 +82,11 @@ impl ViewerCursor {
             .map_err(Error::Routes)?
             .ok_or(Error::Routes(crate::media_quic::Error::InvalidRoutes))?;
         if lanes.view != self.lanes.view {
-            self.tracker.reset(lanes.view.geometry);
+            self.remote.tracker.reset(lanes.view.geometry);
             // A drawn overlay belongs to the old view: re-address it (hide).
             // Nothing is sent to a presenter that never composited a cursor.
-            if self.shown != Some(Shown::Hidden) {
-                self.shown = None;
-            }
-            self.installed = None;
+            self.remote.rendered.overlay_unknown();
+            self.remote.installed = None;
         }
         self.lanes = lanes;
         Ok(())
@@ -105,7 +110,10 @@ impl ViewerCursor {
                 &self.lanes.limits,
             )
             .map_err(Fault::Wire)?;
-            self.tracker.store_shape(&shape).map_err(|e| fault(&e))?;
+            self.remote
+                .tracker
+                .store_shape(&shape)
+                .map_err(|e| fault(&e))?;
             return Ok(());
         }
         let position = wire::decode_position_record(
@@ -114,7 +122,7 @@ impl ViewerCursor {
             self.lanes.position_maximum,
         )
         .map_err(Fault::Wire)?;
-        match self.tracker.process_position(&position) {
+        match self.remote.tracker.process_position(&position) {
             Ok(_)
             | Err(PipelineError::StaleSequence { .. } | PipelineError::MismatchedGeometry { .. }) => {
                 Ok(())
@@ -122,47 +130,135 @@ impl ViewerCursor {
             Err(error) => Err(fault(&error)),
         }
     }
-    fn desired(&self) -> Shown {
+}
+impl Remote {
+    fn new(geometry: fr_core::ids::DisplayGeometryGeneration) -> Self {
+        Self {
+            tracker: CursorPipelineTracker::new(CursorRenderingOwner::ClientRendered, geometry),
+            // A freshly started presenter composites nothing.
+            rendered: Rendered::new(),
+            installed: None,
+            local_lost: false,
+        }
+    }
+    /// The latest confirmed host state resolved against the bounded cache: an
+    /// unknown shape is the built-in fallback; hidden, locked and
+    /// host-composited cursors are never drawn by this client.
+    fn confirmed(&self) -> Confirmed {
         match self.tracker.current() {
-            Some(e) if e.visible => Shown::At {
+            None => Confirmed::Unknown,
+            Some(e) if !e.visible => Confirmed::Hidden,
+            Some(e) => Confirmed::Visible {
                 shape: e.shape_id,
                 x: e.x,
                 y: e.y,
             },
-            _ => Shown::Hidden,
         }
     }
-    /// The presenter update for a changed resolved overlay, if any.
-    pub(super) fn pending(&self) -> Option<Update<'_>> {
-        let desired = self.desired();
-        if self.shown == Some(desired) {
-            return None;
+    fn shape(&self, id: u32) -> Option<&StoredCursorShape> {
+        self.tracker
+            .shape(id)
+            .or_else(|| self.tracker.shape(FALLBACK_SHAPE_ID))
+    }
+    /// The presenter update for one overlay step.
+    fn overlay_update(&self, overlay: Option<At>) -> Option<Update<'_>> {
+        let Some(at) = overlay else {
+            return Some(Update::Hidden);
+        };
+        if self.installed == Some(at.shape) {
+            return Some(Update::Move { x: at.x, y: at.y });
         }
-        match desired {
-            Shown::Hidden => Some(Update::Hidden),
-            Shown::At { shape, x, y } if self.installed == Some(shape) => {
-                Some(Update::Move { x, y })
-            }
-            Shown::At { shape, x, y } => {
-                let s = self.tracker.shape(shape)?;
-                Some(Update::Shape {
-                    x,
-                    y,
+        let s = self.shape(at.shape)?;
+        Some(Update::Shape {
+            x: at.x,
+            y: at.y,
+            width: s.width,
+            height: s.height,
+            hotspot_x: s.hotspot_x,
+            hotspot_y: s.hotspot_y,
+            rgba: s.rgba(),
+        })
+    }
+    fn overlay_applied(&mut self, overlay: Option<At>) {
+        if let Some(at) = overlay {
+            self.installed = Some(at.shape);
+        }
+        self.rendered.overlay_applied(overlay);
+    }
+    fn window_image(&self, cursor: WindowCursor) -> Option<Image<'_>> {
+        Some(match cursor {
+            WindowCursor::Default => Image::Default,
+            WindowCursor::Blank => Image::Blank,
+            WindowCursor::Shape(id) => {
+                let s = self.shape(id)?;
+                Image::Shape {
                     width: s.width,
                     height: s.height,
                     hotspot_x: s.hotspot_x,
                     hotspot_y: s.hotspot_y,
                     rgba: s.rgba(),
-                })
+                }
+            }
+        })
+    }
+    /// Resolve the single owner and advance toward it. Local pointer requests
+    /// are nonblocking and taken here; the only step returned is an overlay
+    /// (applied on the presenter and acknowledged before the next call) or
+    /// `Idle`.
+    fn advance(
+        &mut self,
+        controlling: bool,
+        mut local: Option<&mut (dyn LocalCursor + 'static)>,
+        history: Option<&PointerHistory>,
+        now_us: u64,
+    ) -> Step {
+        for _ in 0..MAX_STEPS {
+            let mut pointer = None;
+            if let Some(owner) = local.as_deref().filter(|_| !self.local_lost) {
+                let state = owner.state();
+                if state.stopped {
+                    self.local_lost = true;
+                    self.rendered.window_detached();
+                } else {
+                    self.rendered.window_attached();
+                    self.rendered.window_applied(state.applied);
+                    pointer = Some(state.pointer);
+                }
+            }
+            let confirmed = self.confirmed();
+            let explained = match confirmed {
+                Confirmed::Visible { x, y, .. } => {
+                    history.is_some_and(|h| h.explains(x, y, now_us))
+                }
+                Confirmed::Unknown | Confirmed::Hidden => false,
+            };
+            let target = resolve(Inputs {
+                controlling,
+                window: pointer,
+                confirmed,
+                explained,
+            });
+            match self.rendered.next(&target) {
+                step @ (Step::Idle | Step::Overlay(_)) => return step,
+                Step::Window(cursor) => {
+                    let (Some(owner), Some(image)) =
+                        (local.as_deref_mut(), self.window_image(cursor))
+                    else {
+                        return Step::Idle;
+                    };
+                    match owner.request(image) {
+                        Ok(generation) => self.rendered.window_requested(cursor, generation),
+                        Err(Refused::Busy) => return Step::Idle,
+                        Err(Refused::Invalid | Refused::Stopped) => {
+                            owner.stop();
+                            self.local_lost = true;
+                            self.rendered.window_detached();
+                        }
+                    }
+                }
             }
         }
-    }
-    fn applied(&mut self) {
-        let desired = self.desired();
-        if let Shown::At { shape, .. } = desired {
-            self.installed = Some(shape);
-        }
-        self.shown = Some(desired);
+        Step::Idle
     }
 }
 fn fault(error: &PipelineError) -> Fault {
@@ -174,21 +270,42 @@ fn fault(error: &PipelineError) -> Fault {
 }
 
 impl StreamingViewer {
-    /// Install a changed overlay while NO decode job borrows the presenter.
-    /// The presenter re-composites its retained picture; this is not a decode,
-    /// presentation or visibility receipt and never touches the receiver.
+    /// Advance the single remote-cursor owner while NO decode job borrows the
+    /// presenter. An overlay change re-composites the retained picture; this
+    /// is not a decode, presentation or visibility receipt and never touches
+    /// the receiver. Local pointer requests never wait on the platform.
     pub(super) async fn apply_cursor(&mut self, cx: &Cx) -> Result<(), Error> {
         let Some(cursor) = &mut self.cursor else {
             return Ok(());
         };
-        let Some(update) = cursor.pending() else {
-            return Ok(());
+        let cursor = &mut cursor.remote;
+        let now = super::now(cx).map_err(Error::Session)?;
+        // Only an active grant makes the local pointer a remote-cursor owner.
+        let (controlling, mut local, history) = match self.peer.controlled() {
+            Some(viewer) => {
+                let (local, history) = viewer.local_cursor();
+                (true, local, Some(history))
+            }
+            None => (false, None, None),
         };
-        self.presenter
-            .apply_cursor(cx, &update)
-            .await
-            .map_err(Error::Media)?;
-        cursor.applied();
+        for _ in 0..MAX_STEPS {
+            let Step::Overlay(overlay) =
+                cursor.advance(controlling, local.as_deref_mut(), history, now)
+            else {
+                return Ok(());
+            };
+            let Some(update) = cursor.overlay_update(overlay) else {
+                return Ok(());
+            };
+            self.presenter
+                .apply_cursor(cx, &update)
+                .await
+                .map_err(Error::Media)?;
+            cursor.overlay_applied(overlay);
+        }
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

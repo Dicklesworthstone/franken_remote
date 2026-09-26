@@ -9,21 +9,11 @@
 //! allowance or view readiness.
 use super::{Entry, Error, Members, ObservationControl, Publisher, SendReport};
 use asupersync::cx::Cx;
-use fr_media::cursor::{HostCursor, Next, SourceState, ViewerLane};
-use fr_transport::quic::{self, QuicRecords, Route};
-use fr_wire::{cursor as wire, decoder::Binding};
-
-/// Retained-record deadline for a reliable shape (the transport's own bound).
-const SHAPE_SEND_US: u64 = 2_000_000;
-/// Admission window for a replaceable position datagram.
-const POSITION_SEND_US: u64 = 100_000;
+use fr_media::cursor::{HostCursor, SourceState};
+use fr_transport::quic::QuicRecords;
 
 /// Per-viewer cursor state, bound to the exact media view it was sent on.
-#[derive(Debug, Default)]
-pub(super) struct EntryCursor {
-    lane: ViewerLane,
-    view: Option<Binding>,
-}
+pub(super) type EntryCursor = crate::media_quic::HostLane;
 
 impl Entry {
     /// Admitted, steady observation on live original media only.
@@ -55,99 +45,15 @@ impl Entry {
         let Some(lanes) = media.cursor_lanes(transport).map_err(Error::Transport)? else {
             return Ok(());
         };
-        if self.cursor.view != Some(lanes.view) {
-            // Fresh attachments mean an empty viewer cache and sequence space.
-            self.cursor.lane.reset();
-            self.cursor.view = Some(lanes.view);
-            self.cursor.lane.observe(host.target());
-        }
         let now = owner.check().map_err(Error::Media)?.as_micros();
         let control = self.control.clone();
         let mut authorize = || owner.check().is_ok() && control.check().is_ok();
-        let lane = &mut self.cursor.lane;
-        if let Next::Shape(id) = lane.next(now) {
-            let Some(shape) = host.shape(id) else {
-                // Superseded image: the next sample supplies a current target.
-                return Ok(());
-            };
-            let bytes = wire::shape_record_bytes(shape.width, shape.height)
-                .filter(|&n| {
-                    n <= lanes.shape.maximum
-                        && n <= lanes.limits.max_control_message_bytes() as usize
-                })
-                .and_then(|n| {
-                    let mut record = Vec::new();
-                    record.try_reserve_exact(n).ok()?;
-                    record.resize(n, 0);
-                    let len = wire::encode_cursor_shape(
-                        &shape.wire(),
-                        lanes.shape.binding,
-                        &lanes.limits,
-                        &mut record,
-                    )
-                    .ok()?;
-                    (len == n).then_some(record)
-                });
-            let Some(record) = bytes else {
-                // Typed degradation: positions name the viewer's fallback.
-                lane.shape_undeliverable(id);
-                return Ok(());
-            };
-            match transport.send(
-                cx,
-                Route::Stream(lanes.shape),
-                &record,
-                now.saturating_add(SHAPE_SEND_US),
-                &mut authorize,
-            ) {
-                Ok(()) => {
-                    report.accepted += 1;
-                    if lane.shape_delivered(id, shape.rgba().len()).is_err() {
-                        lane.shape_undeliverable(id);
-                    }
-                }
-                Err(quic::Error::Backpressure) => {
-                    report.pending = true;
-                    return Ok(());
-                }
-                Err(error) => {
-                    return Err(Error::Transport(crate::media_quic::Error::Transport(error)));
-                }
-            }
-        }
-        if lane.next(now) != Next::Position {
-            return Ok(());
-        }
-        let Ok(Some(position)) = lane.position(lanes.view.geometry.as_raw()) else {
-            // No target, or sequences exhausted: forwarding stops, typed.
-            return Ok(());
-        };
-        let mut record = [0_u8; wire::CURSOR_POSITION_RECORD_BYTES];
-        let Ok(len) = wire::encode_cursor_position(
-            &position,
-            lanes.position.binding,
-            lanes.position_maximum,
-            &mut record,
-        ) else {
-            return Ok(());
-        };
-        match transport.send(
-            cx,
-            Route::Datagram(lanes.position),
-            &record[..len],
-            now.saturating_add(POSITION_SEND_US),
-            &mut authorize,
-        ) {
-            Ok(()) => {
-                report.accepted += 1;
-                lane.position_sent(&position, now);
-            }
-            // Replaceable: the next turn sends the then-latest state instead.
-            Err(quic::Error::Backpressure) => report.pending = true,
-            Err(error) => {
-                return Err(Error::Transport(crate::media_quic::Error::Transport(error)));
-            }
-        }
+        let turn = self
+            .cursor
+            .service(cx, transport, &lanes, host, now, &mut authorize)
+            .map_err(|e| Error::Transport(crate::media_quic::Error::Transport(e)))?;
+        report.accepted += turn.accepted;
+        report.pending |= turn.pending;
         Ok(())
     }
 }

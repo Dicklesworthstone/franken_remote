@@ -29,6 +29,8 @@ try:
         elif k == 8: reply(h, 266, b)
         elif k in (4, 6): reply(h, 261 if k == 4 else 264, b[:8])
         elif k == 5: reply(h, 262); break
+        # ReadCursor: no separate cursor exists here (typed Unsupported).
+        elif k == 16: reply(h, 274, b'\x02')
         elif k in (2, 7):
             frame, observed, forced = struct.unpack('>QQB', b)
             if last is not None and MODE == 'stall': time.sleep(60)

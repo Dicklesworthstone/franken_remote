@@ -253,6 +253,7 @@ fn build_indicator() {
 
 fn build_viewer_input() {
     println!("cargo:rerun-if-changed=src/viewer_input.c");
+    println!("cargo:rerun-if-changed=src/viewer_cursor.c");
     if env::var_os("CARGO_FEATURE_LINUX_VIEWER_INPUT").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux")
     {
@@ -283,17 +284,40 @@ fn build_viewer_input() {
             .success(),
         "install XCB and XKB protocol headers (libxcb1-dev, libx11-dev)"
     );
+    // The local pointer image owner (remote cursor while controlling): its
+    // own connection, RENDER ARGB cursors only.
+    assert!(
+        Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
+            .args([
+                "-std=c11",
+                "-O2",
+                "-fPIC",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-c",
+                "src/viewer_cursor.c",
+                "-o"
+            ])
+            .arg(out.join("viewercursor.o"))
+            .status()
+            .expect("native C compiler")
+            .success(),
+        "install XCB RENDER development headers (libxcb-render0-dev)"
+    );
     assert!(
         Command::new("ar")
             .arg("crs")
             .arg(out.join("libfrviewerinput.a"))
             .arg(out.join("viewerinput.o"))
+            .arg(out.join("viewercursor.o"))
             .status()
             .unwrap()
             .success()
     );
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=frviewerinput");
+    println!("cargo:rustc-link-lib=xcb-render");
     println!("cargo:rustc-link-lib=xcb");
 }
 

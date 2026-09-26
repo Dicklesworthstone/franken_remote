@@ -3,6 +3,7 @@
 //! exact pending record. Neither codec waits nor admission refresh block the
 //! other owner's maintenance. The native input Driver remains independent.
 pub(super) mod acquisition;
+mod cursor;
 mod recovery;
 use super::{ControlledHost, Error, HostSession, Services, now};
 use crate::{
@@ -79,6 +80,8 @@ pub struct StreamingHost {
     feedback: Option<HostFeedback>,
     presentation: Option<HostPresentation>,
     clipboard: Option<crate::native_clipboard::Application>,
+    /// Present only when the viewer selected `remote-cursor` (plan §11.4).
+    cursor: Option<Box<cursor::StreamCursor>>,
 }
 impl HostSession {
     pub fn into_streaming(self, stream: Stream) -> Result<StreamingHost, Error> {
@@ -163,6 +166,7 @@ impl StreamingHost {
             presentation,
             clipboard: None,
             recovery: None,
+            cursor: None,
         })
     }
     pub(crate) fn configure_clipboard(
@@ -347,9 +351,11 @@ impl StreamingHost {
             .map_err(Error::MediaTransport)?;
         let (credit, requests) = mpsc::channel(1);
         let (completed, results) = mpsc::channel(1);
+        let cursor = self.cursor.as_deref();
         let mut producer = pin!(produce(
             &mut stream.source,
             &stream.control,
+            cursor,
             requests,
             completed
         ));
@@ -370,6 +376,7 @@ impl StreamingHost {
             repair_turn: false,
             feedback: self.feedback.as_mut(),
             presentation: self.presentation.as_mut(),
+            cursor,
             other,
         };
         let mut network = pin!(async {
@@ -474,6 +481,7 @@ impl<F> Drop for Guarded<F> {
 async fn produce(
     source: &mut CaptureSource,
     control: &ObservationControl,
+    cursor: Option<&cursor::StreamCursor>,
     mut requests: mpsc::Receiver<()>,
     completed: mpsc::Sender<CaptureUpdate>,
 ) -> Result<(), Error> {
@@ -488,6 +496,12 @@ async fn produce(
         // Exactly one issued credit exists; no second native operation can run
         // until this result has transferred to the canonical cache.
         completed.try_send(update).map_err(|_| Error::Order)?;
+        // Same credit and cadence, separate from pixels: a moving pointer over
+        // a static desktop needs no new picture and is not freshness.
+        if let Some(cursor) = cursor {
+            control.check().map_err(Error::Media)?;
+            cursor.sample(source, control).await?;
+        }
     }
 }
 struct VideoServices<'a, S> {
@@ -507,9 +521,24 @@ struct VideoServices<'a, S> {
     repair_turn: bool,
     feedback: Option<&'a mut HostFeedback>,
     presentation: Option<&'a mut HostPresentation>,
+    cursor: Option<&'a cursor::StreamCursor>,
     other: &'a mut S,
 }
 impl<S> VideoServices<'_, S> {
+    /// After media records: the remote cursor (at most one reliable shape and
+    /// one position datagram), then advisory receiver feedback.
+    fn service_lanes(&mut self, q: &mut QuicRecords, cx: &Cx) -> Result<u64, Error> {
+        if let Some(cursor) = self.cursor {
+            cursor.service(cx, q, self.control)?;
+        }
+        let current = now(cx)?;
+        if let Some(feedback) = &mut self.feedback {
+            feedback
+                .service(q, cx, current)
+                .map_err(Error::ReceiverFeedback)?;
+        }
+        Ok(current)
+    }
     fn collect_capture(&mut self, cx: &Cx) -> Result<Option<Observation>, Error> {
         let mut observation = None;
         if let Some(started) = self.in_flight {
@@ -676,12 +705,7 @@ impl<S: Services> Services for VideoServices<'_, S> {
                 }
             }
         }
-        let current = now(&cx)?;
-        if let Some(feedback) = &mut self.feedback {
-            feedback
-                .service(q, &cx, current)
-                .map_err(Error::ReceiverFeedback)?;
-        }
+        let current = self.service_lanes(q, &cx)?;
         let credit = self.sender.stream_credit(self.capacity);
         let interval = self.capture_interval(current, send, credit, observation)?;
         let wake = self.input_wake.due(

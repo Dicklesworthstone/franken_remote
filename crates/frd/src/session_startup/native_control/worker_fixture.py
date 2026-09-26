@@ -36,6 +36,8 @@ try:
                 reply(h,258,struct.pack('>QQQQB',frame,at,0,0,0)+bytes(7)+IDR)
                 last = frame
         elif k == 5: reply(h,262); break
+        # ReadCursor: no separate cursor exists here (typed Unsupported).
+        elif k == 16: reply(h,274,b'\x02')
         else: raise ValueError(k)
 except (EOFError,BrokenPipeError):
     pass

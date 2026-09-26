@@ -4,8 +4,8 @@
 pub mod fanout;
 mod negotiated;
 pub mod recovery;
-pub(crate) use negotiated::CursorLanes;
 pub use negotiated::{AudioLanes, NegotiatedMedia, replacement};
+pub(crate) use negotiated::{CursorLanes, HostLane};
 
 use crate::{
     media,

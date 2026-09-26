@@ -190,8 +190,25 @@ grant needs a new `fr connect --control`. The completion record has
 counts of host input results (`input_results`, `input_submitted_to_os`); these
 are host-reported stages, not local proof of an effect.
 
-The controlled share does not forward the remote cursor yet: while
-controlling, the only pointer shown over the viewer window is the local one.
+The controlled share forwards the host's cursor too (`frd run --input-agent`
+selects the optional `remote-cursor` capability the client offers), and exactly
+ONE pointer renders it. Before the grant the viewer composites the overlay as
+`--view-only` does. After the grant, while the host pointer is where this
+client's own absolute input put it, the local pointer is the owner: the viewer
+window's X cursor becomes the host's confirmed shape (an ARGB RENDER cursor set
+by a separate thread on its own X connection, alongside input capture), and no
+overlay is composited. When the host pointer is somewhere this client never sent
+it (the host moved, warped or confined it) or the local pointer leaves the
+window, the local pointer over the window is blanked FIRST and the overlay then
+shows the confirmed position; the owner switches back only after the host is
+confirmed to follow new input. A hidden, locked or host-composited cursor draws
+nothing, and a shape that has not arrived is the built-in crosshair. Positions
+are confirmed host state for drawing only, never input. Evidence is the
+namespace e2e on two Xvfb displays
+(`crates/frd/tests/native_host_linux_serial/real_control_cursor.rs`), which
+reads the viewer window's cursor with `XFixesGetCursorImage` and its pixels with
+`XGetImage`. Not evidence for a GPU compositor, HiDPI cursor scaling (the shape
+is drawn at the host's pixel size, also with `--fit`) or Wayland.
 
 ### Clipboard (`--clipboard`, with `--control`)
 

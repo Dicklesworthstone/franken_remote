@@ -3,6 +3,7 @@
 mod clipboard;
 pub mod events;
 mod files;
+pub mod local_cursor;
 pub mod request;
 mod viewport;
 use super::{ViewerSession, now};
@@ -104,6 +105,10 @@ pub struct ControlledViewer {
     clipboard: Option<crate::clipboard_quic::Bridge>,
     clipboard_setup: crate::session_startup::clipboard::Setup,
     files: Box<files::Slot>,
+    /// The platform owner of the local pointer image (remote cursor, §11.4).
+    local_cursor: Option<Box<dyn local_cursor::LocalCursor>>,
+    /// Positions this viewer encoded for the host, to tell lag from divergence.
+    pointer_history: Box<fr_client::cursor::owner::PointerHistory>,
 }
 impl std::fmt::Debug for ControlledViewer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -198,6 +203,8 @@ impl ViewerSession {
             clipboard: None,
             clipboard_setup: crate::session_startup::clipboard::Setup::default(),
             files: Box::default(),
+            local_cursor: None,
+            pointer_history: Box::default(),
         })
     }
 }
@@ -252,6 +259,7 @@ impl ControlledViewer {
             clipboard.stop();
         }
         self.clipboard_setup.stop();
+        self.stop_local_cursor();
         self.viewport.stop();
         self.input.stop(StopReason::Disconnected);
         self.pending = None;
@@ -311,6 +319,7 @@ impl ControlledViewer {
         let result = self.input.action(action, &mut p.bytes, t)?;
         p.len = result.bytes;
         self.pending = Some(p);
+        self.note_action(&action, t);
         Ok(result)
     }
     pub fn pointer(&mut self, position: DesktopPoint) -> Result<Encoded, Error> {
@@ -324,6 +333,7 @@ impl ControlledViewer {
         let result = self.input.pointer(position, &mut p.bytes, t)?;
         p.len = result.bytes;
         self.pending = Some(p);
+        self.note_pointer(position, t);
         Ok(result)
     }
     /// Actual platform snapshots only. One pending slot preserves their ordering

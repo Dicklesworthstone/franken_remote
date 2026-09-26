@@ -298,7 +298,7 @@ fn number(word: &str) -> i32 {
     word.parse().unwrap()
 }
 /// (position, held-button mask) on the host, queried independently.
-fn host_pointer(observer: &mut Harness) -> (Point, u32) {
+pub(super) fn host_pointer(observer: &mut Harness) -> (Point, u32) {
     let answer = observer.ask("pointer");
     assert_eq!(answer[0], "PTR", "{answer:?}");
     (
@@ -564,7 +564,7 @@ impl Controlled {
         )
     }
     /// Move the VIEWER pointer to window-local `local`.
-    fn viewer_move(&mut self, local: Point) {
+    pub(super) fn viewer_move(&mut self, local: Point) {
         let (_, (wx, wy)) = self.window;
         let answer = self
             .driver
