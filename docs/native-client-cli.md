@@ -145,6 +145,12 @@ failure (for example a missed device slot) drops that stream without flushing ol
 samples into the next one and asks the host for a fresh audio epoch, at most
 eight times per session. Audio never feeds video presentation or freshness.
 
+Residual trust, stated: unlike video, whose HEVC decoder runs in a
+seccomp-sandboxed worker process, the Opus decoder runs inside the `fr` process
+on its view-only session thread. Host-generated Opus reaches libopus only after
+the bounds checks above, but without process isolation, so a libopus defect is
+exposed to the host's packets. See [`SECURITY.md`](../SECURITY.md).
+
 The completion record adds `audio_requested`, `audio_active` (at least one decoded
 frame was accepted by the local audio server), `audio_frames_submitted`,
 `audio_output_resets`, `audio_absence` (null or a typed reason such as
