@@ -38,7 +38,8 @@ hardware qualification or an authenticated network session.
 ## Build and reproduce
 
 Install a C compiler, pkg-config, FFmpeg development packages (`libavcodec-dev`,
-`libavutil-dev`, `libswscale-dev`), `libx11-dev`, and the system `libxdamage1` runtime. The x265 test requires an FFmpeg
+`libavutil-dev`, `libswscale-dev`), `libx11-dev`, `libxcb-render0-dev` (the controlled
+viewer's cursor thread), and the system `libxdamage1` runtime. The x265 test requires an FFmpeg
 build with that explicit software encoder. For a controlled matching SDK, set both
 `FR_NATIVE_INCLUDE_DIR` and `FR_NATIVE_LIBRARY_DIR`; neither directory is downloaded
 by the build. Cross builds without a qualified sysroot refuse.

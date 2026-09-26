@@ -29,7 +29,7 @@ jobs:
         run: |
           rustup show active-toolchain
           sudo apt-get update
-          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 libxi6 libxdamage1 libxrandr2 libxfixes3 libx11-xcb1 libopus0 libpulse0 pulseaudio pkg-config xvfb xauth openssl
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxcb-render0-dev libxtst6 libxi6 libxdamage1 libxrandr2 libxfixes3 libx11-xcb1 libopus0 libpulse0 pulseaudio pkg-config xvfb xauth openssl
       - name: Verify committed native QUIC and full workspace
         run: |
           cargo test -p fr-transport --locked -- --test-threads=4

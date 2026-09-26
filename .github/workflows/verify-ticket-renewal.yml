@@ -28,7 +28,7 @@ jobs:
       - name: Install pinned compiler and native SDKs
         run: |
           rustup show active-toolchain
-          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxtst6 libxi6 libxdamage1 libxrandr2 libxfixes3 libx11-xcb1 libopus0 libpulse0 pulseaudio pkg-config xvfb xauth openssl
+          sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxcb-render0-dev libxtst6 libxi6 libxdamage1 libxrandr2 libxfixes3 libx11-xcb1 libopus0 libpulse0 pulseaudio pkg-config xvfb xauth openssl
       - name: Verify committed workspace and native input renewal
         run: |
           ./scripts/verify.sh fast
