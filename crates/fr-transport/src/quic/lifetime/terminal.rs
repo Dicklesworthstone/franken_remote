@@ -19,6 +19,10 @@ use fr_wire::{
 };
 use std::{future::Future, sync::Arc, time::Duration};
 
+mod deferred;
+pub(in crate::quic) use deferred::Armed;
+pub use deferred::{RevocationRegistration, RevocationReport};
+
 const DRAIN_US: u64 = 250_000;
 const TURN: Duration = Duration::from_millis(10);
 
@@ -63,13 +67,33 @@ impl QuicRecords {
         report: Revoked,
     ) -> impl Future<Output = Result<(), Error>> + use<> {
         let prepared = if self.is_bound_to(original) {
-            let prepared = self.prepare_revocation(cx, route, binding, report);
+            let prepared = if self.deferred_revocation.is_some() {
+                Err(Error::InvalidPolicy)
+            } else {
+                self.prepare_revocation(cx, route, binding, report)
+            };
             self.close();
             prepared
         } else {
             Err(Error::WrongRoute)
         };
         async move { prepared?.run().await }
+    }
+
+    fn revocation_route(&self, route: StreamRoute, binding: Binding) -> Result<(), Error> {
+        let native = self.native.as_ref().ok_or(Error::Closed)?;
+        if native.connection().role() != StreamRole::Server
+            || native.connection().state() != QuicConnectionState::Established
+            || !route.outbound
+            || route.messages != Messages::SessionControl
+            || route.priority != Priority::Critical
+            || route.binding != binding.channel
+            || route.maximum < REVOKED_BYTES
+            || !self.has_route(Route::Stream(route))
+        {
+            return Err(Error::WrongRoute);
+        }
+        Ok(())
     }
 
     fn prepare_revocation(
@@ -85,21 +109,15 @@ impl QuicRecords {
         if self.last_now.is_some_and(|last| started < last) {
             return Err(Error::Clock);
         }
-        if self.lifetime_check.as_ref().is_some_and(|gate| !gate()) {
+        if self
+            .terminal_lifetime_check
+            .as_ref()
+            .is_some_and(|gate| !gate())
+        {
             return Err(Error::Unauthorized);
         }
+        self.revocation_route(route, binding)?;
         let native = self.native.as_ref().ok_or(Error::Closed)?;
-        if native.connection().role() != StreamRole::Server
-            || native.connection().state() != QuicConnectionState::Established
-            || !route.outbound
-            || route.messages != Messages::SessionControl
-            || route.priority != Priority::Critical
-            || route.binding != binding.channel
-            || route.maximum < REVOKED_BYTES
-            || !self.has_route(Route::Stream(route))
-        {
-            return Err(Error::WrongRoute);
-        }
         let streams = native.connection().inner().streams();
         if streams.len() > self.streams.len()
             || native
@@ -143,7 +161,7 @@ impl QuicRecords {
         Ok(Drain {
             native: self.native.take().ok_or(Error::Closed)?,
             cx: cx.clone(),
-            gate: self.lifetime_check.clone(),
+            gate: self.terminal_lifetime_check.clone(),
             route,
             empty,
             streams: self.streams.len(),

@@ -20,6 +20,7 @@ use std::{
 };
 
 mod lifetime;
+pub use lifetime::terminal::{RevocationRegistration, RevocationReport};
 
 pub mod budget;
 pub mod clipboard;
@@ -310,7 +311,10 @@ pub struct ConnectionBinding(Weak<()>);
 /// Asupersync still owns congestion/loss recovery and its qualification gates.
 pub struct QuicRecords {
     identity: Arc<()>,
+    // Drop order: the exact input fence precedes native socket destruction.
+    deferred_revocation: Option<Box<lifetime::terminal::Armed>>,
     lifetime_check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    terminal_lifetime_check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     clock_attached: bool,
     display_selection_claimed: bool,
     attachments: Vec<attachment::Reservation>,
@@ -425,6 +429,8 @@ impl QuicRecords {
         Ok(Self {
             identity: Arc::new(()),
             lifetime_check: None,
+            terminal_lifetime_check: None,
+            deferred_revocation: None,
             clock_attached: false,
             display_selection_claimed: false,
             attachments: Vec::new(),
@@ -498,6 +504,7 @@ impl QuicRecords {
         self.native.is_none()
     }
     pub fn close(&mut self) {
+        self.capture_revocation();
         self.native = None;
         self.pending_datagram = None;
         self.pending_writes.clear();
@@ -746,7 +753,7 @@ impl QuicRecords {
             // Native ownership stays outside self across every await: dropping
             // or unwinding an in-flight operation cannot resume its queued data.
             let mut native = self.native.take().ok_or(Error::Closed)?;
-            lifetime::poll_io(
+            let result = lifetime::poll_io(
                 cx,
                 gate.as_deref(),
                 authorize,
@@ -754,8 +761,8 @@ impl QuicRecords {
                 until,
                 native.flush(cx),
             )
-            .await?;
-            self.native = Some(native);
+            .await;
+            self.finish_native_io(native, result)?;
             if queued != Some(Priority::Bulk) {
                 // A critical prefix gets the first native slot, then yields to
                 // receive/service control before spending a bulk turn budget.
@@ -765,7 +772,7 @@ impl QuicRecords {
         let current = self.check(cx, authorize)?;
         let until = self.senders.iter().filter_map(|s| s.until).min();
         let mut native = self.native.take().ok_or(Error::Closed)?;
-        lifetime::poll_io(
+        let result = lifetime::poll_io(
             cx,
             gate.as_deref(),
             authorize,
@@ -773,8 +780,8 @@ impl QuicRecords {
             until,
             native.drive_io_once(cx, wait),
         )
-        .await?;
-        self.native = Some(native);
+        .await;
+        self.finish_native_io(native, result)?;
         self.check(cx, authorize)?;
         let native = self.native.as_mut().ok_or(Error::Closed)?;
         if native.connection().state() != QuicConnectionState::Established
@@ -811,6 +818,22 @@ impl QuicRecords {
             }
         }
         Ok(())
+    }
+    // A *returned* cancelled/failed I/O turn may transfer custody only into
+    // close. Never resume ordinary I/O after that error. The terminal drain must
+    // independently prove absence of native payload/retransmissions; uncertain
+    // or partially staged work is refused. Dropping an unreturned I/O future
+    // still drops its local socket, so no abandoned operation can be resumed.
+    fn finish_native_io<T>(
+        &mut self,
+        native: NativeQuicUdpConnection,
+        result: Result<T, Error>,
+    ) -> Result<T, Error> {
+        self.native = Some(native);
+        if result.is_err() {
+            self.close();
+        }
+        result
     }
     /// Stage one small prefix, leaving congestion/loss control with Asupersync.
     /// Large application records are NOT single QUIC frames. No prefix is staged
