@@ -156,8 +156,23 @@ fn selected_policy_path_and_explicit_overrides_reach_startup_resolution() {
     fs::DirBuilder::new().mode(0o700).create(&root.0).unwrap();
     let config = root.0.join("policy.json");
     let store = Store::new(&config).unwrap();
-    store.update(Change::Approval(Approval::Local)).unwrap();
-    store.update(Change::Sharing(Sharing::Tailnet)).unwrap();
+    // The writer lock is a nonblocking flock. A child forked by a concurrent
+    // test thread briefly inherits the lock's open file description until its
+    // exec (CLOEXEC), so the next update can see a transient Busy. This test
+    // is about path resolution, not contention: retry Busy, bounded.
+    let update = |change: Change| {
+        for _ in 0..200 {
+            match store.update(change) {
+                Err(crate::host_policy::Error::Busy) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                other => return other.unwrap(),
+            }
+        }
+        panic!("policy store stayed Busy for a second");
+    };
+    update(Change::Approval(Approval::Local));
+    update(Change::Sharing(Sharing::Tailnet));
     for explicit in [false, true] {
         let mut argv = vec![
             "--config",
