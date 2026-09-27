@@ -368,9 +368,17 @@ session state is replayed. Each renderer is created only after approved display
 selection, at the selected native pixel dimensions. Unsupported sizes, hide,
 resize or window loss retain the existing terminal behavior.
 
-Close the window, or send SIGINT/Ctrl-C, SIGTERM or SIGHUP. A signal cancels the
-original supervisor but does not abandon its future: the same independent
-cleanup path still runs. Native cleanup failure takes precedence over a friendly
+In an already-running view-only session, normal window-manager close now retires
+local media and sends one `CloseRequest` over the original connection, retaining
+the exact optional host `Closed` report. The exchange has the existing 250 ms
+maximum (shortened by earlier session deadlines); duplicate close events cannot
+restart it. A native 500 ms fallback stops a parked close handler. Bootstrap and
+control-capable windows still stop immediately. No close replays input, reuses
+control, or automatically reconnects a normally closed window.
+
+Direct stop, emergency input, hide/resize/window loss and SIGINT/Ctrl-C, SIGTERM
+or SIGHUP remain immediate cancellation. A signal cancels the original supervisor
+but does not abandon its future: the same independent cleanup path still runs. Native cleanup failure takes precedence over a friendly
 "cancelled" result. A genuine user-close decision is sampled before cleanup;
 programmatic window cleanup cannot turn a connection failure into a successful
 user exit. That decision stops further retries only after mandatory cleanup, and
@@ -384,8 +392,27 @@ handle. They never print, block on terminal input, retain pixels, or build an
 unbounded event log. Output is emitted after the operation and its cleanup return,
 so a slow pipe cannot hold session authority or delay a cleanup callback. Live
 connection/approval status UI is not implemented by this command. A completed
-JSON record distinguishes stopped observation and confirmed cleanup, and retains
-`transport_qualified: false` and `physical_visibility_proven: false`.
+JSON record distinguishes stopped observation and confirmed **local** cleanup,
+and retains `transport_qualified: false` and `physical_visibility_proven: false`.
+The legacy `cleanup_confirmed` field refers only to the local supervisor's
+completed cleanup. It never describes the remote host.
+
+Observation completion now includes `close_exchange`: `null` means no completed
+exchange, including emergency cancellation or unpolled abandonment. Otherwise it
+contains independent `request_acknowledged`, `transport_completed`, and
+`host_report` fields. `host_report: null` means no host report, even when the request
+was acknowledged. A report retains its typed `reason`, `cleanup_stage`
+(`unconfirmed`, `complete`, or `incomplete`) and `outstanding_effects`. Unknown
+effects use `known: false, pending: null, uncertain: null`; explicitly reported
+zero counts use `known: true, pending: 0, uncertain: 0`. They are not interchangeable.
+A failed ACK flush does not erase a received report or upgrade its stages.
+
+A local cleanup failure or signal keeps any already-collected exchange in the
+failure JSON while retaining the original error/exit code. Human output also
+labels the host stages as **host-reported**, separately from local cleanup.
+No report emits peer strings, native error diagnostics, input values or session
+identifiers. The controller's existing lease-revocation format is unchanged.
+See `NATIVE_WINDOW_CLOSURE.md` for the native ownership path and evidence scope.
 
 Exit codes: 0 for a completed command or normally stopped observation, 2 for
 argument/unsupported-mode refusal, 1 for operational failure, 130 for signal

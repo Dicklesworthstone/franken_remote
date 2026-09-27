@@ -406,6 +406,19 @@ fn completed(
     progress: &Progress,
     json: bool,
 ) -> Result<String, Failure> {
+    let result = completed_result(application, result, stopped, progress, json);
+    // Preserve the original host report even when local native cleanup or the
+    // supervisor failed. A failure status must not erase known external effects.
+    crate::closure::preserve(result, application.disconnect_outcome())
+}
+#[cfg(feature = "linux-desktop")]
+fn completed_result(
+    application: &Session<Interface>,
+    result: Result<(), reconnect::Failure>,
+    stopped: bool,
+    progress: &Progress,
+    json: bool,
+) -> Result<String, Failure> {
     // A control attempt's cleanup notice deliberately ended reconnection;
     // classify that attempt's ORIGINAL outcome, never the notice itself.
     let result = match (result, progress.control.and_then(|c| c.ended)) {
@@ -469,7 +482,13 @@ fn completed(
             ),
         });
     }
-    Ok(completion(progress, json))
+    Ok(completion(
+        progress,
+        json,
+        application
+            .disconnect_outcome()
+            .map(crate::closure::Report::from),
+    ))
 }
 
 #[cfg(not(feature = "linux-desktop"))]
@@ -675,7 +694,7 @@ fn install_audio(
     }
 }
 #[cfg(feature = "linux-desktop")]
-fn completion(progress: &Progress, json: bool) -> String {
+fn completion(progress: &Progress, json: bool, closure: Option<crate::closure::Report>) -> String {
     if let Some(control) = progress.control {
         return control_completion(progress, control, json);
     }
@@ -691,8 +710,9 @@ fn completion(progress: &Progress, json: bool) -> String {
             )
         });
     if json {
+        let closure = closure.map_or_else(|| "null".to_owned(), crate::closure::Report::json);
         format!(
-            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"observe\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"audio_requested\":{},\"audio_active\":{},\"audio_frames_submitted\":{},\"audio_output_resets\":{},\"audio_absence\":{},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false,\"audibility_proven\":false}}\n",
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"observe\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"audio_requested\":{},\"audio_active\":{},\"audio_frames_submitted\":{},\"audio_output_resets\":{},\"audio_absence\":{},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false,\"audibility_proven\":false,\"close_exchange\":{closure}}}\n",
             output::timestamp(),
             progress.attempts,
             progress.opened,
@@ -712,8 +732,15 @@ fn completion(progress: &Progress, json: bool) -> String {
             (true, false, Some(reason)) => format!(" Host audio absent: {reason}."),
             (true, false, None) => " Host audio: configured but nothing played.".to_owned(),
         };
+        let closure = closure.map_or_else(
+            || {
+                "No completed close exchange; host cleanup and outstanding effects are unknown."
+                    .to_owned()
+            },
+            crate::closure::Report::text,
+        );
         format!(
-            "View-only session stopped; {} attempt(s), {} opened session(s), cleanup confirmed.{audio} Native transport/hardware remain unqualified.\n",
+            "View-only session stopped; {} attempt(s), {} opened session(s), local cleanup confirmed. {closure}{audio} Native transport/hardware remain unqualified.\n",
             progress.attempts, progress.opened
         )
     }
@@ -872,6 +899,7 @@ mod tests {
             for before in [
                 None,
                 Some(WindowStatus::Mapped),
+                Some(WindowStatus::CloseRequested),
                 Some(WindowStatus::Stopped(StopReason::SessionEnded)),
                 Some(WindowStatus::Stopped(StopReason::NativeFailure)),
             ] {
@@ -1045,7 +1073,7 @@ mod tests {
                 )
                 .is_err()
             );
-            let text = completion(&ended, false);
+            let text = completion(&ended, false, None);
             assert!(text.starts_with("Control session stopped;") && text.contains("granted"));
         }
 
@@ -1097,7 +1125,7 @@ mod tests {
                 ),
             ];
             for (progress, fields) in cases {
-                let json = completion(&progress, true);
+                let json = completion(&progress, true, None);
                 serde_json::from_str::<serde_json::Value>(json.trim()).unwrap();
                 for field in fields {
                     assert!(json.contains(field), "{field}: {json}");
@@ -1110,11 +1138,55 @@ mod tests {
                     absence: None,
                 })),
                 false,
+                None,
             );
             assert!(
                 text.contains("clipboard active (2 host item(s) received)"),
                 "{text}"
             );
+        }
+        #[test]
+        fn observation_completion_keeps_host_report_separate_from_local_cleanup() {
+            use fr_wire::closure::{Cleanup, Closed, ClosedReason, OutstandingEffects};
+            let report = crate::closure::Report::from(frd::session_startup::ViewerCloseOutcome {
+                request_acknowledged: true,
+                report: Some(Closed {
+                    reason: ClosedReason::ClientRequested,
+                    cleanup: Cleanup::Unconfirmed,
+                    effects: OutstandingEffects::Unknown,
+                }),
+                transport: Ok(()),
+            });
+            let progress = Progress::default();
+            let json: serde_json::Value =
+                serde_json::from_str(&completion(&progress, true, Some(report))).unwrap();
+            assert_eq!(json["role"], "observe");
+            assert_eq!(json["cleanup_confirmed"], true); // Local cleanup only.
+            assert_eq!(
+                json["close_exchange"]["host_report"]["cleanup_stage"],
+                "unconfirmed"
+            );
+            assert!(
+                json["close_exchange"]["host_report"]["outstanding_effects"]["pending"].is_null()
+            );
+            let text = completion(&progress, false, Some(report));
+            assert!(text.contains("local cleanup confirmed"));
+            assert!(text.contains("Host-reported reason=client_requested, cleanup=unconfirmed"));
+            let absent: serde_json::Value =
+                serde_json::from_str(&completion(&progress, true, None)).unwrap();
+            assert!(absent.get("close_exchange").unwrap().is_null());
+            assert!(completion(&progress, false, None).contains("No completed close exchange"));
+        }
+        #[test]
+        fn observation_closure_projection_does_not_change_control_completion() {
+            let progress = Progress {
+                control: Some(control::Counters::default()),
+                ..Progress::default()
+            };
+            let json: serde_json::Value =
+                serde_json::from_str(&completion(&progress, true, None)).unwrap();
+            assert_eq!(json["role"], "control");
+            assert!(json.get("close_exchange").is_none());
         }
         #[test]
         fn supervisor_cleanup_failure_cannot_be_masked_by_a_user_close_or_signal() {

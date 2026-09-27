@@ -56,6 +56,7 @@ pub(super) fn failure(value: Revoked) -> Failure {
         next: "Control has ended; it will not be reacquired automatically. Check the host-reported cleanup and effect status before starting a new session. Previously submitted actions are not rolled back.",
         exit: 1,
         revocation: Some(report),
+        closure: None,
     }
 }
 
@@ -63,7 +64,10 @@ pub(super) fn failure(value: Revoked) -> Failure {
 /// output contract unchanged and never infer a host reason from connection loss.
 pub(super) fn output(error: Failure, json: bool) -> String {
     let Some(report) = error.revocation else {
-        return crate::output::failure(error, json);
+        return error.closure.map_or_else(
+            || crate::output::failure(error, json),
+            |report| report.failure(error, json),
+        );
     };
     if json {
         use crate::output::{quoted, timestamp};

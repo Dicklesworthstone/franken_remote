@@ -78,6 +78,36 @@ bindings. Callback assertions begin at observed native intent, not before an
 asynchronous X event is handled. No production deadline or old assertion changed.
 
 This connects normal native-window observation close, not controller shutdown,
-confirmed host cleanup or authoritative external-effect accounting. CLI rendering
-of the retained report is a separate integration from this native ownership change.
+confirmed host cleanup or authoritative external-effect accounting.
+
+## CLI outcome retention
+
+The CLI now projects the original Session's retained outcome into `close_exchange`
+on observation completion. No exchange and no host report are separate nullable
+states. The report retains every typed reason, cleanup stage, and known/unknown
+outstanding-effect count; neither request ACK nor local cleanup manufactures
+remote cleanup. Failed transport after receipt does not discard the report. A
+local cleanup error or signal also preserves a collected outcome on the failure
+record without changing its error or exit status. Existing controller reporting
+and generic failures without closing evidence remain unchanged.
+
+Six added CLI tests cover all reason/stage/count combinations, report absence,
+failed ACK flush, local failure preservation and actual completion rendering.
+The complete CLI unit binary passed 58 tests. The existing 14 CLI process tests
+also passed against the newly linked executable: actual stdout/exit, signal,
+root-credential Unix LocalAPI, trust-store and typed refusal paths. With the 72
+native tests above, this session has 144 distinct passing cases, including 13
+new tests. Repeated runs are not counted twice. CLI production and complete unit
+target strict pedantic Clippy passed; formatting and whitespace checks passed.
+
+The first process run could not launch because the local metadata-only lint
+command had reused the executable output path. Separate metadata/binary outputs
+and an unchanged source rebuild made all 14 cases pass. The initial CLI lint
+finding was corrected by renaming a private field, not suppressing the lint.
+These process checks do not claim a newly executed full CLI-to-live-host window
+session or audio/clipboard feature matrix. The native closure integration tests
+above exercise the actual application/window/session path with synthetic codec
+and peer-accounting fixtures. Remaining full-workspace/native-host cleanup and
+live-tailnet qualifications are unchanged.
+
 Refs: plan 7.3/19; PROTOCOL.md 4/6; fr-rc-protocol-refusal-closure-5dx remains open.

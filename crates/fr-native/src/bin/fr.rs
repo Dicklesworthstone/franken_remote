@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 //! Native CLI entry point. Hosting is never enabled by installing/running it.
+#[path = "fr_cli/closure.rs"]
+mod closure;
 #[cfg(target_os = "linux")]
 #[path = "fr_cli/linux.rs"]
 mod linux;
@@ -17,6 +19,7 @@ struct Failure {
     next: &'static str,
     exit: u8,
     revocation: Option<terminal::Report>,
+    closure: Option<closure::Report>,
 }
 impl Failure {
     const fn new(code: &'static str, next: &'static str, exit: u8) -> Self {
@@ -25,6 +28,7 @@ impl Failure {
             next,
             exit,
             revocation: None,
+            closure: None,
         }
     }
 }
