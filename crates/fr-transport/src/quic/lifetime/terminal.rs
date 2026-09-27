@@ -25,6 +25,7 @@ mod exchange;
 pub(in crate::quic) use deferred::Armed;
 pub use deferred::{ClosedRegistration, ClosedReport, RevocationRegistration, RevocationReport};
 pub use exchange::CloseOutcome;
+pub use exchange::deferred::{ControlCloseRegistration, ControlCloseReport, ControlCloseSignal};
 
 const DRAIN_US: u64 = 250_000;
 const TURN: Duration = Duration::from_millis(10);

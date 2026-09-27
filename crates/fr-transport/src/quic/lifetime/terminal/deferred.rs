@@ -136,14 +136,19 @@ impl Fence {
     }
 }
 
-pub(in crate::quic) struct Armed {
+pub(in crate::quic) enum Armed {
+    Report(ArmedReport),
+    Request(super::exchange::deferred::ArmedRequest),
+}
+
+pub(in crate::quic) struct ArmedReport {
     cleanup: Cx,
     route: StreamRoute,
     binding: Binding,
     registration: RevocationRegistration,
     fence: Option<Fence>,
 }
-impl Drop for Armed {
+impl Drop for ArmedReport {
     fn drop(&mut self) {
         // This field precedes the socket: abandonment also fences the lease or
         // observation before releasing custody. No I/O is performed in Drop.
@@ -245,19 +250,23 @@ impl QuicRecords {
             }
             *state = State::Armed;
         }
-        self.deferred_revocation = Some(Box::new(Armed {
+        self.deferred_revocation = Some(Box::new(Armed::Report(ArmedReport {
             cleanup: cleanup.clone(),
             route,
             binding,
             registration,
             fence: Some(fence),
-        }));
+        })));
         Ok(())
     }
 
     pub(in crate::quic) fn capture_revocation(&mut self) {
-        let Some(mut armed) = self.deferred_revocation.take() else {
+        let Some(armed) = self.deferred_revocation.take() else {
             return;
+        };
+        let mut armed = match *armed {
+            Armed::Request(request) => return request.capture(self),
+            Armed::Report(report) => report,
         };
         // No reporting lock while fencing authority or inspecting native state.
         // Nothing below drives native I/O or dispatches application records.

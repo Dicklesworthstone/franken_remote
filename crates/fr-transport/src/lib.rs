@@ -23,3 +23,6 @@ pub struct ControlCloseOutcome {
     pub exchange: quic::CloseOutcome,
     pub revocation: Option<fr_wire::lease_revoked::Revoked>,
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use quic::{ControlCloseRegistration, ControlCloseReport, ControlCloseSignal};

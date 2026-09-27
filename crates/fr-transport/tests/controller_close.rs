@@ -176,3 +176,6 @@ async fn request_then_report(cx: &Cx, pair: &mut Pair, report: Closed) -> Result
 
 #[path = "terminal_revocation/exchange/controller.rs"]
 mod checks;
+
+#[path = "terminal_revocation/exchange/deferred_controller.rs"]
+mod deferred_checks;

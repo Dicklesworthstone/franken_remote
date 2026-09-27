@@ -1,4 +1,5 @@
 //! One closing client exchange, never an ordinary post-close transport loan.
+pub(super) mod deferred;
 use super::{DRAIN_US, TURN};
 use crate::ControlCloseOutcome;
 use crate::quic::{
