@@ -64,7 +64,8 @@ or exercise an actual desktop locker, logind daemon, Tailscale, or codec.
 A desktop whose locker does not faithfully maintain it is NOT qualified by this
 adapter. The selected user, desktop and OS remain trust boundaries. Actual
 per-desktop lock/logout/suspend qualification is still required before enabling a
-host profile. This feature is not used by `frd run` yet and does not fabricate the separate
+host profile. `frd run --logind-session` consumes it through the separate
+`fr-session-monitor` process (below); neither fabricates the separate
 capture/input permissions that startup requires.
 
 Primary API references: systemd's `org.freedesktop.login1`, `sd_bus_get_name_creds`,
@@ -118,4 +119,43 @@ Additional tests use a private real Xvfb server and an independent Xlib connecti
 to observe held Shift/button state, not only a submission receipt. Synthetic
 logind lock or lost replies cause actual release without another input packet;
 unpolled driver abandonment also releases/reaps the same original native owner.
-This does not qualify an installed desktop locker or enable the `frd run` CLI.
+This does not qualify an installed desktop locker.
+
+## `frd run --logind-session`
+
+`frd run --logind-session ID [--logind-seat SEAT] [--session-monitor PATH]`
+names the operator's local logind session for the shared display (see
+`loginctl`; the seat defaults to `seat0`, the UID is frd's effective UID and the
+display is the one being shared). Nothing is derived from the environment.
+`frd` itself never links libsystemd: it supervises the read-only
+`fr-session-monitor` process (fr-native feature `linux-session-monitor`) over
+inherited pipes, and every status check re-expires the child's evidence on
+`CLOCK_BOOTTIME` independently of its replies.
+
+* Before any tailnet I/O, certificate fetch or bind, `frd run` waits (at most
+  two seconds) for fresh Active evidence; otherwise it exits with
+  `session_monitor_unavailable` and nothing is shared.
+* While running, every share's local maintenance turn and the run's supervisor
+  check the evidence. Lock, inactivity (switching away), suspend, logout,
+  identity change, or lost/expired evidence stops the active share through the
+  normal local-stop teardown (input authority first) and ends the run with a
+  typed cause: `session_locked`, `session_inactive`, `session_suspending`,
+  `session_ended`, `session_identity_changed`, or `session_evidence_lost`. There
+  is no automatic resume: a restarted `frd run` again needs fresh unlocked
+  evidence.
+* Without `--logind-session`, `frd run` states at every listen that locking or
+  logging out does NOT end sharing. A private `--headless` Xvfb has no logind
+  session; this limit applies there.
+
+Evidence: `crates/frd/tests/session_monitor.rs` proves the startup refusal
+(no fresh evidence -> no certificate fetch, no listener) with the synthetic
+monitor fixture. The namespace e2e
+`real_session_lifetime::a_lock_of_the_selected_session_ends_control_and_the_run_with_a_typed_cause`
+runs a real controlled session (`frd run --input-agent`, shipped `fr connect
+--control`, two Xvfb displays) and then makes the explicitly synthetic
+lifecycle fixture report Locked: the lease's executor and its indicator go
+away without further input, viewer motion no longer reaches the host, and the
+run ends with `session_locked`. Planted negative (the two evidence checks
+removed): control survives the lock and the test fails. This is frd's reaction
+to lock evidence; it is not qualification of any installed desktop locker or of
+real logind, which still needs per-desktop runs.
