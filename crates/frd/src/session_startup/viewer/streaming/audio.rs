@@ -45,6 +45,8 @@ pub enum Unavailable {
 /// Local playback supplied by the native client. Calls are synchronous,
 /// bounded and nonblocking; `live` rechecks this session's observation at
 /// each native boundary. Implementations must not log PCM or payload bytes.
+/// Drop must synchronously fence further playback/decoding without waiting for
+/// native completion. Any independently observed cleanup stays with its owner.
 pub trait AudioOutput {
     /// Begin configuring the local output for this validated downlink offer.
     fn configure(&mut self, binding: u32, offer: AudioConfiguration) -> Result<(), OutputRefused>;
@@ -131,6 +133,14 @@ impl ViewerAudio {
         }
         self.output = Some(output);
         Ok(())
+    }
+    /// Local session retirement is not a host `AudioStop` or a playback failure.
+    /// Drop the native output immediately, retaining content-free counters. Do
+    /// not poll it, flush queued samples, acknowledge configuration or renew it.
+    pub(super) fn close(&mut self) {
+        self.state = State::Ended;
+        self.stop = None;
+        drop(self.output.take());
     }
     pub(crate) const fn statistics(&self) -> AudioStatistics {
         self.statistics
@@ -342,3 +352,9 @@ impl ViewerAudio {
 
 #[cfg(test)]
 mod tests;
+
+impl Drop for ViewerAudio {
+    fn drop(&mut self) {
+        self.close();
+    }
+}

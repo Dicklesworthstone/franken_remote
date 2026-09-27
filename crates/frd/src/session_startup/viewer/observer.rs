@@ -379,6 +379,33 @@ impl NativeObserver {
             |_, _| Err(()),
         )
     }
+    /// Retire the original presentation/decoder scope and exchange a close
+    /// request without borrowing raw transport. Retain this observer to reap its
+    /// decoder afterward; the host report does not confirm local native cleanup.
+    pub fn disconnect(
+        &mut self,
+        reason: fr_wire::closure::Reason,
+    ) -> impl Future<Output = Result<fr_transport::quic::CloseOutcome, streaming::Error>> + '_ {
+        self.selected.invalidate();
+        self.viewer.disconnect(reason)
+    }
+    /// Continue the ordinary observation loop until the local UI chooses an
+    /// orderly close. Emergency stop and callback failures retain their existing
+    /// immediate cancellation behavior, including for control-capable sessions.
+    pub fn serve_until<'a>(
+        &'a mut self,
+        ui: impl FnMut(
+            Option<streaming::Presentation>,
+        ) -> Result<std::ops::ControlFlow<fr_wire::closure::Reason>, ()>
+        + 'a,
+    ) -> impl Future<Output = Result<fr_transport::quic::CloseOutcome, streaming::Error>> + 'a {
+        self.viewer.serve_until(ui)
+    }
+    /// Separate request acknowledgement, optional report and transport outcome.
+    /// Local cleanup and missing input/effect receipts are never inferred here.
+    pub fn disconnect_outcome(&self) -> Option<fr_transport::quic::CloseOutcome> {
+        self.viewer.disconnect_outcome()
+    }
     pub async fn reap_media(
         &mut self,
         cleanup: &Cx,

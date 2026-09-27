@@ -72,47 +72,57 @@ impl super::ViewerSession {
         // preparation must fence this same session, not only an awaited future.
         let ending = Disconnect(self);
         let viewer = &mut *ending.0;
-        let ready = viewer.check().and_then(|()| {
-            if viewer.opened.selection.role != fr_wire::negotiation::Role::Observe {
-                return Err(Error::Order);
-            }
-            Ok(viewer
-                .responder
-                .response_deadline()
-                .map_or(viewer.heard_until, |at| at.0.min(viewer.heard_until)))
-        });
-        // Fence ordinary session methods without cancelling the context that
-        // still owns the one terminal exchange. The external stop handle and
-        // immutable transport guard continue to cancel that exchange normally.
-        viewer.closed = true;
-        viewer.responder.stop();
-        if let Some(clock) = &mut viewer.clock {
-            clock.stop();
-        }
-        let prepared = ready.map(|until| {
-            viewer.transport.close_with_request(
-                &viewer.cx,
-                &viewer.connection,
-                viewer.routes,
-                Binding {
-                    channel: viewer.opened.binding.id,
-                    session: viewer.opened.binding.remote_session,
-                },
-                closure::CloseRequest { reason },
-                until,
-            )
-        });
-        if prepared.is_err() {
-            viewer.close();
-        }
+        let prepared = viewer.begin_disconnect(reason);
         async move {
-            let outcome = prepared?.await;
+            let outcome = prepared.await?;
             if let Some(report) = outcome.report {
                 ending.0.remote_closed = Some(report);
             }
             drop(ending);
             Ok(outcome)
         }
+    }
+    /// Separate owned transport preparation so the streaming owner can fence its
+    /// receiver/decoder and still use this EXACT control-session closing path.
+    /// Its caller must install a teardown guard before invoking this method.
+    pub(super) fn begin_disconnect(
+        &mut self,
+        reason: closure::Reason,
+    ) -> impl std::future::Future<Output = Result<quic::CloseOutcome, Error>> + use<> {
+        let ready = self.check().and_then(|()| {
+            if self.opened.selection.role != fr_wire::negotiation::Role::Observe {
+                return Err(Error::Order);
+            }
+            Ok(self
+                .responder
+                .response_deadline()
+                .map_or(self.heard_until, |at| at.0.min(self.heard_until)))
+        });
+        // Fence ordinary session methods without cancelling the context that
+        // still owns the one terminal exchange. The external stop handle and
+        // immutable transport guard continue to cancel that exchange normally.
+        self.closed = true;
+        self.responder.stop();
+        if let Some(clock) = &mut self.clock {
+            clock.stop();
+        }
+        let prepared = ready.map(|until| {
+            Box::pin(self.transport.close_with_request(
+                &self.cx,
+                &self.connection,
+                self.routes,
+                Binding {
+                    channel: self.opened.binding.id,
+                    session: self.opened.binding.remote_session,
+                },
+                closure::CloseRequest { reason },
+                until,
+            ))
+        });
+        if prepared.is_err() {
+            self.close();
+        }
+        async move { Ok(prepared?.await) }
     }
 }
 struct Disconnect<'a>(&'a mut super::ViewerSession);

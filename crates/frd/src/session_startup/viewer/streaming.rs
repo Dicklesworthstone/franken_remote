@@ -4,6 +4,7 @@ mod acquisition;
 pub(crate) mod audio;
 mod continuation;
 mod cursor;
+mod disconnect;
 pub(in crate::session_startup) mod files;
 mod interactive;
 mod recovery;
@@ -264,6 +265,7 @@ pub struct StreamingViewer {
     statistics: Statistics,
     served: bool,
     initial: Option<media::PresentationReceipt>,
+    disconnect_outcome: Option<quic::CloseOutcome>,
 }
 impl ViewerSession {
     /// Retain the actual first native completion for a subsequent control request.
@@ -433,6 +435,7 @@ impl StreamingViewer {
             statistics: Statistics::default(),
             served: false,
             initial: None,
+            disconnect_outcome: None,
         })
     }
     /// Install the native client's local output for an ATTACHED audio-down
@@ -587,16 +590,7 @@ impl StreamingViewer {
         // Fence before codec cancellation or memory retirement.
         self.control.stop();
         self.peer.close();
-        if let Some(app) = &mut self.clipboard {
-            app.close();
-        }
-        self.receiver.close();
-        self.presenter.abort();
-        self.repair.clear();
-        if let Some(recovery) = &mut self.recovery {
-            recovery.close();
-        }
-        self.initial = None;
+        self.close_media();
     }
     /// Reaping is a separate observed OS result, not implied by cancellation.
     pub async fn reap_media(

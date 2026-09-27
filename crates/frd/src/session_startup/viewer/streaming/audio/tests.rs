@@ -16,6 +16,7 @@ struct Calls {
     received: Vec<Vec<u8>>,
     ended: Vec<AudioEnd>,
     resets: u32,
+    dropped: u32,
     fail_receive: bool,
 }
 struct Recording(Rc<RefCell<Calls>>);
@@ -45,6 +46,11 @@ impl AudioOutput for Recording {
     }
     fn reset(&mut self) {
         self.0.borrow_mut().resets += 1;
+    }
+}
+impl Drop for Recording {
+    fn drop(&mut self) {
+        self.0.borrow_mut().dropped += 1;
     }
 }
 fn stream(id: u64, outbound: bool, messages: Messages) -> StreamRoute {
@@ -281,4 +287,24 @@ fn a_viewer_without_an_output_refuses_the_configuration_by_type() {
     assert!(!audio.owns(control(), &packet(1, 0, 40)));
     assert!(audio.owns(datagram(), &packet(1, 0, 40)));
     assert!(audio.owns(control(), &stop(1, AudioStopReason::UserMute)));
+}
+
+#[test]
+fn local_session_close_drops_output_once_without_inventing_host_end_or_failure() {
+    let (mut audio, calls) = owner();
+    audio.state = State::Active(offer(1));
+    audio.statistics.packets = 9;
+    audio.stop = Some((AudioGeneration::from_raw(1), AudioStopReason::DeviceChanged));
+    audio.close();
+    assert_eq!(audio.state, State::Ended);
+    assert!(audio.stop.is_none());
+    assert_eq!(audio.statistics().packets, 9);
+    assert_eq!(calls.borrow().dropped, 1);
+    assert!(calls.borrow().ended.is_empty());
+    assert_eq!(calls.borrow().resets, 0);
+    assert!(audio.configure(Box::new(Recording(calls.clone()))).is_err());
+    assert_eq!(calls.borrow().dropped, 2); // The refused replacement, not another close.
+    audio.close();
+    drop(audio);
+    assert_eq!(calls.borrow().dropped, 2);
 }
