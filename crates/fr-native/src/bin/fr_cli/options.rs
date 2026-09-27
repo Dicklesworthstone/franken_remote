@@ -621,13 +621,6 @@ fn parse_command(
                 2,
             ));
         }
-        if !send.is_empty() && clipboard {
-            return Err(Failure::new(
-                "send_with_clipboard_unsupported",
-                "This build sets up either the clipboard or the file lane on one control session, not both; drop --clipboard or --send.",
-                2,
-            ));
-        }
         if send.len() > MAX_SENDS {
             return Err(Failure::new(
                 "send_too_many",
@@ -849,12 +842,18 @@ mod tests {
                 PathBuf::from("/home/u/données.txt")
             ]
         );
+        // The clipboard and file lanes share one controlled session.
+        let Command::Connect(both) =
+            options(&format!("connect {base} --control --clipboard --send /a"))
+                .unwrap()
+                .command
+        else {
+            unreachable!("connection required");
+        };
+        assert!(both.clipboard);
+        assert_eq!(both.send, [PathBuf::from("/a")]);
         for (flags, code) in [
             ("--view-only --send /a", "send_requires_control"),
-            (
-                "--control --clipboard --send /a",
-                "send_with_clipboard_unsupported",
-            ),
             (
                 "--control --send /1 --send /2 --send /3 --send /4 --send /5 --send /6 --send /7 --send /8 --send /9",
                 "send_too_many",

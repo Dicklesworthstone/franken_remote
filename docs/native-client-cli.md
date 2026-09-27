@@ -280,9 +280,11 @@ whole command refuses (exit 2) on the first problem, naming only the 1-based
 position: `send_symlink`, `send_directory`, `send_special_file` (device, FIFO,
 socket), `send_missing`, `send_unreadable`, `send_name_not_portable`,
 `send_duplicate_name`, `send_changed` or `send_too_many`. `--send` without
-`--control` refuses with `send_requires_control`; with `--clipboard`, with
-`send_with_clipboard_unsupported` (this build never sets up both lanes on one
-session). Files are opened with `O_NOFOLLOW | O_NONBLOCK` and must be the same
+`--control` refuses with `send_requires_control`. With `--clipboard` too, the
+client offers the combined profile and both lanes run on the one controlled
+session (each attaches only under the granted input attachment; the optional
+decoder-load extension is left out of that profile to stay within the
+16-capability offer limit). Files are opened with `O_NOFOLLOW | O_NONBLOCK` and must be the same
 regular file that was classified; nothing is read before the grant.
 
 The host opts in separately with `frd run --input-agent PATH --files DIR`

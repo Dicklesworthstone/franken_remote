@@ -77,7 +77,7 @@ order, into the host's drop directory after control is granted, when the host
 runs frd run --files DIR; symlinks, directories and special files are refused
 before connecting. The host never overwrites: a taken name is refused. The
 completion reports each file by index and size only (host-reported outcome), or
-the typed reason nothing was sent. Not together with --clipboard in this build.
+the typed reason nothing was sent. --clipboard and --send may be combined.
 --audio (with --view-only only) asks for host playback audio; without it no audio
 capability is offered. The host must run frd run --audio. Output goes to the local
 PulseAudio server (--audio-server, else PULSE_SERVER, else

@@ -16,13 +16,15 @@ use frd::native_files::{
 use frd::session_startup::{FileSendError, FileSendOutcome};
 use std::{fmt::Write as _, path::PathBuf};
 
-/// The control offer: `--send` adds the three OPTIONAL file boundaries (the
-/// command line refuses `--send` together with `--clipboard`).
+/// The control offer: `--send` adds the three OPTIONAL file boundaries, and
+/// with `--clipboard` too, the combined profile carries both optional families
+/// on the one controlled session (each lane still attaches only under the
+/// granted input attachment; neither consent implies the other).
 pub(super) fn offer(clipboard: bool, send: bool) -> fr_wire::negotiation::Offer {
-    if send {
-        fr_client::native::control_offer_with_files()
-    } else {
-        super::control::offer(clipboard)
+    match (clipboard, send) {
+        (true, true) => fr_client::native::control_offer_with_clipboard_and_files(),
+        (false, true) => fr_client::native::control_offer_with_files(),
+        (clipboard, false) => super::control::offer(clipboard),
     }
 }
 

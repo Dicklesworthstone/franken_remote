@@ -144,20 +144,20 @@ fn hex(text: &str) -> String {
 }
 /// A unique, non-ASCII item per test run (never a constant a stale
 /// selection could already hold).
-fn unique(label: &str) -> String {
+pub(super) fn unique(label: &str) -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
     format!("{label} {nanos} · λ 👋 ünïcödé ✓")
 }
-struct Peer(Harness);
+pub(super) struct Peer(Harness);
 impl Peer {
-    fn start(display: &str) -> Self {
+    pub(super) fn start(display: &str) -> Self {
         Self(Harness::start(&format!("{PRELUDE}{PEER}"), display, "PEER"))
     }
     /// This application copies `text` (takes CLIPBOARD ownership).
-    fn copy(&mut self, text: &str) {
+    pub(super) fn copy(&mut self, text: &str) {
         assert_eq!(self.0.ask(&format!("own {}", hex(text))), ["OWNED"]);
     }
     /// What an application pasting now would get as `UTF8_STRING`.
@@ -182,7 +182,7 @@ impl Peer {
     }
 }
 /// Poll an independent application's paste until it is `want`.
-fn pasted(peer: &mut Peer, want: &str, limit: Duration) -> Result<(), Option<String>> {
+pub(super) fn pasted(peer: &mut Peer, want: &str, limit: Duration) -> Result<(), Option<String>> {
     let until = Instant::now() + limit;
     let mut last = None;
     while Instant::now() < until {

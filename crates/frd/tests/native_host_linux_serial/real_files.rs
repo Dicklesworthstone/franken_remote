@@ -10,6 +10,7 @@
 //! existing namespace fixtures; the viewer harness plays the window manager
 //! and the user as in `real_control`. A namespace run is not a live tailnet,
 //! a desktop file manager or a drag-and-drop UI.
+use super::real_clipboard::{Peer, pasted, unique};
 use super::real_control::{Controlled, eventually, indicator, signal};
 use super::real_media::close_window;
 use super::shipped_client::wait_for;
@@ -156,6 +157,91 @@ fn fr_connect_send_publishes_identical_bytes_into_frd_run_files() {
         sha256(&fs::read(drop_dir.0.join(name)).unwrap()),
         sha256(&bytes)
     );
+    s.daemon.finish();
+}
+
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; real input agent, clipboard child and file lane"]
+fn fr_connect_sends_files_and_shares_the_clipboard_in_one_controlled_session() {
+    let drop_dir = Dir::new("drop");
+    let source = Dir::new("source");
+    let name = "both-lanes.bin";
+    let bytes = random(512 * 1024);
+    fs::write(source.0.join(name), &bytes).unwrap();
+    // `frd run --input-agent --clipboard --files DIR` and
+    // `fr connect --control --clipboard --send PATH`: one controlled session.
+    let mut s = Controlled::start_full(
+        true,
+        true,
+        Some(drop_dir.directory()),
+        &[source.0.join(name)],
+    );
+    let mut host = Peer::start(&s.host.display);
+    let mut viewer = Peer::start(&s.viewer.display);
+
+    // VIEWER copy -> HOST paste, by independent X11 applications.
+    let first = unique("viewer→host");
+    viewer.copy(&first);
+    if let Err(last) = pasted(&mut host, &first, Duration::from_secs(20)) {
+        panic!(
+            "host never pasted the viewer's copy (last {last:?}); {}; host: {}",
+            client_state(&mut s.client),
+            s.daemon.dump()
+        );
+    }
+    // The selected file lands with identical bytes on the same session.
+    let published = eventually(Duration::from_secs(60), || drop_dir.entries() == [name]);
+    assert!(
+        published,
+        "drop directory {:?}; {}; host: {}",
+        drop_dir.entries(),
+        client_state(&mut s.client),
+        s.daemon.dump()
+    );
+    assert_eq!(
+        sha256(&fs::read(drop_dir.0.join(name)).unwrap()),
+        sha256(&bytes)
+    );
+    // HOST copy -> VIEWER paste after the transfer.
+    let second = unique("host→viewer");
+    host.copy(&second);
+    if let Err(last) = pasted(&mut viewer, &second, Duration::from_secs(20)) {
+        panic!(
+            "viewer never pasted the host's copy (last {last:?}); host: {}",
+            s.daemon.dump()
+        );
+    }
+    // Input still reaches the host beside both lanes.
+    assert!(
+        s.pointer_follows((222, 111), Duration::from_secs(10)),
+        "control beside clipboard and files: {}",
+        s.daemon.dump()
+    );
+    thread::sleep(Duration::from_secs(2));
+    close_window(&s.viewer.display, s.window.0);
+    let output = wait_for(s.client, Duration::from_secs(30));
+    let report = completion(&output, &s.daemon.dump());
+    println!("fr completion: {report}");
+    assert_eq!(report["outcome"], "stopped", "{report}");
+    assert_eq!(report["control_granted"], true, "{report}");
+    assert_eq!(report["clipboard_active"], true, "{report}");
+    assert_eq!(
+        report["clipboard_absence"],
+        serde_json::Value::Null,
+        "{report}"
+    );
+    assert_eq!(
+        report["files_sent"],
+        serde_json::json!([{"index": 0, "bytes": bytes.len(), "durable": true}]),
+        "{report}"
+    );
+    assert_eq!(report["files_absence"], serde_json::Value::Null, "{report}");
+    let text = report.to_string();
+    for secret in [&first, &second] {
+        let nonce = secret.split(' ').nth(1).unwrap();
+        assert!(!text.contains(nonce), "completion leaked clipboard text");
+    }
+    drop((host, viewer));
     s.daemon.finish();
 }
 
