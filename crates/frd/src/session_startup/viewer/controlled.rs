@@ -1,6 +1,7 @@
 //! The running native viewer owns input identities, freshness and network sends.
 //! Decode/present work stays off this task; qualified callbacks arrive between turns.
 mod clipboard;
+mod disconnect;
 pub mod events;
 mod files;
 pub mod local_cursor;
@@ -100,6 +101,7 @@ pub struct ControlledViewer {
     pending: Option<Pending>,
     control: ViewerControl,
     last_result: Option<ResultEvent>,
+    disconnect_outcome: Option<fr_transport::ControlCloseOutcome>,
     events: Option<events::Receiver>,
     native_capture: Option<Box<dyn events::NativeCapture>>,
     clipboard: Option<crate::clipboard_quic::Bridge>,
@@ -198,6 +200,7 @@ impl ViewerSession {
             pending: None,
             control,
             last_result: None,
+            disconnect_outcome: None,
             events: None,
             native_capture: None,
             clipboard: None,
@@ -249,23 +252,7 @@ impl ControlledViewer {
         self.last_result
     }
     pub fn close(&mut self) {
-        // Fence the original authority before invoking any adapter or cleanup.
-        self.control.stop();
-        let _ = self.files.stop(&mut self.session.transport);
-        if let Some(capture) = &self.native_capture {
-            capture.stop();
-        }
-        if let Some(clipboard) = &self.clipboard {
-            clipboard.stop();
-        }
-        self.clipboard_setup.stop();
-        self.stop_local_cursor();
-        self.viewport.stop();
-        self.input.stop(StopReason::Disconnected);
-        self.pending = None;
-        self.control.stop();
-        self.events = None;
-        self.clock.stop();
+        self.fence_input();
         self.session.close();
     }
     fn check_inner(&mut self) -> Result<ClientInstant, Error> {

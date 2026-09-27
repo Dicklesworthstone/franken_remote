@@ -188,3 +188,5 @@ fn terminal_report_remains_readable_after_local_view_failure() {
         cleanup(&mut fixture).await;
     });
 }
+
+mod disconnect;
