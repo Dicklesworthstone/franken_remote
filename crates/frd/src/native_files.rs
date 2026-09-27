@@ -13,8 +13,8 @@
 //!
 //! Stated limits of this slice: viewer to host only; one explicit selection
 //! per connection, sent in order, stopping at the first failure (existing
-//! batch semantics); never together with the clipboard lane (both setups share
-//! one serialized control-route handshake, see `Absence::WithClipboard`);
+//! batch semantics). Clipboard has independent consent, tickets and workers on
+//! the same controlling session; neither lane grants permission to the other;
 //! no resumption, directories, downloads, synchronization or picker UI. File
 //! names and contents never appear in `Debug`, errors or status.
 use fr_files::{
@@ -383,7 +383,8 @@ pub enum Absence {
     /// The peer did not offer files (host without `--files`, or a controller
     /// that asked for none), so the file boundaries were not selected.
     NotNegotiated,
-    /// Both clipboard and files were selected; this slice never sets up both.
+    /// Legacy absence from builds that could not multiplex both attachments.
+    /// Current negotiation does not return this variant.
     WithClipboard,
     /// Configured after service started, twice, or on a closed session.
     Unavailable,

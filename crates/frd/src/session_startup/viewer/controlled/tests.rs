@@ -188,6 +188,7 @@ enum ClipboardMode {
     Files,
     FilesNegotiate,
     FileDrop,
+    Combined,
 }
 #[allow(clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 async fn fixture_with_clipboard(
@@ -215,7 +216,7 @@ async fn fixture_with_clipboard(
     .collect();
     if matches!(
         clipboard,
-        ClipboardMode::Attached | ClipboardMode::Negotiate
+        ClipboardMode::Attached | ClipboardMode::Negotiate | ClipboardMode::Combined
     ) {
         for name in [
             attachment::CLIPBOARD_CAPABILITY,
@@ -228,7 +229,10 @@ async fn fixture_with_clipboard(
             });
         }
     }
-    if clipboard == ClipboardMode::Negotiate {
+    if matches!(
+        clipboard,
+        ClipboardMode::Negotiate | ClipboardMode::Combined
+    ) {
         wire_capabilities.push(WireCapability {
             name: fr_wire::clipboard::startup::CAPABILITY.into(),
             version: 1,
@@ -237,7 +241,10 @@ async fn fixture_with_clipboard(
     }
     if matches!(
         clipboard,
-        ClipboardMode::Files | ClipboardMode::FilesNegotiate | ClipboardMode::FileDrop
+        ClipboardMode::Files
+            | ClipboardMode::FilesNegotiate
+            | ClipboardMode::FileDrop
+            | ClipboardMode::Combined
     ) {
         for name in [attachment::FILES_CAPABILITY, fr_wire::files::CAPABILITY] {
             wire_capabilities.push(WireCapability {
@@ -247,7 +254,7 @@ async fn fixture_with_clipboard(
             });
         }
     }
-    if clipboard == ClipboardMode::FileDrop {
+    if matches!(clipboard, ClipboardMode::FileDrop | ClipboardMode::Combined) {
         wire_capabilities.push(WireCapability {
             name: fr_wire::files::CHANNEL_SCOPE_CAPABILITY.into(),
             version: fr_wire::files::CHANNEL_SCOPE_VERSION,

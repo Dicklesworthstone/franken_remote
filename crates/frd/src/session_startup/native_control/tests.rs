@@ -581,7 +581,7 @@ fn host_audio_is_offered_only_with_the_local_enable_and_only_optionally() {
 }
 
 #[test]
-fn the_drop_lane_needs_both_sides_and_never_rides_with_the_clipboard() {
+fn the_drop_lane_and_clipboard_require_independent_positive_selection() {
     use crate::native_files::Absence;
     let select = |host: Offer, client: &Offer| host.intersect(client).unwrap().select().unwrap();
     let files = fr_client::native::control_offer_with_files();
@@ -611,8 +611,7 @@ fn the_drop_lane_needs_both_sides_and_never_rides_with_the_clipboard() {
         host_offer_with_files(false, false, false, true),
         host_offer(false)
     );
-    // The shipped client cannot even offer both: 14 + 3 exceeds the offer's
-    // capability bound, so `fr connect` refuses the combination up front.
+    // Naively concatenating profiles still exceeds the fixed capability bound.
     let mut both_lanes = fr_client::native::control_offer_with_clipboard();
     both_lanes.capabilities.extend(
         files
@@ -623,10 +622,27 @@ fn the_drop_lane_needs_both_sides_and_never_rides_with_the_clipboard() {
     );
     both_lanes.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
     assert!(both_lanes.validate().is_err());
-    // Another controller selecting clipboard AND files (here: exactly the
-    // host's own set): this slice never sets up both lanes, on either side.
+    // The bounded combined profile negotiates each lane independently.
     let mut minimal = host_offer_with_files(true, true, false, true);
     minimal.role = Role::RequestControl;
     let clipboard = select(host_offer_with_files(true, true, false, true), &minimal);
-    assert_eq!(files_lane(&clipboard), Err(Absence::WithClipboard));
+    assert_eq!(files_lane(&clipboard), Ok(()));
+    let combined = fr_client::native::control_offer_with_clipboard_and_files();
+    assert!(combined.validate().is_ok());
+    assert_eq!(combined.capabilities.len(), 16);
+    for (clipboard, files) in [(false, false), (true, false), (false, true), (true, true)] {
+        let selection = select(
+            host_offer_with_files(true, clipboard, false, files),
+            &combined,
+        );
+        assert!(
+            profile(&selection, true),
+            "optional absence never downgrades control"
+        );
+        assert_eq!(files_lane(&selection).is_ok(), files);
+        assert_eq!(
+            crate::session_startup::clipboard::selected(&selection).is_ok(),
+            clipboard
+        );
+    }
 }

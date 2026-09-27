@@ -105,7 +105,7 @@ impl Pending {
                 if !attachment_kind(bytes) || received {
                     return Ok(Disposition::Blocked);
                 }
-                let Message::Binding(descriptor) = attachment::decode(
+                let message = attachment::decode(
                     bytes,
                     self.parent,
                     self.parent.id,
@@ -113,9 +113,16 @@ impl Pending {
                     InputDirection::HostToViewer,
                     InputDelivery::Reliable,
                 )
-                .map_err(|_| ())?
-                else {
-                    return Err(());
+                .map_err(|_| ())?;
+                let descriptor = match message {
+                    Message::Binding(d) if d.role == MediaRole::Files => d,
+                    Message::Binding(d)
+                    | Message::Ticket(attachment::Grant { descriptor: d, .. })
+                        if d.role == MediaRole::Clipboard =>
+                    {
+                        return Ok(Disposition::Blocked);
+                    }
+                    _ => return Err(()),
                 };
                 let expected = Binding {
                     parent: ControlBinding {
@@ -224,7 +231,7 @@ impl ControlledViewer {
         policy: Policy,
         timeout: Duration,
     ) -> Result<(), Error> {
-        if self.files.used || self.files.stopped || self.clipboard_setup.negotiating() {
+        if self.files.used || self.files.stopped {
             return Err(Error::Busy);
         }
         self.files_admitted(&permission)?;

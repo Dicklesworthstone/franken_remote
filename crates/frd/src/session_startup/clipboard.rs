@@ -351,7 +351,7 @@ impl Pending {
                 if !attachment_kind(bytes) || received {
                     return Ok(Disposition::Blocked);
                 }
-                let Message::Binding(d) = attachment::decode(
+                let message = attachment::decode(
                     bytes,
                     self.parent,
                     self.parent.id,
@@ -359,9 +359,16 @@ impl Pending {
                     InputDirection::HostToViewer,
                     InputDelivery::Reliable,
                 )
-                .map_err(|_| ())?
-                else {
-                    return Err(());
+                .map_err(|_| ())?;
+                let d = match message {
+                    Message::Binding(d) if d.role == MediaRole::Clipboard => d,
+                    Message::Binding(d)
+                    | Message::Ticket(attachment::Grant { descriptor: d, .. })
+                        if d.role == MediaRole::Files =>
+                    {
+                        return Ok(Disposition::Blocked);
+                    }
+                    _ => return Err(()),
                 };
                 // The host may allocate a fresh binding ID, not change the selected
                 // display or view tuple while attaching an auxiliary clipboard lane.

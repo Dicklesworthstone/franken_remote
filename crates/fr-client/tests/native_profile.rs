@@ -320,3 +320,77 @@ fn audio_offer_adds_only_the_optional_downlink_and_negotiates_both_ways() {
             .any(|c| c.name == fr_wire::audio::CAPABILITY && !c.required)
     );
 }
+
+#[test]
+fn combined_control_profile_completes_real_startup_within_the_unchanged_limit() {
+    let combined = fr_client::native::control_offer_with_clipboard_and_files();
+    combined.validate().unwrap();
+    assert_eq!(combined.capabilities.len(), 16);
+    for cap in control_offer().capabilities {
+        if cap.name == receiver_metrics::CAPABILITY {
+            assert!(!cap.required);
+            assert!(
+                !combined.capabilities.contains(&cap),
+                "only optional decoder-load omitted"
+            );
+        } else {
+            assert!(
+                combined.capabilities.contains(&cap),
+                "control and recovery preserved: {}",
+                cap.name
+            );
+        }
+    }
+    for name in [
+        attachment::CLIPBOARD_CAPABILITY,
+        fr_wire::clipboard::CAPABILITY,
+        fr_wire::clipboard::startup::CAPABILITY,
+        attachment::FILES_CAPABILITY,
+        fr_wire::files::CAPABILITY,
+        fr_wire::files::CHANNEL_SCOPE_CAPABILITY,
+    ] {
+        let cap = combined
+            .capabilities
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap();
+        assert!(!cap.required);
+        assert_eq!(cap.version, 1);
+    }
+    let mut startup = Startup::new(combined.clone(), 10, 10_000).unwrap();
+    assert_eq!(
+        negotiation::decode(
+            startup.pending(10).unwrap().unwrap(),
+            negotiation::MAX_RECORD,
+            0
+        )
+        .unwrap(),
+        Message::ClientHello(combined.clone())
+    );
+    startup.sent(11).unwrap();
+    startup
+        .receive(
+            &bytes(&Message::HostCapabilities(
+                combined.intersect(&combined).unwrap(),
+            )),
+            12,
+        )
+        .unwrap();
+    let Message::SelectedConfiguration(selected) = negotiation::decode(
+        startup.pending(13).unwrap().unwrap(),
+        negotiation::MAX_RECORD,
+        0,
+    )
+    .unwrap() else {
+        panic!("selection");
+    };
+    startup.sent(14).unwrap();
+    assert_eq!(selected.role, Role::RequestControl);
+    assert_eq!(selected.capabilities, combined.capabilities);
+    startup
+        .receive(&bytes(&opened(selected.clone())), 15)
+        .unwrap();
+    startup.bound(7, 16).unwrap();
+    startup.sent(17).unwrap();
+    assert_eq!(startup.finish(18).unwrap().selection, selected);
+}

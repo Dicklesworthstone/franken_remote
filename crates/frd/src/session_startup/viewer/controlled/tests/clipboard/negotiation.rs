@@ -431,3 +431,6 @@ fn newly_negotiated_workers_transfer_full_item_limit_in_both_directions() {
         });
     }
 }
+
+#[path = "negotiation/multiplex.rs"]
+mod multiplex;

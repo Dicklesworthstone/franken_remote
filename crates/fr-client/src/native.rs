@@ -125,6 +125,34 @@ pub fn control_offer_with_files() -> Offer {
     )
 }
 
+/// Explicit combined workflow within the original sixteen-capability limit.
+/// Keep all required control gates, recovery and cursor forwarding. Only the
+/// optional solicited decoder-load extension is omitted in this profile; no
+/// records for that extension may be sent. Neither clipboard nor file consent
+/// implies the other, and older hosts may omit either optional family.
+pub fn control_offer_with_clipboard_and_files() -> Offer {
+    let mut combined = control_offer_with_clipboard();
+    combined
+        .capabilities
+        .retain(|cap| cap.name != receiver_metrics::CAPABILITY);
+    for (name, version) in [
+        (attachment::FILES_CAPABILITY, attachment::FILES_VERSION),
+        (fr_wire::files::CAPABILITY, fr_wire::files::VERSION),
+        (
+            fr_wire::files::CHANNEL_SCOPE_CAPABILITY,
+            fr_wire::files::CHANNEL_SCOPE_VERSION,
+        ),
+    ] {
+        combined.capabilities.push(Capability {
+            name: name.into(),
+            version,
+            required: false,
+        });
+    }
+    combined.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    combined
+}
+
 fn offer(role: Role, extra: &[(&str, u16, bool)]) -> Offer {
     let mut capabilities: Vec<_> = [
         (display::CAPABILITY, 1, true),

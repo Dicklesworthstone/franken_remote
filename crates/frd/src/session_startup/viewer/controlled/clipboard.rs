@@ -18,10 +18,7 @@ impl ControlledViewer {
     /// Independent local consent is still required: false retires the completed
     /// pair with `ConsentRequired` and never produces a native-worker seed.
     pub fn expect_clipboard(&mut self, timeout: Duration, granted: bool) -> Result<(), Error> {
-        if self.clipboard.is_some()
-            || !self.clipboard_setup.available()
-            || self.file_send_negotiating()
-        {
+        if self.clipboard.is_some() || !self.clipboard_setup.available() {
             return Err(Error::AlreadyAttached);
         }
         self.check().map_err(|_| Error::Closed)?;
@@ -64,10 +61,7 @@ impl ControlledViewer {
         channel: MediaChannel,
         granted: bool,
     ) -> Result<WorkerSeed, Error> {
-        if self.clipboard.is_some()
-            || !self.clipboard_setup.available()
-            || self.file_send_negotiating()
-        {
+        if self.clipboard.is_some() || !self.clipboard_setup.available() {
             return Err(Error::AlreadyAttached);
         }
         self.check().map_err(|_| Error::Closed)?;

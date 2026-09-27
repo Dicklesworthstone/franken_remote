@@ -140,10 +140,9 @@ pub(crate) fn audio_selected(selection: &Selection) -> bool {
 }
 
 /// Whether this session sets up the drop lane: control and all three file
-/// boundaries selected, and NOT the clipboard. A selected clipboard always
-/// runs its own (consenting or declining) exchange on the same serialized
-/// control-route handshake, and this slice never races the two; both peers
-/// evaluate this same predicate on the same selection.
+/// boundaries selected. Clipboard remains independently negotiated/consented:
+/// its attachment and readiness messages are dispatched to their own owner,
+/// never interpreted as file permission or a file-channel ticket.
 pub(crate) fn files_lane(selection: &Selection) -> Result<(), crate::native_files::Absence> {
     use crate::native_files::Absence;
     if selection.role != Role::RequestControl
@@ -152,9 +151,6 @@ pub(crate) fn files_lane(selection: &Selection) -> Result<(), crate::native_file
             .all(|&(name, version)| selected(selection, name, version))
     {
         return Err(Absence::NotNegotiated);
-    }
-    if super::clipboard::selected(selection).is_ok() {
-        return Err(Absence::WithClipboard);
     }
     Ok(())
 }

@@ -178,11 +178,10 @@ fn local_setup_refusals_do_not_spend_the_single_use_expectation() {
             );
         }
         expect(&mut state, Permission::new(true), Duration::from_secs(1));
-        // The two optional channels cannot compete to consume the same binding
-        // handshake. Completing one leaves the other independently available.
+        // File permission cannot grant clipboard: this fixture selected files only.
         assert_eq!(
             state.viewer.expect_clipboard(Duration::from_secs(1), true),
-            Err(crate::clipboard_quic::Error::AlreadyAttached)
+            Err(crate::clipboard_quic::Error::NotNegotiated)
         );
         state.viewer.close();
         state.host.close();
