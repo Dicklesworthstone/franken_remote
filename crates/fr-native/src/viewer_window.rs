@@ -25,6 +25,12 @@ use std::{
 const TURN_EVENTS: usize = 64;
 const TURN: Duration = Duration::from_millis(10);
 const MAP_TIMEOUT: Duration = Duration::from_secs(2);
+// Local fallback for a parked orderly-close owner, not a renewed transport or
+// authority budget. Covers a network turn plus the existing 250ms exchange.
+const CLOSE_TIMEOUT: Duration = Duration::from_millis(500);
+const CLOSE_DISARMED: u8 = 0;
+const CLOSE_ARMED: u8 = 1;
+const CLOSE_REQUESTED: u8 = 2;
 unsafe extern "C" {
     fn fr_viewer_window_open(
         display: *const c_char,
@@ -47,6 +53,7 @@ pub enum StopReason {
     OwnerDropped,
     MappingExpired,
     EventFlood,
+    CloseExpired,
 }
 impl StopReason {
     fn from_state(value: u8) -> Option<Self> {
@@ -60,6 +67,7 @@ impl StopReason {
             8 => Some(Self::OwnerDropped),
             9 => Some(Self::MappingExpired),
             10 => Some(Self::EventFlood),
+            11 => Some(Self::CloseExpired),
             _ => None,
         }
     }
@@ -69,6 +77,9 @@ pub enum Status {
     Opening,
     /// Server-authored map notification, not compositor visibility or consent.
     Mapped,
+    /// Local WM close intent; no new target may be borrowed. The observation
+    /// owner must retire media and close within the original bounded fallback.
+    CloseRequested,
     Stopped(StopReason),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +95,7 @@ pub enum Error {
 struct Shared {
     session: StreamingViewerControl,
     state: AtomicU8,
+    orderly_close: AtomicU8,
     window: AtomicU32,
     width: u32,
     height: u32,
@@ -134,9 +146,29 @@ impl WindowControl {
         self.0.live();
         match self.0.state.load(Ordering::Acquire) {
             0 => Status::Opening,
+            1 if self.0.orderly_close.load(Ordering::Acquire) == CLOSE_REQUESTED => {
+                Status::CloseRequested
+            }
             1 => Status::Mapped,
             value => Status::Stopped(StopReason::from_state(value).expect("private state")),
         }
+    }
+    /// Only the observation-only Desktop service may arm this policy, after
+    /// decoder startup. Default, control, bootstrap and direct stop stay terminal.
+    pub(crate) fn enable_orderly_close(&self) -> Result<(), Error> {
+        if self.status() != Status::Mapped {
+            return Err(Error::NotReady);
+        }
+        self.0
+            .orderly_close
+            .compare_exchange(
+                CLOSE_DISARMED,
+                CLOSE_ARMED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map_err(|_| Error::NotReady)?;
+        Ok(())
     }
     /// The locally created, exact-size window. A later lifecycle change can
     /// invalidate it; neither a cached target nor a numeric XID is authority.
@@ -204,6 +236,7 @@ impl ViewerWindow {
         let control = WindowControl(Arc::new(Shared {
             session,
             state: AtomicU8::new(0),
+            orderly_close: AtomicU8::new(CLOSE_DISARMED),
             window: AtomicU32::new(0),
             width,
             height,
@@ -335,8 +368,13 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
     let native = Native { handle, shared };
     shared.window.store(window, Ordering::Release);
     let mut mapped = false;
+    let mut close_started: Option<Instant> = None;
     loop {
         if !shared.live() {
+            return;
+        }
+        if close_started.is_some_and(|at| at.elapsed() >= CLOSE_TIMEOUT) {
+            shared.stop(StopReason::CloseExpired);
             return;
         }
         if !mapped && started.elapsed() >= MAP_TIMEOUT {
@@ -370,6 +408,20 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
                 2 => Some(StopReason::Hidden),
                 3 => Some(StopReason::WindowLost),
                 4 => Some(StopReason::GeometryChanged),
+                5 if mapped && shared.orderly_close.load(Ordering::Acquire) != CLOSE_DISARMED => {
+                    // The first WM request fixes the local deadline. Repeated
+                    // requests never reset it. Keep the drawable owned until the
+                    // original observation loop retires its decoder; all other
+                    // negative native events and direct stop still fence NOW.
+                    if close_started.is_none() {
+                        close_started = Some(Instant::now());
+                        shared
+                            .orderly_close
+                            .store(CLOSE_REQUESTED, Ordering::Release);
+                        shared.notify();
+                    }
+                    None
+                }
                 5 => Some(StopReason::User),
                 _ => Some(StopReason::NativeFailure),
             };
@@ -419,6 +471,7 @@ impl Future for Ready<'_> {
         match self.window.control.status() {
             Status::Opening => Poll::Pending,
             Status::Mapped => Poll::Ready(self.window.control.target()),
+            Status::CloseRequested => Poll::Ready(Err(Error::NotReady)),
             Status::Stopped(reason) => Poll::Ready(Err(Error::NativeStopped(reason))),
         }
     }
@@ -434,3 +487,6 @@ impl Drop for Ready<'_> {
             .take();
     }
 }
+
+#[cfg(test)]
+mod tests;

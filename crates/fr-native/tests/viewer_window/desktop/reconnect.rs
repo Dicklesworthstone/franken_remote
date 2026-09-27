@@ -382,6 +382,35 @@ async fn media_peer_until(
     image: &Path,
     stopped: Option<frd::session_startup::StreamingViewerControl>,
 ) {
+    let (mut q, mut source, control, _, _) =
+        Box::pin(start_media(q, h, routes, image, stopped)).await;
+    // Deliberate link loss: no observation renewal reply follows. The viewer
+    // must expire its original authority, return a retryable reason and reap.
+    q.close();
+    control.revoke();
+    source.worker_mut().abort();
+    source
+        .worker_mut()
+        .reap(
+            cleanup,
+            Deadline::after(cleanup, Duration::from_secs(1)).unwrap(),
+        )
+        .await
+        .unwrap();
+}
+async fn start_media(
+    q: QuicRecords,
+    h: &Cx,
+    routes: ControlRoutes,
+    image: &Path,
+    stopped: Option<frd::session_startup::StreamingViewerControl>,
+) -> (
+    QuicRecords,
+    frd::media::CaptureSource,
+    frd::media::ObservationControl,
+    ControlBinding,
+    ControlRoutes,
+) {
     use fr_core::{
         authority::{AuthorityPolicy, SessionAuthority},
         ids::*,
@@ -446,20 +475,9 @@ async fn media_peer_until(
         sender.transmit(h, &mut q, Lane::Original).unwrap();
         q.drive(h, Duration::from_millis(1), || true).await.unwrap();
     }
-    // Deliberate link loss: no observation renewal reply follows. The viewer
-    // must expire its original authority, return a retryable reason and reap.
-    q.close();
-    control.revoke();
-    source.worker_mut().abort();
-    source
-        .worker_mut()
-        .reap(
-            cleanup,
-            Deadline::after(cleanup, Duration::from_secs(1)).unwrap(),
-        )
-        .await
-        .unwrap();
+    (q, source, control, parent, routes)
 }
+
 #[test]
 fn completed_desktop_reconnects_only_after_reap_with_fresh_workers_and_terminal_old_handles() {
     let native = Desktop::start();
@@ -611,3 +629,6 @@ fn incomplete_decoder(mode: &str) {
         assert!(h.checkpoint().is_err());
     });
 }
+
+#[path = "reconnect/closure.rs"]
+mod closure;

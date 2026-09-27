@@ -50,6 +50,8 @@ mod viewer;
 pub use fr_files::sender::{
     Error as FileSendError, Outcome as FileSendOutcome, Receipt as FileSendReceipt,
 };
+/// Exact terminal exchange outcome; distinct from local native cleanup.
+pub use fr_transport::quic::CloseOutcome as ViewerCloseOutcome;
 pub use viewer::controlled::events as viewer_events;
 pub use viewer::controlled::local_cursor as viewer_local_cursor;
 pub use viewer::controlled::{ControlledViewer, Error as ControlledViewerError, ViewerControl};

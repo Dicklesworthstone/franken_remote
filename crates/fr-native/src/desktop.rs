@@ -15,7 +15,8 @@ use fr_wire::display::{Catalog, Display};
 use frd::{
     session_startup::{
         NativeObserver, ObserverError, ObserverPolicy, Presentation, StreamingViewerControl,
-        StreamingViewerError, Viewer, ViewerStatistics, viewer_events::CaptureCleanup,
+        StreamingViewerError, Viewer, ViewerCloseOutcome, ViewerStatistics,
+        viewer_events::CaptureCleanup,
     },
     worker::{Deadline, Launch, Retirement},
 };
@@ -421,6 +422,56 @@ impl Desktop {
             complete: false,
             inner: Box::pin(inner),
         })
+    }
+    /// Service an observation with orderly WM-close handling on its ORIGINAL
+    /// native window and session. Native mapping and the negotiated role must
+    /// already be established. Direct stop, native failures and control-capable
+    /// viewers keep immediate cancellation; no input-cleanup path is bypassed.
+    ///
+    /// WM close is handled before the next UI callback. The receiver and decoder
+    /// retire before terminal network work, while the drawable remains owned for
+    /// native cleanup. A stalled owner is fenced by the window's fixed 500ms
+    /// fallback; this does not extend the existing 250ms exchange or any lease.
+    pub fn serve_until<'a>(
+        &'a mut self,
+        mut ui: impl FnMut(
+            Option<Presentation>,
+        ) -> Result<std::ops::ControlFlow<fr_wire::closure::Reason>, ()>
+        + 'a,
+    ) -> Result<impl Future<Output = Result<ViewerCloseOutcome, StreamingViewerError>> + 'a, Error>
+    {
+        if self.state() != State::Viewing {
+            return Err(Error::NotViewing);
+        }
+        let observer = self.observer.as_mut().ok_or(Error::NotViewing)?;
+        if !observer.is_observation_only() {
+            return Err(Error::Observer(ObserverError::Order));
+        }
+        let window = self.window.as_ref().ok_or(Error::NotViewing)?.control();
+        window.enable_orderly_close().map_err(Error::Window)?;
+        let stop = observer.control();
+        let inner = observer.serve_until(move |frame| {
+            if window.status() == viewer_window::Status::CloseRequested {
+                Ok(std::ops::ControlFlow::Break(
+                    fr_wire::closure::Reason::Requested,
+                ))
+            } else {
+                ui(frame)
+            }
+        });
+        Ok(Operation {
+            state: &mut self.state,
+            stop,
+            success: State::Stopped,
+            complete: false,
+            inner: Box::pin(inner),
+        })
+    }
+    /// Exact optional host report/exchange result, independent of native reap.
+    pub fn disconnect_outcome(&self) -> Option<ViewerCloseOutcome> {
+        self.observer
+            .as_ref()
+            .and_then(NativeObserver::disconnect_outcome)
     }
     /// Keep watching until the UI explicitly calls `request_control` on the
     /// original Viewing state. The UI must supply real mapping/visibility

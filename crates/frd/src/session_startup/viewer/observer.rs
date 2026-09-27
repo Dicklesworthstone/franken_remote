@@ -379,6 +379,11 @@ impl NativeObserver {
             |_, _| Err(()),
         )
     }
+    /// The originally negotiated role, not an input grant or current readiness.
+    /// Native shells may opt into orderly close only for this observation path.
+    pub fn is_observation_only(&self) -> bool {
+        self.viewer.observation_only()
+    }
     /// Retire the original presentation/decoder scope and exchange a close
     /// request without borrowing raw transport. Retain this observer to reap its
     /// decoder afterward; the host report does not confirm local native cleanup.

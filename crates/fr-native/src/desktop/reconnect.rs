@@ -12,7 +12,7 @@ use frd::{
     native_connection::reconnect::{Application, CallbackError, Status},
     session_startup::{
         InteractiveViewerState, ObserverError, ObserverPolicy, Presentation,
-        StreamingViewerControl, Viewer, viewer_events::Layout,
+        StreamingViewerControl, Viewer, ViewerCloseOutcome, viewer_events::Layout,
     },
     worker::Deadline,
 };
@@ -91,6 +91,7 @@ pub struct Session<U> {
     error: Option<Error>,
     cleanup: Option<Cleanup>,
     cleanup_failure: Option<CleanupFailure>,
+    disconnect: Option<ViewerCloseOutcome>,
 }
 impl<U> Session<U> {
     pub const fn new(
@@ -110,6 +111,7 @@ impl<U> Session<U> {
             error: None,
             cleanup: None,
             cleanup_failure: None,
+            disconnect: None,
         }
     }
     pub fn desktop(&self) -> Option<&Desktop> {
@@ -123,6 +125,11 @@ impl<U> Session<U> {
     }
     pub const fn cleanup_failure(&self) -> Option<CleanupFailure> {
         self.cleanup_failure
+    }
+    /// Original closing exchange retained after the Desktop's native owners
+    /// are reaped. None is no completed exchange, never confirmed remote cleanup.
+    pub const fn disconnect_outcome(&self) -> Option<ViewerCloseOutcome> {
+        self.disconnect
     }
     fn configuration(&self, attempt: u8) -> Result<Configuration, ObserverError> {
         // Same finite bound as the canonical supervisor. Monotonic attempts and
@@ -159,6 +166,7 @@ impl<U: Ui> Application for Session<U> {
         self.error = None;
         self.cleanup = None;
         self.cleanup_failure = None;
+        self.disconnect = None;
         // Store before ANY await or callback so interrupted work stays owned.
         self.desktop = Some(Desktop::new(configuration));
         let desktop = self.desktop.as_mut().ok_or(ObserverError::Order)?;
@@ -187,10 +195,13 @@ impl<U: Ui> Application for Session<U> {
                 .map_err(|_| Error::Observer(ObserverError::Application))?;
             match self.mode {
                 Mode::Observe => desktop
-                    .serve(|frame| {
-                        callback(&stop, || ui.borrow_mut().frame(attempt, frame)).map_err(|_| ())
+                    .serve_until(|frame| {
+                        callback(&stop, || ui.borrow_mut().frame(attempt, frame))
+                            .map(|()| std::ops::ControlFlow::Continue(()))
+                            .map_err(|_| ())
                     })?
                     .await
+                    .map(|_| ())
                     .map_err(|e| Error::Observer(ObserverError::Streaming(e))),
                 Mode::ControlCapable(policy) => {
                     desktop
@@ -216,6 +227,7 @@ impl<U: Ui> Application for Session<U> {
             }
         }
         .await;
+        self.disconnect = desktop.disconnect_outcome();
         // Record genuine native cancellation BEFORE cleanup can stop a pending
         // picker itself. It cannot relabel a deadline/link failure as user intent.
         let selection_cancelled = outcome.is_err() && desktop.cancelled_selection();

@@ -107,7 +107,7 @@ impl StreamingViewer {
         }
     }
 
-    fn observation_only(&self) -> bool {
+    pub(in crate::session_startup::viewer) fn observation_only(&self) -> bool {
         matches!(&self.peer, Peer::Observe { session, .. }
             if session.opened.selection.role == Role::Observe)
     }
