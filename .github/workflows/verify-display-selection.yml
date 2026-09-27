@@ -1,15 +1,8 @@
 name: Verify display selection
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/verify-display-selection.yml'
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'scripts/verify.sh'
+  schedule:
+    - cron: '17 7 * * *'
 permissions:
   contents: read
 env:

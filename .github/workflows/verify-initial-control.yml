@@ -1,16 +1,8 @@
 name: Verify initial control grant
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/verify-initial-control.yml'
-      - 'crates/fr-core/**'
-      - 'crates/fr-wire/**'
-      - 'crates/fr-client/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
+  schedule:
+    - cron: '17 7 * * *'
 permissions:
   contents: read
 env:

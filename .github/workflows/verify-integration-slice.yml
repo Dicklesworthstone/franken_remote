@@ -1,15 +1,8 @@
 name: Verify native QUIC integration
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/verify-integration-slice.yml'
-      - 'crates/fr-transport/**'
-      - 'crates/frd/**'
-      - 'crates/fr-wire/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
+  schedule:
+    - cron: '17 7 * * *'
 permissions:
   contents: read
 env:

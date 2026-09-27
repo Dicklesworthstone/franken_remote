@@ -1,9 +1,8 @@
 name: Verify input capture wake
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths: ['.github/workflows/verify-input-capture-wake.yml', 'crates/fr-core/**', 'crates/fr-wire/**', 'crates/fr-media/**', 'crates/fr-client/**', 'crates/frd/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml']
+  schedule:
+    - cron: '17 7 * * *'
 permissions:
   contents: read
 env:

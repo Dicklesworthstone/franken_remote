@@ -1,9 +1,8 @@
 name: Verify host publication
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths: ['.github/workflows/verify-host-publication.yml', 'crates/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'scripts/verify.sh', 'HOST_PUBLICATION.md']
+  schedule:
+    - cron: '17 7 * * *'
 permissions:
   contents: read
 env:

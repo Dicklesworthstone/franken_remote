@@ -1,15 +1,8 @@
 name: Offline Rust toolchain
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/offline-rust-toolchain.yml'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'crates/fr-transport/src/quic/lifetime/**'
-      - 'crates/fr-transport/tests/terminal_revocation.rs'
+  schedule:
+    - cron: '17 7 * * *'
 permissions:
   contents: read
 jobs:

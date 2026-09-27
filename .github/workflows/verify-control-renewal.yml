@@ -1,19 +1,8 @@
 name: Verify control lease renewal
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/verify-control-renewal.yml'
-      - 'crates/fr-core/**'
-      - 'crates/fr-wire/**'
-      - 'crates/fr-client/**'
-      - 'crates/frd/**'
-      - 'crates/fr-native/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'rust-toolchain.toml'
-      - 'CONTROL_LEASE_RENEWAL.md'
+  schedule:
+    - cron: '17 7 * * *'
 permissions:
   contents: read
 env:

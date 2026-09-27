@@ -1,9 +1,8 @@
 name: Verify receiver feedback
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths: ['.github/workflows/verify-receiver-feedback.yml', 'crates/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'scripts/verify.sh', 'RECEIVER_FEEDBACK.md']
+  schedule:
+    - cron: '17 7 * * *'
 permissions:
   contents: read
 env:
