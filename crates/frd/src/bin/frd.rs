@@ -75,6 +75,14 @@ OPTIONS:
                     $XDG_RUNTIME_DIR/pulse/native); requires --audio
     --audio-sink N  Sink whose monitor is captured (default: the server's default
                     sink, pinned when capture starts); requires --audio
+    --logind-session ID  The logind session of the shared display (see
+                    `loginctl`): frd run requires fresh evidence for it before
+                    listening, and its lock, logout, switch-away or suspend ends
+                    every share and the run (exit with a typed cause; no
+                    automatic resume). Absent: locking does NOT end sharing
+    --logind-seat S With --logind-session: its seat (default seat0)
+    --session-monitor PATH  With --logind-session: absolute fr-session-monitor
+                    path (default: next to frd)
     --interface IF  Tailscale interface for ingress enforcement (default: tailscale0)
     --trust-roots P PEM CA bundle for the host certificate chain (default: system)
     --once          Serve one sharing session, then exit
@@ -289,16 +297,28 @@ fn run_refusal(json: bool, code: &str, detail: &str, status: u8) -> ExitCode {
     ExitCode::from(status)
 }
 
+/// What the operator enabled, restated with every listening line so the
+/// console never understates control or overstates lock protection.
 #[cfg(target_os = "linux")]
-fn print_event(json: bool, event: &frd::host_run::Event) {
+#[derive(Clone, Copy)]
+struct Profile {
+    control: bool,
+    session_lifetime: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
     use frd::host_run::Event;
 
     if json {
         let value = match event {
             Event::ObtainingCertificate => serde_json::json!({"event": "obtaining_certificate"}),
-            Event::Listening { address } => {
-                serde_json::json!({"event": "listening", "address": address.to_string()})
-            }
+            Event::Listening { address } => serde_json::json!({
+                "event": "listening",
+                "address": address.to_string(),
+                "control": profile.control,
+                "session_lifetime": if profile.session_lifetime { "monitored" } else { "unmonitored" },
+            }),
             Event::PeerFinished {
                 attempts,
                 admitted,
@@ -321,7 +341,23 @@ fn print_event(json: bool, event: &frd::host_run::Event) {
                 "frd: fetching this host's Tailscale HTTPS certificate (a first issuance can take a minute)"
             ),
             Event::Listening { address } => {
-                println!("frd: sharing this desktop (view-only) on {address}; Ctrl-C to stop");
+                let mode = if profile.control {
+                    "a first viewer may take unattended remote control (--input-agent)"
+                } else {
+                    "view-only"
+                };
+                println!("frd: sharing this desktop ({mode}) on {address}; Ctrl-C to stop");
+                if profile.session_lifetime {
+                    println!(
+                        "frd: locking, logging out of, switching away from or suspending the \
+                         selected logind session ends sharing"
+                    );
+                } else {
+                    println!(
+                        "frd: warning: no --logind-session: locking or logging out of this \
+                         desktop does NOT end sharing"
+                    );
+                }
             }
             Event::PeerFinished { outcome, .. } => println!("frd: peer finished: {outcome}"),
             Event::ShareEnded { outcome } => println!("frd: share ended: {outcome}"),
@@ -481,6 +517,10 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         Ok(audio) => audio,
         Err(code) => return code,
     };
+    let session_monitor = match session_monitor(&options, &display, json) {
+        Ok(monitor) => monitor,
+        Err(code) => return code,
+    };
     let run_options = Options {
         socket: options.socket.clone(),
         port: effective.port,
@@ -508,8 +548,13 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         clipboard: options.clipboard,
         audio,
         files,
+        session_monitor,
     };
-    let report: Reporter = Arc::new(move |event: Event| print_event(json, &event));
+    let profile = Profile {
+        control: run_options.input_agent.is_some(),
+        session_lifetime: run_options.session_monitor.is_some(),
+    };
+    let report: Reporter = Arc::new(move |event: Event| print_event(json, profile, &event));
     let stop = Arc::new(host_run::StopHandle::default());
     // Watch the SAME path resolved at startup. Only explicitly supplied flags
     // are overrides: copying saved effective values here would freeze them and
@@ -524,6 +569,54 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
             run_refusal(json, error.code(), &detail, 1)
         }
     }
+}
+
+/// The optional session-lifetime selection: explicit and local (plan 2.2), never
+/// derived from the environment, validated before any network I/O. The
+/// read-only monitor image defaults next to frd.
+#[cfg(target_os = "linux")]
+fn session_monitor(
+    options: &frd::host_policy::options::RunOptions,
+    display: &str,
+    json: bool,
+) -> Result<Option<frd::session_monitor::Configuration>, ExitCode> {
+    use frd::session_monitor::{Configuration, Selection};
+    let Some(session) = &options.logind_session else {
+        return Ok(None);
+    };
+    let image = options.session_monitor.clone().or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("fr-session-monitor")))
+    });
+    let Some(image) = image.filter(|path| path.is_absolute() && path.is_file()) else {
+        return Err(run_refusal(
+            json,
+            "session_monitor_unavailable",
+            "fr-session-monitor not found; build fr-native with --features \
+             linux-session-monitor and pass --session-monitor /absolute/path/fr-session-monitor",
+            2,
+        ));
+    };
+    let selection = Selection {
+        session: session.clone(),
+        uid: rustix::process::geteuid().as_raw(),
+        seat: options
+            .logind_seat
+            .clone()
+            .unwrap_or_else(|| "seat0".to_owned()),
+        display: display.to_owned(),
+    };
+    if selection.validate().is_err() {
+        return Err(run_refusal(
+            json,
+            "invalid_session_selection",
+            "--logind-session and --logind-seat take logind names ([A-Za-z0-9_-], at most 64 \
+             bytes) and the shared display must be a local :N display",
+            2,
+        ));
+    }
+    Ok(Some(Configuration { image, selection }))
 }
 
 /// The optional control opt-in: an installed absolute `fr-input-agent`.

@@ -230,3 +230,67 @@ fn independent_fixed_wire_bytes_bind_role_epoch_sequence_and_exact_selection() {
     assert!(protocol::query(0, 1).is_err());
     assert!(protocol::query(1, 0).is_err());
 }
+
+/// `frd run --logind-session`: without fresh evidence for the selected session
+/// nothing tailnet-facing starts (no certificate fetch, no listener), and the
+/// refusal is typed. The LocalAPI socket, worker and roots below do not exist:
+/// reaching any of them would fail differently.
+#[test]
+fn frd_run_refuses_to_listen_without_fresh_session_evidence() {
+    use frd::host_run::{self, Event, Options, Reporter, StopHandle};
+    use std::sync::Arc;
+    let _serial = SERIAL.lock().unwrap();
+    for (mode, expected) in [
+        ("opening", Error::OpeningExpired),
+        ("stale", Error::EvidenceExpired),
+        ("exit", Error::ProcessExited),
+    ] {
+        let options = Options {
+            socket: Some(PathBuf::from("/nonexistent/tailscaled.sock")),
+            port: 1,
+            interface: "fr-none".into(),
+            worker: PathBuf::from("/nonexistent/fr-media-worker"),
+            display: ":0".into(),
+            xauthority: None,
+            trust_roots: PathBuf::from("/nonexistent/ca.pem"),
+            sharing: fr_tailnet::Scope::OwnUser,
+            fps: 15,
+            bitrate: 1_000_000,
+            ingress_tools: None,
+            once: true,
+            handle_signals: false,
+            input_agent: None,
+            clipboard: false,
+            audio: None,
+            files: None,
+            session_monitor: Some(configuration(mode)),
+        };
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let report: Reporter = Arc::new(move |event| sink.lock().unwrap().push(event));
+        let started = Instant::now();
+        let result = host_run::run(&options, &report, &Arc::new(StopHandle::default()));
+        let error = result.unwrap_err();
+        // "exit" may surface as the closed pipe or the reaped process.
+        assert!(
+            error == host_run::Error::SessionMonitor(expected)
+                || (mode == "exit" && error == host_run::Error::SessionMonitor(Error::Pipe)),
+            "{mode}: {error:?}"
+        );
+        assert_eq!(error.code(), "session_monitor_unavailable");
+        assert!(started.elapsed() < Duration::from_secs(4), "{mode}");
+        let events = events.lock().unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::ObtainingCertificate | Event::Listening { .. })),
+            "{mode}: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::CleanupFailed { .. })),
+            "{mode}: {events:?}"
+        );
+    }
+}

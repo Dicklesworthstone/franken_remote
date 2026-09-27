@@ -6,6 +6,7 @@
 #include <signal.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 static void readall(unsigned char *b, size_t n) {
   while(n) { ssize_t k=read(0,b,n); if(k<=0) exit(0); b+=k; n-=(size_t)k; }
 }
@@ -14,6 +15,9 @@ int main(void) {
  unsigned char selection[224], q[32], r[40]; readall(selection,sizeof(selection));
  char mode[65]={0}; memcpy(mode,selection+32,selection[28]);
  if(!strcmp(mode,"hang")) raise(SIGSTOP);
+ /* "lockfile-TOKEN": Active until the test creates /tmp/fr-sm-lock-TOKEN, then Locked. */
+ char marker[96]={0}; int lockfile=!strncmp(mode,"lockfile-",9);
+ if(lockfile && snprintf(marker,sizeof(marker),"/tmp/fr-sm-lock-%s",mode+9)>=(int)sizeof(marker)) return 6;
  uint64_t frozen=now()+220000000; int count=0;
  for(;;) {
    readall(q,sizeof(q)); memset(r,0,sizeof(r)); memcpy(r,q,28); memcpy(r,"FRMR",4);
@@ -22,6 +26,7 @@ int main(void) {
    if(!strcmp(mode,"stale")) until=now()-1;
    if(!strcmp(mode,"opening")) {until=0; code=0;}
    if(!strcmp(mode,"locked") && count>=3) {until=0;code=2;}
+   if(lockfile && access(marker,F_OK)==0) {until=0;code=2;}
    for(int i=0;i<8;i++) r[28+i]=(unsigned char)(until>>(56-8*i));
    r[37]=(unsigned char)code;
    if(!strcmp(mode,"wrong")) r[19]^=1;

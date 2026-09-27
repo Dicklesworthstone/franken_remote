@@ -108,6 +108,7 @@ fn options(api: &fixture::Api, tools: &Tools, worker: PathBuf) -> Options {
         clipboard: false,
         audio: None,
         files: None,
+        session_monitor: None,
     }
 }
 

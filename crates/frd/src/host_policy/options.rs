@@ -56,6 +56,13 @@ pub struct RunOptions {
     pub files_max_file_bytes: Option<u64>,
     /// Per-controlled-session cumulative byte limit for `--files`.
     pub files_max_session_bytes: Option<u64>,
+    /// `--logind-session ID`: the operator's explicitly selected local logind
+    /// session whose lock, logout, switch or suspend ends sharing (plan 2.2).
+    pub logind_session: Option<String>,
+    /// `--logind-seat SEAT` for that session (default `seat0`).
+    pub logind_seat: Option<String>,
+    /// Absolute `fr-session-monitor` image (default: next to frd).
+    pub session_monitor: Option<PathBuf>,
 }
 impl RunOptions {
     /// Arguments after `run`. Unknown, duplicate or valueless options refuse
@@ -132,8 +139,17 @@ impl RunOptions {
                 "--files-max-session-bytes" => {
                     set(&mut options.files_max_session_bytes, bytes(value)?)?;
                 }
+                "--logind-session" => set(&mut options.logind_session, value.to_owned())?,
+                "--logind-seat" => set(&mut options.logind_seat, value.to_owned())?,
+                "--session-monitor" => set(&mut options.session_monitor, PathBuf::from(value))?,
                 _ => return Err(Error::InvalidArgument),
             }
+        }
+        // A seat or monitor image without the selected session selects nothing.
+        if options.logind_session.is_none()
+            && (options.logind_seat.is_some() || options.session_monitor.is_some())
+        {
+            return Err(Error::InvalidArgument);
         }
         // Audio selection flags without the enable are a typo, never a default.
         if !options.audio && (options.audio_server.is_some() || options.audio_sink.is_some()) {
@@ -325,6 +341,37 @@ mod tests {
             &["--files", "/a", "--files-max-file-bytes", "0"][..],
             &["--files", "/a", "--files-max-file-bytes", "1MiB"][..],
             &["--files", "/a", "--files-max-session-bytes", "+5"][..],
+        ] {
+            assert!(
+                matches!(parse(refused), Err(Error::InvalidArgument)),
+                "{refused:?}"
+            );
+        }
+    }
+    #[test]
+    fn session_lifetime_is_an_explicit_local_selection() {
+        let off = parse(&["--software-explicit"]).unwrap();
+        assert!(off.logind_session.is_none() && off.session_monitor.is_none());
+        let on = parse(&[
+            "--logind-session",
+            "c2",
+            "--logind-seat",
+            "seat1",
+            "--session-monitor",
+            "/usr/libexec/fr-session-monitor",
+        ])
+        .unwrap();
+        assert_eq!(on.logind_session.as_deref(), Some("c2"));
+        assert_eq!(on.logind_seat.as_deref(), Some("seat1"));
+        assert_eq!(
+            on.session_monitor,
+            Some(PathBuf::from("/usr/libexec/fr-session-monitor"))
+        );
+        for refused in [
+            &["--logind-session"][..],
+            &["--logind-session", "c2", "--logind-session", "c3"][..],
+            &["--logind-seat", "seat0"][..],
+            &["--session-monitor", "/a"][..],
         ] {
             assert!(
                 matches!(parse(refused), Err(Error::InvalidArgument)),

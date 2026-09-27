@@ -201,6 +201,7 @@ fn options(
         clipboard: false,
         audio: None,
         files: None,
+        session_monitor: None,
     }
 }
 

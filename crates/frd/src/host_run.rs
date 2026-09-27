@@ -33,6 +33,7 @@ use crate::{
             prepare::Setup,
         },
     },
+    session_monitor::{self, Monitor, Status as Lifetime},
     session_startup::{Configuration, host_offer_with_files, shared_viewers},
     worker::{Deadline, Launch, Retirement},
 };
@@ -105,6 +106,12 @@ pub struct Options {
     /// controller's explicit sends. Requires `input_agent`. `None` keeps the
     /// file capabilities unoffered (a controller asking gets typed absence).
     pub files: Option<crate::native_files::Directory>,
+    /// The operator's selected local session and its read-only monitor image.
+    /// `Some`: fresh logind evidence is required before binding, and lock,
+    /// logout, switch, suspend or lost evidence ends every share and the run
+    /// with a typed cause (no automatic resume). `None`: the session lifetime
+    /// is not observed; the operator is told that locking does not end sharing.
+    pub session_monitor: Option<session_monitor::Configuration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +128,11 @@ pub enum Error {
     Listener(Box<LinuxError>),
     Desktop(dispatch::Error),
     NoTailnetAddress,
+    /// The session monitor never produced fresh evidence; nothing was bound.
+    SessionMonitor(session_monitor::Error),
+    /// The selected session's evidence ended (lock, logout, switch, suspend,
+    /// or lost evidence); every share was ended first.
+    SessionEnded(session_monitor::Error),
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -150,7 +162,23 @@ impl Error {
             },
             Self::Desktop(_) => "desktop_failed",
             Self::NoTailnetAddress => "no_tailnet_addresses",
+            Self::SessionMonitor(_) => "session_monitor_unavailable",
+            Self::SessionEnded(cause) => session_ended_code(*cause),
         }
+    }
+}
+
+/// Specific causes only where the native evidence names one; everything else
+/// (expiry, a dead or misbehaving monitor) is lost evidence, never "locked".
+fn session_ended_code(cause: session_monitor::Error) -> &'static str {
+    use session_monitor::{Error as E, State};
+    match cause {
+        E::Native(State::Locked) => "session_locked",
+        E::Native(State::Inactive) => "session_inactive",
+        E::Native(State::Suspending) => "session_suspending",
+        E::Native(State::SessionUnavailable) => "session_ended",
+        E::Native(State::IdentityChanged) => "session_identity_changed",
+        _ => "session_evidence_lost",
     }
 }
 
@@ -323,6 +351,50 @@ enum Ended {
     Peer,
     PolicyChanged,
     Failed(dispatch::Error),
+    /// The selected session's evidence ended while this share was up.
+    SessionEnded(session_monitor::Error),
+}
+
+/// The terminal cause once the selected session's evidence has ended.
+fn session_ended(lifetime: Option<&session_monitor::Control>) -> Option<session_monitor::Error> {
+    match lifetime?.status() {
+        Lifetime::Stopped(cause) => Some(cause),
+        Lifetime::Opening | Lifetime::Active => None,
+    }
+}
+
+/// Wait for the monitor's first fresh evidence. The monitor bounds opening
+/// itself (two seconds), so this cannot wait forever.
+async fn session_opened(lifetime: &session_monitor::Control) -> Result<(), Error> {
+    poll_fn(|task| {
+        lifetime.register(task);
+        match lifetime.status() {
+            Lifetime::Opening => Poll::Pending,
+            Lifetime::Active => Poll::Ready(Ok(())),
+            Lifetime::Stopped(cause) => Poll::Ready(Err(Error::SessionMonitor(cause))),
+        }
+    })
+    .await
+}
+
+/// Stop the monitor and reap its thread and child within a bound; residue is
+/// reported, never silently kept.
+fn retire_session_monitor(mut monitor: Monitor, report: &Reporter) {
+    monitor.stop();
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match monitor.try_finish() {
+            Some(Ok(())) => return,
+            Some(Err(_)) => break,
+            None if std::time::Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            None => break,
+        }
+    }
+    report(Event::CleanupFailed {
+        stage: "session_monitor",
+    });
 }
 
 /// Capture pacing: at most 20 captures per second, and never shorter than one
@@ -371,6 +443,33 @@ fn run_inner(
     policy: Option<policy::Configuration>,
 ) -> Result<(), Error> {
     check(options)?;
+    // Started before anything is bound; kept for the whole run.
+    let monitor = match &options.session_monitor {
+        Some(configuration) => {
+            Some(Monitor::start(configuration.clone()).map_err(Error::SessionMonitor)?)
+        }
+        None => None,
+    };
+    let lifetime = monitor.as_ref().map(Monitor::control);
+    let result = serve_run(options, report, stop, policy, lifetime.as_ref());
+    // Sampled before our own stop: only a native end is a session end.
+    let ended = session_ended(lifetime.as_ref());
+    if let Some(monitor) = monitor {
+        retire_session_monitor(monitor, report);
+    }
+    match (result, ended) {
+        (Ok(()), Some(cause)) => Err(Error::SessionEnded(cause)),
+        (result, _) => result,
+    }
+}
+
+fn serve_run(
+    options: &Options,
+    report: &Reporter,
+    stop: &Arc<StopHandle>,
+    policy: Option<policy::Configuration>,
+    lifetime: Option<&session_monitor::Control>,
+) -> Result<(), Error> {
     // One Seat per run: an uncertain release keeps later control refused.
     let seat = Seat::default();
     let runtime = RuntimeBuilder::new()
@@ -387,13 +486,23 @@ fn run_inner(
     runtime.block_on(async {
         let mut policy = policy::Owner::start(&broker, policy)?;
         let result = async {
+            let mut signals = signals(options.handle_signals);
+            // Fresh evidence for the selected session before any tailnet I/O
+            // or binding; a locked or unverifiable session shares nothing.
+            if let Some(lifetime) = lifetime {
+                let Some(opened) =
+                    unless_stopped(session_opened(lifetime), stop, &mut signals).await
+                else {
+                    return Ok(());
+                };
+                opened?;
+            }
             let api = match &options.socket {
                 Some(path) => LocalApi::new(path).map_err(Error::Tailnet)?,
                 None => LocalApi::installed(),
             };
             let roots =
                 fr_tailnet::trust::root_store(&options.trust_roots).map_err(Error::Trust)?;
-            let mut signals = signals(options.handle_signals);
             let Some(ready) = unless_stopped(policy.ready(&broker), stop, &mut signals).await
             else {
                 return Ok(());
@@ -423,10 +532,12 @@ fn run_inner(
                         active: active.clone(),
                         report,
                         seat: seat.clone(),
+                        lifetime,
                     };
                     match share.serve(&broker).await? {
                         Ended::Served => failures = 0,
                         Ended::Peer | Ended::PolicyChanged => {}
+                        Ended::SessionEnded(cause) => return Err(Error::SessionEnded(cause)),
                         Ended::Failed(error) => {
                             if options.once {
                                 return Err(Error::Desktop(error));
@@ -452,6 +563,14 @@ fn run_inner(
                 |task| {
                     for s in [&mut signals.0, &mut signals.1].into_iter().flatten() {
                         if pin!(s.recv()).poll(task).is_ready() {
+                            stop.request();
+                        }
+                    }
+                    // Lock/logout/switch/suspend ends the run even while idle:
+                    // the stop cancels the active share (and its lease) promptly.
+                    if let Some(lifetime) = lifetime {
+                        lifetime.register(task);
+                        if session_ended(Some(lifetime)).is_some() {
                             stop.request();
                         }
                     }
@@ -576,6 +695,7 @@ struct Share<'a> {
     active: Arc<Mutex<Option<Cx>>>,
     report: &'a Reporter,
     seat: Seat,
+    lifetime: Option<&'a session_monitor::Control>,
 }
 impl Share<'_> {
     fn cx(&self) -> Result<Cx, Error> {
@@ -793,6 +913,7 @@ impl Share<'_> {
         let report = self.report.clone();
         let stop = self.stop.clone();
         let source_epoch = epoch.clone();
+        let lifetime = self.lifetime.cloned();
         let end = linux
             .serve_desktop(
                 &mut driver,
@@ -830,6 +951,7 @@ impl Share<'_> {
                 move |_, _| {
                     Ok(
                         if stop.is_requested()
+                            || session_ended(lifetime.as_ref()).is_some()
                             || source_epoch
                                 .as_ref()
                                 .is_some_and(|lease| lease.check().is_err())
@@ -850,6 +972,9 @@ impl Share<'_> {
         }
         self.cleanup(&mut driver, &retirement, &audio_retired, &mut linux)
             .await?;
+        if let Some(cause) = session_ended(self.lifetime) {
+            return Ok(Ended::SessionEnded(cause));
+        }
         if let Some(epoch) = epoch {
             match epoch.check() {
                 Err(crate::host_policy::live::Error::Changed) => return Ok(Ended::PolicyChanged),
@@ -870,6 +995,30 @@ impl Share<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_end_codes_name_only_what_the_evidence_names() {
+        use crate::session_monitor::{Error as E, State};
+        for (cause, code) in [
+            (E::Native(State::Locked), "session_locked"),
+            (E::Native(State::Inactive), "session_inactive"),
+            (E::Native(State::Suspending), "session_suspending"),
+            (E::Native(State::SessionUnavailable), "session_ended"),
+            (
+                E::Native(State::IdentityChanged),
+                "session_identity_changed",
+            ),
+            (E::EvidenceExpired, "session_evidence_lost"),
+            (E::ProcessExited, "session_evidence_lost"),
+            (E::Native(State::Failed), "session_evidence_lost"),
+        ] {
+            assert_eq!(Error::SessionEnded(cause).code(), code, "{cause:?}");
+        }
+        assert_eq!(
+            Error::SessionMonitor(E::OpeningExpired).code(),
+            "session_monitor_unavailable"
+        );
+    }
 
     #[test]
     fn host_offer_matches_the_native_viewer_bootstrap_capabilities() {
@@ -1006,6 +1155,7 @@ mod tests {
             clipboard: false,
             audio: None,
             files: None,
+            session_monitor: None,
         };
         let report: Reporter = Arc::new(|_| {});
         let stop = Arc::new(StopHandle::default());

@@ -654,3 +654,5 @@ mod real_control_cursor;
 mod real_cursor;
 #[path = "native_host_linux_serial/real_files.rs"]
 mod real_files;
+#[path = "native_host_linux_serial/real_session_lifetime.rs"]
+mod real_session_lifetime;

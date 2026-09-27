@@ -412,6 +412,18 @@ impl Daemon {
         clipboard: bool,
         files: Option<frd::native_files::Directory>,
     ) -> Self {
+        Self::start_monitored(display, worker, input_agent, clipboard, files, None)
+    }
+    /// `start` plus `frd run --logind-session`: the selected session's
+    /// lifetime evidence comes from `session_monitor`.
+    pub(super) fn start_monitored(
+        display: &str,
+        worker: &Path,
+        input_agent: Option<PathBuf>,
+        clipboard: bool,
+        files: Option<frd::native_files::Directory>,
+        session_monitor: Option<frd::session_monitor::Configuration>,
+    ) -> Self {
         let api = fixture::Api::new();
         let tools = Tools::new();
         let options = Options {
@@ -432,6 +444,7 @@ impl Daemon {
             clipboard,
             audio: None,
             files,
+            session_monitor,
         };
         let events = Arc::new(Mutex::new(Vec::new()));
         let sink = events.clone();
@@ -458,6 +471,23 @@ impl Daemon {
     }
     pub(super) fn dump(&self) -> String {
         format!("{:?}", self.events.lock().unwrap())
+    }
+    pub(super) fn events(&self) -> Vec<Event> {
+        self.events.lock().unwrap().clone()
+    }
+    /// Wait for the run to end on its own (without a local stop request).
+    pub(super) fn ended(&mut self, limit: Duration) -> Result<(), host_run::Error> {
+        let thread = self.thread.take().unwrap();
+        let until = Instant::now() + limit;
+        while !thread.is_finished() {
+            assert!(
+                Instant::now() < until,
+                "frd run did not end: {}",
+                self.dump()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread.join().unwrap()
     }
     /// Stop, then require a clean, typed end: no cleanup failure, `Stopped`.
     pub(super) fn finish(mut self) {
@@ -505,6 +535,20 @@ impl Controlled {
         files: Option<frd::native_files::Directory>,
         send: &[PathBuf],
     ) -> Self {
+        Self::start_all(host_clipboard, client_clipboard, files, send, None)
+    }
+    /// A plain controlled session whose host also watches the selected
+    /// session through `image` (a monitor image) and logind session name.
+    pub(super) fn start_monitored(image: PathBuf, session: String) -> Self {
+        Self::start_all(false, false, None, &[], Some((image, session)))
+    }
+    fn start_all(
+        host_clipboard: bool,
+        client_clipboard: bool,
+        files: Option<frd::native_files::Directory>,
+        send: &[PathBuf],
+        monitor: Option<(PathBuf, String)>,
+    ) -> Self {
         let (fr, worker, agent) = (
             sibling("fr"),
             sibling("fr-media-worker"),
@@ -514,7 +558,23 @@ impl Controlled {
         let viewer = Xvfb::start("800x600x24");
         let mut observer = Harness::start(HOST_OBSERVER, &host.display, "READY");
         let driver = Harness::start(VIEWER_DRIVER, &viewer.display, "WATCHING");
-        let daemon = Daemon::start(&host.display, &worker, Some(agent), host_clipboard, files);
+        let monitor = monitor.map(|(image, session)| frd::session_monitor::Configuration {
+            image,
+            selection: frd::session_monitor::Selection {
+                session,
+                uid: rustix::process::geteuid().as_raw(),
+                seat: "seat0".into(),
+                display: host.display.clone(),
+            },
+        });
+        let daemon = Daemon::start_monitored(
+            &host.display,
+            &worker,
+            Some(agent),
+            host_clipboard,
+            files,
+            monitor,
+        );
         // No viewer, no lease: the executor (and its indicator) is per lease.
         assert_eq!(indicator(&mut observer), None);
         let client_api = ClientApi::new();
