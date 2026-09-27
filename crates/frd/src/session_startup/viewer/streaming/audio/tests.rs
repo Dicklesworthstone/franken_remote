@@ -300,7 +300,7 @@ fn local_session_close_drops_output_once_without_inventing_host_end_or_failure()
     assert!(audio.stop.is_none());
     assert_eq!(audio.statistics().packets, 9);
     assert_eq!(calls.borrow().dropped, 1);
-    assert!(calls.borrow().ended.is_empty());
+    assert_eq!(calls.borrow().ended, [] as [AudioEnd; 0]);
     assert_eq!(calls.borrow().resets, 0);
     assert!(audio.configure(Box::new(Recording(calls.clone()))).is_err());
     assert_eq!(calls.borrow().dropped, 2); // The refused replacement, not another close.

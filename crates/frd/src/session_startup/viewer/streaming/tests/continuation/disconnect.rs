@@ -28,14 +28,14 @@ async fn streaming(c: &Cx, h: &Cx) -> (HostSession, StreamingViewer, SendCache) 
         .unwrap();
     // Complete ordinary attachment ACK traffic before testing terminal custody.
     for _ in 0..4 {
-        let (a, b) = support::both(
+        let (a, b) = Box::pin(support::both(
             host.drive(
                 Duration::from_millis(1),
                 || Ok(u128::from(stamp()) + 1),
                 |_, _| Ok(Disposition::Blocked),
             ),
             viewer.drive(Duration::from_millis(1), |_, _| Ok(Disposition::Blocked)),
-        )
+        ))
         .await;
         a.unwrap();
         b.unwrap();

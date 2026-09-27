@@ -1,4 +1,6 @@
 //! Ordered observation retirement on the existing receiver and closing exchange.
+#[path = "control_close.rs"]
+mod control_close;
 use super::{Error, Guarded, Operation, Peer, Presentation, StreamingViewer};
 use fr_transport::quic::{CloseOutcome, Disposition};
 use fr_wire::{closure::Reason, negotiation::Role};

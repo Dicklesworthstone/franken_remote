@@ -13,7 +13,8 @@ impl ControlledViewer {
     /// Fence this granted controller's input and native capture at CALL time,
     /// then request the original host's terminal report on the original socket.
     /// There is no new event source, input grant, receipt identity or connection.
-    /// Media/presentation owners must be stopped separately before this call.
+    /// Use the composed `StreamingViewer` close when media is still running; it
+    /// fences input before retiring that separately owned media.
     ///
     /// `cleanup` must have been independently provisioned on the same runtime
     /// clock before application shutdown. Fencing input cancels its application
@@ -40,7 +41,25 @@ impl ControlledViewer {
             viewer: self,
             complete: false,
         };
-        let viewer = &mut *ending.viewer;
+        let prepared = ending.viewer.begin_disconnect_with_cleanup(cleanup, reason);
+        async move {
+            let outcome = prepared.await?;
+            ending.viewer.record_disconnect(outcome);
+            drop(ending);
+            Ok(outcome)
+        }
+    }
+
+    /// The composed streaming owner must fence input before dropping a pending
+    /// decoder future. Preparation returns only owned terminal work, so media
+    /// retirement need not retain a borrow on the controller or its transport.
+    /// Its caller installs an original-owner teardown guard before calling.
+    pub(in crate::session_startup::viewer) fn begin_disconnect_with_cleanup(
+        &mut self,
+        cleanup: &Cx,
+        reason: Reason,
+    ) -> impl Future<Output = Result<ControlCloseOutcome, Error>> + use<> {
+        let viewer = self;
         // No native adapter runs before the scope/role/budget are captured and
         // ordinary method admission is fenced. A failed preflight is terminal.
         let ready = (|| {
@@ -100,13 +119,18 @@ impl ControlledViewer {
         }
         async move {
             let outcome = prepared?.await;
-            if let Some(report) = outcome.exchange.report {
-                ending.viewer.session.remote_closed = Some(report);
-            }
-            ending.viewer.disconnect_outcome = Some(outcome);
-            drop(ending);
             Ok(outcome)
         }
+    }
+
+    pub(in crate::session_startup::viewer) fn record_disconnect(
+        &mut self,
+        outcome: ControlCloseOutcome,
+    ) {
+        if let Some(report) = outcome.exchange.report {
+            self.session.remote_closed = Some(report);
+        }
+        self.disconnect_outcome = Some(outcome);
     }
 
     /// Exact completed terminal exchange, preserved through repeated close and

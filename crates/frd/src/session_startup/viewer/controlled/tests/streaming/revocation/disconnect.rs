@@ -393,3 +393,5 @@ fn a_late_stop_callback_cannot_acquire_a_fresh_network_closure_budget() {
         cleanup(&mut f).await;
     });
 }
+
+mod streaming;

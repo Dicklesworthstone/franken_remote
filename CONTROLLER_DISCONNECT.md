@@ -109,3 +109,58 @@ work is preserved rather than overwritten or counted as rerun. Automatic
 controller window/stream-loop selection, independently confirmed native host
 cleanup and final effect accounting remain open. Applications owning a separate
 receiver/presenter must retire that media before selecting this control-owner API.
+
+## Running granted-controller shutdown
+
+`StreamingViewer::disconnect_control_with_cleanup` composes the granted input
+owner with its original receiver, presenter, audio and repair state. Input is
+fenced and the original deadlines are frozen before media retirement; all of
+that happens at method call, including when the future is abandoned unpolled.
+The original input-capture and decoder owners remain available for explicit
+reaping, and externally borrowed compressed pictures retain their byte charges.
+
+`StreamingViewer::serve_control_until` runs the existing granted-controller loop
+until its bounded UI callback returns `ControlFlow::Break(reason)`. It prepares
+the owned terminal exchange inside that callback turn. This ordering matters:
+input is fenced BEFORE the pending decoder future unwinds, not after awaiting
+a late result or dropping the native operation first. No further presentation,
+input-result or application callback executes during the exchange. Emergency
+stop and callback/protocol errors remain immediate failures, not local intent.
+
+`control_disconnect_outcome` and `pending_control_actions` continue reading the
+original input owner after teardown. Closing does not replay unsent actions,
+erase pending receipts, translate a session report into lease release, or infer
+local native completion from transport success. A rejected repeat attempt cannot
+erase an earlier report. The independently supplied cleanup context has the same
+requirements as the granted-owner API above; using the cancelled application
+context refuses reporting without delaying the local input/media fence.
+
+Six added running-controller tests and 24 existing controller/observation/audio
+tests passed (30 distinct runtime cases). Actual TLS/UDP, production input/receipt
+ledgers and supervised decoder IPC run with explicit compressed-picture, native
+input-capture, visibility and host-accounting fixtures. Media bootstrap is
+injected into the production receiver; closing requests and terminal reports
+cross the original authenticated connection. The new cases cover direct and
+UI-initiated closure after presentation and during pending decode, abandonment,
+exact report retention through both native reaps, external buffer charging,
+unresolved actions, emergency/callback distinction and wrong cleanup contexts.
+The first run correctly refused a new test action without a visibility witness;
+the test now supplies that explicit fixture witness without changing production
+gates or assertions. The complete selected rerun passed.
+
+All eight relevant first-party libraries were rebuilt from the checksum-verified
+b6aca68 source using pinned nightly-2026-08-31 and unchanged matching external
+libraries retained by CI run 36335317709. Complete production-daemon AND complete
+daemon test-source strict pedantic Clippy passed. New and existing test-only lint
+findings were corrected with explicit empty-array assertions and a boxed composed
+future; no check, timeout or runtime policy was weakened. Changed-file formatting
+and whitespace checks passed. Runtime
+tests use a separate copy excluding only unselected test registrations; a
+normalized source comparison verifies unchanged production bodies and selected
+assertions. This is not a cold dependency build, full-workspace run, native
+X11/input-release, HEVC/GPU or installed-Tailscale qualification.
+
+Interactive acquisition and native controller-window selection still need their
+own integration; this API requires an actually granted controller. Observation
+closing and immediate window/emergency behavior remain unchanged. Independently
+confirmed host cleanup and final external-effect accounting remain open.
