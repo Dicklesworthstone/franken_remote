@@ -20,7 +20,9 @@ use std::net::SocketAddr;
 #[allow(dead_code)]
 #[path = "../../../../frd/tests/native_host_accept/fixture.rs"]
 pub(super) mod fixture;
-#[allow(dead_code)]
+// viewer_window/tests.rs includes the same file under an independent feature;
+// with --all-features both test modules exist, which is intended.
+#[allow(dead_code, clippy::duplicate_mod)]
 #[path = "../../../../fr-transport/tests/support/mod.rs"]
 pub(super) mod network;
 

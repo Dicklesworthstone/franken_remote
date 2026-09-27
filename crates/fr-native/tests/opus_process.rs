@@ -1,5 +1,6 @@
 #![cfg(all(target_os = "linux", feature = "linux-opus-process"))]
 //! Actual restricted child and real libopus. Tones and local clocks are fixtures.
+#[allow(dead_code)] // The shared oracle is used by opus_decoder, not here.
 mod opus_support;
 static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 use fr_client::{
