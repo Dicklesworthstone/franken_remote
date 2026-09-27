@@ -1,5 +1,6 @@
 //! One closing client exchange, never an ordinary post-close transport loan.
 use super::{DRAIN_US, TURN};
+use crate::ControlCloseOutcome;
 use crate::quic::{
     ConnectionBinding, ControlRoutes, EmptySendState, Error, Inbound, Messages, Priority,
     QuicRecords, Route, now, validate_record,
@@ -10,12 +11,13 @@ use asupersync::{
     net::quic_native::{NativeQuicUdpConnection, QuicConnectionState, StreamRole},
     time::timeout,
 };
-use fr_core::limits::ProtocolLimits;
+use fr_core::{ids::InputLeaseId, limits::ProtocolLimits};
 use fr_wire::{
     Kind,
     authority::Binding,
     closure::{self, CloseRequest, Closed, REQUEST_BYTES},
     input::{InputDelivery, InputDirection},
+    lease_revoked::{self, Revoked},
 };
 use std::{future::Future, sync::Arc, time::Duration};
 
@@ -45,6 +47,8 @@ struct Exchange {
     outbound: crate::quic::StreamRoute,
     incoming: Inbound,
     binding: Binding,
+    lease: Option<InputLeaseId>,
+    revocation: Option<Revoked>,
     empty: EmptySendState,
     streams: usize,
     read_bytes: u64,
@@ -84,7 +88,55 @@ impl QuicRecords {
         until_micros: u64,
     ) -> impl Future<Output = CloseOutcome> + use<> {
         let prepared = if self.is_bound_to(original) {
-            let prepared = self.prepare_close_exchange(cx, routes, binding, request, until_micros);
+            let prepared =
+                self.prepare_close_exchange(cx, routes, binding, request, until_micros, None);
+            self.close();
+            prepared
+        } else {
+            Err(Error::WrongRoute)
+        };
+        async move {
+            match prepared {
+                Ok(exchange) => exchange.run().await.exchange,
+                Err(error) => CloseOutcome::initial(Err(error)),
+            }
+        }
+    }
+
+    /// End a granted controller's ordinary I/O and send one `CloseRequest`, then
+    /// accept either the original lease's `LeaseRevoked` or a session `Closed` report.
+    /// `lease` must come from the actual input owner, which MUST synchronously
+    /// fence event admission and stop native input capture before calling this.
+    /// This operation does not release host keys or collect individual receipts.
+    ///
+    /// Call with an independently provisioned cleanup context on the same runtime
+    /// clock when fencing input cancels its application context. Never reset or
+    /// un-cancel the old context. The cleanup context's cancellation and immutable
+    /// destination/security gate still apply. The same 250-ms original deadline,
+    /// receive credit, parser, 32-record work bound and native-backlog refusal
+    /// used by observation closing apply; no application callback runs here.
+    /// A foreign proof refuses without mutation; every matched attempt closes
+    /// ordinary I/O at CALL time, even when invalid, abandoned or never polled.
+    #[allow(clippy::too_many_arguments)]
+    pub fn close_control_with_request(
+        &mut self,
+        cleanup: &Cx,
+        original: &ConnectionBinding,
+        routes: ControlRoutes,
+        binding: Binding,
+        lease: InputLeaseId,
+        request: CloseRequest,
+        until_micros: u64,
+    ) -> impl Future<Output = ControlCloseOutcome> + use<> {
+        let prepared = if self.is_bound_to(original) {
+            let prepared = self.prepare_close_exchange(
+                cleanup,
+                routes,
+                binding,
+                request,
+                until_micros,
+                Some(lease),
+            );
             self.close();
             prepared
         } else {
@@ -93,7 +145,10 @@ impl QuicRecords {
         async move {
             match prepared {
                 Ok(exchange) => exchange.run().await,
-                Err(error) => CloseOutcome::initial(Err(error)),
+                Err(error) => ControlCloseOutcome {
+                    exchange: CloseOutcome::initial(Err(error)),
+                    revocation: None,
+                },
             }
         }
     }
@@ -105,7 +160,11 @@ impl QuicRecords {
         binding: Binding,
         request: CloseRequest,
         until_micros: u64,
+        lease: Option<InputLeaseId>,
     ) -> Result<Exchange, Error> {
+        if lease.is_some_and(|lease| lease.as_raw() == 0) {
+            return Err(Error::WrongRoute);
+        }
         cx.checkpoint().map_err(|_| Error::Cancelled)?;
         let started = now(cx)?;
         let until = started
@@ -139,6 +198,7 @@ impl QuicRecords {
                     || r.priority != Priority::Critical
                     || r.binding != binding.channel
                     || r.maximum < closure::CLOSED_BYTES.max(REQUEST_BYTES)
+                    || (lease.is_some() && r.maximum < lease_revoked::REVOKED_BYTES)
                     || !self.has_route(Route::Stream(*r))
             })
         {
@@ -171,6 +231,8 @@ impl QuicRecords {
             outbound: routes.outbound,
             incoming: self.inbound.swap_remove(index),
             binding,
+            lease,
+            revocation: None,
             empty,
             streams: self.streams.len(),
             read_bytes: self.read_bytes,
@@ -206,7 +268,7 @@ impl Exchange {
         }
         Ok(at)
     }
-    async fn run(mut self) -> CloseOutcome {
+    async fn run(mut self) -> ControlCloseOutcome {
         self.outcome.transport = match self.check() {
             Err(error) => Err(error),
             Ok(at) => {
@@ -216,7 +278,10 @@ impl Exchange {
                     .unwrap_or(Err(Error::Expired))
             }
         };
-        self.outcome
+        ControlCloseOutcome {
+            exchange: self.outcome,
+            revocation: self.revocation,
+        }
     }
     fn offer(&mut self) -> Result<(), Error> {
         let streams = self.native.connection().inner().streams();
@@ -284,6 +349,22 @@ impl Exchange {
                         .map_err(|_| Error::Malformed)?,
                     );
                     return Ok(true); // Never interpret a record after Closed.
+                }
+                if u16::from_be_bytes([bytes[6], bytes[7]]) == Kind::LeaseRevoked as u16
+                    && let Some(lease) = self.lease
+                {
+                    self.revocation = Some(
+                        lease_revoked::decode(
+                            bytes,
+                            self.binding,
+                            lease,
+                            &ProtocolLimits::ABSOLUTE,
+                            InputDirection::HostToViewer,
+                            InputDelivery::Reliable,
+                        )
+                        .map_err(|_| Error::Malformed)?,
+                    );
+                    return Ok(true); // Never inspect or replace a terminal report.
                 }
                 // No callback, acknowledgement or semantic action for old
                 // control records, including challenges and media attachments.

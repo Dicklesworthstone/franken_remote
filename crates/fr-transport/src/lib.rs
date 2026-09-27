@@ -11,3 +11,15 @@ pub mod native_accept;
 pub mod quic;
 
 pub mod wss;
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Controller closure on the original session-control lane. The first validated
+/// terminal report wins: a lease report is not fabricated into session cleanup,
+/// and a session report does not prove release of the expected input lease.
+/// Per-action receipt ledgers remain with the original input owner. Uncollected
+/// receipts remain uncertain; this exchange never retries their effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlCloseOutcome {
+    pub exchange: quic::CloseOutcome,
+    pub revocation: Option<fr_wire::lease_revoked::Revoked>,
+}
