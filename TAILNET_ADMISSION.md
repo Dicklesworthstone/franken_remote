@@ -178,10 +178,20 @@ connect to the installed daemon, mutate Tailscale policy or inject OS input.
 The read-only [`localapi_check`](crates/fr-tailnet/examples/localapi_check.rs)
 probe now exercises the production adapter against an installed daemon. On
 Linux Tailscale 1.102.3, the tested peer's WhoIs omitted `MachineAuthorized`
-and returned a null application `CapMap`. Admission remains refused in both
-scopes. `MachineNotAuthorized` identifies missing positive machine approval
-separately from a missing application grant (`CapabilityDenied`); no check is
-relaxed. The [qualification record](spikes/tailnet-identity/README.md) gives
+and returned a null application `CapMap`. At that time admission refused in
+both scopes. `MachineNotAuthorized` identifies missing positive machine approval
+separately from a missing application grant (`CapabilityDenied`).
+
+**Superseded for the own-user scope by 06f175c (2026-09-23):** real tailscaled
+does not return `MachineAuthorized` for peers, so the own-user scope now admits
+on positive evidence instead (`fr-tailnet` `metadata.rs`: the peer's `UserID`
+equals this node's own user, the source is the peer's own tailnet address and
+its node key matches). An explicit `MachineAuthorized: false` still refuses.
+The tailnet scope still needs `MachineAuthorized: true` or a valid desktop grant,
+so without a configured grant it refuses every real peer. The captured 1.102.3 fixture is admitted under
+own-user over the LocalAPI client path. No live peer has been admitted yet (no
+second machine has connected), there is no pinned-version gate, and owner
+ratification of this predicate is pending (fr-rc-identity-owner-decision-p3g). The [qualification record](spikes/tailnet-identity/README.md) gives
 pinned upstream semantics, sanitized fixture provenance and reproduction.
 
 This establishes a live negative result, not successful configured-profile

@@ -31,7 +31,7 @@ Output and Debug contain no diagnostic audio samples or packet bytes.
 These synchronous adapters belong on a supervised audio-worker thread, not the
 input-authority thread or a realtime audio callback. They are not themselves a
 process sandbox, session admission, source consent, or a native audio device.
-Production worker integration and trusted native packaging are still required.
+They are integrated: host capture encodes in `fr-media-worker --audio`, and client decode runs in the restricted per-epoch `fr-opus-worker` child (20c49ef, 7e15e31; see WORKER_SANDBOX.md). Trusted native packaging is still required.
 The system loader/library and native codec remain trust boundaries: this feature
 does not claim protected-path packaging or safely load an arbitrary supplied .so.
 The shared synthetic codecs remain explicitly test doubles, not this implementation.

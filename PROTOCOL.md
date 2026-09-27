@@ -1,6 +1,9 @@
 # PROTOCOL.md — FrankenRemote Wire Specification
 
-**Status: normative v0-draft, not frozen or implemented.** This is the contract
+**Status: normative v0-draft, not frozen; partly implemented.** Many record kinds
+are implemented in `fr-wire` and used by `frd run` and `fr connect` (2026-09-27), but
+no independent implementation has interoperated with them, so the freeze gate is
+still outstanding. This is the contract
 for bead `fr-fr-wire-framing-i0u`, authored under `fr-protocol-draft-bh9`.
 The [design plan](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md),
 especially §§1, 7, 12, 15–17, 19, and 27.1, takes precedence. MUST and MUST NOT

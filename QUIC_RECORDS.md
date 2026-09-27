@@ -1,8 +1,9 @@
 # Native Asupersync QUIC record transport
 
 `fr-transport::quic::QuicRecords` connects FRD0 records to the real
-`NativeQuicUdpConnection` in the workspace-pinned Asupersync 0.4.10. QUIC is
-primary. No WSS implementation, alternate QUIC stack, executor, public listener,
+`NativeQuicUdpConnection` of the workspace-pinned Asupersync (0.4.10 when this
+slice landed and in the 0.4.10 statements below; the workspace pins `=0.5.0`
+since). QUIC is primary. No WSS implementation, alternate QUIC stack, executor, public listener,
 account system, or synthetic handshake is introduced.
 
 ## Implemented boundary

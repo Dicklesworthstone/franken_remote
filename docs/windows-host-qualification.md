@@ -31,7 +31,8 @@ The Windows host adapter implements hardware-accelerated workstation hosting on 
 > evidence is the probe recorded in
 > [`spikes/os-lifecycle/README.md`](../spikes/os-lifecycle/README.md) (Windows 11
 > console session: not tested; Session 0: blocked by design). The runtime table
-> `frd::windows::QUALIFIED_WINDOWS_ROWS` is empty.
+> `frd::windows::QUALIFIED_WINDOWS_ROWS` this note used to cite no longer exists
+> (2026-09-27).
 
 | OS Release | Desktop Duplication | DuplicateOutput1 (HDR) | HW HEVC Encoder | Session 0 Isolation | UIPI Elevation Refusal | Status |
 |---|---|---|---|---|---|---|
@@ -64,7 +65,12 @@ When a display or desktop transition occurs:
 
 ## 4. Verification Evidence
 
-Integration test coverage in `crates/frd/tests/windows_host_adapter_test.rs`:
+> **Withdrawn 2026-09-27:** `crates/frd/tests/windows_host_adapter_test.rs` does not
+> exist in the tree, and no Windows capture, encode or input path exists, so none of
+> the tests listed below exists or ran. The list is kept only as the record of what
+> an earlier version of this document claimed.
+
+Formerly claimed test coverage (`crates/frd/tests/windows_host_adapter_test.rs`):
 - `test_desktop_duplication_prompt_frame_release_invariant`: Verifies DXGI output frame is released before next acquire and copied to `OwnedGpuSurface`.
 - `test_duplicate_output1_hdr_tone_mapping`: Verifies automatic BT.2446 Method A tone mapping on HDR formats.
 - `test_display_transitions_and_gpu_fault_recovery`: Verifies typed transition causes and recovery backoff.

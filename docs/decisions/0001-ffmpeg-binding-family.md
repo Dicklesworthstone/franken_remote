@@ -22,7 +22,7 @@ We must select a single binding strategy, qualify an explicit FFmpeg ABI, establ
 
 ## 2. Decision
 
-FrankenRemote adopts a **project-owned, minimal C ABI shim** (`crates/fr-native/src/bridge.c` and `crates/fr-ffi`) binding directly against a **single pinned FFmpeg 7.1.x ABI** (`libavcodec.so.61`, `libavutil.so.59`, `libswscale.so.8`), rejecting heavy third-party high-level wrapper crates (`ffmpeg-next` and `ffmpeg-the-third`).
+FrankenRemote adopts a **project-owned, minimal C ABI shim** (`crates/fr-native/src/bridge.c`; the duplicate `crates/fr-ffi` wrapper was deleted on 2026-09-24) binding directly against a **single pinned FFmpeg 7.1.x ABI** (`libavcodec.so.61`, `libavutil.so.59`, `libswscale.so.8`), rejecting heavy third-party high-level wrapper crates (`ffmpeg-next` and `ffmpeg-the-third`).
 
 Key architectural invariants enforced by this decision:
 

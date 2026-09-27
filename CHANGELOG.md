@@ -1,5 +1,34 @@
 # Changelog
 
+## 2026-09-25 to 2026-09-27 — control, clipboard, audio, files, second reality check
+
+All namespace end-to-end evidence (real processes, QUIC, X11 and codecs; fixture
+LocalAPI and CA); no client on a second tailnet machine has connected yet.
+
+- Remote control: `frd run --input-agent` + `fr connect --control` (keys, buttons,
+  absolute pointer, discrete wheel) through a per-lease `fr-input-agent` XTest
+  child with a mandatory indicator; consent surfaces reject controller-injected
+  XTest events (a7b29ce).
+- Cursor forwarding with one renderer (view-only and control); opt-in text
+  clipboard; viewer-to-host file sending (and both together since 41f2201); host
+  playback audio for view-only sessions, client Opus decode in the restricted
+  `fr-opus-worker`.
+- LeaseRevoked, Closed and CloseRequest wire kinds and the bounded close exchange.
+- Root `frd ingress-helper` so `frd run` can run unprivileged (6019af0).
+- Control-session deaths root-caused to IDR fragments paced four per turn and
+  fixed without weakening any deadline (eb8f450, bd177a8).
+- `frd run --logind-session`: lock, logout, switch or suspend of the selected
+  session ends sharing and the run with a typed cause (5a8e12d).
+- Operator/diagnostic strings no longer understate control or advertise the
+  unserved HTTPS/h3 endpoints (e55e56e).
+- Second reality check (2026-09-27): 19 new beads (fr-rc2-*), three false
+  closures reopened, done-at-namespace beads blocked on a live lane (71541f6).
+  Narrow CI workflows moved to nightly/dispatch (91d4e3f).
+- Still open: a live two-machine run, transport interoperability (Asupersync
+  pin), more than one peer at a time, hardware HEVC, Wayland/macOS/Windows/
+  browser/mobile, and size (about 312,800 lines against the 240,000 planned
+  maximum; the hard stop is 500,000 since 2026-09-24).
+
 ## 2026-09-12 to 2026-09-24 — audit, first host composition, withdrawn claims
 
 - A reality check on 2026-09-23 (at e1d9cc2) found that no binary could host. It

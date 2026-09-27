@@ -1,5 +1,53 @@
 # Implementation status
 
+## Audited state (2026-09-27)
+
+**Early implementation; not an installable remote desktop.** A second reality
+check (2026-09-27) re-read the plan, AGENTS.md and README against the code and
+re-ran the gates; the 2026-09-24 section below is kept as history.
+
+**What composes end to end (namespace e2e: real processes, UDP/TLS/QUIC, X11,
+codecs; fixture LocalAPI, test CA, synthetic firewall).** `frd run` on Linux X11
+serves the native `fr` client view-only or, with `--input-agent`, with
+keyboard, button, absolute-pointer and discrete-wheel control executed by a
+per-lease `fr-input-agent` child (mandatory indicator, submission-time deadline
+checks, lease expiry proven by freezing the client). Opt-in text clipboard
+(both directions), viewer-to-host file sending (alone or with the clipboard),
+host playback audio for view-only sessions (client Opus decode in the restricted
+`fr-opus-worker`), cursor forwarding with one renderer, the
+LeaseRevoked/Closed/CloseRequest exchange, a root ingress helper so `frd run`
+can run unprivileged, and `--logind-session`, which ends sharing and the run
+with a typed cause on lock/logout/switch/suspend. Each has planted negatives.
+
+**Fixed since 2026-09-24:** control-session deaths from IDR fragments paced four
+per turn (eb8f450, bd177a8); consent surfaces accepting controller-injected
+XTest events (a7b29ce and follow-ups); lock/logout not ending sharing (plan 2.2)
+when `--logind-session` is given (5a8e12d); operator strings that understated
+control or advertised unserved HTTPS/h3 endpoints (e55e56e).
+
+**Open, in priority order:**
+- A live two-machine run: no client on another tailnet node has ever connected
+  (owner decision needed: a second machine, or an auth key for an isolated test
+  node). Every row above is namespace evidence.
+- Transport interoperability: the workspace pins Asupersync `=0.5.0`, which
+  cannot decode QUIC frame types 0x07/0x18/0x19; the 2026-09-20 0.6.0 "GO" has no
+  retained logs.
+- One peer at a time: the 1 controller + 2 viewers hub, late join and `Busy`
+  exist only as library code (serial listener).
+- Control robustness: the static LineScroll grant makes all control fail on X
+  servers without relative XTest or wheel buttons 6/7 mapped.
+- Audio during control, local approval and a host indicator for view-only and
+  audio shares in `frd run`, IPv6 binding.
+- Hardware HEVC (no GPU on the development host), Wayland, macOS, Windows,
+  browser and mobile: not implemented.
+- Size: about 312,800 handwritten Rust lines (240,000 planned maximum, 500,000
+  hard stop); about 9.5k lines are unreachable (owner decision pending).
+
+**Gates (2026-09-27):** CI rust-verification at b6aca68 had only the clippy lane
+red (fixed); plain `cargo test --workspace` 2,548 passed / 4 failed (wall-clock
+tests that pass alone); fr-native Linux features 463/0; namespace suite 55/1
+(one X `BadWindow` at load 86).
+
 ## Audited state (2026-09-24)
 
 **Early implementation; not an installable remote desktop.** This section

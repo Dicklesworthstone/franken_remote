@@ -66,18 +66,19 @@ The host surfaces its display server security model in runtime diagnostics:
 > portal capture, EIS input, restore tokens, clipboard and audio, and claimed XShm
 > capture on X11. The tree contains no xdg-desktop-portal, PipeWire or libei
 > integration (no D-Bus client dependency at all), and X11 capture uses
-> `XGetImage` (`crates/fr-native/src/bridge.c`), not XShm. The honest spike record
+> `XGetImage` (`crates/fr-native/src/bridge.c`), not XShm (XShm capture over a sealed
+> memfd landed afterwards, fr-rc-media-xshm-capture-e23). The honest spike record
 > [`spikes/os-lifecycle/README.md`](../spikes/os-lifecycle/README.md) lists GNOME
 > and KDE as not tested and Hyprland 0.56.2 as blocked. The runtime table
-> `frd::linux::QUALIFIED_ROWS` is empty and `evaluate_compositor` refuses every
-> compositor with a typed reason.
+> `frd::linux::QUALIFIED_ROWS` and `evaluate_compositor` that this note used to cite
+> no longer exist in the tree (2026-09-27): nothing evaluates a compositor.
 
 | Compositor Family | Capture | Pointer | Keyboard | Restore Token | Clipboard | Playback Audio | Status |
 |---|---|---|---|---|---|---|---|
 | **GNOME (Mutter)** | not tested | not tested | not tested | not tested | not tested | not tested | **blocked**: no portal/PipeWire/libei implementation |
 | **KDE Plasma (KWin)** | not tested | not tested | not tested | not tested | not tested | not tested | **blocked**: no portal/PipeWire/libei implementation |
 | **Hyprland / wlroots** | blocked (spike: VAAPI driver missing) | not tested | not tested | not tested | not tested | not tested | **blocked**: no portal/PipeWire/libei implementation |
-| **X11** | `XGetImage` capture exercised under Xvfb in CI | XTest exercised under Xvfb | XTest exercised under Xvfb | not applicable | X11 selection workers exercised under Xvfb | not tested | **not qualified**: Xvfb test evidence only; no installed-desktop run |
+| **X11** | XShm capture (sealed memfd, `XGetImage` fallback) exercised under Xvfb and in the namespace e2e | XTest exercised under Xvfb | XTest exercised under Xvfb | not applicable | X11 selection workers exercised under Xvfb | not tested | **not qualified**: Xvfb test evidence only; no installed-desktop run |
 
 The X11 row reports source/test evidence (Xvfb in CI), a separate category from
 hardware or installed-desktop qualification. The design notes in section 1

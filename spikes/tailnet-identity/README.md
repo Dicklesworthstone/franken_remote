@@ -122,26 +122,26 @@ The full sharing matrix and scope-check decisions have been qualified against st
 | Matrix Row | Description | Scope::OwnUser Decision | Scope::Tailnet Decision |
 |---|---|---|---|
 | `positive_approved` | Matching User ID (7), `MachineAuthorized: true`, CapMap grant | **Admitted** | **Admitted** |
-| `different_owner` | Host User 7, Peer User 8, `MachineAuthorized: true` | **Refused** (`CrossUserDenied`) | **Admitted** |
-| `tagged_host` | Host User 0 (`tag:fr-host`), Peer User 7 | **Refused** (`TaggedHostRequiresExplicitScope`) | **Admitted** |
-| `tagged_peer` | Host User 7, Peer User 0 (`tag:fr-client`) | **Refused** (`CrossUserDenied`) | **Admitted** |
-| `shared_in` | Host User 7, Peer `ShareeNode: true`, `Sharer: 11` | **Refused** (`SharedNodeDenied`) | **Refused** (`SharedNodeDenied`) |
-| `multi_tailnet` | Host User 7, Peer address mismatch (not in `Node.Addresses`) | **Refused** (`SourceAddressMismatch`) | **Refused** (`SourceAddressMismatch`) |
+| `different_owner` | Host User 7, Peer User 8, `MachineAuthorized: true` | **Refused** (`ScopeDenied`) | **Admitted** |
+| `tagged_host` | Host User 0 (`tag:fr-host`), Peer User 7 | **Refused** (`ExplicitScopeRequired`) | **Admitted** |
+| `tagged_peer` | Host User 7, Peer User 0 (`tag:fr-client`) | **Refused** (`ScopeDenied`) | **Admitted** |
+| `shared_in` | Host User 7, Peer `ShareeNode: true`, `Sharer: 11` | **Refused** (`SharedPeer`) | **Refused** (`SharedPeer`) |
+| `multi_tailnet` | Host User 7, Peer address mismatch (not in `Node.Addresses`) | **Refused** (`AddressMismatch` or `IdentityMismatch`) | **Refused** (`AddressMismatch` or `IdentityMismatch`) |
 
 ### Pinned LocalAPI metadata fields and tested semantics
 
 1. `Node.MachineAuthorized: Option<bool>`:
-   - Must be explicitly `Some(true)`.
-   - If missing/omitted (default Go `false` due to `omitempty`) or `Some(false)`, admission is refused with typed error `MachineNotAuthorized`.
+   - `Some(false)` always refuses with `MachineNotAuthorized`.
+   - Missing/omitted (installed daemons omit it for peers) is accepted only under `Scope::OwnUser`, which then rests on the positive user-id equality in rule 3, or with a valid desktop grant; otherwise it refuses with `TailnetMembershipUnverifiable` (changed in 06f175c on 2026-09-23; this section originally required `Some(true)`).
 2. `Node.Addresses: Vec<IpAddr>`:
    - Ingress source IP must strictly match one of the peer's own assigned tailnet addresses.
-   - Traffic arriving from an address routed behind a subnet router or foreign tailnet interface is refused with `SourceAddressMismatch`.
+   - Traffic arriving from an address routed behind a subnet router or foreign tailnet interface is refused with `AddressMismatch`.
 3. `Node.User: UserID` (and `Node.Tags: Vec<String>`):
    - For `Scope::OwnUser`: `host.user == peer.user` and neither node may have `user == 0` (tagged).
-   - If host has `user == 0` (tagged host), `Scope::OwnUser` refuses with `TaggedHostRequiresExplicitScope`, requiring the administrator/daemon to explicitly configure `Scope::Tailnet`.
+   - If host has `user == 0` (tagged host), `Scope::OwnUser` refuses with `ExplicitScopeRequired`, requiring the administrator/daemon to explicitly configure `Scope::Tailnet`.
    - Tagged peers have `user == 0` and are admitted only under `Scope::Tailnet`.
 4. `Node.ShareeNode: Option<bool>` and `Node.Sharer`:
-   - Shared-in nodes (`ShareeNode: true` or nonzero `Sharer`) are refused under both `Scope::OwnUser` and default `Scope::Tailnet` with `SharedNodeDenied`.
+   - Shared-in nodes (`ShareeNode: true` or nonzero `Sharer`) are refused under both `Scope::OwnUser` and default `Scope::Tailnet` with `SharedPeer`.
 5. `WhoIsResponse.CapMap`:
    - Application capability grants (keyed by `https://tailscale.com/cap/frankenremote`) must be present with required permissions (`can_observe`, `can_control`) unless explicitly configured with positive admission policies.
 6. Non-authoritative fields:

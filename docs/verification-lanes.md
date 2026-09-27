@@ -24,7 +24,7 @@ FrankenRemote enforces all build, verification, size discipline, and security bo
 Per **AGENTS.md Section 3.7** and **Plan Section 22.2**:
 - **Target Handwritten Rust**: 194,000 lines
 - **Planned Maximum**: 240,000 lines
-- **Hard Stop**: 250,000 lines (exceeding triggers `OVER_BUDGET_REFUSAL` and exits 1)
+- **Hard Stop**: 500,000 lines since the owner's 2026-09-24 decision (was 250,000; exceeding triggers `OVER_BUDGET_REFUSAL` and exits 1)
 - **Non-Rust Glue Allowance**: 20,000 lines (JS/Swift/Kotlin/C/Python/shell; exceeding exits 1)
 
 ### Category Accounting
@@ -40,13 +40,13 @@ Per **AGENTS.md Section 3.7** and **Plan Section 22.2**:
 
 Per **AGENTS.md Sections 3.1, 3.2, 3.5**:
 1. **Memory-Safety Boundary**:
-   - Every workspace crate except the named boundary crates (`fr-native`, `fr-ffi`) must enforce `#![forbid(unsafe_code)]` at its root module (`src/lib.rs` / `src/main.rs`).
+   - Every workspace crate except the named boundary crate (`fr-native`; `fr-ffi` was deleted on 2026-09-24) must enforce `#![forbid(unsafe_code)]` at its root module (`src/lib.rs` / `src/main.rs`).
    - Zero `unsafe` code is permitted outside the named boundary crates.
 2. **One Runtime**:
    - Asupersync is the sole async runtime.
    - Forbidden across all targets: `tokio`, `async-std`, `smol`, `libwebrtc`, `electron`, `chromium`, `actix`, `rocket`, `axum`.
 3. **Target Constraints**:
-   - **Browser Target (`wasm32-unknown-unknown`)**: Inherits no desktop FFI (`fr-native`, `fr-ffi`, X11, D3D, Metal, ScreenCaptureKit).
+   - **Browser Target (`wasm32-unknown-unknown`)**: Inherits no desktop FFI (`fr-native`, X11, D3D, Metal, ScreenCaptureKit).
    - **Daemon (`frd`)**: Inherits no desktop GUI or windowing libraries (`winit`, `gtk`, `qt`, `viewer_window`).
    - **Dependency Graph Classification**: Direct, build-only, test-only, native, and transitive dependencies are reported separately.
 
@@ -55,7 +55,7 @@ Per **AGENTS.md Sections 3.1, 3.2, 3.5**:
 ## 4. Planted Negative Fixture Proofs (`scripts/test_verify_lanes.py`)
 
 The verification lane includes automated tests with planted negative fixtures proving that drift is caught:
-1. Planted over-budget Rust fixture (>250,000 lines) triggers `OVER_BUDGET_REFUSAL` (exit 1).
+1. Planted over-budget Rust fixture (>500,000 lines) triggers `OVER_BUDGET_REFUSAL` (exit 1).
 2. Planted over-budget glue fixture (>20,000 lines) triggers `OVER_BUDGET_REFUSAL` (exit 1).
 3. Planted `unsafe` usage in a safe crate triggers `AUDIT_REFUSAL` (exit 1).
 4. Planted missing `#![forbid(unsafe_code)]` triggers `AUDIT_REFUSAL` (exit 1).

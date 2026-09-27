@@ -12,10 +12,12 @@ plus a cross-machine pair over a real tailnet direct path.
 **The verdict and full evidence table live in [`RESULTS.md`](RESULTS.md).**
 Raw scenario output is retained under `results/`.
 
-The current manifest selects released Asupersync 0.5.0 at
-`78b64636e99fea4ea2d868096576021dd3b8e519`. This candidate has not yet been
-executed by this harness. The historical results retain their original source
-identities and NO-GO verdict; they do not qualify the new pin.
+The spike manifest pins Asupersync `=0.6.0` at git revision
+`a0ed597cf8effe3808184f7b365f911a160fb1d9` (the 2026-09-20 candidate); the product
+workspace separately pins released `=0.5.0`. The 2026-09-20 GO in RESULTS.md
+retained no logs: everything under `results/` is from the 2026-09-08/09 runs
+(including failed quinn interop handshakes), so that verdict is unverified until a
+rerun retains its results.
 
 ## Layout
 

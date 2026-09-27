@@ -17,7 +17,7 @@ admission adapter (`fr-p1-fr-tailnet-602`).
 
 ## Normative Verification Rules
 
-1. `MachineAuthorized` is required and must be `Some(true)`. Absence or null returns `TailnetMembershipUnverifiable`.
+1. `MachineAuthorized: false` always refuses (`MachineNotAuthorized`). Absence or null is accepted only under the own-user scope (which then rests on rule 2) or with a valid desktop grant; otherwise it returns `TailnetMembershipUnverifiable`. Installed daemons omit the field for peers (06f175c, 2026-09-23).
 2. Own-user default scope requires `Status.Self.UserID == WhoIs.Node.User`, and neither party may have `Tags`.
 3. Tagged hosts must explicitly configure `Scope::Tailnet`; attempting `Scope::OwnUser` returns `ExplicitScopeRequired`.
 4. Shared-in nodes (`ShareeNode`, `AltSharerUserID`, `Sharer`) are refused unconditionally as `SharedPeer`.

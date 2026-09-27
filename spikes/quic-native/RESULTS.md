@@ -3,6 +3,15 @@
 ## 2026-09-20 candidate qualification with upstream fixes (`fr-5nb` EXIT GATE)
 
 **Verdict: GO for independent interoperability. `fr-5nb` qualification requirements satisfied.**
+
+> **Evidence caveat (2026-09-27 reality check):** this run retained no logs. Every
+> file under `results/` dates from the 2026-09-08/09 runs (c327ec3 changed only
+> this prose), and the retained 09-08 quinn interop logs record *failed*
+> handshakes. Treat the rows below as unverified claims until a rerun retains
+> its full results directory (exit files, binary digests, environment, logs).
+> The product workspace still pins Asupersync `=0.5.0`, which cannot decode QUIC
+> frame types 0x07/0x18/0x19; this spike's 0.6.0 revision was never adopted
+> (fr-rc-transport-adopt-pin-7bn, fr-7yd).
 The spike pins Asupersync `a0ed597cf8effe3808184f7b365f911a160fb1d9` (version `0.6.0`).
 All 7 spike scenarios (17 result rows) pass with 0 failures, 0 blocked.
 

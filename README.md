@@ -2,12 +2,14 @@
 
 **A tailnet-native remote workstation in Rust: open a machine on your Tailscale network and use its existing desktop, with hardware-accelerated HEVC, no separate account or pairing ceremony, and a system that refuses to accumulate invisible latency.**
 
-> **Status (audited 2026-09-24): early implementation; not an installable remote desktop yet.** A host can now serve an X11 desktop to the native client, view-only or, when the operator opts in with `frd run --input-agent`, with keyboard and pointer control. Viewers and controllers have been served end to end only in an isolated test namespace; on a real tailnet host `frd run` has started, enforced its firewall rule and stopped cleanly, but no live client has connected yet, and there is no Wayland/macOS/Windows/browser/mobile path and no hardware encoder selection. "What runs today" below lists exactly what exists and at which evidence level. The design source of truth remains [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) (version 1.4). Every latency target, operating envelope and platform claim further below is a **proposed engineering objective from that plan, not a measured FrankenRemote result**.
+> **Status (audited 2026-09-27): early implementation; not an installable remote desktop yet.** On Linux X11, `frd run` serves a desktop to the native `fr` client view-only or, when the operator opts in with `--input-agent`, with keyboard/pointer/wheel control, plus opt-in text clipboard, viewer-to-host file sending (together or separately), host playback audio (view-only sessions) and, with `--logind-session`, an end to sharing when the selected session locks or logs out. All of this has been exercised end to end only in an isolated test namespace with real processes, QUIC, X11 and codecs; on a real tailnet host `frd run` has started, enforced its firewall rule and stopped cleanly, but **no client on a second machine has connected yet**. The listener serves one peer at a time, encoding is the explicit CPU software HEVC profile, and there is no Wayland/macOS/Windows/browser/mobile path. "What runs today" below lists exactly what exists and at which evidence level. The design source of truth remains [`COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md`](COMPREHENSIVE_PLAN_FOR_THE_DESIGN_OF_FRANKENREMOTE.md) (version 1.4). Every latency target, operating envelope and platform claim further below is a **proposed engineering objective from that plan, not a measured FrankenRemote result**.
 
 The two binaries are:
 
-- **`frd`** — FrankenRemoteDaemon, the host-side broker (plus its capture worker `fr-media-worker`);
+- **`frd`** — FrankenRemoteDaemon, the host-side broker (it loads no X11, codec or audio library itself);
 - **`fr`** — the FrankenRemote client and command-line interface.
+
+Helper processes they launch (all built from `fr-native`): `fr-media-worker` (capture/encode, the sandboxed decoder/presenter, host audio capture), `fr-input-agent` (the per-lease XTest executor with its indicator, and the `--clipboard` X11 owner), `fr-opus-worker` (the client's restricted Opus decoder) and `fr-session-monitor` (read-only logind evidence for `frd run --logind-session`).
 
 ## What runs today
 
@@ -31,7 +33,7 @@ Evidence levels: *live* = run against this repository's binaries on a real tailn
 
 Not available: local approval prompts in `frd run` (control therefore requires the operator's explicit input-agent opt-in and runs unattended with its indicator), text, pixel-scroll and relative-pointer input (discrete wheel scrolling is forwarded, with native capture and XTest wheel tests but not yet in the control e2e), observers alongside a controller or observer-to-controller handoff, audio for a controlling session, microphone (client-to-host) audio, host-to-viewer file transfer, directory/resumed/synchronized transfers, image clipboard and any clipboard for observers, hardware HEVC selection, Wayland, macOS, Windows, browser and mobile clients. Earlier documents that marked GNOME/KDE/Hyprland, Windows GPU rows or Windows/macOS worker sandboxes as passed or enforced were withdrawn on 2026-09-24: no evidence existed.
 
-**Size gate:** the owner raised the hard stop from 250,000 to 500,000 handwritten Rust lines on 2026-09-24 and approved deleting the clearly fake modules (about 15k lines removed). The fixed counter (`./scripts/verify.sh count`) reported 302,562 handwritten Rust lines on 2026-09-26 (after the ingress helper, remote control, cursor, clipboard, audio and file-transfer slices added about 38k): over the 240,000 planned maximum, within the 500,000 hard stop.
+**Size gate:** the owner raised the hard stop from 250,000 to 500,000 handwritten Rust lines on 2026-09-24 and approved deleting the clearly fake modules (about 15k lines removed). The fixed counter (`./scripts/verify.sh count`) reported about 312,800 handwritten Rust lines on 2026-09-27 (302,562 on 2026-09-26): over the 240,000 planned maximum, within the 500,000 hard stop.
 
 The engineering thesis, from the plan:
 
@@ -47,7 +49,7 @@ The engineering thesis, from the plan:
 
 ## Develop and verify
 
-The workspace contains 10 crates: `fr-core`, `fr-wire`, `fr-media`, `fr-transport`, `fr-tailnet`, `fr-client`, `fr-native` (the `fr` and `fr-media-worker` binaries), `frd`, `fr-files` and `fr-lab` (the synthetic `fr-e2e` model, the orphan `fr-ffi` wrapper and the `fr-web` mockup were removed on 2026-09-24). From a checkout with Rustup installed, the repository's `rust-toolchain.toml` selects the exact nightly:
+The workspace contains 10 crates: `fr-core`, `fr-wire`, `fr-media`, `fr-transport`, `fr-tailnet`, `fr-client`, `fr-native` (the `fr`, `fr-media-worker`, `fr-input-agent`, `fr-opus-worker` and `fr-session-monitor` binaries), `frd`, `fr-files` and `fr-lab` (the synthetic `fr-e2e` model, the orphan `fr-ffi` wrapper and the `fr-web` mockup were removed on 2026-09-24). From a checkout with Rustup installed, the repository's `rust-toolchain.toml` selects the exact nightly:
 
 ```bash
 ./scripts/verify.sh fast                  # format, workspace check, strict clippy, tests
