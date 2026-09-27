@@ -352,7 +352,7 @@ enum Ended {
     PolicyChanged,
     Failed(dispatch::Error),
     /// The selected session's evidence ended while this share was up.
-    SessionEnded(session_monitor::Error),
+    Session(session_monitor::Error),
 }
 
 /// The terminal cause once the selected session's evidence has ended.
@@ -385,11 +385,10 @@ fn retire_session_monitor(mut monitor: Monitor, report: &Reporter) {
     loop {
         match monitor.try_finish() {
             Some(Ok(())) => return,
-            Some(Err(_)) => break,
             None if std::time::Instant::now() < until => {
                 std::thread::sleep(Duration::from_millis(5));
             }
-            None => break,
+            Some(Err(_)) | None => break,
         }
     }
     report(Event::CleanupFailed {
@@ -537,7 +536,7 @@ fn serve_run(
                     match share.serve(&broker).await? {
                         Ended::Served => failures = 0,
                         Ended::Peer | Ended::PolicyChanged => {}
-                        Ended::SessionEnded(cause) => return Err(Error::SessionEnded(cause)),
+                        Ended::Session(cause) => return Err(Error::SessionEnded(cause)),
                         Ended::Failed(error) => {
                             if options.once {
                                 return Err(Error::Desktop(error));
@@ -560,21 +559,7 @@ fn serve_run(
                 serving,
                 &active,
                 stop,
-                |task| {
-                    for s in [&mut signals.0, &mut signals.1].into_iter().flatten() {
-                        if pin!(s.recv()).poll(task).is_ready() {
-                            stop.request();
-                        }
-                    }
-                    // Lock/logout/switch/suspend ends the run even while idle:
-                    // the stop cancels the active share (and its lease) promptly.
-                    if let Some(lifetime) = lifetime {
-                        lifetime.register(task);
-                        if session_ended(Some(lifetime)).is_some() {
-                            stop.request();
-                        }
-                    }
-                },
+                |task| local_stops(task, &mut signals, lifetime, stop),
             ))
             .await;
             identity.stop();
@@ -589,6 +574,50 @@ fn serve_run(
         // A failed stop must remain visible even when service already failed.
         cleanup.and(result)
     })
+}
+
+type Signals = (
+    Option<asupersync::signal::Signal>,
+    Option<asupersync::signal::Signal>,
+);
+
+/// A handled signal, or the end of the selected session's evidence (lock,
+/// logout, switch, suspend) even while idle, stops the run; the stop cancels
+/// the active share and its lease promptly.
+fn local_stops(
+    task: &mut std::task::Context<'_>,
+    signals: &mut Signals,
+    lifetime: Option<&session_monitor::Control>,
+    stop: &StopHandle,
+) {
+    for s in [&mut signals.0, &mut signals.1].into_iter().flatten() {
+        if pin!(s.recv()).poll(task).is_ready() {
+            stop.request();
+        }
+    }
+    if let Some(lifetime) = lifetime {
+        lifetime.register(task);
+        if session_ended(Some(lifetime)).is_some() {
+            stop.request();
+        }
+    }
+}
+
+/// The share's local maintenance decision: a local stop, the end of the
+/// selected session's evidence, or a changed policy revision ends it.
+fn local_action(
+    stop: &StopHandle,
+    lifetime: Option<&session_monitor::Control>,
+    epoch: Option<&crate::host_policy::live::Lease>,
+) -> LocalAction {
+    if stop.is_requested()
+        || session_ended(lifetime).is_some()
+        || epoch.is_some_and(|lease| lease.check().is_err())
+    {
+        LocalAction::Stop
+    } else {
+        LocalAction::Continue
+    }
 }
 
 fn check(options: &Options) -> Result<(), Error> {
@@ -949,18 +978,11 @@ impl Share<'_> {
                 factory,
                 move |catalog| choose(catalog, fps, bitrate),
                 move |_, _| {
-                    Ok(
-                        if stop.is_requested()
-                            || session_ended(lifetime.as_ref()).is_some()
-                            || source_epoch
-                                .as_ref()
-                                .is_some_and(|lease| lease.check().is_err())
-                        {
-                            LocalAction::Stop
-                        } else {
-                            LocalAction::Continue
-                        },
-                    )
+                    Ok(local_action(
+                        &stop,
+                        lifetime.as_ref(),
+                        source_epoch.as_ref(),
+                    ))
                 },
             )
             .await;
@@ -973,7 +995,7 @@ impl Share<'_> {
         self.cleanup(&mut driver, &retirement, &audio_retired, &mut linux)
             .await?;
         if let Some(cause) = session_ended(self.lifetime) {
-            return Ok(Ended::SessionEnded(cause));
+            return Ok(Ended::Session(cause));
         }
         if let Some(epoch) = epoch {
             match epoch.check() {
