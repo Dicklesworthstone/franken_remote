@@ -9,7 +9,7 @@ use super::{
 use asupersync::tls::RootCertStore;
 use fr_tailnet::{
     CERTIFICATE_TRANSPARENCY_NOTICE, CertificateEventKind, CertificatePolicy, PROJECT_ALPN,
-    WEBTRANSPORT_ALPN, check_port_collision, honest_https_endpoint, honest_quic_endpoint,
+    check_port_collision, honest_quic_endpoint,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -59,19 +59,8 @@ pub(super) fn run(
         }
     }
 
-    // 3. Formulate honest endpoints.
-    let https_endpoint = honest_https_endpoint(&cert_name, doctor.port);
-    let quic_endpoint = honest_quic_endpoint(&cert_name, doctor.port);
-
-    // 4. Formulate ALPN protocols.
-    let alpn_protocols = vec![
-        std::str::from_utf8(PROJECT_ALPN)
-            .unwrap_or("fr-remote/0")
-            .to_string(),
-        std::str::from_utf8(WEBTRANSPORT_ALPN)
-            .unwrap_or("h3")
-            .to_string(),
-    ];
+    // 3-4. Only what `frd run` serves: native QUIC, no HTTPS/h3 listener yet.
+    let (https_endpoint, quic_endpoint, alpn_protocols) = served_endpoints(&cert_name, doctor.port);
 
     // 5. Query TLS 1.3 certificate status if trust roots are provided.
     let certificate = if let Some(roots_path) = &doctor.roots {
@@ -169,6 +158,16 @@ fn event_kind_str(kind: CertificateEventKind) -> &'static str {
     }
 }
 
+/// The endpoints and ALPN protocols a host actually serves. `frd run` has a
+/// native QUIC listener only; an HTTPS/browser (WebTransport, `h3`) endpoint is
+/// reported absent until one exists, never as an unserved URL.
+fn served_endpoints(cert_name: &str, port: u16) -> (Option<String>, String, Vec<String>) {
+    let alpn = std::str::from_utf8(PROJECT_ALPN)
+        .unwrap_or("fr-remote/0")
+        .to_string();
+    (None, honest_quic_endpoint(cert_name, port), vec![alpn])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,10 +192,18 @@ mod tests {
     }
 
     #[test]
+    fn doctor_reports_only_the_served_native_quic_endpoint() {
+        let (https, quic, alpn) = served_endpoints("workstation.fixture.ts.net", 8443);
+        assert_eq!(https, None, "no HTTPS/browser listener exists");
+        assert_eq!(quic, "quic://workstation.fixture.ts.net:8443");
+        assert_eq!(alpn, ["fr-remote/0"], "no h3 listener exists");
+    }
+
+    #[test]
     fn port_collision_and_honest_endpoints_format_reliably() {
         let fqdn = "workstation.fixture.ts.net";
         let port = 8443;
-        let https = honest_https_endpoint(fqdn, port);
+        let https = fr_tailnet::honest_https_endpoint(fqdn, port);
         let quic = honest_quic_endpoint(fqdn, port);
         assert_eq!(https, "https://workstation.fixture.ts.net:8443");
         assert_eq!(quic, "quic://workstation.fixture.ts.net:8443");

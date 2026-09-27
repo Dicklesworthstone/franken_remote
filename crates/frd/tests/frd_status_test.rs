@@ -335,13 +335,15 @@ fn tailnet_disconnected_failure_reproduction() {
 
 #[test]
 fn untested_capability_rule_adherence() {
-    assert_eq!(CapabilityStatus::NotTested.as_str(), "not tested");
+    // One machine spelling for every untested row (capabilities and
+    // permissions, frd status and fr doctor alike); humans see the badge.
+    assert_eq!(CapabilityStatus::NotTested.as_str(), "not_tested");
     assert_eq!(CapabilityStatus::NotTested.badge(), "[NOT TESTED]");
     let mut report = DaemonStatusReport::fixture_operational();
     report.capabilities[0].status = CapabilityStatus::NotTested;
     report.capabilities[0].detail = "Untested codec candidate".into();
     let json = report.render_json();
-    assert!(json.contains("\"status\":\"not tested\""));
+    assert!(json.contains("\"status\":\"not_tested\""));
     assert!(
         !json.to_lowercase().contains("supported with caveats")
             && !json.to_lowercase().contains("caveat")
@@ -822,4 +824,38 @@ fn frd_headless_cli_option_accepted_in_help_and_run() {
     assert_eq!(output.status.code(), Some(1));
     let json_text = String::from_utf8_lossy(&output.stdout);
     assert!(json_text.contains("\"code\":\"tailscale_unavailable\""));
+}
+
+/// The live baseline states what `frd run` actually serves: one peer at a
+/// time, and no Tailscale package variant it never probed.
+#[test]
+fn unmeasured_status_reports_the_served_capacity_not_the_planned_one() {
+    let report = DaemonStatusReport::unmeasured(0);
+    assert_eq!(report.sharing.max_viewers, 1);
+    assert!(
+        report
+            .capabilities
+            .iter()
+            .all(|c| c.status == CapabilityStatus::NotTested)
+    );
+    assert!(report.render_json().contains("\"max_viewers\":1"));
+}
+
+/// Help never advertises an unserved HTTPS listener or a working local prompt,
+/// and names the session-lifetime selection.
+#[test]
+fn frd_help_states_the_served_listener_and_prompt_limits() {
+    let help = wait_for_child(frd_command(&["--help"]).spawn().unwrap());
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(!text.contains("QUIC and HTTPS"), "{text}");
+    assert!(
+        text.contains("no\n                    HTTPS/browser listener exists yet"),
+        "{text}"
+    );
+    assert!(!text.contains("'local' (prompt)"), "{text}");
+    assert!(
+        text.contains("frd run refuses it until the approval prompt is hosted"),
+        "{text}"
+    );
+    assert!(text.contains("--logind-session ID"), "{text}");
 }

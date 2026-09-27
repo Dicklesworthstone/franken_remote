@@ -41,7 +41,7 @@ impl CapabilityStatus {
             Self::Passed => "passed",
             Self::Failed => "failed",
             Self::Blocked => "blocked",
-            Self::NotTested => "not tested",
+            Self::NotTested => "not_tested",
         }
     }
 
@@ -646,7 +646,9 @@ impl DaemonStatusReport {
             let node_id = fqdn.split('.').next().unwrap_or("").to_string();
             let mut report = Self::unmeasured(timestamp_unix_ms);
             report.tailscale = TailscaleStatus {
-                variant: "standalone".into(),
+                // The LocalAPI identity does not say which Tailscale package
+                // (standalone, App Store, operator) is installed; not probed.
+                variant: "unknown".into(),
                 tailnet: tailnet_name,
                 connected: true,
                 node_id: if node_id.is_empty() {
@@ -778,7 +780,9 @@ impl DaemonStatusReport {
                 sharing_scope: "unknown",
                 approval_mode: "unknown",
                 active_viewers: 0,
-                max_viewers: 3,
+                // `frd run` serves one peer at a time (serial listener); the
+                // planned 1 controller + 2 viewers hub is not reachable yet.
+                max_viewers: 1,
                 active_controller: None,
             },
             restrictions: Self::standard_restrictions(),

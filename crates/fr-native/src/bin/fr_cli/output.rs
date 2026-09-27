@@ -136,7 +136,8 @@ pub struct DoctorReport {
     pub addresses: Vec<String>,
     pub port: u16,
     pub port_collisions: Vec<CollisionReport>,
-    pub https_endpoint: String,
+    /// `None` until an HTTPS/browser listener exists; never an unserved URL.
+    pub https_endpoint: Option<String>,
     pub quic_endpoint: String,
     pub alpn_protocols: Vec<String>,
     pub certificate_transparency_notice: &'static str,
@@ -451,7 +452,10 @@ pub fn doctor(report: &DoctorReport, json: bool) -> String {
             addresses_json,
             report.port,
             collisions_json,
-            quoted(&report.https_endpoint),
+            report
+                .https_endpoint
+                .as_deref()
+                .map_or_else(|| "null".into(), quoted),
             quoted(&report.quic_endpoint),
             alpn_json,
             quoted(report.certificate_transparency_notice),
@@ -492,7 +496,14 @@ pub fn doctor(report: &DoctorReport, json: bool) -> String {
             );
         }
         let _ = writeln!(out, "  Honest Endpoints:");
-        let _ = writeln!(out, "    HTTPS: {}", report.https_endpoint);
+        let _ = writeln!(
+            out,
+            "    HTTPS: {}",
+            report
+                .https_endpoint
+                .as_deref()
+                .unwrap_or("not served (no HTTPS/browser listener exists yet)")
+        );
         let _ = writeln!(out, "    QUIC:  {}", report.quic_endpoint);
         let _ = writeln!(
             out,
@@ -645,9 +656,9 @@ mod tests {
             addresses: vec!["100.64.0.1".into()],
             port: 8443,
             port_collisions: vec![],
-            https_endpoint: "https://node.tailnet.ts.net:8443/".into(),
+            https_endpoint: None,
             quic_endpoint: "quic://node.tailnet.ts.net:8443".into(),
-            alpn_protocols: vec!["fr-remote/0".into(), "h3".into()],
+            alpn_protocols: vec!["fr-remote/0".into()],
             certificate_transparency_notice: "CT notice",
             certificate: Some(CertificateReport {
                 generation: 2,
@@ -691,7 +702,9 @@ mod tests {
         assert!(json.contains("\"certificate_name\":\"node.tailnet.ts.net\""));
         assert!(json.contains("\"expiry_countdown_secs\":86400"));
         assert!(json.contains("\"kind\":\"Rotated\""));
-        assert!(json.contains("\"https\":\"https://node.tailnet.ts.net:8443/\""));
+        // No listener serves HTTPS or h3: neither is advertised.
+        assert!(json.contains("\"https\":null"));
+        assert!(!json.contains("\"h3\""));
         assert!(json.contains("\"permissions\":["));
         assert!(json.contains("\"capabilities\":["));
         assert!(json.contains("\"restrictions\":["));

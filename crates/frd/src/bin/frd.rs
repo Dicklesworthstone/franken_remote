@@ -45,9 +45,11 @@ COMMANDS:
                     (config default /etc/frankenremote/ingress-helper.json)
 
 OPTIONS:
-    --port PORT     Ingress port for QUIC and HTTPS (default: 8443)
+    --port PORT     Ingress port for the native QUIC listener (default: 8443; no
+                    HTTPS/browser listener exists yet)
     --socket PATH   Path to tailscaled.sock
-    --approval MODE Process override: 'local' (prompt) or 'none' (unattended)
+    --approval MODE Process override: 'none' (unattended) or 'local' (a prompt;
+                    frd run refuses it until the approval prompt is hosted)
     --sharing SCOPE Process override: 'own-user' (default) or 'tailnet'
     --headless      Share a private headless Xvfb display (cookie-authenticated)
     --display :N    X11 display to share (default: $DISPLAY)
