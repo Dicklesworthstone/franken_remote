@@ -30,6 +30,7 @@ const ACTIVE: u8 = 2;
 const ABANDONED: u8 = 3;
 const RETIRED: u8 = 4;
 
+mod multiplex;
 mod retire;
 const MAX_WAIT_US: u64 = 2_000_000;
 
@@ -43,6 +44,8 @@ pub(super) struct Reservation {
     outbound: StreamId,
     retired_receive_accounted: u64,
     role: MediaRole,
+    // True only after the host Binding entered the ordered control queue.
+    offered: bool,
     pub(super) binding: u32,
     pub(super) datagram_maximum: Option<usize>,
 }
@@ -337,10 +340,14 @@ impl QuicRecords {
     ) -> Result<(StreamRole, u64, u64), Error> {
         if self.streams.len() + 2 > MAX_STREAMS
             || self.attachments.len() >= (MAX_STREAMS - 2) / 2
-            || self
-                .attachments
-                .iter()
-                .any(|r| matches!(r.state.load(Ordering::Acquire), PENDING | ARMED))
+            || self.attachments.iter().any(|r| {
+                matches!(r.state.load(Ordering::Acquire), PENDING | ARMED)
+                    && !matches!(
+                        (r.role, d.role),
+                        (MediaRole::Clipboard, MediaRole::Files)
+                            | (MediaRole::Files, MediaRole::Clipboard)
+                    )
+            })
         {
             return Err(Error::Backpressure);
         }
@@ -535,6 +542,7 @@ impl QuicRecords {
             outbound: outbound.stream,
             retired_receive_accounted: 0,
             role: d.role,
+            offered: false,
             binding: d.binding.parent.id,
             datagram_maximum: has_datagram(d.role).then_some(
                 usize::try_from(allowance)
@@ -796,6 +804,9 @@ impl MediaChannel {
         mut authorize: impl FnMut() -> bool,
     ) -> Result<bool, Error> {
         self.check(q, cx, &mut authorize)?;
+        if self.host && self.phase == Phase::Offer && self.earlier_offer_pending(q) {
+            return Ok(false);
+        }
         if self.host && self.phase == Phase::Ticket && !self.receive_armed {
             let result = (|| {
                 let grant = self.grant.ok_or(Error::WrongRoute)?;
@@ -839,6 +850,9 @@ impl MediaChannel {
             &mut authorize,
         ) {
             Ok(()) => {
+                if self.host && self.phase == Phase::Offer {
+                    self.mark_offered(q)?;
+                }
                 self.pending.fill(0);
                 self.len = 0;
                 self.phase = match (self.host, self.phase) {
@@ -877,6 +891,7 @@ impl MediaChannel {
             (true, Phase::Attach) | (false, Phase::Attached) => self.pair.inbound,
             _ => return Ok(()),
         };
+        let sibling = self.pending_sibling(q);
         let ready = Cell::new(true);
         let mut failure = None;
         let result = q.receive_ready(
@@ -890,6 +905,16 @@ impl MediaChannel {
                 let kind = u16::from_be_bytes([bytes[6], bytes[7]]);
                 if incoming == self.control.inbound && !matches!(kind, 0x0018..=0x001c) {
                     return Ok(Disposition::Blocked);
+                }
+                if incoming == self.control.inbound {
+                    match self.defer_sibling(bytes, sibling) {
+                        Ok(true) => return Ok(Disposition::Blocked),
+                        Ok(false) => {}
+                        Err(error) => {
+                            failure = Some(error);
+                            return Err(());
+                        }
+                    }
                 }
                 let r = self.received(bytes, incoming.binding);
                 match r {

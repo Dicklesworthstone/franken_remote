@@ -304,3 +304,6 @@ mod retire;
 
 #[path = "clipboard/allocation.rs"]
 mod allocation;
+
+#[path = "clipboard/multiplex.rs"]
+mod multiplex;
