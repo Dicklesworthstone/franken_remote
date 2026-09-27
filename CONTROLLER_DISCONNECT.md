@@ -164,3 +164,65 @@ Interactive acquisition and native controller-window selection still need their
 own integration; this API requires an actually granted controller. Observation
 closing and immediate window/emergency behavior remain unchanged. Independently
 confirmed host cleanup and final external-effect accounting remain open.
+
+## Interactive acquisition through the same closing owner
+
+`StreamingViewer::serve_interactive_control_until` and the public
+`NativeObserver::serve_interactive_control_until` now keep watching, requesting,
+actual grant, input delivery and orderly closing in ONE original service. They
+share the previous interactive path's role/attachment validation and one-way
+receiver/view-history transfer. The existing `serve_interactive_control` remains
+source-compatible. No second service invocation, replacement receiver/decoder,
+clock reset, duplicate bootstrap decode or early control-request timeout is used.
+
+The local callback returns `ControlFlow::Continue(())` or an explicit
+`Break(reason)`. After a real grant, Break freezes the original deadlines and
+fences its input INSIDE the callback turn, before a pending decoder can unwind;
+media is then retired before polling the typed terminal exchange. The original
+cleanup context must be independently provisioned. A cancelled application
+context refuses reporting rather than being reset into new authority. Before
+an actual grant, Break cancels locally with `Closed` and no controller report;
+a just-staged request cannot escape that turn or manufacture a lease. Native
+window emergency events, callback errors, lost authority and protocol failures
+keep their existing immediate behavior instead of being relabelled local intent.
+
+The native wrapper exposes `control_disconnect_outcome` and
+`pending_control_actions` on the original controller after teardown/reaping.
+The last authentic receipt remains readable. An unsent release stays unresolved,
+even when the original managed host Driver releases its held key during cleanup.
+Host lease stages, session reports, request/transport acknowledgements and actual
+local native collection remain separate evidence.
+
+Five additional tests run public host/viewer bootstrap and the existing managed
+host service; they do not inject a granted viewer or manually arm its reporting
+owner. The central case watches without a reserved Seat, explicitly requests and
+receives consent, submits a key press and receives its authentic action receipt,
+then closes with a release still encoded but unsent. The host Driver releases
+its fixture held state and reports its actual lease; the viewer retains its
+unresolved release and the exact report through native reaping. Other cases
+cover pre-grant closure (including a request staged in that same turn), abandoned
+unpolled service, callback/emergency distinction and a cancelled cleanup context.
+The original watch-past-request-budget regression and four managed-revocation
+regressions pass unchanged.
+
+Final validation in this continuation: 40 selected daemon runtime tests and all
+50 existing controller-terminal/terminal-drain/receive-credit transport cases
+passed (90 distinct tests, including the 11 added across both commits; reruns
+are not counted twice). Complete production daemon and complete original daemon
+test-source strict pedantic Clippy passed; changed-file formatting and whitespace
+checks passed. Runtime registration filtering in a separate copy excluded only
+1142 unselected tests; normalized comparison verifies identical production and
+selected assertions. All eight relevant first-party libraries were rebuilt from
+the verified b6aca68 source plus these slices with the pinned compiler and matching
+unchanged external libraries retained by CI run 36335317709. The new test helper's
+initial missing Action lifetime and unused mutable binding were corrected before
+runtime verification, not suppressed. Both final daemon runs passed.
+
+TLS/UDP, public startup/consent protocols, receipt tracking, managed input Driver
+and supervised source/decoder IPC are exercised. Codec output, platform visibility,
+native input capture and OS effects are explicit fixtures: this is not real
+HEVC/GPU, X11 input release, installed-Tailscale or a full current-workspace/cold
+dependency qualification. Concurrent native test-only fixes are preserved, not
+counted as rerun. Selecting this API from the default native controller window
+and CLI, independently confirmed host-native cleanup and final effect accounting
+remain open. The default controller window close remains an immediate input fence.

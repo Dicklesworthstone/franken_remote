@@ -124,7 +124,7 @@ impl StreamingViewer {
         }
     }
 
-    pub(super) fn record_control_disconnect(
+    pub(in crate::session_startup::viewer::streaming) fn record_control_disconnect(
         &mut self,
         outcome: ControlCloseOutcome,
     ) -> Result<(), Error> {

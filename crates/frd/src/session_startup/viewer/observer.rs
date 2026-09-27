@@ -1,5 +1,6 @@
 //! One native observer bootstrap, from approved startup to continuous receiving.
 //! The selected display, connection and decoder are transferred, never recreated.
+mod control_close;
 mod inventory;
 use super::{Viewer, ViewerSession, now, streaming};
 use crate::input_quic::NegotiatedInput;

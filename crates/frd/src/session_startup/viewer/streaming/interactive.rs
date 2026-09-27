@@ -1,6 +1,7 @@
 //! Observe continuously, then start one explicit control request at the user's
 //! decision time. The original decoder, view history and connection never move
 //! to another session; an observation-only negotiation is never upgraded.
+mod closing;
 use super::{
     Error, Guarded, Operation, Peer, Presentation, StreamingViewer,
     acquisition::{self, Dispatch, State},
@@ -253,39 +254,14 @@ impl StreamingViewer {
         mut result: impl FnMut(ResultEvent) + 'a,
         mut other: impl FnMut(Route, &[u8]) -> Result<Disposition, ()> + 'a,
     ) -> impl Future<Output = Result<(), Error>> + 'a {
-        let viewing = match &self.peer {
-            Peer::Observe { session, .. } if !self.served => {
-                ViewingControl::new(session, channels, request, policy)
-            }
-            _ => Err(Error::Closed),
-        };
+        let viewing = self.prepare_interactive(channels, request, policy);
         let fence = self.control.clone();
         let operation = Operation { viewer: self };
         Guarded {
             fence,
             inner: Box::pin(async move {
                 let operation = operation;
-                let mut viewing = viewing?;
-                if let Some(initial) = operation.viewer.initial.take() {
-                    viewing.decoded(initial)?;
-                }
-                let Peer::Observe { session, media } =
-                    std::mem::replace(&mut operation.viewer.peer, Peer::Closed)
-                else {
-                    return Err(Error::Closed);
-                };
-                let (_, binding) = viewing
-                    .channels
-                    .viewer_scope(&session.transport)
-                    .map_err(|e| Error::Control(ControlError::Input(e)))?;
-                if binding != media.binding() {
-                    return Err(Error::Control(ControlError::WrongBinding));
-                }
-                operation.viewer.peer = Peer::Viewing {
-                    session,
-                    media,
-                    viewing: Box::new(viewing),
-                };
+                operation.viewer.install_interactive(viewing?)?;
                 operation
                     .viewer
                     .serve_inner(
@@ -308,5 +284,44 @@ impl StreamingViewer {
                     .await
             }),
         }
+    }
+
+    // Both service variants use the same original role/attachment admission and
+    // one-way state transfer. Choosing a close policy cannot recreate a decoder,
+    // reset the served bit, or start the user's control-request timeout early.
+    fn prepare_interactive(
+        &self,
+        channels: NegotiatedInput,
+        request: Request,
+        policy: Policy,
+    ) -> Result<ViewingControl, Error> {
+        match &self.peer {
+            Peer::Observe { session, .. } if !self.served => {
+                ViewingControl::new(session, channels, request, policy)
+            }
+            _ => Err(Error::Closed),
+        }
+    }
+    fn install_interactive(&mut self, mut viewing: ViewingControl) -> Result<(), Error> {
+        if let Some(initial) = self.initial.take() {
+            viewing.decoded(initial)?;
+        }
+        let Peer::Observe { session, media } = std::mem::replace(&mut self.peer, Peer::Closed)
+        else {
+            return Err(Error::Closed);
+        };
+        let (_, binding) = viewing
+            .channels
+            .viewer_scope(&session.transport)
+            .map_err(|e| Error::Control(ControlError::Input(e)))?;
+        if binding != media.binding() {
+            return Err(Error::Control(ControlError::WrongBinding));
+        }
+        self.peer = Peer::Viewing {
+            session,
+            media,
+            viewing: Box::new(viewing),
+        };
+        Ok(())
     }
 }
