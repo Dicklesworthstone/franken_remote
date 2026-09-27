@@ -1,6 +1,6 @@
 //! `frd run --logind-session` ends control and the run when the selected
 //! session locks (plan 2.2/5.3). The lifecycle source is the EXPLICITLY
-//! synthetic session-monitor fixture (tests/session_monitor/fixture.c), not
+//! synthetic session-monitor fixture (`tests/session_monitor/fixture.c`), not
 //! logind or a desktop locker: this proves frd's reaction to lock evidence, not
 //! that any installed locker reports it faithfully.
 use super::real_control::{Controlled, indicator};

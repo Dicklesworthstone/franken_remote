@@ -233,7 +233,7 @@ fn independent_fixed_wire_bytes_bind_role_epoch_sequence_and_exact_selection() {
 
 /// `frd run --logind-session`: without fresh evidence for the selected session
 /// nothing tailnet-facing starts (no certificate fetch, no listener), and the
-/// refusal is typed. The LocalAPI socket, worker and roots below do not exist:
+/// refusal is typed. The `LocalAPI` socket, worker and roots below do not exist:
 /// reaching any of them would fail differently.
 #[test]
 fn frd_run_refuses_to_listen_without_fresh_session_evidence() {
