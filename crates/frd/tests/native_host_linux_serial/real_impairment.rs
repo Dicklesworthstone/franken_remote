@@ -200,7 +200,7 @@ fn view_row(delay_ms: u32, loss_percent: f32) -> (usize, Vec<Duration>, Option<S
     let mut times = Vec::new();
     let mut ended = None;
     for step in 0..6 {
-        let shade = i32::try_from(step * 30).unwrap();
+        let shade = step * 30;
         let colour = (0x20 + shade, 0xa0 - shade, 0x40);
         set_root(&host.display, colour);
         let sent = Instant::now();
