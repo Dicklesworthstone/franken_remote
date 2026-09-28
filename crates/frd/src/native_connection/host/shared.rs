@@ -15,7 +15,8 @@ impl Server {
     /// Join one cold native observer to an ALREADY running shared desktop.
     /// The original hub, capture publisher and local permission/lock service
     /// remain independently serviced by the OS-session owner. This does not
-    /// create a second source, grant control or enable the unfinished CLI loop.
+    /// create a second source or grant control. `frd run` does not call this yet:
+    /// its listener serves one peer at a time.
     ///
     /// Ingress must already be enforced on this exact socket. All canonical
     /// identity, TLS, post-TLS membership and continuing credential/ingress checks

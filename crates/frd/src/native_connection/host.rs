@@ -131,7 +131,8 @@ impl Server {
     /// time. Fresh host metadata is obtained only after an Initial; TLS and local
     /// lookup share the native handshake budget. Its three-second snapshot must
     /// still be revalidatable after TLS: a slow handshake is refused, not granted
-    /// a replacement identity. This is not enabling the unfinished frd CLI loop.
+    /// a replacement identity. `frd run`'s serial listener reaches this through
+    /// `run_on_protected_listener_gated`.
     #[allow(clippy::too_many_lines)]
     pub fn run_on_protected_listener<'a, T: 'a, F, A>(
         &'a mut self,
