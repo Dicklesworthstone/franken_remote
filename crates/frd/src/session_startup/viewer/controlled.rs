@@ -385,26 +385,35 @@ impl ControlledViewer {
             let mut bytes = [0; fr_wire::authority::OBSERVATION_RESPONSE_BYTES + 16];
             if let Some(response) = self.input.pending_control_response(t)? {
                 bytes.copy_from_slice(response);
+                let view = std::cell::Cell::new(None);
                 match q.send(
                     cx,
                     Route::Stream(self.session.routes.outbound),
                     &bytes,
                     until.0,
-                    || permitted(&mut self.input, &self.control, cx),
+                    || gate(&mut self.input, &self.control, cx, &view),
                 ) {
                     Ok(()) => self.input.control_response_sent(ClientInstant(now(cx)?))?,
                     Err(quic::Error::Backpressure) => {}
-                    Err(e) => return Err(Error::Session(e.into())),
+                    Err(e) => return Err(gated(e, view.take())),
                 }
             }
         }
         if let Some(p) = &self.pending {
+            let view = std::cell::Cell::new(None);
             match self.channels.send(cx, q, &p.bytes[..p.len], p.until, || {
-                permitted(&mut self.input, &self.control, cx)
+                gate(&mut self.input, &self.control, cx, &view)
             }) {
                 Ok(()) => self.pending = None,
                 Err(input_quic::Error::Transport(quic::Error::Backpressure)) => {}
-                Err(e) => return Err(Error::Input(e)),
+                Err(e) => {
+                    return Err(match (e, view.take()) {
+                        (input_quic::Error::Transport(quic::Error::Unauthorized), Some(view)) => {
+                            Error::View(view)
+                        }
+                        (e, _) => Error::Input(e),
+                    });
+                }
             }
         }
         Ok(())
@@ -614,6 +623,7 @@ impl ControlledViewer {
                 until = until.min(deadline);
             }
             let remaining = until.checked_sub(now(cx)?).ok_or(Error::Expired)?;
+            let view = std::cell::Cell::new(None);
             viewer
                 .session
                 .transport
@@ -624,10 +634,10 @@ impl ControlledViewer {
                             .as_ref()
                             .is_none_or(crate::clipboard_quic::Bridge::permits_io)
                         && viewer.clipboard_setup.permits_io()
-                        && permitted(&mut viewer.input, &viewer.control, cx)
+                        && gate(&mut viewer.input, &viewer.control, cx, &view)
                 })
                 .await
-                .map_err(|e| Error::Session(e.into()))?;
+                .map_err(|e| gated(e, view.take()))?;
             viewer.step(&mut result, &mut other)?;
             operation.complete = true;
             Ok(())
@@ -635,7 +645,37 @@ impl ControlledViewer {
     }
 }
 fn permitted(input: &mut PresentedInput, control: &ViewerControl, cx: &Cx) -> bool {
-    !control.is_stopped() && now(cx).is_ok_and(|t| input.view_deadline(ClientInstant(t)).is_ok())
+    gate(input, control, cx, &std::cell::Cell::new(None))
+}
+/// The view gate records WHY it refused, so a stale view that the transport
+/// meets first is not reported as a bare authorization failure.
+fn gate(
+    input: &mut PresentedInput,
+    control: &ViewerControl,
+    cx: &Cx,
+    view: &std::cell::Cell<Option<presentation::Error>>,
+) -> bool {
+    if control.is_stopped() {
+        return false;
+    }
+    let Ok(t) = now(cx) else {
+        return false;
+    };
+    match input.view_deadline(ClientInstant(t)) {
+        Ok(_) => true,
+        Err(error) => {
+            view.set(Some(error));
+            false
+        }
+    }
+}
+/// Only this viewer's own view-gate refusal is relabelled. The transport checks
+/// its identity/lifetime gate first, so an identity refusal leaves `view` empty.
+fn gated(error: quic::Error, view: Option<presentation::Error>) -> Error {
+    match (error, view) {
+        (quic::Error::Unauthorized, Some(view)) => Error::View(view),
+        (error, _) => Error::Session(error.into()),
+    }
 }
 impl Drop for ControlledViewer {
     fn drop(&mut self) {

@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-09-28 — impairment limits, named session ends, installer options
+
+Namespace evidence only, as below.
+
+- Real `tc netem` impairment rows for control and view-only sessions (7832436,
+  cfb2402). Control holds on a clean link and at 40 ms RTT, and ends at 60 ms RTT
+  or more, or with 1% loss. View-only holds with 1% loss and at 100 ms RTT, and
+  exits at 200 ms RTT. Causes isolated: near 60 ms RTT the fixed 250 ms
+  source-age bound ends control, and beyond it the transport record deadlines
+  do (PRESENTATION_FRESHNESS.md). The owner decision on view-lapse semantics
+  and an RTT-aware bound is pending.
+- `fr` names local session ends: `view_stale`, `transport_deadline_expired`,
+  `host_not_heard`. A stale view met by the transport's view gate is no longer
+  a bare `Unauthorized`, and any remaining generic end prints its typed chain
+  on stderr.
+- `frd install [flags] -- <frd run options>` (systemd), validated at install
+  time. User units start with the graphical session, and configuration
+  refusals do not restart-loop (514af9b).
+- Test oracles instead of races: the CA-bundle link policy, and UDP socket
+  release checked by this process's own descriptors (e1f9c54, b2abf66).
+
 ## 2026-09-25 to 2026-09-27 — control, clipboard, audio, files, second reality check
 
 All namespace end-to-end evidence (real processes, QUIC, X11 and codecs; fixture

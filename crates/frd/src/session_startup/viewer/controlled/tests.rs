@@ -905,6 +905,68 @@ fn lost_visibility_callback_keeps_the_preceding_view_expiry() {
 }
 
 #[test]
+fn a_stale_view_met_by_the_transport_gate_keeps_its_typed_reason() {
+    use fr_media::freshness::Error as F;
+    let aged = presentation::Error::Media(F::SourceStale);
+    assert_eq!(
+        gated(quic::Error::Unauthorized, Some(aged)),
+        Error::View(aged)
+    );
+    // No recorded view refusal (identity gate, local stop, file/clipboard
+    // gate), or any other transport failure, keeps the transport's own error.
+    assert_eq!(
+        gated(quic::Error::Unauthorized, None),
+        Error::Session(quic::Error::Unauthorized.into())
+    );
+    assert_eq!(
+        gated(quic::Error::Expired, Some(aged)),
+        Error::Session(quic::Error::Expired.into())
+    );
+    run(|client_cx, host_cx| async move {
+        let mut state = Box::pin(fixture(&client_cx, &host_cx)).await;
+        let until = state
+            .viewer
+            .input
+            .view_deadline(ClientInstant(now(&client_cx).unwrap()))
+            .unwrap()
+            .0;
+        let view = std::cell::Cell::new(None);
+        assert!(gate(
+            &mut state.viewer.input,
+            &state.viewer.control,
+            &client_cx,
+            &view
+        ));
+        assert_eq!(view.take(), None);
+        while now(&client_cx).unwrap() < until {
+            asupersync::time::sleep(client_cx.now(), Duration::from_millis(1)).await;
+        }
+        assert!(!gate(
+            &mut state.viewer.input,
+            &state.viewer.control,
+            &client_cx,
+            &view
+        ));
+        let recorded = view.take();
+        assert!(
+            matches!(
+                recorded,
+                Some(
+                    presentation::Error::Media(F::SourceStale | F::SourceUnknown)
+                        | presentation::Error::Input(fr_client::input::Error::Stopped(
+                            StopReason::ViewStale
+                        ))
+                )
+            ),
+            "the gate must record the stale view: {recorded:?}"
+        );
+        state.viewer.close();
+        state.host.close();
+        assert!(state.driver.take().unwrap().await.handoff_safe());
+    });
+}
+
+#[test]
 fn receiver_destruction_fences_an_already_encoded_action_before_network_submission() {
     run(|client_cx, host_cx| async move {
         let mut state = Box::pin(fixture(&client_cx, &host_cx)).await;

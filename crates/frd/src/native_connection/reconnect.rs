@@ -370,6 +370,11 @@ fn notify(app: &mut impl Application, status: Status) -> Result<(), Failure> {
 pub fn retryable(failure: Failure) -> bool {
     use crate::session_startup::ControlledViewerError;
 
+    if let Failure::Observation(ObserverError::Streaming(error)) = failure
+        && let Some(error) = streaming_transport(error)
+    {
+        return transport_retryable(error);
+    }
     match failure {
         Failure::Connection(ConnectionError::Tailnet(
             fr_tailnet::Error::LocalApiUnavailable
@@ -382,18 +387,6 @@ pub fn retryable(failure: Failure) -> bool {
                 | fr_wire::recovery_request::Reason::RecoveryExpired,
             ),
         ))) => true,
-        Failure::Observation(ObserverError::Streaming(
-            StreamingViewerError::Transport(e)
-            | StreamingViewerError::Recovery(crate::media_quic::recovery::Error::Transport(e))
-            | StreamingViewerError::Replacement(crate::media_quic::replacement::Error::Transport(e))
-            | StreamingViewerError::Routes(crate::media_quic::Error::Transport(e))
-            | StreamingViewerError::Feedback(crate::media::ReceiverFeedbackError::Transport(e))
-            | StreamingViewerError::PresentedState(crate::media::PresentedStateError::Transport(e))
-            | StreamingViewerError::Control(
-                ControlledViewerError::Media(crate::media_quic::Error::Transport(e))
-                | ControlledViewerError::Input(crate::input_quic::Error::Transport(e)),
-            ),
-        )) => transport_retryable(e),
         Failure::Observation(ObserverError::Streaming(
             StreamingViewerError::Session(e)
             | StreamingViewerError::Control(ControlledViewerError::Session(e)),
@@ -424,6 +417,85 @@ fn transport_retryable(error: fr_transport::quic::Error) -> bool {
         error,
         fr_transport::quic::Error::Native | fr_transport::quic::Error::Expired
     )
+}
+/// The established-streaming owners that carry a typed transport failure.
+fn streaming_transport(error: StreamingViewerError) -> Option<fr_transport::quic::Error> {
+    use crate::session_startup::ControlledViewerError;
+
+    match error {
+        StreamingViewerError::Transport(e)
+        | StreamingViewerError::Recovery(crate::media_quic::recovery::Error::Transport(e))
+        | StreamingViewerError::Replacement(crate::media_quic::replacement::Error::Transport(e))
+        | StreamingViewerError::Routes(crate::media_quic::Error::Transport(e))
+        | StreamingViewerError::Feedback(crate::media::ReceiverFeedbackError::Transport(e))
+        | StreamingViewerError::PresentedState(crate::media::PresentedStateError::Transport(e))
+        | StreamingViewerError::Control(
+            ControlledViewerError::Media(crate::media_quic::Error::Transport(e))
+            | ControlledViewerError::Input(crate::input_quic::Error::Transport(e)),
+        ) => Some(e),
+        _ => None,
+    }
+}
+
+/// Why a session ended locally without an authenticated host report. For the
+/// user's diagnosis only: it never retries, grants or resumes anything, and a
+/// host refusal or revocation report takes precedence over it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lapse {
+    /// A transport deadline passed (a reliable record not acknowledged by its
+    /// send-by time, or a bounded drive turn) and the connection was closed
+    /// instead of delivering late state.
+    TransportDeadline,
+    /// The active view's source age exceeded, or could no longer be bounded
+    /// within, the freshness limit, so input stopped instead of acting on it.
+    ViewStale,
+    /// An established session's local deadline for hearing from the host
+    /// passed: no observation challenge within the silence bound, an overdue
+    /// response, or the client's renewal lapsed.
+    HostNotHeard,
+}
+pub fn lapse(failure: Failure) -> Option<Lapse> {
+    use crate::session_startup::{ControlledViewerError as C, Error as S};
+    use fr_client::input::presentation::Error as P;
+    use fr_media::freshness::Error as F;
+    use fr_transport::quic::Error as T;
+
+    if let Failure::Observation(
+        ObserverError::Session(error)
+        | ObserverError::Streaming(
+            StreamingViewerError::Session(error) | StreamingViewerError::Control(C::Session(error)),
+        ),
+    ) = failure
+        && matches!(
+            error,
+            S::Expired | S::ClientRenewal(fr_client::authority::Error::Expired)
+        )
+    {
+        return Some(Lapse::HostNotHeard);
+    }
+    match failure {
+        Failure::Connection(ConnectionError::Session(S::Transport(T::Expired)))
+        | Failure::Observation(
+            ObserverError::Transport(T::Expired)
+            | ObserverError::Session(S::Transport(T::Expired))
+            | ObserverError::Streaming(
+                StreamingViewerError::Session(S::Transport(T::Expired))
+                | StreamingViewerError::Control(C::Session(S::Transport(T::Expired))),
+            ),
+        ) => Some(Lapse::TransportDeadline),
+        // The presentation owner reports the source age; the input client that
+        // met it first reports its own stop for the same reason.
+        Failure::Observation(ObserverError::Streaming(StreamingViewerError::Control(C::View(
+            P::Media(F::SourceStale | F::SourceUnknown)
+            | P::Input(fr_client::input::Error::Stopped(fr_client::input::StopReason::ViewStale)),
+        )))) => Some(Lapse::ViewStale),
+        Failure::Observation(ObserverError::Streaming(error))
+            if streaming_transport(error) == Some(T::Expired) =>
+        {
+            Some(Lapse::TransportDeadline)
+        }
+        _ => None,
+    }
 }
 
 // Guard construction, not first polling, establishes cancellation ownership.

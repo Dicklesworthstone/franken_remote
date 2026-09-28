@@ -263,6 +263,104 @@ fn established_streaming_transport_failures_have_the_same_policy_in_every_owner(
 }
 
 #[test]
+fn only_transport_deadlines_and_stale_views_are_named_lapses() {
+    use crate::session_startup::{ControlledViewerError as C, Error as S};
+    use fr_client::input::presentation::Error as P;
+    use fr_media::freshness::Error as F;
+    use fr_transport::quic::Error as T;
+    let observed = |error| Failure::Observation(ObserverError::Streaming(error));
+    for error in [T::Expired, T::Native, T::Closed, T::Unauthorized] {
+        let expected = (error == T::Expired).then_some(Lapse::TransportDeadline);
+        for failure in [
+            Failure::Connection(ConnectionError::Session(S::Transport(error))),
+            Failure::Observation(ObserverError::Transport(error)),
+            Failure::Observation(ObserverError::Session(S::Transport(error))),
+            observed(StreamingViewerError::Transport(error)),
+            observed(StreamingViewerError::Session(S::Transport(error))),
+            observed(StreamingViewerError::Control(C::Session(S::Transport(
+                error,
+            )))),
+            observed(StreamingViewerError::Control(C::Input(
+                crate::input_quic::Error::Transport(error),
+            ))),
+            observed(StreamingViewerError::Recovery(
+                crate::media_quic::recovery::Error::Transport(error),
+            )),
+            observed(StreamingViewerError::PresentedState(
+                crate::media::PresentedStateError::Transport(error),
+            )),
+        ] {
+            assert_eq!(lapse(failure), expected, "{failure:?}");
+        }
+    }
+    for error in [
+        F::SourceStale,
+        F::SourceUnknown,
+        F::QueueExpired,
+        F::NotSubmitted,
+        F::ClockExpired,
+        F::StaleBinding,
+    ] {
+        let expected =
+            matches!(error, F::SourceStale | F::SourceUnknown).then_some(Lapse::ViewStale);
+        let failure = observed(StreamingViewerError::Control(C::View(P::Media(error))));
+        assert_eq!(lapse(failure), expected, "{error:?}");
+        // Naming the lapse never turns a stale view into a reconnect.
+        assert!(!retryable(failure));
+        // A view-only acquisition fault is not an input stop on a stale view.
+        assert_eq!(
+            lapse(observed(StreamingViewerError::Freshness(error))),
+            None
+        );
+    }
+    // The input client can meet the same stale view first and stop itself.
+    for reason in [
+        fr_client::input::StopReason::ViewStale,
+        fr_client::input::StopReason::ViewChanged,
+        fr_client::input::StopReason::ReceiptTimeout,
+        fr_client::input::StopReason::FocusLost,
+    ] {
+        let failure = observed(StreamingViewerError::Control(C::View(P::Input(
+            fr_client::input::Error::Stopped(reason),
+        ))));
+        let expected =
+            (reason == fr_client::input::StopReason::ViewStale).then_some(Lapse::ViewStale);
+        assert_eq!(lapse(failure), expected, "{reason:?}");
+        assert!(!retryable(failure));
+    }
+    for error in [
+        S::Expired,
+        S::ClientRenewal(fr_client::authority::Error::Expired),
+    ] {
+        for failure in [
+            Failure::Observation(ObserverError::Session(error)),
+            observed(StreamingViewerError::Session(error)),
+            observed(StreamingViewerError::Control(C::Session(error))),
+        ] {
+            assert_eq!(lapse(failure), Some(Lapse::HostNotHeard), "{failure:?}");
+        }
+        // Startup expiry (before any session was established) is not named.
+        assert_eq!(
+            lapse(Failure::Connection(ConnectionError::Session(error))),
+            None
+        );
+    }
+    for failure in [
+        observed(StreamingViewerError::Control(C::Expired)),
+        observed(StreamingViewerError::Control(C::Session(S::Authority))),
+        observed(StreamingViewerError::Control(C::Session(S::ClientRenewal(
+            fr_client::authority::Error::Stopped,
+        )))),
+        Failure::Observation(ObserverError::Expired),
+        Failure::Cancelled,
+        Failure::Cleanup,
+        Failure::CleanupExpired,
+    ] {
+        assert_eq!(lapse(failure), None, "{failure:?}");
+    }
+}
+
+#[test]
 fn observation_expiry_reconnects_but_input_expiry_and_revocation_do_not() {
     use crate::session_startup::{ControlledViewerError as C, Error as S};
     for error in [

@@ -144,11 +144,12 @@ fn controlled_session_under_namespace_delay_and_loss() {
     for (delay_ms, loss_percent) in LIMITS {
         let r = row(delay_ms, loss_percent);
         println!("IMPAIRMENT LIMIT {}", summary(&r));
-        // Holding or ending with the shipped client's own outcome record; never a
-        // hang or a silent success after control was lost.
+        // Holding or ending with the shipped client's own outcome record naming
+        // why: never a hang, a silent success after control was lost, or the
+        // generic failure code.
         if let Some(ended) = &r.ended {
             assert!(
-                ended.contains("\"outcome\""),
+                ended.contains("\"outcome\"") && !ended.contains("native_session_failed"),
                 "untyped end: {}",
                 summary(&r)
             );
@@ -220,10 +221,17 @@ fn view_row(delay_ms: u32, loss_percent: f32) -> (usize, Vec<Duration>, Option<S
     }
     let output = wait_for(client, Duration::from_secs(30));
     if ended.is_some() {
+        let host = daemon.dump();
+        let viewer: String = host
+            .split("ShareEnded")
+            .nth(1)
+            .map(|rest| rest.chars().take(200).collect())
+            .unwrap_or_default();
         ended = Some(format!(
-            "{}; completion {}",
+            "{}; completion {} | stderr {}; host share {viewer}",
             ended.unwrap_or_default(),
-            String::from_utf8_lossy(&output.stdout).trim()
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
     daemon.finish();
@@ -258,7 +266,8 @@ fn view_only_session_under_namespace_delay_and_loss() {
             println!("VIEW IMPAIRMENT LIMIT {line}");
             if let Some(ended) = &ended {
                 assert!(
-                    ended.contains("\"outcome\"") || ended.contains("not shown"),
+                    (ended.contains("\"outcome\"") && !ended.contains("native_session_failed"))
+                        || ended.contains("not shown"),
                     "untyped end: {line}"
                 );
             }

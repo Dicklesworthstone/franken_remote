@@ -106,20 +106,42 @@ not WAN, Wi-Fi or DERP qualification.
 | 100 ms RTT | 0/8 (every run) |
 | 40 ms RTT, 1% loss | ended after 1-4 steps (every run) |
 
-When control ends, the client reports only the generic `native_session_failed`
-and the host records the viewer as failed/cancelled. The probable mechanism,
-not yet isolated: a presented picture's evidence must travel from the host's
-source observation through transit, encode/decode/present and the client's
-report back to the host inside the fixed 250 ms source-age bound, and the
-client's conservative age bound also adds the full clock-exchange interval
-(about one RTT), so the slack shrinks by roughly 1.5 x RTT plus pipeline time;
-loss that forces recovery may also move the view to a new recovery generation,
-which the input credentials are bound to. Because a lapse under a lease is
-terminal (above), any such episode ends control. Ordinary tailnet paths across a
-continent, or through DERP, exceed 60 ms RTT, so this is a product-level limit
-for the owner decision `fr-rc2-owner-decision-view-lapse-f7ts`, not a test
-artifact. The test asserts only the clean and 40 ms RTT rows and prints the
-others with their outcomes.
+**Why control ends (isolated 2026-09-28).** A diagnostic build printed the
+client's typed failure chain for each ended row (not committed). Three local
+causes appear, and `fr` now names each instead of the generic
+`native_session_failed`:
+
+- `view_stale`: the presented picture's source age could no longer be proven
+  within 250 ms. The presentation owner, the input client or the transport's
+  view gate may meet it first; the gate used to close the connection with a
+  bare `Transport(Unauthorized)`, which is now reported as the stale view it was.
+- `transport_deadline_expired`: a reliable record on the client's session
+  stream (presented reports, control responses) was not acknowledged before its
+  send-by deadline, so `QuicRecords` closed the connection rather than deliver
+  late state.
+- `host_not_heard` (view-only rows): no observation challenge arrived within the
+  viewer's 3 s silence bound.
+
+Controlled experiment (diagnostic build, not committed): with the source-age
+bound raised from 250 ms to 1 s on both ends (`fr_client::input::Policy::view_age_us`
+and `fr_wire::presented::MAX_SOURCE_AGE_US`), the 60 ms RTT row held 8/8 in 3 of
+3 runs, against ending in 5 of 6 runs at 250 ms. The 100 ms RTT row still failed
+(1/8 then `native_session_failed`, or `fr` did not exit within the harness
+limit), and 1% loss still ended control (once by the host's revocation). So the
+fixed 250 ms bound is what ends control near 60 ms RTT. Beyond that, the
+transport record deadlines and loss recovery end it. The client's conservative
+age bound adds the full clock-exchange interval (about one RTT) to transit and
+pipeline time, which is why a fixed bound bites at modest RTT. Because a lapse
+under a lease is terminal (above), any such episode ends control. Ordinary
+tailnet paths across a continent, or through DERP, exceed 60 ms RTT. This is a
+product-level limit for the owner decision `fr-rc2-owner-decision-view-lapse-f7ts`
+(terminal vs suspend-and-resume, and an RTT-aware source-age bound), not a test
+artifact.
+
+The test asserts that the clean and 40 ms RTT rows hold. Every other row must
+either hold or end with a named cause, never `native_session_failed`. Any other
+end still reports `native_session_failed`, and `fr` prints its content-free
+typed chain on stderr.
 
 View-only is more tolerant but has the same shape of limit
 (`real_impairment::view_only_session_under_namespace_delay_and_loss`: a fresh
@@ -135,9 +157,10 @@ changes per profile, each timed until the viewer window shows it; four runs):
 | 200 ms RTT | 1/6 then the client exited, every run | ~240-250 ms |
 | 40 ms RTT, 5% loss | 6/6 three times, 0/6 and 4/6 once each | ~180-200 ms |
 
-An exiting view-only client also reports only `native_session_failed`. The test
-asserts the first three rows and prints the others. These timings are this
-loaded host's namespace measurements, not latency claims (plan 21).
+An exiting view-only client now reports `host_not_heard` at 200 ms RTT and 5%
+loss (three runs). The test asserts that the first three rows hold. The other
+rows must hold, show a change late, or end with a named cause. These timings
+are this loaded host's namespace measurements, not latency claims (plan 21).
 
 ## Verification scope
 

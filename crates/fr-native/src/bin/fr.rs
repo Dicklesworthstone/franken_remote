@@ -69,6 +69,10 @@ host must run frd run --input-agent. Keys, buttons, absolute pointer and discret
 line-wheel scrolling are available (no text, pixel-scroll or audio).
 Lost or refused control is never
 retried or reacquired: after a request, fr does not reconnect.
+A session that ends without a host report names its local cause: view_stale
+(the picture could not be proven fresh in time), transport_deadline_expired (a
+record missed its delivery deadline) or host_not_heard (host renewals stopped
+arriving); any other end is native_session_failed, its typed chain on stderr.
 --clipboard (with --control; build with linux-clipboard) lets the UTF-8 text
 CLIPBOARD follow the control lease both ways, when the host runs frd run
 --clipboard too; otherwise the completion reports clipboard absence by type.

@@ -11,6 +11,9 @@ mod doctor;
 #[cfg(feature = "linux-desktop")]
 #[path = "linux/files.rs"]
 mod files;
+#[cfg(any(test, feature = "linux-desktop"))]
+#[path = "linux/lapse.rs"]
+mod lapse;
 #[path = "linux/refusal.rs"]
 mod refusal;
 #[path = "linux/robot.rs"]
@@ -471,16 +474,20 @@ fn completed_result(
     if let Err(error) = result
         && !progress.user_closed
     {
-        if let Some(refused) = refusal::reconnect(error) {
+        if let Some(refused) = refusal::reconnect(error).or_else(|| lapse::reconnect(error)) {
             return Err(refused);
         }
-        return Err(match error {
-            reconnect::Failure::Connection(frd::native_connection::Error::Tailnet(e)) => tailnet(e),
-            _ => failure(
-                "native_session_failed",
-                "Verify host approval, selected display, worker/HEVC support and transport qualification; do not bypass admission checks.",
-            ),
-        });
+        if let reconnect::Failure::Connection(frd::native_connection::Error::Tailnet(e)) = error {
+            return Err(tailnet(e));
+        }
+        // The typed chain is content-free (Copy enums: no addresses, names,
+        // text or payloads), so an unnamed end stays diagnosable; stdout keeps
+        // the stable code.
+        eprintln!("fr: session ended without a named reason: {error:?}");
+        return Err(failure(
+            "native_session_failed",
+            "Verify host approval, selected display, worker/HEVC support and transport qualification; do not bypass admission checks.",
+        ));
     }
     Ok(completion(
         progress,
