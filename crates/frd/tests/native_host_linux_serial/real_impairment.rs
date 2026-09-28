@@ -333,9 +333,13 @@ fn view_only_busy_screen_under_namespace_loss() {
     // Ten rapid host changes before each of the six measured ones, so about 60
     // pictures cross the impaired link and loss actually hits video: repair
     // and recovery must work for every measured change to appear. The clean
-    // row must hold; the lossy rows are printed measurements that must hold,
-    // show a change late, or end with a named cause.
-    for (delay_ms, loss_percent, required) in [(0, 0.0, true), (20, 1.0, false), (20, 5.0, false)] {
+    // row and 40 ms RTT with 1% loss must hold. The latter held 10/10 with
+    // reference recovery offered (2abb861); planted negatives on 2026-09-28:
+    // without recovery it froze 2/3, without repair AND recovery it ended 2/3
+    // (repair alone disabled still held 3/3: recovery covers it). 5% loss is a
+    // printed limit that must hold, show a change late, or end with a named
+    // cause.
+    for (delay_ms, loss_percent, required) in [(0, 0.0, true), (20, 1.0, true), (20, 5.0, false)] {
         let (steps, mut times, ended, media) = view_row(delay_ms, loss_percent, 0, 10);
         times.sort();
         let line = format!(

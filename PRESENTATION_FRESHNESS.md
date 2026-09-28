@@ -190,6 +190,27 @@ within 10 s, with neither a reconnect nor a typed end. This is the only
 observation so far of repair actually being exercised, and it did not recover.
 It is under investigation (fr-rc2-namespace-impairment-rows-n29k).
 
+Follow-up, same day. A busy-screen row now exercises loss recovery: ten rapid
+host changes precede each measured one, about 60 pictures per row. It showed
+that `frd run` never offered reference recovery, and it froze at 40 ms RTT with
+1% loss. With recovery offered (2abb861), that row held 10 of 10 runs and is now
+must-hold. Planted negatives:
+- without recovery, it froze in 2 of 3 runs;
+- without repair and recovery, it ended in 2 of 3 runs;
+- with repair alone disabled, it held in 3 of 3 runs, because recovery covers it.
+
+**No input lands on a stale view (namespace e2e).**
+`real_control::a_stale_view_suspends_input_before_it_reaches_the_host` freezes
+the host's capture child with SIGSTOP. No picture or source observation reaches
+the viewer, so its view ages past 250 ms while the window and connection stay
+up. Marker motion then must not move the host pointer. The test passed 3 of 3
+runs, and the client ended with `view_stale`. The planted negative raises both
+bounds, the client's `view_age_us` and the host's presented `MAX_SOURCE_AGE_US`,
+because the host enforces its own bound on presented reports. The client
+policy's own 1.5 s maximum limits how far they can be raised. With that
+planted build, the marker motion reached the host in 1 of 2 runs, and the
+other run's markers arrived after the planted bound.
+
 **Critical records no longer wait behind queued media (2026-09-28).** A
 diagnostic build printed the host transport's state at each sender-deadline
 expiry. The challenge record usually had never been staged: the native stream

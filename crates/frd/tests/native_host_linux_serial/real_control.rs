@@ -867,6 +867,75 @@ fn a_stopped_controller_loses_its_lease_and_later_input_has_no_host_effect() {
     s.daemon.finish();
 }
 
+/// Live host capture children (`fr-media-worker --capture`); the client's
+/// decoder runs `--present` and is never selected.
+fn capture_workers() -> Vec<u32> {
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
+            let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+            let mut words = cmdline.split(|b| *b == 0);
+            (words
+                .next()
+                .is_some_and(|image| image.ends_with(b"/fr-media-worker"))
+                && words.next() == Some(b"--capture"))
+            .then_some(pid)
+        })
+        .collect()
+}
+
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; real input agent"]
+fn a_stale_view_suspends_input_before_it_reaches_the_host() {
+    let mut s = Controlled::start();
+    let workers = capture_workers();
+    assert!(!workers.is_empty(), "no host capture worker found");
+    let (resting, _) = host_pointer(&mut s.observer);
+    // Freeze the host's capture: no new picture or source observation reaches
+    // the viewer, so its view ages past the 250 ms source-age bound while the
+    // window still shows the last picture and the connection stays up.
+    for pid in &workers {
+        assert!(
+            Command::new("kill")
+                .args(["-STOP", &pid.to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    thread::sleep(Duration::from_secs(1));
+    // Marker input on the stale view: none of it may land on the host.
+    for local in [(150, 400), (170, 420), (190, 440)] {
+        s.viewer_move(local);
+    }
+    thread::sleep(Duration::from_secs(2));
+    let (now, _) = host_pointer(&mut s.observer);
+    for pid in &workers {
+        let _ = Command::new("kill")
+            .args(["-CONT", &pid.to_string()])
+            .status();
+    }
+    assert_eq!(
+        now,
+        resting,
+        "input on a stale view moved the host: {}",
+        s.daemon.dump()
+    );
+    // How the client ends is diagnostic; the absent host effect is the evidence.
+    if s.client.try_wait().unwrap().is_none() {
+        signal(&s.client, "-INT");
+    }
+    let output = wait_for(s.client, Duration::from_secs(30));
+    println!(
+        "fr after a stale view: {:?} {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    s.daemon.finish();
+}
+
 #[test]
 #[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; one Xvfb display"]
 fn a_host_without_an_input_agent_refuses_fr_connect_control_by_type() {
