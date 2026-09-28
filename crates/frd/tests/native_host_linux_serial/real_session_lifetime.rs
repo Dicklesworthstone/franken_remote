@@ -89,9 +89,20 @@ fn a_lock_of_the_selected_session_ends_control_and_the_run_with_a_typed_cause() 
     assert!(UdpSocket::bind(address()).is_ok(), "listener retired");
     // The viewer's session ends too.
     let output = wait_for(s.client, Duration::from_secs(30));
+    let completion = String::from_utf8_lossy(&output.stdout);
     eprintln!(
-        "lock -> executor gone in {revoked:?}; client exit {:?}",
-        output.status.code()
+        "lock -> executor gone in {revoked:?}; client exit {:?}; completion {}",
+        output.status.code(),
+        completion.trim()
+    );
+    // The controller is told why, by the host's authenticated terminal report,
+    // not left to guess from a dropped connection.
+    let report: serde_json::Value = serde_json::from_str(completion.trim()).unwrap();
+    assert_eq!(report["outcome"], "revoked", "{report}");
+    assert_eq!(report["error"]["code"], "host_session_ended", "{report}");
+    assert_eq!(
+        report["error"]["revocation"]["reason"], "session_ended",
+        "{report}"
     );
     let _ = std::fs::remove_file(&marker);
     // Event log shape: listening happened before the lock, nothing after stop.
