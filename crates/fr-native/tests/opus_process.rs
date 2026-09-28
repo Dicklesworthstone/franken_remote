@@ -258,8 +258,15 @@ fn confinement_forbids_files_sockets_and_new_processes() {
                 .raw_os_error(),
             Some(1)
         );
-        assert!(UnixStream::pair().is_err());
-        assert!(Command::new("/bin/true").spawn().is_err());
+        // Each succeeds unconfined; EPERM is the seccomp filter's answer.
+        assert_eq!(UnixStream::pair().unwrap_err().raw_os_error(), Some(1));
+        assert_eq!(
+            Command::new("/bin/true")
+                .spawn()
+                .unwrap_err()
+                .raw_os_error(),
+            Some(1)
+        );
         std::io::stdout().write_all(b"confined\n").unwrap();
         return;
     }

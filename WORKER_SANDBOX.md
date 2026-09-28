@@ -24,7 +24,7 @@ Under plan §5.4 and §19.1:
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Linux (x86_64)** | Client Decoder / Presenter (Software HEVC + X11) | **Enforced**: Network sockets (`socket`, `connect`, `bind` blocked with `EPERM`); Filesystem open/read/write (`open`, `openat`, `creat` blocked with `EPERM`); Process spawning (`fork`, `clone`, `clone3`, `execve`, `execveat` blocked); Approval IPC (`/tmp/frd-approval.sock` blocked). Only pre-opened borrowed descriptors (worker pipe + X11 display socket) permitted. | None for software presentation. | Linux Seccomp BPF (`SECCOMP_SET_MODE_FILTER` with `PR_SET_NO_NEW_PRIVS`, configured in `crates/fr-native/src/decoder_sandbox.c`). | Tested by `tests/decoder_sandbox_escape.rs`. Residual trust: X11 server connection allows X protocol requests to the borrowed window/canvas; X server is an explicit trust boundary. |
 | **Linux (x86_64)** | Host Capture / Encoder (X11 XShm over a sealed memfd, `XGetImage` fallback, + software x265) | **None** (no kernel sandbox). | **Unenforced**: network, filesystem and process creation are all available to the same-user worker; no seccomp or Landlock filter is applied. | Process boundary only. The launcher (`crates/frd/src/worker.rs`) clears the environment except `DISPLAY`/`XAUTHORITY` and passes only its stdin/stdout pipes; certificate keys, the Tailscale socket, approval IPC and input authority stay in `frd`. | **Residual Trust**: a compromised capture/encode worker has the host user's full privileges plus the X display. Process separation gives crash/hang containment only (AGENTS §3.2). Hardware encode (VA-API/NVENC) is not implemented. |
-| **Linux (x86_64)** | Client Opus Decoder (`fr-opus-worker`, one per audio epoch) | **Enforced** before any packet: the inherited socket must be a stream from the parent (`SO_PEERCRED` uid and pid); `RLIMIT_AS` 256 MiB, `RLIMIT_CORE`/`RLIMIT_FSIZE` zero; every other descriptor closed (`close_range`); `PR_SET_NO_NEW_PRIVS`; an allow-list seccomp filter on all threads (`SECCOMP_FILTER_FLAG_TSYNC`): reads/writes only on the inherited descriptors, memory calls without executable mappings, clocks/signals/futex/exit, everything else `EPERM` (no sockets, opens or process creation), a non-x86_64 syscall ABI kills the process. | Escape attempts are not yet exercised by a test that first succeeds unsandboxed (fr-rc2-sandbox-escape-tests-non-vacuous). | `crates/fr-native/src/opus/process/sandbox.c`, launched by the client's audio playout supervisor (20c49ef, 7e15e31). | Decodes host-generated (potentially hostile) Opus off the controlling thread; libopus and the kernel remain trust boundaries. |
+| **Linux (x86_64)** | Client Opus Decoder (`fr-opus-worker`, one per audio epoch) | **Enforced** before any packet: the inherited socket must be a stream from the parent (`SO_PEERCRED` uid and pid); `RLIMIT_AS` 256 MiB, `RLIMIT_CORE`/`RLIMIT_FSIZE` zero; every other descriptor closed (`close_range`); `PR_SET_NO_NEW_PRIVS`; an allow-list seccomp filter on all threads (`SECCOMP_FILTER_FLAG_TSYNC`): reads/writes only on the inherited descriptors, memory calls without executable mappings, clocks/signals/futex/exit, everything else `EPERM` (no sockets, opens or process creation), a non-x86_64 syscall ABI kills the process. | Tested: file open, socket creation and process spawn return `EPERM` (`opus_process.rs`). | `crates/fr-native/src/opus/process/sandbox.c`, launched by the client's audio playout supervisor (20c49ef, 7e15e31). | Decodes host-generated (potentially hostile) Opus off the controlling thread; libopus and the kernel remain trust boundaries. |
 | **Linux (x86_64)** | Host Audio Capture / Opus Encoder (`fr-media-worker --audio`) | **None** (no kernel sandbox). | **Unenforced**: network, filesystem and process creation are available to the same-user worker. | Process boundary only; `frd` links neither libpulse nor libopus. | **Residual Trust**: a compromised audio worker has the host user's privileges and the PulseAudio session. |
 | **Windows** | Client Decoder / Presenter | **Not implemented**: no Windows worker exists. | Not applicable. | None. | Not applicable until a Windows worker exists. |
 | **Windows** | Host Capture / Encoder (Desktop Duplication / NVENC / AMF) | **Not implemented**: no Windows worker exists. | Not applicable. | None. | Not applicable until a Windows worker exists. |
@@ -35,26 +35,28 @@ Under plan §5.4 and §19.1:
 
 ## 3. Enforced Escape-Attempt Verification
 
-Verification is automated in `crates/fr-native/tests/decoder_sandbox_escape.rs`. The test spawns a confined worker process under active seccomp BPF confinement and verifies that every attempted sandbox escape is refused with typed OS errors (`PermissionDenied` / `EPERM`):
+Verification is automated in `crates/fr-native/tests/decoder_sandbox_escape.rs`.
+Before 2026-09-27 that test only checked that each probe failed, and its TCP and
+approval-IPC probes targeted endpoints that did not exist, so they would have
+failed without any sandbox. It now proves the filter: the parent opens a TCP
+listener, a Unix listener, a readable file and a writable directory; the child
+first runs every probe **unconfined** against those targets (each must succeed),
+then enters `confine_decoder_process` and repeats them against the same targets,
+where each must fail with `EPERM` (errno 1) specifically:
 
-1. **Network Escape (TCP Connect):**
-   - Probe: `TcpStream::connect("127.0.0.1:80")`
-   - Result: Refused (`PermissionDenied` / `EPERM`). Kernel BPF filter returns `FR_SC_DENY` on `sys_socket` and `sys_connect`.
-2. **Network Escape (UDP Bind):**
-   - Probe: `UdpSocket::bind("127.0.0.1:0")`
-   - Result: Refused (`PermissionDenied` / `EPERM`).
-3. **Filesystem Read Escape:**
-   - Probe: `File::open("/etc/passwd")`
-   - Result: Refused (`PermissionDenied` / `EPERM`). Kernel BPF filter blocks `sys_open` and `sys_openat` with flags creating or opening arbitrary paths.
-4. **Filesystem Write Escape:**
-   - Probe: `File::create("/tmp/fr_sandbox_escape_probe.txt")`
-   - Result: Refused (`PermissionDenied` / `EPERM`).
-5. **Approval IPC Escape:**
-   - Probe: `UnixStream::connect("/tmp/frd-approval.sock")`
-   - Result: Refused (`PermissionDenied` / `EPERM`). Prohibits reaching the host's approval channel from an untrusted media decoder.
-6. **Process Spawning Escape:**
-   - Probe: `Command::new("/bin/sh").spawn()`
-   - Result: Refused (`PermissionDenied` / `EPERM`). Kernel BPF filter denies `sys_clone`, `sys_clone3`, `sys_fork`, `sys_execve`, `sys_execveat`.
+| Probe | Unconfined control run | Confined |
+|---|---|---|
+| TCP connect to the parent's listener | succeeds | `EPERM` |
+| UDP bind `127.0.0.1:0` | succeeds | `EPERM` |
+| open the parent's readable file | succeeds | `EPERM` |
+| create a file in the parent's directory | succeeds | `EPERM` |
+| connect to the parent's Unix listener (stand-in for an approval socket) | succeeds | `EPERM` |
+| spawn `/bin/true` | succeeds | `EPERM` |
+
+The Opus decoder child's test (`crates/fr-native/tests/opus_process.rs`,
+`confinement_forbids_files_sockets_and_new_processes`) asserts `EPERM` for opening
+`/etc/passwd`, creating a socket pair and spawning `/bin/true`, each of which
+succeeds for the unconfined test process.
 
 ---
 
