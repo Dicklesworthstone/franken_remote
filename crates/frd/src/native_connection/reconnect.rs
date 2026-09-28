@@ -453,6 +453,10 @@ pub enum Lapse {
     /// passed: no observation challenge within the silence bound, an overdue
     /// response, or the client's renewal lapsed.
     HostNotHeard,
+    /// A picture later video depends on could not be completed (repair did not
+    /// arrive in time) and the decoder could not recover in place, so the
+    /// session ended after any automatic reconnects.
+    VideoReferenceLost,
 }
 pub fn lapse(failure: Failure) -> Option<Lapse> {
     use crate::session_startup::{ControlledViewerError as C, Error as S};
@@ -480,7 +484,12 @@ pub fn lapse(failure: Failure) -> Option<Lapse> {
             | ObserverError::Session(S::Transport(T::Expired))
             | ObserverError::Streaming(
                 StreamingViewerError::Session(S::Transport(T::Expired))
-                | StreamingViewerError::Control(C::Session(S::Transport(T::Expired))),
+                | StreamingViewerError::Control(
+                    C::Session(S::Transport(T::Expired))
+                    // The controller's clock exchange meets the same record
+                    // deadline; naming it does not widen the retry policy.
+                    | C::Clock(crate::media::clock::Error::Transport(T::Expired)),
+                ),
             ),
         ) => Some(Lapse::TransportDeadline),
         // The presentation owner reports the source age; the input client that
@@ -489,6 +498,16 @@ pub fn lapse(failure: Failure) -> Option<Lapse> {
             P::Media(F::SourceStale | F::SourceUnknown)
             | P::Input(fr_client::input::Error::Stopped(fr_client::input::StopReason::ViewStale)),
         )))) => Some(Lapse::ViewStale),
+        Failure::Observation(ObserverError::Streaming(
+            StreamingViewerError::Delivery(
+                fr_media::delivery::DeliveryError::ReferenceExpired
+                | fr_media::delivery::DeliveryError::RecoveryExpired,
+            )
+            | StreamingViewerError::Media(crate::media::Error::Receiver(
+                fr_media::delivery::DeliveryError::ReferenceExpired
+                | fr_media::delivery::DeliveryError::RecoveryExpired,
+            )),
+        )) => Some(Lapse::VideoReferenceLost),
         Failure::Observation(ObserverError::Streaming(error))
             if streaming_transport(error) == Some(T::Expired) =>
         {

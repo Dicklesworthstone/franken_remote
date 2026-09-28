@@ -289,6 +289,9 @@ fn only_transport_deadlines_and_stale_views_are_named_lapses() {
             observed(StreamingViewerError::PresentedState(
                 crate::media::PresentedStateError::Transport(error),
             )),
+            observed(StreamingViewerError::Control(C::Clock(
+                crate::media::clock::Error::Transport(error),
+            ))),
         ] {
             assert_eq!(lapse(failure), expected, "{failure:?}");
         }
@@ -345,6 +348,32 @@ fn only_transport_deadlines_and_stale_views_are_named_lapses() {
             None
         );
     }
+}
+
+#[test]
+fn a_lost_reference_is_named_but_decode_failure_and_local_ends_are_not() {
+    use crate::session_startup::{ControlledViewerError as C, Error as S};
+    let observed = |error| Failure::Observation(ObserverError::Streaming(error));
+    for error in [
+        fr_media::delivery::DeliveryError::ReferenceExpired,
+        fr_media::delivery::DeliveryError::RecoveryExpired,
+    ] {
+        for failure in [
+            observed(StreamingViewerError::Delivery(error)),
+            observed(StreamingViewerError::Media(crate::media::Error::Receiver(
+                error,
+            ))),
+        ] {
+            assert_eq!(lapse(failure), Some(Lapse::VideoReferenceLost));
+        }
+    }
+    // A decode failure is not a lost reference.
+    assert_eq!(
+        lapse(observed(StreamingViewerError::Delivery(
+            fr_media::delivery::DeliveryError::DecodeFailed
+        ))),
+        None
+    );
     for failure in [
         observed(StreamingViewerError::Control(C::Expired)),
         observed(StreamingViewerError::Control(C::Session(S::Authority))),

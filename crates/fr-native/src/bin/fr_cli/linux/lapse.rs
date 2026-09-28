@@ -14,6 +14,10 @@ pub(super) fn reconnect(error: reconnect::Failure) -> Option<Failure> {
             "view_stale",
             "The picture on screen could no longer be proven fresh within the source-age limit, so input stopped instead of acting on a stale view. Control is not reacquired automatically and submitted actions are not rolled back. Check the path's round-trip time and loss (tailscale ping) before starting a new session.",
         ),
+        Lapse::VideoReferenceLost => failure(
+            "video_reference_lost",
+            "Lost video could not be repaired before the pictures that depend on it were due, and the decoder could not recover in place, so the session ended after any automatic reconnects; nothing is replayed. Check the path's loss (tailscale ping) before starting a new session.",
+        ),
         Lapse::HostNotHeard => failure(
             "host_not_heard",
             "The host's renewals did not arrive within this session's deadline, so the session ended instead of continuing unrenewed; nothing is replayed. Check the path's round-trip time and loss (tailscale ping) and that the host is still running.",
@@ -47,6 +51,11 @@ mod tests {
         )))))
         .unwrap();
         let silent = reconnect(observed(Streaming::Session(Session::Expired))).unwrap();
+        let lost = reconnect(observed(Streaming::Delivery(
+            fr_media::delivery::DeliveryError::ReferenceExpired,
+        )))
+        .unwrap();
+        assert_eq!(lost.code, "video_reference_lost");
         assert_eq!(deadline.code, "transport_deadline_expired");
         assert_eq!(stale.code, "view_stale");
         assert_eq!(silent.code, "host_not_heard");

@@ -87,10 +87,15 @@ version-specific absence proof must be requalified on an Asupersync upgrade and
 can be replaced by an explicit upstream retention query when available.
 
 Staging priority. Asupersync assembles each packet from control frames, then
-STREAM frames, then queued DATAGRAMs. A critical reliable prefix is therefore
-staged whenever the congestion window has room for two packets beyond the bytes
-in flight, even while media datagrams are queued. Those datagrams are
-replaceable. Until 2026-09-28 a critical prefix instead waited until the window
+STREAM frames, then queued DATAGRAMs. A critical reliable prefix (at most 900
+bytes) is therefore staged whenever the congestion window has room for one
+packet beyond the bytes in flight, even while media datagrams are queued. Those
+datagrams are replaceable. The first version of this rule asked for two
+packets. After loss the window sits at its 2 x 1200 byte minimum, so that
+starved critical records whenever anything at all was in flight. Diagnostic
+prints during busy lossy rows showed the room at 1,594-2,399 bytes with nothing
+queued and the renewal challenge unstaged, and the one-packet rule removed
+every such block. Until 2026-09-28 a critical prefix instead waited until the window
 also fitted every queued datagram. Under namespace `tc netem` loss, media kept
 that queue at the window limit, so host renewal challenges missed their send-by
 deadline and closed view-only sessions. Bulk prefixes still wait for the media
