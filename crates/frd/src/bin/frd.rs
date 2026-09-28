@@ -27,7 +27,7 @@ USAGE:
     frd status [--json]
     frd approval [get | set local | set none]
     frd sharing [get | set own-user | set tailnet]
-    frd install [--user | --system] [--dry-run] [--port PORT]
+    frd install [--user | --system] [--dry-run] [--port PORT] [-- FRD-RUN-OPTIONS]
     frd uninstall [--user | --system] [--dry-run]
     frd service-status [--user | --system] [--json]
     frd ingress-helper [--config PATH] [--json]
@@ -39,6 +39,8 @@ COMMANDS:
     approval        Inspect or update local operator approval policy
     sharing         Inspect or update tailnet sharing admission scope
     install         Install frd as an idempotent background service (systemd / launchd)
+                    (options after `--` go to frd run, e.g. -- --input-agent PATH
+                    --logind-session ID; validated now, systemd units only)
     uninstall       Remove installed service and unit files cleanly
     service-status  Check whether background service is registered and active
     ingress-helper  Root-only: own the nftables ingress rule for an unprivileged frd run
@@ -215,11 +217,12 @@ fn execute_uninstall(args: &[String], json: bool) -> ExitCode {
         Ok(report) => {
             if json {
                 println!(
-                    "{{\"outcome\":\"success\",\"kind\":\"{}\",\"unit_path\":\"{}\",\"existed\":{},\"dry_run\":{}}}",
-                    report.kind.as_str(),
-                    report.unit_path.display(),
-                    report.existed,
-                    report.dry_run
+                    "{}",
+                    serde_json::json!({
+                        "outcome": "success", "kind": report.kind.as_str(),
+                        "unit_path": report.unit_path, "existed": report.existed,
+                        "dry_run": report.dry_run, "next_steps": report.next_steps,
+                    })
                 );
             } else {
                 println!(
@@ -236,6 +239,9 @@ fn execute_uninstall(args: &[String], json: bool) -> ExitCode {
                     println!("  Service configuration removed.");
                 } else {
                     println!("  Service was not previously installed (idempotent no-op).");
+                }
+                for step in &report.next_steps {
+                    println!("  {step}");
                 }
                 println!("  Note: Tailscale and user credentials left untouched.");
             }

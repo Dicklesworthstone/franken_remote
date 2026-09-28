@@ -148,6 +148,10 @@ pub struct InstallOptions {
     /// Pass `--software-explicit` to `frd run` (the CPU HEVC developer profile;
     /// `frd run` has no hardware encoder selection yet and refuses without it).
     pub software_explicit: bool,
+    /// Further `frd run` flags (everything after `--`): control, clipboard,
+    /// files, audio, display and session-lifetime options. Validated by
+    /// `frd run`'s own parser at install time; systemd units only.
+    pub run_args: Vec<String>,
 }
 
 impl Default for InstallOptions {
@@ -164,6 +168,7 @@ impl Default for InstallOptions {
             dry_run: false,
             custom_unit_dir: None,
             software_explicit: false,
+            run_args: Vec::new(),
         }
     }
 }
@@ -326,6 +331,8 @@ pub struct UninstallReport {
     pub existed: bool,
     /// Whether this was a dry run.
     pub dry_run: bool,
+    /// Removing the unit file does not stop a running service: what to run.
+    pub next_steps: Vec<String>,
 }
 
 /// Render a systemd service unit file for `frd`.
@@ -363,11 +370,18 @@ pub fn render_systemd_unit(options: &InstallOptions) -> String {
     if options.software_explicit {
         args.push_str(" --software-explicit");
     }
+    for arg in &options.run_args {
+        let _ = write!(args, " {}", quoting::systemd(arg));
+    }
 
+    // A user unit starts with the graphical session (which provides DISPLAY),
+    // not default.target (also reached by SSH-only logins, where `frd run` has
+    // no display and would only fail). A refusal (exit 2: configuration) is not
+    // retried; a runtime failure is.
     let is_user = matches!(options.kind, ServiceKind::SystemdUser);
     let (target, unit_deps) = if is_user {
         (
-            "default.target",
+            "graphical-session.target",
             "After=graphical-session.target network.target tailscaled.service\nPartOf=graphical-session.target",
         )
     } else {
@@ -387,8 +401,9 @@ Wants=tailscaled.service
 [Service]
 Type=simple
 ExecStart=:{} {}
-Restart=always
-RestartSec=3
+Restart=on-failure
+RestartPreventExitStatus=2
+RestartSec=5
 StandardOutput=journal
 StandardError=journal
 LimitNOFILE=65536
@@ -655,11 +670,23 @@ pub fn uninstall(options: &InstallOptions) -> Result<UninstallReport, ServiceErr
         })?;
     }
 
+    let next_steps = match options.kind {
+        ServiceKind::SystemdUser => vec![
+            "[user] Removing the unit file does not stop a running service: run 'systemctl --user disable --now frd' and then 'systemctl --user daemon-reload'.".into(),
+        ],
+        ServiceKind::SystemdSystem => vec![
+            "Removing the unit file does not stop a running service: run 'sudo systemctl disable --now frd' and then 'sudo systemctl daemon-reload'.".into(),
+        ],
+        _ => vec![
+            "Removing the service definition does not stop a running frd: unload or stop it with the platform service manager.".into(),
+        ],
+    };
     Ok(UninstallReport {
         kind: options.kind,
         unit_path,
         existed,
         dry_run: options.dry_run,
+        next_steps,
     })
 }
 
@@ -680,12 +707,15 @@ mod tests {
             dry_run: true,
             custom_unit_dir: None,
             software_explicit: true,
+            run_args: Vec::new(),
         };
 
         let unit = render_systemd_unit(&options);
         assert!(unit.contains("ExecStart=:/usr/local/bin/frd run --port 8443 --socket /var/run/tailscale/tailscaled.sock --approval local --sharing tailnet"));
-        assert!(unit.contains("Restart=always"));
-        assert!(unit.contains("WantedBy=default.target"));
+        assert!(unit.contains("Restart=on-failure"));
+        assert!(unit.contains("RestartPreventExitStatus=2"));
+        assert!(unit.contains("WantedBy=graphical-session.target"));
+        assert!(!unit.contains("default.target"));
     }
 
     #[test]
@@ -701,6 +731,7 @@ mod tests {
             dry_run: true,
             custom_unit_dir: None,
             software_explicit: true,
+            run_args: Vec::new(),
         };
 
         let plist = render_launchd_plist(&options);
@@ -726,6 +757,7 @@ mod tests {
             dry_run: false,
             custom_unit_dir: Some(temp_dir.clone()),
             software_explicit: true,
+            run_args: Vec::new(),
         };
 
         // 1. First install succeeds
@@ -755,6 +787,7 @@ mod tests {
             exec_path: PathBuf::from("/home/someone/.cargo/bin/frd"),
             dry_run: true,
             software_explicit: true,
+            run_args: Vec::new(),
             approval_mode: "none".into(),
             ..InstallOptions::default()
         };
@@ -839,6 +872,7 @@ mod tests {
             dry_run: false,
             custom_unit_dir: None,
             software_explicit: true,
+            run_args: Vec::new(),
         };
 
         let result = preflight_check(&options);

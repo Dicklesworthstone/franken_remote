@@ -13,6 +13,11 @@ impl InstallOptions {
         let mut seen = BTreeSet::new();
         let mut iter = args.iter();
         while let Some(flag) = iter.next() {
+            if flag == "--" {
+                // Everything after `--` is for `frd run` (validated below).
+                options.run_args = iter.by_ref().cloned().collect();
+                break;
+            }
             let key = match flag.as_str() {
                 "--user" | "--system" => "service-kind",
                 other => other,
@@ -74,6 +79,7 @@ impl InstallOptions {
                 });
             }
         }
+        self.validate_run_args()?;
         for path in std::iter::once(&self.exec_path)
             .chain(self.socket_path.iter())
             .chain(self.config_path.iter())
@@ -99,6 +105,69 @@ impl InstallOptions {
             return Err(ServiceError::UnsupportedPlatform {
                 detail: "Windows service registration cannot yet preserve these overrides".into(),
             });
+        }
+        Ok(())
+    }
+}
+impl InstallOptions {
+    /// `frd run` flags carried into the unit are parsed by `frd run`'s own parser
+    /// and refused here when every (re)start would refuse them, so a unit never
+    /// restart-loops on a configuration it cannot run.
+    fn validate_run_args(&self) -> Result<(), ServiceError> {
+        use crate::host_policy::options::RunOptions;
+        if self.run_args.is_empty() {
+            return Ok(());
+        }
+        if !matches!(
+            self.kind,
+            ServiceKind::SystemdUser | ServiceKind::SystemdSystem
+        ) {
+            return Err(ServiceError::UnsupportedPlatform {
+                detail: "frd run options are currently supported only by the Linux host".into(),
+            });
+        }
+        let run = RunOptions::parse(&self.run_args).map_err(|_| ServiceError::InvalidOptions)?;
+        // Set by the installer's own flags; a service never runs `--once`.
+        if run.port.is_some()
+            || run.socket.is_some()
+            || run.config.is_some()
+            || run.approval.is_some()
+            || run.sharing.is_some()
+            || run.software_explicit
+            || run.once
+        {
+            return Err(ServiceError::InvalidOptions);
+        }
+        if run.clipboard && run.input_agent.is_none() {
+            return Err(ServiceError::HostProfileUnavailable {
+                code: "clipboard_requires_input_agent",
+                detail: "--clipboard follows the controller's lease; it needs --input-agent",
+            });
+        }
+        if run.files.is_some() && run.input_agent.is_none() {
+            return Err(ServiceError::HostProfileUnavailable {
+                code: "files_requires_input_agent",
+                detail: "--files receives the controller's sends; it needs --input-agent",
+            });
+        }
+        if self.kind == ServiceKind::SystemdSystem && !run.headless {
+            return Err(ServiceError::HostProfileUnavailable {
+                code: "system_service_requires_headless",
+                detail: "a system unit has no user's X display; install a user unit, or pass -- --headless",
+            });
+        }
+        for path in [
+            &run.worker,
+            &run.input_agent,
+            &run.files,
+            &run.session_monitor,
+            &run.audio_server,
+            &run.trust_roots,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            validate_path(path)?;
         }
         Ok(())
     }

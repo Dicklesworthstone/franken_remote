@@ -247,3 +247,97 @@ fn systemd_install_refuses_units_that_frd_run_would_refuse() {
         "{unit}"
     );
 }
+
+#[test]
+fn frd_run_options_after_double_dash_reach_the_unit_validated_by_frd_run() {
+    let options = parse(&[
+        "--user",
+        "--software-explicit",
+        "--approval",
+        "none",
+        "--",
+        "--input-agent",
+        "/usr/libexec/fr-input-agent",
+        "--clipboard",
+        "--logind-session",
+        "c2",
+    ])
+    .unwrap();
+    assert_eq!(
+        options.run_args,
+        [
+            "--input-agent",
+            "/usr/libexec/fr-input-agent",
+            "--clipboard",
+            "--logind-session",
+            "c2"
+        ]
+    );
+    let unit = crate::service_install::render_systemd_unit(&options);
+    assert!(
+        unit.contains(
+            "--software-explicit --input-agent /usr/libexec/fr-input-agent --clipboard --logind-session c2"
+        ),
+        "{unit}"
+    );
+    assert!(unit.contains("WantedBy=graphical-session.target"), "{unit}");
+    assert!(unit.contains("RestartPreventExitStatus=2"), "{unit}");
+}
+
+#[test]
+fn frd_run_options_that_every_start_would_refuse_are_refused_at_install() {
+    let base = ["--user", "--software-explicit", "--approval", "none", "--"];
+    for (tail, code) in [
+        (&["--clipboard"][..], Some("clipboard_requires_input_agent")),
+        (
+            &["--files", "/srv/drop"][..],
+            Some("files_requires_input_agent"),
+        ),
+        // frd run's own parser refuses these.
+        (&["--no-such-flag"][..], None),
+        (&["--input-agent"][..], None),
+        // Set by the installer's own flags, or meaningless for a service.
+        (&["--port", "9000"][..], None),
+        (&["--approval", "none"][..], None),
+        (&["--once"][..], None),
+        // Paths in a unit must be absolute.
+        (&["--input-agent", "relative/fr-input-agent"][..], None),
+    ] {
+        let args: Vec<&str> = base.iter().chain(tail).copied().collect();
+        match (parse(&args), code) {
+            (Err(ServiceError::HostProfileUnavailable { code: got, .. }), Some(want)) => {
+                assert_eq!(got, want, "{tail:?}");
+            }
+            (Err(ServiceError::InvalidOptions), None) => {}
+            (other, _) => panic!("{tail:?}: {other:?}"),
+        }
+    }
+    // A system unit has no user's X display: only a private headless one.
+    let refused = parse(&[
+        "--system",
+        "--software-explicit",
+        "--approval",
+        "none",
+        "--",
+        "--input-agent",
+        "/usr/libexec/fr-input-agent",
+    ]);
+    assert!(matches!(
+        refused,
+        Err(ServiceError::HostProfileUnavailable {
+            code: "system_service_requires_headless",
+            ..
+        })
+    ));
+    assert!(
+        parse(&[
+            "--system",
+            "--software-explicit",
+            "--approval",
+            "none",
+            "--",
+            "--headless"
+        ])
+        .is_ok()
+    );
+}

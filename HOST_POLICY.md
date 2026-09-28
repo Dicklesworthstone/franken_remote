@@ -58,6 +58,25 @@ because they match the original plan defaults. `--config /absolute/path.json`
 is preserved in Linux service definitions. The file must be readable by the
 service account, not just the account invoking the installer.
 
+Further `frd run` options go after `--` and land in the unit's `ExecStart`, for
+example `frd install --user --software-explicit --approval none -- --input-agent
+/usr/libexec/fr-input-agent --clipboard --logind-session c2`. They are parsed by
+`frd run`'s own parser at install time and refused when every start would refuse
+them: unknown or valueless flags, relative paths, `--clipboard`/`--files` without
+`--input-agent` (typed `clipboard_requires_input_agent` /
+`files_requires_input_agent`), flags the installer sets itself (`--port`,
+`--socket`, `--config`, `--approval`, `--sharing`, `--software-explicit`), and
+`--once`. A **system** unit has no user's X display, so it is refused
+(`system_service_requires_headless`) unless it shares a private `--headless`
+Xvfb. Only systemd units carry these options.
+
+A user unit is wanted by `graphical-session.target` (which provides `DISPLAY`),
+not `default.target`, which SSH-only logins also reach. Units use
+`Restart=on-failure` with `RestartPreventExitStatus=2`: `frd run`'s configuration
+refusals exit 2 and are not retried in a loop; runtime failures are. `frd
+uninstall` removes the unit file and prints how to stop and disable a service that
+is still running (it does not stop it itself, just as install does not start it).
+
 `frd install --dry-run` now prints the actual generated definition. JSON preview
 output includes `unit_content` and `next_steps`, with `started: false`. Writing a
 unit is not evidence that the daemon is running.
