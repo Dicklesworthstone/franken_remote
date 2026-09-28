@@ -202,6 +202,70 @@ fn slow_decode_cannot_reuse_fresh_at_dequeue_snapshot() {
     assert_eq!(view.visible(0, 70_000), Err(Error::QueueExpired));
     assert_eq!(view.evidence(70_001), Err(Error::NotSubmitted));
 }
+/// Shown after its display budget on a static desktop (no newer pixels come):
+/// the picture on screen is not fresh evidence, and nothing known at arrival
+/// can make it so. Only a strictly newer host verification of that exact
+/// picture qualifies it; pixel age keeps the old capture time.
+fn late_picture() -> (ReceivePipeline, ViewTracker, MediaLimits, FrameDescriptor) {
+    let (mut receiver, mut view, limits) = setup();
+    let unit = picture(&mut receiver, limits, 0, 1_005_000, 20_000);
+    let descriptor = unit.descriptor();
+    progress(
+        &mut view,
+        limits,
+        descriptor,
+        descriptor.capture_micros,
+        SourceObservation::Captured,
+        20_000,
+    )
+    .unwrap();
+    let token = receiver.complete_decode(&unit, 70_000).unwrap();
+    view.decoded(token, true, 70_000).unwrap();
+    assert_eq!(view.visible(0, 70_000), Err(Error::QueueExpired));
+    assert_eq!(view.evidence(70_001), Err(Error::NotSubmitted));
+    (receiver, view, limits, descriptor)
+}
+#[test]
+fn a_late_picture_is_qualified_only_by_a_newer_observation_of_itself() {
+    let (_receiver, mut view, limits, descriptor) = late_picture();
+    // Re-sending what was known when it arrived qualifies nothing.
+    assert_eq!(
+        progress(
+            &mut view,
+            limits,
+            descriptor,
+            descriptor.capture_micros,
+            SourceObservation::Captured,
+            71_000,
+        ),
+        Err(Error::Obsolete)
+    );
+    assert_eq!(view.evidence(71_000), Err(Error::NotSubmitted));
+    // The host verified that the source still matches this exact picture.
+    progress(
+        &mut view,
+        limits,
+        descriptor,
+        1_070_000,
+        SourceObservation::QualifiedUnchanged,
+        75_000,
+    )
+    .unwrap();
+    let evidence = view.evidence(76_000).unwrap();
+    assert_eq!(evidence.frame, descriptor.frame);
+    assert_eq!(evidence.source, SourceObservation::QualifiedUnchanged);
+    assert!(evidence.pixel_age_upper_us > evidence.source_age_upper_us);
+    assert!(evidence.source_age_upper_us < 250_000);
+}
+#[test]
+fn a_late_picture_never_verified_again_is_stale_after_the_source_age_limit() {
+    let (_receiver, mut view, _limits, _descriptor) = late_picture();
+    assert_eq!(view.evidence(70_000 + 249_999), Err(Error::NotSubmitted));
+    assert_eq!(view.evidence(70_000 + 250_000), Err(Error::SourceStale));
+    // Hiding it (occlusion, backgrounding) drops the unqualified picture too.
+    view.hide();
+    assert_eq!(view.evidence(70_000 + 250_001), Err(Error::NotSubmitted));
+}
 #[test]
 fn a_stale_network_arrival_is_not_a_fresh_source() {
     let (mut receiver, mut view, limits) = setup();

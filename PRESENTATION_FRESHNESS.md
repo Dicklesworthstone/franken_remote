@@ -60,6 +60,35 @@ picture cannot bless old pixels. Duplicate/reordered observations, decode
 callbacks and polling do not slide deadlines. The native worker now implements an exact X11 snapshot comparator; the
 broker freshness path still needs to consume its unchanged-capture replies.
 
+A picture whose visibility is confirmed after its display budget
+(`QueueExpired`) is never fresh evidence, but it is what the screen now shows,
+and on a static desktop no newer picture follows. The tracker therefore keeps it
+as an unqualified visible picture: `evidence` reports `NotSubmitted` (input stays
+gated; the viewer sends neither a positive nor a negative report, so the host's
+existing deadline neither extends nor lapses early) until a strictly newer host
+observation of that exact picture arrives (`QualifiedUnchanged` from the host's
+idle verification). Observations known when it became visible are `Obsolete` and
+cannot qualify it. Without one within the source-age limit it is `SourceStale`,
+as any unverified view. Previously a late picture was dropped, so on a static
+desktop the viewer had no qualifiable view until the host's view deadline lapsed.
+Evidence: fr-media `a_late_picture_is_qualified_only_by_a_newer_observation_of_itself`
+and `a_late_picture_never_verified_again_is_stale_after_the_source_age_limit`
+(planted negative: dropping the late picture fails both).
+
+**Limit, measured 2026-09-27 (negative evidence):** this does not yet keep
+control alive after a late picture. A namespace e2e (real `frd run`
+controlled session; a test-only client hook confirmed one picture 60 ms or 120 ms
+late, then the desktop stayed static) ended control in 4/4 and 3/3 runs at load
+average ~180-220, while the same screen change without the late confirmation kept
+control. The re-qualifying observation reaches the host after its view deadline,
+which is anchored to the previous picture's last verification (about 250 ms), and
+`SessionAuthority::mark_view_ready_until` refuses to restore readiness while a
+lease is held, so the lease cannot renew and ends. The plan describes stale
+presentation as *suspending* input (and asks for "time spent with input suspended
+by stale view"), which implies resumption within the lease lifetime; the authority
+treats a lapse as terminal. That contradiction is recorded for an owner decision
+(fr-rc2-static-view-represent-0ruq) rather than resolved here.
+
 ## Verification scope
 
 The new media regressions use actual record codecs/reassembly with explicitly
