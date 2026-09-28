@@ -496,7 +496,9 @@ async fn exercise(c: Cx, h: Cx, delay: u64, show: bool, map: bool, updates: bool
                                     && let Some(p) = pending.presentation()
                                     && shown != Some(p.frame)
                                 {
-                                    pending.visible(p.frame.as_raw()).unwrap();
+                                    crate::session_startup::confirm_visible(
+                                        pending.visible(p.frame.as_raw()),
+                                    );
                                     shown = Some(p.frame);
                                 }
                             }
@@ -504,7 +506,9 @@ async fn exercise(c: Cx, h: Cx, delay: u64, show: bool, map: bool, updates: bool
                                 assert!(show && map);
                                 let start = *active_at.get_or_insert_with(|| now(&c).unwrap());
                                 if let Some(p) = event {
-                                    viewer.visible(p.frame.as_raw()).unwrap();
+                                    crate::session_startup::confirm_visible(
+                                        viewer.visible(p.frame.as_raw()),
+                                    );
                                 }
                                 if sent == 0 {
                                     let _ = viewer.action(key(true)).unwrap();

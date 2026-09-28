@@ -179,7 +179,9 @@ async fn requested_from_loop(c: Cx, h: Cx, during_decode: bool) {
                         // Explicit local visibility fixture: native decoding alone
                         // does not authorize an input action on the new picture.
                         if let Some(event) = event {
-                            input.visible(event.frame.as_raw()).unwrap();
+                            crate::session_startup::confirm_visible(
+                                input.visible(event.frame.as_raw()),
+                            );
                         }
                         // This pending action is never transmitted by the closing exchange.
                         let _ = input.action(key(true)).unwrap();

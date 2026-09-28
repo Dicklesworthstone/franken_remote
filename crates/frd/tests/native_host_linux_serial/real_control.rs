@@ -677,11 +677,16 @@ impl Controlled {
                 self.daemon.dump()
             );
         }
-        // The executor maps its indicator BEFORE it accepts any input.
-        assert!(
-            indicator(&mut self.observer).is_some(),
-            "host input without the mandatory indicator"
-        );
+        // The executor maps its indicator BEFORE it accepts any input. An absent
+        // indicator right after input landed means that lease has already ended
+        // (or a real ordering bug): report which, never retry past it.
+        if indicator(&mut self.observer).is_none() {
+            let client = self.client.try_wait().unwrap();
+            panic!(
+                "host input without the mandatory indicator (client exited: {client:?}): {}",
+                self.daemon.dump()
+            );
+        }
     }
     /// Viewer motion reaches exactly this host point (1:1 mapping, origin 0,0).
     pub(super) fn pointer_follows(&mut self, local: Point, limit: Duration) -> bool {

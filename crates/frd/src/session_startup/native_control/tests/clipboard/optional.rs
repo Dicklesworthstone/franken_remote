@@ -110,7 +110,9 @@ async fn unconfigured_peer(c: Cx, h: Cx, cleanup: Cx, configured_ends: [bool; 2]
                                 if let Some(p) = viewing.presentation()
                                     && shown != Some(p.frame)
                                 {
-                                    viewing.visible(p.frame.as_raw()).unwrap();
+                                    crate::session_startup::confirm_visible(
+                                        viewing.visible(p.frame.as_raw()),
+                                    );
                                     shown = Some(p.frame);
                                 }
                                 if !requested && now(&c).unwrap() > start + 100_000 {
@@ -121,7 +123,9 @@ async fn unconfigured_peer(c: Cx, h: Cx, cleanup: Cx, configured_ends: [bool; 2]
                             session_startup::InteractiveViewerState::Requesting(_) => {}
                             session_startup::InteractiveViewerState::Controlled(input) => {
                                 if let Some(p) = frame {
-                                    input.visible(p.frame.as_raw()).unwrap();
+                                    crate::session_startup::confirm_visible(
+                                        input.visible(p.frame.as_raw()),
+                                    );
                                 }
                                 // Application status is collected on each endpoint's
                                 // own turn, after its actual readiness/retirement event.

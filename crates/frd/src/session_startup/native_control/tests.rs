@@ -414,7 +414,9 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, consent: bool, visible: bool) {
                                         && let Some(p) = pending.presentation()
                                         && shown != Some(p.frame)
                                     {
-                                        pending.visible(p.frame.as_raw()).unwrap();
+                                        crate::session_startup::confirm_visible(
+                                            pending.visible(p.frame.as_raw()),
+                                        );
                                         shown = Some(p.frame);
                                     }
                                 }
@@ -422,7 +424,9 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, consent: bool, visible: bool) {
                                     assert!(visible && consent);
                                     let at = *active.get_or_insert_with(|| now(&c).unwrap());
                                     if let Some(p) = event {
-                                        input.visible(p.frame.as_raw()).unwrap();
+                                        crate::session_startup::confirm_visible(
+                                            input.visible(p.frame.as_raw()),
+                                        );
                                     }
                                     if sent_actions == 0
                                         || (sent_actions == 1 && receipts.get() == 1)

@@ -157,7 +157,9 @@ async fn granted(c: Cx, h: Cx, cleanup: Cx, end: End) {
                                     && shown != Some(p.frame)
                                 {
                                     // Explicit platform visibility fixture, not decode=visible.
-                                    viewing.visible(p.frame.as_raw()).unwrap();
+                                    crate::session_startup::confirm_visible(
+                                        viewing.visible(p.frame.as_raw()),
+                                    );
                                     shown = Some(p.frame);
                                 }
                                 if now(&c).unwrap() >= started + 120_000 && !requested.replace(true)
@@ -171,7 +173,9 @@ async fn granted(c: Cx, h: Cx, cleanup: Cx, end: End) {
                             }
                             InteractiveViewerState::Controlled(input) => {
                                 if let Some(frame) = frame {
-                                    input.visible(frame.frame.as_raw()).unwrap();
+                                    crate::session_startup::confirm_visible(
+                                        input.visible(frame.frame.as_raw()),
+                                    );
                                 }
                                 if !pressed {
                                     let _ = input.action(key(true)).unwrap();

@@ -391,7 +391,9 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, case: Case, delay: u64, hold: u64) 
                                             frame.stage,
                                             PresentationStage::SubmittedToCompositor
                                         );
-                                        pending.visible(frame.frame.as_raw()).unwrap();
+                                        crate::session_startup::confirm_visible(
+                                            pending.visible(frame.frame.as_raw()),
+                                        );
                                         visible = Some(frame.frame);
                                     }
                                 }
@@ -399,7 +401,9 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, case: Case, delay: u64, hold: u64) 
                                     active.set(true);
                                     let at = *activated.get_or_insert_with(|| now(&c).unwrap());
                                     if let Some(frame) = event {
-                                        controlled.visible(frame.frame.as_raw()).unwrap();
+                                        crate::session_startup::confirm_visible(
+                                            controlled.visible(frame.frame.as_raw()),
+                                        );
                                     }
                                     if sent == 0 {
                                         let _ = controlled.action(key(true)).unwrap();

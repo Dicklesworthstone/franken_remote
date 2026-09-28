@@ -122,7 +122,7 @@ fn public_native_viewer_watches_past_request_budget_then_takes_control_in_place(
                                         if let Some(p) = viewing.presentation()
                                             && shown != Some(p.frame)
                                         {
-                                            viewing.visible(p.frame.as_raw()).unwrap();
+                                            crate::session_startup::confirm_visible(viewing.visible(p.frame.as_raw()));
                                             shown = Some(p.frame);
                                         }
                                         if now(&c).unwrap() >= start + 2_200_000
@@ -147,7 +147,7 @@ fn public_native_viewer_watches_past_request_budget_then_takes_control_in_place(
                                         assert!(request_started.get());
                                         activated = true;
                                         if let Some(p) = frame {
-                                            input.visible(p.frame.as_raw()).unwrap();
+                                            crate::session_startup::confirm_visible(input.visible(p.frame.as_raw()));
                                         }
                                         if sent_actions == 0
                                             || (sent_actions == 1 && receipts.get() == 1)

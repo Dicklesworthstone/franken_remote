@@ -289,7 +289,7 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, scenario: Scenario) {
                         assert!(!os[0].lock().unwrap().opened && !os[1].lock().unwrap().opened);
                         viewing.confirm_mapping(request.parent, target.view).unwrap();
                         if let Some(p)=viewing.presentation() && shown!=Some(p.frame) {
-                            viewing.visible(p.frame.as_raw()).unwrap(); shown=Some(p.frame);
+                            crate::session_startup::confirm_visible(viewing.visible(p.frame.as_raw())); shown=Some(p.frame);
                         }
                         if !requested && now(&c).unwrap()>start+100_000 {
                             viewing.request_control().unwrap(); requested=true;
@@ -297,7 +297,7 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, scenario: Scenario) {
                     }
                     session_startup::InteractiveViewerState::Requesting(_)=> {},
                     session_startup::InteractiveViewerState::Controlled(input)=> {
-                        if let Some(p)=frame { input.visible(p.frame.as_raw()).unwrap(); }
+                        if let Some(p)=frame { crate::session_startup::confirm_visible(input.visible(p.frame.as_raw())); }
                         if scenario==Scenario::Transfer {
                             let receipt=if copies==1 {local.take_received()}else{remote.take_received()};
                             if let Some(receipt)=receipt {

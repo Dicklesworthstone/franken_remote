@@ -191,13 +191,17 @@ fn a_controlling_first_viewer_gets_the_exclusive_share_and_its_input_reaches_the
                                 if let Some(p) = pending.presentation()
                                     && shown != Some(p.frame)
                                 {
-                                    pending.visible(p.frame.as_raw()).unwrap();
+                                    crate::session_startup::confirm_visible(
+                                        pending.visible(p.frame.as_raw()),
+                                    );
                                     shown = Some(p.frame);
                                 }
                             }
                             ViewerControlState::Controlled(input) => {
                                 if let Some(p) = frame {
-                                    input.visible(p.frame.as_raw()).unwrap();
+                                    crate::session_startup::confirm_visible(
+                                        input.visible(p.frame.as_raw()),
+                                    );
                                 }
                                 if !pressed {
                                     let _ = input.action(key(true)).unwrap();
@@ -479,13 +483,17 @@ fn a_clipboard_profile_follows_the_lease_through_its_own_child_both_ways() {
                                 if let Some(p) = pending.presentation()
                                     && shown != Some(p.frame)
                                 {
-                                    pending.visible(p.frame.as_raw()).unwrap();
+                                    crate::session_startup::confirm_visible(
+                                        pending.visible(p.frame.as_raw()),
+                                    );
                                     shown = Some(p.frame);
                                 }
                             }
                             ViewerControlState::Controlled(input) => {
                                 if let Some(p) = frame {
-                                    input.visible(p.frame.as_raw()).unwrap();
+                                    crate::session_startup::confirm_visible(
+                                        input.visible(p.frame.as_raw()),
+                                    );
                                 }
                                 let published = format!("PUBLISH {}", viewer_copy.len());
                                 match stage.get() {

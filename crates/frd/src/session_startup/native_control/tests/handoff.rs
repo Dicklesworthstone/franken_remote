@@ -432,7 +432,9 @@ async fn exercise(c: Cx, h: Cx, case: Case) {
                                             p.stage,
                                             crate::media::PresentationStage::SubmittedToCompositor
                                         );
-                                        pending.visible(p.frame.as_raw()).unwrap();
+                                        crate::session_startup::confirm_visible(
+                                            pending.visible(p.frame.as_raw()),
+                                        );
                                         shown = Some(p.frame);
                                     }
                                 }
@@ -440,7 +442,9 @@ async fn exercise(c: Cx, h: Cx, case: Case) {
                                     assert!(matches!(case, Case::Idle | Case::CaptureStall));
                                     let since = *activated.get_or_insert_with(|| now(&c).unwrap());
                                     if let Some(p) = frame {
-                                        v.visible(p.frame.as_raw()).unwrap();
+                                        crate::session_startup::confirm_visible(
+                                            v.visible(p.frame.as_raw()),
+                                        );
                                     }
                                     if actions_sent == 0 {
                                         let _ = v.action(key(true)).unwrap();

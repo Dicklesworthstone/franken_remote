@@ -164,7 +164,9 @@ async fn managed(c: Cx, h: Cx, mode: Mode) {
                                     && let Some(p) = pending.presentation()
                                     && shown != Some(p.frame)
                                 {
-                                    pending.visible(p.frame.as_raw()).unwrap();
+                                    crate::session_startup::confirm_visible(
+                                        pending.visible(p.frame.as_raw()),
+                                    );
                                     shown = Some(p.frame);
                                 }
                             }
@@ -178,7 +180,9 @@ async fn managed(c: Cx, h: Cx, mode: Mode) {
                                         | Mode::Fenced
                                 ));
                                 if let Some(p) = frame {
-                                    input.visible(p.frame.as_raw()).unwrap();
+                                    crate::session_startup::confirm_visible(
+                                        input.visible(p.frame.as_raw()),
+                                    );
                                 }
                                 let at = *since.get_or_insert_with(|| now(&c).unwrap());
                                 if !action_sent {

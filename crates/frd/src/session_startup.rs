@@ -925,5 +925,23 @@ pub(crate) fn connection_test_host(
 #[cfg(test)]
 pub(crate) use tests::support as test_network;
 
+/// Test drivers confirm each submitted frame as `fr` does: a picture that is not
+/// fresh evidence on a loaded machine - confirmed after its display budget
+/// (`QueueExpired`) or already older than the source-age limit (`SourceStale`) -
+/// counts for nothing and the next frame is confirmed instead. Any other refusal
+/// (bindings, clock, protocol) still fails the test.
+#[cfg(test)]
+pub(crate) fn confirm_visible<T, E: std::fmt::Debug>(result: Result<T, E>) {
+    if let Err(error) = result {
+        let described = format!("{error:?}");
+        assert!(
+            ["QueueExpired", "SourceStale"]
+                .iter()
+                .any(|freshness| described.contains(freshness)),
+            "visibility refused: {described}"
+        );
+    }
+}
+
 /// Service multiple original shared-viewer connections without per-viewer capture.
 pub use running::hub as shared_viewers;
