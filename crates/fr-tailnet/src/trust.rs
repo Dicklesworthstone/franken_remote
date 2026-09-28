@@ -164,14 +164,64 @@ mod tests {
         assert!(roots.len() > 64, "{}", roots.len());
     }
 
+    /// Independent oracle for one link chain on THIS host: the first element
+    /// that breaks the documented policy (hop not root-owned, a directory not
+    /// root-owned or group/other-writable, final file writable), or `None`.
+    fn policy_violation(path: &Path) -> Option<String> {
+        let stat = |p: &Path| std::fs::symlink_metadata(p).ok();
+        let mut current = path.to_path_buf();
+        for _ in 0..=MAX_LINK_HOPS {
+            let meta = stat(&current)?;
+            let parent = current.parent()?.to_path_buf();
+            let resolved = std::fs::canonicalize(&parent).ok()?;
+            for dir in parent.ancestors().chain(resolved.ancestors()) {
+                if dir.as_os_str().is_empty() {
+                    continue;
+                }
+                let m = stat(dir)?;
+                let link = m.file_type().is_symlink();
+                if m.uid() != 0 || (!link && m.mode() & 0o022 != 0) {
+                    return Some(format!(
+                        "{} uid {} mode {:o}",
+                        dir.display(),
+                        m.uid(),
+                        m.mode()
+                    ));
+                }
+            }
+            if meta.uid() != 0 {
+                return Some(format!("{} uid {}", current.display(), meta.uid()));
+            }
+            if !meta.file_type().is_symlink() {
+                return (meta.mode() & 0o022 != 0)
+                    .then(|| format!("{} mode {:o}", current.display(), meta.mode()));
+            }
+            current = parent.join(std::fs::read_link(&current).ok()?);
+        }
+        Some("too many hops".into())
+    }
+
     #[test]
     fn protected_resolution_follows_root_owned_links_and_refuses_user_links() {
-        // A distribution-owned certificate link (Debian/Ubuntu layout).
+        // A distribution-owned certificate link (Debian/Ubuntu layout). The
+        // resolver must follow it exactly when every element meets the policy,
+        // judged by the independent oracle above, and refuse it otherwise.
         let system = Path::new("/etc/ssl/certs/ISRG_Root_X1.pem");
         if system.exists() {
-            let resolved = resolve_protected(system).unwrap();
-            assert!(!std::fs::symlink_metadata(&resolved).unwrap().is_symlink());
-            assert_eq!(read_certificates(&resolved).unwrap().len(), 1);
+            match policy_violation(system) {
+                None => {
+                    let resolved = resolve_protected(system).unwrap();
+                    assert!(!std::fs::symlink_metadata(&resolved).unwrap().is_symlink());
+                    assert_eq!(read_certificates(&resolved).unwrap().len(), 1);
+                }
+                Some(violation) => {
+                    eprintln!("distribution link violates the policy here: {violation}");
+                    assert_eq!(
+                        resolve_protected(system).err(),
+                        Some(TrustError::Unreadable)
+                    );
+                }
+            }
         } else {
             eprintln!("SKIPPED positive half: no {}", system.display());
         }
