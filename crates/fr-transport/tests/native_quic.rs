@@ -606,6 +606,96 @@ fn one_receive_turn_drains_a_datagram_burst_past_idle_stream_lanes() {
         assert_eq!(turns, [16, 4, 0]);
     });
 }
+/// A critical record admitted behind a window-full media queue goes out in the
+/// next packet (Asupersync assembles STREAM before DATAGRAM frames). It is not
+/// held until the window also fits every queued, replaceable datagram: under
+/// loss that wait expired renewal challenges and closed real sessions.
+#[test]
+fn a_critical_record_is_not_held_behind_queued_media_datagrams() {
+    run_test!(cx, {
+        let mut p = pair(&cx, Policy::default()).await;
+        let limits = MediaLimits::new(ProtocolLimits::ABSOLUTE, 1150, 16384, 64).unwrap();
+        let data = vec![19; 1077];
+        // Queue media until the window refuses more, without driving.
+        let mut queued = 0_u32;
+        loop {
+            assert!(queued < 64, "the window never refused media");
+            let mut bytes = vec![0; 1150];
+            fr_wire::encode_fragment(
+                fr_wire::Fragment {
+                    descriptor: FrameDescriptor {
+                        frame: 1,
+                        reference: Some(0),
+                        total_bytes: 1077 * 64,
+                        stride: 1077,
+                        capture_micros: 0,
+                    },
+                    index: queued,
+                    bytes: &data,
+                },
+                1,
+                &limits,
+                &mut bytes,
+            )
+            .unwrap();
+            match p.server.send(
+                &cx,
+                Route::Datagram(p.video),
+                &bytes,
+                clock(&cx) + 1_000_000,
+                || true,
+            ) {
+                Ok(()) => queued += 1,
+                Err(Error::Backpressure) => break,
+                Err(e) => panic!("media send failed: {e:?}"),
+            }
+        }
+        assert!(queued > 0);
+        let critical = record(3, 0x37, 100, 7);
+        p.server
+            .send(
+                &cx,
+                Route::Stream(p.host_routes[0]),
+                &critical,
+                clock(&cx) + 1_000_000,
+                || true,
+            )
+            .unwrap();
+        // ONE sender turn; the receiver then takes in whatever that turn sent.
+        p.server
+            .drive(&cx, Duration::from_millis(1), || true)
+            .await
+            .unwrap();
+        let mut got = None;
+        for _ in 0..20 {
+            p.client
+                .drive(&cx, Duration::from_millis(1), || true)
+                .await
+                .unwrap();
+            p.client
+                .receive(
+                    &cx,
+                    || true,
+                    |route, bytes| {
+                        if matches!(route, Route::Stream(_)) {
+                            got = Some(bytes.to_vec());
+                        }
+                        Ok(Disposition::Consumed)
+                    },
+                )
+                .unwrap();
+            if got.is_some() {
+                break;
+            }
+        }
+        assert_eq!(
+            got.as_deref(),
+            Some(critical.as_slice()),
+            "critical record held behind {queued} queued datagrams"
+        );
+    });
+}
+
 #[test]
 fn datagram_cap_rejects_before_native_fatal_path_and_delivers_exact_boundary() {
     run_test!(cx, {

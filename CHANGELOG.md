@@ -15,6 +15,10 @@ Namespace evidence only, as below.
   `host_not_heard`. A stale view met by the transport's view gate is no longer
   a bare `Unauthorized`, and any remaining generic end prints its typed chain
   on stderr.
+- Transport: critical session records (renewal challenges, control responses,
+  presented reports) are no longer held behind queued media datagrams. Under
+  loss, that wait expired host renewal challenges and closed view-only sessions.
+  View-only now holds at 40 ms RTT with 5% loss in the netem rows.
 - `frd install [flags] -- <frd run options>` (systemd), validated at install
   time. User units start with the graphical session, and configuration
   refusals do not restart-loop (514af9b).

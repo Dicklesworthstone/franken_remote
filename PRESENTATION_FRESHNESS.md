@@ -120,7 +120,10 @@ causes appear, and `fr` now names each instead of the generic
   send-by deadline, so `QuicRecords` closed the connection rather than deliver
   late state.
 - `host_not_heard` (view-only rows): no observation challenge arrived within the
-  viewer's 3 s silence bound.
+  viewer's 3 s silence bound. On the host the viewer ended with
+  `Renewal(Transport(Expired))`: the host's own challenge record missed its send-by
+  deadline and the host closed the connection, which the client can only detect
+  as silence.
 
 Controlled experiment (diagnostic build, not committed): with the source-age
 bound raised from 250 ms to 1 s on both ends (`fr_client::input::Policy::view_age_us`
@@ -161,6 +164,26 @@ An exiting view-only client now reports `host_not_heard` at 200 ms RTT and 5%
 loss (three runs). The test asserts that the first three rows hold. The other
 rows must hold, show a change late, or end with a named cause. These timings
 are this loaded host's namespace measurements, not latency claims (plan 21).
+
+**Critical records no longer wait behind queued media (2026-09-28).** A
+diagnostic build printed the host transport's state at each sender-deadline
+expiry. The challenge record usually had never been staged: the native stream
+was empty, but `QuicRecords` staged a stream prefix only once the congestion
+window also fitted every queued media datagram. Under loss, media keeps that
+queue at the window limit. Asupersync puts STREAM frames ahead of DATAGRAMs in
+each packet, so critical prefixes now need window room only for themselves,
+while bulk prefixes still wait for the media queue (QUIC_RECORDS.md). The
+remaining expiries at 100 ms RTT had a staged frame awaiting acknowledgement,
+the stop-and-wait epoch cost that needs an upstream retention query.
+
+Before the change, the view-only rows at 40 ms RTT failed as follows:
+- with 1% loss (a must-hold row), 2 of about 15 runs failed;
+- with 5% loss, about half of the runs ended.
+
+After it, both rows held 6/6 in 3 of 3 runs (a small sample). Control still ends
+at ≥60 ms RTT or with 1% loss, through `transport_deadline_expired` or
+`view_stale`: the client's presented-report deadline is the 250 ms age budget
+minus the sample's conservative age, which is again the owner decision above.
 
 ## Verification scope
 

@@ -850,6 +850,11 @@ impl QuicRecords {
     /// Stage one small prefix, leaving congestion/loss control with Asupersync.
     /// Large application records are NOT single QUIC frames. No prefix is staged
     /// when native queued work plus flight could fill the protected-packet window.
+    ///
+    /// Asupersync assembles STREAM frames before queued DATAGRAMs, so a critical
+    /// prefix needs window room for itself only: queued (replaceable) media must
+    /// never hold a renewal challenge, control response or presented report past
+    /// its deadline. Bulk prefixes still wait until the media queue fits too.
     fn queue_stream_prefix(&mut self, cx: &Cx, now: u64) -> Result<Option<Priority>, Error> {
         if self.pending_writes.iter().any(|p| now >= p.send_by) {
             return Err(Error::Expired);
@@ -857,13 +862,12 @@ impl QuicRecords {
         let native = self.native.as_mut().ok_or(Error::Closed)?;
         let inner = native.connection().inner();
         let path = native.connection().path_stats();
-        let needed = (inner.pending_outbound_datagram_count() as u64 + 2) * 1200;
-        if inner.has_pending_stream_frames()
-            || path
-                .congestion_window_bytes
-                .saturating_sub(path.bytes_in_flight)
-                < needed
-        {
+        let room = path
+            .congestion_window_bytes
+            .saturating_sub(path.bytes_in_flight);
+        let critical_needed = 2 * 1200;
+        let bulk_needed = (inner.pending_outbound_datagram_count() as u64 + 2) * 1200;
+        if inner.has_pending_stream_frames() || room < critical_needed {
             return Ok(None);
         }
         let reserve = if self
@@ -878,6 +882,9 @@ impl QuicRecords {
         let connection_credit = inner.streams().connection_send_remaining();
         let mut selected = None;
         for priority in [Priority::Critical, Priority::Bulk] {
+            if priority == Priority::Bulk && room < bulk_needed {
+                break;
+            }
             for (index, pending) in self.pending_writes.iter().enumerate() {
                 // Preserve bytes and whole-record order WITHIN each stream,
                 // while a flow-blocked stream cannot block another stream.

@@ -86,6 +86,19 @@ Debug output. Any unmatched private state conservatively prevents release. This
 version-specific absence proof must be requalified on an Asupersync upgrade and
 can be replaced by an explicit upstream retention query when available.
 
+Staging priority. Asupersync assembles each packet from control frames, then
+STREAM frames, then queued DATAGRAMs. A critical reliable prefix is therefore
+staged whenever the congestion window has room for two packets beyond the bytes
+in flight, even while media datagrams are queued. Those datagrams are
+replaceable. Until 2026-09-28 a critical prefix instead waited until the window
+also fitted every queued datagram. Under namespace `tc netem` loss, media kept
+that queue at the window limit, so host renewal challenges missed their send-by
+deadline and closed view-only sessions. Bulk prefixes still wait for the media
+queue, so a file or recovery transfer never gets ahead of media. Records on one
+stream remain stop-and-wait per epoch (the absence proof above). A record
+admitted while an earlier epoch is unacknowledged therefore waits up to one more
+round trip. Removing that wait needs the upstream retention query.
+
 This distinction matters on 0.4.10: attaching bounded windows in both directions
 can generate continuing ACK/window-update traffic, so total bytes-in-flight
 need not become zero when all reliable payload ownership has ended. Payload
