@@ -25,7 +25,31 @@ XTest events (a7b29ce and follow-ups); lock/logout not ending sharing (plan 2.2)
 when `--logind-session` is given (5a8e12d); operator strings that understated
 control or advertised unserved HTTPS/h3 endpoints (e55e56e).
 
+**Update 2026-09-28 (namespace evidence; see PRESENTATION_FRESHNESS.md).**
+Real `tc netem` rows now measure the network limit. Control holds on a clean
+link and at 40 ms RTT, and ends at 60 ms RTT or more, or with 1% loss.
+View-only holds at 40 ms RTT with 1% or 5% loss and at 100 ms RTT, and ends at
+200 ms RTT. Near 60 ms RTT, control ends because of the fixed 250 ms source-age
+bound and the presented-report deadlines derived from it (a 1 s experiment held
+60 ms RTT). The owner decision `fr-rc2-owner-decision-view-lapse-f7ts` is pending.
+
+Fixed today:
+- critical session records starving behind queued media under loss (faae064);
+- sessions that ended without a host report now name their cause:
+  `view_stale`, `transport_deadline_expired` or `host_not_heard` (83781b0);
+- `frd install -- <frd run options>` (514af9b);
+- a typed certificate-rejection mapping (11cdf3a).
+
+A wrong-host certificate still ends in a dial timeout: the pinned stack surfaces
+the rejection only as an opaque code, and the fix is upstream. Gates:
+- namespace suite 60/0;
+- frd lib 742/0;
+- fr-transport 165/0 (load about 110-120).
+
 **Open, in priority order:**
+- Control over ordinary tailnet paths: it ends at 60 ms RTT or more, or with 1%
+  loss (above). This needs the owner decision on view-lapse semantics and an
+  RTT-aware bound.
 - A live two-machine run: no client on another tailnet node has ever connected
   (owner decision needed: a second machine, or an auth key for an isolated test
   node). Every row above is namespace evidence.
