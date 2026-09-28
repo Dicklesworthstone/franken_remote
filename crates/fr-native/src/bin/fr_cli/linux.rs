@@ -355,6 +355,7 @@ fn connect(
         );
         runtime.block_on(shutdown.run(cx, stopped, operation))
     };
+    state.borrow_mut().media = application.statistics();
     completed(&application, result, stopped.get(), &state.borrow(), json)
 }
 /// The existing local X11 session: `--x-display`, else DISPLAY.
@@ -555,6 +556,8 @@ struct Progress {
     audio: Option<Rc<RefCell<audio::Report>>>,
     /// Some only with `--send`: the explicit selection and its outcome.
     files: Option<files::Local>,
+    /// The last attempt's content-free viewer counters (set after the run).
+    media: Option<frd::session_startup::ViewerStatistics>,
 }
 #[cfg(feature = "linux-desktop")]
 impl Progress {
@@ -723,11 +726,12 @@ fn completion(progress: &Progress, json: bool, closure: Option<crate::closure::R
     if json {
         let closure = closure.map_or_else(|| "null".to_owned(), crate::closure::Report::json);
         format!(
-            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"observe\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"audio_requested\":{},\"audio_active\":{},\"audio_frames_submitted\":{},\"audio_output_resets\":{},\"audio_absence\":{},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false,\"audibility_proven\":false,\"close_exchange\":{closure}}}\n",
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"observe\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{},\"audio_requested\":{},\"audio_active\":{},\"audio_frames_submitted\":{},\"audio_output_resets\":{},\"audio_absence\":{},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false,\"audibility_proven\":false,\"close_exchange\":{closure}}}\n",
             output::timestamp(),
             progress.attempts,
             progress.opened,
             progress.presented,
+            media_json(progress.media),
             requested,
             active,
             played,
@@ -756,6 +760,33 @@ fn completion(progress: &Progress, json: bool, closure: Option<crate::closure::R
         )
     }
 }
+/// Loss-recovery and freshness evidence for the LAST attempt: decoded
+/// pictures, repair requests admitted to transport, completed recovery
+/// handshakes, and the presented source-age upper bound at admitted reports as
+/// 10 ms bucket edges (p50/p95). Counts and bounds only; not visibility,
+/// delivery or latency proof.
+#[cfg(feature = "linux-desktop")]
+fn media_json(media: Option<frd::session_startup::ViewerStatistics>) -> String {
+    media.map_or_else(
+        || "null".to_owned(),
+        |m| {
+            let age = |permille| {
+                m.presented_age
+                    .quantile_upper_us(permille)
+                    .map_or_else(|| "null".to_owned(), |us| (us / 1000).to_string())
+            };
+            format!(
+                "{{\"decoded\":{},\"repair_requests\":{},\"recovered_streams\":{},\"presented_age_reports\":{},\"presented_age_p50_ms_at_most\":{},\"presented_age_p95_ms_at_most\":{}}}",
+                m.decoded,
+                m.repair_requests,
+                m.recovered_streams,
+                m.presented_age.reports(),
+                age(500),
+                age(950)
+            )
+        },
+    )
+}
 /// Counts are host-reported stages, not local effect proof; visibility stays
 /// the X11 submission witness described in `control.rs`, never optical proof.
 /// Clipboard fields are content-free: requested, became active, host items
@@ -773,11 +804,12 @@ fn control_completion(progress: &Progress, control: control::Counters, json: boo
         .unwrap_or("not_requested");
     if json {
         format!(
-            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"control_requested\":{},\"control_granted\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{}{},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false}}\n",
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{},\"control_requested\":{},\"control_granted\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{}{},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false}}\n",
             output::timestamp(),
             progress.attempts,
             progress.opened,
             progress.presented,
+            media_json(progress.media),
             control.requested,
             control.granted,
             control.results,
@@ -1100,6 +1132,34 @@ mod tests {
             );
             let text = completion(&ended, false, None);
             assert!(text.starts_with("Control session stopped;") && text.contains("granted"));
+        }
+
+        #[test]
+        fn completions_report_the_last_attempts_recovery_counts_or_null() {
+            let media = frd::session_startup::ViewerStatistics {
+                decoded: 41,
+                repair_requests: 3,
+                recovered_streams: 1,
+                ..Default::default()
+            };
+            let expected = "\"last_attempt_media\":{\"decoded\":41,\"repair_requests\":3,\"recovered_streams\":1,\"presented_age_reports\":0,\"presented_age_p50_ms_at_most\":null,\"presented_age_p95_ms_at_most\":null}";
+            for progress in [
+                Progress {
+                    media: Some(media),
+                    ..Progress::default()
+                },
+                Progress {
+                    media: Some(media),
+                    control: Some(control::Counters::default()),
+                    ..Progress::default()
+                },
+            ] {
+                let json = completion(&progress, true, None);
+                assert!(json.contains(expected), "{json}");
+                assert!(serde_json::from_str::<serde_json::Value>(&json).is_ok());
+            }
+            let none = completion(&Progress::default(), true, None);
+            assert!(none.contains("\"last_attempt_media\":null"), "{none}");
         }
 
         #[test]

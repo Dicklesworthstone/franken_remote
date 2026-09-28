@@ -402,6 +402,17 @@ and retains `transport_qualified: false` and `physical_visibility_proven: false`
 The legacy `cleanup_confirmed` field refers only to the local supervisor's
 completed cleanup. It never describes the remote host.
 
+Both stopped completions (observation and control) include
+`last_attempt_media`, content-free counters for the last attempt: `decoded`
+pictures, `repair_requests` admitted to transport, `recovered_streams`
+(completed recovery handshakes), and `presented_age_reports` with
+`presented_age_p50_ms_at_most` / `presented_age_p95_ms_at_most`. The last two
+are the presented source-age upper bound at each admitted presented report,
+rounded up to 10 ms buckets. They exist only for control sessions: view-only
+has no clock exchange, so its age fields are `null`. The whole field is `null`
+when that attempt never opened a viewer. None of these counters proves
+delivery, visibility or latency.
+
 Observation completion now includes `close_exchange`: `null` means no completed
 exchange, including emergency cancellation or unpolled abandonment. Otherwise it
 contains independent `request_acknowledged`, `transport_completed`, and

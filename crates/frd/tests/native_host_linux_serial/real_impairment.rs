@@ -17,15 +17,19 @@ use std::{process::Command, thread, time::Instant};
 /// One loopback netem profile for the lifetime of the value.
 struct Netem;
 impl Netem {
-    fn apply(delay_ms: u32, loss_percent: f32) -> Self {
+    /// `rate_kbit` 0 leaves the rate unlimited.
+    fn apply(delay_ms: u32, loss_percent: f32, rate_kbit: u32) -> Self {
         let delay = format!("{delay_ms}ms");
         let loss = format!("{loss_percent}%");
-        let status = Command::new("tc")
-            .args(["qdisc", "replace", "dev", "lo", "root", "netem", "delay"])
-            .args([delay.as_str(), "loss", loss.as_str()])
-            .status()
-            .unwrap();
-        assert!(status.success(), "tc netem {delay} {loss}");
+        let rate = format!("{rate_kbit}kbit");
+        let mut tc = Command::new("tc");
+        tc.args(["qdisc", "replace", "dev", "lo", "root", "netem", "delay"])
+            .args([delay.as_str(), "loss", loss.as_str()]);
+        if rate_kbit != 0 {
+            tc.args(["rate", rate.as_str()]);
+        }
+        let status = tc.status().unwrap();
+        assert!(status.success(), "tc netem {delay} {loss} {rate}");
         Self
     }
 }
@@ -46,13 +50,30 @@ struct Row {
     steps: usize,
     /// None: control still held at the end. Some: the client's completion.
     ended: Option<String>,
+    /// The held session's content-free `last_attempt_media` counters.
+    media: Option<String>,
+}
+
+/// `fr`'s stopped completion from `attempts` through the `last_attempt_media`
+/// object (decoded pictures, repair requests, recovered streams, presented-age
+/// p50/p95 bucket bounds) or its `null`.
+fn media(completion: &str) -> Option<String> {
+    let start = completion.find("\"attempts\":")?;
+    let rest = &completion[start..];
+    let media = rest.find("\"last_attempt_media\":")? + "\"last_attempt_media\":".len();
+    let end = if rest[media..].starts_with("null") {
+        media + "null".len()
+    } else {
+        media + rest[media..].find('}')? + 1
+    };
+    Some(rest[..end].to_owned())
 }
 
 const STEPS: usize = 8;
 
 fn row(delay_ms: u32, loss_percent: f32) -> Row {
     let mut s = Controlled::start_with(false, false);
-    let netem = Netem::apply(delay_ms, loss_percent);
+    let netem = Netem::apply(delay_ms, loss_percent, 0);
     let mut motion = Vec::new();
     let mut ended = None;
     for step in 0..STEPS {
@@ -75,7 +96,7 @@ fn row(delay_ms: u32, loss_percent: f32) -> Row {
     }
     drop(netem);
     let steps = motion.len();
-    if ended.is_some() || s.client.try_wait().unwrap().is_some() {
+    let repaired = if ended.is_some() || s.client.try_wait().unwrap().is_some() {
         let output = wait_for(s.client, Duration::from_secs(30));
         let completion = format!(
             "{} | stderr {}",
@@ -93,17 +114,20 @@ fn row(delay_ms: u32, loss_percent: f32) -> Row {
             ended.unwrap_or_default()
         ));
         s.daemon.finish();
+        None
     } else {
         super::real_media::close_window(&s.viewer.display, s.window.0);
-        let _ = wait_for(s.client, Duration::from_secs(30));
+        let output = wait_for(s.client, Duration::from_secs(30));
         s.daemon.finish();
-    }
+        media(&String::from_utf8_lossy(&output.stdout))
+    };
     Row {
         delay_ms,
         loss_percent,
         motion,
         steps,
         ended,
+        media: repaired,
     }
 }
 
@@ -119,12 +143,13 @@ fn summary(r: &Row) -> String {
     let mut sorted = r.motion.clone();
     sorted.sort();
     format!(
-        "delay {} ms (RTT {} ms) loss {}%: steps {}/{STEPS}, max motion->host {:?} (harness polls ~50 ms), ended {:?}",
+        "delay {} ms (RTT {} ms) loss {}%: steps {}/{STEPS}, max motion->host {:?} (harness polls ~50 ms), media {:?}, ended {:?}",
         r.delay_ms,
         2 * r.delay_ms,
         r.loss_percent,
         r.steps,
         sorted.last(),
+        r.media,
         r.ended
     )
 }
@@ -160,7 +185,15 @@ fn controlled_session_under_namespace_delay_and_loss() {
 /// One view-only profile: a fresh `frd run` (no input agent) + shipped
 /// `fr connect --view-only` on a clean link, then impaired while the host
 /// desktop changes colour; each change must appear in the viewer window.
-fn view_row(delay_ms: u32, loss_percent: f32) -> (usize, Vec<Duration>, Option<String>) {
+/// Shown changes, their times, how the row ended, and the held session's
+/// media counters. `busy` rapid intermediate host changes (never near a
+/// measured colour) precede each measured change, so loss actually hits video.
+fn view_row(
+    delay_ms: u32,
+    loss_percent: f32,
+    rate_kbit: u32,
+    busy: i32,
+) -> (usize, Vec<Duration>, Option<String>, Option<String>) {
     use super::real_control::Daemon;
     use super::real_media::{
         Xvfb, close_window, connect, near, sibling, warp_pointer, window_pixels,
@@ -197,10 +230,14 @@ fn view_row(delay_ms: u32, loss_percent: f32) -> (usize, Vec<Duration>, Option<S
         Duration::from_secs(45),
     )
     .expect("first picture on the clean link");
-    let netem = Netem::apply(delay_ms, loss_percent);
+    let netem = Netem::apply(delay_ms, loss_percent, rate_kbit);
     let mut times = Vec::new();
     let mut ended = None;
     for step in 0..6 {
+        for burst in 0..busy {
+            set_root(&host.display, (0x80, 0x10 + 8 * burst, 0xc0));
+            thread::sleep(Duration::from_millis(30));
+        }
         let shade = step * 30;
         let colour = (0x20 + shade, 0xa0 - shade, 0x40);
         set_root(&host.display, colour);
@@ -220,6 +257,7 @@ fn view_row(delay_ms: u32, loss_percent: f32) -> (usize, Vec<Duration>, Option<S
         close_window(&viewer.display, first);
     }
     let output = wait_for(client, Duration::from_secs(30));
+    let repaired = media(&String::from_utf8_lossy(&output.stdout));
     if ended.is_some() {
         let host = daemon.dump();
         let viewer: String = host
@@ -235,7 +273,7 @@ fn view_row(delay_ms: u32, loss_percent: f32) -> (usize, Vec<Duration>, Option<S
         ));
     }
     daemon.finish();
-    (times.len(), times, ended)
+    (times.len(), times, ended, repaired)
 }
 
 #[test]
@@ -243,18 +281,32 @@ fn view_row(delay_ms: u32, loss_percent: f32) -> (usize, Vec<Duration>, Option<S
 fn view_only_session_under_namespace_delay_and_loss() {
     // Must hold: every change shown on a clean link, at a 40 ms RTT, and at a
     // 40 ms RTT with 1% loss. Measured limits (printed; asserted only to hold or
-    // end with the client's outcome record): 100 and 200 ms RTT, 5% loss.
-    let must: [(u32, f32); 3] = [(0, 0.0), (20, 0.0), (20, 1.0)];
-    let limits: [(u32, f32); 3] = [(50, 0.0), (100, 0.0), (20, 5.0)];
-    for (delay_ms, loss_percent, required) in must
+    // end with the client's outcome record): 100, 120 and 200 ms RTT, 5% loss,
+    // and a 5 Mbit/s bottleneck with and without 1% loss. (delay ms one way,
+    // loss %, rate kbit/s with 0 unlimited.)
+    let must: [(u32, f32, u32); 3] = [(0, 0.0, 0), (20, 0.0, 0), (20, 1.0, 0)];
+    let limits: [(u32, f32, u32); 6] = [
+        (50, 0.0, 0),
+        (60, 0.0, 0),
+        (100, 0.0, 0),
+        (20, 5.0, 0),
+        (20, 0.0, 5000),
+        (20, 1.0, 5000),
+    ];
+    for (delay_ms, loss_percent, rate_kbit, required) in must
         .iter()
-        .map(|&(d, l)| (d, l, true))
-        .chain(limits.iter().map(|&(d, l)| (d, l, false)))
+        .map(|&(d, l, r)| (d, l, r, true))
+        .chain(limits.iter().map(|&(d, l, r)| (d, l, r, false)))
     {
-        let (steps, mut times, ended) = view_row(delay_ms, loss_percent);
+        let (steps, mut times, ended, repaired) = view_row(delay_ms, loss_percent, rate_kbit, 0);
         times.sort();
+        let rate = if rate_kbit == 0 {
+            "unlimited".to_owned()
+        } else {
+            format!("{rate_kbit} kbit/s")
+        };
         let line = format!(
-            "delay {delay_ms} ms (RTT {} ms) loss {loss_percent}%: changes shown {steps}/6, median {:?}, max {:?}, ended {ended:?}",
+            "delay {delay_ms} ms (RTT {} ms) loss {loss_percent}% rate {rate}: changes shown {steps}/6, median {:?}, max {:?}, media {repaired:?}, ended {ended:?}",
             2 * delay_ms,
             times.get(times.len() / 2),
             times.last()
@@ -271,6 +323,36 @@ fn view_only_session_under_namespace_delay_and_loss() {
                     "untyped end: {line}"
                 );
             }
+        }
+    }
+}
+
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; tc netem on the namespace loopback"]
+fn view_only_busy_screen_under_namespace_loss() {
+    // Ten rapid host changes before each of the six measured ones, so about 60
+    // pictures cross the impaired link and loss actually hits video: repair
+    // and recovery must work for every measured change to appear. The clean
+    // row must hold; the lossy rows are printed measurements that must hold,
+    // show a change late, or end with a named cause.
+    for (delay_ms, loss_percent, required) in [(0, 0.0, true), (20, 1.0, false), (20, 5.0, false)] {
+        let (steps, mut times, ended, media) = view_row(delay_ms, loss_percent, 0, 10);
+        times.sort();
+        let line = format!(
+            "delay {delay_ms} ms (RTT {} ms) loss {loss_percent}% busy: changes shown {steps}/6, median {:?}, max {:?}, media {media:?}, ended {ended:?}",
+            2 * delay_ms,
+            times.get(times.len() / 2),
+            times.last()
+        );
+        println!("VIEW BUSY IMPAIRMENT {line}");
+        if required {
+            assert!(steps == 6 && ended.is_none(), "busy view must hold: {line}");
+        } else if let Some(ended) = &ended {
+            assert!(
+                (ended.contains("\"outcome\"") && !ended.contains("native_session_failed"))
+                    || ended.contains("not shown"),
+                "untyped end: {line}"
+            );
         }
     }
 }

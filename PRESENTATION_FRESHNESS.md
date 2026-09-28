@@ -165,6 +165,31 @@ loss (three runs). The test asserts that the first three rows hold. The other
 rows must hold, show a change late, or end with a named cause. These timings
 are this loaded host's namespace measurements, not latency claims (plan 21).
 
+**Measured presented age (age of information, 2026-09-28).** `fr`'s stopped
+completion now reports `last_attempt_media` (see docs/native-client-cli.md),
+and the impairment rows print it. For held control rows at load about 130-200,
+the presented source-age upper bound at each admitted report, rounded up to
+10 ms buckets, was:
+
+| Profile | p50 | p95 |
+|---|---|---|
+| clean link | at most 30-40 ms | at most 60-70 ms |
+| 10 ms RTT, 0.5% loss | at most 40 ms | at most 70 ms |
+| 40 ms RTT | at most 70-90 ms | at most 100-130 ms |
+
+That is roughly half the 250 ms bound at 40 ms RTT, which is consistent with
+control ending near 60 ms RTT. View-only sessions have no clock exchange and so
+no source age.
+
+The same counters show why the view-only lossy rows prove little about repair.
+Idle means idle, so a row sends about six pictures (`decoded: 6`), and 1% or 5%
+iid loss rarely hits one. The rows mostly held with `repair_requests: 0`. In one
+run at load about 200, the must-hold 40 ms RTT with 1% loss row froze instead:
+`decoded: 1`, `repair_requests: 1`, `recovered_streams: 0`, and no change shown
+within 10 s, with neither a reconnect nor a typed end. This is the only
+observation so far of repair actually being exercised, and it did not recover.
+It is under investigation (fr-rc2-namespace-impairment-rows-n29k).
+
 **Critical records no longer wait behind queued media (2026-09-28).** A
 diagnostic build printed the host transport's state at each sender-deadline
 expiry. The challenge record usually had never been staged: the native stream

@@ -229,6 +229,48 @@ impl ViewSample {
         }
     }
 }
+/// Presented source-age upper bounds at admitted reports (plan's age of
+/// information), in 10 ms buckets below the 250 ms limit. Content-free and
+/// bounded; each positive report counts once, so the cadence is the report
+/// interval, not the network turn rate.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AgeHistogram {
+    buckets: [u32; 25],
+}
+impl AgeHistogram {
+    pub const BUCKET_US: u64 = 10_000;
+    fn record(&mut self, age_upper_us: u64) {
+        let index = usize::try_from(age_upper_us / Self::BUCKET_US)
+            .unwrap_or(usize::MAX)
+            .min(self.buckets.len() - 1);
+        self.buckets[index] = self.buckets[index].saturating_add(1);
+    }
+    pub fn reports(&self) -> u64 {
+        self.buckets.iter().map(|&n| u64::from(n)).sum()
+    }
+    /// The upper edge of the bucket holding the `permille`/1000 quantile, or
+    /// None without reports. An upper bound, never a measured exact age.
+    pub fn quantile_upper_us(&self, permille: u64) -> Option<u64> {
+        let total = self.reports();
+        if total == 0 || permille > 1000 {
+            return None;
+        }
+        let rank = (total * permille).div_ceil(1000).max(1);
+        let mut seen = 0;
+        for (index, &n) in self.buckets.iter().enumerate() {
+            seen += u64::from(n);
+            if seen >= rank {
+                return Some(
+                    u64::try_from(index + 1)
+                        .unwrap_or(u64::MAX)
+                        .saturating_mul(Self::BUCKET_US),
+                );
+            }
+        }
+        None
+    }
+}
+
 /// One reporter survives the observation-to-control transition. It never owns
 /// the decoder or creates a visibility sample from a native submission alone.
 pub(crate) struct ViewerPresentation {
@@ -236,6 +278,7 @@ pub(crate) struct ViewerPresentation {
     outbound: Route,
     reporter: Reporter,
     pub(crate) sent: u64,
+    pub(crate) ages: AgeHistogram,
 }
 impl ViewerPresentation {
     pub(crate) fn attach(
@@ -258,6 +301,7 @@ impl ViewerPresentation {
             outbound: Route::Stream(outbound),
             reporter: Reporter::new(setup.binding, setup.limits, now).map_err(Error::Proof)?,
             sent: 0,
+            ages: AgeHistogram::default(),
         }))
     }
     pub(crate) fn service(
@@ -294,6 +338,9 @@ impl ViewerPresentation {
                 Ok(()) => {
                     self.reporter.queued(now).map_err(Error::Proof)?;
                     self.sent = self.sent.saturating_add(1);
+                    if let ViewSample::Visible(sample, _) = sample {
+                        self.ages.record(sample.age_upper_us);
+                    }
                 }
                 Err(quic::Error::Backpressure) => {}
                 Err(error) => return Err(Error::Transport(error)),
@@ -301,4 +348,24 @@ impl ViewerPresentation {
         }
         Ok(())
     }
+}
+
+#[cfg(test)]
+#[test]
+fn presented_age_quantiles_are_bucket_upper_bounds_and_bounded() {
+    let mut ages = AgeHistogram::default();
+    assert_eq!(ages.quantile_upper_us(500), None);
+    for age in [1_000, 12_000, 15_000, 19_999, 240_000] {
+        ages.record(age);
+    }
+    assert_eq!(ages.reports(), 5);
+    // Rank ceil(5 * 0.5) = 3 falls in [10, 20) ms: reported as at most 20 ms.
+    assert_eq!(ages.quantile_upper_us(500), Some(20_000));
+    assert_eq!(ages.quantile_upper_us(950), Some(250_000));
+    assert_eq!(ages.quantile_upper_us(0), Some(10_000));
+    assert_eq!(ages.quantile_upper_us(1001), None);
+    // An out-of-range age clamps into the last bucket instead of growing storage.
+    ages.record(u64::MAX);
+    assert_eq!(ages.reports(), 6);
+    assert_eq!(ages.quantile_upper_us(1000), Some(250_000));
 }

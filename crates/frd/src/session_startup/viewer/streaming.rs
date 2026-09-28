@@ -80,6 +80,8 @@ pub struct Statistics {
     pub network_turns: u64,
     /// Completed recovery handshakes, not visibility or renewed control grants.
     pub recovered_streams: u64,
+    /// Presented source-age upper bounds at admitted reports (age of information).
+    pub presented_age: crate::media::presented::AgeHistogram,
 }
 impl Statistics {
     fn presented(&mut self, stage: PresentationStage) {
@@ -566,7 +568,14 @@ impl StreamingViewer {
         self.presenter.worker_id()
     }
     pub fn statistics(&self) -> Statistics {
-        self.statistics
+        Statistics {
+            presented_age: self
+                .presentation
+                .as_ref()
+                .map(|p| p.ages)
+                .unwrap_or_default(),
+            ..self.statistics
+        }
     }
     /// Actually admitted advisory reports; these are not display acknowledgements.
     pub fn receiver_feedback_reports(&self) -> u64 {

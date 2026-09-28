@@ -12,7 +12,8 @@ use frd::{
     native_connection::reconnect::{Application, CallbackError, Status},
     session_startup::{
         InteractiveViewerState, ObserverError, ObserverPolicy, Presentation,
-        StreamingViewerControl, Viewer, ViewerCloseOutcome, viewer_events::Layout,
+        StreamingViewerControl, Viewer, ViewerCloseOutcome, ViewerStatistics,
+        viewer_events::Layout,
     },
     worker::Deadline,
 };
@@ -92,6 +93,7 @@ pub struct Session<U> {
     cleanup: Option<Cleanup>,
     cleanup_failure: Option<CleanupFailure>,
     disconnect: Option<ViewerCloseOutcome>,
+    statistics: Option<ViewerStatistics>,
 }
 impl<U> Session<U> {
     pub const fn new(
@@ -112,6 +114,7 @@ impl<U> Session<U> {
             cleanup: None,
             cleanup_failure: None,
             disconnect: None,
+            statistics: None,
         }
     }
     pub fn desktop(&self) -> Option<&Desktop> {
@@ -130,6 +133,11 @@ impl<U> Session<U> {
     /// are reaped. None is no completed exchange, never confirmed remote cleanup.
     pub const fn disconnect_outcome(&self) -> Option<ViewerCloseOutcome> {
         self.disconnect
+    }
+    /// The last attempt's content-free viewer counters, sampled before its
+    /// native owners are reaped. None: that attempt never opened a viewer.
+    pub const fn statistics(&self) -> Option<ViewerStatistics> {
+        self.statistics
     }
     fn configuration(&self, attempt: u8) -> Result<Configuration, ObserverError> {
         // Same finite bound as the canonical supervisor. Monotonic attempts and
@@ -167,6 +175,7 @@ impl<U: Ui> Application for Session<U> {
         self.cleanup = None;
         self.cleanup_failure = None;
         self.disconnect = None;
+        self.statistics = None;
         // Store before ANY await or callback so interrupted work stays owned.
         self.desktop = Some(Desktop::new(configuration));
         let desktop = self.desktop.as_mut().ok_or(ObserverError::Order)?;
@@ -228,6 +237,7 @@ impl<U: Ui> Application for Session<U> {
         }
         .await;
         self.disconnect = desktop.disconnect_outcome();
+        self.statistics = desktop.statistics();
         // Record genuine native cancellation BEFORE cleanup can stop a pending
         // picker itself. It cannot relabel a deadline/link failure as user intent.
         let selection_cancelled = outcome.is_err() && desktop.cancelled_selection();
@@ -248,6 +258,11 @@ impl<U: Ui> Application for Session<U> {
     ) -> impl std::future::Future<Output = Result<(), CallbackError>> {
         // Fence at CALL time, including abandoned/unpolled cleanup futures.
         if let Some(desktop) = &mut self.desktop {
+            // A stop can drop the attempt's future before its own sample; the
+            // counters only grow, so this one is at least as complete.
+            if let Some(statistics) = desktop.statistics() {
+                self.statistics = Some(statistics);
+            }
             desktop.close();
         }
         async move {

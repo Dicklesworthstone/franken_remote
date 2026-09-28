@@ -47,6 +47,7 @@ pub use running::{
 };
 
 mod viewer;
+pub use crate::media::presented::AgeHistogram as PresentedAgeHistogram;
 pub use fr_files::sender::{
     Error as FileSendError, Outcome as FileSendOutcome, Receipt as FileSendReceipt,
 };
