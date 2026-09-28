@@ -94,6 +94,14 @@ pub fn host_offer_with_files(control: bool, clipboard: bool, audio: bool, files:
         // Remote-cursor forwarding is optional in both modes: an older viewer
         // omits it and receives no cursor records.
         .chain([(fr_wire::cursor::CAPABILITY, fr_wire::cursor::VERSION, false)])
+        // Reference recovery: an observer whose reference chain broke reports
+        // it and gets a fresh recovery IDR on new channels instead of a full
+        // reconnect (only observers use it; see running/publisher.rs).
+        .chain([(
+            fr_wire::recovery_request::CAPABILITY,
+            fr_wire::recovery_request::VERSION,
+            false,
+        )])
         .chain(
             CLIPBOARD_CAPABILITIES
                 .iter()

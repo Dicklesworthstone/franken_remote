@@ -1,5 +1,26 @@
 # Shared-source reference recovery
 
+**Reachable from `frd run` since 2026-09-28.** Until then, `frd run`'s host offer
+never included the optional `recovery_request` capability, although `fr` offers
+it. So the path below was unreachable in practice, and a view-only session whose
+reference could not be repaired froze or reconnected. In namespace `tc netem`
+rows with a busy host screen at 40 ms RTT and 1% loss, the view froze in 1-2 of 3
+runs without it: no typed end, no reconnect, `decoded` stopped after one repair
+request. With the capability offered, the row held 7 of 7 runs, and the first
+end-to-end `recovered_streams: 1` was observed.
+
+Known costs, not yet fixed:
+- **100 ms RTT:** the no-loss 100 ms RTT view-only row ended `host_not_heard` in
+  about 1 of 3 runs with recovery, against about 1 in 8 without it. The host's
+  Progress records must be acknowledged within the 250 ms reference horizon,
+  and the extra recovery work pushes marginal rows over it. That horizon is the
+  RTT limit tracked on `fr-rc2-owner-decision-view-lapse-f7ts`.
+- **Post-recovery freeze:** one 40 ms RTT, 5% loss row still froze after a
+  completed recovery.
+
+Evidence scope: one loaded machine, namespace impairment only
+(PRESENTATION_FRESHNESS.md).
+
 A failed observation subscriber can now recover on its original QUIC connection,
 sender cache and native decoder without resetting healthy viewers or replacing
 the shared capture worker. The publisher retains the same eight member slots,

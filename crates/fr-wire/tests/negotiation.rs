@@ -199,3 +199,29 @@ fn binding_ack_and_extensions_cannot_change_the_selected_session() {
     assert!(n::decode(&extra, MAX_RECORD, 0).is_err());
     assert!(!format!("{:?}", offer()).contains("media.hevc.main"));
 }
+
+#[test]
+fn an_offer_holds_at_most_max_capabilities_and_a_larger_one_is_refused() {
+    let caps = |count: usize| -> Vec<Capability> {
+        (0..count)
+            .map(|i| Capability {
+                name: format!("cap.{i:02}"),
+                version: 1,
+                required: false,
+            })
+            .collect()
+    };
+    let mut full = offer();
+    full.capabilities = caps(MAX_CAPABILITIES);
+    assert!(full.validate().is_ok());
+    let message = Message::ClientHello(full);
+    let bytes = encode(&message);
+    assert!(bytes.len() < MAX_RECORD / 2, "{}", bytes.len());
+    assert_eq!(
+        n::decode(&bytes, MAX_RECORD, message.binding()),
+        Ok(message)
+    );
+    let mut over = offer();
+    over.capabilities = caps(MAX_CAPABILITIES + 1);
+    assert_eq!(over.validate(), Err(Error::Invalid));
+}

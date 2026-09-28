@@ -12,7 +12,10 @@ use fr_core::{
 };
 
 pub const MAX_RECORD: usize = 4096;
-pub const MAX_CAPABILITIES: usize = 16;
+/// A code-level bound (PROTOCOL.md fixes no count). 24 fits the host's fullest
+/// offer (control, clipboard, files, audio and reference recovery) with room,
+/// and a full offer stays far below `MAX_RECORD`.
+pub const MAX_CAPABILITIES: usize = 24;
 pub const MAX_VERSIONS: usize = 8;
 const MAX_NAME: usize = 64;
 const LIMIT_BYTES: usize = 33;

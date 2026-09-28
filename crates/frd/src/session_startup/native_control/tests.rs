@@ -115,14 +115,12 @@ fn host_offer_makes_control_optional_and_never_upgrades_an_observer() {
     use fr_client::native::{control_offer, observation_offer};
     let observe_only = host_offer(false);
     assert!(observe_only.validate().is_ok());
-    assert_eq!(observe_only.capabilities.len(), 5);
-    // Only remote-cursor forwarding is optional; bootstrap stays mandatory.
-    assert!(
-        observe_only
-            .capabilities
-            .iter()
-            .all(|c| c.required != (c.name == fr_wire::cursor::CAPABILITY))
-    );
+    assert_eq!(observe_only.capabilities.len(), 6);
+    // Only remote-cursor forwarding and reference recovery are optional;
+    // bootstrap stays mandatory.
+    assert!(observe_only.capabilities.iter().all(|c| c.required
+        != (c.name == fr_wire::cursor::CAPABILITY
+            || c.name == fr_wire::recovery_request::CAPABILITY)));
     // Without control, a controller is a typed required-capability refusal.
     assert!(matches!(
         observe_only.intersect(&control_offer()),
@@ -130,7 +128,7 @@ fn host_offer_makes_control_optional_and_never_upgrades_an_observer() {
     ));
     let control = host_offer(true);
     assert!(control.validate().is_ok());
-    assert_eq!(control.capabilities.len(), 9);
+    assert_eq!(control.capabilities.len(), 10);
     assert_eq!(
         control.capabilities.iter().filter(|c| c.required).count(),
         4
@@ -164,7 +162,7 @@ fn clipboard_is_offered_optionally_only_with_control_and_the_local_enable() {
     assert_eq!(host_offer_with(false, true), host_offer(false));
     let host = host_offer_with(true, true);
     assert!(host.validate().is_ok());
-    assert_eq!(host.capabilities.len(), 12);
+    assert_eq!(host.capabilities.len(), 13);
     assert_eq!(host.capabilities.iter().filter(|c| c.required).count(), 4);
     let client = control_offer_with_clipboard();
     assert!(client.validate().is_ok());
@@ -615,7 +613,9 @@ fn the_drop_lane_and_clipboard_require_independent_positive_selection() {
         host_offer_with_files(false, false, false, true),
         host_offer(false)
     );
-    // Naively concatenating profiles still exceeds the fixed capability bound.
+    // Naively concatenating profiles (17 capabilities) exceeded the original
+    // sixteen-capability bound; the raised bound admits it, and the combined
+    // profile below still omits only the solicited decoder-load extension.
     let mut both_lanes = fr_client::native::control_offer_with_clipboard();
     both_lanes.capabilities.extend(
         files
@@ -625,7 +625,8 @@ fn the_drop_lane_and_clipboard_require_independent_positive_selection() {
             .cloned(),
     );
     both_lanes.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
-    assert!(both_lanes.validate().is_err());
+    assert_eq!(both_lanes.capabilities.len(), 17);
+    assert!(both_lanes.validate().is_ok());
     // The bounded combined profile negotiates each lane independently.
     let mut minimal = host_offer_with_files(true, true, false, true);
     minimal.role = Role::RequestControl;

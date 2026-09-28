@@ -1060,16 +1060,19 @@ mod tests {
         ] {
             assert!(names.iter().any(|n| n == required), "{required}");
         }
-        // Only remote-cursor forwarding is optional; bootstrap stays mandatory.
-        assert!(
-            observe
-                .capabilities
-                .iter()
-                .all(|c| c.required != (c.name == fr_wire::cursor::CAPABILITY))
-        );
+        // Only remote-cursor forwarding and reference recovery are optional;
+        // bootstrap stays mandatory. Recovery is offered in both modes: only
+        // observers use it (a controller keeps its terminal refusal).
+        assert!(observe.capabilities.iter().all(|c| c.required
+            != (c.name == fr_wire::cursor::CAPABILITY
+                || c.name == fr_wire::recovery_request::CAPABILITY)));
+        assert!(observe.capabilities.iter().any(|c| {
+            c.name == fr_wire::recovery_request::CAPABILITY
+                && c.version == fr_wire::recovery_request::VERSION
+        }));
         // Control boundaries are offered only with an input agent, optionally.
         let control = offer(true, false, false, false);
-        assert_eq!(control.capabilities.len(), 9);
+        assert_eq!(control.capabilities.len(), 10);
         // Audio-down is offered only with the local enable, and optionally.
         for control_offer in [false, true] {
             let without = offer(control_offer, false, false, false);
@@ -1095,7 +1098,7 @@ mod tests {
         // The clipboard enable adds three optional boundaries, only with control.
         assert_eq!(offer(false, true, false, false), observe);
         let clipboard = offer(true, true, false, false);
-        assert_eq!(clipboard.capabilities.len(), 12);
+        assert_eq!(clipboard.capabilities.len(), 13);
         assert_eq!(
             clipboard.capabilities.iter().filter(|c| c.required).count(),
             4
