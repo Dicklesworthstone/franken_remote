@@ -348,9 +348,12 @@ or release gate. There is no alternate QUIC stack, runtime or codec fallback.
 
 Trust roots are local configuration, never supplied by the peer. By default they
 are the distribution bundle `/etc/ssl/certs/ca-certificates.crt`, which verifies
-the Let's Encrypt certificates Tailscale issues; `--trust-roots` selects another
-file. It must be a regular (non-symlink) PEM file with at most 256 certificates
-and 1 MiB. Certificate checking cannot be disabled. The media worker defaults to
+the Let's Encrypt certificates Tailscale issues. That default may be a symlink
+(Fedora/RHEL and Arch link it into their extracted trust store): it is followed
+only through root-owned links in root-owned, non-group/other-writable
+directories to a root-owned file, at most eight hops. `--trust-roots` selects
+another file, which must be the regular (non-symlink) PEM file itself. Either way
+the bundle holds at most 512 certificates and 1 MiB. Certificate checking cannot be disabled. The media worker defaults to
 the `fr-media-worker` installed beside `fr`; `--worker` selects another absolute
 path. A worker path does not itself establish a trusted package: the
 installer/user must select the protected verified worker image.
