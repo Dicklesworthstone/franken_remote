@@ -161,7 +161,7 @@ fn discovers_unknown_peer_completes_real_tls_and_delivers_authenticated_stream()
         assert_eq!(received, b"authenticated application bytes");
         drop(server);
         drop(client);
-        assert!(UdpSocket::bind(address).is_ok());
+        assert!(!support::process_holds_udp(address));
     });
 }
 // Regression: the accepted connection keeps the discovery socket. One bounded
@@ -221,7 +221,7 @@ fn established_connection_drains_queued_datagrams_in_one_bounded_turn() {
         assert_eq!(received, b"one;two;six;ten;");
         drop(server);
         drop(client);
-        assert!(UdpSocket::bind(address).is_ok());
+        assert!(!support::process_holds_udp(address));
     });
 }
 #[test]
@@ -248,7 +248,7 @@ fn arbitrary_datagram_flood_has_a_fixed_budget_and_never_opens_tls() {
             .unwrap()
             .await;
         assert!(matches!(result, Err(Error::InitialBudget)));
-        assert!(UdpSocket::bind(addr).is_ok());
+        assert!(!support::process_holds_udp(addr));
     });
 }
 #[test]
@@ -274,7 +274,7 @@ fn acquisition_deadline_starts_before_first_poll_and_closes_socket() {
             .unwrap();
         sleep(cx.now(), Duration::from_millis(10)).await;
         assert!(matches!(future.await, Err(Error::InitialTimeout)));
-        assert!(UdpSocket::bind(address).is_ok());
+        assert!(!support::process_holds_udp(address));
     });
 }
 #[test]
@@ -292,7 +292,7 @@ fn unpolled_accept_drop_releases_original_endpoint_without_calling_factory() {
             })
             .unwrap();
         drop(future);
-        assert!(UdpSocket::bind(addr).is_ok());
+        assert!(!support::process_holds_udp(addr));
     });
 }
 #[test]
@@ -318,7 +318,7 @@ fn cancellation_releases_pending_receive_and_never_calls_identity_factory() {
         .await;
         cx.cancel_fast(CancelKind::User);
         assert!(matches!(future.await, Err(Error::Cancelled)));
-        assert!(UdpSocket::bind(addr).is_ok());
+        assert!(!support::process_holds_udp(addr));
     });
 }
 #[test]
@@ -349,7 +349,7 @@ fn wrong_server_name_and_alpn_never_return_an_authenticated_server() {
             .await;
             assert!(client.is_err() || client.unwrap().is_err());
             assert!(server.is_err());
-            assert!(UdpSocket::bind(addr).is_ok());
+            assert!(!support::process_holds_udp(addr));
         });
     }
 }
@@ -397,7 +397,7 @@ fn stalled_candidate_expires_its_original_handshake_budget_and_releases_socket()
             .await;
         assert!(matches!(result, Err(Error::HandshakeTimeout)));
         assert_eq!(calls.get(), 1);
-        assert!(UdpSocket::bind(addr).is_ok());
+        assert!(!support::process_holds_udp(addr));
     });
 }
 #[test]
@@ -425,6 +425,6 @@ fn another_socket_cannot_inherit_the_discovered_candidates_routing_identity() {
         .await;
         assert!(peer.unwrap().is_ok());
         assert!(matches!(result, Err(Error::PeerChanged)));
-        assert!(UdpSocket::bind(addr).is_ok());
+        assert!(!support::process_holds_udp(addr));
     });
 }

@@ -278,3 +278,40 @@ pub fn drive<'a>(cx: &'a Cx, pair: &'a mut Pair) -> Pin<Box<impl Future<Output =
         s.unwrap();
     })
 }
+
+/// Whether THIS process still holds a UDP socket bound to `address` (its own
+/// descriptors, looked up in the kernel's socket table). Tests use it to prove a
+/// listener released its socket: rebinding the freed ephemeral port instead races
+/// every other process that may take that port in the meantime.
+#[allow(dead_code)] // Shared support module: only the accept tests use it.
+pub fn process_holds_udp(address: std::net::SocketAddr) -> bool {
+    let mine: std::collections::HashSet<String> = std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+        .filter_map(|link| {
+            let link = link.to_str()?.strip_prefix("socket:[")?.strip_suffix(']')?;
+            Some(link.to_owned())
+        })
+        .collect();
+    let hex = |octets: &[u8]| {
+        use std::fmt::Write;
+        octets.chunks(4).fold(String::new(), |mut out, word| {
+            let _ = write!(out, "{:08X}", u32::from_le_bytes(word.try_into().unwrap()));
+            out
+        })
+    };
+    let (table, local) = match address.ip() {
+        std::net::IpAddr::V4(ip) => ("/proc/net/udp", hex(&ip.octets())),
+        std::net::IpAddr::V6(ip) => ("/proc/net/udp6", hex(&ip.octets())),
+    };
+    let local = format!("{local}:{:04X}", address.port());
+    std::fs::read_to_string(table)
+        .unwrap()
+        .lines()
+        .skip(1)
+        .any(|row| {
+            let fields: Vec<&str> = row.split_whitespace().collect();
+            fields.get(1) == Some(&local.as_str())
+                && fields.get(9).is_some_and(|i| mine.contains(*i))
+        })
+}

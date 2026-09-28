@@ -183,7 +183,7 @@ fn asynchronous_identity_uses_discovered_peer_and_completes_canonical_tls() {
         assert_eq!(received, b"after identity and TLS");
         drop(server);
         drop(client);
-        assert!(UdpSocket::bind(address).is_ok());
+        assert!(!support::process_holds_udp(address));
     });
 }
 #[test]
@@ -205,7 +205,7 @@ fn stalled_identity_expires_drops_its_owner_and_never_sends_tls() {
             .await;
         assert!(matches!(result, Err(Error::HandshakeTimeout)));
         assert!(dropped.get());
-        assert!(UdpSocket::bind(address).is_ok());
+        assert!(!support::process_holds_udp(address));
         socket.set_nonblocking(true).unwrap();
         assert_eq!(
             socket.recv(&mut [0; 1500]).unwrap_err().kind(),
@@ -225,7 +225,7 @@ fn refused_identity_preserves_typed_failure_and_releases_socket() {
             .unwrap()
             .await;
         assert!(matches!(result, Err(Error::IdentityUnavailable)));
-        assert!(UdpSocket::bind(address).is_ok());
+        assert!(!support::process_holds_udp(address));
     });
 }
 #[test]
@@ -243,7 +243,7 @@ fn ready_identity_cannot_bypass_cancellation_or_begin_tls() {
             .unwrap()
             .await;
         assert!(matches!(result, Err(Error::Cancelled)));
-        assert!(UdpSocket::bind(address).is_ok());
+        assert!(!support::process_holds_udp(address));
     });
 }
 #[test]
@@ -276,7 +276,7 @@ fn abandoning_pending_identity_drops_lookup_and_original_socket() {
             .await;
         }
         assert!(dropped.get());
-        assert!(UdpSocket::bind(address).is_ok());
+        assert!(!support::process_holds_udp(address));
     });
 }
 #[test]
@@ -301,7 +301,7 @@ fn unpolled_async_accept_keeps_call_time_acquisition_deadline() {
             .unwrap();
         sleep(cx.now(), Duration::from_millis(10)).await;
         assert!(matches!(future.await, Err(Error::InitialTimeout)));
-        assert!(UdpSocket::bind(address).is_ok());
+        assert!(!support::process_holds_udp(address));
     });
 }
 #[test]
@@ -322,6 +322,22 @@ fn identity_wait_does_not_restart_the_handshake_budget() {
             .await
             .unwrap();
         assert!(matches!(result, Err(Error::HandshakeTimeout)));
-        assert!(UdpSocket::bind(address).is_ok());
+        assert!(!support::process_holds_udp(address));
     });
+}
+
+/// The release oracle used above is not vacuous: it sees a UDP socket this
+/// process holds (v4 and v6), and stops seeing it once that socket is dropped.
+#[test]
+fn the_release_oracle_sees_only_this_process_live_sockets() {
+    for bind in ["127.0.0.1:0", "[::1]:0"] {
+        let Ok(socket) = UdpSocket::bind(bind) else {
+            eprintln!("SKIPPED {bind}: no such local address here");
+            continue;
+        };
+        let address = socket.local_addr().unwrap();
+        assert!(support::process_holds_udp(address), "{address}");
+        drop(socket);
+        assert!(!support::process_holds_udp(address), "{address}");
+    }
 }
