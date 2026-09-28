@@ -121,6 +121,24 @@ for the owner decision `fr-rc2-owner-decision-view-lapse-f7ts`, not a test
 artifact. The test asserts only the clean and 40 ms RTT rows and prints the
 others with their outcomes.
 
+View-only is more tolerant but has the same shape of limit
+(`real_impairment::view_only_session_under_namespace_delay_and_loss`: a fresh
+`frd run` without an input agent + `fr connect --view-only`, six host colour
+changes per profile, each timed until the viewer window shows it; four runs):
+
+| Profile | Changes shown | Host change -> shown in the viewer |
+|---|---|---|
+| clean link | 6/6 every run | ~130-140 ms median (this loaded host; capture pacing, software x265 and decode included) |
+| 40 ms RTT | 6/6 every run | ~135-185 ms |
+| 40 ms RTT, 1% loss | 6/6 every run | ~140-190 ms |
+| 100 ms RTT | 6/6 twice, 3/6 then the client exited twice | ~185-210 ms |
+| 200 ms RTT | 1/6 then the client exited, every run | ~240-250 ms |
+| 40 ms RTT, 5% loss | 6/6 three times, 0/6 and 4/6 once each | ~180-200 ms |
+
+An exiting view-only client also reports only `native_session_failed`. The test
+asserts the first three rows and prints the others. These timings are this
+loaded host's namespace measurements, not latency claims (plan 21).
+
 ## Verification scope
 
 The new media regressions use actual record codecs/reassembly with explicitly
