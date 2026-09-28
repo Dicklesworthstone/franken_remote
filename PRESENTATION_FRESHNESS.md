@@ -89,6 +89,38 @@ by stale view"), which implies resumption within the lease lifetime; the authori
 treats a lapse as terminal. That contradiction is recorded for an owner decision
 (fr-rc2-static-view-represent-0ruq) rather than resolved here.
 
+**Measured limit under real network impairment (2026-09-28, negative evidence).**
+The namespace e2e `real_impairment::controlled_session_under_namespace_delay_and_loss`
+applies `tc netem` to the namespace loopback, which carries exactly the
+host<->client QUIC traffic, to a real `frd run --input-agent` + `fr connect
+--control` session, then changes the host desktop and moves the viewer pointer
+eight times. Load average ~100-200 on one machine; symmetric delay, iid loss;
+not WAN, Wi-Fi or DERP qualification.
+
+| Profile | Steps completed (runs) |
+|---|---|
+| clean link | 8/8 (every run) |
+| 40 ms RTT | 8/8 (every run) |
+| 10 ms RTT, 0.5% loss | 8/8 in 3 of 4 runs, 3/8 once |
+| 60 ms RTT | ended after 3-7 steps in 5 of 6 runs |
+| 100 ms RTT | 0/8 (every run) |
+| 40 ms RTT, 1% loss | ended after 1-4 steps (every run) |
+
+When control ends, the client reports only the generic `native_session_failed`
+and the host records the viewer as failed/cancelled. The probable mechanism,
+not yet isolated: a presented picture's evidence must travel from the host's
+source observation through transit, encode/decode/present and the client's
+report back to the host inside the fixed 250 ms source-age bound, and the
+client's conservative age bound also adds the full clock-exchange interval
+(about one RTT), so the slack shrinks by roughly 1.5 x RTT plus pipeline time;
+loss that forces recovery may also move the view to a new recovery generation,
+which the input credentials are bound to. Because a lapse under a lease is
+terminal (above), any such episode ends control. Ordinary tailnet paths across a
+continent, or through DERP, exceed 60 ms RTT, so this is a product-level limit
+for the owner decision `fr-rc2-owner-decision-view-lapse-f7ts`, not a test
+artifact. The test asserts only the clean and 40 ms RTT rows and prints the
+others with their outcomes.
+
 ## Verification scope
 
 The new media regressions use actual record codecs/reassembly with explicitly
