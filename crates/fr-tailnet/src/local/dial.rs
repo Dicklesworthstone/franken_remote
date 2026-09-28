@@ -8,8 +8,9 @@ use asupersync::{
     net::{
         quic_core::{ConnectionId, TransportParameters},
         quic_native::{
-            NativeQuicConnectionConfig, NativeQuicUdpConnection, QuicUdpEndpoint,
-            QuicUdpEndpointConfig, handshake_driver::QuicHandshakeDriver,
+            NativeQuicConnectionConfig, NativeQuicUdpConnection, NativeQuicUdpConnectionError,
+            QuicTlsError, QuicUdpEndpoint, QuicUdpEndpointConfig,
+            handshake_driver::QuicHandshakeDriver,
         },
     },
     time::sleep,
@@ -191,7 +192,7 @@ impl NativeClient {
                 connecting
                     .as_mut()
                     .poll(task)
-                    .map_err(|_| Error::NativeHandshake)
+                    .map_err(|error| handshake_error(&error))
             })
             .await?
         };
@@ -274,6 +275,20 @@ impl ConnectedPeer {
     }
 }
 
+/// The peer's certificate failing verification keeps its own reason; every
+/// other handshake failure stays `NativeHandshake`. Only the TLS stack's typed,
+/// redaction-safe classification is read, never an error string.
+fn handshake_error(error: &NativeQuicUdpConnectionError) -> Error {
+    match error {
+        NativeQuicUdpConnectionError::Handshake(
+            QuicTlsError::ServerCertificateRejected { .. }
+            | QuicTlsError::ServerCertificateChainEmpty
+            | QuicTlsError::ServerCertificateUnverified,
+        ) => Error::PeerCertificateRejected,
+        _ => Error::NativeHandshake,
+    }
+}
+
 fn connection_ids() -> Result<(ConnectionId, ConnectionId), Error> {
     let mut bytes = [0u8; 32];
     // Kernel entropy, no deterministic runtime seed and no peer-controlled path.
@@ -329,6 +344,35 @@ pub(super) fn transport_parameters() -> Result<Vec<u8>, Error> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn only_a_rejected_peer_certificate_is_named_apart_from_other_handshake_failures() {
+    for rejected in [
+        QuicTlsError::ServerCertificateRejected {
+            code: "server_certificate_invalid",
+        },
+        QuicTlsError::ServerCertificateChainEmpty,
+        QuicTlsError::ServerCertificateUnverified,
+    ] {
+        assert_eq!(
+            handshake_error(&NativeQuicUdpConnectionError::Handshake(rejected)),
+            Error::PeerCertificateRejected
+        );
+    }
+    for other in [
+        NativeQuicUdpConnectionError::Cancelled,
+        NativeQuicUdpConnectionError::Handshake(QuicTlsError::InvalidServerName),
+        NativeQuicUdpConnectionError::Handshake(QuicTlsError::ServerIdentityRootStoreEmpty),
+        NativeQuicUdpConnectionError::HandshakeIncomplete("keys"),
+        NativeQuicUdpConnectionError::AlpnMismatch {
+            expected: b"fr-remote/0".to_vec(),
+            negotiated: None,
+        },
+    ] {
+        assert_eq!(handshake_error(&other), Error::NativeHandshake);
+    }
+}
 
 #[cfg(test)]
 #[test]

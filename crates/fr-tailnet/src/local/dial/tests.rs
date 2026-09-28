@@ -348,10 +348,17 @@ fn native_dial_rejects_wrong_certificate_name_without_exposing_connection() {
             ),
         ))
         .await;
-        assert!(matches!(
-            result,
-            Err(Error::NativeHandshake | Error::Timeout)
-        ));
+        // No connection is exposed either way. Measured 2026-09-28: here the
+        // client ends in Timeout even with a 12 s budget (the server's accept
+        // fails, the client never surfaces the rejection), so the typed
+        // PeerCertificateRejected path is covered by handshake_error's unit test
+        // and the missing prompt refusal is tracked on
+        // fr-rc-transport-client-trust-g9u.
+        assert!(
+            matches!(result, Err(Error::PeerCertificateRejected | Error::Timeout)),
+            "{:?}",
+            result.err()
+        );
     });
 }
 #[test]

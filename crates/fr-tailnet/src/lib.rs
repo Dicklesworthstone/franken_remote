@@ -67,6 +67,10 @@ pub enum Error {
     InvalidTrustStore,
     NativeBind,
     NativeHandshake,
+    /// The peer's certificate failed verification for the selected tailnet name
+    /// against the configured roots. The pinned TLS stack does not say whether
+    /// the name, validity period or issuer failed.
+    PeerCertificateRejected,
     EntropyUnavailable,
     KeyExpired,
     Clock,

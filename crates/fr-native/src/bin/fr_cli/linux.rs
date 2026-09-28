@@ -95,6 +95,10 @@ fn tailnet(error: TailnetError) -> Failure {
             "tailnet_key_expired",
             "Reauthenticate the affected Tailscale node locally.",
         ),
+        TailnetError::PeerCertificateRejected => failure(
+            "tls_certificate_rejected",
+            "The host's certificate did not verify for the selected tailnet name against the trusted roots (wrong host, expired, or an untrusted issuer; the TLS stack does not say which). Check the host's Tailscale certificate and any --trust-roots; never disable certificate checks.",
+        ),
         TailnetError::NativeHandshake
         | TailnetError::CertificateRejected
         | TailnetError::InvalidTrustStore => failure(
@@ -822,6 +826,20 @@ mod tests {
         assert!(offer.capabilities.iter().all(|c| !c.name.contains("input")
             && !c.name.contains("clipboard")
             && !c.name.contains("audio")));
+    }
+    #[test]
+    fn a_rejected_host_certificate_is_named_apart_from_other_tls_failures() {
+        let rejected = tailnet(TailnetError::PeerCertificateRejected);
+        assert_eq!(rejected.code, "tls_certificate_rejected");
+        assert_eq!(rejected.exit, 1);
+        assert!(rejected.next.contains("never disable certificate checks"));
+        for other in [
+            TailnetError::NativeHandshake,
+            TailnetError::CertificateRejected,
+            TailnetError::InvalidTrustStore,
+        ] {
+            assert_eq!(tailnet(other).code, "tls_identity_refused");
+        }
     }
     #[test]
     fn signal_cancels_without_abandoning_the_original_cleanup_future() {
