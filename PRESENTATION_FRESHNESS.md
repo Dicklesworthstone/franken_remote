@@ -216,6 +216,13 @@ View-only, two runs: 6 and 40 ms RTT hold in every cell, including 5% loss and
 5 Mbit/s, apart from an occasional late change at 5% loss. 120 and 200 ms RTT
 end `host_not_heard` in every cell.
 
+Rerun at 3f927de (after the late-picture fix below; one run, load about 170):
+the same shape. Control holds at 6 ms RTT with up to 1% loss and at 40 ms RTT
+without loss; 40 ms with 1% loss held 8/8 this time (it ended in the earlier
+full run, so one run shows nothing either way). View-only holds at 6 and 40 ms
+RTT in every cell except 40 ms with 5% loss at 5 Mbit/s. Every shorter row in
+both tests ended with a named cause; none froze silently.
+
 A controlled-viewer `Expired` is now named by what expired:
 - the view (`view_stale`);
 - host silence (`host_not_heard`);
