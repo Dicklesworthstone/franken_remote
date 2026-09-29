@@ -58,8 +58,6 @@ the rejection only as an opaque code, and the fix is upstream. Gates:
   retained logs.
 - One peer at a time: the 1 controller + 2 viewers hub, late join and `Busy`
   exist only as library code (serial listener).
-- Control robustness: the static LineScroll grant makes all control fail on X
-  servers without relative XTest or wheel buttons 6/7 mapped.
 - Audio during control, local approval and a host indicator for view-only and
   audio shares in `frd run`, IPv6 binding.
 - Hardware HEVC (no GPU on the development host), Wayland, macOS, Windows,
