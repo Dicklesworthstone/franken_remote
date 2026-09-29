@@ -1,5 +1,9 @@
 //! Actual private dbus-daemon and libsystemd peer. All logind data is SYNTHETIC;
 //! never impersonates a service on the installed system bus or changes OS state.
+#![allow(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test-only Xlib/libsystemd/Opus fixture calls on test-owned objects; the production FFI in src/ documents every unsafe block"
+)]
 use super::*;
 use std::{
     fs,

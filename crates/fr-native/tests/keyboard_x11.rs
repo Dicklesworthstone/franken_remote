@@ -1,4 +1,8 @@
 #![cfg(all(target_os = "linux", feature = "linux-input"))]
+#![allow(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test-only Xlib/libsystemd/Opus fixture calls on test-owned objects; the production FFI in src/ documents every unsafe block"
+)]
 use core::ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_void};
 use fr_core::{
     authority::{AuthorityPolicy, SessionAuthority},

@@ -58,9 +58,15 @@ linux-input-agent = ["linux-input", "dep:frd", "dep:asupersync"]
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+# fr-native is a named FFI boundary crate (AGENTS.md 3.2): it holds the X11,
+# XTest, XFixes/DAMAGE/RandR, FFmpeg bridge, PulseAudio, libopus, seccomp and
+# sd-bus bindings, so it opts out of the workspace's `unsafe_code = "forbid"`
+# explicitly. Every unsafe block states its invariant (lint below).
+unsafe_code = "allow"
 
 [lints.clippy]
 pedantic = { level = "deny", priority = -1 }
+undocumented_unsafe_blocks = "deny"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 module_name_repetitions = "allow"

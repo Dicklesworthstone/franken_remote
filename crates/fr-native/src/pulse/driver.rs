@@ -59,6 +59,8 @@ impl PlaybackDevice {
             return Ok(());
         }
         let stream = self.stream()?;
+        // SAFETY: `stream()` returned this driver's live stream, used only on
+        // the mainloop-owning thread; the query retains no caller pointer.
         let stream_state = unsafe { ffi::pa_stream_get_state(stream) };
         if stream_state > ffi::STREAM_READY {
             return Err(Error::DeviceChanged);

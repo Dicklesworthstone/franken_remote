@@ -1,4 +1,8 @@
 //! Independent, test-only C decoder oracle; no synthetic payloads.
+#![allow(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test-only Xlib/libsystemd/Opus fixture calls on test-owned objects; the production FFI in src/ documents every unsafe block"
+)]
 use fr_core::audio::{AudioChannels, AudioDirection, AudioGeneration, AudioStreamConfig};
 use fr_media::audio::AudioPcmFrame;
 use std::{

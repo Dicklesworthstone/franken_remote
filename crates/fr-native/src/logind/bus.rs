@@ -113,9 +113,13 @@ fn read(value: c_int) -> Result<(), StopReason> {
 // SAFETY: every caller supplies a NULL or live NUL-terminated libsystemd string.
 // Limit scanning/copying; the owning message/bus remains alive throughout use.
 unsafe fn string(p: *const c_char) -> Result<String, StopReason> {
+    // SAFETY: p is non-null (checked first) and, per this function's contract,
+    // points at a live libsystemd string; strnlen reads at most 513 bytes.
     if p.is_null() || unsafe { strnlen(p, 513) } > 512 {
         return Err(StopReason::Malformed);
     }
+    // SAFETY: strnlen above found a NUL within 512 bytes of this live string,
+    // and the result is copied before the owning message can be released.
     unsafe { CStr::from_ptr(p) }
         .to_str()
         .map(str::to_owned)
@@ -124,18 +128,26 @@ unsafe fn string(p: *const c_char) -> Result<String, StopReason> {
 struct Message(NonNull<c_void>);
 impl Drop for Message {
     fn drop(&mut self) {
+        // SAFETY: Message holds the one reference this code took (a method-call
+        // reply); it is released exactly once, and no Cursor outlives it.
         unsafe {
             sd_bus_message_unref(self.0.as_ptr());
         }
     }
 }
 // Borrowed cursor: never unreferences signal messages owned by libsystemd.
+// Invariant for every method: `self.0` is a live sd_bus_message for the whole
+// use, either borrowed for the duration of a signal callback (libsystemd keeps
+// it alive until the callback returns) or a reply held by the enclosing
+// `Message`, and it is only used on the bus-owning thread.
 struct Cursor(Raw);
 impl Cursor {
     fn signature(&self, signature: &CStr) -> Result<(), StopReason> {
+        // SAFETY: live message (type invariant); NUL-terminated signature.
         read(unsafe { sd_bus_message_has_signature(self.0, signature.as_ptr()) })
     }
     fn enter(&self, ty: u8, contents: &CStr) -> Result<bool, StopReason> {
+        // SAFETY: live message (type invariant); NUL-terminated contents string.
         let n =
             unsafe { sd_bus_message_enter_container(self.0, ty.cast_signed(), contents.as_ptr()) };
         if n < 0 {
@@ -145,15 +157,21 @@ impl Cursor {
         }
     }
     fn leave(&self) -> Result<(), StopReason> {
+        // SAFETY: live message (type invariant); sd-bus checks container nesting.
         ok(unsafe { sd_bus_message_exit_container(self.0) }).map_err(|_| StopReason::Malformed)
     }
     fn text(&self, ty: u8) -> Result<String, StopReason> {
         let mut p: *const c_char = ptr::null();
+        // SAFETY: live message (type invariant); for the string-like types used
+        // here ('s', 'o') sd-bus writes one `const char *` into p's storage.
         read(unsafe { sd_bus_message_read_basic(self.0, ty.cast_signed(), (&raw mut p).cast()) })?;
+        // SAFETY: p is null or points into the still-live message; `string`
+        // bounds the scan and copies before the message can be released.
         unsafe { string(p) }
     }
     fn number(&self) -> Result<u32, StopReason> {
         let mut n = 0_u32;
+        // SAFETY: live message (type invariant); 'u' writes one uint32_t into n.
         read(unsafe {
             sd_bus_message_read_basic(self.0, b'u'.cast_signed(), (&raw mut n).cast())
         })?;
@@ -161,6 +179,7 @@ impl Cursor {
     }
     fn timestamp(&self) -> Result<u64, StopReason> {
         let mut n = 0_u64;
+        // SAFETY: live message (type invariant); 't' writes one uint64_t into n.
         read(unsafe {
             sd_bus_message_read_basic(self.0, b't'.cast_signed(), (&raw mut n).cast())
         })?;
@@ -168,6 +187,7 @@ impl Cursor {
     }
     fn boolean(&self) -> Result<bool, StopReason> {
         let mut n = 0_i32;
+        // SAFETY: live message (type invariant); 'b' writes one C int into n.
         read(unsafe {
             sd_bus_message_read_basic(self.0, b'b'.cast_signed(), (&raw mut n).cast())
         })?;
@@ -178,6 +198,7 @@ impl Cursor {
         }
     }
     fn skip_variant(&self) -> Result<(), StopReason> {
+        // SAFETY: live message (type invariant); static NUL-terminated signature.
         read(unsafe { sd_bus_message_skip(self.0, c"v".as_ptr()) })
     }
     fn variant(&self, signature: &CStr) -> Result<(), StopReason> {
@@ -336,8 +357,13 @@ struct Signals {
 }
 impl Signals {
     fn handle(&self, raw: Raw) -> Result<(), StopReason> {
+        // SAFETY: raw is the signal message libsystemd passes to `signal` and
+        // keeps alive until the callback returns; these getters return NULL or
+        // a string inside it, which `string` bounds and copies at once.
         let sender = unsafe { string(sd_bus_message_get_sender(raw)) }?;
+        // SAFETY: as for the sender, on the same live message.
         let interface = unsafe { string(sd_bus_message_get_interface(raw)) }?;
+        // SAFETY: as for the sender, on the same live message.
         let member = unsafe { string(sd_bus_message_get_member(raw)) }?;
         let cursor = Cursor(raw);
         self.count.set(self.count.get().saturating_add(1));
@@ -375,6 +401,7 @@ impl Signals {
             }
             return Ok(());
         }
+        // SAFETY: as for the sender, on the same live callback message.
         let path = unsafe { string(sd_bus_message_get_path(raw)) }?;
         if self
             .path
@@ -411,6 +438,7 @@ impl Signals {
             // Invalidating a critical property is not permission to retain it.
             loop {
                 let mut p: *const c_char = ptr::null();
+                // SAFETY: live callback message; 's' writes one `const char *`.
                 let n = unsafe {
                     sd_bus_message_read_basic(raw, b's'.cast_signed(), (&raw mut p).cast())
                 };
@@ -422,6 +450,8 @@ impl Signals {
                 if count > 128 {
                     return Err(StopReason::EventFlood);
                 }
+                // SAFETY: p points into the live callback message (n > 0 above);
+                // `string` bounds the scan and copies immediately.
                 changed(&unsafe { string(p) }?)?;
             }
         }
@@ -453,6 +483,9 @@ pub(super) struct Connection {
 }
 impl Drop for Connection {
     fn drop(&mut self) {
+        // SAFETY: the bus reference created in `open` is released exactly once,
+        // on its owning thread; closing destroys the floating match slots before
+        // `signals` (their callback data) is dropped after this body.
         unsafe {
             sd_bus_close_unref(self.bus.as_ptr());
         }
@@ -466,6 +499,7 @@ impl Connection {
         trusted_uid: u32,
     ) -> Result<Self, StopReason> {
         let mut bus = ptr::null_mut();
+        // SAFETY: writable out-pointer; on success sd-bus stores one new reference.
         ok(unsafe { sd_bus_new(&raw mut bus) })?;
         let mut this = Self {
             bus: NonNull::new(bus).ok_or(StopReason::BusUnavailable)?,
@@ -478,9 +512,14 @@ impl Connection {
             }),
         };
         let address = CString::new(address).map_err(|_| StopReason::Malformed)?;
+        // SAFETY: bus is the live, not yet started reference owned by `this`;
+        // sd-bus copies the NUL-terminated address.
         ok(unsafe { sd_bus_set_address(bus, address.as_ptr()) })?;
+        // SAFETY: same live, not yet started bus; scalar argument.
         ok(unsafe { sd_bus_set_bus_client(bus, 1) })?;
+        // SAFETY: same live bus; scalar argument (microseconds).
         ok(unsafe { sd_bus_set_method_call_timeout(bus, 200_000) })?;
+        // SAFETY: same live, fully configured bus, started once on this thread.
         ok(unsafe { sd_bus_start(bus) })?;
         this.credentials(None, trusted_uid)?;
         let owner = this.owner()?;
@@ -493,6 +532,9 @@ impl Connection {
         for rule in rules {
             let rule = CString::new(rule).map_err(|_| StopReason::Malformed)?;
             // Floating slots are destroyed with the bus, while signals still live.
+            // SAFETY: live bus; NULL slot requests a floating slot owned by the
+            // bus; `signal` never unwinds; userdata is the boxed Signals, whose
+            // address is stable and which outlives the bus (see Drop).
             ok(unsafe {
                 sd_bus_add_match(
                     bus,
@@ -530,6 +572,8 @@ impl Connection {
     fn credentials(&self, name: Option<&CStr>, expected: u32) -> Result<(), StopReason> {
         let mut creds = ptr::null_mut();
         // EUID only, WITHOUT SD_BUS_CREDS_AUGMENT's race-prone /proc augmentation.
+        // SAFETY: live bus; name (if any) is NUL-terminated; creds is a writable
+        // out-pointer that receives one new reference, released below.
         let result = unsafe {
             match name {
                 Some(name) => {
@@ -541,9 +585,11 @@ impl Connection {
         let mut uid = u32::MAX;
         let valid = result >= 0
             && !creds.is_null()
+            // SAFETY: creds is a live, non-null reference; uid is writable.
             && unsafe { sd_bus_creds_get_euid(creds, &raw mut uid) } >= 0
             && uid == expected;
         if !creds.is_null() {
+            // SAFETY: releases the one reference returned above, exactly once.
             unsafe {
                 sd_bus_creds_unref(creds);
             }
@@ -563,6 +609,9 @@ impl Connection {
         arg: &CStr,
     ) -> Result<Message, StopReason> {
         let mut message = ptr::null_mut();
+        // SAFETY: live bus; every string is NUL-terminated and outlives the
+        // call; NULL error storage; the variadic argument matches the "s"
+        // signature (one `const char *`); reply is a writable out-pointer.
         let result = unsafe {
             sd_bus_call_method(
                 self.bus.as_ptr(),
@@ -578,6 +627,7 @@ impl Connection {
         };
         if result < 0 {
             if !message.is_null() {
+                // SAFETY: releases a reply reference returned on failure, once.
                 unsafe {
                     sd_bus_message_unref(message);
                 }
@@ -605,6 +655,8 @@ impl Connection {
         }
         for property in [c"PreparingForSleep", c"PreparingForShutdown"] {
             let mut preparing = 0_i32;
+            // SAFETY: live bus; NUL-terminated names; NULL error storage; the
+            // trivial type 'b' writes one C int into `preparing`.
             ok(unsafe {
                 sd_bus_get_property_trivial(
                     self.bus.as_ptr(),
@@ -629,6 +681,8 @@ impl Connection {
         // Callbacks also run while synchronous methods are pending. Do not clear
         // their terminal latch or treat a later positive reply as replacement.
         for _ in 0..32 {
+            // SAFETY: live bus on its owning thread; NULL means no message is
+            // returned to us; callbacks run serially inside this call.
             let n = unsafe { sd_bus_process(self.bus.as_ptr(), ptr::null_mut()) };
             ok(n)?;
             if let super::Status::Stopped(reason) = self.signals.shared.status(boottime()) {

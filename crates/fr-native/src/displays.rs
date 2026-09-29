@@ -157,6 +157,7 @@ impl X11Inventory {
         // SAFETY: live, exclusively owned display; all out-pointers are valid.
         if unsafe { XRRQueryExtension(display.as_ptr(), &raw mut this.event_base, &raw mut error) }
             == 0
+            // SAFETY: the same live display; major/minor are writable scalars.
             || unsafe { XRRQueryVersion(display.as_ptr(), &raw mut major, &raw mut minor) } == 0
             || major != 1
             || minor < 5
@@ -166,6 +167,8 @@ impl X11Inventory {
         // SAFETY: root belongs to this display; masks are RandR 1.5 subscription
         // bits for screen/CRTC/output/property/resource changes. No mutation RPC.
         this.root = unsafe { XDefaultRootWindow(display.as_ptr()) };
+        // SAFETY: live, exclusively owned display and its own root window;
+        // event-mask subscriptions only, no pointer is retained by Xlib.
         unsafe {
             XRRSelectInput(display.as_ptr(), this.root, 1 | 2 | 4 | 8 | 64);
             // RandR monitor add/delete uses core ConfigureNotify on the root,
@@ -241,6 +244,8 @@ impl X11Inventory {
         // SAFETY: sole thread-confined connection. XSync establishes a server
         // ordering barrier; False preserves all notifications for inspection.
         unsafe { XSync(self.display.as_ptr(), 0) };
+        // SAFETY: the same thread-confined connection; QueuedAlready (0) only
+        // counts the local queue.
         let queued = unsafe { XEventsQueued(self.display.as_ptr(), 0) };
         let queued = usize::try_from(queued).map_err(|_| NativeError::DisplayUnavailable)?;
         if queued > MAX_EVENTS {
@@ -250,6 +255,8 @@ impl X11Inventory {
             let mut event = Event { padding: [0; 24] };
             // SAFETY: queued events exist; Event is Xlib's public C union ABI.
             unsafe { XNextEvent(self.display.as_ptr(), &raw mut event) };
+            // SAFETY: XNextEvent filled the union; every XEvent begins with its
+            // int `type`, so reading `kind` is valid for any event.
             let kind = unsafe { event.kind };
             // Revalidation must not swallow source-change notifications. In
             // particular, CheckMonitor and post-encode barriers can run between
@@ -328,6 +335,9 @@ impl X11Inventory {
                 .validate_coded_dimensions(monitor.width, monitor.height)
                 .map_err(|_| NativeError::InvalidConfiguration)?;
             for j in 0..count {
+                // SAFETY: j < count == native.noutput <= MAX_OUTPUTS, and
+                // outputs is non-null when count != 0 (checked above); the
+                // monitor allocation stays owned for the whole copy.
                 monitor.outputs[j] = unsafe { *native.outputs.add(j) };
                 if monitor.outputs[j] == 0 || monitor.outputs[..j].contains(&monitor.outputs[j]) {
                     return Err(NativeError::InvalidConfiguration);

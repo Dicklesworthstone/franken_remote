@@ -1,4 +1,8 @@
 //! Real X server and cursor creation; no fake native cursor provider.
+#![allow(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test-only Xlib/libsystemd/Opus fixture calls on test-owned objects; the production FFI in src/ documents every unsafe block"
+)]
 use core::ffi::{c_char, c_int, c_uint, c_ulong, c_void};
 use std::{
     ffi::CString,

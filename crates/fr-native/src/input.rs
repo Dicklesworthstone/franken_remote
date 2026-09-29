@@ -132,6 +132,7 @@ impl X11Pointer {
             .ok_or(PlatformError::Unavailable)?;
         // SAFETY: live owned connection; these queries retain no caller pointer.
         let screen = unsafe { XDefaultScreen(display.as_ptr()) };
+        // SAFETY: the same live connection; `screen` is its default screen.
         let root = unsafe { XRootWindow(display.as_ptr(), screen) };
         let mut owner = Self {
             display,

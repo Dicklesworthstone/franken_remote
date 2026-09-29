@@ -156,7 +156,9 @@ pub(crate) fn frame_len(w: u32, h: u32, limits: &ProtocolLimits) -> Result<usize
 fn initialize() -> Result<(), NativeError> {
     // SAFETY: version queries touch no caller memory. This process owns native logging.
     static LOG_INIT: std::sync::Once = std::sync::Once::new();
+    // SAFETY: the bridge's log-quieting call has no arguments and runs once.
     LOG_INIT.call_once(|| unsafe { fr_native_quiet() });
+    // SAFETY: both version queries take no arguments and touch no caller memory.
     let (built, loaded) = unsafe {
         (
             fr_native_compiled_avcodec_version(),

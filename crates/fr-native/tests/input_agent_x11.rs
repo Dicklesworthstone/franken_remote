@@ -1,4 +1,8 @@
 #![cfg(all(target_os = "linux", feature = "linux-input-agent"))]
+#![allow(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test-only Xlib/libsystemd/Opus fixture calls on test-owned objects; the production FFI in src/ documents every unsafe block"
+)]
 use asupersync::{
     cx::Cx,
     runtime::{Runtime, RuntimeBuilder},

@@ -1,5 +1,9 @@
 //! Actual private D-Bus -> canonical native input thread -> independent X11
 //! observation. Logind metadata/approval are fixtures; `XTest` effects are real.
+#![allow(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test-only Xlib/libsystemd/Opus fixture calls on test-owned objects; the production FFI in src/ documents every unsafe block"
+)]
 use super::*;
 use crate::input_agent::{Error as StartError, start_x11_guarded};
 use asupersync::{runtime::RuntimeBuilder, types::Budget};

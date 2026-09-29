@@ -47,6 +47,7 @@ impl Damage {
         // SAFETY: caller supplies the live original connection; outputs are
         // writable scalars. No returned allocation or foreign pointer escapes.
         if unsafe { XDamageQueryExtension(display.as_ptr(), &raw mut event, &raw mut error) } == 0
+            // SAFETY: the same live connection; writable scalar outputs.
             || unsafe { XDamageQueryVersion(display.as_ptr(), &raw mut major, &raw mut minor) } == 0
             || major != 1
         {
@@ -54,6 +55,8 @@ impl Damage {
         }
         // XDamageReportNonEmpty = 3. Server-side damage accumulates until the
         // next readback boundary; do not request unbounded rectangle events.
+        // SAFETY: live connection owning `drawable` (this function's contract);
+        // the returned XID is freed by this object's Drop on the same connection.
         let id = unsafe { XDamageCreate(display.as_ptr(), drawable, 3) };
         if id == 0 {
             return None;
@@ -80,6 +83,8 @@ impl Damage {
         unsafe { XSync(self.display.as_ptr(), 0) };
         for _ in 0..128 {
             let mut event = Event { padding: [0; 24] };
+            // SAFETY: the same owned connection on its thread; `event` is a
+            // writable Xlib XEvent-sized union.
             if unsafe { XCheckTypedEvent(self.display.as_ptr(), self.event, &raw mut event) } == 0 {
                 return Ok(());
             }

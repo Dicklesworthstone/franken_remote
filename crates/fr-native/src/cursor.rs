@@ -165,6 +165,7 @@ pub(crate) unsafe fn snapshot(
     let (mut event, mut error, mut major, mut minor) = (0, 0, 1, 0);
     // SAFETY: live original connection and scalar outputs, synchronously borrowed.
     if unsafe { XFixesQueryExtension(display.as_ptr(), &raw mut event, &raw mut error) } == 0
+        // SAFETY: the same live connection; writable scalar outputs.
         || unsafe { XFixesQueryVersion(display.as_ptr(), &raw mut major, &raw mut minor) } == 0
         || major < 1
     {

@@ -1,6 +1,10 @@
 #![cfg(all(target_os = "linux", feature = "linux-media"))]
 //! Actual X11 exposure of the production presenter. No callback manufactures a
 //! presentation witness, source timestamp, decoded receipt, or input authority.
+#![allow(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test-only Xlib/libsystemd/Opus fixture calls on test-owned objects; the production FFI in src/ documents every unsafe block"
+)]
 use fr_core::limits::ProtocolLimits;
 use fr_native::{BgraFrame, NativeError, X11Surface};
 use std::{

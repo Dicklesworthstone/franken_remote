@@ -1,5 +1,9 @@
 #![cfg(all(target_os = "linux", feature = "linux-media"))]
 //! Actual child, XFIXES and HEVC. Logical cursor IPC cannot advance video state.
+#![allow(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test-only Xlib/libsystemd/Opus fixture calls on test-owned objects; the production FFI in src/ documents every unsafe block"
+)]
 mod cursor_support;
 use cursor_support::Server;
 use fr_core::{
