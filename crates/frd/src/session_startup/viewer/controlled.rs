@@ -622,7 +622,10 @@ impl ControlledViewer {
             if let Some(deadline) = viewer.clipboard_setup.deadline_us() {
                 until = until.min(deadline);
             }
-            let remaining = until.checked_sub(now(cx)?).ok_or(Error::Expired)?;
+            let current = now(cx)?;
+            let Some(remaining) = until.checked_sub(current) else {
+                return Err(expired(viewer, current));
+            };
             let view = std::cell::Cell::new(None);
             viewer
                 .session
@@ -668,6 +671,17 @@ fn gate(
             false
         }
     }
+}
+/// Which local deadline had already passed: the view (its owner reports why),
+/// the session's host-silence bound, else a pending record or response.
+fn expired(viewer: &mut ControlledViewer, current: u64) -> Error {
+    if let Err(view) = viewer.input.view_deadline(ClientInstant(current)) {
+        return Error::View(view);
+    }
+    if current >= viewer.session.heard_until {
+        return Error::Session(super::Error::Expired);
+    }
+    Error::Expired
 }
 /// Only this viewer's own view-gate refusal is relabelled. The transport checks
 /// its identity/lifetime gate first, so an identity refusal leaves `view` empty.

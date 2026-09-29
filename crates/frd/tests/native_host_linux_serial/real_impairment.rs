@@ -45,6 +45,7 @@ impl Drop for Netem {
 struct Row {
     delay_ms: u32,
     loss_percent: f32,
+    rate_kbit: u32,
     /// Viewer-motion-to-host-pointer times for the steps that completed.
     motion: Vec<Duration>,
     steps: usize,
@@ -52,6 +53,28 @@ struct Row {
     ended: Option<String>,
     /// The held session's content-free `last_attempt_media` counters.
     media: Option<String>,
+    /// Clean-link session starts that failed before any impairment.
+    setup_retries: u32,
+}
+
+/// A fresh controlled session on a CLEAN link, before any impairment is
+/// applied. Session startup is asserted strictly by the other control tests;
+/// here a failed start (seen at load ~200: startup budgets, or a view that
+/// aged out before control) is retried at most twice and counted, so the
+/// matrix measures impairment rather than startup. A third failure fails the
+/// test.
+fn start_row() -> (Controlled, u32) {
+    let mut retries = 0;
+    loop {
+        match std::panic::catch_unwind(|| Controlled::start_with(false, false)) {
+            Ok(session) => return (session, retries),
+            Err(_) if retries < 2 => {
+                retries += 1;
+                eprintln!("IMPAIRMENT setup failed on a clean link; retry {retries}");
+            }
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
 }
 
 /// `fr`'s stopped completion from `attempts` through the `last_attempt_media`
@@ -71,9 +94,9 @@ fn media(completion: &str) -> Option<String> {
 
 const STEPS: usize = 8;
 
-fn row(delay_ms: u32, loss_percent: f32) -> Row {
-    let mut s = Controlled::start_with(false, false);
-    let netem = Netem::apply(delay_ms, loss_percent, 0);
+fn row(delay_ms: u32, loss_percent: f32, rate_kbit: u32) -> Row {
+    let (mut s, setup_retries) = start_row();
+    let netem = Netem::apply(delay_ms, loss_percent, rate_kbit);
     let mut motion = Vec::new();
     let mut ended = None;
     for step in 0..STEPS {
@@ -124,32 +147,47 @@ fn row(delay_ms: u32, loss_percent: f32) -> Row {
     Row {
         delay_ms,
         loss_percent,
+        rate_kbit,
         motion,
         steps,
         ended,
         media: repaired,
+        setup_retries,
     }
 }
 
 /// Profiles control must survive: a clean link and a 40 ms RTT.
-const MUST_HOLD: [(u32, f32); 2] = [(0, 0.0), (20, 0.0)];
-/// Measured limits, printed with their scope and asserted only to hold or end
-/// with the client's own outcome record: 0.5% loss at a 10 ms RTT, 60 and 100 ms
-/// RTT, and 1% loss at a 40 ms RTT. On 2026-09-28 at load ~100-200 control ended
-/// in some or all runs of each (see `PRESENTATION_FRESHNESS.md`).
-const LIMITS: [(u32, f32); 4] = [(5, 0.5), (30, 0.0), (50, 0.0), (20, 1.0)];
+const MUST_HOLD: [(u32, f32, u32); 2] = [(0, 0.0, 0), (20, 0.0, 0)];
+
+/// The impairment matrix (one-way delay ms, loss %, rate kbit/s with 0
+/// unlimited): about 5, 40 and 120 ms RTT x 0, 1 and 5% loss x unlimited and
+/// 5 Mbit/s. Cells not required to hold are printed measured limits that must
+/// hold or end with the client's own named outcome (`PRESENTATION_FRESHNESS.md`).
+fn matrix() -> Vec<(u32, f32, u32)> {
+    let mut cells = Vec::new();
+    for delay_ms in [3, 20, 60] {
+        for loss_percent in [0.0, 1.0, 5.0] {
+            for rate_kbit in [0, 5000] {
+                cells.push((delay_ms, loss_percent, rate_kbit));
+            }
+        }
+    }
+    cells
+}
 
 fn summary(r: &Row) -> String {
     let mut sorted = r.motion.clone();
     sorted.sort();
     format!(
-        "delay {} ms (RTT {} ms) loss {}%: steps {}/{STEPS}, max motion->host {:?} (harness polls ~50 ms), media {:?}, ended {:?}",
+        "delay {} ms (RTT {} ms) loss {}% rate {} kbit/s (0 unlimited): steps {}/{STEPS}, max motion->host {:?} (harness polls ~50 ms), media {:?}, setup retries {}, ended {:?}",
         r.delay_ms,
         2 * r.delay_ms,
         r.loss_percent,
+        r.rate_kbit,
         r.steps,
         sorted.last(),
         r.media,
+        r.setup_retries,
         r.ended
     )
 }
@@ -157,8 +195,8 @@ fn summary(r: &Row) -> String {
 #[test]
 #[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; real input agent; tc netem on the namespace loopback"]
 fn controlled_session_under_namespace_delay_and_loss() {
-    for (delay_ms, loss_percent) in MUST_HOLD {
-        let r = row(delay_ms, loss_percent);
+    for (delay_ms, loss_percent, rate_kbit) in MUST_HOLD {
+        let r = row(delay_ms, loss_percent, rate_kbit);
         println!("IMPAIRMENT {}", summary(&r));
         assert!(
             r.ended.is_none() && r.steps == STEPS,
@@ -166,8 +204,11 @@ fn controlled_session_under_namespace_delay_and_loss() {
             summary(&r)
         );
     }
-    for (delay_ms, loss_percent) in LIMITS {
-        let r = row(delay_ms, loss_percent);
+    for (delay_ms, loss_percent, rate_kbit) in matrix()
+        .into_iter()
+        .filter(|cell| !MUST_HOLD.contains(cell))
+    {
+        let r = row(delay_ms, loss_percent, rate_kbit);
         println!("IMPAIRMENT LIMIT {}", summary(&r));
         // Holding or ending with the shipped client's own outcome record naming
         // why: never a hang, a silent success after control was lost, or the
@@ -280,19 +321,17 @@ fn view_row(
 #[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; tc netem on the namespace loopback"]
 fn view_only_session_under_namespace_delay_and_loss() {
     // Must hold: every change shown on a clean link, at a 40 ms RTT, and at a
-    // 40 ms RTT with 1% loss. Measured limits (printed; asserted only to hold or
-    // end with the client's outcome record): 100, 120 and 200 ms RTT, 5% loss,
-    // and a 5 Mbit/s bottleneck with and without 1% loss. (delay ms one way,
-    // loss %, rate kbit/s with 0 unlimited.)
+    // 40 ms RTT with 1% loss. Measured limits (printed; asserted only to hold,
+    // show a change late, or end with the client's outcome record): the rest of
+    // the matrix and 200 ms RTT. (delay ms one way, loss %, rate kbit/s with 0
+    // unlimited.)
     let must: [(u32, f32, u32); 3] = [(0, 0.0, 0), (20, 0.0, 0), (20, 1.0, 0)];
-    let limits: [(u32, f32, u32); 6] = [
-        (50, 0.0, 0),
-        (60, 0.0, 0),
-        (100, 0.0, 0),
-        (20, 5.0, 0),
-        (20, 0.0, 5000),
-        (20, 1.0, 5000),
-    ];
+    // The matrix cells not required above, plus 200 ms RTT.
+    let limits: Vec<_> = matrix()
+        .into_iter()
+        .filter(|cell| !must.contains(cell))
+        .chain([(100, 0.0, 0)])
+        .collect();
     for (delay_ms, loss_percent, rate_kbit, required) in must
         .iter()
         .map(|&(d, l, r)| (d, l, r, true))

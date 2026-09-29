@@ -967,6 +967,31 @@ fn a_stale_view_met_by_the_transport_gate_keeps_its_typed_reason() {
 }
 
 #[test]
+fn an_expired_deadline_is_named_by_what_expired() {
+    run(|client_cx, host_cx| async move {
+        let mut state = Box::pin(fixture(&client_cx, &host_cx)).await;
+        let current = now(&client_cx).unwrap();
+        // Fresh view and a recently heard host: only a pending record or
+        // response deadline can be the one that passed.
+        assert_eq!(expired(&mut state.viewer, current), Error::Expired);
+        let until = state
+            .viewer
+            .input
+            .view_deadline(ClientInstant(current))
+            .unwrap()
+            .0;
+        while now(&client_cx).unwrap() < until {
+            asupersync::time::sleep(client_cx.now(), Duration::from_millis(1)).await;
+        }
+        let named = expired(&mut state.viewer, now(&client_cx).unwrap());
+        assert!(matches!(named, Error::View(_)), "{named:?}");
+        state.viewer.close();
+        state.host.close();
+        assert!(state.driver.take().unwrap().await.handoff_safe());
+    });
+}
+
+#[test]
 fn receiver_destruction_fences_an_already_encoded_action_before_network_submission() {
     run(|client_cx, host_cx| async move {
         let mut state = Box::pin(fixture(&client_cx, &host_cx)).await;

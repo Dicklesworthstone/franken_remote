@@ -488,7 +488,11 @@ pub fn lapse(failure: Failure) -> Option<Lapse> {
                     C::Session(S::Transport(T::Expired))
                     // The controller's clock exchange meets the same record
                     // deadline; naming it does not widen the retry policy.
-                    | C::Clock(crate::media::clock::Error::Transport(T::Expired)),
+                    | C::Clock(crate::media::clock::Error::Transport(T::Expired))
+                    // After the controlled viewer named an expired view or host
+                    // silence, its own Expired is a pending input record or
+                    // response that could not be sent before its deadline.
+                    | C::Expired,
                 ),
             ),
         ) => Some(Lapse::TransportDeadline),

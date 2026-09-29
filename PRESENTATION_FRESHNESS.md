@@ -199,6 +199,34 @@ must-hold. Planted negatives:
 - without repair and recovery, it ended in 2 of 3 runs;
 - with repair alone disabled, it held in 3 of 3 runs, because recovery covers it.
 
+**The full impairment matrix (2026-09-28, load about 160-250).** Both tests run
+about 5, 40 and 120 ms RTT × 0, 1 and 5% loss × unlimited and 5 Mbit/s, plus
+the clean link (and 200 ms RTT for view-only). Every cell must hold or end with
+a named cause, and all did.
+
+Control, one full run:
+- 6 ms RTT holds at 0% and 1% loss, with or without 5 Mbit/s (AoI p95 at most
+  80-90 ms), and ends at 5% loss (`view_stale`).
+- 40 ms RTT holds without loss, including at 5 Mbit/s (p95 at most 120-140 ms).
+  It ends at 1% and 5% loss (`view_stale`, `transport_deadline_expired`). The
+  1% cell held in some earlier runs.
+- 120 ms RTT ends before the first step in every cell.
+
+View-only, two runs: 6 and 40 ms RTT hold in every cell, including 5% loss and
+5 Mbit/s, apart from an occasional late change at 5% loss. 120 and 200 ms RTT
+end `host_not_heard` in every cell.
+
+A controlled-viewer `Expired` is now named by what expired:
+- the view (`view_stale`);
+- host silence (`host_not_heard`);
+- a pending input record or response that could not be sent before its
+  deadline (`transport_deadline_expired`).
+
+Each cell starts a fresh session on a clean link. A clean-link start that
+fails at this load is retried at most twice and counted as `setup retries`.
+That happened in 3 of 19 control cells, and a third failure fails the test.
+Startup itself stays strictly asserted by the other control tests.
+
 **No input lands on a stale view (namespace e2e).**
 `real_control::a_stale_view_suspends_input_before_it_reaches_the_host` freezes
 the host's capture child with SIGSTOP. No picture or source observation reaches

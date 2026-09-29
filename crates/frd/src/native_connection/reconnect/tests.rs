@@ -374,8 +374,12 @@ fn a_lost_reference_is_named_but_decode_failure_and_local_ends_are_not() {
         ))),
         None
     );
+    // The controlled viewer's own Expired is a local send/response deadline.
+    assert_eq!(
+        lapse(observed(StreamingViewerError::Control(C::Expired))),
+        Some(Lapse::TransportDeadline)
+    );
     for failure in [
-        observed(StreamingViewerError::Control(C::Expired)),
         observed(StreamingViewerError::Control(C::Session(S::Authority))),
         observed(StreamingViewerError::Control(C::Session(S::ClientRenewal(
             fr_client::authority::Error::Stopped,

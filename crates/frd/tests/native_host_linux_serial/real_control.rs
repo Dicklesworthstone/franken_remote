@@ -510,6 +510,18 @@ impl Daemon {
 /// harnesses, `frd run --input-agent`, the shipped client, the host pointer
 /// following viewer motion, and the executor's indicator shown on the host.
 /// Fields drop in order: the X clients (harnesses) end before their servers.
+/// A daemon left running by a panicking test (or a retried setup) is stopped
+/// and joined, so its listener is released; `finish`/`ended` take the thread
+/// first and keep their own assertions.
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        if let Some(thread) = self.thread.take() {
+            self.stop.request();
+            let _ = thread.join();
+        }
+    }
+}
+
 pub(super) struct Controlled {
     pub(super) observer: Harness,
     driver: Harness,
