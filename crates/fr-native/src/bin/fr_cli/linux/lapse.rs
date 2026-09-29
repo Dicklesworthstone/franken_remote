@@ -51,6 +51,10 @@ mod tests {
         )))))
         .unwrap();
         let silent = reconnect(observed(Streaming::Session(Session::Expired))).unwrap();
+        // A controlled viewer's own deadline that was neither the view nor
+        // host silence: a pending record or response (17e0a67).
+        let pending = reconnect(observed(Streaming::Control(Control::Expired))).unwrap();
+        assert_eq!(pending.code, "transport_deadline_expired");
         let lost = reconnect(observed(Streaming::Delivery(
             fr_media::delivery::DeliveryError::ReferenceExpired,
         )))
@@ -73,7 +77,6 @@ mod tests {
             observed(Streaming::Control(Control::View(View::Media(
                 Freshness::QueueExpired,
             )))),
-            observed(Streaming::Control(Control::Expired)),
             reconnect::Failure::Observation(ObserverError::Expired),
             reconnect::Failure::Cleanup,
             reconnect::Failure::Cancelled,
