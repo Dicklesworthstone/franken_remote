@@ -414,6 +414,15 @@ injection and physical keys are separate capabilities. Unsupported text is
 refused, never guessed through a keyboard layout or implicit clipboard paste.
 IME composition stays local until committed; reconnect cannot replay it.
 
+The native control grant echoes its request; the host never clamps one. The
+optional `native-input-line-scroll` v1 capability therefore tells a controller
+before it asks whether the host's input executor can inject discrete line
+scrolling, as measured when the host started. A host offers it only then; a
+controller requests line scrolling only when both peers selected it and
+otherwise requests the rest of its operations, so the wheel alone is
+unavailable. A host whose executor lacks a core operation (keys, repeat,
+absolute pointer, buttons) does not offer control at all.
+
 ### Clipboard, audio, and files
 
 | Kind | Message | Sender / channel | Bound | Required content and state constraints |

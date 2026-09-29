@@ -60,6 +60,8 @@ fn every_request_and_reply_round_trips_with_its_sequence() {
         Request::Cancel,
         Request::Cleanup,
         Request::Stop,
+        Request::Probe { epoch: 1 },
+        Request::Probe { epoch: u128::MAX },
     ];
     for op in operations() {
         requests.push(Request::Prepare(op));
@@ -130,7 +132,7 @@ fn malformed_frames_are_refused_before_any_field_is_used() {
     assert_eq!(decode_request(&with(4, 2)), Err(CodecError::Version));
     assert_eq!(decode_request(&with(4, 0)), Err(CodecError::Version));
     assert_eq!(decode_request(&with(5, 0)), Err(CodecError::Kind));
-    assert_eq!(decode_request(&with(5, 8)), Err(CodecError::Kind));
+    assert_eq!(decode_request(&with(5, 9)), Err(CodecError::Kind));
     assert_eq!(decode_request(&with(6, 1)), Err(CodecError::Reserved));
     assert_eq!(decode_request(&with(7, 1)), Err(CodecError::Reserved));
     // Unused operation bytes, unused body bytes and the final byte.
@@ -258,6 +260,20 @@ fn invalid_operation_fields_and_hello_values_are_refused() {
         Err(CodecError::Value)
     );
     assert_eq!(encode_request(0, Request::Stop), Err(CodecError::Sequence));
+    // A probe carries only its launch identity: no bounds, no capabilities.
+    let probe = encode_request(1, Request::Probe { epoch: 7 }).unwrap();
+    let mut no_epoch = probe;
+    no_epoch[16..32].fill(0);
+    assert_eq!(decode_request(&no_epoch), Err(CodecError::Value));
+    for at in [32, 48, 63] {
+        let mut padded = probe;
+        padded[at] = 1;
+        assert_eq!(decode_request(&padded), Err(CodecError::Padding), "{at}");
+    }
+    assert_eq!(
+        encode_request(1, Request::Probe { epoch: 0 }),
+        Err(CodecError::Value)
+    );
 }
 
 #[test]
@@ -358,6 +374,10 @@ fn diagnostics_hide_operations_and_epochs() {
         }
     );
     assert_eq!(hello, "Hello");
+    assert_eq!(
+        format!("{:?}", Request::Probe { epoch: 0x1234_5678 }),
+        "Probe"
+    );
     let ready = format!(
         "{:?}",
         Reply::Ready {

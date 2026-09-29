@@ -190,7 +190,7 @@ fn optional_features_cannot_refresh_the_original_startup_deadline() {
     assert_eq!(startup.tick(20), Err(Error::Closed));
 }
 #[test]
-fn control_profile_adds_only_mandatory_control_boundaries_and_completes_startup() {
+fn control_profile_adds_mandatory_control_boundaries_and_optional_line_scroll() {
     let offer = control_offer();
     offer.validate().unwrap();
     assert_eq!(offer.role, Role::RequestControl);
@@ -203,7 +203,16 @@ fn control_profile_adds_only_mandatory_control_boundaries_and_completes_startup(
         .iter()
         .filter(|c| !observation.capabilities.contains(c))
         .collect();
-    assert_eq!(added.len(), 4);
+    assert_eq!(added.len(), 5);
+    // Wheel input is optional: a host whose executor lacks it omits it.
+    assert!(
+        added
+            .iter()
+            .any(|c| c.name == control::LINE_SCROLL_CAPABILITY
+                && c.version == control::LINE_SCROLL_VERSION
+                && !c.required)
+    );
+    assert_eq!(added.iter().filter(|c| c.required).count(), 4);
     for (name, version) in [
         (attachment::INPUT_CAPABILITY, attachment::INPUT_VERSION),
         (control::GRANT_CAPABILITY, 1),
@@ -322,10 +331,11 @@ fn audio_offer_adds_only_the_optional_downlink_and_negotiates_both_ways() {
 }
 
 #[test]
-fn combined_control_profile_completes_real_startup_within_the_unchanged_limit() {
+fn combined_control_profile_completes_real_startup_within_the_capability_bound() {
     let combined = fr_client::native::control_offer_with_clipboard_and_files();
     combined.validate().unwrap();
-    assert_eq!(combined.capabilities.len(), 16);
+    assert_eq!(combined.capabilities.len(), 17);
+    assert!(combined.capabilities.len() <= negotiation::MAX_CAPABILITIES);
     for cap in control_offer().capabilities {
         if cap.name == receiver_metrics::CAPABILITY {
             assert!(!cap.required);

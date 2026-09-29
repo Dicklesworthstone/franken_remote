@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-09-29 — a repaired picture on a static screen is shown; control without a wheel
+
+- A picture whose repair completed after its 50 ms display budget was decoded
+  without being presented even when it was the newest picture. On a static
+  screen nothing replaced it, so a view-only session showed the previous
+  picture indefinitely without a named end (12 of 61 diagnostic repetitions
+  at 40 ms RTT with 5% loss). The newest late picture is now presented; a
+  superseded one is still decode-only, and late presentation is never fresh
+  evidence (PRESENTATION_FRESHNESS.md). With the fix: 0 of 24.
+- Control capabilities are a meet, not a static grant (fr-rc2-control-capability-meet-sf8).
+  `frd run --input-agent` probes its executor once at startup (the same display
+  open, no indicator, no input). Missing keys, repeat, absolute pointer or
+  buttons refuse at startup (`control_capability_missing`); a failed probe is
+  `input_agent_unavailable`. Line scrolling is offered as the optional
+  `native-input-line-scroll` v1 capability only when the executor has it, and
+  `fr` asks for the wheel only when both peers selected it. Previously a host
+  with several X screens or unmapped horizontal wheel buttons failed every
+  grant. `fr`'s control completion reports `control_capabilities_granted` and
+  `wheel_unavailable`. Namespace e2e: a viewer wheel notch reaches the host as a
+  button-4 press/release; a host without horizontal wheel buttons keeps control
+  without the wheel (planted negative: the static grant fails it).
+
 ## 2026-09-28 — impairment limits, named session ends, installer options
 
 Namespace evidence only, as below.

@@ -134,6 +134,19 @@ try:
             log("STOP")
             reply(seq, 0x8C)
             break
+        elif kind == 8:
+            # The one-shot startup probe: report, then exit. Capability bits:
+            # Keys, Repeat, Absolute, Buttons = 0x0f; LineScroll = 0x40.
+            log("PROBE")
+            if MODE == "probe-hang":
+                time.sleep(30)
+            if MODE == "probe-refused":
+                reply(seq, 0x82, b"\x01")
+            else:
+                epoch = bytes(15) + b"\x01" if MODE == "probe-wrong-epoch" else body[:16]
+                caps = b"\x00\x0f" if MODE == "probe-no-wheel" else b"\x00\x4f"
+                reply(seq, 0x81, epoch + caps + b"\x03")
+            break
         else:
             log("BADKIND")
             sys.exit(7)

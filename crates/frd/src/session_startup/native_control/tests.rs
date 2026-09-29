@@ -613,7 +613,8 @@ fn the_drop_lane_and_clipboard_require_independent_positive_selection() {
         host_offer_with_files(false, false, false, true),
         host_offer(false)
     );
-    // Naively concatenating profiles (17 capabilities) exceeded the original
+    // Naively concatenating profiles (18 capabilities, with the optional
+    // line-scroll boundary every control offer carries) exceeds the original
     // sixteen-capability bound; the raised bound admits it, and the combined
     // profile below still omits only the solicited decoder-load extension.
     let mut both_lanes = fr_client::native::control_offer_with_clipboard();
@@ -625,7 +626,7 @@ fn the_drop_lane_and_clipboard_require_independent_positive_selection() {
             .cloned(),
     );
     both_lanes.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
-    assert_eq!(both_lanes.capabilities.len(), 17);
+    assert_eq!(both_lanes.capabilities.len(), 18);
     assert!(both_lanes.validate().is_ok());
     // The bounded combined profile negotiates each lane independently.
     let mut minimal = host_offer_with_files(true, true, false, true);
@@ -634,7 +635,7 @@ fn the_drop_lane_and_clipboard_require_independent_positive_selection() {
     assert_eq!(files_lane(&clipboard), Ok(()));
     let combined = fr_client::native::control_offer_with_clipboard_and_files();
     assert!(combined.validate().is_ok());
-    assert_eq!(combined.capabilities.len(), 16);
+    assert_eq!(combined.capabilities.len(), 17);
     for (clipboard, files) in [(false, false), (true, false), (false, true), (true, true)] {
         let selection = select(
             host_offer_with_files(true, clipboard, false, files),

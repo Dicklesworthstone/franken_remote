@@ -136,6 +136,21 @@ pub fn host_offer_with_files(control: bool, clipboard: bool, audio: bool, files:
     }
 }
 
+/// Only for a control-capable host whose probed input executor can scroll by
+/// lines: the optional `native-input-line-scroll` boundary. A controller asks
+/// for `LineScroll` only when both peers select it; without it the wheel alone
+/// is unavailable and every other granted operation still works.
+#[must_use]
+pub fn with_line_scroll(mut offer: Offer) -> Offer {
+    offer.capabilities.push(Capability {
+        name: control::LINE_SCROLL_CAPABILITY.into(),
+        version: control::LINE_SCROLL_VERSION,
+        required: false,
+    });
+    offer.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    offer
+}
+
 /// Positive audio-down selection by an OBSERVER: both peers offered it, so
 /// the host locally enabled playback capture. A controller never gets audio
 /// in this slice (the transport also refuses the attachment for it).

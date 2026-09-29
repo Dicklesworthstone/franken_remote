@@ -244,6 +244,17 @@ impl NativeObserver {
                 .map_err(Error::Wire)?,
         })
     }
+    /// The request both serving paths send: the wanted operations met with
+    /// what negotiation allows. The host never clamps, so a host whose input
+    /// executor cannot scroll by lines grants everything but the wheel.
+    fn negotiated_request(
+        &mut self,
+        sequence: u64,
+        wanted: fr_core::input_submission::Capabilities,
+    ) -> Result<fr_wire::control::Request, Error> {
+        let allowed = self.viewer.requestable().map_err(Error::Streaming)?;
+        self.control_request(sequence, wanted.meet(allowed))
+    }
     pub fn presentation_reports(&self) -> u64 {
         self.viewer.presentation_reports()
     }
@@ -284,7 +295,7 @@ impl NativeObserver {
         result: impl FnMut(fr_client::input::ResultEvent) + 'a,
     ) -> impl Future<Output = Result<(), Error>> + 'a {
         let cx = self.cx.clone();
-        let request = self.control_request(sequence, capabilities);
+        let request = self.negotiated_request(sequence, capabilities);
         let future = request.and_then(|request| {
             self.input
                 .take()
@@ -325,7 +336,7 @@ impl NativeObserver {
         result: impl FnMut(fr_client::input::ResultEvent) + 'a,
     ) -> impl Future<Output = Result<(), Error>> + 'a {
         let cx = self.cx.clone();
-        let request = self.control_request(sequence, capabilities);
+        let request = self.negotiated_request(sequence, capabilities);
         let future = request.and_then(|request| {
             self.input
                 .take()

@@ -228,3 +228,45 @@ fn diagnostics_do_not_include_secrets_or_target_coordinates() {
     g.lease = InputLeaseId::from_raw(u128::MAX);
     assert_eq!(format!("{g:?}"), format!("{:?}", grant()));
 }
+
+#[test]
+fn line_scroll_is_requestable_only_when_both_peers_selected_it() {
+    use fr_wire::negotiation::Capability as Negotiated;
+    let cap = |name: &str, version| Negotiated {
+        name: name.into(),
+        version,
+        required: false,
+    };
+    let core = Capabilities::default()
+        .with(Capability::Keys)
+        .with(Capability::Repeat)
+        .with(Capability::Absolute)
+        .with(Capability::Buttons);
+    let wanted = core.with(Capability::LineScroll);
+    let grant = [cap(GRANT_CAPABILITY, 1)];
+    let without = requestable(&grant);
+    assert!(!without.contains(Capability::LineScroll));
+    assert_eq!(wanted.meet(without), core);
+    // Another version, or a similar name, is not this capability.
+    for other in [
+        cap(LINE_SCROLL_CAPABILITY, LINE_SCROLL_VERSION + 1),
+        cap("native-input-line-scrolls", LINE_SCROLL_VERSION),
+    ] {
+        assert!(!requestable(&[other]).contains(Capability::LineScroll));
+    }
+    let with = requestable(&[cap(GRANT_CAPABILITY, 1), cap(LINE_SCROLL_CAPABILITY, 1)]);
+    assert_eq!(wanted.meet(with), wanted);
+    // Selection only removes line scrolling; every other operation stays
+    // whatever the controller wanted (the host still decides the grant).
+    for c in [
+        Capability::Keys,
+        Capability::Repeat,
+        Capability::Absolute,
+        Capability::Buttons,
+        Capability::Relative,
+        Capability::PixelScroll,
+        Capability::Text,
+    ] {
+        assert!(without.contains(c) && with.contains(c), "{c:?}");
+    }
+}

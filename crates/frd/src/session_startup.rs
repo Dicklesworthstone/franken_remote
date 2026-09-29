@@ -32,7 +32,7 @@ pub(crate) mod closure_reporting;
 mod native_control;
 pub use native_control::{
     CLIPBOARD_CAPABILITIES, FILE_CAPABILITIES, host_offer, host_offer_with, host_offer_with_audio,
-    host_offer_with_files,
+    host_offer_with_files, with_line_scroll,
 };
 mod opening;
 mod running;

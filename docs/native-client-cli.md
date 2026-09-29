@@ -179,9 +179,18 @@ shows an X11-submitted frame, the client confirms that window's coordinate
 mapping, reports the frame, and sends ONE control request when the session
 itself reports current view evidence. After the host's grant, it supplies the
 single layout (native pixels 1:1, or the `--fit` rectangle) that attaches X11
-input capture to this window. Keys (with repeat), absolute pointer and buttons
-are captured; text, scrolling, relative pointer and audio are not. The
-clipboard and file sending are separate opt-ins, described next.
+input capture to this window. Keys (with repeat), absolute pointer, buttons
+and wheel notches (one line per notch, both axes) are captured; text, pixel
+scrolling, relative pointer and audio are not. The wheel is requested only when
+the host offers the optional `native-input-line-scroll` capability: `frd run`
+probes its input executor once at startup and offers it only when that
+executor can inject line scrolling (one X screen, wheel buttons 4-7 mapped).
+Otherwise control is granted without the wheel, wheel notches stay local, and
+the completion reports `wheel_unavailable: true`. An executor that lacks keys,
+repeat, absolute pointer or buttons makes `frd run --input-agent` refuse at
+startup (`control_capability_missing`, or `input_agent_unavailable` when the
+probe itself fails) instead of failing every later grant. The clipboard and
+file sending are separate opt-ins, described next.
 
 The visibility witness is stated, not overclaimed: a frame counts as visible
 when the presenter completed `SubmittedToCompositor` into the still-mapped
@@ -192,9 +201,12 @@ Control is requested at most once per invocation. A refused, expired or lost
 grant is never retried or reacquired: after a request, cleanup runs and the
 command does not reconnect, reporting that attempt's original outcome. A new
 grant needs a new `fr connect --control`. The completion record has
-`role: "control"`, `control_requested`, `control_granted`, and content-free
-counts of host input results (`input_results`, `input_submitted_to_os`); these
-are host-reported stages, not local proof of an effect.
+`role: "control"`, `control_requested`, `control_granted`,
+`control_capabilities_granted` (the host's exact grant, e.g. `["keys",
+"repeat", "absolute_pointer", "buttons", "line_scroll"]`, or `null`),
+`wheel_unavailable`, and content-free counts of host input results
+(`input_results`, `input_submitted_to_os`); these are host-reported stages,
+not local proof of an effect.
 
 The controlled share forwards the host's cursor too (`frd run --input-agent`
 selects the optional `remote-cursor` capability the client offers), and exactly

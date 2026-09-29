@@ -39,7 +39,9 @@ pub fn observation_offer_with_audio() -> Offer {
 /// grant, clock correlation and presented-state proof, all mandatory. Asking
 /// for control is an intent, never permission: the host may still refuse
 /// (typed), and no input is sent before its local grant and the client's own
-/// presented view.
+/// presented view. Every control offer also carries the OPTIONAL line-scroll
+/// boundary: a host whose input executor cannot scroll by lines omits it, and
+/// the controller then asks for everything but the wheel.
 pub fn control_offer() -> Offer {
     offer(
         Role::RequestControl,
@@ -125,7 +127,7 @@ pub fn control_offer_with_files() -> Offer {
     )
 }
 
-/// Explicit combined workflow within the original sixteen-capability limit.
+/// Explicit combined workflow within the negotiation capability bound.
 /// Keep all required control gates, recovery and cursor forwarding. Only the
 /// optional solicited decoder-load extension is omitted in this profile; no
 /// records for that extension may be sent. Neither clipboard nor file consent
@@ -174,6 +176,15 @@ fn offer(role: Role, extra: &[(&str, u16, bool)]) -> Offer {
     ]
     .iter()
     .chain(extra)
+    .chain(
+        [(
+            control::LINE_SCROLL_CAPABILITY,
+            control::LINE_SCROLL_VERSION,
+            false,
+        )]
+        .iter()
+        .filter(|_| role == Role::RequestControl),
+    )
     .map(|(name, version, required)| Capability {
         name: (*name).into(),
         version: *version,

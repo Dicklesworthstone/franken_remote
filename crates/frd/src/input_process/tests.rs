@@ -482,3 +482,52 @@ fn a_crashed_child_is_a_native_failure_with_uncertain_cleanup() {
     assert!(seat.is_occupied());
     assert!(transcript(&log).iter().any(|l| l == "DIE"));
 }
+
+#[test]
+fn the_startup_probe_reports_the_executor_capabilities_and_ends_the_child() {
+    let core = caps();
+    for (mode, line_scroll) in [("probe", true), ("probe-no-wheel", false)] {
+        let (image, log) = fixture(mode);
+        let probed = probe(&launch(&image)).unwrap();
+        assert!(probed.contains_all(core), "{mode}");
+        assert_eq!(
+            probed.contains(Capability::LineScroll),
+            line_scroll,
+            "{mode}"
+        );
+        let lines = transcript(&log);
+        // One request, no Hello (no indicator), nothing prepared or injected.
+        assert_eq!(lines[1..], ["PROBE"], "{mode}");
+        let pid = child_pid(&lines);
+        eventually(|| !Path::new(&format!("/proc/{pid}")).exists());
+    }
+}
+
+#[test]
+fn a_refused_mismatched_hung_or_missing_probe_is_typed_and_bounded() {
+    let (image, _) = fixture("probe-refused");
+    assert_eq!(
+        probe(&launch(&image)).err(),
+        Some(PlatformError::Unsupported)
+    );
+    // Another launch's epoch is never accepted as this probe's answer.
+    let (image, _) = fixture("probe-wrong-epoch");
+    assert_eq!(
+        probe(&launch(&image)).err(),
+        Some(PlatformError::Unavailable)
+    );
+    let (image, log) = fixture("probe-hang");
+    let started = Instant::now();
+    assert_eq!(
+        probe(&launch(&image)).err(),
+        Some(PlatformError::Unavailable)
+    );
+    assert!(started.elapsed() < HELLO_TIMEOUT + Duration::from_secs(2));
+    let pid = child_pid(&transcript(&log));
+    eventually(|| !Path::new(&format!("/proc/{pid}")).exists());
+    let missing = ProcessLaunch::new(Path::new("/nonexistent/fr-input-agent"), ":0", None, 1);
+    assert_eq!(
+        probe(&missing.unwrap()).err(),
+        Some(PlatformError::Unsupported)
+    );
+}

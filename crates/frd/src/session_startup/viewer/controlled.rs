@@ -236,6 +236,12 @@ impl ControlledViewer {
     ) -> Result<(), Error> {
         self.input.check_receiver(receiver).map_err(Error::View)
     }
+    /// The host's exact grant (it never clamps a request): what this viewer
+    /// asked for after negotiation, e.g. without line scrolling on a host
+    /// whose input executor cannot scroll by lines.
+    pub fn granted_capabilities(&self) -> fr_core::input_submission::Capabilities {
+        self.input.capabilities()
+    }
     pub fn control(&self) -> ViewerControl {
         self.control.clone()
     }

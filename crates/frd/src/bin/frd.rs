@@ -58,7 +58,11 @@ OPTIONS:
     --worker PATH   Absolute fr-media-worker path (default: next to frd)
     --input-agent PATH  Absolute fr-input-agent path: lets the first viewer take
                     exclusive, unattended control (requires approval none; the
-                    agent shows a mandatory local indicator). Absent: view-only
+                    agent shows a mandatory local indicator). Probed once at
+                    startup: no keys/pointer/buttons on this display refuses
+                    (control_capability_missing); no line scrolling (several
+                    X screens, wheel buttons unmapped) offers control without
+                    the wheel. Absent: view-only
     --clipboard     With --input-agent: the controller's UTF-8 text clipboard
                     follows its lease, both directions (the agent's per-lane
                     --clipboard child owns X11 CLIPBOARD). Off by default

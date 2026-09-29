@@ -20,6 +20,7 @@ pub use audio::AudioOptions;
 
 use crate::{
     input_agent::Seat,
+    input_process::{self, ProcessLaunch},
     media::{ObservationControl, host_now},
     native_connection::host::{
         LinuxError, LinuxServer, Request, Server,
@@ -34,7 +35,7 @@ use crate::{
         },
     },
     session_monitor::{self, Monitor, Status as Lifetime},
-    session_startup::{Configuration, host_offer_with_files, shared_viewers},
+    session_startup::{Configuration, host_offer_with_files, shared_viewers, with_line_scroll},
     worker::{Deadline, Launch, Retirement},
 };
 use asupersync::{
@@ -48,7 +49,7 @@ use fr_core::{
     authority::{AuthorityPolicy, SessionAuthority},
     ids::{CodecConfigurationGeneration, HostBootId, OsSessionId, RemoteSessionId},
     input::{DesktopPoint, InputBounds},
-    input_submission::{Capabilities, Capability},
+    input_submission::{Capabilities, Capability, PlatformError},
     limits::ProtocolLimits,
 };
 use fr_media::{
@@ -133,6 +134,13 @@ pub enum Error {
     /// The selected session's evidence ended (lock, logout, switch, suspend,
     /// or lost evidence); every share was ended first.
     SessionEnded(session_monitor::Error),
+    /// `--input-agent`: the startup probe of the local executor failed
+    /// (missing image, display refused, no `XTest`, timeout). Nothing was bound.
+    InputAgentUnavailable(PlatformError),
+    /// `--input-agent`: the local executor cannot perform an operation control
+    /// needs on this display (named). Nothing was bound; observation-only
+    /// sharing needs no input agent.
+    ControlCapabilityMissing(Capability),
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -164,6 +172,8 @@ impl Error {
             Self::NoTailnetAddress => "no_tailnet_addresses",
             Self::SessionMonitor(_) => "session_monitor_unavailable",
             Self::SessionEnded(cause) => session_ended_code(*cause),
+            Self::InputAgentUnavailable(_) => "input_agent_unavailable",
+            Self::ControlCapabilityMissing(_) => "control_capability_missing",
         }
     }
 }
@@ -237,13 +247,55 @@ fn random_nonzero_u32() -> Result<u32, Error> {
 /// and (only with the clipboard enable too) the optional clipboard ones, and
 /// (only with a drop directory too) the optional file ones.
 /// Optional client capabilities outside this set are dropped by negotiation.
-// Independent operator opt-ins, each one plain capability switch.
-#[allow(clippy::fn_params_excessive_bools)]
-fn offer(control: bool, clipboard: bool, audio: bool, files: bool) -> Offer {
-    host_offer_with_files(control, clipboard, audio, files)
+/// `control` is what this host can grant (see [`grantable`]); line scrolling
+/// is offered, optionally, only when the probed executor has it.
+fn offer(control: Option<Capabilities>, clipboard: bool, audio: bool, files: bool) -> Offer {
+    let offer = host_offer_with_files(control.is_some(), clipboard, audio, files);
+    if control.is_some_and(|c| c.contains(Capability::LineScroll)) {
+        with_line_scroll(offer)
+    } else {
+        offer
+    }
 }
-/// Native operations a controller may request in this X11 slice. Discrete
-/// wheel input uses bounded `XTest` press/release pairs, not pixel-scroll emulation.
+/// Operations control cannot work without. An executor missing any of them
+/// refuses `frd run --input-agent` at startup rather than every later grant.
+const REQUIRED_CONTROL: [Capability; 4] = [
+    Capability::Keys,
+    Capability::Repeat,
+    Capability::Absolute,
+    Capability::Buttons,
+];
+/// What this host can grant: the static policy met with what the local
+/// executor measured on this display (plan 15.1). A missing core operation
+/// is named; a missing optional one (line scrolling) is simply not offered.
+fn grantable(probed: Capabilities) -> Result<Capabilities, Capability> {
+    let grant = control_capabilities().meet(probed);
+    match REQUIRED_CONTROL.into_iter().find(|&c| !grant.contains(c)) {
+        Some(missing) => Err(missing),
+        None => Ok(grant),
+    }
+}
+/// One bounded startup probe of the configured `fr-input-agent` on the
+/// selected display, before any runtime, listener or tailnet I/O.
+fn probe_control(options: &Options) -> Result<Option<Capabilities>, Error> {
+    let Some(image) = &options.input_agent else {
+        return Ok(None);
+    };
+    let launch = ProcessLaunch::new(
+        image,
+        &options.display,
+        options.xauthority.as_deref(),
+        random_nonzero_u128()?,
+    )
+    .map_err(|_| Error::Configuration)?;
+    let probed = input_process::probe(&launch).map_err(Error::InputAgentUnavailable)?;
+    grantable(probed)
+        .map(Some)
+        .map_err(Error::ControlCapabilityMissing)
+}
+/// The static host policy for this X11 slice: operations a controller may
+/// request if the local executor also has them. Discrete wheel input uses
+/// bounded `XTest` press/release pairs, not pixel-scroll emulation.
 fn control_capabilities() -> Capabilities {
     Capabilities::default()
         .with(Capability::Keys)
@@ -258,7 +310,7 @@ fn request(
     host_boot: HostBootId,
     os_session: u32,
     scope: Scope,
-    (control, clipboard, files): (bool, bool, bool),
+    (control, clipboard, files): (Option<Capabilities>, bool, bool),
     audio: bool,
 ) -> Result<Request, serial::Error> {
     let fresh = |_| serial::Error::Configuration;
@@ -442,6 +494,7 @@ fn run_inner(
     policy: Option<policy::Configuration>,
 ) -> Result<(), Error> {
     check(options)?;
+    let control = probe_control(options)?;
     // Started before anything is bound; kept for the whole run.
     let monitor = match &options.session_monitor {
         Some(configuration) => {
@@ -450,7 +503,7 @@ fn run_inner(
         None => None,
     };
     let lifetime = monitor.as_ref().map(Monitor::control);
-    let result = serve_run(options, report, stop, policy, lifetime.as_ref());
+    let result = serve_run(options, report, stop, policy, lifetime.as_ref(), control);
     // Sampled before our own stop: only a native end is a session end.
     let ended = session_ended(lifetime.as_ref());
     if let Some(monitor) = monitor {
@@ -468,6 +521,7 @@ fn serve_run(
     stop: &Arc<StopHandle>,
     policy: Option<policy::Configuration>,
     lifetime: Option<&session_monitor::Control>,
+    control: Option<Capabilities>,
 ) -> Result<(), Error> {
     // One Seat per run: an uncertain release keeps later control refused.
     let seat = Seat::default();
@@ -532,6 +586,7 @@ fn serve_run(
                         report,
                         seat: seat.clone(),
                         lifetime,
+                        control,
                     };
                     match share.serve(&broker).await? {
                         Ended::Served => failures = 0,
@@ -725,6 +780,8 @@ struct Share<'a> {
     report: &'a Reporter,
     seat: Seat,
     lifetime: Option<&'a session_monitor::Control>,
+    /// Some only with `--input-agent`: the probed grantable operations.
+    control: Option<Capabilities>,
 }
 impl Share<'_> {
     fn cx(&self) -> Result<Cx, Error> {
@@ -786,13 +843,13 @@ impl Share<'_> {
         agent
             .permissions_mut()
             .set_permission(PermissionKind::ScreenCapture, PermissionStatus::Granted);
-        if let Some(input_agent) = &self.options.input_agent {
+        if let (Some(input_agent), Some(capabilities)) = (&self.options.input_agent, self.control) {
             let profile = ControlProfile::new(
                 input_agent,
                 &self.options.display,
                 self.options.xauthority.as_deref(),
                 self.seat.clone(),
-                control_capabilities(),
+                capabilities,
                 fps,
                 self.options.bitrate,
                 Backend::SoftwareExplicit,
@@ -934,7 +991,7 @@ impl Share<'_> {
         let (fps, bitrate) = (self.options.fps, self.options.bitrate);
         let (host_boot, scope) = (self.host_boot, self.options.sharing);
         let control = (
-            self.options.input_agent.is_some(),
+            self.control,
             self.options.clipboard,
             self.options.files.is_some(),
         );
@@ -1042,10 +1099,76 @@ mod tests {
         );
     }
 
+    /// A probed executor with the whole required core but no line scrolling.
+    fn core() -> Capabilities {
+        REQUIRED_CONTROL
+            .into_iter()
+            .fold(Capabilities::default(), Capabilities::with)
+    }
+
+    #[test]
+    fn control_is_the_static_policy_met_with_the_probed_executor() {
+        use fr_wire::control::{LINE_SCROLL_CAPABILITY, LINE_SCROLL_VERSION};
+        let all = [
+            Capability::Keys,
+            Capability::Repeat,
+            Capability::Absolute,
+            Capability::Buttons,
+            Capability::Relative,
+            Capability::PixelScroll,
+            Capability::LineScroll,
+            Capability::Text,
+        ];
+        let everything = all
+            .into_iter()
+            .fold(Capabilities::default(), Capabilities::with);
+        // A probe never widens the static policy.
+        assert_eq!(grantable(everything), Ok(control_capabilities()));
+        // Several X screens or unmapped wheel buttons: the core, no wheel.
+        assert_eq!(grantable(core()), Ok(core()));
+        // A missing core operation is named instead of failing every grant.
+        for missing in REQUIRED_CONTROL {
+            let probed = all
+                .into_iter()
+                .filter(|&c| c != missing)
+                .fold(Capabilities::default(), Capabilities::with);
+            assert_eq!(grantable(probed), Err(missing));
+        }
+        assert_eq!(grantable(Capabilities::default()), Err(Capability::Keys));
+        // Line scrolling is offered, optionally, only when grantable.
+        let wheel = grantable(core().with(Capability::LineScroll)).unwrap();
+        let line_scroll = |c: &fr_wire::negotiation::Capability| c.name == LINE_SCROLL_CAPABILITY;
+        let with = offer(Some(wheel), false, false, false);
+        let without = offer(Some(core()), false, false, false);
+        assert_eq!(with.capabilities.len(), without.capabilities.len() + 1);
+        assert!(
+            with.capabilities
+                .iter()
+                .any(|c| line_scroll(c) && c.version == LINE_SCROLL_VERSION && !c.required)
+        );
+        assert!(!without.capabilities.iter().any(line_scroll));
+        assert!(
+            !offer(None, true, true, true)
+                .capabilities
+                .iter()
+                .any(line_scroll)
+        );
+        assert!(with.validate().is_ok());
+        assert!(offer(Some(wheel), true, true, true).validate().is_ok());
+        assert_eq!(
+            Error::InputAgentUnavailable(PlatformError::Unavailable).code(),
+            "input_agent_unavailable"
+        );
+        assert_eq!(
+            Error::ControlCapabilityMissing(Capability::Keys).code(),
+            "control_capability_missing"
+        );
+    }
+
     #[test]
     fn host_offer_matches_the_native_viewer_bootstrap_capabilities() {
         use fr_wire::{attachment, decoder, display, negotiation::Role};
-        let observe = offer(false, false, false, false);
+        let observe = offer(None, false, false, false);
         assert_eq!(observe.role, Role::Observe);
         let names: Vec<_> = observe
             .capabilities
@@ -1071,18 +1194,18 @@ mod tests {
                 && c.version == fr_wire::recovery_request::VERSION
         }));
         // Control boundaries are offered only with an input agent, optionally.
-        let control = offer(true, false, false, false);
+        let control = offer(Some(core()), false, false, false);
         assert_eq!(control.capabilities.len(), 10);
         // Audio-down is offered only with the local enable, and optionally.
         for control_offer in [false, true] {
-            let without = offer(control_offer, false, false, false);
+            let without = offer(control_offer.then(core), false, false, false);
             assert!(
                 without
                     .capabilities
                     .iter()
                     .all(|c| c.name != fr_wire::audio::CAPABILITY)
             );
-            let with = offer(control_offer, false, true, false);
+            let with = offer(control_offer.then(core), false, true, false);
             assert_eq!(with.capabilities.len(), without.capabilities.len() + 1);
             assert!(with.capabilities.iter().any(|c| {
                 c.name == fr_wire::audio::CAPABILITY
@@ -1096,8 +1219,8 @@ mod tests {
             4
         );
         // The clipboard enable adds three optional boundaries, only with control.
-        assert_eq!(offer(false, true, false, false), observe);
-        let clipboard = offer(true, true, false, false);
+        assert_eq!(offer(None, true, false, false), observe);
+        let clipboard = offer(Some(core()), true, false, false);
         assert_eq!(clipboard.capabilities.len(), 13);
         assert_eq!(
             clipboard.capabilities.iter().filter(|c| c.required).count(),
@@ -1105,8 +1228,8 @@ mod tests {
         );
         // The drop directory adds three optional file boundaries, only with
         // control; the required set never changes.
-        assert_eq!(offer(false, false, false, true), observe);
-        let files = offer(true, false, false, true);
+        assert_eq!(offer(None, false, false, true), observe);
+        let files = offer(Some(core()), false, false, true);
         assert_eq!(files.capabilities.len(), control.capabilities.len() + 3);
         assert_eq!(files.capabilities.iter().filter(|c| c.required).count(), 4);
         for (name, version) in crate::session_startup::FILE_CAPABILITIES {
@@ -1140,12 +1263,36 @@ mod tests {
     #[test]
     fn every_request_allocates_fresh_unpredictable_identifiers() {
         let boot = HostBootId::from_raw(9);
-        let a = request(1, boot, 5, Scope::OwnUser, (false, false, false), false).unwrap();
-        let b = request(2, boot, 5, Scope::OwnUser, (true, false, false), false).unwrap();
-        let c = request(3, boot, 5, Scope::OwnUser, (true, true, false), false).unwrap();
-        let d = request(4, boot, 5, Scope::OwnUser, (false, false, false), true).unwrap();
-        let files = request(5, boot, 5, Scope::OwnUser, (true, false, true), false).unwrap();
-        assert_eq!(files.session.offer, offer(true, false, false, true));
+        let a = request(1, boot, 5, Scope::OwnUser, (None, false, false), false).unwrap();
+        let b = request(
+            2,
+            boot,
+            5,
+            Scope::OwnUser,
+            (Some(core()), false, false),
+            false,
+        )
+        .unwrap();
+        let c = request(
+            3,
+            boot,
+            5,
+            Scope::OwnUser,
+            (Some(core()), true, false),
+            false,
+        )
+        .unwrap();
+        let d = request(4, boot, 5, Scope::OwnUser, (None, false, false), true).unwrap();
+        let files = request(
+            5,
+            boot,
+            5,
+            Scope::OwnUser,
+            (Some(core()), false, true),
+            false,
+        )
+        .unwrap();
+        assert_eq!(files.session.offer, offer(Some(core()), false, false, true));
         assert_ne!(
             a.session.binding.remote_session,
             b.session.binding.remote_session
@@ -1154,10 +1301,10 @@ mod tests {
         assert_eq!(a.session.binding.os_session.as_raw(), 5);
         assert!(!a.session.require_approval);
         assert_eq!(a.admission.scope, Scope::OwnUser);
-        assert_eq!(a.session.offer, offer(false, false, false, false));
-        assert_eq!(b.session.offer, offer(true, false, false, false));
-        assert_eq!(c.session.offer, offer(true, true, false, false));
-        assert_eq!(d.session.offer, offer(false, false, true, false));
+        assert_eq!(a.session.offer, offer(None, false, false, false));
+        assert_eq!(b.session.offer, offer(Some(core()), false, false, false));
+        assert_eq!(c.session.offer, offer(Some(core()), true, false, false));
+        assert_eq!(d.session.offer, offer(None, false, true, false));
     }
 
     #[test]

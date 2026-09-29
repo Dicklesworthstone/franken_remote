@@ -804,7 +804,7 @@ fn control_completion(progress: &Progress, control: control::Counters, json: boo
         .unwrap_or("not_requested");
     if json {
         format!(
-            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{},\"control_requested\":{},\"control_granted\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{}{},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false}}\n",
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{},\"control_requested\":{},\"control_granted\":{},\"control_capabilities_granted\":{},\"wheel_unavailable\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{}{},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false}}\n",
             output::timestamp(),
             progress.attempts,
             progress.opened,
@@ -812,6 +812,18 @@ fn control_completion(progress: &Progress, control: control::Counters, json: boo
             media_json(progress.media),
             control.requested,
             control.granted,
+            control.capabilities.map_or_else(
+                || "null".to_owned(),
+                |granted| format!(
+                    "[{}]",
+                    control::capability_names(granted)
+                        .iter()
+                        .map(|name| format!("\"{name}\""))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+            ),
+            control.wheel_unavailable(),
             control.results,
             control.submitted,
             control.clipboard.is_some(),
@@ -830,6 +842,9 @@ fn control_completion(progress: &Progress, control: control::Counters, json: boo
             progress.attempts,
             progress.opened,
             match (control.requested, control.granted) {
+                (_, true) if control.wheel_unavailable() => {
+                    "granted (the host cannot inject wheel scrolling: wheel unavailable)"
+                }
                 (_, true) => "granted",
                 (true, false) => "requested but not granted",
                 (false, false) => "not requested",
@@ -1098,6 +1113,7 @@ mod tests {
             let counters = ended.control.as_mut().unwrap();
             counters.requested = true;
             counters.granted = true;
+            counters.capabilities = Some(control::capabilities());
             counters.results = 3;
             counters.submitted = 2;
             counters.ended = Some(Ok(()));
@@ -1113,6 +1129,8 @@ mod tests {
                 "\"role\":\"control\"",
                 "\"control_requested\":true",
                 "\"control_granted\":true",
+                "\"control_capabilities_granted\":[\"keys\",\"repeat\",\"absolute_pointer\",\"buttons\",\"line_scroll\"]",
+                "\"wheel_unavailable\":false",
                 "\"input_results\":3",
                 "\"input_submitted_to_os\":2",
                 "\"physical_visibility_proven\":false",
@@ -1132,6 +1150,26 @@ mod tests {
             );
             let text = completion(&ended, false, None);
             assert!(text.starts_with("Control session stopped;") && text.contains("granted"));
+            assert!(!text.contains("wheel unavailable"), "{text}");
+            // A host whose executor cannot scroll by lines: granted, no wheel.
+            let counters = ended.control.as_mut().unwrap();
+            counters.capabilities =
+                Some(control::capabilities().meet(fr_wire::control::requestable(&[])));
+            let json = completion(&ended, true, None);
+            assert!(json.contains("\"wheel_unavailable\":true"), "{json}");
+            assert!(!json.contains("line_scroll"), "{json}");
+            assert!(serde_json::from_str::<serde_json::Value>(&json).is_ok());
+            assert!(completion(&ended, false, None).contains("wheel unavailable"));
+            // Not granted: no set, and no wheel claim either way.
+            let counters = ended.control.as_mut().unwrap();
+            counters.granted = false;
+            counters.capabilities = None;
+            let json = completion(&ended, true, None);
+            assert!(
+                json.contains("\"control_capabilities_granted\":null"),
+                "{json}"
+            );
+            assert!(json.contains("\"wheel_unavailable\":false"), "{json}");
         }
 
         #[test]

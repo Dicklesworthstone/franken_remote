@@ -21,6 +21,23 @@ use fr_core::{
 /// Negotiated name (version 1) of the explicit native control-grant exchange
 /// defined here. Shared by host and client; selecting it grants nothing.
 pub const GRANT_CAPABILITY: &str = "native-control-grant";
+/// Optional negotiated name (version 1): the host's input executor can inject
+/// discrete line scrolling (measured when the host starts). A controller asks
+/// for `LineScroll` only when both peers selected it; without it the wheel is
+/// unavailable and control still works. The host never clamps a request.
+pub const LINE_SCROLL_CAPABILITY: &str = "native-input-line-scroll";
+pub const LINE_SCROLL_VERSION: u16 = 1;
+/// What a controller may ask for under this selection: every operation the
+/// grant exchange carries, line scrolling only with [`LINE_SCROLL_CAPABILITY`].
+/// A controller requests `wanted.meet(requestable(selection))`.
+pub fn requestable(selection: &[crate::negotiation::Capability]) -> Capabilities {
+    let line_scroll = selection
+        .iter()
+        .any(|c| c.name == LINE_SCROLL_CAPABILITY && c.version == LINE_SCROLL_VERSION);
+    CAPS.iter()
+        .filter(|&&c| line_scroll || c != Capability::LineScroll)
+        .fold(Capabilities::default(), |set, &c| set.with(c))
+}
 pub const REQUEST_BYTES: usize = HEADER_BYTES + 109;
 pub const GRANTED_BYTES: usize = REQUEST_BYTES + 76;
 pub const MAX_LEASE_LIFETIME_US: u64 = 3_000_000;

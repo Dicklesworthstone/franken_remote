@@ -131,6 +131,8 @@ sig(x.XSetForeground, I, D, c.c_void_p, W)
 sig(x.XFillRectangle, I, D, W, c.c_void_p, I, I, U, U)
 sig(x.XQueryPointer, I, D, W, c.POINTER(W), c.POINTER(W), c.POINTER(I), c.POINTER(I),
     c.POINTER(I), c.POINTER(I), c.POINTER(U))
+sig(x.XGetPointerMapping, I, D, c.POINTER(c.c_ubyte), I)
+sig(x.XSetPointerMapping, I, D, c.POINTER(c.c_ubyte), I)
 w = x.XCreateSimpleWindow(d, root, 0, 0, 640, 480, 0, 0, 0)
 x.XSelectInput(d, w, 1 | 2 | 4 | 8)
 x.XMapWindow(d, w)
@@ -170,6 +172,17 @@ def command(cmd):
         say("OK")
     elif cmd[0] == "keycode":
         say("CODE", x.XKeysymToKeycode(d, int(cmd[1], 0)))
+    elif cmd[0] == "unmap":
+        # No physical button produces this logical one (a server whose map
+        # lacks the horizontal wheel buttons).
+        m = (c.c_ubyte * 256)()
+        n = x.XGetPointerMapping(d, m, 256)
+        for i in range(n):
+            if m[i] == int(cmd[1]):
+                m[i] = 0
+        status = x.XSetPointerMapping(d, m, n)
+        x.XSync(d, 0)
+        say("OK" if status == 0 else "BUSY")
 say("READY", w)
 serve(event, command, idle)
 "#;
@@ -547,12 +560,17 @@ impl Controlled {
         files: Option<frd::native_files::Directory>,
         send: &[PathBuf],
     ) -> Self {
-        Self::start_all(host_clipboard, client_clipboard, files, send, None)
+        Self::start_all(host_clipboard, client_clipboard, files, send, None, false)
     }
     /// A plain controlled session whose host also watches the selected
     /// session through `image` (a monitor image) and logind session name.
     pub(super) fn start_monitored(image: PathBuf, session: String) -> Self {
-        Self::start_all(false, false, None, &[], Some((image, session)))
+        Self::start_all(false, false, None, &[], Some((image, session)), false)
+    }
+    /// A host display whose pointer map lacks the horizontal wheel buttons
+    /// (logical 6/7) BEFORE `frd run` starts and probes its input executor.
+    fn start_without_wheel() -> Self {
+        Self::start_all(false, false, None, &[], None, true)
     }
     fn start_all(
         host_clipboard: bool,
@@ -560,6 +578,7 @@ impl Controlled {
         files: Option<frd::native_files::Directory>,
         send: &[PathBuf],
         monitor: Option<(PathBuf, String)>,
+        unmap_wheel: bool,
     ) -> Self {
         let (fr, worker, agent) = (
             sibling("fr"),
@@ -570,6 +589,11 @@ impl Controlled {
         let viewer = Xvfb::start("800x600x24");
         let mut observer = Harness::start(HOST_OBSERVER, &host.display, "READY");
         let driver = Harness::start(VIEWER_DRIVER, &viewer.display, "WATCHING");
+        if unmap_wheel {
+            for logical in [6, 7] {
+                assert_eq!(observer.ask(&format!("unmap {logical}")), ["OK"]);
+            }
+        }
         let monitor = monitor.map(|(image, session)| frd::session_monitor::Configuration {
             image,
             selection: frd::session_monitor::Selection {
@@ -719,6 +743,25 @@ impl Controlled {
     }
 }
 
+/// A wheel notch on the VIEWER (logical button 4, one line up) reaches the
+/// host window at `at` as one discrete wheel press/release: the host offered
+/// line scrolling because its executor probed it, so the client asked for it.
+fn wheel_reaches_host(s: &mut Controlled, at: Point) {
+    let before = host_events(&mut s.observer).len();
+    s.viewer("button 4 1");
+    s.viewer("button 4 0");
+    let scrolled = eventually(Duration::from_secs(10), || {
+        let events = host_events(&mut s.observer);
+        let new = &events[before..];
+        new.contains(&(4, 4, at, false)) && new.contains(&(5, 4, at, false))
+    });
+    assert!(
+        scrolled,
+        "no host wheel press/release at {at:?}: {:?}",
+        host_events(&mut s.observer)
+    );
+}
+
 #[test]
 #[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; real input agent"]
 fn fr_connect_control_drives_the_host_desktop_through_frd_run() {
@@ -755,6 +798,7 @@ fn fr_connect_control_drives_the_host_desktop_through_frd_run() {
         "no host ButtonPress/Release at {at:?}: {:?}",
         host_events(&mut s.observer)
     );
+    wheel_reaches_host(&mut s, at);
 
     // A key typed on the VIEWER reaches the focused host window, same keycode.
     let code: u32 = s.observer.ask("keycode 0x61")[1].parse().unwrap();
@@ -807,6 +851,18 @@ fn fr_connect_control_drives_the_host_desktop_through_frd_run() {
     assert_eq!(report["role"], "control", "{report}");
     assert_eq!(report["control_requested"], true, "{report}");
     assert_eq!(report["control_granted"], true, "{report}");
+    assert_eq!(
+        report["control_capabilities_granted"],
+        serde_json::json!([
+            "keys",
+            "repeat",
+            "absolute_pointer",
+            "buttons",
+            "line_scroll"
+        ]),
+        "{report}"
+    );
+    assert_eq!(report["wheel_unavailable"], false, "{report}");
     // Two button and two key transitions were each submitted to the host OS.
     assert!(
         report["input_submitted_to_os"].as_u64().unwrap() >= 4,
@@ -979,4 +1035,63 @@ fn a_host_without_an_input_agent_refuses_fr_connect_control_by_type() {
         daemon.dump()
     );
     daemon.finish();
+}
+
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; real input agent"]
+fn a_host_without_wheel_buttons_grants_control_without_the_wheel() {
+    // The host's pointer map lacks logical 6/7, so its executor cannot scroll
+    // by lines. Before sf8 this failed EVERY grant (the host granted the
+    // client's LineScroll request statically and the lease executor then
+    // refused it); now control works and only the wheel is unavailable.
+    let mut s = Controlled::start_without_wheel();
+    assert!(s.pointer_follows((200, 210), Duration::from_secs(10)));
+    let (at, _) = host_pointer(&mut s.observer);
+    let before = host_events(&mut s.observer).len();
+    s.viewer("button 1 1");
+    s.viewer("button 1 0");
+    let clicked = eventually(Duration::from_secs(10), || {
+        let events = host_events(&mut s.observer);
+        let new = &events[before..];
+        new.contains(&(4, 1, at, false)) && new.contains(&(5, 1, at, false))
+    });
+    assert!(clicked, "no host click: {:?}", host_events(&mut s.observer));
+    // A wheel notch stays local: nothing was granted for it to become.
+    let before = host_events(&mut s.observer).len();
+    s.viewer("button 4 1");
+    s.viewer("button 4 0");
+    thread::sleep(Duration::from_secs(1));
+    let events = host_events(&mut s.observer);
+    assert!(
+        events[before..].iter().all(|e| !(4..=7).contains(&e.1)),
+        "a wheel event reached the host: {events:?}"
+    );
+    assert!(
+        s.pointer_follows((260, 240), Duration::from_secs(10)),
+        "control ended after a local wheel notch: {}",
+        s.daemon.dump()
+    );
+    close_window(&s.viewer.display, s.window.0);
+    let output = wait_for(s.client, Duration::from_secs(30));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| {
+        panic!(
+            "fr: {stdout} {}; host: {}",
+            String::from_utf8_lossy(&output.stderr),
+            s.daemon.dump()
+        )
+    });
+    eprintln!(
+        "WHEEL granted {} wheel_unavailable {}",
+        report["control_capabilities_granted"], report["wheel_unavailable"]
+    );
+    assert_eq!(report["outcome"], "stopped", "{report}");
+    assert_eq!(report["control_granted"], true, "{report}");
+    assert_eq!(
+        report["control_capabilities_granted"],
+        serde_json::json!(["keys", "repeat", "absolute_pointer", "buttons"]),
+        "{report}"
+    );
+    assert_eq!(report["wheel_unavailable"], true, "{report}");
+    s.daemon.finish();
 }

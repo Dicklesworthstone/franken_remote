@@ -455,6 +455,15 @@ impl StreamingViewer {
             .ok_or(audio::Unavailable::NotSelected)?
             .configure(output)
     }
+    /// What this session's negotiated selection lets a controller ask for;
+    /// the host never clamps a request, so the controller meets it first.
+    pub(crate) fn requestable(&mut self) -> Result<fr_core::input_submission::Capabilities, Error> {
+        let (session, _) = self.peer.parts()?;
+        session.check().map_err(Error::Session)?;
+        Ok(fr_wire::control::requestable(
+            &session.opened.selection.capabilities,
+        ))
+    }
     pub(crate) fn audio_statistics(&self) -> Option<audio::AudioStatistics> {
         self.audio.as_ref().map(audio::ViewerAudio::statistics)
     }

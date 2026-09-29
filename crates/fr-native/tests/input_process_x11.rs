@@ -23,7 +23,7 @@ use fr_native::input::{X11Pointer, emergency};
 use fr_wire::input::{InputDelivery, InputDirection, MAX_INPUT_RECORD_BYTES, encode_input};
 use frd::{
     input_agent::{Agent, Driver, Error as AgentError, Phase, Reply, Route, Seat, Shutdown},
-    input_process::{Fence, ProcessLaunch, RemoteSink, factory},
+    input_process::{Fence, ProcessLaunch, RemoteSink, factory, probe as probe_executor},
     input_watchdog::{StopReason, host_now},
 };
 use std::{
@@ -137,6 +137,8 @@ unsafe extern "C" {
     fn XSync(d: *mut c_void, discard: c_int) -> c_int;
     fn XKeysymToKeycode(d: *mut c_void, sym: c_ulong) -> u8;
     fn XQueryKeymap(d: *mut c_void, keys: *mut u8) -> c_int;
+    fn XGetPointerMapping(d: *mut c_void, map: *mut u8, count: c_int) -> c_int;
+    fn XSetPointerMapping(d: *mut c_void, map: *const u8, count: c_int) -> c_int;
     fn XQueryPointer(
         d: *mut c_void,
         w: c_ulong,
@@ -248,6 +250,43 @@ impl Observer {
             }
         }
         out
+    }
+    /// Map no physical button to `logical` (a wheel direction), as on a server
+    /// whose pointer map lacks horizontal wheel buttons.
+    fn unmap_logical(&self, logical: u8) {
+        let mut map = [0; 256];
+        // SAFETY: live connection and full-size map; the server validates it.
+        unsafe {
+            let n = usize::try_from(XGetPointerMapping(self.d, map.as_mut_ptr(), 256)).unwrap();
+            let slot = map[..n].iter().position(|&b| b == logical).unwrap();
+            map[slot] = 0;
+            assert_eq!(
+                XSetPointerMapping(self.d, map.as_ptr(), c_int::try_from(n).unwrap()),
+                0
+            );
+            XSync(self.d, 0);
+        }
+    }
+    /// Top-level windows created since `watch_root` (e.g. an indicator).
+    fn watch_root(&self) {
+        // SAFETY: live connection; SubstructureNotifyMask on the root.
+        unsafe {
+            XSelectInput(self.d, self.root, 1 << 19);
+            XSync(self.d, 0);
+        }
+    }
+    fn root_creations(&self) -> usize {
+        let mut created = 0;
+        // SAFETY: as in `events`; only the event kind is read.
+        unsafe {
+            XSync(self.d, 0);
+            while XPending(self.d) > 0 {
+                let mut e = Event { padding: [0; 24] };
+                XNextEvent(self.d, &raw mut e);
+                created += usize::from(e.kind == 16);
+            }
+        }
+        created
     }
     fn release_key(&self, code: u8) {
         // SAFETY: cleanup of a test-induced leftover press on the private server.
@@ -1121,4 +1160,35 @@ fn local_indicator_failures_always_revoke_their_owner() {
         Status::Stopped(IndicatorStop::NativeFailure)
     );
     assert!(calls.load(Ordering::SeqCst) >= 5);
+}
+
+#[test]
+fn the_startup_probe_reports_executor_capabilities_without_input_or_indicator() {
+    let server = Server::start();
+    let o = Observer::new(&server.display);
+    let _ = o.events();
+    o.watch_root();
+    let before = o.pointer();
+    // The same computation as an in-process open, measured by the real child.
+    let (_, local) = probe(&server);
+    assert!(local.contains(Capability::LineScroll), "default Xvfb map");
+    assert_eq!(probe_executor(&launch(&server)), Ok(local));
+    // A pointer map without the horizontal wheel: the core stays, the wheel
+    // alone is reported unavailable (the host then does not offer it).
+    o.unmap_logical(7);
+    let probed = probe_executor(&launch(&server)).unwrap();
+    assert!(!probed.contains(Capability::LineScroll));
+    assert!(
+        probed.contains_all(
+            Capabilities::default()
+                .with(Capability::Keys)
+                .with(Capability::Repeat)
+                .with(Capability::Absolute)
+                .with(Capability::Buttons)
+        )
+    );
+    assert_eq!(probed, probe(&server).1);
+    // Neither probe created a window (no indicator), moved, pressed or typed.
+    assert_eq!(o.root_creations(), 0);
+    assert_eq!(o.pointer(), before);
 }

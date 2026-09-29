@@ -38,10 +38,13 @@ use frd::{
     },
 };
 
-/// Exactly what this X11 viewer captures and the `frd run --input-agent` host
-/// profile executes: keys (with repeat), absolute pointer, buttons and discrete
-/// line scrolling on both axes. Pixel scrolling, relative pointer and text stay
-/// unavailable; no fractional wheel accumulation or keyboard emulation is used.
+/// What this X11 viewer captures and wants from the `frd run --input-agent`
+/// host profile: keys (with repeat), absolute pointer, buttons and discrete
+/// line scrolling on both axes. Line scrolling is requested only when the host
+/// selected the optional `native-input-line-scroll` boundary (its executor can
+/// scroll by lines); otherwise the wheel alone is unavailable. Pixel scrolling,
+/// relative pointer and text stay unavailable; no fractional wheel
+/// accumulation or keyboard emulation is used.
 pub(super) fn capabilities() -> Capabilities {
     Capabilities::default()
         .with(Capability::Keys)
@@ -141,11 +144,39 @@ fn configuration(
     ))
 }
 
+/// Content-free names of granted operations, in a fixed order.
+pub(super) fn capability_names(granted: Capabilities) -> Vec<&'static str> {
+    [
+        (Capability::Keys, "keys"),
+        (Capability::Repeat, "repeat"),
+        (Capability::Absolute, "absolute_pointer"),
+        (Capability::Buttons, "buttons"),
+        (Capability::Relative, "relative_pointer"),
+        (Capability::PixelScroll, "pixel_scroll"),
+        (Capability::LineScroll, "line_scroll"),
+        (Capability::Text, "text"),
+    ]
+    .into_iter()
+    .filter(|(c, _)| granted.contains(*c))
+    .map(|(_, name)| name)
+    .collect()
+}
+impl Counters {
+    /// Granted, but without the wheel: the host's input executor cannot
+    /// scroll by lines (several X screens, or wheel buttons unmapped).
+    pub(super) fn wheel_unavailable(&self) -> bool {
+        self.capabilities
+            .is_some_and(|c| !c.contains(Capability::LineScroll))
+    }
+}
+
 /// Content-free tallies for the completion report; never input values.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Counters {
     pub(super) requested: bool,
     pub(super) granted: bool,
+    /// The host's exact grant, once granted (never clamped by the host).
+    pub(super) capabilities: Option<Capabilities>,
     pub(super) results: u64,
     pub(super) submitted: u64,
     /// The ORIGINAL outcome of the attempt whose cleanup ended reconnection.
@@ -310,6 +341,7 @@ impl Attempt {
             }
             InteractiveViewerState::Controlled(viewer) => {
                 counters.granted = true;
+                counters.capabilities = Some(viewer.granted_capabilities());
                 if let Some(frame) = self.candidate(frame) {
                     // The controlled clock is already correlated; a refusal
                     // only withholds evidence and new input stays gated.

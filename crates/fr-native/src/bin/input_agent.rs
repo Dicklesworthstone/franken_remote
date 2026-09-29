@@ -21,6 +21,12 @@
 //! panic or Xlib error releases through the dedicated emergency connection.
 //! It writes nothing but reply frames and signal datagrams, and logs no input.
 //!
+//! A launch whose first request is `Probe` is a separate one-shot role: frd's
+//! startup capability probe. It opens the display exactly as a lease executor
+//! does, replies `Ready` with the capabilities that executor would advertise,
+//! and exits. It installs no emergency path, shows no indicator and accepts no
+//! further request, so it cannot inject anything.
+//!
 //! `--clipboard --parent-pid PID` selects a different, separately launched
 //! role: the per-lease X11 CLIPBOARD owner for frd's `clipboard_process`
 //! (see `input_agent/clipboard.rs`; built with `linux-clipboard`, otherwise it
@@ -152,6 +158,30 @@ mod linux {
         }
     }
 
+    /// The same display open and capability computation as a lease executor,
+    /// reported once. The connection closes before this process exits; no
+    /// input path, emergency release connection or indicator ever exists.
+    fn probe(command: &mut UnixStream, epoch: u128) -> i32 {
+        let reply = match std::env::var("DISPLAY")
+            .map_err(|_| PlatformError::Unsupported)
+            .and_then(|display| X11Pointer::open(&display))
+        {
+            Ok(pointer) => Reply::Ready {
+                epoch,
+                capabilities: pointer.capabilities(),
+                repeat_requires_pair: pointer.repeat_requires_pair(),
+                line_scroll_requires_pairs: pointer.line_scroll_requires_pairs(),
+            },
+            Err(error) => Reply::Refused(error),
+        };
+        let refused = matches!(reply, Reply::Refused(_));
+        match send(command, 1, reply) {
+            Err(_) => EXIT_CHANNEL,
+            Ok(()) if refused => EXIT_REFUSED,
+            Ok(()) => 0,
+        }
+    }
+
     // Field order is teardown order: the X11 owner releases and restores
     // while the indicator is still shown.
     struct Executor {
@@ -170,16 +200,18 @@ mod linux {
                 .set_read_timeout(Some(HELLO_TIMEOUT))
                 .map_err(|_| EXIT_CHANNEL)?;
             let frame = receive(&mut command).map_err(|_| EXIT_CHANNEL)?;
-            let Ok((
-                1,
-                Request::Hello {
-                    epoch,
-                    bounds,
-                    required,
-                },
-            )) = process::decode_request(&frame)
-            else {
-                return Err(EXIT_PROTOCOL);
+            // `Err` carries the exit code; a completed probe exits with 0.
+            let (epoch, bounds, required) = match process::decode_request(&frame) {
+                Ok((
+                    1,
+                    Request::Hello {
+                        epoch,
+                        bounds,
+                        required,
+                    },
+                )) => (epoch, bounds, required),
+                Ok((1, Request::Probe { epoch })) => return Err(probe(&mut command, epoch)),
+                _ => return Err(EXIT_PROTOCOL),
             };
             command.set_read_timeout(None).map_err(|_| EXIT_CHANNEL)?;
             let revoked = Arc::new(AtomicBool::new(false));
@@ -247,7 +279,7 @@ mod linux {
                 self.expected = next;
                 self.drain_signals();
                 let reply = match request {
-                    Request::Hello { .. } => return EXIT_PROTOCOL,
+                    Request::Hello { .. } | Request::Probe { .. } => return EXIT_PROTOCOL,
                     Request::Prepare(operation) => self.prepare(operation),
                     Request::Submit {
                         operation,

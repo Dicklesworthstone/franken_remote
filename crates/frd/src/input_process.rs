@@ -224,32 +224,7 @@ impl RemoteSink {
             return Err(PlatformError::Permission);
         }
         input_watchdog::host_now(&cx).map_err(|_| PlatformError::Unavailable)?;
-        let (command, child_command) =
-            UnixStream::pair().map_err(|_| PlatformError::Unavailable)?;
-        let (signals, child_signals) =
-            UnixDatagram::pair().map_err(|_| PlatformError::Unavailable)?;
-        signals
-            .set_nonblocking(true)
-            .map_err(|_| PlatformError::Unavailable)?;
-        let mut spawn = Command::new(&launch.image);
-        spawn
-            .env_clear()
-            .env("DISPLAY", &launch.display)
-            .arg("--parent-pid")
-            .arg(std::process::id().to_string())
-            .stdin(Stdio::from(OwnedFd::from(child_command)))
-            .stdout(Stdio::from(OwnedFd::from(child_signals)))
-            .stderr(Stdio::null())
-            .process_group(0);
-        if let Some(path) = &launch.xauthority {
-            spawn.env("XAUTHORITY", path);
-        }
-        let child = spawn.spawn().map_err(|error| match error.kind() {
-            io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied => PlatformError::Unsupported,
-            _ => PlatformError::Unavailable,
-        })?;
-        // Close our copies of the child's ends: its exit must read as EOF here.
-        drop(spawn);
+        let (child, command, signals) = spawn(launch)?;
         let signals = Arc::new(signals);
         // Custody first: every failure below kills and reaps this child.
         let mut sink = Self {
@@ -497,6 +472,78 @@ impl Drop for RemoteSink {
             let _ = child.wait();
         }
     }
+}
+
+/// What `fr-input-agent` can execute on this display, measured once by a
+/// separate one-shot launch of the same locally selected image and context: it
+/// opens the display exactly as a lease executor does, replies and exits. That
+/// process has no indicator, emergency path or input channel; nothing is
+/// injected and no Seat is involved. Bounded blocking I/O (`HELLO_TIMEOUT`):
+/// call it before serving, never on an authority path.
+pub fn probe(launch: &ProcessLaunch) -> Result<Capabilities, PlatformError> {
+    let (mut child, mut command, _signals) = spawn(launch)?;
+    let result = (|| {
+        let deadline = Instant::now()
+            .checked_add(HELLO_TIMEOUT)
+            .ok_or(PlatformError::Unavailable)?;
+        let frame = process::encode_request(
+            1,
+            Request::Probe {
+                epoch: launch.epoch,
+            },
+        )
+        .map_err(|_| PlatformError::Unavailable)?;
+        command
+            .set_write_timeout(Some(HELLO_TIMEOUT))
+            .and_then(|()| command.write_all(&frame))
+            .map_err(|_| PlatformError::Unavailable)?;
+        let bytes = read_frame(&mut command, deadline).map_err(|_| PlatformError::Unavailable)?;
+        match process::decode_reply(&bytes) {
+            Ok((
+                1,
+                Reply::Ready {
+                    epoch,
+                    capabilities,
+                    ..
+                },
+            )) if epoch == launch.epoch => Ok(capabilities),
+            Ok((1, Reply::Refused(error))) => Err(error),
+            _ => Err(PlatformError::Unavailable),
+        }
+    })();
+    // Nothing to release: end the one-shot child whatever it replied.
+    kill_group(&child);
+    let _ = child.wait();
+    result
+}
+/// Launch the locally selected image with a cleared environment, the private
+/// command stream on stdin and the signal datagram socket on stdout.
+fn spawn(launch: &ProcessLaunch) -> Result<(Child, UnixStream, UnixDatagram), PlatformError> {
+    let (command, child_command) = UnixStream::pair().map_err(|_| PlatformError::Unavailable)?;
+    let (signals, child_signals) = UnixDatagram::pair().map_err(|_| PlatformError::Unavailable)?;
+    signals
+        .set_nonblocking(true)
+        .map_err(|_| PlatformError::Unavailable)?;
+    let mut spawn = Command::new(&launch.image);
+    spawn
+        .env_clear()
+        .env("DISPLAY", &launch.display)
+        .arg("--parent-pid")
+        .arg(std::process::id().to_string())
+        .stdin(Stdio::from(OwnedFd::from(child_command)))
+        .stdout(Stdio::from(OwnedFd::from(child_signals)))
+        .stderr(Stdio::null())
+        .process_group(0);
+    if let Some(path) = &launch.xauthority {
+        spawn.env("XAUTHORITY", path);
+    }
+    let child = spawn.spawn().map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied => PlatformError::Unsupported,
+        _ => PlatformError::Unavailable,
+    })?;
+    // Close our copies of the child's ends: its exit must read as EOF here.
+    drop(spawn);
+    Ok((child, command, signals))
 }
 
 /// Between exchanges the child must send nothing: EOF (it exited) or any

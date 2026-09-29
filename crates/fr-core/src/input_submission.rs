@@ -54,6 +54,12 @@ impl Capabilities {
     pub const fn contains_all(self, required: Self) -> bool {
         self.0 & required.0 == required.0
     }
+    /// What both sets permit: a host's policy and its probed executor, or a
+    /// controller's wanted operations and what negotiation allows it to ask.
+    #[must_use]
+    pub const fn meet(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
 }
 
 /// One bounded native API operation. Text is one Unicode scalar, never half of

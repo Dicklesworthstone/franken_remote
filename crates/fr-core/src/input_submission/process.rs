@@ -64,6 +64,12 @@ pub enum Request {
     Cancel,
     Cleanup,
     Stop,
+    /// A separate one-shot launch: open the display, reply `Ready` with the
+    /// capabilities a lease executor would have, then exit. It shows no
+    /// indicator, accepts no other request and never injects input.
+    Probe {
+        epoch: u128,
+    },
 }
 impl fmt::Debug for Request {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -75,6 +81,7 @@ impl fmt::Debug for Request {
             Self::Cancel => "Cancel",
             Self::Cleanup => "Cleanup",
             Self::Stop => "Stop",
+            Self::Probe { .. } => "Probe",
         })
     }
 }
@@ -200,6 +207,13 @@ pub fn encode_request(sequence: u64, request: Request) -> Result<[u8; FRAME_BYTE
         Request::Cancel => 5,
         Request::Cleanup => 6,
         Request::Stop => 7,
+        Request::Probe { epoch } => {
+            if epoch == 0 {
+                return Err(CodecError::Value);
+            }
+            body[..16].copy_from_slice(&epoch.to_be_bytes());
+            8
+        }
     };
     frame(sequence, kind, &body)
 }
@@ -260,6 +274,14 @@ pub fn decode_request(bytes: &[u8]) -> Result<(u64, Request), CodecError> {
                 6 => Request::Cleanup,
                 _ => Request::Stop,
             }
+        }
+        8 => {
+            let epoch = u128::from_be_bytes(body[..16].try_into().expect("fixed"));
+            zero(&body[16..])?;
+            if epoch == 0 {
+                return Err(CodecError::Value);
+            }
+            Request::Probe { epoch }
         }
         _ => return Err(CodecError::Kind),
     };
