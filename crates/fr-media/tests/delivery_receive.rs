@@ -295,6 +295,7 @@ fn stale_for_display_reference_still_unlocks_fresh_dependent_picture() {
     }
     let reference = receiver.take_decodable(60_000).unwrap().unwrap();
     assert!(!reference.within_display_queue_budget());
+    assert!(!reference.is_newest(), "frame 2 supersedes it");
     assert_eq!(reference.descriptor().frame, 1);
     receiver
         .acknowledge_decode(&reference, true, 61_000)
@@ -302,7 +303,45 @@ fn stale_for_display_reference_still_unlocks_fresh_dependent_picture() {
     drop(reference);
     let latest = receiver.take_decodable(61_000).unwrap().unwrap();
     assert!(latest.within_display_queue_budget());
+    assert!(latest.is_newest());
     assert_eq!(latest.descriptor().frame, 2);
+}
+
+#[test]
+fn a_late_picture_is_newest_only_when_nothing_later_was_announced() {
+    let c = config();
+    let (mut receiver, _) = running(c);
+    // Frame 1 completes after its display budget (a repair) and nothing
+    // follows: it is the source's latest known state, worth presenting.
+    let first = fragments(descriptor(1, Some(0)), &payload(), c);
+    receiver.receive(Channel::Video, &first[0], 10).unwrap();
+    for packet in &first[1..] {
+        receiver.receive(Channel::Video, packet, 60_000).unwrap();
+    }
+    let late = receiver.take_decodable(60_000).unwrap().unwrap();
+    assert!(!late.within_display_queue_budget());
+    assert!(late.is_newest());
+    receiver.acknowledge_decode(&late, true, 61_000).unwrap();
+    drop(late);
+    // Frame 2 is late too, but frame 3 was announced meanwhile: superseded.
+    let second = fragments(descriptor(2, Some(1)), &payload(), c);
+    receiver
+        .receive(Channel::Video, &second[0], 61_000)
+        .unwrap();
+    receiver
+        .receive(
+            Channel::MediaConfig,
+            &progress(descriptor(3, Some(2)), c),
+            62_000,
+        )
+        .unwrap();
+    for packet in &second[1..] {
+        receiver.receive(Channel::Video, packet, 120_000).unwrap();
+    }
+    let superseded = receiver.take_decodable(120_000).unwrap().unwrap();
+    assert_eq!(superseded.descriptor().frame, 2);
+    assert!(!superseded.within_display_queue_budget());
+    assert!(!superseded.is_newest());
 }
 #[test]
 fn reliable_announcement_detects_an_entirely_lost_final_frame() {

@@ -144,6 +144,7 @@ pub struct ReceivedPicture {
     epoch: MediaEpoch,
     bindings: MediaBindings,
     queue_fresh: bool,
+    newest: bool,
     display_until_us: u64,
     reference_until_us: u64,
     bytes: TrackedBytes,
@@ -154,6 +155,7 @@ impl fmt::Debug for ReceivedPicture {
             .field("descriptor", &self.descriptor)
             .field("epoch", &self.epoch)
             .field("queue_fresh", &self.queue_fresh)
+            .field("newest", &self.newest)
             .field("byte_len", &self.bytes.bytes.len())
             .finish_non_exhaustive()
     }
@@ -189,6 +191,15 @@ impl ReceivedPicture {
     /// clock-uncertainty, visibility and current authority checks.
     pub const fn within_display_queue_budget(&self) -> bool {
         self.queue_fresh
+    }
+    /// Nothing newer had been announced or received when this picture was
+    /// taken: it is the source's latest known state. A picture past its display
+    /// budget is still worth presenting then (prefer the newest ready frame;
+    /// only superseded work is obsolete). Presenting it late never makes it
+    /// fresh evidence: the view tracker keeps it unqualified until a newer
+    /// observation of that exact picture.
+    pub const fn is_newest(&self) -> bool {
+        self.newest
     }
 }
 
@@ -821,12 +832,20 @@ impl ReceivePipeline {
             frame: a.descriptor.frame,
             deadline: a.reference_until,
         });
+        let frame = a.descriptor.frame;
+        let newest = self.progress.is_none_or(|p| p.descriptor.frame <= frame)
+            && !self
+                .slots
+                .iter()
+                .flatten()
+                .any(|other| other.descriptor.frame > frame);
         Ok(Some(ReceivedPicture {
             scope: self.scope.clone(),
             descriptor: a.descriptor,
             epoch: self.config.epoch,
             bindings: self.config.bindings,
             queue_fresh: now < a.display_until,
+            newest,
             display_until_us: a.display_until,
             reference_until_us: a.reference_until,
             bytes: a.bytes,

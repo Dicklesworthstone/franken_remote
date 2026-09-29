@@ -163,7 +163,11 @@ impl Presenter {
             if current >= picture.reference_deadline_us() {
                 return Err(Error::Worker(worker::Error::Deadline));
             }
-            let display = current < picture.display_deadline_us();
+            // A late picture is skipped only when something newer supersedes it.
+            // The newest one is what the source shows; on a static desktop no
+            // later picture would ever replace a skipped one. Late presentation
+            // is never fresh evidence (the view tracker keeps it unqualified).
+            let display = current < picture.display_deadline_us() || picture.is_newest();
             let d = picture.descriptor();
             let kind = d.reference.map_or(
                 FrameKind::Idr {

@@ -186,6 +186,7 @@ fn queued_decode_uses_original_display_deadline_not_dequeue_freshness() {
         let (mut presenter, mut receiver, _) = fixture(&cx, "healthy").await;
         let job = presenter.take_next(&cx, &mut receiver).unwrap().unwrap();
         assert!(job.picture().within_display_queue_budget());
+        assert!(job.picture().is_newest());
         let deadline = job.picture().display_deadline_us();
         sleep(cx.now(), Duration::from_millis(60)).await;
         let receipt = presenter
@@ -194,7 +195,10 @@ fn queued_decode_uses_original_display_deadline_not_dequeue_freshness() {
             .unwrap()
             .complete(&cx, &mut receiver)
             .unwrap();
-        assert_eq!(receipt.stage, PresentationStage::DecodedOnly);
+        // Late but the newest known picture: presented, and its receipt keeps
+        // the ORIGINAL display deadline, so it can never count as fresh.
+        assert_eq!(receipt.stage, PresentationStage::SubmittedToCompositor);
+        assert!(host_now(&cx).unwrap().as_micros() >= deadline);
         assert_eq!(receipt.decoded.display_deadline_us(), deadline);
     });
 }

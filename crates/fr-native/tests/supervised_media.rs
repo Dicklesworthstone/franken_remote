@@ -362,14 +362,16 @@ async fn exercise_pair(
             .unwrap()
             .unwrap();
         assert_eq!(receipt.frame.as_raw(), u64::from(frame) + 1);
-        assert_eq!(
-            receipt.stage,
-            if frame == 3 {
-                PresentationStage::DecodedOnly
-            } else {
-                PresentationStage::SubmittedToCompositor
-            }
-        );
+        // Frame 3 is past its display budget but nothing newer exists: it is
+        // what the source shows, so it is presented (never fresh evidence).
+        // A late picture that IS superseded stays decode-only and invisible:
+        // `presentation_input`'s late-reference recovery case asserts that.
+        assert_eq!(receipt.stage, PresentationStage::SubmittedToCompositor);
+        if frame == 3 {
+            assert!(
+                host_now(&cleanup).unwrap().as_micros() >= receipt.decoded.display_deadline_us()
+            );
+        }
         assert_eq!(
             receiver.budget_usage().pictures,
             0,
@@ -377,11 +379,7 @@ async fn exercise_pair(
         );
         let pixels = output.snapshot().unwrap();
         if let Some(old) = previous {
-            if frame == 3 {
-                assert_eq!(pixels.pixels(), old, "late reference was displayed");
-            } else {
-                assert_ne!(pixels.pixels(), old);
-            }
+            assert_ne!(pixels.pixels(), old, "frame {frame} was not displayed");
         }
         previous = Some(pixels.pixels().to_vec());
     }

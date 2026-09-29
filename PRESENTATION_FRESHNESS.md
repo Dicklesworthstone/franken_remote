@@ -227,6 +227,39 @@ fails at this load is retried at most twice and counted as `setup retries`.
 That happened in 3 of 19 control cells, and a third failure fails the test.
 Startup itself stays strictly asserted by the other control tests.
 
+**A repaired picture on a static screen is shown (2026-09-28).** The
+view-only 40 ms RTT, 5% loss row sometimes froze with no named end: the
+viewer kept the previous picture for 10 s while the connection stayed up.
+Diagnostic builds (not committed) showed why. The host's latest picture lost
+fragments, the client requested a repair, and the repair completed the
+picture after its 50 ms display budget. The presenter then decoded it without
+presenting it, a rule meant for pictures that something newer supersedes. The
+test waits for that very change, so the host screen stayed static: every
+later capture was unchanged, and the host sent only `QualifiedUnchanged`
+observations of that picture (about 13 per second, no new video). Nothing
+newer ever replaced the skipped picture, and nothing timed out. Unfixed, 12 of
+61 diagnostic repetitions froze this way (batches of 2/12, 0/12, 7/24 and 3/13,
+load about 150-210); other short rows ended with a named cause.
+
+A late picture is now presented when nothing newer has been announced or
+received (`ReceivedPicture::is_newest`). A superseded late picture is still
+decoded only. Presenting late never makes a picture fresh evidence: its
+receipt keeps the original display deadline, and the view tracker keeps it
+unqualified until a newer host observation of it arrives (above). This follows
+the plan's presentation rule (prefer the newest ready frame; discard only
+obsolete presentation work) instead of showing an older picture indefinitely.
+Evidence: fr-media `a_late_picture_is_newest_only_when_nothing_later_was_announced`,
+frd `queued_decode_uses_original_display_deadline_not_dequeue_freshness`, and
+the real-worker `supervised_media` case, whose late newest picture must now
+change the X11 readback. `presentation_input`'s late-reference case still
+requires a superseded late reference to stay invisible. On the same
+diagnostic build with the fix, 24 repetitions (load about 165-180) had no
+silent freeze: 18 showed all six changes and 6 ended with a named cause
+(`transport_deadline_expired` 5, `host_not_heard` 1), the 5% loss limit
+recorded above. Planted negative: with the newest-picture rule removed, the frd
+unit test and `supervised_media` both fail (`DecodedOnly` instead of
+`SubmittedToCompositor`).
+
 **No input lands on a stale view (namespace e2e).**
 `real_control::a_stale_view_suspends_input_before_it_reaches_the_host` freezes
 the host's capture child with SIGSTOP. No picture or source observation reaches
@@ -308,7 +341,9 @@ delivered fragments. It drops either the final fragment, an entire final picture
 or every fifth fragment of a predictive picture. Missing pictures never reach
 the decoder. Repair requests run from the receiver's idle deadline, including
 when no later capture arrives. The repaired late reference is decoded without
-presentation; only its fresh dependent may be displayed. Frame IDs and a known
+presentation because its dependent was already announced; only that fresh
+dependent may be displayed. A late picture that is still the newest known one
+is presented (see "A repaired picture on a static screen" above). Frame IDs and a known
 source marker checked at three interior pixels identify the expected image
 before `PresentedInput::visible` runs. The color tolerance is the existing
 less-than-10-per-channel HEVC conversion allowance.
