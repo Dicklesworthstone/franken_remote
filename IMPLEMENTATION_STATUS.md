@@ -46,6 +46,19 @@ the rejection only as an opaque code, and the fix is upstream. Gates:
 - frd lib 742/0;
 - fr-transport 165/0 (load about 110-120).
 
+**Update 2026-09-29 (namespace evidence).**
+- A view-only session no longer freezes silently under loss (64ea6b7). A
+  repaired picture that completed after its display budget was decoded but
+  never shown, and on a static screen nothing replaced it. Diagnostic
+  repetitions at 40 ms RTT with 5% loss: 12 of 61 froze unfixed, 0 of 24 fixed.
+- Control capabilities are a meet (3f927de): `frd run --input-agent` probes its
+  executor at startup. It refuses typed without keys, pointer or buttons, and
+  offers control without the wheel where the executor cannot scroll by lines,
+  where every grant used to fail. A wheel notch now reaches the host in the
+  control e2e.
+- A full matrix rerun (ec91b25) has the same shape as above, with every
+  shorter row ending on a named cause.
+
 **Open, in priority order:**
 - Control over ordinary tailnet paths: it ends at 60 ms RTT or more, or with 1%
   loss (above). This needs the owner decision on view-lapse semantics and an
