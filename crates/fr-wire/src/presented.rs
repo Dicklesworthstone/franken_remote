@@ -11,7 +11,33 @@ use fr_core::limits::ProtocolLimits;
 pub const CAPABILITY: &str = "presented-state";
 pub const VERSION: u16 = 1;
 pub const BYTES: usize = HEADER_BYTES + decoder::BINDING_BYTES + 43;
-pub const MAX_SOURCE_AGE_US: u64 = 250_000;
+/// How far a presented view may lag its source on a fast path.
+pub const BASE_SOURCE_AGE_US: u64 = 250_000;
+/// The largest source age any path admits, and the validity ceiling of a
+/// report's age. A slower path is refused as stale, never admitted as fresh.
+pub const MAX_SOURCE_AGE_US: u64 = 1_000_000;
+/// The viewer's allowance, in measured round trips. A static view's age grows by
+/// the host observation's transit, a stop-and-wait wait behind the previous
+/// record on its stream, and up to one round trip of clock uncertainty in the
+/// viewer's conservative age. Host-side ages peaked near three round trips at
+/// 60, 120 and 200 ms RTT (namespace probe, 2026-09-30).
+pub const VIEWER_RTT_MULTIPLE: u64 = 3;
+/// The host's check allows one round trip more than the viewer's: margin for
+/// the report's transit and the two ends' separate RTT estimates. When the host
+/// still finds a report stale, its check stands and the view lapses.
+pub const HOST_RTT_MULTIPLE: u64 = 4;
+/// The source-age bound for one path: `base` plus `rtt_multiple` smoothed
+/// round trips, capped at [`MAX_SOURCE_AGE_US`] (never below `base`). An
+/// unknown RTT keeps the base. Each end computes it from its own measurement.
+#[must_use]
+pub fn source_age_bound_us(base_us: u64, smoothed_rtt_us: Option<u64>, rtt_multiple: u64) -> u64 {
+    smoothed_rtt_us.map_or(base_us, |rtt| {
+        base_us
+            .saturating_add(rtt.saturating_mul(rtt_multiple))
+            .min(MAX_SOURCE_AGE_US)
+            .max(base_us)
+    })
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stamp {
     pub frame: u64,

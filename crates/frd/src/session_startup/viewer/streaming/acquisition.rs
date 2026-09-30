@@ -468,7 +468,12 @@ pub(super) fn notify(
             return Err(Error::Closed);
         };
         let at = ClientInstant(request.current()?);
-        let (_, input) = request.grant.take().ok_or(Error::Closed)?;
+        let (_, mut input) = request.grant.take().ok_or(Error::Closed)?;
+        // Judge the grant's first evidence with the same path bound that made
+        // this view ready, not the fast-path base.
+        input
+            .follow_path_rtt(session.transport.smoothed_rtt_us())
+            .map_err(|e| Error::Control(ControlError::View(e.into())))?;
         let view = request.local.view.take().ok_or(Error::Closed)?;
         let mut input = PresentedInput::from_view(input, receiver, view, at)
             .map_err(|e| Error::Control(ControlError::View(e)))?;

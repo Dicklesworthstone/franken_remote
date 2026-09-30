@@ -299,6 +299,54 @@ at ≥60 ms RTT or with 1% loss, through `transport_deadline_expired` or
 `view_stale`: the client's presented-report deadline is the 250 ms age budget
 minus the sample's conservative age, which is again the owner decision above.
 
+## Path-aware bound and delivery allowance (2026-09-30)
+
+The owner decision `fr-rc2-owner-decision-view-lapse-f7ts` was taken under the
+owner's standing delegation. Two parts have landed:
+- Reliable records get a path delivery allowance (0d4b59a, QUIC_RECORDS.md).
+- The source-age bound follows the measured path (PRESENTATION_READINESS.md):
+  250 ms plus three smoothed RTTs at the viewer and plus four at the host,
+  capped at 1 s.
+
+The multiples come from a 1 s-bound probe. Host-side presented ages peaked at
+about 180, 360 and 540 ms at 60, 120 and 200 ms RTT, roughly three round trips.
+A first cut with two and three RTTs still ended the 120 ms rows on the viewer.
+
+Namespace matrix, load 110-165, four runs with the path bound:
+
+| Control row | Fixed 250 ms bound | Path bound |
+|---|---|---|
+| 40 ms RTT, 1% loss | ended (2 of 2 rows) | held 2 of 6 rows at the final multiples |
+| 120 ms RTT, no loss | ended at step 1 (2 of 2) | held 2 of 8 rows |
+| 120 ms RTT with loss | ended | ended |
+
+Diagnostic prints (never committed) name each remaining control end:
+- Most are the input client's own stale-view stop
+  (`Input(Stopped(ViewStale))`), including at 6 ms RTT with 1% loss. A lost
+  packet delays the source observation past the bound, and a lapse ends
+  control. Plan 11.3 asks for suspension ("sustained unknown/stale
+  presentation suspends input"), which is not implemented. That, not the
+  bound, is the main limit on control under loss.
+- At 120 ms RTT some rows end with a transport deadline. It was a clock
+  exchange or session record whose epoch waited past the 3-PTO allowance. An
+  earlier experiment with a flat 1 s floor held these rows.
+- The 120 ms rows mostly end at the first host desktop change. The likely
+  mechanism: a large picture needs several round trips while the congestion
+  window grows. It misses the 50 ms display budget (counted from its first
+  fragment), is shown unqualified, and the previous view's deadline lapses
+  first. Suspension would absorb this. A grant now judges its first evidence
+  with the same path bound that made the view ready.
+
+View-only at 120 ms RTT without loss held in 5 of 8 rows across the four
+runs, against 1 of 2 with the fixed bound. View-only has no clock exchange, so
+the bound hardly applies there. At 200 ms RTT, and at 120 ms with loss, it still
+ends:
+- mostly with `host_not_heard`: the viewer heard no observation challenge for
+  3 s while the host's session was healthy (cause not yet isolated);
+- or with a transport deadline;
+- or, once, with the newly named `video_startup_expired`: a decoder restart
+  that ran out of time, which used to be an unnamed `native_session_failed`.
+
 ## Verification scope
 
 The new media regressions use actual record codecs/reassembly with explicitly

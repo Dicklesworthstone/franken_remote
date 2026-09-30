@@ -48,16 +48,36 @@ a different connection cannot borrow that authority.
 
 The host retains 64 source-stamp records, not another queue of encoded frames or
 surfaces. A positive report must match that history. Readiness expires at the
-original host source-observation time plus the protocol's 250 ms maximum source
-age; neither receipt time nor repeated reports slide that deadline. Enabling this
+original host source-observation time plus this path's host source-age bound;
+neither receipt time nor repeated reports slide that deadline.
+
+The source-age bound follows the measured path (2026-09-30,
+`fr_wire::presented::source_age_bound_us`). It is 250 ms plus a multiple of the
+connection's smoothed QUIC round trip, capped at 1 s, and never below 250 ms.
+An unmeasured path keeps 250 ms.
+- The viewer uses three round trips. A static view's age grows by the host
+  observation's transit, a stop-and-wait wait behind the previous record on its
+  stream, and up to one round trip of clock uncertainty in the viewer's
+  conservative age. Host-side ages peaked near three round trips at 60, 120 and
+  200 ms RTT (namespace probe, 2026-09-30).
+- The host uses four. The extra round trip covers the report's transit and
+  the two ends' separate RTT estimates, so the host rarely refuses a report its
+  viewer found fresh. When it does, the host's stricter check stands: the view
+  lapses, never a looser admission.
+- 1 s is also the wire ceiling for a sample's age. A slower path is refused as
+  stale, never admitted as fresh.
+- A smaller bound (the path got faster) never shortens a confirmed host
+  deadline: such a report is obsolete. On the viewer the smaller bound applies at
+  once, which gates input earlier, the conservative direction. Enabling this
 mode retires legacy unbounded readiness. Existing native input monitors check
 finite readiness immediately before OS submission, even without another packet
 or watchdog service turn. A report cannot create a lease or resurrect an expired
 one.
 
 The viewer retains one fixed-size pending report and bounds positive-report
-cadence to 50 ms. Its send deadline starts from the actual visibility/source-age
-sample, not the later network service call. Backpressure preserves exact bytes
+cadence to 50 ms. Its send deadline is the remainder of the viewer's bound after
+the sample's age. It starts from the actual visibility/source-age sample, not the
+later network service call. A sample at or past the bound is not evidence. Backpressure preserves exact bytes
 and the original deadline; the final transport guard checks expiry again.
 Explicit loss of source/visibility evidence preempts positive-report throttling
 with one bounded negative report, which later positive evidence cannot replace

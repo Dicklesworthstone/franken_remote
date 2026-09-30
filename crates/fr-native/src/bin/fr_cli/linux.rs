@@ -731,7 +731,7 @@ fn completion(progress: &Progress, json: bool, closure: Option<crate::closure::R
             progress.attempts,
             progress.opened,
             progress.presented,
-            media_json(progress.media),
+            media_json(progress.media.as_ref()),
             requested,
             active,
             played,
@@ -766,7 +766,7 @@ fn completion(progress: &Progress, json: bool, closure: Option<crate::closure::R
 /// 10 ms bucket edges (p50/p95). Counts and bounds only; not visibility,
 /// delivery or latency proof.
 #[cfg(feature = "linux-desktop")]
-fn media_json(media: Option<frd::session_startup::ViewerStatistics>) -> String {
+fn media_json(media: Option<&frd::session_startup::ViewerStatistics>) -> String {
     media.map_or_else(
         || "null".to_owned(),
         |m| {
@@ -809,7 +809,7 @@ fn control_completion(progress: &Progress, control: control::Counters, json: boo
             progress.attempts,
             progress.opened,
             progress.presented,
-            media_json(progress.media),
+            media_json(progress.media.as_ref()),
             control.requested,
             control.granted,
             control.capabilities.map_or_else(

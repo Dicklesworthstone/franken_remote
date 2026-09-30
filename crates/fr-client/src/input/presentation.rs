@@ -98,6 +98,9 @@ impl PresentedInput {
             return Err(Error::AlreadyUsed);
         }
         view.check_receiver(receiver)?;
+        // The grant enforces its own bound, whatever the observer's tracker used.
+        // Callers that measured the path first call `InputClient::follow_path_rtt`.
+        view.set_max_source_age(input.view_bound_us())?;
         if view.epoch().configuration != input.credentials.view.configuration
             || view.epoch().recovery != input.credentials.view.recovery
         {
@@ -115,6 +118,13 @@ impl PresentedInput {
         };
         this.deliver(evidence, now)?;
         Ok(this)
+    }
+    /// Follow this path's measured round trip: the input client and its view
+    /// tracker both enforce the same path bound (`InputClient::follow_path_rtt`).
+    pub fn follow_path_rtt(&mut self, smoothed_rtt_us: Option<u64>) -> Result<(), Error> {
+        let bound = self.input.follow_path_rtt(smoothed_rtt_us)?;
+        self.view.set_max_source_age(bound)?;
+        Ok(())
     }
     /// Join a separately admitted clipboard lane to this original grant and
     /// decoder-backed visible view. No input owner, media receiver or freshness

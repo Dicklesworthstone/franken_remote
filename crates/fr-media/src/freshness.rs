@@ -216,6 +216,19 @@ impl ViewTracker {
             closed: false,
         })
     }
+    /// Follow the path: the source-age bound this tracker enforces from now on
+    /// (the same 1..=1.5 s range as at construction). A smaller bound applies
+    /// at once: a view older than it is stale, as it would have been under it.
+    pub fn set_max_source_age(&mut self, max_source_age_us: u64) -> Result<(), Error> {
+        if !(1..=1_500_000).contains(&max_source_age_us) {
+            return Err(Error::InvalidProgress);
+        }
+        self.max_source_age_us = max_source_age_us;
+        Ok(())
+    }
+    pub const fn max_source_age_us(&self) -> u64 {
+        self.max_source_age_us
+    }
     /// Match the actual original receiver lifetime, not equal numeric bindings
     /// or a shared memory budget. This is ownership metadata, not live authority: a
     /// closed viewer can still close its own receiver without touching a foreign

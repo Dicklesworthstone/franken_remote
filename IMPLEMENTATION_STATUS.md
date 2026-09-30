@@ -59,10 +59,27 @@ the rejection only as an opaque code, and the fix is upstream. Gates:
 - A full matrix rerun (ec91b25) has the same shape as above, with every
   shorter row ending on a named cause.
 
+**Update 2026-09-30 (f7ts, decided under the owner's standing delegation).**
+- A late ACK no longer kills the connection (0d4b59a). An admitted reliable
+  record has max(send-by, admission + three probe timeouts) to be
+  acknowledged, clamped to 250 ms-2 s.
+- The presented source-age bound follows the measured RTT: 250 ms plus three
+  RTTs at the viewer and four at the host, capped at 1 s.
+  - Control at 120 ms RTT without loss now holds in some namespace rows (2 of
+    8, against 0 of 2 before).
+  - Diagnostics show the main remaining limit: a stale view ends control
+    instead of suspending input (plan 11.3). That is terminal today, even at
+    6 ms RTT with 1% loss.
+- An expired decoder restart is named (`video_startup_expired`).
+- Harness fixes:
+  - the stale-view test no longer SIGSTOPs other suites' capture workers;
+  - control-e2e pointer polling no longer misreads a 120 ms RTT path as lost.
+
 **Open, in priority order:**
-- Control over ordinary tailnet paths: it ends at 60 ms RTT or more, or with 1%
-  loss (above). This needs the owner decision on view-lapse semantics and an
-  RTT-aware bound.
+- Control over ordinary tailnet paths: a stale view still ends control instead
+  of suspending input (plan 11.3, the remaining half of f7ts). At 120 ms RTT,
+  record queueing can outlast the 3-PTO delivery allowance. See
+  PRESENTATION_FRESHNESS.md.
 - A live two-machine run: no client on another tailnet node has ever connected
   (owner decision needed: a second machine, or an auth key for an isolated test
   node). Every row above is namespace evidence.

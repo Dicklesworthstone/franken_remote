@@ -442,9 +442,9 @@ fn streaming_transport(error: StreamingViewerError) -> Option<fr_transport::quic
 /// host refusal or revocation report takes precedence over it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lapse {
-    /// A transport deadline passed (a reliable record not acknowledged by its
-    /// send-by time, or a bounded drive turn) and the connection was closed
-    /// instead of delivering late state.
+    /// A transport deadline passed (a reliable record not acknowledged within
+    /// its delivery deadline, or a bounded drive turn) and the connection was
+    /// closed instead of delivering late state.
     TransportDeadline,
     /// The active view's source age exceeded, or could no longer be bounded
     /// within, the freshness limit, so input stopped instead of acting on it.
@@ -457,6 +457,10 @@ pub enum Lapse {
     /// arrive in time) and the decoder could not recover in place, so the
     /// session ended after any automatic reconnects.
     VideoReferenceLost,
+    /// The decoder's start or restart handshake (configuration, recovery
+    /// picture, first decode) did not complete within its bounded deadline, so
+    /// the session ended instead of showing an unverified picture.
+    VideoStartupExpired,
 }
 pub fn lapse(failure: Failure) -> Option<Lapse> {
     use crate::session_startup::{ControlledViewerError as C, Error as S};
@@ -512,6 +516,9 @@ pub fn lapse(failure: Failure) -> Option<Lapse> {
                 | fr_media::delivery::DeliveryError::RecoveryExpired,
             )),
         )) => Some(Lapse::VideoReferenceLost),
+        Failure::Observation(ObserverError::Streaming(StreamingViewerError::Startup(
+            crate::media::decoder_startup::Error::Expired,
+        ))) => Some(Lapse::VideoStartupExpired),
         Failure::Observation(ObserverError::Streaming(error))
             if streaming_transport(error) == Some(T::Expired) =>
         {

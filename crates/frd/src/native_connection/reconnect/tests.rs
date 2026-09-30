@@ -316,6 +316,19 @@ fn only_transport_deadlines_and_stale_views_are_named_lapses() {
             None
         );
     }
+    // A decoder start/restart handshake that ran out of time is named; its
+    // other failures keep the generic path.
+    {
+        use crate::media::decoder_startup::Error as D;
+        for error in [D::Expired, D::WrongState, D::Closed, D::InvalidRoutes] {
+            let expected = (error == D::Expired).then_some(Lapse::VideoStartupExpired);
+            assert_eq!(
+                lapse(observed(StreamingViewerError::Startup(error))),
+                expected,
+                "{error:?}"
+            );
+        }
+    }
     // The input client can meet the same stale view first and stop itself.
     for reason in [
         fr_client::input::StopReason::ViewStale,

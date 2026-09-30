@@ -425,3 +425,48 @@ fn lost_media_receiver_invalidates_a_pending_control_response_before_send() {
     assert!(input.stopped().is_some());
     assert_eq!(input.control_response_deadline(), None);
 }
+#[test]
+fn the_view_bound_follows_the_measured_path_up_to_its_ceiling() {
+    // Host observation at client time 190 ms, 20 ms old when it arrives.
+    for (rtt, stale_at) in [
+        (None, 440_000),
+        (Some(120_000), 800_000),
+        (Some(10_000_000), 1_190_000),
+    ] {
+        let (_receiver, mut input, limits, d) = shown();
+        input.follow_path_rtt(rtt).unwrap();
+        progress(
+            &mut input,
+            limits,
+            d,
+            1_190_000,
+            SourceObservation::QualifiedUnchanged,
+            200_000,
+        )
+        .unwrap();
+        assert!(input.tick(ClientInstant(stale_at - 1)).unwrap(), "{rtt:?}");
+        assert!(input.tick(ClientInstant(stale_at)).is_err(), "{rtt:?}");
+        assert_eq!(input.stopped(), Some(StopReason::ViewStale));
+    }
+}
+#[test]
+fn a_faster_path_applies_the_smaller_bound_to_the_viewer_at_once() {
+    let (_receiver, mut input, limits, d) = shown();
+    input.follow_path_rtt(Some(120_000)).unwrap();
+    progress(
+        &mut input,
+        limits,
+        d,
+        1_190_000,
+        SourceObservation::QualifiedUnchanged,
+        200_000,
+    )
+    .unwrap();
+    // The RTT estimate is gone: the viewer's tracker checks the base again at
+    // once, so the unverified view is stale at the base deadline. Gating input
+    // earlier than the path allowed is the conservative direction.
+    input.follow_path_rtt(None).unwrap();
+    assert!(input.tick(ClientInstant(439_999)).unwrap());
+    assert!(input.tick(ClientInstant(440_000)).is_err());
+    assert_eq!(input.stopped(), Some(StopReason::ViewStale));
+}

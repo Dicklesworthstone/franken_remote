@@ -583,6 +583,13 @@ impl ControlledViewer {
                 .map_err(Error::Files)?;
             operation.viewer.service_clipboard()?;
             let t = operation.viewer.check_inner()?;
+            // The source-age bound follows this path's measured round trip.
+            let rtt = operation.viewer.session.transport.smoothed_rtt_us();
+            operation
+                .viewer
+                .input
+                .follow_path_rtt(rtt)
+                .map_err(Error::View)?;
             // A submitted frame is not yet a visible frame. Pause all network
             // submission during this short callback gap, but do not make it
             // impossible for the actual visibility callback to complete. The

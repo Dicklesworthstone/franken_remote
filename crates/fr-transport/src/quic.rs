@@ -488,6 +488,15 @@ impl QuicRecords {
             cursor: 0,
         })
     }
+    /// This path's smoothed round trip as QUIC measures it, once sampled.
+    /// Freshness and delivery bounds scale with it; it grants nothing.
+    pub fn smoothed_rtt_us(&self) -> Option<u64> {
+        self.native
+            .as_ref()?
+            .connection()
+            .path_stats()
+            .smoothed_rtt_micros
+    }
     pub fn binding(&self) -> ConnectionBinding {
         ConnectionBinding(Arc::downgrade(&self.identity))
     }

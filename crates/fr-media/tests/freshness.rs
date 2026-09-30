@@ -579,3 +579,24 @@ fn new_unseen_picture_cannot_repair_unknown_evidence_for_the_visible_picture() {
     .unwrap();
     assert_eq!(view.evidence(29_000), Err(Error::SourceUnknown));
 }
+#[test]
+fn the_source_age_bound_follows_the_path_and_a_smaller_one_applies_at_once() {
+    let (_receiver, mut view, _limits, _descriptor) = shown();
+    assert_eq!(view.max_source_age_us(), 250_000);
+    assert_eq!(view.evidence(300_000), Err(Error::SourceStale));
+    // A slow path's larger bound admits the same unverified view...
+    view.set_max_source_age(490_000).unwrap();
+    let evidence = view.evidence(300_001).unwrap();
+    assert!(evidence.source_age_upper_us >= 250_000);
+    assert!(evidence.source_age_upper_us < 490_000);
+    // ...and returning to a fast path stales it immediately, not later.
+    view.set_max_source_age(250_000).unwrap();
+    assert_eq!(view.evidence(300_002), Err(Error::SourceStale));
+    for invalid in [0, 1_500_001] {
+        assert_eq!(
+            view.set_max_source_age(invalid),
+            Err(Error::InvalidProgress)
+        );
+    }
+    assert_eq!(view.max_source_age_us(), 250_000);
+}

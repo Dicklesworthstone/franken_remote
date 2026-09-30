@@ -7,6 +7,7 @@ use fr_wire::{
     negotiation::ControlBinding,
     presented::{self as wire, Report, Sample, Stamp},
 };
+const BASE: u64 = wire::BASE_SOURCE_AGE_US;
 fn binding() -> Binding {
     Binding {
         parent: ControlBinding {
@@ -69,15 +70,15 @@ fn delayed_report_keeps_the_original_host_source_expiry() {
     let s = sample(120_000);
     v.observe(progress(s), 120_000).unwrap();
     assert_eq!(
-        v.receive(&record(1, Some(s)), 300_000).unwrap(),
+        v.receive(&record(1, Some(s)), 300_000, BASE).unwrap(),
         Decision::Ready { until_us: 370_000 }
     );
     assert_eq!(
-        v.receive(&record(2, Some(s)), 369_999).unwrap(),
+        v.receive(&record(2, Some(s)), 369_999, BASE).unwrap(),
         Decision::Obsolete
     );
     assert_eq!(
-        v.receive(&record(3, Some(s)), 370_000).unwrap(),
+        v.receive(&record(3, Some(s)), 370_000, BASE).unwrap(),
         Decision::Obsolete
     );
 }
@@ -89,13 +90,13 @@ fn never_issued_and_mismatched_frame_source_are_not_evidence() {
     let mut forged = s;
     forged.stamp.frame = 1;
     assert_eq!(
-        v.receive(&record(1, Some(forged)), 130_000),
+        v.receive(&record(1, Some(forged)), 130_000, BASE),
         Err(Error::UnknownSource)
     );
     forged = s;
     forged.stamp.observed_us += 1;
     assert_eq!(
-        v.receive(&record(2, Some(forged)), 130_000),
+        v.receive(&record(2, Some(forged)), 130_000, BASE),
         Err(Error::UnknownSource)
     );
 }
@@ -105,11 +106,11 @@ fn aged_report_and_unavailable_never_establish_readiness() {
     let s = sample(120_000);
     v.observe(progress(s), 120_000).unwrap();
     assert_eq!(
-        v.receive(&record(1, Some(s)), 370_000).unwrap(),
+        v.receive(&record(1, Some(s)), 370_000, BASE).unwrap(),
         Decision::Unavailable
     );
     assert_eq!(
-        v.receive(&record(2, None), 370_001).unwrap(),
+        v.receive(&record(2, None), 370_001, BASE).unwrap(),
         Decision::Unavailable
     );
 }
@@ -119,9 +120,12 @@ fn repeated_reports_and_regressed_clock_are_rejected() {
     let s = sample(120_000);
     v.observe(progress(s), 120_000).unwrap();
     let b = record(1, Some(s));
-    v.receive(&b, 130_000).unwrap();
-    assert_eq!(v.receive(&b, 130_001), Err(Error::Replay));
-    assert_eq!(v.receive(&record(2, Some(s)), 130_000), Err(Error::Clock));
+    v.receive(&b, 130_000, BASE).unwrap();
+    assert_eq!(v.receive(&b, 130_001, BASE), Err(Error::Replay));
+    assert_eq!(
+        v.receive(&record(2, Some(s)), 130_000, BASE),
+        Err(Error::Clock)
+    );
 }
 #[test]
 fn proof_history_is_fixed_and_eviction_cannot_authorize_unknown_source() {
@@ -131,12 +135,12 @@ fn proof_history_is_fixed_and_eviction_cannot_authorize_unknown_source() {
         v.observe(progress(s), 130_000).unwrap();
     }
     assert_eq!(
-        v.receive(&record(1, Some(sample(120_000))), 130_000),
+        v.receive(&record(1, Some(sample(120_000))), 130_000, BASE),
         Err(Error::UnknownSource)
     );
     let s = sample(120_000 + u64::try_from(HISTORY).unwrap());
     assert!(matches!(
-        v.receive(&record(2, Some(s)), 130_000),
+        v.receive(&record(2, Some(s)), 130_000, BASE),
         Ok(Decision::Ready { .. })
     ));
 }
@@ -150,7 +154,7 @@ fn unknown_host_source_retires_previous_provenance() {
     p.observed_micros = 0;
     v.observe(p, 125_000).unwrap();
     assert_eq!(
-        v.receive(&record(1, Some(s)), 130_000),
+        v.receive(&record(1, Some(s)), 130_000, BASE),
         Err(Error::UnknownSource)
     );
 }
@@ -158,7 +162,7 @@ fn unknown_host_source_retires_previous_provenance() {
 fn pending_report_preserves_bytes_and_deadline_under_backpressure() {
     let mut r = Reporter::new(binding(), ProtocolLimits::ABSOLUTE, 0).unwrap();
     let s = sample(120_000);
-    r.prepare(Some(s), 130_000).unwrap();
+    r.prepare(Some(s), 130_000, BASE).unwrap();
     let (b, until) = r.pending(130_000).unwrap().unwrap();
     let b = b.to_vec();
     assert_eq!(until, 360_000);
@@ -168,6 +172,7 @@ fn pending_report_preserves_bytes_and_deadline_under_backpressure() {
             ..s
         }),
         210_000,
+        BASE,
     )
     .unwrap();
     assert_eq!(r.pending(210_000).unwrap(), Some((b.as_slice(), until)));
@@ -178,21 +183,21 @@ fn pending_report_preserves_bytes_and_deadline_under_backpressure() {
 fn same_source_does_not_emit_heartbeats_and_visibility_loss_discards_unsent() {
     let mut r = Reporter::new(binding(), ProtocolLimits::ABSOLUTE, 0).unwrap();
     let s = sample(120_000);
-    r.prepare(Some(s), 130_000).unwrap();
+    r.prepare(Some(s), 130_000, BASE).unwrap();
     r.queued(130_001).unwrap();
     assert!(r.has_reported());
-    r.prepare(Some(s), 200_000).unwrap();
+    r.prepare(Some(s), 200_000, BASE).unwrap();
     assert!(r.pending(200_000).unwrap().is_none());
-    r.prepare(Some(sample(200_000)), 220_000).unwrap();
+    r.prepare(Some(sample(200_000)), 220_000, BASE).unwrap();
     assert!(r.pending(220_000).unwrap().is_some());
-    r.prepare(None, 220_001).unwrap();
+    r.prepare(None, 220_001, BASE).unwrap();
     let (negative, until) = r.pending(220_001).unwrap().unwrap();
     assert_eq!(negative, record(2, None));
     assert_eq!(until, 220_001 + REPORT_INTERVAL_US);
     r.queued(220_002).unwrap();
-    r.prepare(None, 220_003).unwrap();
+    r.prepare(None, 220_003, BASE).unwrap();
     assert!(r.pending(220_003).unwrap().is_none());
-    r.prepare(Some(s), 300_000).unwrap();
+    r.prepare(Some(s), 300_000, BASE).unwrap();
     assert!(r.pending(300_000).unwrap().is_none());
 }
 #[test]
@@ -200,13 +205,13 @@ fn new_source_replaces_only_unsent_metadata_and_roundtrips_through_verifier() {
     let mut r = Reporter::new(binding(), ProtocolLimits::ABSOLUTE, 0).unwrap();
     let mut v = verifier();
     let old = sample(120_000);
-    r.prepare(Some(old), 130_000).unwrap();
+    r.prepare(Some(old), 130_000, BASE).unwrap();
     let new = sample(140_000);
     v.observe(progress(new), 140_000).unwrap();
-    r.prepare(Some(new), 150_000).unwrap();
+    r.prepare(Some(new), 150_000, BASE).unwrap();
     let (b, _) = r.pending(150_000).unwrap().unwrap();
     assert_eq!(
-        v.receive(b, 180_000).unwrap(),
+        v.receive(b, 180_000, BASE).unwrap(),
         Decision::Ready { until_us: 390_000 }
     );
     r.queued(150_001).unwrap();
@@ -216,20 +221,20 @@ fn new_source_replaces_only_unsent_metadata_and_roundtrips_through_verifier() {
 fn negative_report_preempts_positive_throttle_and_survives_later_visibility() {
     let mut r = Reporter::new(binding(), ProtocolLimits::ABSOLUTE, 0).unwrap();
     let old = sample(120_000);
-    r.prepare(Some(old), 130_000).unwrap();
+    r.prepare(Some(old), 130_000, BASE).unwrap();
     r.queued(130_000).unwrap();
-    r.prepare(None, 130_001).unwrap();
+    r.prepare(None, 130_001, BASE).unwrap();
     let (b, until) = r.pending(130_001).unwrap().unwrap();
     let original = b.to_vec();
     assert_eq!(original, record(2, None));
     assert_eq!(until, 180_001);
-    r.prepare(Some(sample(140_000)), 150_000).unwrap();
+    r.prepare(Some(sample(140_000)), 150_000, BASE).unwrap();
     assert_eq!(
         r.pending(150_000).unwrap(),
         Some((original.as_slice(), until))
     );
     r.queued(150_001).unwrap();
-    r.prepare(Some(sample(200_000)), 220_000).unwrap();
+    r.prepare(Some(sample(200_000)), 220_000, BASE).unwrap();
     assert_eq!(
         r.pending(220_000).unwrap().unwrap().0,
         record(3, Some(sample(200_000)))
@@ -238,17 +243,17 @@ fn negative_report_preempts_positive_throttle_and_survives_later_visibility() {
 #[test]
 fn never_visible_emits_nothing_and_negative_expiry_cannot_be_retimed() {
     let mut r = Reporter::new(binding(), ProtocolLimits::ABSOLUTE, 0).unwrap();
-    r.prepare(None, 100_000).unwrap();
+    r.prepare(None, 100_000, BASE).unwrap();
     assert!(r.pending(100_000).unwrap().is_none());
-    r.prepare(Some(sample(120_000)), 130_000).unwrap();
-    r.prepare(None, 130_001).unwrap();
+    r.prepare(Some(sample(120_000)), 130_000, BASE).unwrap();
+    r.prepare(None, 130_001, BASE).unwrap();
     assert!(r.pending(130_001).unwrap().is_none());
-    r.prepare(Some(sample(140_000)), 150_000).unwrap();
+    r.prepare(Some(sample(140_000)), 150_000, BASE).unwrap();
     r.queued(150_000).unwrap();
-    r.prepare(None, 150_001).unwrap();
-    assert_eq!(r.prepare(None, 200_001), Err(Error::Expired));
+    r.prepare(None, 150_001, BASE).unwrap();
+    assert_eq!(r.prepare(None, 200_001, BASE), Err(Error::Expired));
     assert_eq!(
-        r.prepare(Some(sample(180_000)), 200_002),
+        r.prepare(Some(sample(180_000)), 200_002, BASE),
         Err(Error::Expired)
     );
     assert_eq!(r.pending(200_003), Err(Error::Expired));
@@ -258,15 +263,15 @@ fn never_visible_emits_nothing_and_negative_expiry_cannot_be_retimed() {
 fn unconfirmed_candidate_pauses_positive_reports_without_erasing_explicit_loss() {
     let mut r = Reporter::new(binding(), ProtocolLimits::ABSOLUTE, 0).unwrap();
     let s = sample(120_000);
-    r.prepare(Some(s), 130_000).unwrap();
+    r.prepare(Some(s), 130_000, BASE).unwrap();
     r.pause(130_001).unwrap();
     assert!(r.pending(130_001).unwrap().is_none());
     assert!(!r.has_reported());
-    r.prepare(Some(s), 130_002).unwrap();
+    r.prepare(Some(s), 130_002, BASE).unwrap();
     r.queued(130_002).unwrap();
     r.pause(130_003).unwrap();
     assert!(r.pending(130_003).unwrap().is_none());
-    r.prepare(None, 130_004).unwrap();
+    r.prepare(None, 130_004, BASE).unwrap();
     let until = r.pending(130_004).unwrap().unwrap().1;
     r.pause(140_000).unwrap();
     assert_eq!(
@@ -274,4 +279,76 @@ fn unconfirmed_candidate_pauses_positive_reports_without_erasing_explicit_loss()
         Some((record(2, None).as_slice(), until))
     );
     assert_eq!(r.pause(until), Err(Error::Expired));
+}
+#[test]
+fn a_slow_path_bound_admits_an_older_report_but_never_past_the_ceiling() {
+    let s = sample(120_000);
+    // At 370 ms the 250 ms fast-path bound has lapsed...
+    let mut v = verifier();
+    v.observe(progress(s), 120_000).unwrap();
+    assert_eq!(
+        v.receive(&record(1, Some(s)), 370_000, wire::BASE_SOURCE_AGE_US)
+            .unwrap(),
+        Decision::Unavailable
+    );
+    // ...while the host bound of a 120 ms RTT path (250 + 4 x 120 ms) still
+    // admits the same report, until the source observation plus that bound.
+    let mut v = verifier();
+    v.observe(progress(s), 120_000).unwrap();
+    assert_eq!(
+        v.receive(&record(1, Some(s)), 370_000, 730_000).unwrap(),
+        Decision::Ready { until_us: 850_000 }
+    );
+    // No path admits more than the ceiling; zero is not a bound.
+    for bound in [0, wire::MAX_SOURCE_AGE_US + 1] {
+        let mut v = verifier();
+        v.observe(progress(s), 120_000).unwrap();
+        assert_eq!(
+            v.receive(&record(1, Some(s)), 370_000, bound),
+            Err(Error::Overflow)
+        );
+    }
+}
+#[test]
+fn a_shrinking_bound_never_shortens_a_confirmed_host_deadline() {
+    let mut v = verifier();
+    let s = sample(120_000);
+    let mut newer = sample(130_000);
+    newer.stamp.frame = 1;
+    v.observe(progress(s), 120_000).unwrap();
+    v.observe(progress(newer), 130_000).unwrap();
+    assert_eq!(
+        v.receive(&record(1, Some(s)), 200_000, 730_000).unwrap(),
+        Decision::Ready { until_us: 850_000 }
+    );
+    // The path got faster: the newer source under the base bound would end
+    // earlier than the confirmed deadline, so it is obsolete, not a cut.
+    assert_eq!(
+        v.receive(&record(2, Some(newer)), 210_000, wire::BASE_SOURCE_AGE_US)
+            .unwrap(),
+        Decision::Obsolete
+    );
+}
+#[test]
+fn the_viewer_bound_decides_which_samples_are_evidence_and_their_report_deadline() {
+    let old = Sample {
+        age_upper_us: 300_000,
+        ..sample(120_000)
+    };
+    // Under the fast-path bound a 300 ms old view is no evidence at all.
+    let mut r = Reporter::new(binding(), ProtocolLimits::ABSOLUTE, 0).unwrap();
+    r.prepare(Some(old), 130_000, wire::BASE_SOURCE_AGE_US)
+        .unwrap();
+    assert!(r.pending(130_000).unwrap().is_none());
+    // A 120 ms RTT viewer bound (250 + 3 x 120 ms) reports it, and the report
+    // is useful only for the rest of that bound.
+    let mut r = Reporter::new(binding(), ProtocolLimits::ABSOLUTE, 0).unwrap();
+    r.prepare(Some(old), 130_000, 610_000).unwrap();
+    let (bytes, until) = r.pending(130_000).unwrap().unwrap();
+    assert_eq!(bytes, record(1, Some(old)));
+    assert_eq!(until, 130_000 + 310_000);
+    for bound in [0, wire::MAX_SOURCE_AGE_US + 1] {
+        let mut r = Reporter::new(binding(), ProtocolLimits::ABSOLUTE, 0).unwrap();
+        assert_eq!(r.prepare(Some(old), 130_000, bound), Err(Error::Overflow));
+    }
 }

@@ -268,6 +268,30 @@ fn used_grant_and_mismatched_generation_cannot_reuse_existing_view() {
     ));
 }
 #[test]
+fn a_grant_that_follows_a_slow_path_promotes_a_view_the_base_bound_refuses() {
+    // At 300 ms this source is past the 250 ms base (the test below) but
+    // inside a 120 ms RTT path's viewer bound, 250 + 3 x 120 ms.
+    let (receiver, view) = shown(true);
+    let mut client = input(credentials());
+    assert_eq!(client.follow_path_rtt(Some(120_000)).unwrap(), 610_000);
+    let mut input =
+        PresentedInput::from_view(client, &receiver, view, ClientInstant(300_000)).unwrap();
+    input
+        .confirm_mapping(
+            credentials().session,
+            credentials().view,
+            ClientInstant(300_000),
+        )
+        .unwrap();
+    // Observed at 15 ms with 10 ms of clock uncertainty: 15 + 610 - 10 ms.
+    assert_eq!(
+        input.view_deadline(ClientInstant(300_000)).unwrap(),
+        ClientInstant(615_000)
+    );
+    assert!(input.tick(ClientInstant(614_999)).unwrap());
+    assert!(input.tick(ClientInstant(615_000)).is_err());
+}
+#[test]
 fn late_promotion_cannot_restart_expired_source_freshness() {
     let (receiver, view) = shown(true);
     assert!(

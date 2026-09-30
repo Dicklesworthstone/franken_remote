@@ -91,10 +91,14 @@ impl LocalView {
                     .map_err(Error::Freshness)?,
             );
         }
-        self.view
-            .as_mut()
-            .ok_or(Error::Closed)?
-            .observe_receiver(receiver, at)
+        let bound = fr_wire::presented::source_age_bound_us(
+            policy.view_age_us,
+            session.transport.smoothed_rtt_us(),
+            fr_wire::presented::VIEWER_RTT_MULTIPLE,
+        );
+        let view = self.view.as_mut().ok_or(Error::Closed)?;
+        view.set_max_source_age(bound).map_err(Error::Freshness)?;
+        view.observe_receiver(receiver, at)
             .map_err(Error::Freshness)?;
         if let Some(initial) = self.initial.take() {
             self.decoded(initial, at)?;

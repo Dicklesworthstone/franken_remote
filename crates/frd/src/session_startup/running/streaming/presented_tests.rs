@@ -325,7 +325,13 @@ fn viewer_report_deadline_includes_time_between_view_sampling_and_service() {
         .unwrap()
         .unwrap();
         let mut evidence = sample(sampled_at);
-        evidence.age_upper_us = wire::MAX_SOURCE_AGE_US - 10_000;
+        // 10 ms short of this path's viewer bound (the reporter's own formula).
+        let bound = wire::source_age_bound_us(
+            wire::BASE_SOURCE_AGE_US,
+            q.smoothed_rtt_us(),
+            wire::VIEWER_RTT_MULTIPLE,
+        );
+        evidence.age_upper_us = bound - 10_000;
         asupersync::time::sleep(c.now(), Duration::from_millis(20)).await;
         let before = q.usage();
         assert_eq!(
@@ -371,7 +377,12 @@ fn actual_critical_backpressure_does_not_extend_a_pending_presentation_deadline(
             }
         }
         let mut evidence = sample(start);
-        evidence.age_upper_us = wire::MAX_SOURCE_AGE_US - 100_000;
+        let bound = wire::source_age_bound_us(
+            wire::BASE_SOURCE_AGE_US,
+            q.smoothed_rtt_us(),
+            wire::VIEWER_RTT_MULTIPLE,
+        );
+        evidence.age_upper_us = bound - 100_000;
         reporter
             .service(
                 q,

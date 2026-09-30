@@ -225,3 +225,29 @@ fn literal_network_order_fixture_and_datagram_refusal() {
         .is_err()
     );
 }
+#[test]
+fn the_source_age_bound_follows_the_path_between_base_and_ceiling() {
+    let viewer = |rtt| source_age_bound_us(BASE_SOURCE_AGE_US, rtt, VIEWER_RTT_MULTIPLE);
+    let host = |rtt| source_age_bound_us(BASE_SOURCE_AGE_US, rtt, HOST_RTT_MULTIPLE);
+    // An unmeasured path keeps the fast-path base on both ends.
+    assert_eq!(viewer(None), 250_000);
+    assert_eq!(host(None), 250_000);
+    // 40, 120 and 200 ms RTT: three round trips at the viewer, four at the host.
+    assert_eq!(viewer(Some(40_000)), 370_000);
+    assert_eq!(viewer(Some(120_000)), 610_000);
+    assert_eq!(viewer(Some(200_000)), 850_000);
+    assert_eq!(host(Some(120_000)), 730_000);
+    assert_eq!(host(Some(200_000)), MAX_SOURCE_AGE_US);
+    // The host is never stricter than its viewer on the same measurement.
+    for rtt in [0, 1_000, 60_000, 120_000, 250_000, 375_000, 400_000] {
+        assert!(host(Some(rtt)) >= viewer(Some(rtt)));
+    }
+    // Capped at the ceiling, even for an absurd estimate.
+    assert_eq!(host(Some(400_000)), MAX_SOURCE_AGE_US);
+    assert_eq!(viewer(Some(u64::MAX)), MAX_SOURCE_AGE_US);
+    // Never below the configured base, even a base above the ceiling.
+    assert_eq!(
+        source_age_bound_us(1_500_000, Some(1_000), VIEWER_RTT_MULTIPLE),
+        1_500_000
+    );
+}

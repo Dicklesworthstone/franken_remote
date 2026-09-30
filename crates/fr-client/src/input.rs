@@ -141,6 +141,8 @@ pub struct InputClient {
     capabilities: Capabilities,
     pub(crate) limits: ProtocolLimits,
     policy: Policy,
+    /// The path's current source-age bound: `policy.view_age_us` is its base.
+    view_bound_us: u64,
     clock: ClientInstant,
     started: ClientInstant,
     stopped: Option<StopReason>,
@@ -193,6 +195,7 @@ impl InputClient {
             capabilities,
             limits,
             policy,
+            view_bound_us: policy.view_age_us,
             clock: now,
             started: now,
             stopped: None,
@@ -302,11 +305,7 @@ impl InputClient {
         if evidence.received_at > now {
             return self.fail(StopReason::ClockRegression);
         }
-        let Some(remaining) = self
-            .policy
-            .view_age_us
-            .checked_sub(evidence.source_age_upper_us)
-        else {
+        let Some(remaining) = self.view_bound_us.checked_sub(evidence.source_age_upper_us) else {
             return self.fail(StopReason::ViewStale);
         };
         let Some(until) = evidence
@@ -324,6 +323,31 @@ impl InputClient {
         self.view_until = Some(until);
         self.clipboard_readiness();
         Ok(())
+    }
+    /// The source-age bound for this path, between the configured base and
+    /// 1.5 s. Applies to later evidence; a view deadline already derived from
+    /// earlier evidence is neither extended nor shortened by it.
+    pub fn set_view_bound(&mut self, bound_us: u64) -> Result<(), Error> {
+        if !(self.policy.view_age_us..=1_500_000).contains(&bound_us) {
+            return Err(Error::InvalidConfiguration);
+        }
+        self.view_bound_us = bound_us;
+        Ok(())
+    }
+    pub const fn view_bound_us(&self) -> u64 {
+        self.view_bound_us
+    }
+    /// Follow this path's measured round trip: later evidence is judged against
+    /// `fr_wire::presented::source_age_bound_us` with the configured base and
+    /// `VIEWER_RTT_MULTIPLE`. Unknown RTT keeps the base. Returns the bound.
+    pub fn follow_path_rtt(&mut self, smoothed_rtt_us: Option<u64>) -> Result<u64, Error> {
+        let bound = fr_wire::presented::source_age_bound_us(
+            self.policy.view_age_us,
+            smoothed_rtt_us,
+            fr_wire::presented::VIEWER_RTT_MULTIPLE,
+        );
+        self.set_view_bound(bound)?;
+        Ok(bound)
     }
     /// A new opaque host ticket affects ONLY future actions. It neither changes
     /// pending action identities nor reopens stopped or unready control.

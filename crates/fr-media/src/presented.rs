@@ -99,8 +99,15 @@ impl Verifier {
         self.last_source = Some(stamp);
         Ok(())
     }
-    pub fn receive(&mut self, bytes: &[u8], now: u64) -> Result<Decision, Error> {
+    /// `bound_us` is the host's source-age bound for this path
+    /// (`wire::source_age_bound_us` with `HOST_RTT_MULTIPLE`). A report whose
+    /// deadline would not extend the confirmed one (a shrunken bound included)
+    /// is obsolete: it never shortens an existing view deadline.
+    pub fn receive(&mut self, bytes: &[u8], now: u64, bound_us: u64) -> Result<Decision, Error> {
         tick(&mut self.last_now, now)?;
+        if !(1..=wire::MAX_SOURCE_AGE_US).contains(&bound_us) {
+            return Err(Error::Overflow);
+        }
         let report = wire::decode(
             bytes,
             self.binding,
@@ -119,7 +126,7 @@ impl Verifier {
         let until_us = sample
             .stamp
             .observed_us
-            .checked_add(wire::MAX_SOURCE_AGE_US)
+            .checked_add(bound_us)
             .ok_or(Error::Overflow)?;
         if self.confirmed_until.is_some_and(|old| until_us <= old) {
             return Ok(Decision::Obsolete);
@@ -168,8 +175,19 @@ impl Reporter {
     pub fn has_reported(&self) -> bool {
         self.sent.is_some()
     }
-    pub fn prepare(&mut self, sample: Option<Sample>, now: u64) -> Result<(), Error> {
+    /// `bound_us` is the viewer's source-age bound for this path. A sample at
+    /// or past it is not fresh evidence: it is reported like no visible view.
+    pub fn prepare(
+        &mut self,
+        sample: Option<Sample>,
+        now: u64,
+        bound_us: u64,
+    ) -> Result<(), Error> {
         tick(&mut self.last_now, now)?;
+        if !(1..=wire::MAX_SOURCE_AGE_US).contains(&bound_us) {
+            return Err(Error::Overflow);
+        }
+        let sample = sample.filter(|s| s.age_upper_us < bound_us);
         // Once loss of visibility is observed, its negative report cannot be
         // replaced by a later positive sample before the host receives it.
         if self.pending.as_ref().is_some_and(|p| p.stamp.is_none()) {
@@ -219,7 +237,7 @@ impl Reporter {
             return Ok(());
         }
         let until = now
-            .checked_add(wire::MAX_SOURCE_AGE_US - sample.age_upper_us)
+            .checked_add(bound_us - sample.age_upper_us)
             .ok_or(Error::Overflow)?;
         let mut bytes = [0; wire::BYTES];
         wire::encode(

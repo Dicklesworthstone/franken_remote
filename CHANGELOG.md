@@ -2,6 +2,28 @@
 
 ## 2026-09-30 — slow paths keep their connection
 
+- The presented-view source-age bound follows the measured path instead of a
+  fixed 250 ms (PRESENTATION_READINESS.md, PRESENTATION_FRESHNESS.md).
+  - The viewer allows 250 ms plus three smoothed round trips; the host allows
+    250 ms plus four. Both are capped at 1 s, which is also the wire ceiling
+    for a sample's age.
+  - An unmeasured path keeps 250 ms.
+  - A smaller bound never shortens a confirmed host deadline.
+  - Namespace matrix, four runs with the path bound:
+    - Control at 120 ms RTT without loss held in 2 of 8 rows, against 0 of 2
+      with the fixed bound.
+    - Control at 40 ms RTT with 1% loss held in 2 of 6 rows at the final
+      multiples.
+    - View-only at 120 ms RTT without loss held in 5 of 8, against 1 of 2.
+  - Control still ends at those points. The usual cause is the input client's
+    own stale-view stop after a lost packet delays the source observation.
+    That stop is terminal today; the plan asks for suspension, which is next.
+  - At 120 ms RTT control also ends with `transport_deadline_expired`, and
+    view-only at 120-200 ms with `host_not_heard`.
+- A viewer whose decoder start or restart runs out of time now ends with the
+  named `video_startup_expired` instead of the generic
+  `native_session_failed`.
+
 - An admitted reliable QUIC record had to be acknowledged by its send-by, and
   missing that closed the connection. At 120 ms RTT a 250 ms record could miss
   it on a healthy path, because records on one stream wait for the previous

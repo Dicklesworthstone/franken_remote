@@ -18,6 +18,10 @@ pub(super) fn reconnect(error: reconnect::Failure) -> Option<Failure> {
             "video_reference_lost",
             "Lost video could not be repaired before the pictures that depend on it were due, and the decoder could not recover in place, so the session ended after any automatic reconnects; nothing is replayed. Check the path's loss (tailscale ping) before starting a new session.",
         ),
+        Lapse::VideoStartupExpired => failure(
+            "video_startup_expired",
+            "The video decoder's start or restart (configuration, recovery picture, first decode) did not finish within its deadline, so the session ended instead of showing an unverified picture; nothing is replayed. Check the path's round-trip time and loss (tailscale ping) before starting a new session.",
+        ),
         Lapse::HostNotHeard => failure(
             "host_not_heard",
             "The host's renewals did not arrive within this session's deadline, so the session ended instead of continuing unrenewed; nothing is replayed. Check the path's round-trip time and loss (tailscale ping) and that the host is still running.",
@@ -60,6 +64,13 @@ mod tests {
         )))
         .unwrap();
         assert_eq!(lost.code, "video_reference_lost");
+        let startup = reconnect(observed(Streaming::Startup(
+            frd::media::decoder_startup::Error::Expired,
+        )))
+        .unwrap();
+        assert_eq!(startup.code, "video_startup_expired");
+        assert_eq!(startup.exit, 1);
+        assert!(startup.next.contains("tailscale ping"));
         assert_eq!(deadline.code, "transport_deadline_expired");
         assert_eq!(stale.code, "view_stale");
         assert_eq!(silent.code, "host_not_heard");

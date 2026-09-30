@@ -86,7 +86,16 @@ pub(crate) struct HostPresentation {
     inbound: Route,
     control: ObservationControl,
     verifier: Verifier,
+    /// This path's host source-age bound, refreshed every service turn.
+    bound_us: u64,
     pub(crate) accepted: u64,
+}
+fn host_bound(q: &QuicRecords) -> u64 {
+    wire::source_age_bound_us(
+        wire::BASE_SOURCE_AGE_US,
+        q.smoothed_rtt_us(),
+        wire::HOST_RTT_MULTIPLE,
+    )
 }
 impl HostPresentation {
     pub(crate) fn attach(
@@ -128,6 +137,7 @@ impl HostPresentation {
             inbound: Route::Stream(inbound),
             control,
             verifier,
+            bound_us: host_bound(q),
             accepted: 0,
         }))
     }
@@ -137,6 +147,7 @@ impl HostPresentation {
             return Err(Error::Binding);
         }
         self.control.check().map_err(Error::Authority)?;
+        self.bound_us = host_bound(q);
         Ok(())
     }
     /// The containing `StreamingHost` reads this ONLY from its admitted sender's
@@ -175,7 +186,7 @@ impl HostPresentation {
             let at = host_now(&self.control.cx).map_err(Error::Authority)?;
             match self
                 .verifier
-                .receive(bytes, at.as_micros())
+                .receive(bytes, at.as_micros(), self.bound_us)
                 .map_err(Error::Proof)?
             {
                 Decision::Ready { until_us } => {
@@ -230,12 +241,17 @@ impl ViewSample {
     }
 }
 /// Presented source-age upper bounds at admitted reports (plan's age of
-/// information), in 10 ms buckets below the 250 ms limit. Content-free and
+/// information), in 10 ms buckets up to the 1 s ceiling. Content-free and
 /// bounded; each positive report counts once, so the cadence is the report
 /// interval, not the network turn rate.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AgeHistogram {
-    buckets: [u32; 25],
+    buckets: [u32; 100],
+}
+impl Default for AgeHistogram {
+    fn default() -> Self {
+        Self { buckets: [0; 100] }
+    }
 }
 impl AgeHistogram {
     pub const BUCKET_US: u64 = 10_000;
@@ -315,6 +331,11 @@ impl ViewerPresentation {
             return Err(Error::Binding);
         }
         cx.checkpoint().map_err(|_| Error::Closed)?;
+        let bound = wire::source_age_bound_us(
+            wire::BASE_SOURCE_AGE_US,
+            q.smoothed_rtt_us(),
+            wire::VIEWER_RTT_MULTIPLE,
+        );
         match sample {
             ViewSample::Visible(sample, sampled_at) => {
                 // Age was measured at sampled_at, not at this later service
@@ -322,9 +343,9 @@ impl ViewerPresentation {
                 if now < sampled_at {
                     return Err(Error::Proof(fr_media::presented::Error::Clock));
                 }
-                self.reporter.prepare(Some(sample), sampled_at)
+                self.reporter.prepare(Some(sample), sampled_at, bound)
             }
-            ViewSample::Unavailable => self.reporter.prepare(None, now),
+            ViewSample::Unavailable => self.reporter.prepare(None, now, bound),
             ViewSample::Pending => self.reporter.pause(now),
         }
         .map_err(Error::Proof)?;
@@ -364,8 +385,9 @@ fn presented_age_quantiles_are_bucket_upper_bounds_and_bounded() {
     assert_eq!(ages.quantile_upper_us(950), Some(250_000));
     assert_eq!(ages.quantile_upper_us(0), Some(10_000));
     assert_eq!(ages.quantile_upper_us(1001), None);
-    // An out-of-range age clamps into the last bucket instead of growing storage.
+    // An out-of-range age clamps into the last bucket (the 1 s ceiling)
+    // instead of growing storage.
     ages.record(u64::MAX);
     assert_eq!(ages.reports(), 6);
-    assert_eq!(ages.quantile_upper_us(1000), Some(250_000));
+    assert_eq!(ages.quantile_upper_us(1000), Some(wire::MAX_SOURCE_AGE_US));
 }
