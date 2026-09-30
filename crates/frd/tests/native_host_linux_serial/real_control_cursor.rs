@@ -18,7 +18,7 @@
 //! Xvfb is neither a GPU compositor nor `HiDPI` nor Wayland.
 use super::real_control::{Controlled, eventually, host_pointer};
 use super::real_cursor::{HostPointer, MAGENTA, pixels_at};
-use super::real_media::{close_window, near};
+use super::real_media::near;
 use super::shipped_client::wait_for;
 use super::*;
 use std::process::Command;
@@ -218,7 +218,7 @@ fn fr_connect_control_draws_the_host_cursor_once_as_the_local_pointer_or_the_ove
     println!("local pointer left: window pixels at {back:?} {left:x?}");
 
     drop(pointer);
-    close_window(&s.viewer.display, s.window.0);
+    s.close_viewer();
     let output = wait_for(s.client, Duration::from_secs(30));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let report: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| {

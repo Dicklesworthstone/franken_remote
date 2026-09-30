@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-09-30 — slow paths keep their connection
+
+- An admitted reliable QUIC record had to be acknowledged by its send-by, and
+  missing that closed the connection. At 120 ms RTT a 250 ms record could miss
+  it on a healthy path, because records on one stream wait for the previous
+  epoch. Such sessions ended with `transport_deadline_expired`. A record now
+  has max(send-by, admission + a path allowance). The allowance is three RFC 9002
+  probe timeouts from the measured RTT, clamped to 250 ms-2 s (QUIC_RECORDS.md).
+  Admission still refuses records past their send-by, and a peer that stops
+  acknowledging still closes the connection.
+
 ## 2026-09-29 — a repaired picture on a static screen is shown; control without a wheel
 
 - A picture whose repair completed after its 50 ms display budget was decoded

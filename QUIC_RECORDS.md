@@ -104,6 +104,39 @@ stream remain stop-and-wait per epoch (the absence proof above). A record
 admitted while an earlier epoch is unacknowledged therefore waits up to one more
 round trip. Removing that wait needs the upstream retention query.
 
+Delivery allowance (2026-09-30). A reliable record's send-by is its usefulness
+deadline, enforced at admission: a record already past it is refused. Until
+2026-09-30 the send-by was also the deadline for staging and acknowledgement,
+and missing it closed the connection. A 250 ms record on a 120 ms RTT path
+waits one round trip for the previous epoch and another for its own flight and
+ACK. Any loss recovery comes on top of that. In namespace runs at 60 ms one-way
+delay, control and view-only sessions ended with `transport_deadline_expired`
+while both peers were healthy. An admitted reliable record must now be staged
+and acknowledged by max(send-by, admission + `delivery_allowance_us`):
+
+- The allowance is three RFC 9002 probe timeouts, 3 x (smoothed RTT +
+  max(4 x RTT variation, 1 ms) + 25 ms maximum ACK delay).
+- It is clamped to [250 ms, 2 s].
+- Before the first RTT sample, the RFC 9002 initial RTT (333 ms) gives the 2 s
+  ceiling. The native handshake leaves no sample, so the first records get it.
+
+A peer that stops acknowledging still closes the connection, within 2 s. A late
+acknowledgement means a slow path, not a stale record. Content lateness is
+enforced where the content is used: input tickets and lease expiry at the host,
+the presented report's source age, and recovery deadlines.
+`native_quic.rs` tests:
+
+- the formula and its bounds;
+- a 2 ms send-by record whose peer is silent for 60 ms keeps the connection
+  and is delivered;
+- a peer that never acknowledges closes the connection in bounded time: near
+  the floor on a measured loopback path, within the ceiling on an unmeasured
+  one.
+
+`native_bulk/epochs.rs` states that a later record never extends an earlier
+record's deadline. Planted negatives fail these tests: deliver-by = send-by, and
+ignoring the measured RTT.
+
 This distinction matters on 0.4.10: attaching bounded windows in both directions
 can generate continuing ACK/window-update traffic, so total bytes-in-flight
 need not become zero when all reliable payload ownership has ended. Payload

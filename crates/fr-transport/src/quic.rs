@@ -58,6 +58,32 @@ const TURN_SEND_PREFIXES: usize = 8;
 /// by Asupersync. This is a conservative APPLICATION-record cap, not an MTU.
 pub const MAX_DATAGRAM_RECORD: usize = 1150;
 
+/// Bounds of [`delivery_allowance_us`]: never below the 250 ms that every
+/// record already had on a fast path, never above the partial-record lifetime.
+pub const MIN_DELIVERY_ALLOWANCE_US: u64 = 250_000;
+pub const MAX_DELIVERY_ALLOWANCE_US: u64 = 2_000_000;
+
+/// How long this path may take to deliver and acknowledge one admitted
+/// reliable record: three RFC 9002 probe timeouts (smoothed RTT + max(4 x
+/// RTT variation, 1 ms) + 25 ms maximum ACK delay). That covers waiting for
+/// the previous stop-and-wait epoch, the record's own flight and one loss
+/// recovery. Before any RTT sample the RFC 9002 initial RTT (333 ms, variation
+/// 166.5 ms) applies. Clamped to [`MIN_DELIVERY_ALLOWANCE_US`,
+/// `MAX_DELIVERY_ALLOWANCE_US`].
+#[must_use]
+pub fn delivery_allowance_us(smoothed_rtt_us: Option<u64>, rtt_variation_us: Option<u64>) -> u64 {
+    let (rtt, variation) = match smoothed_rtt_us {
+        Some(rtt) => (rtt, rtt_variation_us.unwrap_or(rtt / 2)),
+        None => (333_000, 166_500),
+    };
+    let probe = rtt
+        .saturating_add(variation.saturating_mul(4).max(1_000))
+        .saturating_add(25_000);
+    probe
+        .saturating_mul(3)
+        .clamp(MIN_DELIVERY_ALLOWANCE_US, MAX_DELIVERY_ALLOWANCE_US)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     InvalidPolicy,
@@ -277,7 +303,9 @@ struct PendingWrite {
     route: StreamRoute,
     bytes: Bytes,
     offset: usize,
-    send_by: u64,
+    /// max(the caller's send-by, admission + this path's delivery allowance):
+    /// staging and acknowledgement must both complete by then.
+    deliver_by: u64,
     in_epoch: bool,
 }
 struct Inbound {
@@ -618,6 +646,13 @@ impl QuicRecords {
     /// checked again before bounded admission. Reliable records are sliced into
     /// native stream writes by `drive`, with authority/deadline checks there too.
     /// Backpressure admits no bytes: retain this SAME prepared record for retry.
+    ///
+    /// `send_by_micros` is the record's usefulness deadline and is enforced at
+    /// admission: a record already past it is refused. An admitted reliable
+    /// record must then be staged and acknowledged by max(send-by, admission +
+    /// [`delivery_allowance_us`] for this path), or the connection closes. A
+    /// late acknowledgement is a slow path, not a stale record: receivers judge
+    /// lateness by the record's own timestamps and deadlines.
     pub fn send(
         &mut self,
         cx: &Cx,
@@ -631,6 +666,11 @@ impl QuicRecords {
             return Err(Error::Expired);
         }
         let native = self.native.as_ref().ok_or(Error::Closed)?;
+        let path = native.connection().path_stats();
+        let deliver_by = send_by_micros.max(current.saturating_add(delivery_allowance_us(
+            path.smoothed_rtt_micros,
+            path.rttvar_micros,
+        )));
         match route {
             Route::Stream(r) => {
                 if !r.outbound || !self.has_route(Route::Stream(r)) {
@@ -690,7 +730,7 @@ impl QuicRecords {
                     route,
                     bytes: Bytes::from(storage),
                     offset: 0,
-                    send_by: send_by_micros,
+                    deliver_by,
                     in_epoch: false,
                 });
                 let sender = self
@@ -700,11 +740,7 @@ impl QuicRecords {
                     .expect("validated outgoing route");
                 sender.bytes += bytes.len();
                 sender.records += 1;
-                sender.until = Some(
-                    sender
-                        .until
-                        .map_or(send_by_micros, |old| old.min(send_by_micros)),
-                );
+                sender.until = Some(sender.until.map_or(deliver_by, |old| old.min(deliver_by)));
             }
             Route::Datagram(_) => {
                 if self
@@ -825,7 +861,7 @@ impl QuicRecords {
                     .pending_writes
                     .iter()
                     .filter(|p| p.route == sender.route)
-                    .map(|p| p.send_by)
+                    .map(|p| p.deliver_by)
                     .min();
             }
         }
@@ -858,7 +894,7 @@ impl QuicRecords {
     /// minimum congestion window (2 x 1200 after loss) whenever anything at all
     /// is in flight. Bulk prefixes still wait until the media queue fits too.
     fn queue_stream_prefix(&mut self, cx: &Cx, now: u64) -> Result<Option<Priority>, Error> {
-        if self.pending_writes.iter().any(|p| now >= p.send_by) {
+        if self.pending_writes.iter().any(|p| now >= p.deliver_by) {
             return Err(Error::Expired);
         }
         let native = self.native.as_mut().ok_or(Error::Closed)?;

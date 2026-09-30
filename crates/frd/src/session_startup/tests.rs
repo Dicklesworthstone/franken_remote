@@ -49,11 +49,15 @@ struct Viewer {
     quic: QuicRecords,
     routes: ControlRoutes,
     no_ack: bool,
+    /// Tests that expect the host's best-effort terminal refusal keep it here;
+    /// every other test still fails on any startup error.
+    expect_refusal: bool,
+    refused: Option<client_startup::Error>,
 }
 impl Viewer {
     fn step(&mut self, cx: &Cx) {
         let current = now(cx).unwrap();
-        if self.startup.is_complete() {
+        if self.startup.is_complete() || self.refused.is_some() {
             return;
         }
         if let Some((binding, maximum)) = self.startup.binding_to_install(current).unwrap() {
@@ -106,9 +110,15 @@ impl Viewer {
             )
             .unwrap();
         if read.get() {
-            self.startup
-                .receive(&bytes[..len], now(cx).unwrap())
-                .unwrap();
+            match self.startup.receive(&bytes[..len], now(cx).unwrap()) {
+                Ok(()) => {}
+                Err(error @ client_startup::Error::Protocol(negotiation::Error::Refused(_)))
+                    if self.expect_refusal =>
+                {
+                    self.refused = Some(error);
+                }
+                Err(error) => panic!("client startup failed: {error:?}"),
+            }
         }
     }
     async fn drive(&mut self, cx: &Cx) {
@@ -144,6 +154,8 @@ async fn pair(
             quic,
             routes,
             no_ack: false,
+            expect_refusal: false,
+            refused: None,
         },
         alive,
     )

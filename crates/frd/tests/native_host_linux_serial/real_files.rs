@@ -12,7 +12,6 @@
 //! a desktop file manager or a drag-and-drop UI.
 use super::real_clipboard::{Peer, pasted, unique};
 use super::real_control::{Controlled, eventually, indicator, signal};
-use super::real_media::close_window;
 use super::shipped_client::wait_for;
 use super::*;
 use frd::native_files::{Directory, Limits};
@@ -133,7 +132,7 @@ fn fr_connect_send_publishes_identical_bytes_into_frd_run_files() {
     );
     // Let the host's publication proof reach the client before closing.
     thread::sleep(Duration::from_secs(2));
-    close_window(&s.viewer.display, s.window.0);
+    s.close_viewer();
     let output = wait_for(s.client, Duration::from_secs(30));
     let report = completion(&output, &s.daemon.dump());
     println!("fr completion: {report}");
@@ -218,7 +217,7 @@ fn fr_connect_sends_files_and_shares_the_clipboard_in_one_controlled_session() {
         s.daemon.dump()
     );
     thread::sleep(Duration::from_secs(2));
-    close_window(&s.viewer.display, s.window.0);
+    s.close_viewer();
     let output = wait_for(s.client, Duration::from_secs(30));
     let report = completion(&output, &s.daemon.dump());
     println!("fr completion: {report}");
@@ -277,7 +276,7 @@ fn fr_connect_send_never_overwrites_a_name_the_host_already_holds() {
     // rename; give its refusal time to reach the client.
     thread::sleep(Duration::from_secs(3));
     assert_eq!(fs::read(drop_dir.0.join("notes.txt")).unwrap(), original);
-    close_window(&s.viewer.display, s.window.0);
+    s.close_viewer();
     let output = wait_for(s.client, Duration::from_secs(30));
     let report = completion(&output, &s.daemon.dump());
     println!("fr completion: {report}");
@@ -393,7 +392,7 @@ fn a_host_without_files_keeps_control_and_the_client_reports_typed_absence() {
         "control without files: {}",
         s.daemon.dump()
     );
-    close_window(&s.viewer.display, s.window.0);
+    s.close_viewer();
     let output = wait_for(s.client, Duration::from_secs(30));
     let report = completion(&output, &s.daemon.dump());
     println!("fr completion: {report}");

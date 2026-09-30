@@ -1470,3 +1470,134 @@ fn bootstrap_transition_cannot_relabel_an_incomplete_record() {
         host.bind_control(&cx, h, 9, 4096, || true).unwrap();
     });
 }
+
+#[test]
+fn the_delivery_allowance_follows_the_measured_path_within_its_bounds() {
+    // Fast path: the old 250 ms floor; unknown path: the RFC 9002 initial RTT.
+    assert_eq!(
+        delivery_allowance_us(Some(1_000), Some(500)),
+        MIN_DELIVERY_ALLOWANCE_US
+    );
+    assert_eq!(delivery_allowance_us(None, None), MAX_DELIVERY_ALLOWANCE_US);
+    // 3 x (srtt + 4 x rttvar + 25 ms ACK delay).
+    assert_eq!(delivery_allowance_us(Some(60_000), Some(15_000)), 435_000);
+    assert_eq!(delivery_allowance_us(Some(120_000), Some(30_000)), 795_000);
+    assert_eq!(
+        delivery_allowance_us(Some(200_000), Some(50_000)),
+        1_275_000
+    );
+    // A missing variation estimate is taken as half the RTT, never zero.
+    assert_eq!(
+        delivery_allowance_us(Some(100_000), None),
+        delivery_allowance_us(Some(100_000), Some(50_000))
+    );
+    // Saturating arithmetic; never above the partial-record lifetime.
+    assert_eq!(
+        delivery_allowance_us(Some(u64::MAX), Some(u64::MAX)),
+        MAX_DELIVERY_ALLOWANCE_US
+    );
+}
+
+/// One record delivered and acknowledged: the handshake leaves no RTT sample,
+/// and an unmeasured path gets the ceiling allowance instead of its own.
+async fn measure_path(cx: &Cx, p: &mut support::Pair, route: Route) {
+    p.server
+        .send(
+            cx,
+            route,
+            &recovery_packet(2, 100),
+            clock(cx) + 1_000_000,
+            || true,
+        )
+        .unwrap();
+    for _ in 0..500 {
+        if p.server.usage().retained_send_records == 0 {
+            return;
+        }
+        drive(cx, p).await;
+        p.client
+            .receive(cx, || true, |_, _| Ok(Disposition::Consumed))
+            .unwrap();
+    }
+    panic!("the measuring record was never acknowledged");
+}
+
+#[test]
+fn a_slow_acknowledgement_within_the_path_allowance_keeps_the_connection() {
+    run_test!(cx, {
+        let mut p = pair(&cx, Policy::default()).await;
+        let route = Route::Stream(p.host_routes[1]);
+        measure_path(&cx, &mut p, route).await;
+        let packet = recovery_packet(2, 100);
+        // Useful for only 2 ms, but admitted: the path gets its allowance.
+        p.server
+            .send(&cx, route, &packet, clock(&cx) + 2_000, || true)
+            .unwrap();
+        // The peer stays silent (no receive, no ACK) far past the send-by.
+        let until = clock(&cx) + 60_000;
+        while clock(&cx) < until {
+            p.server
+                .drive(&cx, Duration::from_millis(1), || true)
+                .await
+                .unwrap();
+        }
+        assert!(!p.server.is_closed(), "a slow ACK closed the connection");
+        let mut received = 0;
+        for _ in 0..500 {
+            drive(&cx, &mut p).await;
+            p.client
+                .receive(
+                    &cx,
+                    || true,
+                    |_, b| {
+                        assert_eq!(b, packet);
+                        received += 1;
+                        Ok(Disposition::Consumed)
+                    },
+                )
+                .unwrap();
+            if received == 1 && p.server.usage().retained_send_records == 0 {
+                break;
+            }
+        }
+        assert_eq!(received, 1);
+        assert_eq!(p.server.usage().retained_send_records, 0);
+    });
+}
+
+#[test]
+fn a_peer_that_stops_acknowledging_still_closes_the_connection_in_bounded_time() {
+    run_test!(cx, {
+        for measured in [false, true] {
+            let mut p = pair(&cx, Policy::default()).await;
+            let route = Route::Stream(p.host_routes[1]);
+            if measured {
+                measure_path(&cx, &mut p, route).await;
+            }
+            let admitted = clock(&cx);
+            p.server
+                .send(
+                    &cx,
+                    route,
+                    &recovery_packet(2, 100),
+                    admitted + 2_000,
+                    || true,
+                )
+                .unwrap();
+            let mut result = Ok(());
+            while result.is_ok() && clock(&cx) < admitted + 3_000_000 {
+                result = p.server.drive(&cx, Duration::from_millis(1), || true).await;
+            }
+            let elapsed = clock(&cx) - admitted;
+            assert_eq!(result, Err(Error::Expired));
+            assert!(p.server.is_closed());
+            // Not at the 2 ms send-by, and never later than the largest allowance.
+            assert!(elapsed >= MIN_DELIVERY_ALLOWANCE_US - 10_000, "{elapsed}");
+            assert!(elapsed < MAX_DELIVERY_ALLOWANCE_US + 500_000, "{elapsed}");
+            // A measured loopback path gets the floor, far below the ceiling.
+            if measured {
+                assert!(elapsed < MIN_DELIVERY_ALLOWANCE_US + 750_000, "{elapsed}");
+            }
+        }
+    });
+}

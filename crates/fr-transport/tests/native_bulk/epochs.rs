@@ -93,21 +93,44 @@ fn continuous_progress_retires_acked_epochs_with_newer_records_still_queued() {
 
 #[test]
 fn newer_epoch_cannot_extend_unacknowledged_or_waiting_record_deadlines() {
+    // Each admitted record must be staged and acknowledged by max(send-by,
+    // admission + this path's delivery allowance). A record admitted later with
+    // a later deadline never extends an earlier record's deadline, whichever of
+    // the two is still waiting for the frozen epoch.
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         for waiting_expires_first in [false, true] {
             let mut pair = pair(&cx, Policy::default()).await;
-            let now = clock(&cx);
-            let (first, next) = if waiting_expires_first {
-                (1_000_000, 40_000)
-            } else {
-                (40_000, 1_000_000)
-            };
+            // One acknowledged record first: the handshake leaves no RTT sample,
+            // and an unmeasured path gets the ceiling allowance instead.
+            let warm = clock(&cx) + 1_000_000;
             pair.server
                 .send(
                     &cx,
                     Route::Stream(pair.host_routes[0]),
                     &progress(0),
+                    warm,
+                    || true,
+                )
+                .unwrap();
+            while pair.server.usage().retained_send_records != 0 {
+                assert!(clock(&cx) < warm);
+                drive(&cx, &mut pair).await;
+                pair.client
+                    .receive(&cx, || true, |_, _| Ok(Disposition::Consumed))
+                    .unwrap();
+            }
+            let now = clock(&cx);
+            let (first, next) = if waiting_expires_first {
+                (1_900_000, 40_000)
+            } else {
+                (40_000, 1_900_000)
+            };
+            pair.server
+                .send(
+                    &cx,
+                    Route::Stream(pair.host_routes[0]),
+                    &progress(1),
                     now + first,
                     || true,
                 )
@@ -121,14 +144,26 @@ fn newer_epoch_cannot_extend_unacknowledged_or_waiting_record_deadlines() {
                 .send(
                     &cx,
                     Route::Stream(pair.host_routes[0]),
-                    &progress(1),
+                    &progress(2),
                     now + next,
                     || true,
                 )
                 .unwrap();
             assert_eq!(pair.server.usage().retained_send_records, 2);
+            // Past the 40 ms send-by, the path's allowance still holds.
             asupersync::time::sleep(cx.now(), Duration::from_millis(45)).await;
-            assert_eq!(pair.server.tick(&cx, || true), Err(Error::Expired));
+            assert_eq!(pair.server.tick(&cx, || true), Ok(()));
+            // The earlier record's allowance ends it, not the 1.9 s record.
+            let mut result = Ok(());
+            while result.is_ok() {
+                assert!(
+                    clock(&cx) < now + 1_900_000,
+                    "a later record extended an earlier deadline"
+                );
+                asupersync::time::sleep(cx.now(), Duration::from_millis(10)).await;
+                result = pair.server.tick(&cx, || true);
+            }
+            assert_eq!(result, Err(Error::Expired));
             assert!(pair.server.is_closed());
             assert_eq!(pair.server.usage().retained_send_records, 0);
         }

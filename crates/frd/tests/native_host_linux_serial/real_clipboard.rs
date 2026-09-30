@@ -13,7 +13,6 @@
 //! and the user as in `real_control`. Xvfb selections in a namespace are not a
 //! desktop clipboard manager, Wayland, or a live tailnet.
 use super::real_control::{Controlled, Harness, PRELUDE, eventually, indicator, signal};
-use super::real_media::close_window;
 use super::shipped_client::wait_for;
 use super::*;
 use std::{thread, time::Instant};
@@ -259,7 +258,7 @@ fn fr_connect_clipboard_crosses_both_ways_through_frd_run() {
 
     // The user closes the viewer: content-free completion, then the lease's
     // executor AND the clipboard child go away with the lease.
-    close_window(&s.viewer.display, s.window.0);
+    s.close_viewer();
     let output = wait_for(s.client, Duration::from_secs(30));
     let report = completion(&output, &s.daemon.dump());
     assert_eq!(report["outcome"], "stopped", "{report}");
@@ -311,7 +310,7 @@ fn a_host_without_clipboard_keeps_control_and_the_client_reports_typed_absence()
         "control without clipboard: {}",
         s.daemon.dump()
     );
-    close_window(&s.viewer.display, s.window.0);
+    s.close_viewer();
     let output = wait_for(s.client, Duration::from_secs(30));
     let report = completion(&output, &s.daemon.dump());
     assert_eq!(report["outcome"], "stopped", "{report}");

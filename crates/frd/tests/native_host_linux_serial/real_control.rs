@@ -650,6 +650,12 @@ impl Controlled {
             );
         }
     }
+    /// Close the viewer window as a window manager would. A client that already
+    /// ended reports its own completion here rather than a missing window.
+    pub(super) fn close_viewer(&mut self) {
+        self.alive();
+        close_window(&self.viewer.display, self.window.0);
+    }
     /// The focused, exact-size viewer window: (XID, origin on the viewer display).
     fn viewer_window(&mut self) -> (u64, Point) {
         let mut found = None;
@@ -737,8 +743,20 @@ impl Controlled {
                 driver.ask(&format!("move {} {}", wx + target.0, wy + target.1)),
                 ["OK"]
             );
-            thread::sleep(Duration::from_millis(50));
-            host_pointer(observer).0 == target
+            // Delivery takes at least one path traversal plus the pipeline:
+            // watch the host for this exact target before moving again. With a
+            // fixed 50 ms check, motion over a path slower than that always
+            // landed one nudge behind and was reported as never arriving.
+            let settle = Instant::now() + Duration::from_millis(400);
+            loop {
+                thread::sleep(Duration::from_millis(25));
+                if host_pointer(observer).0 == target {
+                    return true;
+                }
+                if Instant::now() >= settle {
+                    return false;
+                }
+            }
         })
     }
 }
@@ -837,7 +855,7 @@ fn fr_connect_control_drives_the_host_desktop_through_frd_run() {
 
     // The user closes the viewer window: a clean stop, with content-free
     // host-reported result counts, then the lease's executor goes away.
-    close_window(&s.viewer.display, s.window.0);
+    s.close_viewer();
     let output = wait_for(s.client, Duration::from_secs(30));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let report: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| {
@@ -935,8 +953,10 @@ fn a_stopped_controller_loses_its_lease_and_later_input_has_no_host_effect() {
     s.daemon.finish();
 }
 
-/// Live host capture children (`fr-media-worker --capture`); the client's
-/// decoder runs `--present` and is never selected.
+/// Live host capture children (`fr-media-worker --capture`) of THIS test's
+/// in-process daemon; the client's decoder runs `--present` and is never
+/// selected. The suite runs as root without a PID namespace, so an unscoped
+/// scan would also freeze the workers of any other suite on the machine.
 fn capture_workers() -> Vec<u32> {
     std::fs::read_dir("/proc")
         .unwrap()
@@ -948,10 +968,37 @@ fn capture_workers() -> Vec<u32> {
             (words
                 .next()
                 .is_some_and(|image| image.ends_with(b"/fr-media-worker"))
-                && words.next() == Some(b"--capture"))
+                && words.next() == Some(b"--capture")
+                && descends_from_this_test(pid))
             .then_some(pid)
         })
         .collect()
+}
+
+/// Whether `pid`'s parent chain reaches this test process.
+fn descends_from_this_test(pid: u32) -> bool {
+    let me = std::process::id();
+    let mut current = pid;
+    for _ in 0..64 {
+        // "pid (comm) state ppid ...": comm may contain spaces and ')'.
+        let Some(parent) = std::fs::read_to_string(format!("/proc/{current}/stat"))
+            .ok()
+            .and_then(|stat| {
+                let (_, rest) = stat.rsplit_once(')')?;
+                rest.split_whitespace().nth(1)?.parse::<u32>().ok()
+            })
+        else {
+            return false;
+        };
+        if parent == me {
+            return true;
+        }
+        if parent <= 1 {
+            return false;
+        }
+        current = parent;
+    }
+    false
 }
 
 #[test]
@@ -1071,7 +1118,7 @@ fn a_host_without_wheel_buttons_grants_control_without_the_wheel() {
         "control ended after a local wheel notch: {}",
         s.daemon.dump()
     );
-    close_window(&s.viewer.display, s.window.0);
+    s.close_viewer();
     let output = wait_for(s.client, Duration::from_secs(30));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let report: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| {

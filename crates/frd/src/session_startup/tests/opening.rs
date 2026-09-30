@@ -153,6 +153,7 @@ fn parked_startup_and_callback_delay_cannot_start_fresh_authority() {
             let mut configuration = config(true);
             configuration.startup_timeout = Duration::from_millis(100);
             let (host, mut viewer, alive) = pair(&c, &h, configuration, true).await;
+            viewer.expect_refusal = true;
             let finished = AtomicBool::new(false);
             let opening = host.open(Duration::from_millis(1), |local, _| {
                 assert!(!parked);
@@ -178,6 +179,18 @@ fn parked_startup_and_callback_delay_cannot_start_fresh_authority() {
                 assert!(matches!(result, Err(Error::Expired)));
             }
             assert!(!alive.load(Ordering::Acquire));
+            // The terminal refusal is best-effort: when it reaches the viewer
+            // (an unexpired path usually delivers it), it names the lapse.
+            if let Some(refused) = &viewer.refused {
+                assert!(
+                    matches!(
+                        refused,
+                        client_startup::Error::Protocol(negotiation::Error::Refused(r))
+                            if r.reason == fr_wire::refusal::Reason::ApprovalExpired
+                    ),
+                    "{refused:?}"
+                );
+            }
         });
     }
 }
