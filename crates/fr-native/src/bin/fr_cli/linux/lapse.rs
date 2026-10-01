@@ -26,6 +26,14 @@ pub(super) fn reconnect(error: reconnect::Failure) -> Option<Failure> {
             "host_not_heard",
             "The host's renewals did not arrive within this session's deadline, so the session ended instead of continuing unrenewed; nothing is replayed. Check the path's round-trip time and loss (tailscale ping) and that the host is still running.",
         ),
+        Lapse::InputDispatchStalled => failure(
+            "input_dispatch_stalled",
+            "Local keyboard or pointer input waited more than 100 ms before this client could send it, so control ended rather than send stale input; nothing is replayed. Check this machine's load, then the path's loss (tailscale ping), before starting a new session.",
+        ),
+        Lapse::ControlRenewalFailed => failure(
+            "control_renewal_failed",
+            "The control lease could not be renewed, or proven live by a newer host ticket, before its deadline, so control ended; nothing is replayed and control is not reacquired automatically. Check the path's round-trip time and loss (tailscale ping) before starting a new session.",
+        ),
     })
 }
 
@@ -44,6 +52,27 @@ mod tests {
         reconnect::Failure::Observation(ObserverError::Streaming(error))
     }
 
+    #[test]
+    fn a_stalled_input_dispatch_and_a_failed_renewal_are_named() {
+        let stalled = reconnect(observed(Streaming::Control(Control::Capture(
+            frd::session_startup::viewer_events::Error::Expired,
+        ))))
+        .unwrap();
+        assert_eq!(stalled.code, "input_dispatch_stalled");
+        for renewal in [
+            fr_client::input::Error::Stopped(fr_client::input::StopReason::InvalidControl),
+            fr_client::input::Error::Control(fr_client::authority::Error::Expired),
+        ] {
+            let failed = reconnect(observed(Streaming::Control(Control::View(View::Input(
+                renewal,
+            )))))
+            .unwrap();
+            assert_eq!(failed.code, "control_renewal_failed");
+            assert_eq!(failed.exit, 1);
+            assert!(failed.next.contains("tailscale ping"));
+        }
+        assert_eq!(stalled.exit, 1);
+    }
     #[test]
     fn each_lapse_has_a_distinct_code_and_exit_one() {
         let deadline = reconnect(observed(Streaming::Control(Control::Session(

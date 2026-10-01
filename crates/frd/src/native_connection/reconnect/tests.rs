@@ -364,6 +364,42 @@ fn only_transport_deadlines_and_stale_views_are_named_lapses() {
 }
 
 #[test]
+fn a_stalled_dispatch_and_a_lapsed_control_lease_are_named() {
+    use crate::session_startup::ControlledViewerError as C;
+    use fr_client::input::{Error as I, StopReason};
+    use fr_client::{authority::Error as A, input::presentation::Error as P};
+    let observed = |error| Failure::Observation(ObserverError::Streaming(error));
+    // Only a captured event that aged past its dispatch bound is a stalled
+    // dispatch; the capture's other faults keep the generic path.
+    {
+        use crate::session_startup::viewer_events::Error as E;
+        for error in [E::Expired, E::Closed, E::Clock, E::Overflow, E::Unavailable] {
+            let failure = observed(StreamingViewerError::Control(C::Capture(error)));
+            let expected = (error == E::Expired).then_some(Lapse::InputDispatchStalled);
+            assert_eq!(lapse(failure), expected, "{error:?}");
+            assert!(!retryable(failure));
+        }
+    }
+    // A lapsed control lease is named both as the expiry the client met first
+    // and as the stop it reports afterwards; a malformed or stale challenge is
+    // a protocol fault, not a lapse.
+    for (error, expected) in [
+        (
+            I::Stopped(StopReason::InvalidControl),
+            Some(Lapse::ControlRenewalFailed),
+        ),
+        (I::Control(A::Expired), Some(Lapse::ControlRenewalFailed)),
+        (I::Control(A::StaleChallenge), None),
+        (I::Control(A::WrongScope), None),
+        (I::Stopped(StopReason::InvalidTicket), None),
+    ] {
+        let failure = observed(StreamingViewerError::Control(C::View(P::Input(error))));
+        assert_eq!(lapse(failure), expected, "{error:?}");
+        assert!(!retryable(failure));
+    }
+}
+
+#[test]
 fn a_lost_reference_is_named_but_decode_failure_and_local_ends_are_not() {
     use crate::session_startup::{ControlledViewerError as C, Error as S};
     let observed = |error| Failure::Observation(ObserverError::Streaming(error));

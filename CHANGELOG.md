@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-10-01 — two more control ends are named
+
+- Two local ends of a controlled session that `fr` reported as the generic
+  `native_session_failed` now have their own codes. The session still ends;
+  only the report changes.
+  - `input_dispatch_stalled`: a captured key, text or pointer event waited
+    past its 100 ms dispatch bound before the viewer could send it.
+  - `control_renewal_failed`: the control lease could not be renewed, or
+    proven live by a newer ticket, before its deadline.
+- `fr --help` now lists every named end, including `video_startup_expired`.
+- Namespace control matrix: the stalled dispatch had aborted most runs at
+  the 6 ms RTT, 5% loss row as an untyped end. With the name, the matrix
+  reaches its 40 and 120 ms rows. The stall itself (the viewer loop not
+  driven for 108-140 ms) is not fixed.
+
 ## 2026-09-30 — a stale view suspends control instead of ending it
 
 - When the presented view goes stale under a held control lease, input is now
