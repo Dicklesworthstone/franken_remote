@@ -90,14 +90,42 @@ the rejection only as an opaque code, and the fix is upstream. Gates:
   - the stale-view test no longer SIGSTOPs other suites' capture workers;
   - control-e2e pointer polling no longer misreads a 120 ms RTT path as lost.
 
+**Update 2026-10-01.**
+- Controlled sessions negotiate reference recovery (fr-4vf5,
+  RECOVERY_HOST.md). The loss suspends input. The host then advances the
+  view's recovery generation, so actions decided on older pictures are
+  refused, and the same lease resumes on the recovered picture.
+  - Unit-tested in fr-core and fr-client; the client test drives a real
+    receive pipeline through a lost reference. Planted negatives fail.
+  - In frd, only negotiation is tested for control. The host and viewer
+    recovery paths are covered by the existing observation recovery
+    fixtures, not a controlled one.
+  - Not yet exercised end to end: no namespace row recovered a reference
+    (see Open).
+- Two control ends are named: `input_dispatch_stalled` and
+  `control_renewal_failed` (46a5891). The control matrix now reaches all its
+  rows instead of aborting on an untyped end.
+- Namespace on this build: full suite 63/63; the stale-view suspend e2e
+  passed 2 of 2.
+
 **Open, in priority order:**
-- Control over lossy paths. A lost video reference ends a controlled session,
-  because reference recovery runs only in view-only sessions. It shows as
-  `video_reference_lost`, or as `host_control_revoked` with reason
-  `local_revoke` when the host's media loop ends first; that reason is a
-  mislabel. At 120 ms RTT with loss, record queueing outlasts the 3-PTO
-  delivery allowance (`transport_deadline_expired`). See
-  PRESENTATION_FRESHNESS.md.
+- Control over lossy paths. At 40 and 120 ms RTT with loss, the matrix never
+  reaches the new controlled recovery. Host diagnostics, 13 of 20 lossy ends:
+  the host's own sender could not finish sending a picture within the 250 ms
+  reference horizon (`OriginalExpired`, a 3 KB picture once). It ends the
+  session in its first serving round.
+  - Cause: Asupersync 0.5.0's NewReno sits at its 2-datagram floor under
+    loss, and a lost tail packet waits for a probe timeout.
+  - The client reports it as `host_control_revoked` with reason
+    `local_revoke`, which is a mislabel (any host serve error is labelled
+    so), or as `transport_deadline_expired`.
+  - Next: a host-side expired reference should wait for the viewer's
+    recovery request instead of ending (MEDIA_DELIVERY.md: the caller must
+    recover).
+  - Separately, the controlled viewer loop sometimes is not driven for
+    108-140 ms, which ends control with `input_dispatch_stalled`; the cause
+    is not isolated.
+  - See PRESENTATION_FRESHNESS.md.
 - A live two-machine run: no client on another tailnet node has ever connected
   (owner decision needed: a second machine, or an auth key for an isolated test
   node). Every row above is namespace evidence.

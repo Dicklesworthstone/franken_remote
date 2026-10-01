@@ -510,3 +510,149 @@ fn a_faster_path_applies_the_smaller_bound_to_the_viewer_at_once() {
     assert!(input.tick(ClientInstant(439_999)).unwrap());
     suspended_at(&mut input, 440_000);
 }
+/// A reference recovery abandons an accepted dependent picture, which fences
+/// the old receiver scope (`cancel_decode`).
+fn abandon_dependent_picture(receiver: &mut ReceivePipeline, limits: MediaLimits) {
+    let next = FrameDescriptor {
+        frame: 1,
+        reference: Some(0),
+        total_bytes: 4,
+        stride: 4,
+        capture_micros: 1_012_000,
+    };
+    let mut out = [0; 1150];
+    let n = encode_progress(
+        Progress {
+            descriptor: next,
+            observed_micros: next.capture_micros,
+            observation: SourceObservation::Captured,
+            pipeline: PipelineState::Running,
+        },
+        3,
+        &limits,
+        &mut out,
+    )
+    .unwrap();
+    receiver
+        .receive(Channel::MediaConfig, &out[..n], 23_200)
+        .unwrap();
+    let n = encode_fragment(
+        Fragment {
+            descriptor: next,
+            index: 0,
+            bytes: b"next",
+        },
+        1,
+        &limits,
+        &mut out,
+    )
+    .unwrap();
+    receiver.receive(Channel::Video, &out[..n], 23_200).unwrap();
+    let abandoned = receiver.take_decodable(23_200).unwrap().unwrap();
+    abandoned.cancel_decode();
+}
+/// The recovered generation's IDR (bindings 11-14), decoded and shown.
+fn show_recovered_idr(
+    receiver: &mut ReceivePipeline,
+    input: &mut PresentedInput,
+    limits: MediaLimits,
+) {
+    receiver.decoder_configured(25_000).unwrap();
+    let mut out = [0; 1150];
+    let n = encode_recovery(
+        RecoveryChunk {
+            frame: 0,
+            total_bytes: 4,
+            offset: 0,
+            capture_micros: 1_014_000,
+            bytes: b"data",
+        },
+        12,
+        &limits,
+        &mut out,
+    )
+    .unwrap();
+    receiver
+        .receive(Channel::Recovery, &out[..n], 25_000)
+        .unwrap();
+    let unit = receiver.take_decodable(25_000).unwrap().unwrap();
+    let n = encode_progress(
+        Progress {
+            descriptor: unit.descriptor(),
+            observed_micros: 1_014_000,
+            observation: SourceObservation::Captured,
+            pipeline: PipelineState::Running,
+        },
+        13,
+        &limits,
+        &mut out,
+    )
+    .unwrap();
+    input
+        .progress(&out[..n], &limits, ClientInstant(25_000))
+        .unwrap();
+    input
+        .decoded(
+            receiver.complete_decode(&unit, 26_000).unwrap(),
+            true,
+            ClientInstant(26_000),
+        )
+        .unwrap();
+    input.visible(0, ClientInstant(27_000)).unwrap();
+}
+#[test]
+fn a_reference_recovery_rebinds_the_suspended_grant_to_the_recovered_receiver() {
+    let (mut receiver, mut input, limits, _) = shown();
+    input.expect_reference_recovery();
+    // The loss is found while the view is still live: the abandoned decode
+    // fences the old receiver scope before any recovery begins. The grant's
+    // next tick suspends it instead of ending it on that stale tracker.
+    abandon_dependent_picture(&mut receiver, limits);
+    assert_eq!(input.tick(ClientInstant(23_000)), Ok(false));
+    assert_eq!(input.stopped(), None);
+    assert_eq!(input.suspended_since(), Some(ClientInstant(23_000)));
+    // Entering the recovery is idempotent. Ticks and clock updates leave the
+    // grant suspended without consulting the fenced tracker.
+    input.suspend_for_recovery(ClientInstant(23_100)).unwrap();
+    assert_eq!(input.tick(ClientInstant(23_300)), Ok(false));
+    let later = ClockCorrelation::new(
+        ClockSample {
+            host_boot: HostBootId::from_raw(1),
+            client_sent_us: 23_000,
+            host_sample_us: 1_013_000,
+            client_received_us: 23_400,
+        },
+        ClockPolicy {
+            drift_ppm: 0,
+            ..ClockPolicy::default()
+        },
+    )
+    .unwrap();
+    input.synchronize(later, ClientInstant(23_400)).unwrap();
+    assert_eq!(input.stopped(), None);
+    // The receiver installs the recovery's next generation and fresh bindings.
+    let next = RecoveryGeneration::INITIAL.next().unwrap();
+    receiver
+        .replace(
+            MediaEpoch {
+                configuration: CodecConfigurationGeneration::INITIAL,
+                recovery: next,
+            },
+            MediaBindings::new(11, 12, 13, 14).unwrap(),
+            24_000,
+        )
+        .unwrap();
+    assert!(input.check_receiver(&receiver).is_err());
+    input
+        .follow_recovery(&receiver, ClientInstant(24_000))
+        .unwrap();
+    input.check_receiver(&receiver).unwrap();
+    assert_eq!(input.input_view().recovery, next);
+    assert_eq!(input.suspended_since(), Some(ClientInstant(23_000)));
+    // The recovered IDR, decoded and shown, is the new generation's evidence.
+    show_recovered_idr(&mut receiver, &mut input, limits);
+    // Fresh evidence alone does not resume: that needs a ticket issued after
+    // the host's own lapse. The grant is suspended, not ended.
+    assert_eq!(input.tick(ClientInstant(27_001)), Ok(false));
+    assert_eq!(input.stopped(), None);
+}

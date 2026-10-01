@@ -313,11 +313,33 @@ fn late_promotion_cannot_restart_expired_source_freshness() {
 mod clipboard;
 /// Deliver an authenticated ticket for `c` issued at host time `issued`.
 fn deliver_ticket(client: &mut InputClient, id: u128, sequence: u64, issued: u64, now: u64) {
+    deliver_ticket_at(
+        client,
+        id,
+        sequence,
+        issued,
+        now,
+        RecoveryGeneration::INITIAL,
+    );
+}
+/// A host ticket naming the view of recovery generation `recovery`.
+fn deliver_ticket_at(
+    client: &mut InputClient,
+    id: u128,
+    sequence: u64,
+    issued: u64,
+    now: u64,
+    recovery: RecoveryGeneration,
+) {
     let mut bytes = [0; INPUT_TICKET_BYTES];
     let n = input_ticket::encode(
         Ticket {
             credentials: InputCredentials {
                 ticket: InputTicketId::from_raw(id),
+                view: InputView {
+                    recovery,
+                    ..credentials().view
+                },
                 ..credentials()
             },
             sequence,
@@ -336,12 +358,19 @@ fn deliver_ticket(client: &mut InputClient, id: u128, sequence: u64, issued: u64
         .unwrap();
 }
 fn fresh(client: &mut InputClient, serial: u64, at: u64) {
+    fresh_at(client, serial, at, RecoveryGeneration::INITIAL);
+}
+/// Fresh presented evidence of a picture of recovery generation `recovery`.
+fn fresh_at(client: &mut InputClient, serial: u64, at: u64, recovery: RecoveryGeneration) {
     client
         .presented(
             PresentedObservation {
                 session: credentials().session,
                 serial,
-                view: credentials().view,
+                view: InputView {
+                    recovery,
+                    ..credentials().view
+                },
                 received_at: ClientInstant(at),
                 source_age_upper_us: 5_000,
             },
@@ -466,4 +495,79 @@ fn a_key_released_by_the_suspension_is_dropped_but_a_real_misuse_is_not() {
         )
         .unwrap();
     assert_eq!(press.sequence, 1);
+}
+#[test]
+fn a_reference_recovery_moves_a_suspended_grant_to_its_new_generation() {
+    let next = RecoveryGeneration::INITIAL.next().unwrap();
+    let mut client = input(credentials());
+    client
+        .confirm_mapping(
+            credentials().session,
+            credentials().view,
+            ClientInstant(30_000),
+        )
+        .unwrap();
+    fresh(&mut client, 1, 40_000);
+    // A live grant cannot change generation under the user's hands.
+    assert_eq!(
+        client.advance_recovery(next, ClientInstant(41_000)),
+        Err(input::Error::InvalidTransition)
+    );
+    // The lost reference lets the view lapse; the viewer then installs the
+    // recovery's next generation on the same suspended grant.
+    client.tick(ClientInstant(285_000)).unwrap();
+    client
+        .advance_recovery(next, ClientInstant(290_000))
+        .unwrap();
+    assert_eq!(client.suspended_since(), Some(ClientInstant(285_000)));
+    // The recovered generation's evidence (a new serial space) and a ticket
+    // naming it, issued after the host's own lapse, resume input.
+    fresh_at(&mut client, 1, 1_415_000, next);
+    deliver_ticket_at(&mut client, 6, 1, 2_400_000, 1_420_000, next);
+    assert_eq!(client.suspended_since(), None);
+    let mut out = [0; 512];
+    let encoded = client
+        .action(key(), &mut out, ClientInstant(1_421_000))
+        .unwrap();
+    let request = fr_wire::input::decode_input(
+        &out[..encoded.bytes],
+        &ProtocolLimits::ABSOLUTE,
+        7,
+        InputDirection::ViewerToHost,
+        InputDelivery::Reliable,
+    )
+    .unwrap();
+    assert_eq!(request.credentials.view.recovery, next);
+    assert_eq!(client.stopped(), None);
+}
+#[test]
+fn after_a_recovery_old_generation_evidence_or_a_backward_step_ends_the_grant() {
+    let next = RecoveryGeneration::INITIAL.next().unwrap();
+    let mut client = input(credentials());
+    fresh(&mut client, 1, 40_000);
+    client.tick(ClientInstant(285_000)).unwrap();
+    client
+        .advance_recovery(next, ClientInstant(290_000))
+        .unwrap();
+    // Evidence of an old-generation picture can only be stale.
+    assert_eq!(
+        client.presented(
+            PresentedObservation {
+                session: credentials().session,
+                serial: 1,
+                view: credentials().view,
+                received_at: ClientInstant(300_000),
+                source_age_upper_us: 5_000,
+            },
+            ClientInstant(300_000),
+        ),
+        Err(input::Error::Stopped(input::StopReason::ViewChanged))
+    );
+    let mut client = input(credentials());
+    fresh(&mut client, 1, 40_000);
+    client.tick(ClientInstant(285_000)).unwrap();
+    assert_eq!(
+        client.advance_recovery(RecoveryGeneration::INITIAL, ClientInstant(290_000)),
+        Err(input::Error::Stopped(input::StopReason::ViewChanged))
+    );
 }

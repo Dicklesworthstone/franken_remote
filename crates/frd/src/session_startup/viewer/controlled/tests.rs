@@ -752,7 +752,7 @@ fn lifecycle_handle_fences_queued_input_without_borrowing_viewer() {
 // They are never passed to a native decoder or described as actual video.
 fn submit_successor(state: &mut Fixture, client_cx: &Cx) {
     let stamp = now(client_cx).unwrap();
-    let limits = state.viewer.media.limits();
+    let limits = state.viewer.media.as_ref().unwrap().limits();
     let mut bytes = [0; 1150];
     let descriptor = FrameDescriptor {
         frame: 1,
@@ -767,7 +767,13 @@ fn submit_successor(state: &mut Fixture, client_cx: &Cx) {
             index: 0,
             bytes: b"next",
         },
-        state.viewer.media.bindings().for_channel(Channel::Video),
+        state
+            .viewer
+            .media
+            .as_ref()
+            .unwrap()
+            .bindings()
+            .for_channel(Channel::Video),
         &limits,
         &mut bytes,
     )
@@ -788,6 +794,8 @@ fn submit_successor(state: &mut Fixture, client_cx: &Cx) {
         state
             .viewer
             .media
+            .as_ref()
+            .unwrap()
             .bindings()
             .for_channel(Channel::MediaConfig),
         &limits,
@@ -1065,7 +1073,7 @@ fn local_slot_backpressure_does_not_consume_action_or_pointer_identities() {
 fn real_send_backpressure_and_fresh_source_do_not_retime_an_encoded_action() {
     run(|client_cx, host_cx| async move {
         let mut state = Box::pin(fixture(&client_cx, &host_cx)).await;
-        let limits = state.viewer.media.limits();
+        let limits = state.viewer.media.as_ref().unwrap().limits();
         let mut bytes = [0; 128];
         let length = fr_wire::authority::encode(
             fr_wire::authority::Message::Response {
@@ -1116,6 +1124,8 @@ fn real_send_backpressure_and_fresh_source_do_not_retime_an_encoded_action() {
             state
                 .viewer
                 .media
+                .as_ref()
+                .unwrap()
                 .bindings()
                 .for_channel(Channel::MediaConfig),
             &limits,

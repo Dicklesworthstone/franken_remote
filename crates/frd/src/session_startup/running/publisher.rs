@@ -834,18 +834,23 @@ async fn bootstrap(
     let mut host = host
         .into_streaming(stream)
         .map_err(|e| budget.fail(Error::Session(e)))?;
-    if !controlled
-        && negotiation.capabilities.iter().any(|c| {
-            c.name == fr_wire::recovery_request::CAPABILITY
-                && c.version == fr_wire::recovery_request::VERSION
-        })
-    {
-        host.enable_reference_recovery(media)
-            .map_err(|e| budget.fail(Error::Session(e)))?;
-    } else if controlled {
+    let recovery = negotiation.capabilities.iter().any(|c| {
+        c.name == fr_wire::recovery_request::CAPABILITY
+            && c.version == fr_wire::recovery_request::VERSION
+    });
+    if controlled {
         // The controller sees the host's confirmed pointer shape/position
         // (typed absence when it did not select `remote-cursor`).
         host.enable_cursor(media)
+            .map_err(|e| budget.fail(Error::Session(e)))?;
+        // A lost reference recovers on the same lease: its fence suspends
+        // input (plan 11.3), which resumes on the recovered generation.
+        if recovery {
+            host.enable_retained_recovery()
+                .map_err(|e| budget.fail(Error::Session(e)))?;
+        }
+    } else if recovery {
+        host.enable_reference_recovery(media)
             .map_err(|e| budget.fail(Error::Session(e)))?;
     }
     Ok(NativePublisher {

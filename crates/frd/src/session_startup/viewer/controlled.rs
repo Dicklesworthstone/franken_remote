@@ -98,7 +98,9 @@ pub struct ControlledViewer {
     input: Box<PresentedInput>,
     viewport: fr_client::input::viewport::Viewport,
     channels: NegotiatedInput,
-    media: NegotiatedMedia,
+    /// Absent only while a reference recovery holds the media (plan 12.3):
+    /// input is then suspended, and its renewals stay serviced without media.
+    media: Option<NegotiatedMedia>,
     clock: ClockSync,
     clock_at: u64,
     pending: Option<Pending>,
@@ -187,6 +189,14 @@ impl ViewerSession {
         }
         input.view_deadline(t)?;
         input.enable_control_renewal(binding.id, t)?;
+        // Negotiated reference recovery: a lost reference suspends this grant
+        // until the recovered generation instead of ending it (plan 12.3).
+        if self.opened.selection.capabilities.iter().any(|c| {
+            c.name == fr_wire::recovery_request::CAPABILITY
+                && c.version == fr_wire::recovery_request::VERSION
+        }) {
+            input.expect_reference_recovery();
+        }
         let control = ViewerControl {
             cx: self.cx.clone(),
             stopped: Arc::new(AtomicBool::new(false)),
@@ -197,7 +207,7 @@ impl ViewerSession {
             input: Box::new(input),
             viewport,
             channels,
-            media,
+            media: Some(media),
             clock,
             clock_at: sample.received_at_us(),
             pending: None,
@@ -231,7 +241,50 @@ impl ControlledViewer {
         &mut self,
     ) -> Result<(&mut ViewerSession, &NegotiatedMedia), Error> {
         self.check()?;
-        Ok((&mut self.session, &self.media))
+        Ok((&mut self.session, self.media.as_ref().ok_or(Error::Closed)?))
+    }
+    /// The parent session a reference recovery keeps serving through this
+    /// grant's own drive (renewals, tickets, results, clock).
+    pub(super) fn session_mut(&mut self) -> &mut ViewerSession {
+        &mut self.session
+    }
+    /// A reference loss was found: suspend this grant's input now and stop
+    /// consulting the fenced view until the recovered generation is installed.
+    pub(super) fn enter_recovery(&mut self) -> Result<(), Error> {
+        let t = ClientInstant(now(&self.session.cx)?);
+        self.input.suspend_for_recovery(t)?;
+        self.abandon_if_suspended()
+    }
+    /// Hand this stream's media to its reference recovery, suspending the
+    /// grant's input first: the lost reference means the view cannot advance
+    /// (plan 12.3). Renewals continue; no input is sent until resumed.
+    pub(super) fn take_media_for_recovery(&mut self) -> Result<NegotiatedMedia, Error> {
+        let t = self.check()?;
+        self.input.suspend_for_recovery(t)?;
+        self.abandon_if_suspended()?;
+        self.media.take().ok_or(Error::Closed)
+    }
+    /// Install the recovered media and move this suspended grant to the
+    /// recovered receiver's generation. Input resumes only on its fresh
+    /// evidence and a ticket naming it.
+    pub(super) fn install_recovered_media(
+        &mut self,
+        media: NegotiatedMedia,
+        receiver: &fr_media::delivery::ReceivePipeline,
+    ) -> Result<(), Error> {
+        if self.media.is_some() {
+            return Err(Error::Closed);
+        }
+        media.check(&self.session.transport).map_err(Error::Media)?;
+        let t = ClientInstant(now(&self.session.cx)?);
+        self.input.follow_recovery(receiver, t)?;
+        let b = media.binding();
+        let v = self.input.input_view();
+        if v.recovery != b.recovery || v.configuration != b.configuration {
+            return Err(Error::WrongBinding);
+        }
+        self.media = Some(media);
+        Ok(())
     }
     pub(super) fn check_stream_receiver(
         &self,
@@ -280,9 +333,9 @@ impl ControlledViewer {
         self.channels
             .viewer_routes(&self.session.transport)
             .map_err(Error::Input)?;
-        self.media
-            .check(&self.session.transport)
-            .map_err(Error::Media)?;
+        if let Some(media) = &self.media {
+            media.check(&self.session.transport).map_err(Error::Media)?;
+        }
         let t = ClientInstant(now(&self.session.cx)?);
         self.input.maintenance_deadline(t)?;
         self.abandon_if_suspended()?;
@@ -488,11 +541,18 @@ impl ControlledViewer {
             .channels
             .viewer_routes(&self.session.transport)
             .map_err(Error::Input)?;
+        // During a reference recovery there is no media: its progress belongs
+        // to the recovery's own dispatch, never to this grant's evidence.
         let progress = self
             .media
-            .progress_route(&self.session.transport)
+            .as_ref()
+            .map(|media| {
+                media
+                    .progress_route(&self.session.transport)
+                    .map(|route| (route, media.limits()))
+            })
+            .transpose()
             .map_err(Error::Media)?;
-        let limits = self.media.limits();
         let inbound = self.session.routes.inbound;
         let control_binding = fr_wire::authority::Binding {
             channel: inbound.binding,
@@ -558,7 +618,8 @@ impl ControlledViewer {
                 }
             } else {
                 let disposition = other(route, bytes)?;
-                if disposition == Disposition::Consumed
+                if let Some((progress, limits)) = progress
+                    && disposition == Disposition::Consumed
                     && route == Route::Stream(progress)
                     && kind == Some(&(Kind::Progress as u16).to_be_bytes())
                 {

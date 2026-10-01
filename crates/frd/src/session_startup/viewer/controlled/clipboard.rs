@@ -33,7 +33,7 @@ impl ControlledViewer {
                 parent: self.session.opened.binding,
                 selection: &self.session.opened.selection,
             },
-            self.media.binding(),
+            self.media.as_ref().ok_or(Error::Closed)?.binding(),
             timeout,
             Consent {
                 scope: Binding {

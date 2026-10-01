@@ -171,16 +171,13 @@ impl NegotiatedMedia {
     }
     /// Preserve only the original dispatch map after reference failure. The
     /// peer may already have reset media before its next offer reaches control;
-    /// connection identity and negotiated observation scope still must match.
+    /// connection identity and negotiated recovery still must match.
     pub(crate) fn retiring_viewer_routes(&self, q: &QuicRecords) -> Result<[Route; 4], Error> {
         if !q.is_bound_to(&self.connection) {
             return Err(Error::ForeignConnection);
         }
         self.check_recovery_capability()?;
-        if q.is_closed()
-            || self.is_host()
-            || self.selection.role != fr_wire::negotiation::Role::Observe
-        {
+        if q.is_closed() || self.is_host() {
             return Err(Error::InvalidRoutes);
         }
         Ok([

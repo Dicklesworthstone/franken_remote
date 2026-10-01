@@ -1,12 +1,17 @@
 //! Same-session recovery: old media is fenced, but parent renewal never stops.
 //! One bounded configuration record and the ORIGINAL native decoder/receiver
-//! cross the attachment and acknowledgement handoffs. No controller is promoted.
+//! cross the attachment and acknowledgement handoffs. No controller is promoted:
+//! a control grant stays suspended until the recovered view's evidence and a
+//! new ticket resume it (plan 11.3, 12.3).
 use super::{
     Error, Presentation, Presenter, ViewerSession, acquisition, decoder_startup, feedback, now,
     recovery_control,
 };
-use crate::{media::PresentationReceipt, media_quic::NegotiatedMedia};
+use crate::{
+    media::PresentationReceipt, media_quic::NegotiatedMedia, session_startup::ControlledViewer,
+};
 use asupersync::cx::Cx;
+use fr_client::input::ResultEvent;
 use fr_media::delivery::ReceivePipeline;
 use fr_transport::quic::{Disposition, Route, StreamRoute};
 use fr_wire::{
@@ -14,15 +19,64 @@ use fr_wire::{
     attachment::{self, MediaRole, Message},
     decoder::Binding,
     input::{InputDelivery, InputDirection},
-    negotiation::Role,
     receiver_metrics,
 };
 use std::{cell::Cell, future::Future, pin::pin, task::Poll, time::Duration};
 
+/// The parent a recovery keeps serving while old media is fenced: an
+/// observation session, or a control grant whose suspended input keeps its
+/// renewals, tickets and results serviced through its own drive.
+pub(super) enum Link<'a> {
+    Observe(&'a mut ViewerSession),
+    Control(&'a mut ControlledViewer, &'a mut dyn FnMut(ResultEvent)),
+}
+impl Link<'_> {
+    fn session(&mut self) -> &mut ViewerSession {
+        match self {
+            Self::Observe(session) => session,
+            Self::Control(viewer, _) => viewer.session_mut(),
+        }
+    }
+    async fn drive(
+        &mut self,
+        wait: Duration,
+        dispatch: impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Observe(session) => session.drive(wait, dispatch).await.map_err(Error::Session),
+            Self::Control(viewer, result) => viewer
+                .drive(wait, &mut **result, dispatch)
+                .await
+                .map_err(Error::Control),
+        }
+    }
+    fn close(&mut self) {
+        match self {
+            Self::Observe(session) => session.close(),
+            Self::Control(viewer, _) => viewer.close(),
+        }
+    }
+    /// An interactive embedding sees its grant, not an observer.
+    fn notify(
+        &mut self,
+        budget: &Budget,
+        ui: &mut impl FnMut(acquisition::Dispatch<'_>, Option<Presentation>) -> Result<(), ()>,
+    ) -> Result<(), Error> {
+        budget.remaining()?;
+        let state = match self {
+            Self::Observe(_) => acquisition::State::Observing,
+            Self::Control(viewer, _) => acquisition::State::Controlled(viewer),
+        };
+        ui(acquisition::Dispatch::Existing(state), None).map_err(|()| Error::Application)?;
+        budget.remaining()?;
+        Ok(())
+    }
+}
+
 /// This guard exists before polling, including before the first native await.
 /// Failure/cancellation closes the original parent BEFORE decoder cleanup.
 struct Attempt<'a> {
-    session: &'a mut ViewerSession,
+    link: Link<'a>,
     presenter: &'a mut Presenter,
     receiver: &'a mut ReceivePipeline,
     completed: bool,
@@ -30,7 +84,7 @@ struct Attempt<'a> {
 impl Drop for Attempt<'_> {
     fn drop(&mut self) {
         if !self.completed {
-            self.session.close();
+            self.link.close();
             self.receiver.close();
             self.presenter.abort();
         }
@@ -39,7 +93,7 @@ impl Drop for Attempt<'_> {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resume<'a>(
-    session: &'a mut ViewerSession,
+    link: Link<'a>,
     previous: NegotiatedMedia,
     report: &'a mut recovery_control::Receiver,
     presenter: &'a mut Presenter,
@@ -48,7 +102,7 @@ pub(super) fn resume<'a>(
     other: &'a mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
 ) -> impl Future<Output = Result<(NegotiatedMedia, PresentationReceipt), Error>> + 'a {
     let attempt = Attempt {
-        session,
+        link,
         presenter,
         receiver,
         completed: false,
@@ -56,7 +110,7 @@ pub(super) fn resume<'a>(
     async move {
         let mut attempt = attempt;
         let result = Box::pin(run(
-            attempt.session,
+            &mut attempt.link,
             previous,
             report,
             attempt.presenter,
@@ -157,23 +211,9 @@ impl Dispatch {
         other(route, bytes)
     }
 }
-fn notify(
-    budget: &Budget,
-    ui: &mut impl FnMut(acquisition::Dispatch<'_>, Option<Presentation>) -> Result<(), ()>,
-) -> Result<(), Error> {
-    budget.remaining()?;
-    ui(
-        acquisition::Dispatch::Existing(acquisition::State::Observing),
-        None,
-    )
-    .map_err(|()| Error::Application)?;
-    budget.remaining()?;
-    Ok(())
-}
-
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run(
-    session: &mut ViewerSession,
+    link: &mut Link<'_>,
     previous: NegotiatedMedia,
     report: &mut recovery_control::Receiver,
     presenter: &mut Presenter,
@@ -181,10 +221,9 @@ async fn run(
     ui: &mut impl FnMut(acquisition::Dispatch<'_>, Option<Presentation>) -> Result<(), ()>,
     other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
 ) -> Result<(NegotiatedMedia, PresentationReceipt), Error> {
+    let session = link.session();
     session.check().map_err(Error::Session)?;
-    if session.opened.selection.role != Role::Observe
-        || report.state() != recovery_control::State::Requested
-    {
+    if report.state() != recovery_control::State::Requested {
         return Err(Error::Closed);
     }
     let budget = Budget {
@@ -212,6 +251,7 @@ async fn run(
     // NEXT configuration offer before sending resets for our old media streams.
     // The offer stays in its original bounded receive slot for Replacement.
     loop {
+        let session = link.session();
         let heard = session.heard_until;
         report
             .service(&budget.cx, &mut session.transport, receiver, || {
@@ -221,12 +261,11 @@ async fn run(
         if replacement_offered(session, &budget, &dispatch)? {
             break;
         }
-        session
-            .drive(budget.turn()?, |r, b| dispatch.receive(r, b, other))
-            .await
-            .map_err(Error::Session)?;
-        notify(&budget, ui)?;
+        link.drive(budget.turn()?, |r, b| dispatch.receive(r, b, other))
+            .await?;
+        link.notify(&budget, ui)?;
     }
+    let session = link.session();
     let heard = session.heard_until;
     let mut replacement = previous
         .begin_replacement(
@@ -240,6 +279,7 @@ async fn run(
         )
         .map_err(Error::Replacement)?;
     loop {
+        let session = link.session();
         let heard = session.heard_until;
         if replacement
             .advance(&budget.cx, &mut session.transport, || {
@@ -249,18 +289,17 @@ async fn run(
         {
             break;
         }
-        session
-            .drive(budget.turn()?, |r, b| {
-                if replacement.owns_record(r, b) {
-                    Ok(Disposition::Blocked)
-                } else {
-                    dispatch.receive(r, b, other)
-                }
-            })
-            .await
-            .map_err(Error::Session)?;
-        notify(&budget, ui)?;
+        link.drive(budget.turn()?, |r, b| {
+            if replacement.owns_record(r, b) {
+                Ok(Disposition::Blocked)
+            } else {
+                dispatch.receive(r, b, other)
+            }
+        })
+        .await?;
+        link.notify(&budget, ui)?;
     }
+    let session = link.session();
     let media = replacement
         .finish(&budget.cx, &mut session.transport)
         .map_err(Error::Replacement)?;
@@ -273,11 +312,10 @@ async fn run(
     let configuration = media
         .viewer_configuration_route(&session.transport)
         .map_err(Error::Routes)?;
-    let config =
-        configuration_record(session, &budget, configuration, &dispatch, ui, other).await?;
+    let config = configuration_record(link, &budget, configuration, &dispatch, ui, other).await?;
     let mut handshake = decoder_startup::ViewerRecovery::prepare(
         budget.cx.clone(),
-        &session.transport,
+        &link.session().transport,
         &media,
         &config,
         budget.until,
@@ -289,8 +327,9 @@ async fn run(
     drop(config);
     // Do not poll the old requestor after replacement: its failed scope is
     // deliberately invalid. The borrowed handshake retains that same deadline.
-    send_ack(session, &budget, &mut handshake, &dispatch, ui, other).await?;
+    send_ack(link, &budget, &mut handshake, &dispatch, ui, other).await?;
     let receipt = loop {
+        let session = link.session();
         let heard = session.heard_until;
         let mut failure = None;
         media
@@ -307,7 +346,7 @@ async fn run(
             )
             .map_err(|e| failure.map_or(Error::Routes(e), Error::Startup))?;
         let decoded = during(
-            session,
+            link,
             &budget,
             handshake.present_first(),
             &dispatch,
@@ -315,12 +354,15 @@ async fn run(
             other,
         )
         .await?;
-        handshake.tick(&session.transport).map_err(Error::Startup)?;
+        handshake
+            .tick(&link.session().transport)
+            .map_err(Error::Startup)?;
         if let Some(receipt) = decoded {
             break receipt;
         }
     };
-    send_ack(session, &budget, &mut handshake, &dispatch, ui, other).await?;
+    send_ack(link, &budget, &mut handshake, &dispatch, ui, other).await?;
+    let session = link.session();
     handshake
         .finish(&session.transport, &media)
         .map_err(Error::Startup)?;
@@ -378,7 +420,7 @@ fn replacement_offered(
 }
 
 async fn configuration_record(
-    session: &mut ViewerSession,
+    link: &mut Link<'_>,
     budget: &Budget,
     route: StreamRoute,
     dispatch: &Dispatch,
@@ -395,6 +437,7 @@ async fn configuration_record(
     loop {
         budget.remaining()?;
         let available = Cell::new(true);
+        let session = link.session();
         let heard = session.heard_until;
         session
             .transport
@@ -415,22 +458,20 @@ async fn configuration_record(
         if !bytes.is_empty() {
             return Ok(bytes);
         }
-        session
-            .drive(budget.turn()?, |r, b| {
-                if r == Route::Stream(route) {
-                    Ok(Disposition::Blocked)
-                } else {
-                    dispatch.receive(r, b, other)
-                }
-            })
-            .await
-            .map_err(Error::Session)?;
-        notify(budget, ui)?;
+        link.drive(budget.turn()?, |r, b| {
+            if r == Route::Stream(route) {
+                Ok(Disposition::Blocked)
+            } else {
+                dispatch.receive(r, b, other)
+            }
+        })
+        .await?;
+        link.notify(budget, ui)?;
     }
 }
 
 async fn send_ack(
-    session: &mut ViewerSession,
+    link: &mut Link<'_>,
     budget: &Budget,
     handshake: &mut decoder_startup::ViewerRecovery<'_>,
     dispatch: &Dispatch,
@@ -439,16 +480,17 @@ async fn send_ack(
 ) -> Result<(), Error> {
     loop {
         budget.remaining()?;
+        let session = link.session();
         session.check().map_err(Error::Session)?;
         let sent = handshake
             .transmit(&mut session.transport)
             .map_err(Error::Startup)?;
-        session
-            .drive(budget.turn()?, |r, b| dispatch.receive(r, b, other))
-            .await
-            .map_err(Error::Session)?;
-        handshake.tick(&session.transport).map_err(Error::Startup)?;
-        notify(budget, ui)?;
+        link.drive(budget.turn()?, |r, b| dispatch.receive(r, b, other))
+            .await?;
+        handshake
+            .tick(&link.session().transport)
+            .map_err(Error::Startup)?;
+        link.notify(budget, ui)?;
         if sent {
             return Ok(());
         }
@@ -458,7 +500,7 @@ async fn send_ack(
 /// Finish an already-polled parent network turn even when native success wins.
 /// A decoder wait never borrows QUIC and never stops observation challenge service.
 async fn during<T>(
-    session: &mut ViewerSession,
+    link: &mut Link<'_>,
     budget: &Budget,
     native: impl Future<Output = Result<T, decoder_startup::Error>>,
     dispatch: &Dispatch,
@@ -469,8 +511,7 @@ async fn during<T>(
     loop {
         let mut result = None;
         {
-            let mut turn =
-                pin!(session.drive(budget.turn()?, |r, b| dispatch.receive(r, b, other)));
+            let mut turn = pin!(link.drive(budget.turn()?, |r, b| dispatch.receive(r, b, other)));
             std::future::poll_fn(|task| {
                 budget.remaining()?;
                 if result.is_none()
@@ -481,11 +522,11 @@ async fn during<T>(
                 if let Some(Err(e)) = &result {
                     return Poll::Ready(Err(Error::Startup(*e)));
                 }
-                turn.as_mut().poll(task).map_err(Error::Session)
+                turn.as_mut().poll(task)
             })
             .await?;
         }
-        notify(budget, ui)?;
+        link.notify(budget, ui)?;
         if let Some(value) = result {
             return value.map_err(Error::Startup);
         }
@@ -493,32 +534,91 @@ async fn during<T>(
 }
 
 impl super::StreamingViewer {
-    pub(super) async fn resume_observation(
+    /// Resume this stream on its recovered generation, on the same session:
+    /// an observer's, or a control grant's (suspended until resumed by the
+    /// recovered view's evidence and a new ticket).
+    pub(super) async fn resume_stream(
         &mut self,
         ui: &mut impl FnMut(acquisition::Dispatch<'_>, Option<Presentation>) -> Result<(), ()>,
+        result: &mut impl FnMut(ResultEvent),
         other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
     ) -> Result<Presentation, Error> {
-        let super::Peer::Observe { mut session, media } =
-            std::mem::replace(&mut self.peer, super::Peer::Closed)
-        else {
-            return Err(Error::Closed);
-        };
         self.initial = None;
         self.repair.clear();
         // Only lifetime counters cross epochs; old pending replies and source
         // evidence do not. Late old metrics are explicitly retired by Dispatch.
         let feedback_sent = self.feedback.take().map_or(0, |f| f.sent);
         let presentation_sent = self.presentation.take().map_or(0, |p| p.sent);
-        let (media, receipt) = resume(
-            &mut session,
-            media,
-            self.recovery.as_mut().ok_or(Error::Closed)?,
-            &mut self.presenter,
-            &mut self.receiver,
-            ui,
-            other,
-        )
-        .await?;
+        match std::mem::replace(&mut self.peer, super::Peer::Closed) {
+            super::Peer::Observe { mut session, media } => {
+                let (media, receipt) = resume(
+                    Link::Observe(&mut session),
+                    media,
+                    self.recovery.as_mut().ok_or(Error::Closed)?,
+                    &mut self.presenter,
+                    &mut self.receiver,
+                    ui,
+                    other,
+                )
+                .await?;
+                let presentation = self.reinstall(
+                    &mut session,
+                    &media,
+                    &receipt,
+                    feedback_sent,
+                    presentation_sent,
+                )?;
+                self.peer = super::Peer::Observe { session, media };
+                Ok(presentation)
+            }
+            super::Peer::Control(mut viewer) => {
+                let previous = match viewer.take_media_for_recovery() {
+                    Ok(previous) => previous,
+                    Err(error) => {
+                        viewer.close();
+                        return Err(Error::Control(error));
+                    }
+                };
+                let (media, receipt) = resume(
+                    Link::Control(&mut viewer, result),
+                    previous,
+                    self.recovery.as_mut().ok_or(Error::Closed)?,
+                    &mut self.presenter,
+                    &mut self.receiver,
+                    ui,
+                    other,
+                )
+                .await?;
+                let presentation = self.reinstall(
+                    viewer.session_mut(),
+                    &media,
+                    &receipt,
+                    feedback_sent,
+                    presentation_sent,
+                )?;
+                if let Err(error) = viewer.install_recovered_media(media, &self.receiver) {
+                    viewer.close();
+                    return Err(Error::Control(error));
+                }
+                self.peer = super::Peer::Control(viewer);
+                Ok(presentation)
+            }
+            other_peer => {
+                self.peer = other_peer;
+                Err(Error::Closed)
+            }
+        }
+    }
+    /// New-generation report, feedback and presentation owners: only lifetime
+    /// counters cross the recovery, never old evidence.
+    fn reinstall(
+        &mut self,
+        session: &mut ViewerSession,
+        media: &NegotiatedMedia,
+        receipt: &PresentationReceipt,
+        feedback_sent: u64,
+        presentation_sent: u64,
+    ) -> Result<Presentation, Error> {
         let mut report = media
             .recovery_receiver(
                 &session.transport,
@@ -562,12 +662,11 @@ impl super::StreamingViewer {
             presentation.sent = presentation_sent;
         }
         self.presenter
-            .check_stream(&session.transport, &media, &self.receiver)
+            .check_stream(&session.transport, media, &self.receiver)
             .map_err(Error::Media)?;
         self.recovery = Some(Box::new(report));
         self.statistics.presented(receipt.stage);
         self.statistics.recovered_streams = self.statistics.recovered_streams.saturating_add(1);
-        self.peer = super::Peer::Observe { session, media };
         Ok(Presentation {
             frame: receipt.frame,
             stage: receipt.stage,

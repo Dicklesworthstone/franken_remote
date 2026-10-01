@@ -278,8 +278,10 @@ async fn fixture_features(
         pacing: None,
     };
     let mut host = host.into_streaming(stream).unwrap();
+    // Negotiation alone decides: since plan 11.3 suspension, a control
+    // session's recovery suspends input instead of being refused.
     let enable = host.enable_reference_recovery(hm);
-    if enabled && role == Role::Observe {
+    if enabled {
         enable.unwrap();
     } else {
         assert!(enable.is_err());
@@ -477,8 +479,12 @@ fn a_native_worker_ignoring_force_idr_cannot_complete_automatic_recovery() {
 }
 
 #[test]
-fn missing_negotiation_and_control_intent_cannot_enable_automatic_recovery() {
-    for (role, enabled) in [(Role::Observe, false), (Role::RequestControl, true)] {
+fn only_negotiation_decides_automatic_recovery_also_with_control_intent() {
+    for (role, enabled) in [
+        (Role::Observe, false),
+        (Role::RequestControl, false),
+        (Role::RequestControl, true),
+    ] {
         run(move |c, h| async move {
             let cleanup = Cx::current().unwrap();
             let Fixture {
@@ -487,7 +493,7 @@ fn missing_negotiation_and_control_intent_cannot_enable_automatic_recovery() {
                 viewer,
                 ..
             } = Box::pin(fixture(&c, &h, "healthy", 2_000_000, role, enabled)).await;
-            assert!(host.recovery.is_none());
+            assert_eq!(host.reference_recovery, enabled);
             assert!(host.stream.control.check().is_ok());
             drop(viewer);
             host.reap_media(

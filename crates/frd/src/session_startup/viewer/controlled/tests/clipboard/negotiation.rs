@@ -31,7 +31,7 @@ async fn setup(c: &Cx, h: &Cx) -> Fixture {
     .await
 }
 fn request(state: &Fixture) -> ChannelRequest {
-    let b = state.viewer.media.binding();
+    let b = state.viewer.media.as_ref().unwrap().binding();
     ChannelRequest {
         binding: decoder::Binding {
             parent: fr_wire::negotiation::ControlBinding { id: 12, ..b.parent },

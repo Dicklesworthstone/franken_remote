@@ -84,6 +84,8 @@ fn early_failure(failure: Failure) {
         let mut host = Host::Closed;
         let error = during(
             &mut host,
+            &mut None,
+            &mut |_| Ok(None),
             Policy::default(),
             &mut waiting,
             &mut || Ok(100),
@@ -152,8 +154,12 @@ fn cancelling_an_in_flight_handoff_fences_before_the_native_future_is_dropped() 
         let mut host = Host::Observe(session);
         let mut entropy = || Ok(101);
         let mut ticket = || None;
+        let mut acquisition = None;
+        let mut local = no_local_control;
         let mut operation = Box::pin(during(
             &mut host,
+            &mut acquisition,
+            &mut local,
             Policy::default(),
             &mut waiting,
             &mut entropy,
@@ -174,4 +180,12 @@ fn cancelling_an_in_flight_handoff_fences_before_the_native_future_is_dropped() 
         host.close();
         viewer.close();
     });
+}
+/// An observation session's recovery: no control acquisition to service.
+/// The `Result` is the callback's required signature.
+#[allow(clippy::unnecessary_wraps)]
+fn no_local_control(
+    _: acquisition::LocalControl<'_>,
+) -> Result<Option<fr_wire::control::Target>, crate::input_quic::grant::Error> {
+    Ok(None)
 }

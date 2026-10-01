@@ -44,6 +44,15 @@ pub struct PresentedInput {
     view: ViewTracker,
     delivered_serial: Option<u64>,
     active: bool,
+    /// Set while a reference recovery holds this grant's receiver: the old
+    /// tracker's receiver scope is fenced by then, so it is not consulted and
+    /// input stays suspended. Holds the latest clock correlation for the
+    /// recovered generation's tracker (plan 12.3).
+    recovering: Option<ClockCorrelation>,
+    /// The stream negotiated reference recovery: a receiver that fails a
+    /// reference fences its scope at once, and that suspends this grant until
+    /// `follow_recovery` instead of ending it.
+    expects_recovery: bool,
 }
 impl PresentedInput {
     pub fn new(
@@ -74,6 +83,8 @@ impl PresentedInput {
             view,
             delivered_serial: None,
             active: false,
+            recovering: None,
+            expects_recovery: false,
         })
     }
     /// Attach an unused grant to an already observed view without decoding again
@@ -115,9 +126,54 @@ impl PresentedInput {
             view,
             delivered_serial: None,
             active: false,
+            recovering: None,
+            expects_recovery: false,
         };
         this.deliver(evidence, now)?;
         Ok(this)
+    }
+    /// The stream negotiated reference recovery (plan 12.3). Without this, a
+    /// failed or replaced receiver ends the grant at its next check.
+    pub fn expect_reference_recovery(&mut self) {
+        self.expects_recovery = true;
+    }
+    /// The receiver lost a reference (plan 12.3): the view cannot advance until
+    /// a recovery completes, so active input suspends now rather than at the
+    /// source-age bound. The grant and its renewals continue.
+    pub fn suspend_for_recovery(&mut self, now: ClientInstant) -> Result<(), Error> {
+        self.input.tick(now)?;
+        if self.active {
+            self.input.suspend(now);
+        }
+        if self.recovering.is_none() {
+            self.recovering = Some(self.view.clock_correlation());
+        }
+        Ok(())
+    }
+    /// Follow a reference recovery of this grant's own receiver (plan 12.3):
+    /// a new tracker for the receiver's new epoch, on the same grant, which a
+    /// stale view must already have suspended. The old tracker is closed, so
+    /// late callbacks for old pictures cannot reach the new view.
+    pub fn follow_recovery(
+        &mut self,
+        receiver: &ReceivePipeline,
+        now: ClientInstant,
+    ) -> Result<(), Error> {
+        let clock = self
+            .recovering
+            .unwrap_or_else(|| self.view.clock_correlation());
+        let view = ViewTracker::new(receiver, clock, self.view.max_source_age_us(), now.0)?;
+        // A recovery restarts the reference chain of the same configuration;
+        // a configuration change is not a recovery.
+        if view.epoch().configuration != self.input.credentials.view.configuration {
+            return Err(Error::ViewMismatch);
+        }
+        self.input.advance_recovery(view.epoch().recovery, now)?;
+        self.recovering = None;
+        self.view.close();
+        self.view = view;
+        self.delivered_serial = None;
+        Ok(())
     }
     /// Follow this path's measured round trip: the input client and its view
     /// tracker both enforce the same path bound (`InputClient::follow_path_rtt`).
@@ -336,6 +392,10 @@ impl PresentedInput {
         now: ClientInstant,
     ) -> Result<(), Error> {
         self.input.tick(now)?;
+        if let Some(pending) = &mut self.recovering {
+            *pending = clock;
+            return Ok(());
+        }
         self.view.synchronize(clock, now.0).map_err(Error::Media)
     }
     /// Actual, bound `MediaProgress` only. Unknown source state stops active input
@@ -427,6 +487,9 @@ impl PresentedInput {
     /// continue running while a new compositor submission awaits visibility.
     pub fn tick(&mut self, now: ClientInstant) -> Result<bool, Error> {
         self.input.tick(now)?;
+        if self.recovering.is_some() {
+            return Ok(false);
+        }
         match self.view.evidence(now.0) {
             Ok(evidence) => {
                 self.deliver(evidence, now)?;
@@ -442,6 +505,14 @@ impl PresentedInput {
                 }
                 Ok(false)
             }
+            // A failed reference fenced the receiver's scope. With negotiated
+            // recovery this view awaits its recovered generation: suspend, and
+            // never act on it. The suspension limit still ends a lost stream.
+            Err(freshness::Error::StaleBinding) if self.expects_recovery && self.active => {
+                self.input.suspend(now);
+                self.recovering = Some(self.view.clock_correlation());
+                Ok(false)
+            }
             Err(error) => {
                 self.stop(StopReason::ViewStale);
                 Err(Error::Media(error))
@@ -455,6 +526,9 @@ impl PresentedInput {
         now: ClientInstant,
     ) -> Result<fr_wire::presented::Sample, Error> {
         self.input.tick(now)?;
+        if self.recovering.is_some() {
+            return Err(Error::Media(freshness::Error::NotSubmitted));
+        }
         self.view.presented_sample(now.0).map_err(Error::Media)
     }
     pub fn pointer(

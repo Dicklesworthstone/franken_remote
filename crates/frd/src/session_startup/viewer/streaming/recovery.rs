@@ -12,17 +12,18 @@ pub(super) fn recoverable(error: DeliveryError) -> bool {
     )
 }
 
-/// Only a positively negotiated, observation-only session can retain its
-/// decoder across a failed chain. Acquiring/viewing peers may own input state.
+/// A positively negotiated observation session or control grant retains its
+/// decoder across a failed chain; a grant's input stays suspended meanwhile
+/// (plan 11.3, 12.3). Acquiring/viewing peers still end on a failed chain.
 pub(super) fn enabled(peer: &Peer, report: Option<&recovery_control::Receiver>) -> bool {
-    report.is_some() && matches!(peer, Peer::Observe { .. })
+    report.is_some() && matches!(peer, Peer::Observe { .. } | Peer::Control(_))
 }
 
-/// Fences the real receiver before any new decode or transport work. There is
-/// no control bypass here: an input-owning or control-requesting peer retains
-/// the existing terminal refusal. Observation-only peers can report loss while
-/// their original renewal owner remains active, bounded by the failed chain's
-/// single absolute recovery deadline. No new binding or authority is invented.
+/// Fences the real receiver before any new decode or transport work. A peer
+/// still acquiring control retains the terminal refusal. Observers and control
+/// grants report loss while their original renewal owner remains active,
+/// bounded by the failed chain's single absolute recovery deadline. No new
+/// binding or authority is invented, and a grant's input is suspended.
 pub(super) fn service(
     peer: &mut Peer,
     report: Option<&mut recovery_control::Receiver>,
@@ -36,7 +37,7 @@ pub(super) fn service(
             .map_err(Error::Delivery)?;
         return Ok(false);
     };
-    if !matches!(peer, Peer::Observe { .. }) {
+    if !matches!(peer, Peer::Observe { .. } | Peer::Control(_)) {
         receiver
             .tick(now(cx).map_err(Error::Session)?)
             .map_err(Error::Delivery)?;
@@ -93,9 +94,7 @@ pub(super) fn prepare(
     }
     match repair.prepare(receiver, now(cx).map_err(Error::Session)?) {
         Ok(()) => Ok(()),
-        Err(Error::Delivery(error))
-            if report.is_some() && matches!(peer, Peer::Observe { .. }) && recoverable(error) =>
-        {
+        Err(Error::Delivery(error)) if enabled(peer, report.as_deref()) && recoverable(error) => {
             service(peer, report, receiver, repair, cx)?;
             Ok(())
         }

@@ -7,7 +7,7 @@ pub mod held;
 pub mod ticket;
 pub mod viewport;
 use fr_core::{
-    ids::{InputTicketId, RemoteSessionId},
+    ids::{InputTicketId, RecoveryGeneration, RemoteSessionId},
     input::{
         DesktopPoint, InputBounds, InputCredentials, InputEvent, InputRequest, InputView,
         KeyTransition, MAX_COMMITTED_TEXT_BYTES, PhysicalKey, PointerButton, ScrollUnit,
@@ -300,6 +300,28 @@ impl InputClient {
         {
             return self.fail(StopReason::InvalidControl);
         }
+        Ok(())
+    }
+    /// The viewer installed a reference recovery of the presented stream (plan
+    /// 12.3): input decided on older pictures is stale. Never under a live view
+    /// (only suspended, or before any view), and only forward. Later presented
+    /// evidence and tickets name this generation; input resumes only with both,
+    /// as after any suspension. The new receiver epoch starts a new evidence
+    /// serial space.
+    pub fn advance_recovery(
+        &mut self,
+        generation: RecoveryGeneration,
+        now: ClientInstant,
+    ) -> Result<(), Error> {
+        self.tick(now)?;
+        if self.suspended_since.is_none() && self.view_until.is_some() {
+            return Err(Error::InvalidTransition);
+        }
+        if !generation.supersedes(self.credentials.view.recovery) {
+            return self.fail(StopReason::ViewChanged);
+        }
+        self.credentials.view.recovery = generation;
+        self.observation = None;
         Ok(())
     }
     /// Call only on the host's authenticated acknowledgement of this exact map.

@@ -14,7 +14,7 @@
 
 use core::fmt;
 
-use crate::ids::{InputLeaseId, InputTicketId, RemoteSessionId};
+use crate::ids::{InputLeaseId, InputTicketId, RecoveryGeneration, RemoteSessionId};
 use crate::time::{HostDuration, HostInstant};
 
 /// Bounded host authorization and input-ticket lifetime policy.
@@ -99,6 +99,8 @@ pub enum AuthorityError {
     /// A stale view suspended a held lease; fresh readiness waits until the
     /// native owner has released every remotely held key and button.
     ReleasePending,
+    /// The generation does not supersede the current one.
+    StaleGeneration,
 }
 
 /// Whether presented source state is trustworthy enough for input.
@@ -186,6 +188,7 @@ pub struct SessionAuthority {
     bounded_view: bool,
     lease: Option<Lease>,
     suspension: Option<Suspension>,
+    recovery: Option<RecoveryGeneration>,
     native_owner: Option<std::sync::Arc<()>>,
     observation_challenge: Option<Challenge>,
     control_challenge: Option<Challenge>,
@@ -238,6 +241,7 @@ impl SessionAuthority {
             bounded_view: false,
             lease: None,
             suspension: None,
+            recovery: None,
             native_owner: None,
             observation_challenge: None,
             control_challenge: None,
@@ -413,6 +417,38 @@ impl SessionAuthority {
         if let Some(lease) = self.lease.as_mut() {
             lease.tickets.fill(None);
         }
+    }
+
+    /// The media owner installed a reference recovery of the observed view
+    /// (plan 12.3): input decided on pictures of an older recovery generation is
+    /// stale. Allowed only while the view is not ready (recovery admission has
+    /// already fenced it) and only forward. Retained tickets name the old view
+    /// and are invalidated; input resumes with a ticket issued for this
+    /// generation after fresh evidence. Neither the lease nor observation is
+    /// renewed, and a suspension keeps its original start.
+    pub fn advance_recovery(
+        &mut self,
+        generation: RecoveryGeneration,
+    ) -> Result<(), AuthorityError> {
+        if self.readiness == ViewReadiness::Ready {
+            return Err(AuthorityError::InvalidState { phase: self.phase });
+        }
+        if self
+            .recovery
+            .is_some_and(|current| !generation.supersedes(current))
+        {
+            return Err(AuthorityError::StaleGeneration);
+        }
+        self.recovery = Some(generation);
+        if let Some(lease) = self.lease.as_mut() {
+            lease.tickets.fill(None);
+        }
+        Ok(())
+    }
+
+    /// The latest reference-recovery generation installed by the media owner.
+    pub const fn recovery_generation(&self) -> Option<RecoveryGeneration> {
+        self.recovery
     }
 
     /// The native owner released every remotely held key and button after a

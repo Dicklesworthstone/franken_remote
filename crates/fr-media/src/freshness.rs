@@ -161,8 +161,10 @@ impl ReceiverLifetime {
 }
 
 /// One configured stream's decode -> submit -> visible path. On replacement,
-/// create a new tracker with new bindings and invalidate the previous input
-/// owner. Late callbacks cannot rebind this owner. At most one pending renderer
+/// create a new tracker with new bindings and close this one. A configuration
+/// change invalidates the input owner; a reference recovery moves an input
+/// owner that a stale view already suspended to the new tracker (plan 12.3).
+/// Late callbacks cannot rebind this owner. At most one pending renderer
 /// candidate and one visible descriptor are retained, regardless of packet rate.
 #[derive(Debug)]
 pub struct ViewTracker {

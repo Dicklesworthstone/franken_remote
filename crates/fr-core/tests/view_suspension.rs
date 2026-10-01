@@ -224,3 +224,138 @@ fn lease_expiry_during_the_suspension_revokes_and_cleans_up() {
     assert_eq!(cleanup.remaining, 0);
     assert_eq!(sink.releases, 1);
 }
+/// One key press decided on the view of `recovery`, with `ticket`.
+fn key_at(
+    native: &mut InputSession,
+    sink: &mut Sink,
+    ticket: InputTicketId,
+    recovery: RecoveryGeneration,
+    sequence: u64,
+    now: u64,
+) -> Receipt {
+    let mut credentials = credentials(ticket);
+    credentials.view.recovery = recovery;
+    match native.dispatch(
+        InputRequest {
+            credentials,
+            sequence,
+            event: InputEvent::Key {
+                key: PhysicalKey::new(5).unwrap(),
+                transition: KeyTransition::Press,
+            },
+        },
+        sink,
+        || at(now),
+    ) {
+        Ok(Dispatch::Completed(receipt)) => receipt,
+        other => panic!("{other:?}"),
+    }
+}
+/// A reference recovery: its admission fences the view (a suspension that
+/// releases the held key), the media owner installs the next generation, and
+/// that generation's first presented evidence revives readiness.
+fn recovered(
+    sink: &mut Sink,
+) -> (
+    Arc<Mutex<SessionAuthority>>,
+    InputSession,
+    RecoveryGeneration,
+) {
+    let (shared, mut native) = pressed(sink);
+    let lease_until = shared.lock().unwrap().lease_deadline().unwrap();
+    let next = RecoveryGeneration::INITIAL.next().unwrap();
+    shared.lock().unwrap().mark_view_stale();
+    let cleanup = native.maintain(at(110_000), sink);
+    assert_eq!((cleanup.submitted_releases, cleanup.remaining), (1, 0));
+    shared.lock().unwrap().advance_recovery(next).unwrap();
+    shared
+        .lock()
+        .unwrap()
+        .mark_view_ready_until(at(400_000), at(120_000))
+        .unwrap();
+    assert_eq!(
+        shared.lock().unwrap().lease_deadline().unwrap(),
+        lease_until,
+        "a recovery never renews the lease"
+    );
+    (shared, native, next)
+}
+#[test]
+fn a_recovery_generation_advances_only_on_a_fenced_view_and_only_forward() {
+    let mut sink = Sink::default();
+    let (shared, _native) = pressed(&mut sink);
+    let next = RecoveryGeneration::INITIAL.next().unwrap();
+    let mut a = shared.lock().unwrap();
+    assert!(
+        matches!(
+            a.advance_recovery(next),
+            Err(AuthorityError::InvalidState { .. })
+        ),
+        "a ready view cannot change generation under live input"
+    );
+    a.mark_view_stale();
+    a.advance_recovery(next).unwrap();
+    assert_eq!(a.recovery_generation(), Some(next));
+    assert_eq!(
+        a.advance_recovery(next),
+        Err(AuthorityError::StaleGeneration)
+    );
+    assert_eq!(
+        a.advance_recovery(RecoveryGeneration::INITIAL),
+        Err(AuthorityError::StaleGeneration)
+    );
+}
+#[test]
+fn input_resumes_on_the_recovered_generation_with_the_same_lease() {
+    let mut sink = Sink::default();
+    let (_shared, mut native, next) = recovered(&mut sink);
+    // The old ticket was invalidated; a new one names the new generation.
+    let fresh = InputTicketId::from_raw(4);
+    native.issue_ticket(fresh, at(130_000)).unwrap();
+    assert_eq!(native.ticket_credentials(fresh).view.recovery, next);
+    let receipt = key_at(&mut native, &mut sink, fresh, next, 1, 140_000);
+    assert_eq!(receipt.outcome, InputOutcome::SubmittedToOs);
+    assert_eq!(sink.presses, 2);
+    assert!(!native.monitor().is_revoked());
+}
+#[test]
+fn an_action_decided_on_the_old_generation_is_refused_even_with_a_new_ticket() {
+    let mut sink = Sink::default();
+    let (_shared, mut native, _) = recovered(&mut sink);
+    let fresh = InputTicketId::from_raw(4);
+    native.issue_ticket(fresh, at(130_000)).unwrap();
+    let receipt = key_at(
+        &mut native,
+        &mut sink,
+        fresh,
+        RecoveryGeneration::INITIAL,
+        1,
+        140_000,
+    );
+    assert_eq!(receipt.refusal, Some(Refusal::StaleView));
+    assert_eq!(sink.presses, 1, "only the original press reached the OS");
+}
+#[test]
+fn an_old_generation_action_is_refused_with_a_ticket_issued_at_the_authority() {
+    let mut sink = Sink::default();
+    let (shared, mut native, _) = recovered(&mut sink);
+    // A ticket issued on the shared authority itself, not through this native
+    // owner (as the initial grant's is): submission still checks the action's
+    // view against the authority's current recovery generation.
+    let fresh = InputTicketId::from_raw(4);
+    shared
+        .lock()
+        .unwrap()
+        .issue_input_ticket(InputLeaseId::from_raw(2), fresh, at(130_000))
+        .unwrap();
+    let receipt = key_at(
+        &mut native,
+        &mut sink,
+        fresh,
+        RecoveryGeneration::INITIAL,
+        1,
+        140_000,
+    );
+    assert_eq!(receipt.refusal, Some(Refusal::StaleView));
+    assert_eq!(sink.presses, 1, "only the original press reached the OS");
+}

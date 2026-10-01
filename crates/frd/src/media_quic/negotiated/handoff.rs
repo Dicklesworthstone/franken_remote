@@ -3,7 +3,7 @@ use super::{Error, NegotiatedMedia, QuicEgress, Routes, same_view};
 use crate::media::{CaptureSource, decoder_startup::Setup};
 use asupersync::net::quic_native::StreamRole;
 use fr_transport::quic::{ControlRoutes, QuicRecords, Route};
-use fr_wire::negotiation::{ControlBinding, Role};
+use fr_wire::negotiation::ControlBinding;
 use std::time::Duration;
 
 impl NegotiatedMedia {
@@ -19,7 +19,7 @@ impl NegotiatedMedia {
         self.check(q)?;
         self.check_recovery_capability()?;
         previous.recovery = previous.recovery.next().ok_or(Error::InvalidRoutes)?;
-        if self.selection.role != Role::Observe || !same_view(previous, self.binding()) {
+        if !same_view(previous, self.binding()) {
             return Err(Error::InvalidRoutes);
         }
         self.decoder_setup(q, std::time::Duration::from_secs(2))
@@ -29,8 +29,9 @@ impl NegotiatedMedia {
 
     /// Route only the original negotiated control lane to its actual capture
     /// owner. Media-channel numbers and peer-proposed view tuples are not
-    /// authority. An input-owning session needs explicit reacquisition and is
-    /// refused here; recovery never silently keeps its old control lease.
+    /// authority. In a control session the recovery's fence suspends input:
+    /// the lease survives unrenewed, and input resumes only with the recovered
+    /// generation's fresh evidence and a ticket naming it (plan 11.3, 12.3).
     #[allow(clippy::too_many_arguments)]
     pub fn request_recovery(
         &self,
@@ -78,8 +79,7 @@ impl NegotiatedMedia {
     ) -> Result<fr_wire::decoder::Binding, Error> {
         self.check(q)?;
         self.check_recovery_capability()?;
-        if self.selection.role != Role::Observe
-            || q.role().map_err(Error::Transport)? != StreamRole::Server
+        if q.role().map_err(Error::Transport)? != StreamRole::Server
             || route != Route::Stream(control.inbound)
             || sender.view != Some(self.binding())
             || sender.connection.as_ref().is_none_or(|b| !q.is_bound_to(b))
@@ -105,10 +105,7 @@ impl NegotiatedMedia {
     pub fn recover_sender(&self, q: &QuicRecords, sender: &mut QuicEgress) -> Result<Setup, Error> {
         self.check(q)?;
         self.check_recovery_capability()?;
-        if !self.is_host()
-            || self.selection.role != Role::Observe
-            || sender.connection.as_ref().is_none_or(|b| !q.is_bound_to(b))
-        {
+        if !self.is_host() || sender.connection.as_ref().is_none_or(|b| !q.is_bound_to(b)) {
             return Err(Error::ForeignConnection);
         }
         let mut expected = sender.view.ok_or(Error::InvalidRoutes)?;

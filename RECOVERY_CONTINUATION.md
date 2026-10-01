@@ -1,10 +1,23 @@
-# Automatic observation-viewer recovery
+# Automatic viewer recovery
 
-The running `StreamingViewer::serve` loop now continues an observation-only
-session from an actual reference failure through fresh media attachment, the
-existing native decoder handshake, and resumed video. The original connection,
-receiver reservation, decoder process and local stop handle remain owned by the
-same session. It neither reconnects nor grants control.
+The running `StreamingViewer::serve` loop continues an observation session, or
+since 2026-09-30 a granted control session, from an actual reference failure.
+It goes through fresh media attachment, the existing native decoder handshake,
+and resumed video. The original connection, receiver reservation, decoder
+process and local stop handle remain owned by the same session. It neither
+reconnects nor grants control.
+
+For a control grant (plan 11.3, 12.3):
+- `take_media_for_recovery` suspends the grant's input at once, because the
+  lost reference means the view cannot advance. The one never-admitted record
+  is abandoned.
+- The recovery drives the grant's own turn, so renewals, tickets, results and
+  the clock stay serviced while it holds the media. An interactive embedding
+  keeps seeing its grant, not an observer.
+- `install_recovered_media` moves the suspended grant to the recovered
+  receiver's generation (`PresentedInput::follow_recovery`). Input resumes on
+  that view's fresh evidence plus a ticket naming it, as after any suspension.
+- A grant that is still being acquired keeps the terminal refusal.
 
 ## One failure, one original deadline
 
@@ -19,8 +32,8 @@ The original local failure deadline covers that wait, all three one-use
 attachments, the configuration record, native first decode, and both decoder
 acknowledgements. Observation renewal continues throughout, but cannot extend the
 recovery deadline. Cancellation, expiry, malformed offers and failed handoff
-close the parent and fence the receiver before native cleanup. A control-owning
-or control-requesting viewer retains its separate terminal/reacquisition rules.
+close the parent and fence the receiver before native cleanup. A viewer still
+acquiring control retains its separate terminal/reacquisition rules.
 
 The existing `Replacement` owner, not application callbacks, consumes attachment
 records. One bounded buffer holds the new configuration. `ViewerRecovery` checks
@@ -63,9 +76,9 @@ The original viewer-only tests retain a manually orchestrated peer. The running
 host is now joined separately in `RECOVERY_HOST.md`, including an integration
 test that runs both canonical peers through loss, fresh attachments, native IPC
 and resumed dependent frames. Real-HEVC injected-loss qualification still remains
-open; these tests do not globally qualify automatic desktop healing. This
-observation-only change does not implement automatic control reacquisition or
-replay old input.
+open; these tests do not globally qualify automatic desktop healing. A
+control grant's recovery keeps its suspended lease; it never reacquires
+control or replays old input.
 
 Owning design: plan sections 7, 11, 12, 17 and 19; recovery work tracked under
 `fr-p1-loss-recovery-20s`. No protocol limit, authority lifetime, dependency pin,

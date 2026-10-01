@@ -11,7 +11,7 @@ use fr_wire::{
     attachment::{self, MediaRole, Message, Ticket},
     decoder::Binding,
     input::{InputDelivery, InputDirection},
-    negotiation::{ControlBinding, Role, Selection},
+    negotiation::{ControlBinding, Selection},
 };
 use std::{cell::Cell, time::Duration};
 
@@ -88,9 +88,7 @@ impl NegotiatedMedia {
             return Err(Error::WrongBinding);
         }
         self.check_recovery_capability().map_err(Error::Media)?;
-        if self.selection.role != Role::Observe
-            || (q.role().map_err(Error::Transport)? == StreamRole::Server) != tickets.is_some()
-        {
+        if (q.role().map_err(Error::Transport)? == StreamRole::Server) != tickets.is_some() {
             return Err(Error::WrongRole);
         }
         let mut view = super::super::recovery::control_binding(

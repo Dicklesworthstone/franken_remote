@@ -23,9 +23,10 @@ struct State {
     host: HostCursor,
     lane: HostLane,
 }
-/// Present only when the viewer positively selected `remote-cursor`.
+/// Present only when the viewer positively selected `remote-cursor`. Its lanes
+/// come from the stream's CURRENT media each turn: a reference recovery
+/// replaces the media, and the lane resends the shape on the new binding.
 pub(super) struct StreamCursor {
-    media: NegotiatedMedia,
     // Shared by the producer and network halves of ONE serve task, which are
     // polled sequentially: never contended and never held across an await.
     state: Mutex<State>,
@@ -64,8 +65,9 @@ impl StreamCursor {
         cx: &Cx,
         q: &mut QuicRecords,
         control: &ObservationControl,
+        media: &NegotiatedMedia,
     ) -> Result<usize, Error> {
-        let Some(lanes) = self.media.cursor_lanes(q).map_err(Error::MediaTransport)? else {
+        let Some(lanes) = media.cursor_lanes(q).map_err(Error::MediaTransport)? else {
             return Ok(0);
         };
         let now = control.check().map_err(Error::Media)?.as_micros();
@@ -78,11 +80,33 @@ impl StreamCursor {
 
 impl StreamingHost {
     /// Forward the host cursor on THIS stream's exact negotiated media, before
-    /// service. `Ok(false)` is typed absence: the viewer did not select
+    /// service. The stream retains the media either way (reference recovery
+    /// replaces it). `Ok(false)` is typed absence: the viewer did not select
     /// `remote-cursor`, so no cursor record is sampled, sent or accepted.
-    /// Observation-only recovery owns its media and does not forward a cursor.
     pub fn enable_cursor(&mut self, media: NegotiatedMedia) -> Result<bool, Error> {
-        if self.stream.served || self.cursor.is_some() || self.recovery.is_some() {
+        if self.cursor.is_some() {
+            return Err(Error::Order);
+        }
+        self.retain_media(media)?;
+        if !self
+            .media
+            .as_ref()
+            .is_some_and(NegotiatedMedia::cursor_selected)
+        {
+            return Ok(false);
+        }
+        self.cursor = Some(Box::new(StreamCursor {
+            state: Mutex::new(State {
+                host: HostCursor::new(),
+                lane: HostLane::default(),
+            }),
+        }));
+        Ok(true)
+    }
+    /// The stream's one owner of its completed media attachments: the cursor
+    /// lanes and reference recovery both use it, never a copy.
+    pub(super) fn retain_media(&mut self, media: NegotiatedMedia) -> Result<(), Error> {
+        if self.stream.served || self.media.is_some() {
             return Err(Error::Order);
         }
         let session = self.host.session()?;
@@ -99,16 +123,7 @@ impl StreamingHost {
         {
             return Err(Error::Order);
         }
-        if !media.cursor_selected() {
-            return Ok(false);
-        }
-        self.cursor = Some(Box::new(StreamCursor {
-            media,
-            state: Mutex::new(State {
-                host: HostCursor::new(),
-                lane: HostLane::default(),
-            }),
-        }));
-        Ok(true)
+        self.media = Some(media);
+        Ok(())
     }
 }

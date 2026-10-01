@@ -135,7 +135,7 @@ impl ControlledViewer {
                 id: channel.descriptor().binding.parent.id,
                 ..self.session.opened.binding
             },
-            ..self.media.binding()
+            ..self.media.as_ref().ok_or(Error::Closed)?.binding()
         };
         if channel.completed_parent(q).map_err(Error::Transport)? != self.session.opened.binding
             || channel.descriptor().binding != expected

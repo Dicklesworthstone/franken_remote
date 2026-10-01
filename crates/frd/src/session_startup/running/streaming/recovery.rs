@@ -34,19 +34,25 @@ impl Drop for CaptureFence {
 
 impl StreamingHost {
     /// Enable reference recovery using the actual completed media attachments.
-    /// This is observation-only and requires positive capability negotiation.
-    /// No new sender, native worker, input authority or connection is created.
+    /// Requires positive capability negotiation. No new sender, native worker,
+    /// input authority or connection is created.
     pub fn enable_reference_recovery(&mut self, media: NegotiatedMedia) -> Result<(), Error> {
-        if self.stream.served
-            || self.recovery.is_some()
-            || self.cursor.is_some()
-            || !matches!(self.host, Host::Observe(_))
-        {
+        self.retain_media(media)?;
+        self.enable_retained_recovery()
+    }
+    /// Reference recovery on the media this stream already retains: a
+    /// controlled share's cursor lanes and its recovery share one owner.
+    /// A recovery suspends the grant's input (its fence is a stale view, plan
+    /// 11.3) and moves it to the recovered generation (plan 12.3).
+    pub fn enable_retained_recovery(&mut self) -> Result<(), Error> {
+        if self.stream.served || self.reference_recovery {
             return Err(Error::Order);
         }
         let session = self.host.session()?;
         session.check()?;
-        media
+        self.media
+            .as_ref()
+            .ok_or(Error::Order)?
             .check_recovery_host(
                 &session.opened.transport,
                 session.opened.routes,
@@ -55,27 +61,52 @@ impl StreamingHost {
                 Route::Stream(session.opened.routes.inbound),
             )
             .map_err(Error::MediaTransport)?;
-        self.recovery = Some(media);
+        self.reference_recovery = true;
         Ok(())
     }
 }
 
-pub(super) async fn serve(
+/// One reference recovery of this stream, after its round drained the
+/// in-flight capture: replace the media attachments, advance the authority's
+/// recovery generation so input decided on older pictures is stale (plan
+/// 12.3), then rebuild advisory evidence for the new generation.
+pub(super) async fn recover(
     host: &mut StreamingHost,
+    demand: RecoveryDemand,
     nonce: &mut impl FnMut() -> Result<u128, ()>,
     ticket: &mut impl FnMut() -> Option<InputTicketId>,
     other: &mut impl Services,
+    acquisition: &mut Option<Box<acquisition::Acquisition>>,
+    local: &mut impl FnMut(
+        acquisition::LocalControl<'_>,
+    )
+        -> Result<Option<fr_wire::control::Target>, crate::input_quic::grant::Error>,
 ) -> Result<(), Error> {
-    let mut media = host.recovery.take().ok_or(Error::Order)?;
-    loop {
-        let demand = round(host, &media, nonce, ticket, other).await?;
-        media = Box::pin(handoff::replace(host, media, demand, nonce, ticket, other)).await?;
-        // Reports from the old generation cannot establish readiness/freshness
-        // for this one. The native capture and pacing histories are not reset.
-        install_evidence(host)?;
-        host.stream.statistics.recovered_streams =
-            host.stream.statistics.recovered_streams.saturating_add(1);
-    }
+    let media = host.media.take().ok_or(Error::Order)?;
+    let media = Box::pin(handoff::replace(
+        host,
+        media,
+        demand,
+        nonce,
+        ticket,
+        other,
+        acquisition,
+        local,
+    ))
+    .await?;
+    // Before any report of the new generation can revive readiness or a
+    // ticket can name it. The recovery fence already suspended input.
+    host.stream
+        .control
+        .advance_recovery(media.binding().recovery)
+        .map_err(Error::Media)?;
+    host.media = Some(media);
+    // Reports from the old generation cannot establish readiness/freshness
+    // for this one. The native capture and pacing histories are not reset.
+    install_evidence(host)?;
+    host.stream.statistics.recovered_streams =
+        host.stream.statistics.recovered_streams.saturating_add(1);
+    Ok(())
 }
 
 fn install_evidence(host: &mut StreamingHost) -> Result<(), Error> {
@@ -124,101 +155,21 @@ fn install_evidence(host: &mut StreamingHost) -> Result<(), Error> {
     Ok(())
 }
 
-async fn round(
-    host: &mut StreamingHost,
-    media: &NegotiatedMedia,
-    nonce: &mut impl FnMut() -> Result<u128, ()>,
-    ticket: &mut impl FnMut() -> Option<InputTicketId>,
-    other: &mut impl Services,
-) -> Result<RecoveryDemand, Error> {
-    let session = host.host.session()?;
-    let routes = session.opened.routes;
-    let parent = session.opened.binding;
-    let stream = &mut host.stream;
-    let control = stream.control.clone();
-    let (credit, requests) = mpsc::channel(1);
-    let (completed, results) = mpsc::channel(1);
-    let last_capture = stream
-        .sender
-        .source_progress()
-        .map_err(Error::MediaTransport)?
-        .map(|p| p.descriptor.capture_micros);
-    let next_capture = last_capture
-        .unwrap_or(0)
-        .checked_add(
-            u64::try_from(stream.policy.capture_interval.as_micros()).map_err(|_| Error::Clock)?,
-        )
-        .ok_or(Error::Clock)?;
-    // Observation-only recovery owns its media: no cursor is forwarded here.
-    let mut producer = pin!(produce(
-        &mut stream.source,
-        &stream.control,
-        None,
-        requests,
-        completed
-    ));
-    let mut services = Admission {
-        media,
-        routes,
-        parent,
-        pending: None,
-        video: VideoServices {
-            control: &stream.control,
-            sender: &mut stream.sender,
-            statistics: &mut stream.statistics,
-            policy: stream.policy,
-            capacity: stream.capacity,
-            credit,
-            results,
-            in_flight: None,
-            pacing: stream.pacing.as_mut(),
-            last_work: None,
-            last_capture,
-            next_capture,
-            input_wake: super::super::input_wake::Wake::default(),
-            repair_turn: false,
-            feedback: host.feedback.as_mut(),
-            presentation: host.presentation.as_mut(),
-            cursor: None,
-            other,
-        },
-    };
-    let mut network = pin!(async {
-        loop {
-            host.host
-                .drive(stream.policy.network_turn, nonce, ticket, &mut services)
-                .await?;
-            if services.video.in_flight.is_none()
-                && let Some(demand) = services.pending.take()
-            {
-                return Ok(demand);
-            }
-            asupersync::runtime::yield_now().await;
-        }
-    });
-    // Return intentionally ONLY after the network turn ended and the previous
-    // capture's result was drained. Dropping the producer then abandons only its
-    // idle credit wait, never a pending worker operation or an in-flight QUIC I/O.
-    let mut fence = CaptureFence::new(control);
-    let result = poll_fn(|task| {
-        if let Poll::Ready(result) = producer.as_mut().poll(task) {
-            return Poll::Ready(Err(result.err().unwrap_or(Error::Closed)));
-        }
-        network.as_mut().poll(task)
-    })
-    .await;
-    fence.complete = result.is_ok();
-    result
-}
-
-struct Admission<'a, S> {
-    video: VideoServices<'a, S>,
-    media: &'a NegotiatedMedia,
-    routes: ControlRoutes,
-    parent: ControlBinding,
-    pending: Option<RecoveryDemand>,
+/// Every round's services: without negotiated recovery (`media` absent) a
+/// plain pass-through to the video services.
+pub(super) struct Admission<'a, S> {
+    pub(super) video: VideoServices<'a, S>,
+    pub(super) media: Option<&'a NegotiatedMedia>,
+    pub(super) routes: ControlRoutes,
+    pub(super) parent: ControlBinding,
+    pub(super) pending: Option<RecoveryDemand>,
 }
 impl<S: Services> Services for Admission<'_, S> {
+    // Not a defaulted no-op: a controlled session's collected input wakes an
+    // idle capture through the video services.
+    fn input_submitted(&mut self, at_us: u64) {
+        self.video.input_submitted(at_us);
+    }
     fn permitted(&mut self) -> bool {
         self.video.permitted()
             && self.pending.as_ref().is_none_or(|p| {
@@ -233,12 +184,14 @@ impl<S: Services> Services for Admission<'_, S> {
         q: &mut QuicRecords,
         nonce: &mut N,
     ) -> Result<(), Error> {
+        let Some(media) = self.media else {
+            return self.video.maintain(q, nonce);
+        };
         if !self.permitted() {
             return Err(Error::Expired);
         }
         let cx = self.video.control.context();
         let mut failure = None;
-        let media = self.media;
         let sender = &mut *self.video.sender;
         let pending = &mut self.pending;
         // Dispatch without mutably borrowing q inside receive_ready. One fixed
@@ -300,6 +253,9 @@ impl<S: Services> Services for Admission<'_, S> {
         }
     }
     fn receive(&mut self, route: Route, bytes: &[u8]) -> Result<Disposition, ()> {
+        if self.media.is_none() {
+            return self.video.receive(route, bytes);
+        }
         if route == Route::Stream(self.routes.inbound) && is_request(bytes) {
             return Ok(Disposition::Blocked);
         }

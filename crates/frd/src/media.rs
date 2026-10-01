@@ -204,6 +204,18 @@ impl ObservationControl {
         }
         Ok(now)
     }
+    /// A reference recovery installed generation `generation` of this view
+    /// (plan 12.3); see `SessionAuthority::advance_recovery`.
+    pub(crate) fn advance_recovery(
+        &self,
+        generation: fr_core::ids::RecoveryGeneration,
+    ) -> Result<(), Error> {
+        self.check()?;
+        let mut authority = self.authority.lock().map_err(|_| Error::Poisoned)?;
+        authority
+            .advance_recovery(generation)
+            .map_err(Error::Authority)
+    }
     /// The control lease itself is alive: live, or suspended by a stale view
     /// (plan 11.3). For renewal and its I/O only, never for submitting input.
     pub(crate) fn check_lease(&self) -> Result<HostInstant, Error> {

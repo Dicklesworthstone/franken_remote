@@ -75,7 +75,11 @@ impl Host {
 /// The stream is already configured and its bootstrap acknowledged. Control,
 /// when present, must already come from the existing initial-grant broker.
 pub struct StreamingHost {
-    recovery: Option<crate::media_quic::NegotiatedMedia>,
+    /// The stream's one owner of its completed media attachments, when the
+    /// cursor lane or reference recovery needs them. Recovery replaces it.
+    media: Option<crate::media_quic::NegotiatedMedia>,
+    /// Positively negotiated reference recovery (observation or control).
+    reference_recovery: bool,
     host: Host,
     stream: Stream,
     feedback: Option<HostFeedback>,
@@ -168,7 +172,8 @@ impl StreamingHost {
             presentation,
             clipboard: None,
             files: None,
-            recovery: None,
+            media: None,
+            reference_recovery: false,
             cursor: None,
         })
     }
@@ -373,24 +378,76 @@ impl StreamingHost {
             return Err(Error::Closed);
         }
         self.stream.served = true;
-        if self.recovery.is_some() {
-            if acquisition.is_some() || !matches!(self.host, Host::Observe(_)) {
-                return Err(Error::Order);
-            }
-            return recovery::serve(self, nonce, ticket, other).await;
-        }
         if acquisition.is_some() {
             self.decline_unconfigured_clipboard()?;
         }
+        let mut first = true;
+        loop {
+            // A round ends only with a negotiated reference recovery's demand,
+            // once the one in-flight capture has drained. Every other end is
+            // terminal and already fenced inside the round.
+            let demand = self
+                .serve_round(nonce, ticket, other, &mut acquisition, local, first)
+                .await?;
+            first = false;
+            Box::pin(recovery::recover(
+                self,
+                demand,
+                nonce,
+                ticket,
+                other,
+                &mut acquisition,
+                local,
+            ))
+            .await?;
+        }
+    }
+    #[allow(clippy::too_many_lines)]
+    async fn serve_round(
+        &mut self,
+        nonce: &mut impl FnMut() -> Result<u128, ()>,
+        ticket: &mut impl FnMut() -> Option<InputTicketId>,
+        other: &mut impl Services,
+        acquisition: &mut Option<Box<acquisition::Acquisition>>,
+        local: &mut impl FnMut(
+            acquisition::LocalControl<'_>,
+        ) -> Result<
+            Option<fr_wire::control::Target>,
+            crate::input_quic::grant::Error,
+        >,
+        first: bool,
+    ) -> Result<fr_media::delivery::RecoveryDemand, Error> {
         let fence = Fence {
             control: self.stream.control.clone(),
             native: self.host.native(),
         };
+        let session = self.host.session()?;
+        let routes = session.opened.routes;
+        let parent = session.opened.binding;
         let stream = &mut self.stream;
         let clipboard_view = stream
             .sender
             .feedback_view()
             .map_err(Error::MediaTransport)?;
+        // After a recovery the recovered IDR is the last capture: keep the
+        // capture cadence rather than capturing again at once.
+        let (last_capture, next_capture) = if first {
+            (None, 0)
+        } else {
+            let last = stream
+                .sender
+                .source_progress()
+                .map_err(Error::MediaTransport)?
+                .map(|p| p.descriptor.capture_micros);
+            let interval = u64::try_from(stream.policy.capture_interval.as_micros())
+                .map_err(|_| Error::Clock)?;
+            (
+                last,
+                last.unwrap_or(0)
+                    .checked_add(interval)
+                    .ok_or(Error::Clock)?,
+            )
+        };
         let (credit, requests) = mpsc::channel(1);
         let (completed, results) = mpsc::channel(1);
         let cursor = self.cursor.as_deref();
@@ -401,43 +458,54 @@ impl StreamingHost {
             requests,
             completed
         ));
-        let mut services = VideoServices {
-            control: &stream.control,
-            sender: &mut stream.sender,
-            statistics: &mut stream.statistics,
-            policy: stream.policy,
-            capacity: stream.capacity,
-            credit,
-            results,
-            in_flight: None,
-            pacing: stream.pacing.as_mut(),
-            last_work: None,
-            last_capture: None,
-            next_capture: 0,
-            input_wake: super::input_wake::Wake::default(),
-            repair_turn: false,
-            feedback: self.feedback.as_mut(),
-            presentation: self.presentation.as_mut(),
-            cursor,
-            other,
+        let recovery_media = if self.reference_recovery {
+            self.media.as_ref()
+        } else {
+            None
+        };
+        let mut services = recovery::Admission {
+            media: recovery_media,
+            routes,
+            parent,
+            pending: None,
+            video: VideoServices {
+                control: &stream.control,
+                sender: &mut stream.sender,
+                statistics: &mut stream.statistics,
+                policy: stream.policy,
+                capacity: stream.capacity,
+                credit,
+                results,
+                in_flight: None,
+                pacing: stream.pacing.as_mut(),
+                last_work: None,
+                last_capture,
+                next_capture,
+                input_wake: super::input_wake::Wake::default(),
+                repair_turn: false,
+                feedback: self.feedback.as_mut(),
+                presentation: self.presentation.as_mut(),
+                cursor,
+                media: self.media.as_ref(),
+                other,
+            },
         };
         let mut network = pin!(async {
             loop {
-                if let Some(acquisition) = &mut acquisition {
-                    acquisition
-                        .drive(
-                            &mut self.host,
-                            stream.policy.network_turn,
-                            nonce,
-                            ticket,
-                            &mut services,
-                            local,
-                        )
-                        .await?;
-                } else {
-                    self.host
-                        .drive(stream.policy.network_turn, nonce, ticket, &mut services)
-                        .await?;
+                turn(
+                    &mut self.host,
+                    acquisition.as_deref_mut(),
+                    local,
+                    stream.policy.network_turn,
+                    nonce,
+                    ticket,
+                    &mut services,
+                )
+                .await?;
+                if services.video.in_flight.is_none()
+                    && let Some(demand) = services.pending.take()
+                {
+                    return Ok(demand);
                 }
                 // Between complete network turns, not in transport/approval callbacks.
                 if let Some(app) = &mut self.clipboard
@@ -451,7 +519,8 @@ impl StreamingHost {
             }
         });
         // Neither successful capture nor a ready refresh wins a cancellation
-        // race with an in-flight QUIC drive. Only terminal failure exits the join.
+        // race with an in-flight QUIC drive. Only a terminal failure or a
+        // drained recovery demand exits the join.
         let mut producer_end = None;
         poll_fn(|task| {
             if producer_end.is_none()
@@ -465,14 +534,43 @@ impl StreamingHost {
             // here would destroy its socket before terminal-only reporting can
             // take custody. Its existing I/O/deadline checks still bound this.
             match network.as_mut().poll(task) {
+                // The producer then waits idle for its next credit: dropping it
+                // abandons no worker operation or in-flight QUIC I/O.
+                Poll::Ready(Ok(demand)) if producer_end.is_none() => Poll::Ready(Ok(demand)),
                 Poll::Ready(result) => {
                     fence.stop();
-                    Poll::Ready(producer_end.take().unwrap_or(result))
+                    Poll::Ready(Err(match (producer_end.take(), result) {
+                        (Some(Err(error)), _) | (_, Err(error)) => error,
+                        _ => Error::Closed,
+                    }))
                 }
                 Poll::Pending => Poll::Pending,
             }
         })
         .await
+    }
+}
+/// One bounded network turn, through the control acquisition when the session
+/// has one, so its grant and local-control checks run on every turn.
+async fn turn(
+    host: &mut Host,
+    acquisition: Option<&mut acquisition::Acquisition>,
+    local: &mut impl FnMut(
+        acquisition::LocalControl<'_>,
+    )
+        -> Result<Option<fr_wire::control::Target>, crate::input_quic::grant::Error>,
+    wait: Duration,
+    nonce: &mut impl FnMut() -> Result<u128, ()>,
+    ticket: &mut impl FnMut() -> Option<InputTicketId>,
+    services: &mut impl Services,
+) -> Result<(), Error> {
+    match acquisition {
+        Some(acquisition) => {
+            acquisition
+                .drive(host, wait, nonce, ticket, services, local)
+                .await
+        }
+        None => host.drive(wait, nonce, ticket, services).await,
     }
 }
 impl Drop for StreamingHost {
@@ -565,14 +663,15 @@ struct VideoServices<'a, S> {
     feedback: Option<&'a mut HostFeedback>,
     presentation: Option<&'a mut HostPresentation>,
     cursor: Option<&'a cursor::StreamCursor>,
+    media: Option<&'a crate::media_quic::NegotiatedMedia>,
     other: &'a mut S,
 }
 impl<S> VideoServices<'_, S> {
     /// After media records: the remote cursor (at most one reliable shape and
     /// one position datagram), then advisory receiver feedback.
     fn service_lanes(&mut self, q: &mut QuicRecords, cx: &Cx) -> Result<u64, Error> {
-        if let Some(cursor) = self.cursor {
-            cursor.service(cx, q, self.control)?;
+        if let (Some(cursor), Some(media)) = (self.cursor, self.media) {
+            cursor.service(cx, q, self.control, media)?;
         }
         let current = now(cx)?;
         if let Some(feedback) = &mut self.feedback {

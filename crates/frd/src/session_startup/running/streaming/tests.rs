@@ -454,6 +454,7 @@ fn pending_admission_refresh_services_native_results_before_the_lookup_finishes(
         let control = stream.control.clone();
         let mut other = block;
         let mut services = VideoServices {
+            media: None,
             control: &control,
             sender: &mut stream.sender,
             statistics: &mut stream.statistics,

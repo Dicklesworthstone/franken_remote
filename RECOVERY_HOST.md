@@ -1,10 +1,33 @@
-# Automatic observation-host recovery
+# Automatic host recovery
 
 `StreamingHost::enable_reference_recovery` retains the original completed media
-attachments for an observation-only session. Native publisher bootstrap enables
-it when `reference-recovery` v1 was positively selected. Controlled and
-control-requesting sessions do not enter this path; there is no implicit input
-grant, replay, reconnect, or replacement capture process.
+attachments for an observation session. Native publisher bootstrap enables it
+when `reference-recovery` v1 was positively selected. There is no implicit
+input grant, replay, reconnect, or replacement capture process.
+
+## Controlled sessions (2026-09-30)
+
+A controlled session recovers on the same path. Its cursor lanes and the
+recovery share the stream's one retained media owner
+(`enable_retained_recovery`). The recovery does not end the control lease:
+- Admission's fence (`mark_view_stale`) is a stale view, which suspends the
+  held lease (PRESENTATION_READINESS.md, Suspension). Held keys and buttons are
+  released, and every ticket is invalidated.
+- Serving runs in rounds. A round ends only with a drained recovery demand.
+  Every network turn of the round and of the handoff goes through the
+  session's control acquisition, so grant and local-control checks keep
+  running, as do renewals.
+- After the handoff, `SessionAuthority::advance_recovery` moves the lease's
+  input view to the recovered generation. This happens before any report of
+  that generation can revive readiness, or any ticket can name it.
+- An action decided on an older generation is refused as `StaleView`, even
+  with a new ticket. Input resumes only after the recovered view's presented
+  evidence and a ticket issued for it.
+- The lease is never renewed by a recovery. The suspension limit (10 s) and
+  the recovery's own deadline still bound it.
+
+The viewer side is in RECOVERY_CONTINUATION.md. A control-requesting viewer
+that has not been granted control yet still ends on a failed chain.
 
 The normal host loop now consumes recovery requests from the original reliable
 control stream before admitting another media send. The existing subscription

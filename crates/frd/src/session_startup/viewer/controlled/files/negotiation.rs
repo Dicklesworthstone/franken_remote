@@ -251,7 +251,7 @@ impl ControlledViewer {
             control: self.session.routes,
             parent: self.session.opened.binding,
             selection: self.session.opened.selection.clone(),
-            expected: self.media.binding(),
+            expected: self.media.as_ref().ok_or(Error::Closed)?.binding(),
             lease: self.input.binding().lease,
             handle,
             permission,

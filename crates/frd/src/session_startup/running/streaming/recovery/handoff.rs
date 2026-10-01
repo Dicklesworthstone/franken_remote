@@ -6,7 +6,8 @@ use crate::media_quic::replacement;
 use fr_wire::attachment::Ticket;
 
 // Keep the single linear authority/worker handoff visible; each stage is bounded.
-#[allow(clippy::too_many_lines)]
+// Every network turn goes through the session's control acquisition, if any.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub(super) async fn replace(
     host: &mut StreamingHost,
     media: NegotiatedMedia,
@@ -14,6 +15,11 @@ pub(super) async fn replace(
     nonce: &mut impl FnMut() -> Result<u128, ()>,
     ticket: &mut impl FnMut() -> Option<InputTicketId>,
     other: &mut impl Services,
+    acquisition: &mut Option<Box<acquisition::Acquisition>>,
+    local: &mut impl FnMut(
+        acquisition::LocalControl<'_>,
+    )
+        -> Result<Option<fr_wire::control::Target>, crate::input_quic::grant::Error>,
 ) -> Result<NegotiatedMedia, Error> {
     let until = demand.deadline_micros();
     let control = host.stream.control.clone();
@@ -70,7 +76,16 @@ pub(super) async fn replace(
         };
         while !service.replacement.is_complete() {
             let wait = service.waiting.wait(policy.network_turn)?;
-            host.host.drive(wait, nonce, ticket, &mut service).await?;
+            turn(
+                &mut host.host,
+                acquisition.as_deref_mut(),
+                local,
+                wait,
+                nonce,
+                ticket,
+                &mut service,
+            )
+            .await?;
         }
     }
     waiting.check()?;
@@ -90,11 +105,22 @@ pub(super) async fn replace(
         .is_some_and(|n| control.check().is_ok_and(|now| now < n))
     {
         let wait = waiting.wait(policy.network_turn)?;
-        host.host.drive(wait, nonce, ticket, &mut waiting).await?;
+        turn(
+            &mut host.host,
+            acquisition.as_deref_mut(),
+            local,
+            wait,
+            nonce,
+            ticket,
+            &mut waiting,
+        )
+        .await?;
     }
     waiting.check()?;
     let update = during(
         &mut host.host,
+        acquisition,
+        local,
         policy,
         &mut waiting,
         nonce,
@@ -123,7 +149,16 @@ pub(super) async fn replace(
         };
         while !service.startup.is_complete() {
             let wait = service.waiting.wait(policy.network_turn)?;
-            host.host.drive(wait, nonce, ticket, &mut service).await?;
+            turn(
+                &mut host.host,
+                acquisition.as_deref_mut(),
+                local,
+                wait,
+                nonce,
+                ticket,
+                &mut service,
+            )
+            .await?;
         }
     }
     waiting.check()?;
@@ -168,8 +203,14 @@ impl<S: Services> Services for Attaching<'_, '_, S> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn during<S: Services>(
     host: &mut Host,
+    acquisition: &mut Option<Box<acquisition::Acquisition>>,
+    local: &mut impl FnMut(
+        acquisition::LocalControl<'_>,
+    )
+        -> Result<Option<fr_wire::control::Target>, crate::input_quic::grant::Error>,
     policy: Policy,
     waiting: &mut Waiting<'_, S>,
     nonce: &mut impl FnMut() -> Result<u128, ()>,
@@ -182,7 +223,15 @@ async fn during<S: Services>(
     loop {
         let wait = waiting.wait(policy.network_turn)?;
         let control = waiting.control.clone();
-        let mut network = pin!(host.drive(wait, nonce, ticket, waiting));
+        let mut network = pin!(turn(
+            host,
+            acquisition.as_deref_mut(),
+            local,
+            wait,
+            nonce,
+            ticket,
+            waiting
+        ));
         let driven = poll_fn(|task| {
             if result.is_none()
                 && let Poll::Ready(value) = native.as_mut().poll(task)

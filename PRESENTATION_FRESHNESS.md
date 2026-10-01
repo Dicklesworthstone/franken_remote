@@ -405,6 +405,47 @@ runs on the suspension build. In the same session it failed 1 of 5 on
 already-expired unchanged-source observation instead of ending the session,
 so no mechanism links the two. The sample cannot rule a regression out.
 
+## Controlled recovery A/B (2026-10-01)
+
+Controlled sessions now negotiate reference recovery (fr-4vf5,
+RECOVERY_HOST.md, Controlled sessions). Control matrix at load 7-10: two
+runs of that working tree (with the 46a5891 names) against two of 67acc95,
+alternating.
+
+- No row recovered a reference. Every held row reports `recovered_streams`
+  0. The one held 40 ms RTT, 1% loss row (8 of 8 steps, in one run)
+  survived on selective repair, with 3 repair requests.
+- The new names let both runs reach every row. One 67acc95 run aborted at
+  6 ms RTT, 5% loss on the untyped stalled dispatch.
+- Lossy rows at 40 and 120 ms RTT end the same way on both builds. The
+  client reports `host_control_revoked` (reason `local_revoke`) or
+  `transport_deadline_expired`.
+
+A scratch build with host prints (three complete runs, never committed)
+shows what ends them, all in the host's first serving round, before any
+recovery request:
+- In 13 of 20 lossy ends at 40 and 120 ms RTT, the host's own send cache
+  expired a picture it had not finished sending within the 250 ms reference
+  horizon (`OriginalExpired`). The one traced from the cache's own tick was a
+  2.9 KB picture with its announcement and 2 of 3 fragments sent.
+- The rest: a renewal record past its delivery deadline (4), an input or
+  control-renewal record (1 each), and once clock synchronization.
+- One more run aborted at 120 ms RTT, 1% loss on an unnamed end: the
+  viewer's clock probe reply missed its deadline
+  (`Control(Clock(Client(Expired)))`).
+- The `local_revoke` reason is the host fence's label for any serve error.
+
+The likely mechanism is transport send starvation. Asupersync 0.5.0's
+NewReno halves its window to a 2-datagram floor under loss and has no
+pacing. A lost last packet in flight then waits for a probe timeout, which
+doubles each time, so a few kilobytes can miss a 250 ms deadline at 40 ms
+RTT.
+
+So the matrix does not exercise controlled recovery yet; only fr-core and
+fr-client unit tests do. MEDIA_DELIVERY.md already says an expired unsent reference fences
+its dependents and the caller must recover. The next slice keeps a host with
+negotiated recovery alive for the viewer's request instead of ending it.
+
 ## Verification scope
 
 The new media regressions use actual record codecs/reassembly with explicitly

@@ -343,6 +343,16 @@ pub struct Cleanup {
     pub remaining: u16,
 }
 
+/// The granted view at the latest reference-recovery generation the media
+/// owner installed. Geometry, viewport and configuration never move here.
+fn follow_recovery(view: &mut InputView, authority: &SessionAuthority) {
+    if let Some(generation) = authority.recovery_generation()
+        && generation.supersedes(view.recovery)
+    {
+        view.recovery = generation;
+    }
+}
+
 /// Owns one already granted input lease, its replay ledger, and synthetic held
 /// state. Never reconstruct it to resume an old lease. No Clone or secret Debug.
 /// The enclosing OS share-session owner still arbitrates the global controller.
@@ -442,8 +452,10 @@ impl InputSession {
             control_taken: false,
         })
     }
-    /// Immutable scope of this already admitted native owner. Naming a ticket
-    /// here does not issue it; the authority must first accept `issue_ticket`.
+    /// Scope of this already admitted native owner: its granted view, at the
+    /// latest reference-recovery generation seen when a ticket was issued.
+    /// Naming a ticket here does not issue it; the authority must first accept
+    /// `issue_ticket`.
     pub fn ticket_credentials(&self, ticket: InputTicketId) -> InputCredentials {
         InputCredentials {
             session: self.session,
@@ -533,8 +545,11 @@ impl InputSession {
         now: HostInstant,
     ) -> Result<(HostInstant, HostInstant), Refusal> {
         self.check_active()?;
+        let view = &mut self.view;
+        let lease = self.lease;
         self.authority.with_time(&mut self.clock, now, |a, at| {
-            a.issue_input_ticket(self.lease, ticket, at)
+            follow_recovery(view, a);
+            a.issue_input_ticket(lease, ticket, at)
                 .map(|until| (at, until))
         })
     }
@@ -728,6 +743,16 @@ impl InputSession {
         now: HostInstant,
     ) -> Result<HostInstant, Refusal> {
         self.check_active()?;
+        // An installed reference recovery makes every older view stale, even
+        // for an action already on the wire (plan 12.3).
+        {
+            let authority = self
+                .authority
+                .authority
+                .lock()
+                .map_err(|_| Refusal::AuthorityUnavailable)?;
+            follow_recovery(&mut self.view, &authority);
+        }
         if credentials.view != self.view {
             return Err(Refusal::StaleView);
         }

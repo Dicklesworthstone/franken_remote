@@ -21,9 +21,9 @@ fn request(state: &Fixture, timeout: Duration) -> ChannelRequest {
         binding: Binding {
             parent: ControlBinding {
                 id: 14,
-                ..state.viewer.media.binding().parent
+                ..state.viewer.media.as_ref().unwrap().binding().parent
             },
-            ..state.viewer.media.binding()
+            ..state.viewer.media.as_ref().unwrap().binding()
         },
         ticket: Ticket(814),
         timeout,

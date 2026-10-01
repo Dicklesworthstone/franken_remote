@@ -1184,8 +1184,8 @@ mod tests {
             assert!(names.iter().any(|n| n == required), "{required}");
         }
         // Only remote-cursor forwarding and reference recovery are optional;
-        // bootstrap stays mandatory. Recovery is offered in both modes: only
-        // observers use it (a controller keeps its terminal refusal).
+        // bootstrap stays mandatory. Recovery is offered and used in both
+        // modes: a controller's input stays suspended until it completes.
         assert!(observe.capabilities.iter().all(|c| c.required
             != (c.name == fr_wire::cursor::CAPABILITY
                 || c.name == fr_wire::recovery_request::CAPABILITY)));

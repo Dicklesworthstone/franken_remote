@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-10-01 — controlled sessions negotiate reference recovery
+
+- A controlled session now runs the same reference recovery as a view-only
+  one when both sides negotiate it (RECOVERY_HOST.md, Controlled sessions).
+  Until now a lost reference ended control (`video_reference_lost`).
+  - The loss suspends the grant's input; renewals continue.
+  - After the handoff, the host advances the view's recovery generation in
+    the authority. Every ticket is invalidated, and an action decided on an
+    older picture is refused as a stale view, even with a new ticket.
+  - The same lease resumes on the recovered picture once a new ticket
+    arrives. Nothing is replayed and no new grant is made.
+  - A viewer still acquiring control keeps the terminal refusal.
+- Found on the way:
+  - The round wrapper must forward `input_submitted`, or a controlled
+    host's input no longer wakes an idle capture.
+  - A recovery fences the old receiver at the loss itself, so the grant
+    must suspend there rather than end on the fenced tracker.
+- Not yet shown end to end. Namespace control matrix, two runs against two
+  of 67acc95: no row recovered a reference. Host diagnostics show why: at 40
+  and 120 ms RTT with loss, the host's own sender usually expires a picture
+  it could not finish sending within the 250 ms reference horizon
+  (`OriginalExpired`) and ends the session first. Full suite 63/63; the
+  stale-view suspend e2e passed 2 of 2.
+
 ## 2026-10-01 — two more control ends are named
 
 - Two local ends of a controlled session that `fr` reported as the generic

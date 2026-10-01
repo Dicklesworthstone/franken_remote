@@ -201,6 +201,11 @@ impl Peer {
                 session.check().map_err(Error::Session)?;
                 Ok(session)
             }
+            Self::Control(v) => {
+                let session = v.session_mut();
+                session.check().map_err(Error::Session)?;
+                Ok(session)
+            }
             _ => self.parts().map(|(session, _)| session),
         }
     }
@@ -710,11 +715,16 @@ impl StreamingViewer {
                 &mut self.repair,
                 cx,
             )?;
+            // The loss already fenced the old receiver scope: a control grant
+            // suspends now, before another turn could act on that view.
+            if recovering && let Peer::Control(viewer) = &mut self.peer {
+                viewer.enter_recovery().map_err(Error::Control)?;
+            }
             if recovering
-                && matches!(self.peer, Peer::Observe { .. })
+                && matches!(self.peer, Peer::Observe { .. } | Peer::Control(_))
                 && self.recovery_state() == Some(recovery_control::State::Requested)
             {
-                let event = self.resume_observation(ui, other).await?;
+                let event = self.resume_stream(ui, result, other).await?;
                 acquisition::notify(
                     &mut self.peer,
                     &self.receiver,
@@ -1009,7 +1019,7 @@ async fn network(
             cx.checkpoint().is_ok()
         })?;
     }
-    let allow_recovery = recovery.is_some() && matches!(peer, Peer::Observe { .. });
+    let allow_recovery = recovery::enabled(peer, recovery.as_deref());
     let mut failure = None;
     let driven = peer
         .drive(Duration::from_millis(5), result, |route, bytes| {
