@@ -87,7 +87,9 @@ lease is held, so the lease cannot renew and ends. The plan describes stale
 presentation as *suspending* input (and asks for "time spent with input suspended
 by stale view"), which implies resumption within the lease lifetime; the authority
 treats a lapse as terminal. That contradiction is recorded for an owner decision
-(fr-rc2-static-view-represent-0ruq) rather than resolved here.
+(fr-rc2-static-view-represent-0ruq) rather than resolved here. Since 2026-09-30 a
+lapse under a held lease suspends input instead (PRESENTATION_READINESS.md,
+Suspension).
 
 **Measured limit under real network impairment (2026-09-28, negative evidence).**
 The namespace e2e `real_impairment::controlled_session_under_namespace_delay_and_loss`
@@ -279,6 +281,33 @@ policy's own 1.5 s maximum limits how far they can be raised. With that
 planted build, the marker motion reached the host in 1 of 2 runs, and the
 other run's markers arrived after the planted bound.
 
+**A stale view suspends input and control resumes (namespace e2e, 2026-09-30).**
+The same test now checks suspension (plan 11.3):
+- A key held on the viewer reaches the host. Then the capture child is
+  frozen for 400 ms.
+- Marker motion sent 310 ms into the freeze must not move the host pointer.
+- The host releases the held key by itself at its lapse. The viewer's own
+  later release is dropped, so the host sees exactly one release.
+- The grant's indicator stays up. The same session and lease resume control
+  once the view is fresh again: no reconnect and no new grant.
+- The completion record reports the suspension.
+
+It passed 3 of 3 runs on the final build, each with one suspension of
+1.05-1.24 s.
+
+The freeze stays under about 450 ms. A capture's deadline is also capped at
+the tailnet admission proof, which is refreshed only with 500 ms left, so a
+longer stall can end observation as a hung worker. A 600 ms freeze did that
+whenever it straddled a refresh.
+
+Qualifying the test found two faults, both fixed with planted-negative tests:
+- The frozen capture's result arrived past the 250 ms reference horizon. An
+  unchanged-source result that late was fatal, although an expiring queued
+  observation is simply dropped. It is now dropped too. A late *encoded*
+  picture is still fatal: dropping it needs a recovery picture (follow-up).
+- The client refused control-renewal challenges while suspended, which ended
+  its session.
+
 **Critical records no longer wait behind queued media (2026-09-28).** A
 diagnostic build printed the host transport's state at each sender-deadline
 expiry. The challenge record usually had never been staged: the native stream
@@ -325,8 +354,9 @@ Diagnostic prints (never committed) name each remaining control end:
   (`Input(Stopped(ViewStale))`), including at 6 ms RTT with 1% loss. A lost
   packet delays the source observation past the bound, and a lapse ends
   control. Plan 11.3 asks for suspension ("sustained unknown/stale
-  presentation suspends input"), which is not implemented. That, not the
-  bound, is the main limit on control under loss.
+  presentation suspends input"), which was not implemented then (see the
+  suspension A/B below). That, not the bound, was the main limit on control
+  under loss.
 - At 120 ms RTT some rows end with a transport deadline. It was a clock
   exchange or session record whose epoch waited past the 3-PTO allowance. An
   earlier experiment with a flat 1 s floor held these rows.
@@ -346,6 +376,34 @@ ends:
 - or with a transport deadline;
 - or, once, with the newly named `video_startup_expired`: a decoder restart
   that ran out of time, which used to be an unnamed `native_session_failed`.
+
+## Suspension A/B (2026-09-30)
+
+A stale view now suspends control input (PRESENTATION_READINESS.md,
+Suspension). Control matrix at load 21-45: three runs of the suspension
+build against two of 33c2bd0 (the path bound without suspension), in the
+same session.
+
+| Control rows | With suspension | 33c2bd0 |
+|---|---|---|
+| 6 ms RTT, 5% loss | held 5 of 6 | held 0 of 3 (`view_stale` 2, `native_session_failed` 1) |
+| 120 ms RTT, no loss, unshaped | held 2 of 2 | held 0 of 1 (`view_stale`) |
+| rows ending with `view_stale` | 0 | 5 |
+| runs aborted by an untyped `native_session_failed` | 1 of 3 | 2 of 2 |
+
+Rows with loss at 40 ms and 120 ms RTT still end, now through what the stale
+view used to hide:
+- `video_reference_lost`: controlled sessions have no reference recovery;
+  only view-only sessions recover a lost reference.
+- `host_control_revoked` with reason `local_revoke`: the host's media loop
+  ended and its fence labels that a local revoke, which is a mislabel.
+- `transport_deadline_expired` at 120 ms RTT.
+
+The busy-screen view-only must-hold row (40 ms RTT, 1% loss) failed 3 of 10
+runs on the suspension build. In the same session it failed 1 of 5 on
+33c2bd0, and 2 of 11 before. The only view-only change in this slice drops an
+already-expired unchanged-source observation instead of ending the session,
+so no mechanism links the two. The sample cannot rule a regression out.
 
 ## Verification scope
 

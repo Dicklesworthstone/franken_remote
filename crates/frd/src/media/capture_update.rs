@@ -5,7 +5,10 @@ use super::{
 };
 use asupersync::{time::sleep, types::Time};
 use fr_core::ids::CodecConfigurationGeneration;
-use fr_media::worker::{Kind, UnchangedCapture, capture_payload, parse_unit};
+use fr_media::{
+    delivery::SendError,
+    worker::{Kind, UnchangedCapture, capture_payload, parse_unit},
+};
 use std::{fmt, sync::Arc, time::Duration};
 
 mod prepared;
@@ -217,13 +220,22 @@ impl Subscription {
                 if self.capture_source.is_none() {
                     return Err(Error::InvalidFrame);
                 }
-                self.cache.observe_unchanged(
-                    proof.reference.as_raw(),
-                    proof.observed_micros,
-                    now.as_micros(),
-                )?;
+                self.admit_unchanged(&proof, now.as_micros())?;
             }
         }
         Ok(())
+    }
+    /// An observation already past the reference horizon on arrival (a stalled
+    /// capture) is obsolete evidence, like queued metadata that expires: it is
+    /// dropped with no effect. The view stays as stale as it is; only a later
+    /// observation can refresh it, and a suspended lease survives (plan 11.3).
+    fn admit_unchanged(&mut self, proof: &UnchangedCapture, now: u64) -> Result<(), Error> {
+        match self
+            .cache
+            .observe_unchanged(proof.reference.as_raw(), proof.observed_micros, now)
+        {
+            Ok(_) | Err(SendError::ObservationExpired) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 }

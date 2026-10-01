@@ -178,27 +178,31 @@ fn presentation_age_includes_network_uncertainty_and_time_waiting_to_present() {
         view_age_us: 100,
         receipt_timeout_us: 200,
     };
+    // Evidence already too old when it arrives suspends input (plan 11.3).
     let mut viewer = client(p);
-    assert_eq!(
-        viewer.presented(evidence(0, 0, 60), local(40)),
-        Err(Error::Stopped(StopReason::ViewStale))
-    );
+    viewer.presented(evidence(0, 0, 60), local(40)).unwrap();
+    assert_eq!(viewer.suspended_since(), Some(local(40)));
+    assert_eq!(viewer.stopped(), None);
     let mut viewer = client(p);
     viewer.presented(evidence(1, 0, 60), local(39)).unwrap();
     assert_eq!(
         viewer.presented(evidence(1, 39, 0), local(39)),
         Err(Error::ObsoleteObservation)
     );
+    viewer.tick(local(40)).unwrap();
+    assert_eq!(viewer.suspended_since(), Some(local(40)));
+    // Fresh evidence and an opaque ticket do not resume: the ticket was not
+    // issued after the host's own lapse.
+    viewer.presented(evidence(2, 40, 0), local(40)).unwrap();
+    viewer
+        .ticket(InputTicketId::from_raw(10), local(40))
+        .unwrap();
+    let mut out = [0; MAX_INPUT_RECORD_BYTES];
     assert_eq!(
-        viewer.tick(local(40)),
-        Err(Error::Stopped(StopReason::ViewStale))
+        viewer.action(Action::Text("a"), &mut out, local(40)),
+        Err(Error::ViewSuspended)
     );
-    assert!(viewer.presented(evidence(2, 40, 0), local(40)).is_err());
-    assert!(
-        viewer
-            .ticket(InputTicketId::from_raw(10), local(40))
-            .is_err()
-    );
+    assert_eq!(viewer.stopped(), None);
 }
 #[test]
 fn qualified_unchanged_source_can_refresh_static_pixels_without_a_new_frame() {
@@ -209,10 +213,9 @@ fn qualified_unchanged_source_can_refresh_static_pixels_without_a_new_frame() {
     ready(&mut viewer);
     viewer.presented(evidence(1, 80, 10), local(85)).unwrap();
     viewer.tick(local(160)).unwrap();
-    assert_eq!(
-        viewer.tick(local(170)),
-        Err(Error::Stopped(StopReason::ViewStale))
-    );
+    viewer.tick(local(170)).unwrap();
+    assert_eq!(viewer.suspended_since(), Some(local(170)));
+    assert_eq!(viewer.stopped(), None);
 }
 #[test]
 fn old_session_and_old_local_observation_never_enable_a_new_grant() {

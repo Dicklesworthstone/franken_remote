@@ -68,11 +68,12 @@ An unmeasured path keeps 250 ms.
   stale, never admitted as fresh.
 - A smaller bound (the path got faster) never shortens a confirmed host
   deadline: such a report is obsolete. On the viewer the smaller bound applies at
-  once, which gates input earlier, the conservative direction. Enabling this
-mode retires legacy unbounded readiness. Existing native input monitors check
-finite readiness immediately before OS submission, even without another packet
-or watchdog service turn. A report cannot create a lease or resurrect an expired
-one.
+  once, which gates input earlier, the conservative direction.
+
+Enabling this mode retires legacy unbounded readiness. Existing native input
+monitors check finite readiness immediately before OS submission, even without
+another packet or watchdog service turn. A report cannot create a lease or
+resurrect an expired one.
 
 The viewer retains one fixed-size pending report and bounds positive-report
 cadence to 50 ms. Its send deadline is the remainder of the viewer's bound after
@@ -89,6 +90,54 @@ the preceding host deadline. It cannot certify the candidate or extend readiness
 Existing input logic pauses submissions during this gap. Unknown/stale source
 state invalidates readiness; terminal platform lifecycle events retain the
 existing immediate stop behavior. Old source reports cannot reopen a stale gate.
+
+## Suspension (plan 11.3, 2026-09-30)
+
+A lapse of readiness under a held control lease SUSPENDS input; it does not
+end the lease.
+
+Host (`SessionAuthority`):
+- The lapse invalidates every ticket and starts a suspension, dated at the
+  passed view deadline.
+- `control_status` reports `Suspended` while the lease and observation live.
+  Control renewals continue.
+- The native owner releases every remotely held key and button at once, with
+  no new input event (the executor loop and `InputSession::maintain`), then
+  confirms the release.
+- Until that confirmation, fresh readiness is refused (`ReleasePending`), so no
+  key held across a frozen view can autorepeat unseen.
+- Revival never renews the lease and never revives an old ticket. Input resumes
+  only with a newly issued ticket.
+- A suspension that outlasts `MAX_VIEW_SUSPENSION` (10 s), or lease or
+  observation expiry during one, ends control terminally.
+
+Client (`InputClient`):
+- A stale or unknown view suspends input: actions are refused
+  (`ViewSuspended`), never queued.
+- The one record the transport never admitted is abandoned. Its sequence is
+  reused, so the host's strictly ordered stream has no gap.
+- The session's own I/O continues: media, presented reports, renewals.
+- Input resumes on fresh evidence plus a ticket that was, by the clock
+  correlation's conservative bound, issued more than the 1 s source-age ceiling
+  after the suspension began. The host's own lapse cannot be later than that,
+  and it refuses tickets while suspended, so such a ticket was issued after the
+  host revived. This costs about a 1 s minimum suspension; an explicit
+  readiness generation in tickets would remove it.
+- Releases of keys the host already released are dropped.
+- Suspension count and duration are reported.
+
+Known limits:
+- A file or clipboard transfer in flight during a lapse still ends the session.
+  Its own authorization checks treat the lapse as terminal.
+- A host capture stall longer than the 250 ms reference horizon survives only
+  on a static screen. There the late unchanged-source result is dropped as
+  obsolete evidence. A late encoded picture still ends the session, because
+  dropping a reference needs a recovery picture first.
+- An action sent while the client's view was fresh but arriving after the
+  host's lapse is refused, and a refusal fences the host's ordered action
+  stream for the rest of the lease. The host's bound is one RTT larger than
+  the viewer's, so this needs the host to lapse first, for example on an
+  explicit negative report.
 
 Qualified unchanged-source observations keep a genuinely static view current
 without encoding or decoding dummy frames. The reporter and source verifier

@@ -302,6 +302,15 @@ impl ControlledViewer {
                 super::Error::Backpressure
                 | super::Error::View(input::presentation::Error::Input(input::Error::Backpressure)),
             ) => Ok(()),
+            // A stale view suspends input (plan 11.3): this event is refused and
+            // dropped, never queued for later. So is a release of a key or button
+            // that suspension already released on the host. The session continues.
+            Err(super::Error::View(input::presentation::Error::Input(
+                input::Error::ViewSuspended | input::Error::ReleasedBySuspension,
+            ))) => {
+                receiver.pending = None;
+                Ok(())
+            }
             Err(super::Error::Viewport(input::viewport::Error::OutsideImage))
                 if matches!(captured.event, Event::Pointer(_)) =>
             {

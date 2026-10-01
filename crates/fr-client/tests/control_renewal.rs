@@ -173,10 +173,11 @@ fn exact_bound_response_preserves_actions_and_never_refreshes_view() {
     );
     v.control_response_sent(now).unwrap();
     assert_eq!(v.pending_actions(), 1);
-    assert_eq!(
-        v.tick(ClientInstant(1_510_100)),
-        Err(Error::Stopped(StopReason::ViewStale))
-    );
+    // The control response never refreshed the view: it lapses on time and
+    // suspends input (plan 11.3), while the pending action stays pending.
+    v.tick(ClientInstant(1_510_100)).unwrap();
+    assert_eq!(v.suspended_since(), Some(ClientInstant(1_510_100)));
+    assert_eq!(v.pending_actions(), 1);
 }
 #[test]
 fn ticket_expiry_does_not_stop_live_lease_response_or_authorize_an_action() {

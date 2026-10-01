@@ -1007,10 +1007,28 @@ fn a_stale_view_suspends_input_before_it_reaches_the_host() {
     let mut s = Controlled::start();
     let workers = capture_workers();
     assert!(!workers.is_empty(), "no host capture worker found");
+    // A key held on the viewer reaches the host.
+    let code: u32 = s.observer.ask("keycode 0x62")[1].parse().unwrap();
+    let before = host_events(&mut s.observer).len();
+    s.viewer("key 0x62 1");
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            host_events(&mut s.observer)[before..]
+                .iter()
+                .any(|e| (e.0, e.1, e.3) == (2, code, false))
+        }),
+        "the held key never reached the host: {}",
+        s.daemon.dump()
+    );
     let (resting, _) = host_pointer(&mut s.observer);
+    let held = host_events(&mut s.observer).len();
     // Freeze the host's capture: no new picture or source observation reaches
-    // the viewer, so its view ages past the 250 ms source-age bound while the
-    // window still shows the last picture and the connection stays up.
+    // the viewer, so its view ages past the source-age bound while the window
+    // still shows the last picture and the connection stays up. Keep the
+    // freeze under the shortest capture deadline: a capture is also capped at
+    // the current tailnet admission, refreshed with 500 ms left, so a longer
+    // stall can meet that cap as a hung worker and end observation by design.
+    let frozen = Instant::now();
     for pid in &workers {
         assert!(
             Command::new("kill")
@@ -1020,33 +1038,70 @@ fn a_stale_view_suspends_input_before_it_reaches_the_host() {
                 .success()
         );
     }
-    thread::sleep(Duration::from_secs(1));
-    // Marker input on the stale view: none of it may land on the host.
+    // The views lapse by 250 ms into the freeze (view and host source-age
+    // bounds). Marker input after that lands on a suspended view: none of it
+    // may reach the host.
+    thread::sleep(Duration::from_millis(310));
     for local in [(150, 400), (170, 420), (190, 440)] {
         s.viewer_move(local);
     }
-    thread::sleep(Duration::from_secs(2));
+    if let Some(rest) = Duration::from_millis(400).checked_sub(frozen.elapsed()) {
+        thread::sleep(rest);
+    }
     let (now, _) = host_pointer(&mut s.observer);
     for pid in &workers {
         let _ = Command::new("kill")
             .args(["-CONT", &pid.to_string()])
             .status();
     }
+    // The host released the held key by itself at its lapse, with no event
+    // from the viewer (the viewer's own release is only sent after resuming,
+    // and dropped): suspension releases held input (plan 11.3).
+    assert!(
+        eventually(Duration::from_secs(2), || {
+            host_events(&mut s.observer)[held..]
+                .iter()
+                .any(|e| (e.0, e.1, e.3) == (3, code, false))
+        }),
+        "the host kept a key held across a stale view: {:?}",
+        &host_events(&mut s.observer)[held..]
+    );
     assert_eq!(
         now,
         resting,
         "input on a stale view moved the host: {}",
         s.daemon.dump()
     );
-    // How the client ends is diagnostic; the absent host effect is the evidence.
-    if s.client.try_wait().unwrap().is_none() {
-        signal(&s.client, "-INT");
-    }
+    assert!(
+        indicator(&mut s.observer).is_some(),
+        "the lease ended instead of suspending: {}",
+        s.daemon.dump()
+    );
+    // The user's own release of that key is dropped, not sent again.
+    s.viewer("key 0x62 0");
+    // The same session and lease resume control once the view is fresh
+    // again: no reconnect, no new grant, the same executor.
+    assert!(
+        s.pointer_follows((300, 250), Duration::from_secs(20)),
+        "control did not resume after the view refreshed: {}",
+        s.daemon.dump()
+    );
+    assert!(indicator(&mut s.observer).is_some());
+    let releases = host_events(&mut s.observer)[held..]
+        .iter()
+        .filter(|e| (e.0, e.1, e.3) == (3, code, false))
+        .count();
+    assert_eq!(releases, 1, "the key was released twice on the host");
+    s.close_viewer();
     let output = wait_for(s.client, Duration::from_secs(30));
-    println!(
-        "fr after a stale view: {:?} {}",
-        output.status.code(),
-        String::from_utf8_lossy(&output.stdout)
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|_| panic!("fr: {stdout} {}", String::from_utf8_lossy(&output.stderr)));
+    println!("fr after a suspended and resumed view: {report}");
+    assert_eq!(report["outcome"], "stopped", "{report}");
+    assert!(
+        report["input_suspensions"].as_u64().is_some_and(|n| n >= 1),
+        "{report}"
     );
     s.daemon.finish();
 }

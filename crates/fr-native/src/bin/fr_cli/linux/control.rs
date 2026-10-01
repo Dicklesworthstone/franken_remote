@@ -179,6 +179,9 @@ pub(super) struct Counters {
     pub(super) capabilities: Option<Capabilities>,
     pub(super) results: u64,
     pub(super) submitted: u64,
+    /// Stale-view suspensions of control input and their total duration.
+    pub(super) suspensions: u32,
+    pub(super) suspended_us: u64,
     /// The ORIGINAL outcome of the attempt whose cleanup ended reconnection.
     pub(super) ended: Option<Result<(), Failure>>,
     /// Some only with `--clipboard`.
@@ -342,6 +345,7 @@ impl Attempt {
             InteractiveViewerState::Controlled(viewer) => {
                 counters.granted = true;
                 counters.capabilities = Some(viewer.granted_capabilities());
+                (counters.suspensions, counters.suspended_us) = viewer.suspension_totals();
                 if let Some(frame) = self.candidate(frame) {
                     // The controlled clock is already correlated; a refusal
                     // only withholds evidence and new input stays gated.

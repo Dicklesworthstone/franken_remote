@@ -878,27 +878,30 @@ fn lost_visibility_callback_keeps_the_preceding_view_expiry() {
             .0;
         submit_successor(&mut state, &client_cx);
         while now(&client_cx).unwrap() < until {
-            match state.viewer.drive(Duration::ZERO, |_| {}, block).await {
-                Ok(()) => {}
-                Err(Error::Expired) => {
-                    // The executor can cross the exclusive deadline AFTER the
-                    // loop's clock sample, even for a zero-duration drive.
-                    assert!(now(&client_cx).unwrap() >= until);
-                    break;
-                }
-                Err(error) => panic!("unexpected pre-expiry failure: {error:?}"),
-            }
-            asupersync::time::sleep(client_cx.now(), Duration::from_millis(1)).await;
-        }
-        assert!(
             state
                 .viewer
                 .drive(Duration::ZERO, |_| {}, block)
                 .await
-                .is_err()
-        );
-        assert!(state.viewer.is_closed());
-        assert!(state.viewer.visible(1).is_err());
+                .unwrap();
+            asupersync::time::sleep(client_cx.now(), Duration::from_millis(1)).await;
+        }
+        // The successor never became visible, so the PRECEDING view's expiry
+        // still ends input exactly on time. It suspends input (plan 11.3)
+        // instead of ending the session: I/O continues, actions are refused.
+        state
+            .viewer
+            .drive(Duration::ZERO, |_| {}, block)
+            .await
+            .unwrap();
+        assert!(!state.viewer.is_closed());
+        assert!(state.viewer.input.suspended_since().is_some());
+        assert!(matches!(
+            state.viewer.action(key(true)),
+            Err(Error::View(presentation::Error::Input(
+                fr_client::input::Error::ViewSuspended
+            )))
+        ));
+        state.viewer.close();
         state.host.close();
         assert!(state.driver.take().unwrap().await.handoff_safe());
     });
@@ -941,25 +944,23 @@ fn a_stale_view_met_by_the_transport_gate_keeps_its_typed_reason() {
         while now(&client_cx).unwrap() < until {
             asupersync::time::sleep(client_cx.now(), Duration::from_millis(1)).await;
         }
-        assert!(!gate(
+        // The view is now stale: input is SUSPENDED (plan 11.3), so the
+        // session's own I/O stays open and no refusal is recorded; the input
+        // owner itself refuses every action instead.
+        assert!(gate(
             &mut state.viewer.input,
             &state.viewer.control,
             &client_cx,
             &view
         ));
-        let recorded = view.take();
-        assert!(
-            matches!(
-                recorded,
-                Some(
-                    presentation::Error::Media(F::SourceStale | F::SourceUnknown)
-                        | presentation::Error::Input(fr_client::input::Error::Stopped(
-                            StopReason::ViewStale
-                        ))
-                )
-            ),
-            "the gate must record the stale view: {recorded:?}"
-        );
+        assert_eq!(view.take(), None);
+        assert!(state.viewer.input.suspended_since().is_some());
+        assert!(matches!(
+            state.viewer.action(key(true)),
+            Err(Error::View(presentation::Error::Input(
+                fr_client::input::Error::ViewSuspended
+            )))
+        ));
         state.viewer.close();
         state.host.close();
         assert!(state.driver.take().unwrap().await.handoff_safe());

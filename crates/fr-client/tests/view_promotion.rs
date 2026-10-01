@@ -207,7 +207,10 @@ fn promotion_preserves_source_time_and_enforces_the_grants_stricter_age() {
         ClientInstant(255_000)
     );
     assert!(input.tick(ClientInstant(254_999)).unwrap());
-    assert!(input.tick(ClientInstant(255_000)).is_err());
+    // The grant's stricter age suspends input at 255 ms (plan 11.3).
+    assert_eq!(input.tick(ClientInstant(255_000)), Ok(false));
+    assert_eq!(input.suspended_since(), Some(ClientInstant(255_000)));
+    assert_eq!(input.stopped(), None);
 }
 #[test]
 fn decode_submission_without_visibility_and_hidden_views_cannot_promote() {
@@ -289,7 +292,8 @@ fn a_grant_that_follows_a_slow_path_promotes_a_view_the_base_bound_refuses() {
         ClientInstant(615_000)
     );
     assert!(input.tick(ClientInstant(614_999)).unwrap());
-    assert!(input.tick(ClientInstant(615_000)).is_err());
+    assert_eq!(input.tick(ClientInstant(615_000)), Ok(false));
+    assert_eq!(input.suspended_since(), Some(ClientInstant(615_000)));
 }
 #[test]
 fn late_promotion_cannot_restart_expired_source_freshness() {
@@ -307,3 +311,159 @@ fn late_promotion_cannot_restart_expired_source_freshness() {
 
 #[path = "view_promotion/clipboard.rs"]
 mod clipboard;
+/// Deliver an authenticated ticket for `c` issued at host time `issued`.
+fn deliver_ticket(client: &mut InputClient, id: u128, sequence: u64, issued: u64, now: u64) {
+    let mut bytes = [0; INPUT_TICKET_BYTES];
+    let n = input_ticket::encode(
+        Ticket {
+            credentials: InputCredentials {
+                ticket: InputTicketId::from_raw(id),
+                ..credentials()
+            },
+            sequence,
+            issued_at_us: issued,
+            expires_at_us: issued + 1_000_000,
+        },
+        &mut bytes,
+        &ProtocolLimits::ABSOLUTE,
+        7,
+        InputDirection::HostToViewer,
+        InputDelivery::Reliable,
+    )
+    .unwrap();
+    client
+        .accept_ticket(&bytes[..n], clock(), ClientInstant(now))
+        .unwrap();
+}
+fn fresh(client: &mut InputClient, serial: u64, at: u64) {
+    client
+        .presented(
+            PresentedObservation {
+                session: credentials().session,
+                serial,
+                view: credentials().view,
+                received_at: ClientInstant(at),
+                source_age_upper_us: 5_000,
+            },
+            ClientInstant(at),
+        )
+        .unwrap();
+}
+#[test]
+fn a_suspension_resumes_only_with_fresh_evidence_and_a_ticket_issued_after_the_hosts_lapse() {
+    let mut client = input(credentials());
+    client
+        .confirm_mapping(
+            credentials().session,
+            credentials().view,
+            ClientInstant(30_000),
+        )
+        .unwrap();
+    fresh(&mut client, 1, 40_000);
+    let mut out = [0; 512];
+    assert_eq!(
+        client
+            .action(key(), &mut out, ClientInstant(50_000))
+            .unwrap()
+            .sequence,
+        0
+    );
+    // The view (5 ms old at 40 ms, 250 ms bound) lapses at 285 ms: suspended.
+    client.tick(ClientInstant(285_000)).unwrap();
+    assert_eq!(client.suspended_since(), Some(ClientInstant(285_000)));
+    // Fresh evidence alone does not resume...
+    fresh(&mut client, 2, 300_000);
+    assert_eq!(
+        client.action(key(), &mut out, ClientInstant(301_000)),
+        Err(input::Error::ViewSuspended)
+    );
+    // ...nor does a ticket the host may have issued before its own lapse.
+    deliver_ticket(&mut client, 5, 1, 1_300_000, 320_000);
+    assert_eq!(
+        client.action(key(), &mut out, ClientInstant(321_000)),
+        Err(input::Error::ViewSuspended)
+    );
+    // A ticket issued more than the 1 s ceiling after the suspension began,
+    // with fresh evidence, resumes input on the same lease.
+    fresh(&mut client, 3, 1_415_000);
+    deliver_ticket(&mut client, 6, 2, 2_400_000, 1_420_000);
+    assert_eq!(client.suspended_since(), None);
+    let encoded = client
+        .action(key(), &mut out, ClientInstant(1_421_000))
+        .unwrap();
+    assert_eq!(encoded.sequence, 1, "the refused actions consumed nothing");
+    assert_eq!(
+        client.suspension_totals(ClientInstant(1_421_000)),
+        (1, 1_420_000 - 285_000)
+    );
+    assert_eq!(client.stopped(), None);
+}
+#[test]
+fn a_suspension_that_outlasts_its_limit_ends_the_grant_as_a_stale_view() {
+    let mut client = input(credentials());
+    fresh(&mut client, 1, 40_000);
+    client.tick(ClientInstant(285_000)).unwrap();
+    let limit = 285_000 + input::MAX_VIEW_SUSPENSION_US;
+    client.tick(ClientInstant(limit - 1)).unwrap();
+    assert_eq!(
+        client.tick(ClientInstant(limit)),
+        Err(input::Error::Stopped(input::StopReason::ViewStale))
+    );
+}
+#[test]
+fn a_key_released_by_the_suspension_is_dropped_but_a_real_misuse_is_not() {
+    let key = |usage, transition| Action::Key {
+        key: PhysicalKey::new(usage).unwrap(),
+        transition,
+    };
+    let mut client = input(credentials());
+    client
+        .confirm_mapping(
+            credentials().session,
+            credentials().view,
+            ClientInstant(30_000),
+        )
+        .unwrap();
+    fresh(&mut client, 1, 40_000);
+    let mut out = [0; 512];
+    let press = client
+        .action(
+            key(4, KeyTransition::Press),
+            &mut out,
+            ClientInstant(50_000),
+        )
+        .unwrap();
+    assert_eq!(press.sequence, 0);
+    // Suspended while key 4 is held; the host releases it at its own lapse.
+    client.tick(ClientInstant(285_000)).unwrap();
+    fresh(&mut client, 2, 1_415_000);
+    deliver_ticket(&mut client, 6, 1, 2_400_000, 1_420_000);
+    assert_eq!(client.suspended_since(), None);
+    // The user's own release of that key, after resuming, is dropped.
+    assert_eq!(
+        client.action(
+            key(4, KeyTransition::Release),
+            &mut out,
+            ClientInstant(1_421_000)
+        ),
+        Err(input::Error::ReleasedBySuspension)
+    );
+    // A genuinely unpaired release is still a misuse.
+    assert_eq!(
+        client.action(
+            key(5, KeyTransition::Release),
+            &mut out,
+            ClientInstant(1_421_001)
+        ),
+        Err(input::Error::InvalidTransition)
+    );
+    // A new press and release of key 4 are ordinary input again.
+    let press = client
+        .action(
+            key(4, KeyTransition::Press),
+            &mut out,
+            ClientInstant(1_421_002),
+        )
+        .unwrap();
+    assert_eq!(press.sequence, 1);
+}

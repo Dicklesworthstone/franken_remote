@@ -24,6 +24,7 @@ use asupersync::{
     types::Time,
 };
 use fr_core::{
+    authority::ControlStatus,
     ids::InputTicketId,
     input_submission::{
         Cleanup, Dispatch, InputSession, InputSink, PlatformError, Receipt, Reconciliation, Refusal,
@@ -835,8 +836,17 @@ fn native_loop<S: InputSink, F: FnOnce() -> Result<S, PlatformError>, C: FnMut(&
         if sink.native_failed() {
             shared.control.stop(StopReason::NativeFailure);
         }
-        if session.monitor().deadline(now).is_err() {
-            shared.control.stop(StopReason::AuthorityEnded);
+        match session.monitor().status(now) {
+            Ok(ControlStatus::Live { .. } | ControlStatus::Suspended { released: true, .. }) => {}
+            // A stale view suspends input (plan 11.3): release every remotely
+            // held key and button now, without waiting for another input event,
+            // and confirm it so fresh readiness may revive the same lease.
+            Ok(ControlStatus::Suspended {
+                released: false, ..
+            }) => {
+                let _ = session.maintain(now, &mut sink);
+            }
+            Err(_) => shared.control.stop(StopReason::AuthorityEnded),
         }
         let command = shared.lock().command.take();
         if shared.control.is_stopped() {

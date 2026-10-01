@@ -140,7 +140,7 @@ impl PresentedInput {
             return Err(Error::Clipboard(crate::clipboard::Error::Permission));
         }
         if !self.tick(now)? {
-            return Err(Error::Input(super::Error::NoPresentedView));
+            return Err(self.not_ready());
         }
         self.input
             .attach_clipboard(channel, true, now)
@@ -161,7 +161,7 @@ impl PresentedInput {
             return Err(Error::Clipboard(crate::clipboard::Error::Permission));
         }
         if !self.tick(now)? {
-            return Err(Error::Input(super::Error::NoPresentedView));
+            return Err(self.not_ready());
         }
         self.input
             .attach_clipboard_lane(parent, outgoing, limits, true, now)
@@ -209,15 +209,29 @@ impl PresentedInput {
     /// maintenance bound, NOT permission to send input or renew control.
     pub fn maintenance_deadline(&mut self, now: ClientInstant) -> Result<ClientInstant, Error> {
         self.tick(now)?;
+        // Suspended by a stale view (plan 11.3): the grant lives until the
+        // suspension limit unless fresh evidence and a new ticket resume it.
+        if let Some(since) = self.input.suspended_since() {
+            return since
+                .0
+                .checked_add(super::MAX_VIEW_SUSPENSION_US)
+                .map(ClientInstant)
+                .ok_or(Error::Input(super::Error::InvalidConfiguration));
+        }
         self.input
             .view_until
             .ok_or(Error::Input(super::Error::NoPresentedView))
+    }
+    /// See `InputClient::abandon_unsent`: only while suspended, only for the
+    /// caller's single never-admitted record.
+    pub fn abandon_unsent(&mut self, unsent: super::Unsent) -> Result<(), Error> {
+        self.input.abandon_unsent(unsent).map_err(Error::Input)
     }
     /// Bound transport retention by the evidence used at encoding, not a newer
     /// observation received while an older action is waiting to be transmitted.
     pub fn view_deadline(&mut self, now: ClientInstant) -> Result<ClientInstant, Error> {
         if !self.tick(now)? {
-            return Err(Error::Input(super::Error::NoPresentedView));
+            return Err(self.not_ready());
         }
         if !self.input.mapped {
             return Err(Error::Input(super::Error::MappingUnconfirmed));
@@ -270,9 +284,7 @@ impl PresentedInput {
         bytes: &[u8],
         now: ClientInstant,
     ) -> Result<(), Error> {
-        if !self.tick(now)? {
-            return Err(Error::Input(super::Error::NoPresentedView));
-        }
+        self.renewal_ready(now)?;
         self.input
             .accept_control_challenge(bytes, now)
             .map_err(Error::Input)
@@ -281,17 +293,13 @@ impl PresentedInput {
         self.input.control_response_deadline()
     }
     pub fn pending_control_response(&mut self, now: ClientInstant) -> Result<Option<&[u8]>, Error> {
-        if !self.tick(now)? {
-            return Err(Error::Input(super::Error::NoPresentedView));
-        }
+        self.renewal_ready(now)?;
         self.input
             .pending_control_response(now)
             .map_err(Error::Input)
     }
     pub fn control_response_sent(&mut self, now: ClientInstant) -> Result<(), Error> {
-        if !self.tick(now)? {
-            return Err(Error::Input(super::Error::NoPresentedView));
-        }
+        self.renewal_ready(now)?;
         self.input.control_response_sent(now).map_err(Error::Input)
     }
     pub fn stopped(&self) -> Option<StopReason> {
@@ -389,20 +397,49 @@ impl PresentedInput {
         }
         Ok(())
     }
+    /// Control renewal needs a presented view, never merely a live
+    /// connection, and continues while a stale view suspends input (plan 11.3).
+    fn renewal_ready(&mut self, now: ClientInstant) -> Result<(), Error> {
+        if self.tick(now)? || self.input.suspended_since().is_some() {
+            Ok(())
+        } else {
+            Err(self.not_ready())
+        }
+    }
+    /// Why input is not ready: suspended by a stale view, or no view yet.
+    fn not_ready(&self) -> Error {
+        Error::Input(if self.input.suspended_since().is_some() {
+            super::Error::ViewSuspended
+        } else {
+            super::Error::NoPresentedView
+        })
+    }
+    /// Since when a stale view suspends this grant's input (plan 11.3).
+    pub const fn suspended_since(&self) -> Option<ClientInstant> {
+        self.input.suspended_since()
+    }
+    /// Suspensions so far and their total duration, the current one included.
+    pub fn suspension_totals(&self, now: ClientInstant) -> (u32, u64) {
+        self.input.suspension_totals(now)
+    }
     /// Service on idle, not only on UI events. False means temporarily awaiting
-    /// a qualified view and forbids new input. Existing view/receipt deadlines
+    /// a qualified view, or suspended by a stale one, and forbids new input. Existing view/receipt deadlines
     /// continue running while a new compositor submission awaits visibility.
     pub fn tick(&mut self, now: ClientInstant) -> Result<bool, Error> {
         self.input.tick(now)?;
         match self.view.evidence(now.0) {
             Ok(evidence) => {
                 self.deliver(evidence, now)?;
-                Ok(true)
+                // Fresh evidence alone does not resume a suspension: it also
+                // needs a ticket issued after the host's own lapse.
+                Ok(self.input.suspended_since().is_none())
             }
             Err(freshness::Error::NotSubmitted) => Ok(false),
-            Err(freshness::Error::SourceUnknown | freshness::Error::SourceStale)
-                if !self.active =>
-            {
+            // A stale or unknown view SUSPENDS active input (plan 11.3).
+            Err(freshness::Error::SourceUnknown | freshness::Error::SourceStale) => {
+                if self.active {
+                    self.input.suspend(now);
+                }
                 Ok(false)
             }
             Err(error) => {
@@ -427,7 +464,7 @@ impl PresentedInput {
         now: ClientInstant,
     ) -> Result<Encoded, Error> {
         if !self.tick(now)? {
-            return Err(Error::Input(super::Error::NoPresentedView));
+            return Err(self.not_ready());
         }
         self.input.pointer(position, out, now).map_err(Error::Input)
     }
@@ -438,7 +475,7 @@ impl PresentedInput {
         now: ClientInstant,
     ) -> Result<Encoded, Error> {
         if !self.tick(now)? {
-            return Err(Error::Input(super::Error::NoPresentedView));
+            return Err(self.not_ready());
         }
         self.input.action(action, out, now).map_err(Error::Input)
     }

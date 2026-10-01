@@ -34,7 +34,9 @@ impl InputClient {
         if !self.mapped {
             return Err(Error::MappingUnconfirmed);
         }
-        if self.view_until.is_none() {
+        // A stale view suspends input, not the lease (plan 11.3): control
+        // renewal continues while suspended; it never refreshes the view.
+        if self.view_until.is_none() && self.suspended_since.is_none() {
             return Err(Error::NoPresentedView);
         }
         Ok(())

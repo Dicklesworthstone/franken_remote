@@ -3,7 +3,7 @@
 //! sink. A watchdog must service `maintain` while idle and use the independent
 //! revoke handle when OS work stalls. An OS call already entered is irreversible.
 use crate::{
-    authority::{AuthorityError, SessionAuthority},
+    authority::{AuthorityError, ControlStatus, SessionAuthority},
     ids::{InputLeaseId, InputTicketId, RemoteSessionId},
     input::{
         DesktopPoint, InputBounds, InputCredentials, InputEvent, InputRequest, InputView,
@@ -225,21 +225,31 @@ impl InputMonitor {
     /// Check a freshly sampled clock, returning the actual authority deadline.
     /// Ticket expiry is intentionally independent: it refuses new actions but
     /// does not release a key that is still held under a live control lease.
+    /// A stale view that suspends the lease refuses with `ViewUnready` WITHOUT
+    /// revoking it (plan 11.3); lease, observation or suspension-limit expiry
+    /// revokes terminally.
     pub fn deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
+        match self.status(now)? {
+            ControlStatus::Live { until } => Ok(until),
+            ControlStatus::Suspended { .. } => Err(Refusal::Authority(AuthorityError::ViewUnready)),
+        }
+    }
+    /// Live or suspended control at a freshly sampled clock. Any error has
+    /// already revoked this lease's native owner (terminal).
+    pub fn status(&self, now: HostInstant) -> Result<ControlStatus, Refusal> {
         let result = self.with(|a| {
-            let deadline = a.control_deadline()?;
-            if now >= deadline {
-                // Fence before releasing the policy lock. A concurrent renewal
-                // cannot install authority after this terminal expiry decision.
-                self.revoke();
-                return Err(AuthorityError::LeaseExpired);
-            }
-            Ok(deadline)
+            // Fence before releasing the policy lock on a terminal decision: a
+            // concurrent renewal cannot install authority after it.
+            a.control_status(now).inspect_err(|_| self.revoke())
         });
         if result.is_err() {
             self.revoke();
         }
         result
+    }
+    /// The native owner released every held key and button after a lapse.
+    pub fn confirm_suspension_release(&self) -> Result<(), Refusal> {
+        self.with(|a| a.confirm_suspension_release(self.lease))
     }
     /// Read-only final check for publishing this native owner's original grant.
     /// The retained owner identity must still match, including after revocation
@@ -529,16 +539,29 @@ impl InputSession {
         })
     }
     /// Service independently during idle, not only when a packet arrives.
-    /// Ticket expiry rejects actions; lease/view expiry additionally ends held
-    /// state. A runtime watchdog must call this; this type starts no timer itself.
+    /// Ticket expiry rejects actions. A stale view suspends the lease: held
+    /// state is released (without revoking) and, once nothing is held, the
+    /// release is confirmed so fresh readiness may revive input (plan 11.3).
+    /// Lease, observation or suspension-limit expiry revokes and cleans up.
+    /// A runtime watchdog must call this; this type starts no timer itself.
     pub fn maintain(&mut self, now: HostInstant, sink: &mut impl InputSink) -> Cleanup {
-        if self.revoke.is_revoked()
-            || !self
+        if !self.revoke.is_revoked() {
+            match self
                 .authority
-                .with_time(&mut self.clock, now, |a, at| Ok(a.has_live_control(at)))
-                .unwrap_or(false)
-        {
-            self.revoke();
+                .with_time(&mut self.clock, now, SessionAuthority::control_status)
+            {
+                Ok(ControlStatus::Live { .. }) => {}
+                Ok(ControlStatus::Suspended { released, .. }) => {
+                    let cleanup = self.release_held(sink);
+                    if cleanup.remaining == 0 && !released {
+                        // A failed confirmation leaves the suspension pending:
+                        // readiness stays refused, which is the safe side.
+                        let _ = self.authority.confirm_suspension_release();
+                    }
+                    return cleanup;
+                }
+                Err(_) => self.revoke(),
+            }
         }
         if self.revoke.is_revoked() {
             self.cleanup(sink)
@@ -554,6 +577,11 @@ impl InputSession {
     /// a platform trust limitation, not claimed to be perfectly attributable.
     pub fn cleanup(&mut self, sink: &mut impl InputSink) -> Cleanup {
         self.revoke();
+        self.release_held(sink)
+    }
+    /// The release-only part of cleanup, WITHOUT fencing this owner: a
+    /// suspended lease keeps its identity and ledger. No press is possible.
+    pub fn release_held(&mut self, sink: &mut impl InputSink) -> Cleanup {
         let mut submitted = 0;
         if let Some(direction) = self.wheel {
             let prepared = PreparedSink(sink);

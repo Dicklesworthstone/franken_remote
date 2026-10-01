@@ -204,6 +204,18 @@ impl ObservationControl {
         }
         Ok(now)
     }
+    /// The control lease itself is alive: live, or suspended by a stale view
+    /// (plan 11.3). For renewal and its I/O only, never for submitting input.
+    pub(crate) fn check_lease(&self) -> Result<HostInstant, Error> {
+        self.check()?;
+        if let Some(admission) = &self.admission {
+            admission.control().map_err(Error::Admission)?;
+        }
+        let mut authority = self.authority.lock().map_err(|_| Error::Poisoned)?;
+        let now = host_now(&self.cx)?;
+        authority.control_status(now).map_err(Error::Authority)?;
+        Ok(now)
+    }
     pub(crate) fn owns_control_lease(
         &self,
         lease: &fr_core::input_submission::ControlLease,

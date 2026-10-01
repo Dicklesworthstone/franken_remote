@@ -170,7 +170,8 @@ impl ControlRenewal {
         {
             return Err(Error::Stopped);
         }
-        self.observation.check_control().map_err(Error::Media)?;
+        // Renewal continues while a stale view suspends input (plan 11.3).
+        self.observation.check_lease().map_err(Error::Media)?;
         let now = input_watchdog::host_now(&self.cx).map_err(|_| Error::Clock)?;
         self.lease.deadline(now).map_err(Error::Authority)?;
         Ok(now)
@@ -257,7 +258,7 @@ impl ControlRenewal {
                     || {
                         !control.is_stopped()
                             && admission.permitted()
-                            && observation.check_control().is_ok()
+                            && observation.check_lease().is_ok()
                     },
                 ) {
                     Ok(()) => {
@@ -306,11 +307,7 @@ impl ControlRenewal {
         let mut failure = None;
         let result = io.connection.receive(
             &cx,
-            || {
-                !control.is_stopped()
-                    && admission.permitted()
-                    && observation.check_control().is_ok()
-            },
+            || !control.is_stopped() && admission.permitted() && observation.check_lease().is_ok(),
             |route, bytes| {
                 let kind = bytes.get(6..8);
                 if route == Route::Stream(self.routes.inbound)
@@ -383,7 +380,7 @@ impl ControlRenewal {
                 .drive(&self.cx, wait.min(remaining), || {
                     !control.is_stopped()
                         && admission.permitted()
-                        && observation.check_control().is_ok()
+                        && observation.check_lease().is_ok()
                 })
                 .await
                 .map_err(Error::Transport)?;

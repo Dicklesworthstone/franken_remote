@@ -208,6 +208,19 @@ grant needs a new `fr connect --control`. The completion record has
 (`input_results`, `input_submitted_to_os`); these are host-reported stages,
 not local proof of an effect.
 
+A stale or unknown view suspends control input instead of ending the session
+(plan 11.3).
+- While suspended, captured keys, clicks and motion are dropped, never queued.
+- The host releases every key and button it holds for this client.
+- Input resumes on the same lease once the view is fresh again and a ticket
+  issued after the host's own lapse arrives. That is at least about one second
+  after the lapse.
+- A release of a key held across the suspension is dropped, since the host
+  already released it.
+- A suspension longer than 10 s ends the session with `view_stale`.
+- `input_suspensions` and `input_suspended_ms` report how often and how long
+  input was suspended.
+
 The controlled share forwards the host's cursor too (`frd run --input-agent`
 selects the optional `remote-cursor` capability the client offers), and exactly
 ONE pointer renders it. Before the grant the viewer composites the overlay as

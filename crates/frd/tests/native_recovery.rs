@@ -284,6 +284,31 @@ fn malformed_foreign_source_and_foreign_session_requests_do_not_stale_a_healthy_
     });
 }
 #[test]
+fn a_stalled_unchanged_observation_is_dropped_without_ending_the_subscription() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let (control, _input) = control(&cx, 9);
+        let mut source = source(&control, "healthy").await;
+        let mut subscription = subscription(&control, &mut source, 2_000_000).await;
+        let mut bytes = [0; 1150];
+        while subscription.next_packet(&mut bytes).unwrap().is_some() {}
+        // Evidence from a capture stalled past the 250 ms reference horizon is
+        // obsolete on arrival: nothing is sent and the subscription survives.
+        let late = source.capture_if_changed(&control, false).await.unwrap();
+        assert!(late.is_unchanged());
+        sleep(cx.timer_driver().unwrap().now(), Duration::from_millis(300)).await;
+        subscription.enqueue_capture(late).unwrap();
+        assert!(subscription.next_packet(&mut bytes).unwrap().is_none());
+        // The next actual observation is sent as usual.
+        let fresh = source.capture_if_changed(&control, false).await.unwrap();
+        assert!(fresh.is_unchanged());
+        subscription.enqueue_capture(fresh).unwrap();
+        let progress = subscription.next_packet(&mut bytes).unwrap().unwrap();
+        assert_eq!(progress.channel(), Channel::MediaConfig);
+        stop(&mut source, &cx).await;
+    });
+}
+#[test]
 fn worker_polling_and_delayed_capture_cannot_restart_the_original_recovery_deadline() {
     runtime().block_on(async {
         let cx = Cx::current().unwrap();

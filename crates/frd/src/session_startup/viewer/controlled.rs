@@ -15,7 +15,7 @@ use crate::{
 };
 use asupersync::{cx::Cx, types::CancelKind};
 use fr_client::input::{
-    self, Action, ClientInstant, Encoded, ResultEvent, StopReason,
+    self, Action, ClientInstant, Encoded, ResultEvent, StopReason, Unsent,
     held::EncodedHeldState,
     presentation::{self, PresentedInput},
 };
@@ -83,6 +83,9 @@ struct Pending {
     bytes: [u8; MAX_INPUT_RECORD_BYTES],
     len: usize,
     until: u64,
+    /// The sequence this never-admitted record consumed, returned if a stale
+    /// view suspends input before the transport admits it.
+    unsent: Unsent,
 }
 /// Consumes one existing explicit grant and its exact media/input/clock owners.
 /// One fixed-size pending record holds an action, pointer OR held-state snapshot.
@@ -242,6 +245,13 @@ impl ControlledViewer {
     pub fn granted_capabilities(&self) -> fr_core::input_submission::Capabilities {
         self.input.capabilities()
     }
+    /// Stale-view suspensions of this grant's input so far and their total
+    /// duration in microseconds, the current one included (plan 21: time
+    /// spent with input suspended by stale view). Counts only, no content.
+    pub fn suspension_totals(&self) -> (u32, u64) {
+        let at = now(&self.session.cx).unwrap_or(0);
+        self.input.suspension_totals(ClientInstant(at))
+    }
     pub fn control(&self) -> ViewerControl {
         self.control.clone()
     }
@@ -275,6 +285,7 @@ impl ControlledViewer {
             .map_err(Error::Media)?;
         let t = ClientInstant(now(&self.session.cx)?);
         self.input.maintenance_deadline(t)?;
+        self.abandon_if_suspended()?;
         if let Some(events) = &self.events {
             events.check(t).map_err(Error::Capture)?;
         }
@@ -282,6 +293,19 @@ impl ControlledViewer {
             return Err(Error::Expired);
         }
         Ok(t)
+    }
+    /// A stale view suspended input (plan 11.3): the one record the transport
+    /// never admitted is returned to the input owner, never sent late and never
+    /// expired as a failure. The host never saw it.
+    fn abandon_if_suspended(&mut self) -> Result<(), Error> {
+        if self.input.suspended_since().is_some()
+            && let Some(pending) = self.pending.take()
+        {
+            self.input
+                .abandon_unsent(pending.unsent)
+                .map_err(Error::View)?;
+        }
+        Ok(())
     }
     fn check(&mut self) -> Result<ClientInstant, Error> {
         let result = self.check_inner();
@@ -308,9 +332,11 @@ impl ControlledViewer {
             bytes: [0; MAX_INPUT_RECORD_BYTES],
             len: 0,
             until,
+            unsent: Unsent::Pointer,
         };
         let result = self.input.action(action, &mut p.bytes, t)?;
         p.len = result.bytes;
+        p.unsent = Unsent::Action(result.sequence);
         self.pending = Some(p);
         self.note_action(&action, t);
         Ok(result)
@@ -322,6 +348,7 @@ impl ControlledViewer {
             bytes: [0; MAX_INPUT_RECORD_BYTES],
             len: 0,
             until,
+            unsent: Unsent::Pointer,
         };
         let result = self.input.pointer(position, &mut p.bytes, t)?;
         p.len = result.bytes;
@@ -341,11 +368,13 @@ impl ControlledViewer {
             bytes: [0; MAX_INPUT_RECORD_BYTES],
             len: 0,
             until,
+            unsent: Unsent::Pointer,
         };
         let Some(result) = self.input.reconcile_held(observed, &mut p.bytes, t)? else {
             return Ok(None);
         };
         p.len = result.bytes;
+        p.unsent = Unsent::Held(result.sequence);
         self.pending = Some(p);
         Ok(Some(result))
     }
@@ -412,6 +441,11 @@ impl ControlledViewer {
             }) {
                 Ok(()) => self.pending = None,
                 Err(input_quic::Error::Transport(quic::Error::Backpressure)) => {}
+                // Suspended between the check and this send: admission refused
+                // it (all or nothing), so it was never admitted either.
+                Err(_) if self.input.suspended_since().is_some() && !self.control.is_stopped() => {
+                    self.abandon_if_suspended()?;
+                }
                 Err(e) => {
                     return Err(match (e, view.take()) {
                         (input_quic::Error::Transport(quic::Error::Unauthorized), Some(view)) => {
@@ -594,7 +628,11 @@ impl ControlledViewer {
             // submission during this short callback gap, but do not make it
             // impossible for the actual visibility callback to complete. The
             // preceding view and every queued action keep their old deadlines.
-            if !operation.viewer.input.tick(t)? {
+            // A SUSPENDED view (plan 11.3) instead keeps the session's I/O
+            // running below: fresh media, reports and renewals resume it.
+            if !operation.viewer.input.tick(t)?
+                && operation.viewer.input.suspended_since().is_none()
+            {
                 let viewer = &mut *operation.viewer;
                 let mut until = viewer.input.maintenance_deadline(t)?.0;
                 if let Some(deadline) = viewer.files.deadline_us() {
@@ -615,9 +653,7 @@ impl ControlledViewer {
             let viewer = &mut *operation.viewer;
             let cx = &viewer.session.cx;
             let t = ClientInstant(now(cx)?);
-            let mut until = viewer
-                .input
-                .view_deadline(t)?
+            let mut until = input_deadline(&mut viewer.input, t)?
                 .0
                 .min(viewer.session.heard_until);
             if let Some(p) = &viewer.pending {
@@ -679,10 +715,25 @@ fn gate(
     };
     match input.view_deadline(ClientInstant(t)) {
         Ok(_) => true,
+        // Suspended by a stale view (plan 11.3): the session's own I/O (media,
+        // presented reports, renewals) continues. No input record is sent:
+        // new ones are refused and the unsent one is abandoned, never admitted.
+        Err(_) if input.suspended_since().is_some() && input.stopped().is_none() => true,
         Err(error) => {
             view.set(Some(error));
             false
         }
+    }
+}
+/// The earliest deadline the input owner imposes on this turn: its view
+/// deadline, or while suspended by a stale view, the suspension limit.
+fn input_deadline(input: &mut PresentedInput, t: ClientInstant) -> Result<ClientInstant, Error> {
+    match input.view_deadline(t) {
+        Ok(until) => Ok(until),
+        Err(_) if input.suspended_since().is_some() && input.stopped().is_none() => {
+            input.maintenance_deadline(t).map_err(Error::View)
+        }
+        Err(error) => Err(Error::View(error)),
     }
 }
 /// Which local deadline had already passed: the view (its owner reports why),

@@ -211,12 +211,15 @@ fn stopped_or_stale_view_cannot_be_resurrected_by_reconciliation() {
         );
         assert_eq!(out, [0x99; HELD_STATE_BYTES]);
     }
+    // A stale view suspends input (plan 11.3); reconciliation stays refused.
     let mut c = setup();
-    let mut out = [0; HELD_STATE_BYTES];
+    let mut out = [0x99; HELD_STATE_BYTES];
     assert_eq!(
         c.reconcile_held(HeldState::empty(), &mut out, ClientInstant(1_500_000)),
-        Err(Error::Stopped(StopReason::ViewStale))
+        Err(Error::ViewSuspended)
     );
+    assert_eq!(out, [0x99; HELD_STATE_BYTES]);
+    assert_eq!(c.stopped(), None);
 }
 #[test]
 fn full_action_receipt_window_does_not_block_release_only_snapshot() {

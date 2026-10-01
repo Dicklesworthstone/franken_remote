@@ -79,7 +79,15 @@ impl QuicInput {
         let Reply::Ticket(result) = reply else {
             return Err(Error::Agent(crate::input_agent::Error::NotInputCommand));
         };
-        let ticket = result.map_err(Error::TicketRefused)?;
+        let ticket = match result {
+            Ok(ticket) => ticket,
+            // A stale view suspends the lease (plan 11.3): no ticket this turn.
+            // The next cadence retries once fresh readiness revives it.
+            Err(fr_core::input_submission::Refusal::Authority(
+                fr_core::authority::AuthorityError::ViewUnready,
+            )) => return Ok(Progress::Idle),
+            Err(refusal) => return Err(Error::TicketRefused(refusal)),
+        };
         let mut bytes = [0; INPUT_TICKET_BYTES];
         let length = input_ticket::encode(
             ticket,

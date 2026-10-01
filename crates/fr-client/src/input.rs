@@ -102,9 +102,26 @@ pub enum Error {
     InvalidTransition,
     Backpressure,
     TicketExpired,
+    /// A stale or unknown view suspends input (plan 11.3). The action is
+    /// refused, not queued; input resumes after fresh evidence and a new ticket.
+    ViewSuspended,
+    /// A release or repeat of a key or button that a suspension already
+    /// released on the host. Nothing is sent; the caller drops the event.
+    ReleasedBySuspension,
     Control(crate::authority::Error),
     Wire(WireError),
 }
+/// A record encoded but never admitted to the transport when a stale view
+/// suspended input, identified by the sequence space it consumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unsent {
+    Action(u64),
+    Pointer,
+    Held(u64),
+}
+/// Longest a stale view may suspend input before the grant ends with
+/// `StopReason::ViewStale` (plan 11.3), matching the host's own limit.
+pub const MAX_VIEW_SUSPENSION_US: u64 = 10_000_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use]
 pub struct Encoded {
@@ -160,6 +177,16 @@ pub struct InputClient {
     control_response: Option<crate::authority::ObservationResponder>,
     keys: [bool; 256],
     buttons: [bool; 5],
+    /// When a stale view suspended input, if it is suspended now.
+    suspended_since: Option<ClientInstant>,
+    /// Keys and buttons held when a suspension released them on the host,
+    /// until the user's own release or next press.
+    released_keys: [bool; 256],
+    released_buttons: [bool; 5],
+    /// A suspension resumes only with a ticket issued after the host's lapse.
+    awaiting_ticket: bool,
+    suspensions: u32,
+    suspended_us: u64,
 }
 impl InputClient {
     /// The caller has authenticated the channel and received an explicit grant.
@@ -213,6 +240,12 @@ impl InputClient {
             control_response: None,
             keys: [false; 256],
             buttons: [false; 5],
+            suspended_since: None,
+            released_keys: [false; 256],
+            released_buttons: [false; 5],
+            awaiting_ticket: false,
+            suspensions: 0,
+            suspended_us: 0,
         })
     }
     pub fn stop(&mut self, reason: StopReason) {
@@ -254,6 +287,12 @@ impl InputClient {
             return self.fail(StopReason::ReceiptTimeout);
         }
         if self.view_until.is_some_and(|until| now >= until) {
+            self.suspend(now);
+        }
+        if self
+            .suspended_since
+            .is_some_and(|since| now.0.saturating_sub(since.0) >= MAX_VIEW_SUSPENSION_US)
+        {
             return self.fail(StopReason::ViewStale);
         }
         if let Some(owner) = &self.clipboard_projection
@@ -306,7 +345,9 @@ impl InputClient {
             return self.fail(StopReason::ClockRegression);
         }
         let Some(remaining) = self.view_bound_us.checked_sub(evidence.source_age_upper_us) else {
-            return self.fail(StopReason::ViewStale);
+            self.observation = Some(evidence.serial);
+            self.suspend(now);
+            return Ok(());
         };
         let Some(until) = evidence
             .received_at
@@ -316,13 +357,97 @@ impl InputClient {
         else {
             return self.fail(StopReason::CounterExhausted);
         };
-        if now >= until {
-            return self.fail(StopReason::ViewStale);
-        }
         self.observation = Some(evidence.serial);
+        if now >= until {
+            self.suspend(now);
+            return Ok(());
+        }
         self.view_until = Some(until);
+        self.try_resume(now);
         self.clipboard_readiness();
         Ok(())
+    }
+    /// A stale or unknown view suspends input (plan 11.3): nothing is encoded
+    /// or queued until fresh evidence AND a ticket issued after the host's own
+    /// lapse arrive. The host releases remotely held keys and buttons at that
+    /// lapse, so the local held-state mirror starts empty again.
+    pub fn suspend(&mut self, now: ClientInstant) {
+        self.view_until = None;
+        if self.suspended_since.is_none() && self.stopped.is_none() {
+            self.suspended_since = Some(now);
+            self.awaiting_ticket = true;
+            self.suspensions = self.suspensions.saturating_add(1);
+            // The clipboard lane's authority projection cannot outlive a
+            // lapse: only a ticket proves the lease, none is issued while
+            // suspended, and an expired projection is never revived. The
+            // clipboard ends for this grant; input itself continues.
+            if let Some(owner) = self.clipboard_projection.take() {
+                owner.stop();
+            }
+            for (released, held) in self.released_keys.iter_mut().zip(self.keys) {
+                *released |= held;
+            }
+            for (released, held) in self.released_buttons.iter_mut().zip(self.buttons) {
+                *released |= held;
+            }
+            self.keys = [false; 256];
+            self.buttons = [false; 5];
+        }
+    }
+    fn try_resume(&mut self, now: ClientInstant) {
+        if let Some(since) = self.suspended_since
+            && !self.awaiting_ticket
+            && self.view_until.is_some()
+        {
+            self.suspended_us = self
+                .suspended_us
+                .saturating_add(now.0.saturating_sub(since.0));
+            self.suspended_since = None;
+        }
+    }
+    /// While suspended, return the most recent record the transport never
+    /// admitted (still in the caller's one unsent slot). Its sequence is reused
+    /// by the next record, so the host's strictly ordered stream sees no gap.
+    /// The host never saw it: nothing is replayed, retried or rolled back.
+    pub fn abandon_unsent(&mut self, unsent: Unsent) -> Result<(), Error> {
+        if self.suspended_since.is_none() {
+            return Err(Error::InvalidTransition);
+        }
+        match unsent {
+            Unsent::Action(sequence) => {
+                if self.next_action != sequence.checked_add(1) {
+                    return Err(Error::InvalidTransition);
+                }
+                let slot = self
+                    .pending
+                    .iter()
+                    .position(|p| p.is_some_and(|p| p.sequence == sequence))
+                    .ok_or(Error::InvalidTransition)?;
+                self.pending[slot] = None;
+                self.next_action = Some(sequence);
+            }
+            Unsent::Held(sequence) => {
+                if self.next_held != sequence.checked_add(1) {
+                    return Err(Error::InvalidTransition);
+                }
+                self.next_held = Some(sequence);
+                self.held_after = None;
+            }
+            // Replaceable pointer state: the host tolerates missing datagrams.
+            Unsent::Pointer => {}
+        }
+        Ok(())
+    }
+    /// Since when input is suspended by a stale view, if it is now.
+    pub const fn suspended_since(&self) -> Option<ClientInstant> {
+        self.suspended_since
+    }
+    /// Suspensions so far and their total duration, the current one included.
+    pub fn suspension_totals(&self, now: ClientInstant) -> (u32, u64) {
+        let current = self
+            .suspended_since
+            .map_or(0, |since| now.0.saturating_sub(since.0));
+        (self.suspensions, self.suspended_us.saturating_add(current))
     }
     /// The source-age bound for this path, between the configured base and
     /// 1.5 s. Applies to later evidence; a view deadline already derived from
@@ -364,6 +489,9 @@ impl InputClient {
     }
     fn ready(&mut self, now: ClientInstant) -> Result<(), Error> {
         self.tick(now)?;
+        if self.suspended_since.is_some() {
+            return Err(Error::ViewSuspended);
+        }
         if self.ticket_state.is_some_and(|s| now.0 >= s.until_us) {
             return Err(Error::TicketExpired);
         }
@@ -472,10 +600,14 @@ impl InputClient {
         match event {
             InputEvent::Key { key, transition } => {
                 self.keys[usize::from(key.usage())] = transition != KeyTransition::Release;
+                self.released_keys[usize::from(key.usage())] = false;
             }
             InputEvent::Button {
                 button, pressed, ..
-            } => self.buttons[button as usize - 1] = pressed,
+            } => {
+                self.buttons[button as usize - 1] = pressed;
+                self.released_buttons[button as usize - 1] = false;
+            }
             _ => {}
         }
         self.pending[slot] = Some(Pending {
@@ -504,6 +636,12 @@ impl InputClient {
             Action::Key { key, transition } => {
                 self.require(Capability::Keys)?;
                 let held = self.keys[usize::from(key.usage())];
+                if transition != KeyTransition::Press
+                    && !held
+                    && self.released_keys[usize::from(key.usage())]
+                {
+                    return Err(Error::ReleasedBySuspension);
+                }
                 if (transition == KeyTransition::Press) == held {
                     return Err(Error::InvalidTransition);
                 }
@@ -522,6 +660,12 @@ impl InputClient {
             } => {
                 self.require(Capability::Buttons)?;
                 self.position(position)?;
+                if !pressed
+                    && !self.buttons[button as usize - 1]
+                    && self.released_buttons[button as usize - 1]
+                {
+                    return Err(Error::ReleasedBySuspension);
+                }
                 if self.buttons[button as usize - 1] == pressed {
                     return Err(Error::InvalidTransition);
                 }

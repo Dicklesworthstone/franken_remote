@@ -67,18 +67,36 @@ the rejection only as an opaque code, and the fix is upstream. Gates:
   RTTs at the viewer and four at the host, capped at 1 s.
   - Control at 120 ms RTT without loss now holds in some namespace rows (2 of
     8, against 0 of 2 before).
-  - Diagnostics show the main remaining limit: a stale view ends control
-    instead of suspending input (plan 11.3). That is terminal today, even at
-    6 ms RTT with 1% loss.
+  - Diagnostics showed the main remaining limit: a stale view ended control
+    instead of suspending input (plan 11.3), even at 6 ms RTT with 1% loss.
+- A stale view now suspends control input instead of ending it
+  (fr-suspend-o37f, PRESENTATION_READINESS.md). The host releases held input
+  at the lapse, and the same lease resumes on fresh evidence.
+  - Namespace A/B, control matrix at load 21-45: 3 runs with suspension
+    against 2 on 33c2bd0 without it.
+    - 6 ms RTT with 5% loss held in 5 of 6 rows (0 of 3 without).
+    - 120 ms RTT without loss held 2 of 2 (0 of 1 without).
+    - No row ended with `view_stale` (5 rows did without).
+    - An untyped `native_session_failed` still aborted 1 of 3 runs (2 of 2
+      without).
+  - The busy-screen view-only must-hold row (40 ms RTT, 1% loss) failed 3 of
+    10 runs on this build. In the same session the baseline failed 1 of 5
+    (2 of 11 before). The slice's only view-only change drops an
+    already-expired observation instead of ending the session, so no
+    mechanism links them. That is not proof of no regression at this sample
+    size.
 - An expired decoder restart is named (`video_startup_expired`).
 - Harness fixes:
   - the stale-view test no longer SIGSTOPs other suites' capture workers;
   - control-e2e pointer polling no longer misreads a 120 ms RTT path as lost.
 
 **Open, in priority order:**
-- Control over ordinary tailnet paths: a stale view still ends control instead
-  of suspending input (plan 11.3, the remaining half of f7ts). At 120 ms RTT,
-  record queueing can outlast the 3-PTO delivery allowance. See
+- Control over lossy paths. A lost video reference ends a controlled session,
+  because reference recovery runs only in view-only sessions. It shows as
+  `video_reference_lost`, or as `host_control_revoked` with reason
+  `local_revoke` when the host's media loop ends first; that reason is a
+  mislabel. At 120 ms RTT with loss, record queueing outlasts the 3-PTO
+  delivery allowance (`transport_deadline_expired`). See
   PRESENTATION_FRESHNESS.md.
 - A live two-machine run: no client on another tailnet node has ever connected
   (owner decision needed: a second machine, or an auth key for an isolated test

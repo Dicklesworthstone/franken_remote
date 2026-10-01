@@ -1,6 +1,4 @@
-use fr_client::input::{
-    ClientInstant, InputClient, Policy, PresentedObservation, StopReason, viewport::*,
-};
+use fr_client::input::{ClientInstant, InputClient, Policy, PresentedObservation, viewport::*};
 use fr_core::{
     authority::{AuthorityPolicy, SessionAuthority},
     ids::*,
@@ -306,9 +304,7 @@ fn layout_confirmation_is_neither_host_acknowledgement_nor_freshness() {
     ready(&mut input, creds);
     assert_eq!(
         input.pointer_on(&viewport, &point, &mut out, ClientInstant(250_000)),
-        Err(Error::Input(fr_client::input::Error::Stopped(
-            StopReason::ViewStale
-        )))
+        Err(Error::Input(fr_client::input::Error::ViewSuspended))
     );
 }
 

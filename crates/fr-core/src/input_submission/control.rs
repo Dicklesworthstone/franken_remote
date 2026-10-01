@@ -1,7 +1,7 @@
 //! Renewal-only access to the exact native lease. No native mailbox or OS call.
 use super::{
-    AuthorityError, HostInstant, InputLeaseId, InputMonitor, InputSession, Refusal,
-    RemoteSessionId, SessionAuthority,
+    ControlStatus, HostInstant, InputLeaseId, InputMonitor, InputSession, Refusal, RemoteSessionId,
+    SessionAuthority,
 };
 use std::sync::{Arc, Mutex};
 
@@ -48,13 +48,14 @@ impl ControlLease {
     pub fn stopped(&self) -> bool {
         self.monitor.is_revoked()
     }
+    /// The lease's live deadline for renewal. A stale view SUSPENDS input but
+    /// not the lease (plan 11.3): renewals continue until the lease,
+    /// observation or suspension limit ends.
     pub fn deadline(&mut self, now: HostInstant) -> Result<HostInstant, Refusal> {
         let result = self.monitor.with_time(&mut self.clock, now, |a, at| {
-            let until = a.control_deadline()?;
-            if at >= until {
-                return Err(AuthorityError::LeaseExpired);
+            match a.control_status(at)? {
+                ControlStatus::Live { until } | ControlStatus::Suspended { until, .. } => Ok(until),
             }
-            Ok(until)
         });
         if result.is_err() {
             self.stop();

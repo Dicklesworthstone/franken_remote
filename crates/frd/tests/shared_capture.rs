@@ -4,6 +4,7 @@
 use asupersync::{
     cx::Cx,
     runtime::{Runtime, RuntimeBuilder},
+    time::sleep,
     types::Budget,
 };
 use fr_core::{
@@ -292,6 +293,41 @@ fn unchanged_native_results_update_both_subscribers_without_another_encoded_allo
         a.close();
         b.close();
         assert_eq!(pool.usage(), BudgetUsage::default());
+        stop(&mut s, &cx).await;
+    });
+}
+#[test]
+fn a_stalled_unchanged_result_is_dropped_without_fencing_the_subscriber() {
+    run_shared!(rt, cx, {
+        let (owner, _) = gate(&rt, 1);
+        let (ac, ai) = gate(&rt, 2);
+        let mut s = source(&owner, false).await;
+        let pool = pool();
+        let mut a = egress(&ac, limits(1150), bindings(1), SendPolicy::default());
+        let mut ar = receiver(&cx, limits(1150), bindings(1));
+        let initial = capture(&owner, &mut s, &pool, true).await;
+        initial.distribute(&mut [&mut a]).unwrap();
+        pump(&cx, &mut a, &mut ar);
+        decoded(&cx, &mut ar);
+        drop(initial);
+        // Evidence from a capture stalled past the 250 ms reference horizon is
+        // obsolete on arrival: nothing is sent, and neither the subscriber's
+        // cache nor its view or input is fenced.
+        let late = capture(&owner, &mut s, &pool, false).await;
+        assert!(late.is_unchanged());
+        sleep(cx.timer_driver().unwrap().now(), Duration::from_millis(300)).await;
+        assert_eq!(late.distribute(&mut [&mut a]).unwrap().results(), &[Ok(())]);
+        assert_eq!(pump(&cx, &mut a, &mut ar), Vec::<Channel>::new());
+        assert!(ac.view_ready().unwrap());
+        assert!(input_live(&cx, &ai));
+        // The next actual observation is sent as usual.
+        let fresh = capture(&owner, &mut s, &pool, false).await;
+        assert_eq!(
+            fresh.distribute(&mut [&mut a]).unwrap().results(),
+            &[Ok(())]
+        );
+        assert_eq!(pump(&cx, &mut a, &mut ar), [Channel::MediaConfig]);
+        a.close();
         stop(&mut s, &cx).await;
     });
 }

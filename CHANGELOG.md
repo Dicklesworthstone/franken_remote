@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026-09-30 — a stale view suspends control instead of ending it
+
+- When the presented view goes stale under a held control lease, input is now
+  suspended and the lease survives (plan 11.3; PRESENTATION_READINESS.md,
+  Suspension).
+  - The host releases every key and button it holds for the client at the
+    lapse. Fresh readiness waits until that release is confirmed.
+  - Control renewals, media and presented reports continue.
+  - The client refuses input while suspended (`ViewSuspended`) and never
+    queues it.
+  - Input resumes on the same lease once the view is fresh and a ticket
+    issued after the host's lapse arrives: at least about one second.
+  - A suspension longer than 10 s ends control (`view_stale`).
+  - `fr` reports `input_suspensions` and `input_suspended_ms`.
+- Namespace e2e: a held key is released by the host at the lapse, input on
+  the suspended view never reaches the host, and the same lease resumes. It
+  passed 3 of 3 runs, each with one suspension of 1.05-1.24 s.
+- Two faults found while qualifying it:
+  - A capture stalled past the 250 ms reference horizon produced an
+    unchanged-source result that ended the session. It is now dropped as
+    obsolete evidence, like an expiring queued observation.
+  - The client refused control-renewal challenges while suspended.
+- Namespace control matrix, A/B against 33c2bd0 at load 21-45 (3 runs
+  against 2):
+  - 6 ms RTT with 5% loss held in 5 of 6 rows (0 of 3 without).
+  - 120 ms RTT without loss held 2 of 2 (0 of 1 without).
+  - No row ended with `view_stale` (5 did without).
+  - Rows with loss at 40-120 ms RTT still end, now with
+    `video_reference_lost` or `transport_deadline_expired`. Controlled
+    sessions have no reference recovery yet.
+  - An untyped `native_session_failed` still aborted 1 of 3 runs (2 of 2
+    without).
+
 ## 2026-09-30 — slow paths keep their connection
 
 - The presented-view source-age bound follows the measured path instead of a

@@ -190,10 +190,14 @@ impl HostPresentation {
                 .map_err(Error::Proof)?
             {
                 Decision::Ready { until_us } => {
-                    authority
-                        .mark_view_ready_until(HostInstant::from_micros(until_us), at)
-                        .map_err(|e| Error::Authority(MediaError::Authority(e)))?;
-                    self.accepted = self.accepted.saturating_add(1);
+                    match authority.mark_view_ready_until(HostInstant::from_micros(until_us), at) {
+                        Ok(()) => self.accepted = self.accepted.saturating_add(1),
+                        // A suspended lease revives only after its native
+                        // owner confirmed the release of held input (plan
+                        // 11.3); a later report retries. The view stays stale.
+                        Err(fr_core::authority::AuthorityError::ReleasePending) => {}
+                        Err(e) => return Err(Error::Authority(MediaError::Authority(e))),
+                    }
                 }
                 Decision::Unavailable => authority.mark_view_stale(),
                 Decision::Obsolete => {}

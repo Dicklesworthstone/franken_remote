@@ -155,6 +155,19 @@ fn decoded(
         .unwrap();
     descriptor
 }
+/// A stale view suspends input at exactly `at` (plan 11.3): the grant is not
+/// stopped, `tick` reports not ready, and an action is refused unencoded.
+fn suspended_at(input: &mut PresentedInput, at: u64) {
+    assert_eq!(input.tick(ClientInstant(at)), Ok(false));
+    assert_eq!(input.stopped(), None);
+    assert_eq!(input.suspended_since(), Some(ClientInstant(at)));
+    let mut out = [0xAA; 512];
+    assert_eq!(
+        input.action(key(), &mut out, ClientInstant(at)),
+        Err(Error::Input(input::Error::ViewSuspended))
+    );
+    assert!(out.iter().all(|v| *v == 0xAA));
+}
 fn key() -> Action<'static> {
     Action::Key {
         key: PhysicalKey::new(4).unwrap(),
@@ -216,30 +229,32 @@ fn static_observations_extend_source_deadline_without_new_video_or_polling_renew
     .unwrap();
     assert!(input.tick(ClientInstant(300_000)).unwrap());
     assert!(input.tick(ClientInstant(439_999)).unwrap());
-    assert!(input.tick(ClientInstant(440_000)).is_err());
-    assert_eq!(input.stopped(), Some(StopReason::ViewStale));
-    assert!(
-        progress(
-            &mut input,
-            limits,
-            d,
-            1_441_000,
-            SourceObservation::QualifiedUnchanged,
-            441_000
-        )
-        .is_err()
-    );
+    suspended_at(&mut input, 440_000);
+    // A later fresh observation alone does not resume input: a ticket issued
+    // after the host's own lapse is also required.
+    progress(
+        &mut input,
+        limits,
+        d,
+        1_441_000,
+        SourceObservation::QualifiedUnchanged,
+        441_000,
+    )
+    .unwrap();
+    assert_eq!(input.tick(ClientInstant(442_000)), Ok(false));
+    assert_eq!(input.suspended_since(), Some(ClientInstant(440_000)));
 }
 #[test]
-fn unknown_source_with_zero_timestamp_stops_without_waiting_for_old_pixels_to_expire() {
+fn unknown_source_with_zero_timestamp_suspends_without_waiting_for_old_pixels_to_expire() {
     let (_receiver, mut input, limits, d) = shown();
-    assert!(progress(&mut input, limits, d, 0, SourceObservation::Unknown, 23_000).is_err());
-    assert_eq!(input.stopped(), Some(StopReason::ViewStale));
-    assert!(
-        input
-            .ticket(InputTicketId::from_raw(9), ClientInstant(23_001))
-            .is_err()
-    );
+    progress(&mut input, limits, d, 0, SourceObservation::Unknown, 23_000).unwrap();
+    suspended_at(&mut input, 23_000);
+    // An opaque ticket is not one issued after the host's lapse: still suspended.
+    input
+        .ticket(InputTicketId::from_raw(9), ClientInstant(23_001))
+        .unwrap();
+    assert_eq!(input.tick(ClientInstant(23_002)), Ok(false));
+    assert_eq!(input.stopped(), None);
 }
 #[test]
 fn receiver_failure_is_checked_at_the_next_action_without_a_new_callback() {
@@ -358,8 +373,7 @@ fn new_unpresented_picture_cannot_reset_existing_view_age() {
     )
     .unwrap();
     assert!(input.tick(ClientInstant(254_999)).unwrap());
-    assert!(input.tick(ClientInstant(255_000)).is_err());
-    assert_eq!(input.stopped(), Some(StopReason::ViewStale));
+    suspended_at(&mut input, 255_000);
 }
 #[test]
 fn generation_change_cannot_reuse_the_old_presented_grant() {
@@ -382,19 +396,13 @@ fn generation_change_cannot_reuse_the_old_presented_grant() {
     );
 }
 
-#[test]
-fn lost_media_receiver_invalidates_a_pending_control_response_before_send() {
-    let (mut receiver, mut input, limits) = setup();
-    decoded(&mut receiver, &mut input, limits, 30_000);
-    input.visible(0, ClientInstant(30_000)).unwrap();
-    input
-        .enable_control_renewal(11, ClientInstant(30_000))
-        .unwrap();
+/// A control challenge on renewal channel 11, due at 4 s.
+fn control_challenge(nonce: u128) -> Vec<u8> {
     let mut bytes = [0; authority::MAX_AUTHORITY_BYTES];
     let n = authority::encode(
         authority::Message::Challenge {
             scope: authority::Scope::Control(credentials().lease),
-            nonce: 7,
+            nonce,
             deadline_micros: 4_000_000,
         },
         authority::Binding {
@@ -407,8 +415,42 @@ fn lost_media_receiver_invalidates_a_pending_control_response_before_send() {
         InputDelivery::Reliable,
     )
     .unwrap();
+    bytes[..n].to_vec()
+}
+#[test]
+fn control_renewal_continues_while_a_stale_view_suspends_input() {
+    let (_receiver, mut input, limits, d) = shown();
     input
-        .accept_control_challenge(&bytes[..n], ClientInstant(30_000))
+        .enable_control_renewal(11, ClientInstant(22_000))
+        .unwrap();
+    progress(&mut input, limits, d, 0, SourceObservation::Unknown, 23_000).unwrap();
+    suspended_at(&mut input, 23_000);
+    // The lease stays alive while suspended: answering its challenge is
+    // renewal, not input, and neither resumes input nor ends the grant.
+    input
+        .accept_control_challenge(&control_challenge(7), ClientInstant(23_001))
+        .unwrap();
+    assert!(
+        input
+            .pending_control_response(ClientInstant(23_002))
+            .unwrap()
+            .is_some()
+    );
+    input.control_response_sent(ClientInstant(23_003)).unwrap();
+    assert_eq!(input.stopped(), None);
+    assert_eq!(input.suspended_since(), Some(ClientInstant(23_000)));
+    assert_eq!(input.tick(ClientInstant(23_004)), Ok(false));
+}
+#[test]
+fn lost_media_receiver_invalidates_a_pending_control_response_before_send() {
+    let (mut receiver, mut input, limits) = setup();
+    decoded(&mut receiver, &mut input, limits, 30_000);
+    input.visible(0, ClientInstant(30_000)).unwrap();
+    input
+        .enable_control_renewal(11, ClientInstant(30_000))
+        .unwrap();
+    input
+        .accept_control_challenge(&control_challenge(7), ClientInstant(30_000))
         .unwrap();
     assert!(
         input
@@ -445,8 +487,7 @@ fn the_view_bound_follows_the_measured_path_up_to_its_ceiling() {
         )
         .unwrap();
         assert!(input.tick(ClientInstant(stale_at - 1)).unwrap(), "{rtt:?}");
-        assert!(input.tick(ClientInstant(stale_at)).is_err(), "{rtt:?}");
-        assert_eq!(input.stopped(), Some(StopReason::ViewStale));
+        suspended_at(&mut input, stale_at);
     }
 }
 #[test]
@@ -467,6 +508,5 @@ fn a_faster_path_applies_the_smaller_bound_to_the_viewer_at_once() {
     // earlier than the path allowed is the conservative direction.
     input.follow_path_rtt(None).unwrap();
     assert!(input.tick(ClientInstant(439_999)).unwrap());
-    assert!(input.tick(ClientInstant(440_000)).is_err());
-    assert_eq!(input.stopped(), Some(StopReason::ViewStale));
+    suspended_at(&mut input, 440_000);
 }

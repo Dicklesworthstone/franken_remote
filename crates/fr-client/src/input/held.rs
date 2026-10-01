@@ -35,6 +35,11 @@ impl InputClient {
         now: ClientInstant,
     ) -> Result<Option<EncodedHeldState>, Error> {
         self.tick(now)?;
+        // A stale view cannot be resurrected by reconciliation: the host has
+        // already released everything held at its own lapse.
+        if self.suspended_since.is_some() {
+            return Err(Error::ViewSuspended);
+        }
         if self.held_after.is_some_and(|at| now < at) {
             return Ok(None);
         }

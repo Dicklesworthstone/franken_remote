@@ -6,6 +6,7 @@ use fr_media::freshness::ClockCorrelation;
 use fr_wire::{
     input::{InputDelivery, InputDirection},
     input_ticket,
+    presented::MAX_SOURCE_AGE_US,
 };
 #[derive(Clone, Copy)]
 pub(super) struct State {
@@ -73,6 +74,21 @@ impl InputClient {
             return self.fail(StopReason::InvalidControl);
         }
         self.credentials.ticket = c.ticket;
+        if let Some(since) = self.suspended_since {
+            // Only a ticket issued after the HOST's own lapse can authorize
+            // input again: the host invalidated every older one. That lapse
+            // is at most the 1 s source-age ceiling after this suspension
+            // began, so a ticket conservatively issued later than that was
+            // issued after the host revived (it refuses tickets meanwhile).
+            let elapsed = now.0.saturating_sub(since.0);
+            if clock
+                .age_upper_us(ticket.issued_at_us, now.0)
+                .is_ok_and(|age| age.saturating_add(MAX_SOURCE_AGE_US) < elapsed)
+            {
+                self.awaiting_ticket = false;
+                self.try_resume(now);
+            }
+        }
         Ok(())
     }
     pub fn ticket_deadline(&self) -> Option<ClientInstant> {

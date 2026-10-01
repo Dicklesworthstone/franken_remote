@@ -96,6 +96,9 @@ pub enum AuthorityError {
     ClockRegression,
     /// Deadline arithmetic overflowed or cannot produce a future deadline.
     DeadlineOverflow,
+    /// A stale view suspended a held lease; fresh readiness waits until the
+    /// native owner has released every remotely held key and button.
+    ReleasePending,
 }
 
 /// Whether presented source state is trustworthy enough for input.
@@ -107,6 +110,36 @@ pub enum ViewReadiness {
     Ready,
     /// Presentation is stale/unknown; old submission tickets are invalid.
     Stale,
+}
+
+/// Longest a stale view may suspend a held lease's input before control ends
+/// (plan 11.3). A starting point, not a measured optimum.
+pub const MAX_VIEW_SUSPENSION: HostDuration = HostDuration::from_micros(10_000_000);
+
+/// Control as seen by the lease's own monitors: usable input, or input
+/// suspended by a stale view while the lease itself stays live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlStatus {
+    /// Input may be submitted before this exclusive deadline (lease,
+    /// observation and view readiness combined).
+    Live {
+        /// Earliest of the lease, observation and view deadlines.
+        until: HostInstant,
+    },
+    /// A stale view suspends input. No ticket authorizes a submission; the
+    /// lease, observation and control renewals continue until `until`.
+    Suspended {
+        /// Earliest of the lease, observation and suspension-limit deadlines.
+        until: HostInstant,
+        /// Whether the native owner confirmed it released all held input.
+        released: bool,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Suspension {
+    since: HostInstant,
+    released: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -152,6 +185,7 @@ pub struct SessionAuthority {
     view_until: Option<HostInstant>,
     bounded_view: bool,
     lease: Option<Lease>,
+    suspension: Option<Suspension>,
     native_owner: Option<std::sync::Arc<()>>,
     observation_challenge: Option<Challenge>,
     control_challenge: Option<Challenge>,
@@ -169,6 +203,7 @@ impl fmt::Debug for SessionAuthority {
             .field("readiness", &self.readiness)
             .field("view_until", &self.view_until)
             .field("has_lease", &self.lease.is_some())
+            .field("suspended", &self.suspension.is_some())
             .field(
                 "has_ticket",
                 &self
@@ -202,6 +237,7 @@ impl SessionAuthority {
             view_until: None,
             bounded_view: false,
             lease: None,
+            suspension: None,
             native_owner: None,
             observation_challenge: None,
             control_challenge: None,
@@ -314,8 +350,10 @@ impl SessionAuthority {
     /// Install a verifier's ORIGINAL host-clock source deadline, not receipt
     /// time plus a fresh TTL. The containing authenticated media owner validates
     /// the source identity and presentation stage. This never grants a lease.
-    /// A readiness lapse cannot revive an existing native owner, even if no
-    /// watchdog tick ran during the lapse: revoke/cleanup must precede a grant.
+    /// A readiness lapse under a held lease suspends it (plan 11.3). Fresh
+    /// readiness then waits for the native owner's confirmation that it
+    /// released every held key and button, even if no watchdog tick ran during
+    /// the lapse. Revival neither renews the lease nor revives an old ticket.
     pub fn mark_view_ready_until(
         &mut self,
         until: HostInstant,
@@ -323,14 +361,27 @@ impl SessionAuthority {
     ) -> Result<(), AuthorityError> {
         self.check_time(now)?;
         self.check_observation_live(now)?;
-        if until <= now
-            || (self.bounded_view && self.readiness != ViewReadiness::Ready && self.lease.is_some())
-        {
+        if until <= now {
             return Err(AuthorityError::ViewUnready);
+        }
+        match self.suspension {
+            Some(suspension) if !suspension.released => {
+                return Err(AuthorityError::ReleasePending);
+            }
+            Some(_) => {}
+            None => {
+                if self.bounded_view
+                    && self.readiness != ViewReadiness::Ready
+                    && self.lease.is_some()
+                {
+                    return Err(AuthorityError::ViewUnready);
+                }
+            }
         }
         if self.view_until.is_some_and(|previous| until < previous) {
             return Err(AuthorityError::ViewUnready);
         }
+        self.suspension = None;
         self.bounded_view = true;
         self.view_until = Some(until);
         self.phase = Phase::Viewing;
@@ -339,15 +390,88 @@ impl SessionAuthority {
     }
 
     /// Suspends input and invalidates old tickets. Recovery requires a new
-    /// ticket even if the lease identity and observation remain live.
+    /// ticket even if the lease identity and observation remain live. Under a
+    /// held lease with evidence-bounded readiness this starts a suspension,
+    /// timed from the latest checked clock sample.
     pub fn mark_view_stale(&mut self) {
+        self.lapse_view(self.last_checked.unwrap_or(HostInstant::from_micros(0)));
+    }
+
+    /// The view stopped being trustworthy at `at` (its passed deadline, or the
+    /// latest checked sample for an explicit report).
+    fn lapse_view(&mut self, at: HostInstant) {
         self.view_until = None;
         if self.readiness == ViewReadiness::Ready {
             self.readiness = ViewReadiness::Stale;
+            if self.bounded_view && self.lease.is_some() && self.suspension.is_none() {
+                self.suspension = Some(Suspension {
+                    since: at,
+                    released: false,
+                });
+            }
         }
         if let Some(lease) = self.lease.as_mut() {
             lease.tickets.fill(None);
         }
+    }
+
+    /// The native owner released every remotely held key and button after a
+    /// suspension began. Only then may fresh readiness revive the lease.
+    pub fn confirm_suspension_release(
+        &mut self,
+        lease_id: InputLeaseId,
+    ) -> Result<(), AuthorityError> {
+        if self.lease_id() != Some(lease_id) {
+            return Err(AuthorityError::StaleLease);
+        }
+        if let Some(suspension) = self.suspension.as_mut() {
+            suspension.released = true;
+        }
+        Ok(())
+    }
+
+    /// Control status for the lease's own monitors at a fresh clock sample.
+    /// A passed view deadline becomes a suspension here even without a network
+    /// or watchdog event, dated at that deadline. Expiry of the lease or
+    /// observation, and a suspension that outlasts [`MAX_VIEW_SUSPENSION`], are
+    /// errors (terminal for callers). Like any monitor read, this never moves
+    /// the checked-clock high-water mark: other participants keep serializing
+    /// their own samples against it.
+    pub fn control_status(&mut self, now: HostInstant) -> Result<ControlStatus, AuthorityError> {
+        if self.clock_faulted {
+            return Err(AuthorityError::ClockRegression);
+        }
+        let now = self.serialized_time(now);
+        if let Some(until) = self.view_until.filter(|until| now >= *until) {
+            self.lapse_view(until);
+        }
+        self.check_observation_live(now)?;
+        let lease = self.lease.ok_or(AuthorityError::NoLease)?;
+        let observation = self
+            .observation_until
+            .ok_or(AuthorityError::ObservationExpired)?;
+        let lease_until = lease.authorized_until.min(observation);
+        if now >= lease_until {
+            return Err(AuthorityError::LeaseExpired);
+        }
+        if self.phase == Phase::Viewing && self.readiness == ViewReadiness::Ready {
+            let until = self
+                .view_until
+                .map_or(lease_until, |view| lease_until.min(view));
+            return Ok(ControlStatus::Live { until });
+        }
+        let suspension = self.suspension.ok_or(AuthorityError::ViewUnready)?;
+        let limit = suspension
+            .since
+            .checked_add(MAX_VIEW_SUSPENSION)
+            .ok_or(AuthorityError::DeadlineOverflow)?;
+        if now >= limit {
+            return Err(AuthorityError::ViewUnready);
+        }
+        Ok(ControlStatus::Suspended {
+            until: lease_until.min(limit),
+            released: suspension.released,
+        })
     }
 
     /// Issues one bounded observation challenge. A cadence tick cannot
@@ -586,6 +710,7 @@ impl SessionAuthority {
     /// and buttons; this does not claim that OS cleanup has completed.
     pub fn revoke_lease(&mut self) {
         self.lease = None;
+        self.suspension = None;
         self.native_owner = None;
         self.control_challenge = None;
     }
@@ -687,6 +812,7 @@ impl SessionAuthority {
         self.readiness = ViewReadiness::Unready;
         self.view_until = None;
         self.lease = None;
+        self.suspension = None;
         self.native_owner = None;
         self.observation_challenge = None;
         self.control_challenge = None;
@@ -738,8 +864,8 @@ impl SessionAuthority {
             return Err(AuthorityError::ClockRegression);
         }
         self.last_checked = Some(now);
-        if self.view_until.is_some_and(|until| now >= until) {
-            self.mark_view_stale();
+        if let Some(until) = self.view_until.filter(|until| now >= *until) {
+            self.lapse_view(until);
         }
         Ok(())
     }

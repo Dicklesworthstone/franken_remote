@@ -180,13 +180,7 @@ impl Subscription {
                     self.first = false;
                     self.capture_source = Some(update.source.clone());
                 }
-                SharedContent::Unchanged(proof) => {
-                    self.cache.observe_unchanged(
-                        proof.reference.as_raw(),
-                        proof.observed_micros,
-                        now,
-                    )?;
-                }
+                SharedContent::Unchanged(proof) => self.admit_unchanged(proof, now)?,
             }
             Ok(())
         })();

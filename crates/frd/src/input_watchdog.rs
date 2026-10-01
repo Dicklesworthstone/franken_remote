@@ -7,7 +7,7 @@ use asupersync::{
     time::{TimerDriverHandle, TimerHandle},
     types::Time,
 };
-use fr_core::{input_submission::InputMonitor, time::HostInstant};
+use fr_core::{authority::ControlStatus, input_submission::InputMonitor, time::HostInstant};
 use std::{
     future::Future,
     pin::Pin,
@@ -234,11 +234,18 @@ impl Future for Watchdog {
             return this.finish(StopReason::ClockRegression);
         }
         this.last = now;
-        let Ok(deadline) = this
+        // A stale view suspends input but not the lease (plan 11.3): keep
+        // watching until the lease, observation or suspension limit ends.
+        let Ok(
+            ControlStatus::Live { until: deadline }
+            | ControlStatus::Suspended {
+                until: deadline, ..
+            },
+        ) = this
             .control
             .0
             .monitor
-            .deadline(HostInstant::from_micros(now.as_nanos() / 1000))
+            .status(HostInstant::from_micros(now.as_nanos() / 1000))
         else {
             return this.finish(StopReason::AuthorityEnded);
         };
