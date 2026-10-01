@@ -995,6 +995,110 @@ fn streaming_codec_stall_does_not_hold_input_results_tickets_or_local_cleanup() 
     });
 }
 
+/// Serve one controlled stream until the host's lease stops, while the viewer
+/// keeps its session driven; `act` runs once after the first viewer turn.
+/// Returns the reason the lease's terminal report carries.
+async fn serve_until_stopped(
+    c: &Cx,
+    h: &Cx,
+    crash: bool,
+    act: impl FnOnce(&crate::media::ObservationControl, &crate::input_watchdog::Control),
+) -> Option<StopReason> {
+    let Fixture {
+        mut host,
+        mut viewer,
+        driver,
+        seat,
+        ..
+    } = Box::pin(fixture(c, h, None)).await;
+    let stream = if crash {
+        Box::pin(
+            crate::session_startup::running::streaming::tests::crashing_source_for_controlled(
+                &mut host.session,
+                &mut viewer.session,
+                c,
+                h,
+            ),
+        )
+        .await
+    } else {
+        Box::pin(
+            crate::session_startup::running::streaming::tests::source_for_controlled(
+                &mut host.session,
+                &mut viewer.session,
+                c,
+                h,
+            ),
+        )
+        .await
+    };
+    let observation = host.session.observation().unwrap();
+    let stop = host.control();
+    let mut host = host.into_streaming(stream).unwrap();
+    let (mut n, mut t) = (2000, 5000);
+    let ((), shutdown) = Box::pin(support::both(
+        async {
+            viewer.visible(c);
+            let until = now(c).unwrap() + 3_000_000;
+            let (result, ()) = Box::pin(support::both(
+                host.serve(|| nonce(&mut n), || ticket(&mut t), block),
+                async {
+                    let mut act = Some(act);
+                    while !stop.is_stopped() && now(c).unwrap() < until {
+                        // The host closes its connection when it fails.
+                        if viewer
+                            .session
+                            .drive(Duration::from_millis(2), block)
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                        if let Some(act) = act.take() {
+                            act(&observation, &stop);
+                        }
+                    }
+                },
+            ))
+            .await;
+            assert!(result.is_err(), "the stream ended on its own: {result:?}");
+            host.reap_media(
+                c,
+                crate::worker::Deadline::after(c, Duration::from_secs(1)).unwrap(),
+            )
+            .await
+            .ok();
+        },
+        driver,
+    ))
+    .await;
+    assert!(shutdown.handoff_safe());
+    assert!(!seat.is_occupied());
+    stop.reason()
+}
+
+#[test]
+fn a_failed_stream_under_a_live_authority_reports_a_host_failure_not_a_local_revoke() {
+    crate::session_startup::running::streaming::tests::run(|c, h| async move {
+        // The capture worker exits while observation and control are live.
+        let reason = Box::pin(serve_until_stopped(&c, &h, true, |_, _| {})).await;
+        assert_eq!(reason, Some(StopReason::NativeFailure));
+    });
+}
+#[test]
+fn a_local_revoke_keeps_its_reason_when_the_stream_then_fails() {
+    crate::session_startup::running::streaming::tests::run(|c, h| async move {
+        // As the session agent's immediate revoke: name the lease's reason,
+        // then revoke observation. The serve failing afterwards never renames it.
+        let reason = Box::pin(serve_until_stopped(&c, &h, false, |observation, lease| {
+            lease.stop(StopReason::LocalRevoke);
+            observation.revoke();
+        }))
+        .await;
+        assert_eq!(reason, Some(StopReason::LocalRevoke));
+    });
+}
+
 mod input_wake;
 
 #[path = "tests/files.rs"]

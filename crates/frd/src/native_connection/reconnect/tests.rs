@@ -380,6 +380,22 @@ fn a_stalled_dispatch_and_a_lapsed_control_lease_are_named() {
             assert!(!retryable(failure));
         }
     }
+    // A clock probe whose reply missed its deadline is that exchange's
+    // delivery deadline; the exchange's other faults are not.
+    for (error, expected) in [
+        (
+            fr_client::clock::Error::Expired,
+            Some(Lapse::TransportDeadline),
+        ),
+        (fr_client::clock::Error::Stopped, None),
+        (fr_client::clock::Error::UnexpectedReply, None),
+    ] {
+        let failure = observed(StreamingViewerError::Control(C::Clock(
+            crate::media::clock::Error::Client(error),
+        )));
+        assert_eq!(lapse(failure), expected, "{error:?}");
+        assert!(!retryable(failure));
+    }
     // A lapsed control lease is named both as the expiry the client met first
     // and as the stop it reports afterwards; a malformed or stale challenge is
     // a protocol fault, not a lapse.

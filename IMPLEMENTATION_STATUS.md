@@ -114,14 +114,17 @@ the rejection only as an opaque code, and the fix is upstream. Gates:
   the host's own sender could not finish sending a picture within the 250 ms
   reference horizon (`OriginalExpired`, a 3 KB picture once). It ends the
   session in its first serving round.
-  - Cause: Asupersync 0.5.0's NewReno sits at its 2-datagram floor under
-    loss, and a lost tail packet waits for a probe timeout.
-  - The client reports it as `host_control_revoked` with reason
-    `local_revoke`, which is a mislabel (any host serve error is labelled
-    so), or as `transport_deadline_expired`.
-  - Next: a host-side expired reference should wait for the viewer's
-    recovery request instead of ending (MEDIA_DELIVERY.md: the caller must
-    recover).
+  - Likely cause: Asupersync 0.5.0's NewReno sits at its 2-datagram floor
+    under loss, and a lost tail packet waits for a probe timeout.
+  - The client reports it as `host_control_failure` (reason `host_failure`),
+    or as `transport_deadline_expired`. Before the labels commit it read
+    `host_control_revoked` / `local_revoke`, a mislabel.
+  - Most traced expiries are a prepared packet that missed its send-by while
+    waiting for transport admission, which closes the transport. A host wait
+    for the viewer's recovery request would rescue only the others. The
+    options (upstream tail-loss probing and pacing, egress handling of an
+    unwritten expired packet, a bounded host wait, the 250 ms horizon cap)
+    and the evidence are in bead fr-xfvs.
   - Separately, the controlled viewer loop sometimes is not driven for
     108-140 ms, which ends control with `input_dispatch_stalled`; the cause
     is not isolated.

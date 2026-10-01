@@ -97,6 +97,17 @@ pub(in crate::session_startup::running) async fn source_for_controlled(
         .await
         .stream
 }
+/// The capture worker exits on its second capture request.
+pub(in crate::session_startup::running) async fn crashing_source_for_controlled(
+    host: &mut HostSession,
+    viewer: &mut ViewerSession,
+    c: &Cx,
+    h: &Cx,
+) -> Stream {
+    Box::pin(media(host, viewer, c, h, "crash", SendPolicy::default()))
+        .await
+        .stream
+}
 pub(in crate::session_startup::running) async fn idle_source_for_controlled(
     host: &mut HostSession,
     viewer: &mut ViewerSession,

@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-10-01 — host failures are no longer reported as local revokes
+
+- When a controlled stream fails on the host while its authority is still
+  live, the lease's terminal report now says `host_failure`. `fr` shows it as
+  `host_control_failure`. Media, transport and renewal failures used to read
+  `host_control_revoked` with reason `local_revoke`, as if someone at the
+  host had revoked control.
+- A reason named earlier, such as the session agent's local revoke, is kept.
+- A viewer clock probe whose reply missed its deadline is now named
+  `transport_deadline_expired` instead of `native_session_failed`. It had
+  aborted one control matrix run at 120 ms RTT with 1% loss.
+
 ## 2026-10-01 — controlled sessions negotiate reference recovery
 
 - A controlled session now runs the same reference recovery as a view-only

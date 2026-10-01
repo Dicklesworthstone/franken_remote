@@ -433,7 +433,14 @@ recovery request:
 - One more run aborted at 120 ms RTT, 1% loss on an unnamed end: the
   viewer's clock probe reply missed its deadline
   (`Control(Clock(Client(Expired)))`).
-- The `local_revoke` reason is the host fence's label for any serve error.
+- The `local_revoke` reason was the host fence's label for any serve error.
+  Since the labels commit, a serve failure under a live authority reports
+  `host_failure`; a reason named earlier (a local revoke) is kept.
+- Of the four expiries a later run traced to their site, three were a
+  prepared packet submitted 0.3-3.4 ms past its send-by after waiting for
+  transport admission. That closes the transport, so a host-side wait for the
+  viewer's recovery request could rescue only the fourth kind: an announced
+  picture with fragments left (bead fr-xfvs).
 
 The likely mechanism is transport send starvation. Asupersync 0.5.0's
 NewReno halves its window to a 2-datagram floor under loss and has no
@@ -442,9 +449,7 @@ doubles each time, so a few kilobytes can miss a 250 ms deadline at 40 ms
 RTT.
 
 So the matrix does not exercise controlled recovery yet; only fr-core and
-fr-client unit tests do. MEDIA_DELIVERY.md already says an expired unsent reference fences
-its dependents and the caller must recover. The next slice keeps a host with
-negotiated recovery alive for the viewer's request instead of ending it.
+fr-client unit tests do. Bead fr-xfvs carries the options.
 
 ## Verification scope
 

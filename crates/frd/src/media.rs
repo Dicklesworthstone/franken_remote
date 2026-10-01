@@ -244,6 +244,13 @@ impl ObservationControl {
         let nanos = until.checked_mul(1000).ok_or(worker::Error::Deadline)?;
         Ok(Deadline::after(&self.cx, maximum)?.capped_at(Time::from_nanos(nanos)))
     }
+    /// Closed by `revoke` (a local stop), as opposed to an expiry or failure.
+    /// Reads no admission state and never waits; for terminal labels only.
+    pub(crate) fn revoked(&self) -> bool {
+        self.authority
+            .lock()
+            .is_ok_and(|a| a.phase() == fr_core::authority::Phase::Closed)
+    }
     pub fn revoke(&self) {
         if let Some(admission) = &self.admission {
             admission.revoke();

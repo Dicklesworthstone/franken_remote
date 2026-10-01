@@ -390,7 +390,7 @@ impl StreamingHost {
                 .serve_round(nonce, ticket, other, &mut acquisition, local, first)
                 .await?;
             first = false;
-            Box::pin(recovery::recover(
+            let recovered = Box::pin(recovery::recover(
                 self,
                 demand,
                 nonce,
@@ -399,7 +399,16 @@ impl StreamingHost {
                 &mut acquisition,
                 local,
             ))
-            .await?;
+            .await;
+            if recovered.is_err() {
+                // Before the acquisition drops and labels it a local revoke.
+                Fence {
+                    control: self.stream.control.clone(),
+                    native: self.host.native(),
+                }
+                .fail();
+            }
+            recovered?;
         }
     }
     #[allow(clippy::too_many_lines)]
@@ -526,7 +535,7 @@ impl StreamingHost {
             if producer_end.is_none()
                 && let Poll::Ready(result) = producer.as_mut().poll(task)
             {
-                fence.stop();
+                fence.fail();
                 producer_end = Some(result);
             }
             // A failed/cancelled producer fences FIRST, then lets the original
@@ -538,7 +547,7 @@ impl StreamingHost {
                 // abandons no worker operation or in-flight QUIC I/O.
                 Poll::Ready(Ok(demand)) if producer_end.is_none() => Poll::Ready(Ok(demand)),
                 Poll::Ready(result) => {
-                    fence.stop();
+                    fence.fail();
                     Poll::Ready(Err(match (producer_end.take(), result) {
                         (Some(Err(error)), _) | (_, Err(error)) => error,
                         _ => Error::Closed,
@@ -596,6 +605,27 @@ impl Fence {
             control.stop(StopReason::LocalRevoke);
         }
         self.control.revoke();
+    }
+    /// A failed serve names its cause in the lease's terminal report BEFORE
+    /// fencing (the first reason wins): only a revoked authority is a local
+    /// revoke. A failure under a live one is the host's own (media, transport
+    /// or renewal), never reported as a local revoke.
+    fn fail(&self) {
+        if let Some(control) = &self.native {
+            control.stop(failure_reason(&self.control));
+        }
+        self.stop();
+    }
+}
+fn failure_reason(control: &ObservationControl) -> StopReason {
+    // A revoke also cancels the context, so it is read before `check`.
+    if control.revoked() {
+        return StopReason::LocalRevoke;
+    }
+    match control.check() {
+        Ok(_) => StopReason::NativeFailure,
+        Err(crate::media::Error::Worker(crate::worker::Error::Cancelled)) => StopReason::Cancelled,
+        Err(_) => StopReason::AuthorityEnded,
     }
 }
 struct Guarded<F> {

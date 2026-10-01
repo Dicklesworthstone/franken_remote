@@ -27,6 +27,7 @@ try:
         assert k in (2,7)
         frame,observed,forced = struct.unpack('>QQB',b)
         if last is not None and MODE == 'stall': time.sleep(60)
+        if last is not None and MODE == 'crash': sys.exit(3)
         if last is not None and MODE == 'slow': time.sleep(.06)
         if last is not None and MODE == 'overloaded': time.sleep(.18)
         if last is not None and (MODE == 'unchanged' or (MODE == 'wake' and time.monotonic() - start < 1.65)) and not forced:
