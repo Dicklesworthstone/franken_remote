@@ -240,10 +240,14 @@ fn lease_expiring_during_disk_work_is_terminal_without_resurrection() {
         calls += 1;
         if calls == 1 { at(1) } else { at(3_000_000) }
     });
+    // The lease and its observation were both authorized at 0 for the same
+    // lifetime, and a lease never outlives its observation: at 3 s both lapse.
+    // The authority checks observation first (plan 11.3 suspension, 70a53a8)
+    // and names it. Either way the refusal is terminal (below).
     assert_eq!(
         result,
         Err(Error::Authority(Refusal::Authority(
-            AuthorityError::LeaseExpired
+            AuthorityError::ObservationExpired
         )))
     );
     assert!(input.monitor().is_revoked());
