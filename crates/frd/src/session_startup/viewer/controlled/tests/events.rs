@@ -247,6 +247,154 @@ fn future_sample_cannot_mint_a_longer_native_event_lifetime() {
     });
 }
 
+/// Drive both sessions until `done` holds for the host's submitted operations.
+async fn turns_until(
+    state: &mut Fixture,
+    client: &Cx,
+    host: &Cx,
+    done: impl Fn(&[Op]) -> bool,
+) -> Vec<Op> {
+    let (mut counter, mut ticket) = (30000, 40000);
+    let until = now(client).unwrap() + 1_000_000;
+    loop {
+        let operations = state.effects.lock().unwrap().operations.clone();
+        if done(&operations) {
+            return operations;
+        }
+        assert!(now(client).unwrap() < until, "stalled at {operations:?}");
+        let (left, right) = turn(state, client, host, &mut counter, &mut ticket).await;
+        left.unwrap();
+        right.unwrap();
+    }
+}
+/// Hold local dispatch (no turn) until events sampled now are past their bound.
+async fn age_past_dispatch_bound(client: &Cx) {
+    asupersync::time::sleep(
+        client.now(),
+        Duration::from_micros(events::MAX_EVENT_AGE_US + 20_000),
+    )
+    .await;
+}
+
+#[test]
+fn an_aged_release_of_a_held_key_is_still_delivered() {
+    run(|client, host| async move {
+        let mut state = Box::pin(fixture(&client, &host)).await;
+        let mut source = state.viewer.capture_input().unwrap();
+        let driver = state.driver.take().unwrap();
+        let ((), shutdown) = Box::pin(support::both(
+            async {
+                let at = source.clock().unwrap();
+                source.push(physical(KeyTransition::Press), at).unwrap();
+                Box::pin(turns_until(&mut state, &client, &host, |ops| {
+                    ops.len() == 1
+                }))
+                .await;
+                // The release waits past its bound (a view awaiting its
+                // visibility callback holds dispatch the same way). Leaving the
+                // key held on the host would be worse than releasing it late.
+                let released = source.clock().unwrap();
+                age_past_dispatch_bound(&client).await;
+                source
+                    .push(physical(KeyTransition::Release), released)
+                    .unwrap();
+                let operations = Box::pin(turns_until(&mut state, &client, &host, |ops| {
+                    ops.len() == 2
+                }))
+                .await;
+                assert_eq!(
+                    operations,
+                    [
+                        Op::Key {
+                            key: PhysicalKey::new(4).unwrap(),
+                            transition: KeyTransition::Press
+                        },
+                        Op::Key {
+                            key: PhysicalKey::new(4).unwrap(),
+                            transition: KeyTransition::Release
+                        },
+                    ]
+                );
+                assert!(!state.viewer.is_closed());
+                assert_eq!(state.viewer.input_dropped_aged(), 0);
+                source.stop();
+                state.viewer.close();
+                state.host.close();
+            },
+            driver,
+        ))
+        .await;
+        assert!(shutdown.handoff_safe());
+    });
+}
+#[test]
+fn an_aged_press_is_dropped_with_its_release_and_control_continues() {
+    run(|client, host| async move {
+        let mut state = Box::pin(fixture(&client, &host)).await;
+        let layout = layout(&mut state);
+        let mut source = state.viewer.capture_input().unwrap();
+        let driver = state.driver.take().unwrap();
+        let ((), shutdown) = Box::pin(support::both(
+            async {
+                let at = source.clock().unwrap();
+                source.push(physical(KeyTransition::Press), at).unwrap();
+                source
+                    .push(Event::Pointer(layout.at(LocalPoint::pixels(20, 20))), at)
+                    .unwrap();
+                age_past_dispatch_bound(&client).await;
+                // Obsolete local input: dropped and counted, never sent late,
+                // and never a reason to end control.
+                let (mut counter, mut ticket) = (30000, 40000);
+                let mut quiet_turns = async |state: &mut Fixture| {
+                    let quiet = now(&client).unwrap() + 150_000;
+                    while now(&client).unwrap() < quiet {
+                        let (left, right) =
+                            turn(state, &client, &host, &mut counter, &mut ticket).await;
+                        left.unwrap();
+                        right.unwrap();
+                    }
+                };
+                quiet_turns(&mut state).await;
+                assert_eq!(state.viewer.input_dropped_aged(), 2);
+                // A FRESH release of that dropped press goes with it: the host
+                // never saw the press, so sending it would be a protocol error.
+                let fresh = source.clock().unwrap();
+                source
+                    .push(physical(KeyTransition::Release), fresh)
+                    .unwrap();
+                quiet_turns(&mut state).await;
+                assert_eq!(state.effects.lock().unwrap().operations, [] as [Op; 0]);
+                assert_eq!(state.viewer.input_dropped_aged(), 3);
+                assert!(!state.viewer.is_closed());
+                // Fresh input on the same grant still reaches the host.
+                let fresh = source.clock().unwrap();
+                source.push(physical(KeyTransition::Press), fresh).unwrap();
+                source
+                    .push(physical(KeyTransition::Release), fresh)
+                    .unwrap();
+                let operations = Box::pin(turns_until(&mut state, &client, &host, |ops| {
+                    ops.len() == 2
+                }))
+                .await;
+                assert_eq!(
+                    operations[0],
+                    Op::Key {
+                        key: PhysicalKey::new(4).unwrap(),
+                        transition: KeyTransition::Press
+                    }
+                );
+                assert_eq!(state.viewer.input_dropped_aged(), 3);
+                source.stop();
+                state.viewer.close();
+                state.host.close();
+            },
+            driver,
+        ))
+        .await;
+        assert!(shutdown.handoff_safe());
+    });
+}
+
 mod text;
 
 #[test]

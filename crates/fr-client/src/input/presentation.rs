@@ -482,6 +482,14 @@ impl PresentedInput {
     pub fn suspension_totals(&self, now: ClientInstant) -> (u32, u64) {
         self.input.suspension_totals(now)
     }
+    /// See `InputClient::holds_key`.
+    pub fn holds_key(&self, key: fr_core::input::PhysicalKey) -> bool {
+        self.input.holds_key(key)
+    }
+    /// See `InputClient::holds_button`.
+    pub fn holds_button(&self, button: fr_core::input::PointerButton) -> bool {
+        self.input.holds_button(button)
+    }
     /// Service on idle, not only on UI events. False means temporarily awaiting
     /// a qualified view, or suspended by a stale one, and forbids new input. Existing view/receipt deadlines
     /// continue running while a new compositor submission awaits visibility.

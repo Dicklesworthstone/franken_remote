@@ -221,6 +221,17 @@ A stale or unknown view suspends control input instead of ending the session
 - `input_suspensions` and `input_suspended_ms` report how often and how long
   input was suspended.
 
+Local input has a 100 ms dispatch bound from when it was captured. While a new
+picture waits for its visibility confirmation, the client holds input, because
+which picture the user saw is not yet known. Under load that wait can outlast
+the bound. Control continues when it does:
+- An aged key press, repeat, pointer motion, scroll or text is dropped, never
+  sent late. The release or repeat of a dropped press is dropped with it,
+  since the host never saw the press.
+- A release of a key or button the host holds, and held-state
+  reconciliation, is sent late rather than leaving input held on the host.
+- `input_dropped_aged` counts the dropped events.
+
 The controlled share forwards the host's cursor too (`frd run --input-agent`
 selects the optional `remote-cursor` capability the client offers), and exactly
 ONE pointer renders it. Before the grant the viewer composites the overlay as

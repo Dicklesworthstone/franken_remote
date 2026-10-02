@@ -125,9 +125,11 @@ the rejection only as an opaque code, and the fix is upstream. Gates:
     options (upstream tail-loss probing and pacing, egress handling of an
     unwritten expired packet, a bounded host wait, the 250 ms horizon cap)
     and the evidence are in bead fr-xfvs.
-  - Separately, the controlled viewer loop sometimes is not driven for
-    108-140 ms, which ends control with `input_dispatch_stalled`; the cause
-    is not isolated.
+  - Separately, under CPU load, captured input waited behind a slow
+    visibility confirmation (145-161 ms) past its 100 ms bound and ended
+    control (`input_dispatch_stalled`). Since fr-1r40 an aged event is
+    dropped and counted instead, and a release the host needs is still sent.
+    Not yet re-run in the namespace matrix.
   - See PRESENTATION_FRESHNESS.md.
 - A live two-machine run: no client on another tailnet node has ever connected
   (owner decision needed: a second machine, or an auth key for an isolated test

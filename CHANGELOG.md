@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-10-01 — aged local input is dropped instead of ending control
+
+- Cause of `input_dispatch_stalled` (fr-1r40):
+  - While a new picture waits for its visibility confirmation, the
+    controlled viewer holds input, because which picture the user saw is not
+    yet known.
+  - Under CPU load that wait took 145-161 ms, and an event captured behind
+    it passed its 100 ms bound, which ended control.
+  - Found with a scratch build that timed every await of the viewer loop and
+    the wait itself. No poll gap exceeded 40 ms and no single poll exceeded
+    20 ms; the loop was running the whole time, only holding input.
+- Now an aged press, repeat, motion, scroll or text is dropped, never sent
+  late. The release or repeat of a dropped press goes with it.
+- A release of a key or button the host holds, and held-state
+  reconciliation, are sent late rather than leaving input held.
+- Capture no longer stops on an aged event.
+- `fr` reports `input_dropped_aged` in its control completion.
+- The `input_dispatch_stalled` code (46a5891) is removed: that end can no
+  longer occur, so `fr` no longer lists it.
+
 ## 2026-10-01 — host failures are no longer reported as local revokes
 
 - When a controlled stream fails on the host while its authority is still

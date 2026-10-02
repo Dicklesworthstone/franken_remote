@@ -182,6 +182,9 @@ pub(super) struct Counters {
     /// Stale-view suspensions of control input and their total duration.
     pub(super) suspensions: u32,
     pub(super) suspended_us: u64,
+    /// Captured local events dropped as obsolete after aging past their
+    /// dispatch bound (counts only).
+    pub(super) dropped_aged: u64,
     /// The ORIGINAL outcome of the attempt whose cleanup ended reconnection.
     pub(super) ended: Option<Result<(), Failure>>,
     /// Some only with `--clipboard`.
@@ -346,6 +349,7 @@ impl Attempt {
                 counters.granted = true;
                 counters.capabilities = Some(viewer.granted_capabilities());
                 (counters.suspensions, counters.suspended_us) = viewer.suspension_totals();
+                counters.dropped_aged = viewer.input_dropped_aged();
                 if let Some(frame) = self.candidate(frame) {
                     // The controlled clock is already correlated; a refusal
                     // only withholds evidence and new input stays gated.

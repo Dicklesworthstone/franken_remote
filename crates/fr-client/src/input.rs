@@ -471,6 +471,15 @@ impl InputClient {
             .map_or(0, |since| now.0.saturating_sub(since.0));
         (self.suspensions, self.suspended_us.saturating_add(current))
     }
+    /// This grant sent the key's press and not yet its release, so the host
+    /// may hold it. A press never sent, or one a suspension released, is not.
+    pub fn holds_key(&self, key: PhysicalKey) -> bool {
+        self.keys[usize::from(key.usage())]
+    }
+    /// As `holds_key`, for a pointer button.
+    pub fn holds_button(&self, button: PointerButton) -> bool {
+        self.buttons[button as usize - 1]
+    }
     /// The source-age bound for this path, between the configured base and
     /// 1.5 s. Applies to later evidence; a view deadline already derived from
     /// earlier evidence is neither extended nor shortened by it.

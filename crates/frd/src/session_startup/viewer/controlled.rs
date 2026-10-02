@@ -305,6 +305,11 @@ impl ControlledViewer {
         let at = now(&self.session.cx).unwrap_or(0);
         self.input.suspension_totals(ClientInstant(at))
     }
+    /// Captured local events dropped as obsolete because they aged past
+    /// their dispatch bound (fr-1r40). Counts only, no content.
+    pub fn input_dropped_aged(&self) -> u64 {
+        self.events.as_ref().map_or(0, events::Receiver::dropped)
+    }
     pub fn control(&self) -> ViewerControl {
         self.control.clone()
     }
@@ -339,8 +344,14 @@ impl ControlledViewer {
         let t = ClientInstant(now(&self.session.cx)?);
         self.input.maintenance_deadline(t)?;
         self.abandon_if_suspended()?;
-        if let Some(events) = &self.events {
-            events.check(t).map_err(Error::Capture)?;
+        if let Some(events) = &mut self.events {
+            let input = &self.input;
+            events
+                .expire(t, &|held| match held {
+                    events::Held::Key(key) => input.holds_key(key),
+                    events::Held::Button(button) => input.holds_button(button),
+                })
+                .map_err(Error::Capture)?;
         }
         if self.pending.as_ref().is_some_and(|p| t.0 >= p.until) {
             return Err(Error::Expired);

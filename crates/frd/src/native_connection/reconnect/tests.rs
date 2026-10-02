@@ -364,19 +364,18 @@ fn only_transport_deadlines_and_stale_views_are_named_lapses() {
 }
 
 #[test]
-fn a_stalled_dispatch_and_a_lapsed_control_lease_are_named() {
+fn a_lapsed_control_lease_is_named_but_capture_faults_are_not() {
     use crate::session_startup::ControlledViewerError as C;
     use fr_client::input::{Error as I, StopReason};
     use fr_client::{authority::Error as A, input::presentation::Error as P};
     let observed = |error| Failure::Observation(ObserverError::Streaming(error));
-    // Only a captured event that aged past its dispatch bound is a stalled
-    // dispatch; the capture's other faults keep the generic path.
+    // No capture fault is a named lapse: an aged event is dropped as obsolete
+    // input, never an end (fr-1r40); the other faults keep the generic path.
     {
         use crate::session_startup::viewer_events::Error as E;
-        for error in [E::Expired, E::Closed, E::Clock, E::Overflow, E::Unavailable] {
+        for error in [E::Closed, E::Clock, E::Overflow, E::Unavailable] {
             let failure = observed(StreamingViewerError::Control(C::Capture(error)));
-            let expected = (error == E::Expired).then_some(Lapse::InputDispatchStalled);
-            assert_eq!(lapse(failure), expected, "{error:?}");
+            assert_eq!(lapse(failure), None, "{error:?}");
             assert!(!retryable(failure));
         }
     }

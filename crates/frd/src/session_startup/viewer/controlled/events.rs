@@ -10,7 +10,7 @@ pub use fr_client::input::{
 pub use fr_core::held_state::HeldState;
 pub use fr_core::input::{CommittedText, TextError};
 use fr_core::{
-    input::{KeyTransition, MAX_COMMITTED_TEXT_BYTES, PhysicalKey},
+    input::{KeyTransition, MAX_COMMITTED_TEXT_BYTES, PhysicalKey, PointerButton},
     input_submission::{Capabilities, Capability},
 };
 pub use native::{CaptureCleanup, CaptureReapError, CaptureStartError, NativeCapture};
@@ -46,7 +46,6 @@ pub enum Error {
     AlreadyAttached,
     Closed,
     Clock,
-    Expired,
     Overflow,
     Unavailable,
     UnsupportedText,
@@ -74,6 +73,17 @@ pub struct Source {
 pub(super) struct Receiver {
     queue: Arc<Mutex<Queue>>,
     pending: Option<Captured>,
+    /// Presses dropped as aged: their later release or repeat goes with them.
+    dropped_keys: [bool; 256],
+    dropped_buttons: [bool; 5],
+    /// Captured events dropped as obsolete local input (counts only).
+    dropped: u64,
+}
+/// What the host may hold for this grant: a sent press not yet released.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Held {
+    Key(PhysicalKey),
+    Button(PointerButton),
 }
 impl Source {
     /// The ORIGINAL viewer's terminal fence, for a native supervisor that must
@@ -114,7 +124,7 @@ impl Source {
     /// Oversized commits are refused whole, never split into separately retried actions.
     pub fn commit_text(&mut self, text: &str, sampled: ClientInstant) -> Result<(), Error> {
         let result = (|| {
-            check_age(sampled, self.clock()?)?;
+            not_future(sampled, self.clock()?)?;
             if !self.capabilities.contains(Capability::Text) {
                 return Err(Error::UnsupportedText);
             }
@@ -153,7 +163,9 @@ impl Source {
     }
     fn push_inner(&mut self, event: Event, sampled: ClientInstant) -> Result<(), Error> {
         let current = self.clock()?;
-        check_age(sampled, current)?;
+        // An aged event is still admitted: the session drops it as obsolete,
+        // or sends it late if it releases what the host holds (`expire`).
+        not_future(sampled, current)?;
         if matches!(event, Event::Text(_)) && !self.capabilities.contains(Capability::Text) {
             return Err(Error::UnsupportedText);
         }
@@ -164,9 +176,6 @@ impl Source {
         }
         if sampled < queue.last_sample {
             return Err(Error::Clock);
-        }
-        if let Some(first) = queue.events.front() {
-            check_age(first.sampled, current)?;
         }
         queue.last_sample = sampled;
         if matches!(event, Event::Pointer(_))
@@ -189,23 +198,122 @@ impl Drop for Source {
         self.stop();
     }
 }
-fn check_age(sampled: ClientInstant, current: ClientInstant) -> Result<(), Error> {
+fn not_future(sampled: ClientInstant, current: ClientInstant) -> Result<(), Error> {
+    current
+        .0
+        .checked_sub(sampled.0)
+        .ok_or(Error::Clock)
+        .map(|_| ())
+}
+fn aged(sampled: ClientInstant, current: ClientInstant) -> Result<bool, Error> {
     let age = current.0.checked_sub(sampled.0).ok_or(Error::Clock)?;
-    if age >= MAX_EVENT_AGE_US {
-        Err(Error::Expired)
-    } else {
-        Ok(())
+    Ok(age >= MAX_EVENT_AGE_US)
+}
+/// A release of what the host holds, or held-state reconciliation, is cleanup
+/// (AGENTS.md 4: releasing is cleanup, not rollback): delivered late rather
+/// than left held on the host.
+fn cleanup(event: &Event, holds: &impl Fn(Held) -> bool) -> bool {
+    match event {
+        Event::Key {
+            key,
+            transition: KeyTransition::Release,
+        } => holds(Held::Key(*key)),
+        Event::Positioned {
+            action:
+                PositionedAction::Button {
+                    button,
+                    pressed: false,
+                },
+            ..
+        } => holds(Held::Button(*button)),
+        Event::HeldState(_) => true,
+        _ => false,
+    }
+}
+/// The repeat or release of a press dropped as aged (a release clears the mark).
+fn follows_dropped(event: &Event, keys: &mut [bool; 256], buttons: &mut [bool; 5]) -> bool {
+    match event {
+        Event::Key { key, transition } => {
+            let slot = &mut keys[usize::from(key.usage())];
+            let follows = *slot && *transition != KeyTransition::Press;
+            if follows && *transition == KeyTransition::Release {
+                *slot = false;
+            }
+            follows
+        }
+        Event::Positioned {
+            action: PositionedAction::Button { button, pressed },
+            ..
+        } => {
+            let slot = &mut buttons[*button as usize - 1];
+            let follows = *slot && !*pressed;
+            if follows {
+                *slot = false;
+            }
+            follows
+        }
+        _ => false,
+    }
+}
+/// A press that reaches the session supersedes an earlier dropped one.
+fn sent(event: &Event, keys: &mut [bool; 256], buttons: &mut [bool; 5]) {
+    match event {
+        Event::Key {
+            key,
+            transition: KeyTransition::Press,
+        } => keys[usize::from(key.usage())] = false,
+        Event::Positioned {
+            action:
+                PositionedAction::Button {
+                    button,
+                    pressed: true,
+                },
+            ..
+        } => buttons[*button as usize - 1] = false,
+        _ => {}
     }
 }
 impl Receiver {
-    pub(super) fn check(&self, current: ClientInstant) -> Result<(), Error> {
-        if let Some(pending) = &self.pending {
-            check_age(pending.sampled, current)?;
+    fn new(queue: Arc<Mutex<Queue>>) -> Self {
+        Self {
+            queue,
+            pending: None,
+            dropped_keys: [false; 256],
+            dropped_buttons: [false; 5],
+            dropped: 0,
         }
-        match self.queue.try_lock() {
-            Ok(queue) => {
-                if let Some(first) = queue.events.front() {
-                    check_age(first.sampled, current)?;
+    }
+    pub(super) const fn dropped(&self) -> u64 {
+        self.dropped
+    }
+    /// Local input older than its dispatch bound is obsolete work (AGENTS.md
+    /// 5), never a reason to end control: an aged press, repeat, motion,
+    /// scroll or text is dropped and counted, never sent late. Cleanup
+    /// (`cleanup`) stays queued and is sent late. Front only, so nothing is
+    /// reordered. A view that awaits its visibility callback holds dispatch,
+    /// so events can age even while the loop runs (fr-1r40).
+    pub(super) fn expire(
+        &mut self,
+        current: ClientInstant,
+        holds: &impl Fn(Held) -> bool,
+    ) -> Result<(), Error> {
+        if let Some(pending) = &self.pending
+            && aged(pending.sampled, current)?
+            && !cleanup(&pending.event, holds)
+        {
+            let Captured { event, .. } = self.pending.take().ok_or(Error::Unavailable)?;
+            self.note_dropped(&event);
+        }
+        let queue = self.queue.clone();
+        match queue.try_lock() {
+            Ok(mut queue) => {
+                while let Some(first) = queue.events.front() {
+                    if !aged(first.sampled, current)? || cleanup(&first.event, holds) {
+                        break;
+                    }
+                    let Captured { event, .. } =
+                        queue.events.pop_front().ok_or(Error::Unavailable)?;
+                    self.note_dropped(&event);
                 }
                 Ok(())
             }
@@ -213,8 +321,25 @@ impl Receiver {
             Err(TryLockError::Poisoned(_)) => Err(Error::Unavailable),
         }
     }
-    fn front(&mut self, current: ClientInstant) -> Result<Option<&Captured>, Error> {
-        self.check(current)?;
+    fn note_dropped(&mut self, event: &Event) {
+        self.dropped = self.dropped.saturating_add(1);
+        match event {
+            Event::Key {
+                key,
+                transition: KeyTransition::Press,
+            } => self.dropped_keys[usize::from(key.usage())] = true,
+            Event::Positioned {
+                action:
+                    PositionedAction::Button {
+                        button,
+                        pressed: true,
+                    },
+                ..
+            } => self.dropped_buttons[*button as usize - 1] = true,
+            _ => {}
+        }
+    }
+    fn front(&mut self) -> Result<Option<&Captured>, Error> {
         if self.pending.is_none() {
             match self.queue.try_lock() {
                 Ok(mut queue) => self.pending = queue.events.pop_front(),
@@ -242,10 +367,7 @@ impl ControlledViewer {
             events,
             last_sample: at,
         }));
-        self.events = Some(Receiver {
-            queue: queue.clone(),
-            pending: None,
-        });
+        self.events = Some(Receiver::new(queue.clone()));
         Ok(Source {
             queue: Arc::downgrade(&queue),
             control: self.control(),
@@ -264,10 +386,28 @@ impl ControlledViewer {
     }
     fn dispatch_one(&mut self, receiver: &mut Receiver) -> Result<(), super::Error> {
         let at = self.check_inner()?;
-        let Some(captured) = receiver.front(at).map_err(super::Error::Capture)? else {
+        let input = &self.input;
+        receiver
+            .expire(at, &|held| match held {
+                Held::Key(key) => input.holds_key(key),
+                Held::Button(button) => input.holds_button(button),
+            })
+            .map_err(super::Error::Capture)?;
+        if receiver.front().map_err(super::Error::Capture)?.is_none() || self.pending_send() {
+            return Ok(());
+        }
+        let Some(captured) = receiver.pending.as_ref() else {
             return Ok(());
         };
-        if self.pending_send() {
+        // The repeat or release of a press dropped as aged: the host never saw
+        // the press, so this goes with it.
+        if follows_dropped(
+            &captured.event,
+            &mut receiver.dropped_keys,
+            &mut receiver.dropped_buttons,
+        ) {
+            receiver.dropped = receiver.dropped.saturating_add(1);
+            receiver.pending = None;
             return Ok(());
         }
         let result = match &captured.event {
@@ -287,14 +427,23 @@ impl ControlledViewer {
         match result {
             Ok(()) => {
                 // Native event age survives encoding AND transport backpressure.
+                // Cleanup sent after its age bound keeps the send deadline it
+                // was given: clamping it to the past would expire it at once.
                 let deadline = captured
                     .sampled
                     .0
                     .checked_add(MAX_EVENT_AGE_US)
                     .ok_or(super::Error::Capture(Error::Clock))?;
-                if let Some(pending) = &mut self.pending {
+                if deadline > at.0
+                    && let Some(pending) = &mut self.pending
+                {
                     pending.until = pending.until.min(deadline);
                 }
+                sent(
+                    &captured.event,
+                    &mut receiver.dropped_keys,
+                    &mut receiver.dropped_buttons,
+                );
                 receiver.pending = None;
                 Ok(())
             }

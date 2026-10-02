@@ -461,10 +461,6 @@ pub enum Lapse {
     /// picture, first decode) did not complete within its bounded deadline, so
     /// the session ended instead of showing an unverified picture.
     VideoStartupExpired,
-    /// A captured local input event (key, button, motion) waited past its
-    /// 100 ms dispatch bound before the controlled viewer could send it, so
-    /// control ended rather than send stale input.
-    InputDispatchStalled,
     /// The control lease could not be kept: a renewal challenge was refused or
     /// its response missed its deadline, or (under a live view) no newer
     /// ticket proved the lease before the clipboard's projection of it
@@ -533,9 +529,6 @@ pub fn lapse(failure: Failure) -> Option<Lapse> {
         Failure::Observation(ObserverError::Streaming(StreamingViewerError::Startup(
             crate::media::decoder_startup::Error::Expired,
         ))) => Some(Lapse::VideoStartupExpired),
-        Failure::Observation(ObserverError::Streaming(StreamingViewerError::Control(C::Capture(
-            crate::session_startup::viewer_events::Error::Expired,
-        )))) => Some(Lapse::InputDispatchStalled),
         Failure::Observation(ObserverError::Streaming(StreamingViewerError::Control(C::View(
             P::Input(
                 fr_client::input::Error::Stopped(fr_client::input::StopReason::InvalidControl)

@@ -804,7 +804,7 @@ fn control_completion(progress: &Progress, control: control::Counters, json: boo
         .unwrap_or("not_requested");
     if json {
         format!(
-            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{},\"control_requested\":{},\"control_granted\":{},\"control_capabilities_granted\":{},\"wheel_unavailable\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"input_suspensions\":{},\"input_suspended_ms\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{}{},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false}}\n",
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{},\"control_requested\":{},\"control_granted\":{},\"control_capabilities_granted\":{},\"wheel_unavailable\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"input_suspensions\":{},\"input_suspended_ms\":{},\"input_dropped_aged\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{}{},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false}}\n",
             output::timestamp(),
             progress.attempts,
             progress.opened,
@@ -828,6 +828,7 @@ fn control_completion(progress: &Progress, control: control::Counters, json: boo
             control.submitted,
             control.suspensions,
             control.suspended_us / 1_000,
+            control.dropped_aged,
             control.clipboard.is_some(),
             clipboard.active,
             clipboard.received,
@@ -1075,10 +1076,12 @@ mod tests {
             counters.granted = true;
             counters.suspensions = 2;
             counters.suspended_us = 1_499_999;
+            counters.dropped_aged = 3;
             counters.ended = Some(Ok(()));
             let json = completion(&ended, true, None);
             assert!(json.contains("\"input_suspensions\":2"), "{json}");
             assert!(json.contains("\"input_suspended_ms\":1499"), "{json}");
+            assert!(json.contains("\"input_dropped_aged\":3"), "{json}");
             assert!(serde_json::from_str::<serde_json::Value>(&json).is_ok());
         }
 

@@ -73,8 +73,7 @@ A session that ends without a host report names its local cause: view_stale
 (the picture could not be proven fresh in time), transport_deadline_expired (a
 record missed its delivery deadline), host_not_heard (host renewals stopped
 arriving), video_reference_lost (lost video could not be repaired in time),
-video_startup_expired (a decoder start or restart ran out of time),
-input_dispatch_stalled (local input waited more than 100 ms to be sent) or
+video_startup_expired (a decoder start or restart ran out of time) or
 control_renewal_failed (the control lease could not be renewed in time);
 any other end is native_session_failed, its typed chain on stderr.
 --clipboard (with --control; build with linux-clipboard) lets the UTF-8 text
