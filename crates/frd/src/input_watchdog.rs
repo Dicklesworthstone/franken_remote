@@ -37,7 +37,7 @@ pub enum StopReason {
     Suspended,
 }
 impl StopReason {
-    fn from_raw(value: u8) -> Option<Self> {
+    pub(crate) fn from_raw(value: u8) -> Option<Self> {
         Some(match value {
             1 => Self::LocalRevoke,
             2 => Self::AuthorityEnded,

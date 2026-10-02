@@ -78,7 +78,8 @@ pub enum Error {
 /// The one owner an indicator revokes, FIRST, on every stop.
 enum Owner {
     #[cfg(feature = "linux-session-ui")]
-    Observation(ObservationControl),
+    // Boxed: the observation owner is far larger than the local revoke.
+    Observation(Box<ObservationControl>),
     /// A local executor's revoke. It must be idempotent, nonblocking and must
     /// not call back into the indicator.
     Local(Box<dyn Fn() + Send + Sync>),
@@ -242,7 +243,7 @@ impl SharingIndicator {
         }
         let (control, task) = launch(
             display,
-            Owner::Observation(observation.clone()),
+            Owner::Observation(Box::new(observation.clone())),
             Mode::Sharing,
         )?;
         Ok(Self {

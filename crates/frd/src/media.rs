@@ -96,6 +96,12 @@ pub struct ObservationControl {
     admission: Option<fr_tailnet::Lease>,
     renewal_attached: Arc<std::sync::atomic::AtomicBool>,
     control_grant_attached: Arc<std::sync::atomic::AtomicBool>,
+    /// Why a serve ended, recorded before its fence (first wins). A label for
+    /// the controlled lease's terminal report only; no authority effect.
+    end_reason: Arc<std::sync::atomic::AtomicU8>,
+    /// The input lease granted on this observation, so that a fence built
+    /// before the grant still names a failure's cause on it.
+    lease: Arc<Mutex<Option<crate::input_watchdog::Control>>>,
 }
 impl ObservationControl {
     pub fn new(cx: Cx, mut authority: SessionAuthority) -> Result<Self, Error> {
@@ -108,6 +114,8 @@ impl ObservationControl {
             admission: None,
             renewal_attached: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             control_grant_attached: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            end_reason: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            lease: Arc::new(Mutex::new(None)),
         })
     }
     /// Bind the already locally approved application authority to live Tailscale
@@ -243,6 +251,34 @@ impl ObservationControl {
         let until = peer_until.map_or(until.as_micros(), |peer| peer.min(until.as_micros()));
         let nanos = until.checked_mul(1000).ok_or(worker::Error::Deadline)?;
         Ok(Deadline::after(&self.cx, maximum)?.capped_at(Time::from_nanos(nanos)))
+    }
+    /// Record why a serve ended (first wins), before fencing it.
+    pub(crate) fn note_end(&self, reason: crate::input_watchdog::StopReason) {
+        let _ = self.end_reason.compare_exchange(
+            0,
+            reason as u8,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        );
+    }
+    pub(crate) fn register_lease(&self, lease: crate::input_watchdog::Control) {
+        if let Ok(mut slot) = self.lease.lock() {
+            *slot = Some(lease);
+        }
+    }
+    /// Stop the granted lease, if any, with `reason` (its first reason wins).
+    /// The stop never blocks.
+    pub(crate) fn stop_lease(&self, reason: crate::input_watchdog::StopReason) {
+        if let Ok(slot) = self.lease.lock()
+            && let Some(lease) = slot.as_ref()
+        {
+            lease.stop(reason);
+        }
+    }
+    pub(crate) fn end_reason(&self) -> Option<crate::input_watchdog::StopReason> {
+        crate::input_watchdog::StopReason::from_raw(
+            self.end_reason.load(std::sync::atomic::Ordering::Acquire),
+        )
     }
     /// Closed by `revoke` (a local stop), as opposed to an expiry or failure.
     /// Reads no admission state and never waits; for terminal labels only.

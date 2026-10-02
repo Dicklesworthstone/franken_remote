@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-10-01 — host failures in the granting round are named too
+
+- The `host_failure` label (134b6d7) missed the common case. When control
+  is granted in the same serving round that then fails, the lease still read
+  `local_revoke`, as two namespace matrix rows showed.
+- The granted lease now registers on the session's observation owner. The
+  serve fence names the failure on it before revoking: revoking cancels the
+  session, and the input agent would otherwise stop the lease as merely
+  cancelled.
+
 ## 2026-10-01 — aged local input is dropped instead of ending control
 
 - Cause of `input_dispatch_stalled` (fr-1r40):

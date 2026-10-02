@@ -255,6 +255,9 @@ enum Case {
     Presented,
     PresentedNoConsent,
     PresentedNoVisibility,
+    /// The capture worker exits about 1 s in, after the grant, with
+    /// observation and control live.
+    HostFailureAfterGrant,
 }
 impl Case {
     fn proof(self) -> bool {
@@ -280,7 +283,11 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, case: Case, delay: u64, hold: u64) 
         &c,
         &h,
         !matches!(case, Case::NotReady) && !case.proof(),
-        "unchanged",
+        if matches!(case, Case::HostFailureAfterGrant) {
+            "crash-late"
+        } else {
+            "unchanged"
+        },
         case.proof(),
     ))
     .await;
@@ -478,6 +485,18 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, case: Case, delay: u64, hold: u64) 
             assert!(controlled.control_renewed_until().is_some());
             assert!(controlled.observation_renewed_until().is_some());
         }
+    } else if matches!(case, Case::HostFailureAfterGrant) {
+        // Control was granted inside the first serving round, after its fence
+        // was built: the lease still reports the host's own failure.
+        assert!(granted && active.get());
+        let Host::Control(controlled) = &host.host else {
+            panic!("lost owner");
+        };
+        assert_eq!(
+            controlled.control().reason(),
+            Some(crate::input_watchdog::StopReason::NativeFailure),
+            "host={host_result:?}"
+        );
     } else if matches!(case, Case::ChangeAfterGrant) {
         assert!(granted && active.get());
         assert_eq!(
@@ -521,6 +540,10 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, case: Case, delay: u64, hold: u64) 
         )
         .await
         .unwrap();
+}
+#[test]
+fn a_host_failure_after_a_mid_round_grant_reports_a_host_failure() {
+    run3(|c, h, cleanup| exercise(c, h, cleanup, Case::HostFailureAfterGrant, 0, 10_000_000));
 }
 #[test]
 fn live_grant_preserves_capture_and_renews_original_input() {

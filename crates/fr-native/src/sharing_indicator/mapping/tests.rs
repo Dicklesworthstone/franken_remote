@@ -52,7 +52,7 @@ fn fixture(
                 Status::Mapped => 1,
                 Status::Stopped(reason) => reason as u8,
             }),
-            owner: Owner::Observation(observation.clone()),
+            owner: Owner::Observation(Box::new(observation.clone())),
             window: AtomicU32::new(0),
         })),
         task: None,

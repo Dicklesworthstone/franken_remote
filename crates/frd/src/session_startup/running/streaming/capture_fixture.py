@@ -28,9 +28,10 @@ try:
         frame,observed,forced = struct.unpack('>QQB',b)
         if last is not None and MODE == 'stall': time.sleep(60)
         if last is not None and MODE == 'crash': sys.exit(3)
+        if last is not None and MODE == 'crash-late' and time.monotonic() - start > 1.0: sys.exit(3)
         if last is not None and MODE == 'slow': time.sleep(.06)
         if last is not None and MODE == 'overloaded': time.sleep(.18)
-        if last is not None and (MODE == 'unchanged' or (MODE == 'wake' and time.monotonic() - start < 1.65)) and not forced:
+        if last is not None and (MODE in ('unchanged', 'crash-late') or (MODE == 'wake' and time.monotonic() - start < 1.65)) and not forced:
             reply(h,265,struct.pack('>QQQ',frame,last,observed)); continue
         reference = 0 if last is None or forced else last
         predicted = int(last is not None and not forced)

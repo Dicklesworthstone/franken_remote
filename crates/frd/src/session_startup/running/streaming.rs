@@ -602,7 +602,7 @@ struct Fence {
 impl Fence {
     fn stop(&self) {
         if let Some(control) = &self.native {
-            control.stop(StopReason::LocalRevoke);
+            control.stop(self.control.end_reason().unwrap_or(StopReason::LocalRevoke));
         }
         self.control.revoke();
     }
@@ -610,10 +610,15 @@ impl Fence {
     /// fencing (the first reason wins): only a revoked authority is a local
     /// revoke. A failure under a live one is the host's own (media, transport
     /// or renewal), never reported as a local revoke.
+    /// The reason is also recorded on the shared observation control, and the
+    /// lease registered there (granted, perhaps, after this fence was built)
+    /// is stopped with it.
     fn fail(&self) {
-        if let Some(control) = &self.native {
-            control.stop(failure_reason(&self.control));
-        }
+        let reason = failure_reason(&self.control);
+        self.control.note_end(reason);
+        // Before revoking: a revoke cancels the context, and the input agent
+        // would then stop the lease as merely Cancelled.
+        self.control.stop_lease(reason);
         self.stop();
     }
 }

@@ -76,6 +76,10 @@ impl HostSession {
         if let Some(reporting) = reporting {
             host.arm_revocation_reporting(reporting)?;
         }
+        host.session
+            .opened
+            .control
+            .register_lease(host.input.control());
         Ok(host)
     }
 }
