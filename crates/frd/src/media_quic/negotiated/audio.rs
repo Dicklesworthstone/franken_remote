@@ -4,7 +4,7 @@
 //! enable, an approval, or evidence of capture freshness.
 use super::{Error, NegotiatedMedia};
 use fr_transport::quic::{DatagramRoute, MediaChannel, Messages, QuicRecords, Route, StreamRoute};
-use fr_wire::{attachment::MediaRole, negotiation::Role};
+use fr_wire::attachment::MediaRole;
 
 /// Exact routes of one side of the audio-down channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,13 +22,11 @@ pub struct AudioLanes {
 }
 
 impl NegotiatedMedia {
-    /// Positive selection of audio-down by an OBSERVER in this negotiation.
-    /// A control selection never carries audio in this slice.
+    /// Positive playback selection. Control-capable sessions also require the
+    /// explicit native-audio-control extension; legacy audio-down alone never
+    /// makes a controller wait for an unsupported auxiliary attachment.
     pub fn audio_selected(&self) -> bool {
-        self.selection.role == Role::Observe
-            && self.selection.capabilities.iter().any(|c| {
-                c.name == fr_wire::audio::CAPABILITY && c.version == fr_wire::audio::VERSION
-            })
+        fr_wire::audio_control::downlink_selected(&self.selection)
     }
     /// Join the completed audio-down attachment. It must belong to this
     /// connection and view (same parent tuple, its own binding ID) and carry

@@ -145,14 +145,10 @@ impl std::fmt::Debug for NativeObserver {
     }
 }
 impl NativeObserver {
-    /// Configure once before serving control. Factory/identifiers are local,
-    /// independently permitted and never received from the peer. Clipboard starts
-    /// automatically only after the ORIGINAL input grant and bilateral readiness;
-    /// merely observing a desktop never opens or reads a clipboard.
-    /// Host playback audio for this observer: install the native client's
-    /// local output, once, before serving. `Err(())` is typed absence: the
-    /// host did not select audio-down (not locally enabled there, or this is
-    /// a controlled session) or no channel attached.
+    /// Host playback audio: install the native client's local output once,
+    /// before serving. Absence means the host did not select or attach playback,
+    /// including an older host without the explicit control-audio extension.
+    /// The output must isolate codec/device work from session/input servicing.
     pub fn configure_audio(
         &mut self,
         output: Box<dyn super::streaming::audio::AudioOutput>,
@@ -163,6 +159,10 @@ impl NativeObserver {
     pub fn audio_statistics(&self) -> Option<super::streaming::audio::AudioStatistics> {
         self.viewer.audio_statistics()
     }
+    /// Configure once before serving control. Factory/identifiers are local,
+    /// independently permitted and never received from the peer. Clipboard starts
+    /// automatically only after the ORIGINAL input grant and bilateral readiness;
+    /// merely observing a desktop never opens or reads a clipboard.
     pub fn configure_clipboard(
         &mut self,
         config: crate::native_clipboard::Configuration,
@@ -743,8 +743,9 @@ fn role_index(role: MediaRole, controlled: bool, audio: bool) -> Result<usize, E
         MediaRole::Recovery => Ok(1),
         MediaRole::Video => Ok(2),
         MediaRole::Input if controlled => Ok(3),
-        // Only a positively selected observer expects the audio-down channel.
-        MediaRole::AudioDown if audio && !controlled => Ok(4),
+        // Audio has its own slot in BOTH modes, after explicit capability
+        // selection. No unselected audio or input role is accepted here.
+        MediaRole::AudioDown if audio => Ok(4),
         MediaRole::Input | MediaRole::Clipboard | MediaRole::Files | MediaRole::AudioDown => {
             Err(Error::Order)
         }
@@ -762,7 +763,7 @@ async fn attach_media(
         Route::Stream(session.routes.inbound),
         Kind::StreamBinding,
     )?;
-    let audio = !controlled && native_control::audio_selected(&session.opened.selection);
+    let audio = native_control::audio_selected(&session.opened.selection);
     for _ in 0..3 + usize::from(controlled) + usize::from(audio) {
         receive_record(session, budget, &mut slot).await?;
         let Message::Binding(descriptor) = attachment::decode(

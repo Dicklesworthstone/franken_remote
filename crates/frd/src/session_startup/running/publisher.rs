@@ -751,8 +751,15 @@ async fn bootstrap(
     } else {
         None
     };
+    // Playback is independently opt-in and consumes its own one-use attachment.
+    // Neither successful audio attachment nor decoder readiness grants input.
+    let audio_channel = if controlled && native_control::audio_selected(host.selection()) {
+        Some(attach(&mut host, &mut selected, MediaRole::AudioDown, budget, entropy).await?)
+    } else {
+        None
+    };
     let negotiation = host.selection().clone();
-    let media = NegotiatedMedia::new(
+    let mut media = NegotiatedMedia::new(
         host.io().map_err(|e| budget.fail(Error::Session(e)))?.0,
         &negotiation,
         &c,
@@ -760,6 +767,14 @@ async fn bootstrap(
         &v,
     )
     .map_err(|e| budget.fail(Error::Routes(e)))?;
+    if let Some(channel) = audio_channel {
+        media
+            .attach_audio(
+                host.io().map_err(|e| budget.fail(Error::Session(e)))?.0,
+                &channel,
+            )
+            .map_err(|e| budget.fail(Error::Routes(e)))?;
+    }
     let input = input_channel
         .map(|input| {
             NegotiatedInput::new(

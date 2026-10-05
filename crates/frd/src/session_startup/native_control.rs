@@ -114,6 +114,18 @@ pub fn host_offer_with_files(control: bool, clipboard: bool, audio: bool, files:
                 .into_iter()
                 .filter(|_| audio),
         )
+        // Legacy hosts offer audio-down even when their control path cannot
+        // use it. The extra OPTIONAL boundary prevents an attachment deadlock
+        // with those hosts without making audio mandatory for control.
+        .chain(
+            [(
+                fr_wire::audio_control::CAPABILITY,
+                fr_wire::audio_control::VERSION,
+                false,
+            )]
+            .into_iter()
+            .filter(|_| control && audio),
+        )
         .chain(
             FILE_CAPABILITIES
                 .iter()
@@ -152,15 +164,10 @@ pub fn with_line_scroll(mut offer: Offer) -> Offer {
     offer
 }
 
-/// Positive audio-down selection by an OBSERVER: both peers offered it, so
-/// the host locally enabled playback capture. A controller never gets audio
-/// in this slice (the transport also refuses the attachment for it).
+/// Positive playback selection, including the explicit control-audio extension.
+/// A legacy audio-down capability alone still applies only to observers.
 pub(crate) fn audio_selected(selection: &Selection) -> bool {
-    selection.role == Role::Observe
-        && selection
-            .capabilities
-            .iter()
-            .any(|c| c.name == fr_wire::audio::CAPABILITY && c.version == fr_wire::audio::VERSION)
+    fr_wire::audio_control::downlink_selected(selection)
 }
 
 /// Whether this session sets up the drop lane: control and all three file

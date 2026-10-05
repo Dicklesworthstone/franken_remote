@@ -221,12 +221,11 @@ fn validate_role(scope: &ChannelScope<'_>, role: MediaRole) -> Result<(), Error>
             }
             (attachment::INPUT_CAPABILITY, attachment::INPUT_VERSION)
         }
-        // Playback audio serves an admitted read-only viewer (PROTOCOL.md §6).
-        // This first slice refuses it on a control selection: the native
-        // client does not isolate its in-process playback decode from input
-        // authority, so a controller never receives an audio channel.
+        // Legacy audio-down remains observer-only. The explicit control-audio
+        // extension additionally requires isolated playback and the same local
+        // observation admission; attachment still never grants an input lease.
         MediaRole::AudioDown => {
-            if scope.selection.role != fr_wire::negotiation::Role::Observe {
+            if !fr_wire::audio_control::downlink_selected(scope.selection) {
                 return Err(Error::WrongRoute);
             }
             (fr_wire::audio::CAPABILITY, fr_wire::audio::VERSION)
