@@ -221,6 +221,25 @@ impl<D: PolledDecoder> PulsePlayout<D> {
     pub fn receive_record(
         &mut self,
         bytes: &[u8],
+        checkpoint: impl FnMut() -> Result<ClientInstant, DeviceError>,
+    ) -> Result<ReceiveResult, Error> {
+        self.receive_record_inner(bytes, None, checkpoint)
+    }
+    /// Preserve the original local receipt across a bounded worker handoff.
+    /// Queueing and native device polling both consume the packet's age budget.
+    /// A matching stop remains an immediate fence, regardless of packet age.
+    pub fn receive_record_at(
+        &mut self,
+        bytes: &[u8],
+        arrived: ClientInstant,
+        checkpoint: impl FnMut() -> Result<ClientInstant, DeviceError>,
+    ) -> Result<ReceiveResult, Error> {
+        self.receive_record_inner(bytes, Some(arrived), checkpoint)
+    }
+    fn receive_record_inner(
+        &mut self,
+        bytes: &[u8],
+        arrived: Option<ClientInstant>,
         mut checkpoint: impl FnMut() -> Result<ClientInstant, DeviceError>,
     ) -> Result<ReceiveResult, Error> {
         self.check()?;
@@ -241,9 +260,14 @@ impl<D: PolledDecoder> PulsePlayout<D> {
             if !this.acknowledged {
                 return Err(Error::NotAcknowledged);
             }
+            // Even a direct caller records arrival BEFORE foreign device work.
+            let arrived = match arrived {
+                Some(arrived) => arrived,
+                None => checkpoint().map_err(Error::Device)?,
+            };
             let clock = device_clock(&mut this.device, &mut checkpoint).map_err(Error::Device)?;
             this.receiver
-                .receive_record(bytes, clock)
+                .receive_record_at(bytes, arrived, clock)
                 .map_err(Error::Receiver)
         })
     }

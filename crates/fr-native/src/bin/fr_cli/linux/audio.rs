@@ -3,6 +3,8 @@
 //! fr-opus-worker, never on the session thread or by an in-process fallback.
 //! Configuration acknowledgement waits for BOTH real native owners. PCM replies
 //! retain their original arrival/device deadlines; a receipt is not audibility.
+//! The CLI uses a bounded output worker: no `PulseAudio` call or native teardown
+//! runs on the session thread. The decoder remains a restricted child process.
 use super::super::{Failure, options::AudioRequest};
 use std::path::PathBuf;
 
@@ -88,9 +90,10 @@ fn server(request: &AudioRequest) -> Result<PathBuf, Failure> {
 }
 
 #[cfg(feature = "linux-audio")]
-pub(super) use output::Output;
+pub(super) use output::threaded::Output;
 #[cfg(feature = "linux-audio")]
 mod output {
+    pub(super) mod threaded;
     use super::Report;
     use fr_client::input::ClientInstant;
     use fr_core::audio::{AudioStopReason, AudioStreamConfig};
@@ -142,6 +145,45 @@ mod output {
                 stage: Stage::Idle,
                 report,
             }
+        }
+    }
+    impl Output {
+        fn receive_at(
+            &mut self,
+            bytes: &[u8],
+            arrived: ClientInstant,
+            live: &mut dyn FnMut() -> bool,
+        ) -> Result<(), ViewerAudioRefused> {
+            let origin = self.origin;
+            let mut checkpoint = || {
+                if live() {
+                    Ok(now(origin))
+                } else {
+                    Err(DeviceError::Denied)
+                }
+            };
+            match std::mem::replace(&mut self.stage, Stage::Done) {
+                Stage::Playing(mut playout) => {
+                    match playout
+                        .receive_record_at(bytes, arrived, &mut checkpoint)
+                        .map_err(|_| ViewerAudioRefused)?
+                    {
+                        ReceiveResult::Stopped(_) => self.stage = Stage::Stopping(playout),
+                        ReceiveResult::Queued | ReceiveResult::Ignored => {
+                            self.stage = Stage::Playing(playout);
+                        }
+                    }
+                }
+                Stage::Configuring(mut playout) => {
+                    playout.disconnect();
+                }
+                Stage::Starting { mut device, .. } => {
+                    // Only a matching stop reaches us before acknowledgement.
+                    device.disconnect();
+                }
+                stage => self.stage = stage,
+            }
+            Ok(())
         }
     }
     fn now(origin: Instant) -> ClientInstant {
@@ -295,36 +337,7 @@ mod output {
             bytes: &[u8],
             live: &mut dyn FnMut() -> bool,
         ) -> Result<(), ViewerAudioRefused> {
-            let origin = self.origin;
-            let mut checkpoint = || {
-                if live() {
-                    Ok(now(origin))
-                } else {
-                    Err(DeviceError::Denied)
-                }
-            };
-            match std::mem::replace(&mut self.stage, Stage::Done) {
-                Stage::Playing(mut playout) => {
-                    match playout
-                        .receive_record(bytes, &mut checkpoint)
-                        .map_err(|_| ViewerAudioRefused)?
-                    {
-                        ReceiveResult::Stopped(_) => self.stage = Stage::Stopping(playout),
-                        ReceiveResult::Queued | ReceiveResult::Ignored => {
-                            self.stage = Stage::Playing(playout);
-                        }
-                    }
-                }
-                Stage::Configuring(mut playout) => {
-                    playout.disconnect();
-                }
-                Stage::Starting { mut device, .. } => {
-                    // Only a matching stop reaches us before acknowledgement.
-                    device.disconnect();
-                }
-                stage => self.stage = stage,
-            }
-            Ok(())
+            self.receive_at(bytes, now(self.origin), live)
         }
         fn reset(&mut self) {
             // Retain the exact retirement until proven complete. A new epoch
