@@ -2,7 +2,7 @@
 //!
 //! `frd run --audio` is the local enable. It only arms a demand-driven source:
 //! the separate `fr-media-worker --audio` process starts when at least one
-//! admitted, streaming observer that selected audio-down is attached, and is
+//! admitted, streaming viewer that selected audio-down is attached, and is
 //! stopped and reaped when none remains. frd links neither libpulse nor
 //! libopus; it receives already encoded packets over the bounded private IPC.
 //!
@@ -33,6 +33,8 @@ use std::{
     sync::{Arc, Mutex, Weak},
     time::Duration,
 };
+
+mod exclusive;
 
 /// Pull cadence: half of the 20 ms packet duration.
 const PULL_US: u64 = 10_000;
@@ -137,6 +139,95 @@ impl EntryAudio {
     pub(super) fn close(&mut self) {
         self.lane.close();
     }
+    /// The same bounded lane service for shared and exclusive publications.
+    /// Native work never runs under this synchronous transport callback.
+    #[allow(clippy::too_many_arguments)]
+    fn service(
+        &mut self,
+        cx: &Cx,
+        transport: &mut QuicRecords,
+        ring: &AudioRing,
+        lanes: AudioLanes,
+        owner: &ObservationControl,
+        control: &ObservationControl,
+        report: &mut SendReport,
+    ) -> Result<(), Error> {
+        if self.lane.is_stopped() {
+            return Ok(());
+        }
+        if self.lanes.is_some_and(|l| l != lanes)
+            || wire::packet_record_bytes(usize::from(MAX_PACKET_BYTES))
+                .is_none_or(|n| n > lanes.packet_maximum)
+        {
+            self.close();
+            return Ok(());
+        }
+        self.lanes = Some(lanes);
+        let mut authorize = || owner.check().is_ok() && control.check().is_ok();
+        for _ in 0..RECORDS_PER_TURN {
+            let now = owner.check().map_err(Error::Media)?.as_micros();
+            let action = self.lane.next(ring, now);
+            let (route, record, deadline) = match audio_record(action, ring, lanes, now) {
+                Ok(Some(send)) => send,
+                Ok(None) => return Ok(()),
+                Err(_) => {
+                    self.close();
+                    return Ok(());
+                }
+            };
+            match transport.send(cx, route, &record, deadline, &mut authorize) {
+                Ok(()) => {
+                    report.accepted += 1;
+                    let result = match action {
+                        LaneAction::Configure(_) => self.lane.configuration_sent(now),
+                        LaneAction::Stop(_) => self.lane.stop_sent(),
+                        LaneAction::Packet { sequence, .. } => self.lane.packet_sent(sequence),
+                        LaneAction::Nothing => Ok(()),
+                    };
+                    if result.is_err() {
+                        self.close();
+                        return Ok(());
+                    }
+                }
+                Err(quic::Error::Backpressure) => {
+                    report.pending = true;
+                    return Ok(());
+                }
+                Err(error) => {
+                    return Err(Error::Transport(crate::media_quic::Error::Transport(error)));
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Only the original reliable reply route may change this lane's state.
+    fn receive(
+        &mut self,
+        ring: &AudioRing,
+        route: Route,
+        bytes: &[u8],
+    ) -> Option<Disposition> {
+        let lanes = self.lanes?;
+        if route != Route::Stream(lanes.replies) {
+            return None;
+        }
+        match wire::record_kind(bytes) {
+            Some(0x0061) => match wire::decode_configured(bytes, lanes.binding) {
+                Ok(ack) => {
+                    let _ = self.lane.configured(ack, ring);
+                }
+                Err(_) => self.close(),
+            },
+            Some(0x0063) => match wire::decode_stop(bytes, lanes.binding) {
+                Ok(stop) => {
+                    let _ = self.lane.viewer_stopped(stop);
+                }
+                Err(_) => self.close(),
+            },
+            _ => self.close(),
+        }
+        Some(Disposition::Consumed)
+    }
 }
 impl Entry {
     /// Admitted, decoder-ready observation with an attached audio-down lane.
@@ -171,93 +262,23 @@ impl Entry {
             Ok(Some(lanes)) => lanes,
             Ok(None) => return Ok(()),
             Err(_) => {
-                // Retired/reset audio lane: typed local fence, video continues.
-                self.audio.lane.close();
+                self.audio.close();
                 self.audio.lanes = None;
                 return Ok(());
             }
         };
-        // A lane that changed under us, or whose datagram route cannot carry
-        // this source's largest packet, is a typed audio-only refusal.
-        if self.audio.lanes.is_some_and(|l| l != lanes)
-            || wire::packet_record_bytes(usize::from(MAX_PACKET_BYTES))
-                .is_none_or(|n| n > lanes.packet_maximum)
-        {
-            self.audio.lane.close();
-            return Ok(());
-        }
-        self.audio.lanes = Some(lanes);
-        let control = self.control.clone();
-        let mut authorize = || owner.check().is_ok() && control.check().is_ok();
-        for _ in 0..RECORDS_PER_TURN {
-            let now = owner.check().map_err(Error::Media)?.as_micros();
-            let lane = &mut self.audio.lane;
-            let action = lane.next(ring, now);
-            let (route, record, deadline) = match audio_record(action, ring, lanes, now) {
-                Ok(Some(send)) => send,
-                Ok(None) => return Ok(()),
-                // Never a video failure: fence this viewer's audio only.
-                Err(_) => {
-                    lane.close();
-                    return Ok(());
-                }
-            };
-            match transport.send(cx, route, &record, deadline, &mut authorize) {
-                Ok(()) => {
-                    report.accepted += 1;
-                    let result = match action {
-                        LaneAction::Configure(_) => lane.configuration_sent(now),
-                        LaneAction::Stop(_) => lane.stop_sent(),
-                        LaneAction::Packet { sequence, .. } => lane.packet_sent(sequence),
-                        LaneAction::Nothing => Ok(()),
-                    };
-                    if result.is_err() {
-                        lane.close();
-                        return Ok(());
-                    }
-                }
-                // Congestion: nothing is queued here; the packet ages out.
-                Err(quic::Error::Backpressure) => {
-                    report.pending = true;
-                    return Ok(());
-                }
-                Err(error) => {
-                    return Err(Error::Transport(crate::media_quic::Error::Transport(error)));
-                }
-            }
-        }
-        Ok(())
+        self.audio
+            .service(cx, transport, ring, lanes, owner, &self.control, report)
     }
     /// One reliable record on this viewer's audio reply lane. Records for
-    /// other routes are not ours (`None`); a stale generation is refused and
-    /// changes nothing; a malformed record fences audio only.
+    /// other routes are not ours; malformed records fence audio only.
     pub(super) fn audio_record(
         &mut self,
         ring: &AudioRing,
         route: Route,
         bytes: &[u8],
     ) -> Option<Disposition> {
-        let lanes = self.audio.lanes?;
-        if route != Route::Stream(lanes.replies) {
-            return None;
-        }
-        let lane = &mut self.audio.lane;
-        match wire::record_kind(bytes) {
-            Some(0x0061) => match wire::decode_configured(bytes, lanes.binding) {
-                Ok(ack) => {
-                    let _ = lane.configured(ack, ring);
-                }
-                Err(_) => lane.close(),
-            },
-            Some(0x0063) => match wire::decode_stop(bytes, lanes.binding) {
-                Ok(stop) => {
-                    let _ = lane.viewer_stopped(stop);
-                }
-                Err(_) => lane.close(),
-            },
-            _ => lane.close(),
-        }
-        Some(Disposition::Consumed)
+        self.audio.receive(ring, route, bytes)
     }
 }
 
@@ -301,7 +322,6 @@ fn audio_record(
             wire::encode_packet(
                 &wire::AudioPacket {
                     direction: packet.direction(),
-                    // The viewer's own lane epoch, never the private source one.
                     generation,
                     sequence: packet.sequence(),
                     timestamp_samples: packet.timestamp_samples(),
@@ -327,30 +347,78 @@ impl Members {
     }
 }
 
-/// The source side's handle on the share's members: demand, clock, ring.
+/// The source side's handle on the share's demand, clock and ONE packet ring.
+/// Both publisher forms use the same source and lane state machines.
 #[derive(Clone)]
 pub struct AudioFeed {
-    members: Weak<Mutex<Members>>,
+    target: FeedTarget,
+}
+#[derive(Clone)]
+enum FeedTarget {
+    Shared(Weak<Mutex<Members>>),
+    Exclusive(Arc<Mutex<exclusive::State>>),
 }
 impl std::fmt::Debug for AudioFeed {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("AudioFeed([share members])")
+        f.write_str("AudioFeed([share audio])")
     }
 }
 impl AudioFeed {
     pub(super) const fn new(members: Weak<Mutex<Members>>) -> Self {
-        Self { members }
-    }
-    fn with<T>(&self, action: impl FnOnce(&mut Members) -> T) -> Result<T, Error> {
-        let shared = self.members.upgrade().ok_or(Error::Closed)?;
-        let mut members = shared.lock().map_err(|_| Error::Poisoned)?;
-        if members.closed {
-            return Err(Error::Closed);
+        Self {
+            target: FeedTarget::Shared(members),
         }
-        Ok(action(&mut members))
+    }
+    fn with_ring<T>(&self, action: impl FnOnce(&mut AudioRing) -> T) -> Result<T, Error> {
+        match &self.target {
+            FeedTarget::Shared(weak) => {
+                let shared = weak.upgrade().ok_or(Error::Closed)?;
+                let mut members = shared.lock().map_err(|_| Error::Poisoned)?;
+                if members.closed {
+                    return Err(Error::Closed);
+                }
+                Ok(action(&mut members.audio))
+            }
+            FeedTarget::Exclusive(shared) => {
+                let mut state = shared.lock().map_err(|_| Error::Poisoned)?;
+                if state.closed {
+                    return Err(Error::Closed);
+                }
+                Ok(action(&mut state.ring))
+            }
+        }
     }
     fn owner(&self) -> Result<ObservationControl, Error> {
-        self.with(|m| m.owner.clone())
+        match &self.target {
+            FeedTarget::Shared(weak) => {
+                let shared = weak.upgrade().ok_or(Error::Closed)?;
+                let members = shared.lock().map_err(|_| Error::Poisoned)?;
+                if members.closed {
+                    return Err(Error::Closed);
+                }
+                Ok(members.owner.clone())
+            }
+            FeedTarget::Exclusive(shared) => {
+                let state = shared.lock().map_err(|_| Error::Poisoned)?;
+                if state.closed {
+                    return Err(Error::Closed);
+                }
+                Ok(state.owner.clone())
+            }
+        }
+    }
+    fn demand(&self) -> Result<bool, Error> {
+        match &self.target {
+            FeedTarget::Shared(weak) => {
+                let shared = weak.upgrade().ok_or(Error::Closed)?;
+                let members = shared.lock().map_err(|_| Error::Poisoned)?;
+                Ok(!members.closed && members.audio_demand())
+            }
+            FeedTarget::Exclusive(shared) => {
+                let state = shared.lock().map_err(|_| Error::Poisoned)?;
+                Ok(!state.closed && state.audio.lane.wants_audio())
+            }
+        }
     }
 }
 
@@ -363,9 +431,7 @@ pub struct AudioSource {
     worker: Option<Worker>,
     stream: Option<SourceStream>,
     next_generation: u64,
-    /// A worker exists whose exit has not been confirmed: never start another.
     unreaped: bool,
-    /// Typed terminal state for this share (unavailable source or failure).
     failed: bool,
 }
 impl std::fmt::Debug for AudioSource {
@@ -388,14 +454,13 @@ impl AudioSource {
             failed: false,
         }
     }
-    /// Run until the share closes. Errors are the share's own closure; audio
-    /// failures are typed per-viewer stops, never a share failure.
+    /// Run until the share closes. Audio failures become per-viewer stops.
     pub async fn serve(mut self) -> Result<(), Error> {
         loop {
             let owner = self.feed.owner()?;
             let cx = owner.context();
             let now = owner.check().map_err(Error::Media)?.as_micros();
-            let demand = self.feed.with(|m| m.audio_demand())?;
+            let demand = self.feed.demand()?;
             match (self.worker.is_some(), demand) {
                 (false, true) if !self.failed && !self.unreaped => self.start(&cx).await?,
                 (true, true) => self.pull(&cx).await?,
@@ -429,17 +494,15 @@ impl AudioSource {
             Err(error) => Err(error),
         };
         let Ok(worker) = result else {
-            // Missing/unavailable monitor or a failed worker: typed and
-            // terminal for this share, never a respawn loop.
             self.failed = true;
             return self
                 .feed
-                .with(|m| m.audio.fail(stream, AudioStopReason::HostDisabled));
+                .with_ring(|ring| ring.fail(stream, AudioStopReason::HostDisabled));
         };
         self.worker = Some(worker);
         self.stream = Some(stream);
         self.feed
-            .with(|m| m.audio.start(stream))?
+            .with_ring(|ring| ring.start(stream))?
             .map_err(|_| Error::Closed)
     }
     async fn pull(&mut self, cx: &Cx) -> Result<(), Error> {
@@ -460,7 +523,6 @@ impl AudioSource {
             .map_err(|_| ())
             .and_then(|reply| decode_batch(reply.body(), &capture).map_err(|_| ()));
         let Ok(batch) = batch else {
-            // The device changed or the worker failed: fence every lane first.
             self.failed = true;
             return self.stop(cx, AudioStopReason::DeviceChanged).await;
         };
@@ -468,24 +530,20 @@ impl AudioSource {
         let pulled = owner.check().map_err(Error::Media)?.as_micros();
         let count = u64::try_from(batch.packets.len()).map_err(|_| Error::InvalidBudget)?;
         let frame_us = u64::from(FRAME_MS) * 1000;
-        self.feed.with(|m| {
+        self.feed.with_ring(|ring| {
             for (index, unit) in (0_u64..).zip(batch.packets) {
-                // The newest frame completed no later than this pull; each
-                // older one a frame earlier. A late pull therefore ages its
-                // backlog honestly and lanes drop it rather than burst it.
                 let captured = pulled.saturating_sub((count - 1 - index) * frame_us);
-                // Refusals are counted by the ring itself.
-                let _ = m.audio.push(unit, captured);
+                let _ = ring.push(unit, captured);
             }
         })
     }
     async fn stop(&mut self, cx: &Cx, reason: AudioStopReason) -> Result<(), Error> {
         // Fence lanes BEFORE native cleanup: queued packets are discarded now.
-        self.feed.with(|m| {
+        self.feed.with_ring(|ring| {
             if reason == AudioStopReason::HostDisabled && !self.failed {
-                m.audio.idle();
+                ring.idle();
             } else {
-                m.audio.end(reason);
+                ring.end(reason);
             }
         })?;
         self.stream = None;
@@ -512,12 +570,9 @@ impl AudioSource {
 }
 impl Drop for AudioSource {
     fn drop(&mut self) {
-        if let Ok(shared) = self.feed.members.upgrade().ok_or(()) {
-            let mut members = shared
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            members.audio.end(AudioStopReason::SessionEnded);
-        }
+        let _ = self
+            .feed
+            .with_ring(|ring| ring.end(AudioStopReason::SessionEnded));
         if let Some(worker) = &mut self.worker {
             worker.abort();
         }
