@@ -24,6 +24,12 @@
 //! that asked to send files gets the one-use file lane on the same session,
 //! after its grant and first lease renewal (`native_files`); its disk worker
 //! is reaped with the share and a fenced transfer never publishes.
+//!
+//! With the independent local `--audio` enable and this viewer's positive
+//! control-audio negotiation, host playback uses the existing shared audio
+//! source/ring/lane beside the managed service. Input is always polled first;
+//! no audio IPC wait or native call runs on the input executor. The host-run
+//! owner retains the original audio-child receipt and reaps it at share end.
 use super::super::{Error, LocalAction, Report, Wake};
 use super::{SessionAgent, Setup, Startup, local_stage};
 use crate::{
@@ -178,9 +184,10 @@ impl SessionAgent {
         self.control.as_ref()
     }
     /// The operator's LOCAL playback-audio enable. It only arms a demand-
-    /// driven source: capture starts when an admitted observer that selected
-    /// audio-down is streaming, and stops when no such viewer remains. The
-    /// controlled share never carries audio in this slice.
+    /// driven source: capture starts only for an admitted viewer with a completed
+    /// audio-down attachment. Controllers additionally select native-audio-control.
+    /// The profile's retained cleanup slot belongs to the enclosing host-run
+    /// owner in either mode; service completion alone never proves child exit.
     #[must_use]
     pub fn with_audio(mut self, profile: crate::media::shared_publisher::AudioProfile) -> Self {
         self.audio = Some(profile);
@@ -273,6 +280,10 @@ impl ControlledDesktop {
         };
         let (nonce, ticket, ids) = (entropy.clone(), entropy.clone(), entropy);
         let seat = self.profile.seat.clone();
+        // Local enable only. The publisher independently requires the viewer's
+        // completed audio attachment; None preserves the original no-audio path.
+        // Cloning retains the SAME cleanup receipt slot owned by host_run.
+        let audio = agent.audio.clone();
         // The managed service takes its attachment at CALL time, as before.
         let prepared = match &mut self.media {
             Media::Live(publisher) => Ok((
@@ -287,12 +298,13 @@ impl ControlledDesktop {
                     .then(|| configure_clipboard(publisher, &self.profile, &cx, ids))
                     .flatten(),
                 publisher.control(),
-                publisher.serve_managed_control_with_cleanup(
+                publisher.serve_managed_control_with_audio(
                     &cx,
                     seat,
                     move |state| decider.turn(state),
                     move || nonce(),
                     move || ticket().ok().map(InputTicketId::from_raw),
+                    audio,
                 ),
             )),
             Media::Reaped(_) => Err(Error::Closed),

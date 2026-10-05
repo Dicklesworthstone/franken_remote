@@ -155,6 +155,38 @@ pub fn control_offer_with_clipboard_and_files() -> Offer {
     combined
 }
 
+/// The controller's independently requested auxiliary capabilities. Each flag
+/// is a LOCAL opt-in; no host offer can enable an unrequested capability.
+/// Playback requires both audio-down and the control-audio extension so an
+/// older observer-only audio host cannot strand this controller in attachment.
+/// Missing optional capabilities never remove any of the required input gates.
+/// This uses the same isolated output as observation, never an in-process codec.
+pub fn control_offer_with_auxiliary(clipboard: bool, files: bool, audio: bool) -> Offer {
+    let mut combined = match (clipboard, files) {
+        (false, false) => control_offer(),
+        (true, false) => control_offer_with_clipboard(),
+        (false, true) => control_offer_with_files(),
+        (true, true) => control_offer_with_clipboard_and_files(),
+    };
+    if audio {
+        for (name, version) in [
+            (fr_wire::audio::CAPABILITY, fr_wire::audio::VERSION),
+            (
+                fr_wire::audio_control::CAPABILITY,
+                fr_wire::audio_control::VERSION,
+            ),
+        ] {
+            combined.capabilities.push(Capability {
+                name: name.into(),
+                version,
+                required: false,
+            });
+        }
+        combined.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    combined
+}
+
 fn offer(role: Role, extra: &[(&str, u16, bool)]) -> Offer {
     let mut capabilities: Vec<_> = [
         (display::CAPABILITY, 1, true),
