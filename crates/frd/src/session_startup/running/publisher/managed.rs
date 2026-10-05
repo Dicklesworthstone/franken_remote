@@ -1,6 +1,7 @@
 //! Own the native input Driver alongside the canonical publisher service.
 //! Native calls still run on the existing foreign-call thread; no new runtime,
 //! authority, transport, media worker or retry loop is introduced here.
+mod audio;
 use super::{Error, NativePublisher};
 use crate::{
     input_agent::{Driver, Seat, Shutdown, Status},
@@ -177,7 +178,7 @@ impl NativePublisher {
         nonce: impl FnMut() -> Result<u128, ()> + 'a,
         ticket: impl FnMut() -> Option<InputTicketId> + 'a,
     ) -> impl Future<Output = ManagedControlReport> + 'a {
-        self.managed_control(Ok(None), seat, local, nonce, ticket)
+        self.managed_control(Ok(None), seat, local, nonce, ticket, None)
     }
 
     /// The managed service with terminal reporting on cooperative shutdown.
@@ -193,14 +194,35 @@ impl NativePublisher {
         nonce: impl FnMut() -> Result<u128, ()> + 'a,
         ticket: impl FnMut() -> Option<InputTicketId> + 'a,
     ) -> impl Future<Output = ManagedControlReport> + 'a {
+        self.serve_managed_control_with_audio(cleanup, seat, local, nonce, ticket, None)
+    }
+
+    /// The original managed service with independently enabled host playback
+    /// audio. The profile never selects an unnegotiated lane or grants input.
+    /// Capture runs only for a completed audio attachment, through the SAME
+    /// bounded AudioSource/AudioRing/AudioLane used by shared publications.
+    ///
+    /// The caller must retain and reap the profile's exact audio-child retirement
+    /// slot along with the capture child. Service return is not cleanup evidence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn serve_managed_control_with_audio<'a>(
+        &'a mut self,
+        cleanup: &asupersync::cx::Cx,
+        seat: Seat,
+        local: impl FnMut(ManagedHostControlState<'_>) -> Result<Option<Target>, GrantError> + 'a,
+        nonce: impl FnMut() -> Result<u128, ()> + 'a,
+        ticket: impl FnMut() -> Option<InputTicketId> + 'a,
+        audio: Option<crate::media::shared_publisher::AudioProfile>,
+    ) -> impl Future<Output = ManagedControlReport> + 'a {
         let reporting = self
             .host
             .enable_revocation_reporting(cleanup)
             .map(Some)
             .map_err(Error::Session);
-        self.managed_control(reporting, seat, local, nonce, ticket)
+        self.managed_control(reporting, seat, local, nonce, ticket, audio)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn managed_control<'a>(
         &'a mut self,
         reporting: Result<Option<fr_transport::quic::RevocationReport>, Error>,
@@ -208,11 +230,12 @@ impl NativePublisher {
         mut local: impl FnMut(ManagedHostControlState<'_>) -> Result<Option<Target>, GrantError> + 'a,
         nonce: impl FnMut() -> Result<u128, ()> + 'a,
         ticket: impl FnMut() -> Option<InputTicketId> + 'a,
+        audio: Option<crate::media::shared_publisher::AudioProfile>,
     ) -> impl Future<Output = ManagedControlReport> + 'a {
         let native = Arc::new(Mutex::new(Native::default()));
         let slot = native.clone();
         let control = self.control();
-        let inner = self.serve_accepting_control(
+        let inner = self.accepting_control_with_audio(
             seat,
             move |state| {
                 local(match state {
@@ -229,6 +252,7 @@ impl NativePublisher {
             },
             nonce,
             ticket,
+            audio,
         );
         let (reporting, initialized) = match reporting {
             Ok(report) => (report, Ok(())),

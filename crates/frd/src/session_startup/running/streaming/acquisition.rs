@@ -281,10 +281,24 @@ impl StreamingHost {
         &'a mut self,
         seat: Seat,
         channels: NegotiatedInput,
+        local: impl FnMut(LocalControl<'_>) -> Result<Option<Target>, GrantError> + 'a,
+        nonce: impl FnMut() -> Result<u128, ()> + 'a,
+        ticket: impl FnMut() -> Option<InputTicketId> + 'a,
+        other: impl FnMut(Route, &[u8]) -> Result<Disposition, ()> + 'a,
+    ) -> impl Future<Output = Result<(), Error>> + 'a {
+        self.serve_control_services(seat, channels, local, nonce, ticket, other)
+    }
+    /// The same owner, allowing bounded auxiliary maintenance during control
+    /// acquisition and admission refresh. This is not a second session loop.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::session_startup::running) fn serve_control_services<'a>(
+        &'a mut self,
+        seat: Seat,
+        channels: NegotiatedInput,
         mut local: impl FnMut(LocalControl<'_>) -> Result<Option<Target>, GrantError> + 'a,
         mut nonce: impl FnMut() -> Result<u128, ()> + 'a,
         mut ticket: impl FnMut() -> Option<InputTicketId> + 'a,
-        mut other: impl FnMut(Route, &[u8]) -> Result<Disposition, ()> + 'a,
+        mut other: impl Services + 'a,
     ) -> impl Future<Output = Result<(), Error>> + 'a {
         let prepared = Acquisition::new(self, seat, channels).map(Box::new);
         let fence = Fence {
@@ -309,6 +323,38 @@ impl StreamingHost {
                     .await
             }),
         }
+    }
+    /// Prepare only the positively attached optional audio lane. The profile
+    /// is a local operator choice; no process is launched by preparation.
+    pub(in crate::session_startup::running) fn prepare_audio(
+        &mut self,
+        profile: crate::media::shared_publisher::AudioProfile,
+    ) -> Result<
+        Option<(
+            crate::media::shared_publisher::AudioFeed,
+            crate::media::shared_publisher::AudioSource,
+        )>,
+        Error,
+    > {
+        use crate::media::shared_publisher::{AudioFeed, AudioSource};
+        if self.stream.served {
+            return Err(Error::Order);
+        }
+        let Some(media) = self.media.as_ref() else {
+            return Ok(None);
+        };
+        let session = self.host.session()?;
+        session.check()?;
+        let feed = AudioFeed::exclusive(
+            self.stream.control.clone(),
+            media,
+            &session.opened.transport,
+        )
+        .map_err(Error::SharedPublication)?;
+        Ok(feed.map(|feed| {
+            let source = AudioSource::new(profile, feed.clone());
+            (feed, source)
+        }))
     }
 }
 
