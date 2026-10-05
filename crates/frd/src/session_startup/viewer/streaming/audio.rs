@@ -14,6 +14,8 @@ use fr_core::audio::{AudioDirection, AudioGeneration, AudioStopReason};
 use fr_transport::quic::{self, QuicRecords, Route};
 use fr_wire::audio::{self as wire, AudioConfiguration};
 
+mod acknowledgement;
+
 /// Reliable-record retention for this viewer's replies.
 const REPLY_SEND_US: u64 = 2_000_000;
 
@@ -311,38 +313,39 @@ impl ViewerAudio {
             return Ok(());
         };
         let replies = Route::Stream(self.lanes.replies);
-        let mut acknowledged = false;
+        let mut gate = acknowledgement::Gate::new(self.state, self.lanes.binding);
         let mut transport_error = None;
         let result = {
+            // Both callbacks are synchronous and nonoverlapping. The output's
+            // own permission checks do not replace the session's check at the
+            // actual send boundary (in particular after a worker handoff).
+            let permission = std::cell::RefCell::new(live);
+            let mut checkpoint = || (permission.borrow_mut())();
             let mut acknowledge = |record: &[u8]| {
-                if !matches!(self.state, State::Configuring(_)) {
-                    return Err(OutputRefused);
-                }
-                // The session's own context is cancelled on close/revocation.
-                match q.send(
-                    cx,
-                    replies,
-                    record,
-                    now_us.saturating_add(REPLY_SEND_US),
-                    || cx.checkpoint().is_ok(),
-                ) {
-                    Ok(()) => {
-                        acknowledged = true;
-                        Ok(())
+                gate.admit(record, || {
+                    match q.send(
+                        cx,
+                        replies,
+                        record,
+                        now_us.saturating_add(REPLY_SEND_US),
+                        || cx.checkpoint().is_ok() && (permission.borrow_mut())(),
+                    ) {
+                        Ok(()) => Ok(()),
+                        Err(error) => {
+                            transport_error = Some(error);
+                            Err(OutputRefused)
+                        }
                     }
-                    Err(error) => {
-                        transport_error = Some(error);
-                        Err(OutputRefused)
-                    }
-                }
+                })
             };
-            output.service(live, &mut acknowledge)
+            output.service(&mut checkpoint, &mut acknowledge)
         };
         if let Some(offer) = offer {
-            if acknowledged {
+            if gate.admitted() {
                 self.state = State::Active(offer);
             }
-            if result.is_err() || transport_error.is_some() {
+            // A faulty output cannot hide its refused callback by returning Ok.
+            if result.is_err() || gate.failed() || transport_error.is_some() {
                 self.fail_locally(offer.generation);
             }
         }
