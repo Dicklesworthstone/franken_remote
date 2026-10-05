@@ -1,9 +1,10 @@
 //! Recovery retains the admitted subscription instead of minting a new cache.
 use super::{Error, NegotiatedMedia, QuicEgress, Routes, same_view};
 use crate::media::{CaptureSource, decoder_startup::Setup};
-use asupersync::net::quic_native::StreamRole;
+use asupersync::{cx::Cx, net::quic_native::StreamRole};
+use fr_media::delivery::RecoveryDemand;
 use fr_transport::quic::{ControlRoutes, QuicRecords, Route};
-use fr_wire::negotiation::ControlBinding;
+use fr_wire::{negotiation::ControlBinding, recovery_request};
 use std::time::Duration;
 
 impl NegotiatedMedia {
@@ -60,13 +61,109 @@ impl NegotiatedMedia {
         parent: ControlBinding,
         sender: &mut QuicEgress,
         bytes: &[u8],
-    ) -> Result<Option<fr_media::delivery::RecoveryDemand>, Error> {
+    ) -> Result<Option<RecoveryDemand>, Error> {
         let view =
             self.check_recovery_host(q, control, parent, sender, Route::Stream(control.inbound))?;
         sender
             .egress
             .admit_recovery_request(bytes, view)
             .map_err(Error::Media)
+    }
+
+    /// Admit a sender-discovered broken chain under the SAME allowance and
+    /// authority fence as a peer request. The fixed record below is local
+    /// admission input, never received from or attributed to the peer and never
+    /// transmitted. Unknown peer decode progress remains unknown.
+    ///
+    /// The caller must notify the peer and wait for its actual bound request
+    /// before replacing channels. That request coalesces with this demand and
+    /// cannot restart the failure budget while the old capture drains.
+    pub(crate) fn admit_sender_failure(
+        &self,
+        q: &QuicRecords,
+        control: ControlRoutes,
+        parent: ControlBinding,
+        sender: &mut QuicEgress,
+    ) -> Result<RecoveryDemand, Error> {
+        let view =
+            self.check_recovery_host(q, control, parent, sender, Route::Stream(control.inbound))?;
+        if !sender
+            .egress
+            .stream_subscription()
+            .map_err(Error::Media)?
+            .recovery_pending(self.limits)
+        {
+            return Err(Error::InvalidRoutes);
+        }
+        let mut bytes = [0; recovery_request::REQUEST_BYTES];
+        let len = recovery_request::encode(
+            recovery_request::Request {
+                reason: recovery_request::Reason::ReferenceExpired,
+                last_useful_frame: None,
+            },
+            view,
+            self.limits.protocol(),
+            &mut bytes,
+            fr_wire::input::InputDirection::ViewerToHost,
+            fr_wire::input::InputDelivery::Reliable,
+        )
+        .map_err(|_| Error::InvalidRoutes)?;
+        sender
+            .egress
+            .admit_recovery_request(&bytes[..len], view)
+            .map_err(Error::Media)?
+            .ok_or(Error::InvalidRoutes)
+    }
+
+    /// Signal an actually failed sender through the existing reliable progress
+    /// lane. The last real descriptor/observation stays unchanged; Failed cannot
+    /// refresh presentation and fences even a peer which already decoded it.
+    /// Only transport admission is reported, not peer receipt or decoder state.
+    /// Repeated backpressure attempts encode identical metadata and retain the
+    /// original demand deadline. No encoded payload is retained or retried.
+    pub(crate) fn notify_sender_failure(
+        &self,
+        cx: &Cx,
+        q: &mut QuicRecords,
+        sender: &QuicEgress,
+        mut progress: fr_wire::Progress,
+        until: u64,
+    ) -> Result<bool, Error> {
+        self.check(q)?;
+        self.check_recovery_capability()?;
+        if !self.is_host()
+            || sender.view != Some(self.binding())
+            || sender.connection.as_ref().is_none_or(|b| !q.is_bound_to(b))
+        {
+            return Err(Error::InvalidRoutes);
+        }
+        let subscription = sender.egress.stream_subscription().map_err(Error::Media)?;
+        if !subscription.recovery_pending(self.limits)
+            || subscription.recovery_deadline().map_err(Error::Media)? != until
+        {
+            return Err(Error::InvalidRoutes);
+        }
+        progress.pipeline = fr_wire::PipelineState::Failed;
+        let mut bytes = [0; 128];
+        let len = fr_wire::encode_progress(
+            progress,
+            self.bindings.for_channel(fr_wire::Channel::MediaConfig),
+            &self.limits,
+            &mut bytes,
+        )
+        .map_err(|_| Error::InvalidRoutes)?;
+        let result = q.send(
+            cx,
+            Route::Stream(self.video.outbound),
+            &bytes[..len],
+            until,
+            || subscription.recovery_deadline().is_ok_and(|deadline| deadline == until),
+        );
+        match result {
+            Ok(()) => Ok(true),
+            Err(fr_transport::quic::Error::Backpressure) => Ok(false),
+            Err(error) => Err(Error::Transport(error)),
+        }
     }
 
     pub(crate) fn check_recovery_host(
@@ -143,7 +240,7 @@ impl QuicEgress {
         &self,
         q: &QuicRecords,
         source: &mut CaptureSource,
-        demand: fr_media::delivery::RecoveryDemand,
+        demand: RecoveryDemand,
     ) -> Result<(), Error> {
         if self.connection.as_ref().is_none_or(|b| !q.is_bound_to(b)) || q.is_closed() {
             return Err(Error::ForeignConnection);

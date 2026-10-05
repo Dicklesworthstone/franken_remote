@@ -225,46 +225,50 @@ async fn fixture_features(
             break receipt;
         }
     };
-    // Lose an actual sender reference before handing both peers to their normal
-    // running loops. No test host drives the recovery handshake or creates a
-    // replacement sender. Every remaining recovery stage is production code.
-    sender
-        .enqueue_capture(source.capture_if_changed(&control, false).await.unwrap())
-        .unwrap();
-    let mut announced = false;
-    let mut lost = false;
-    while !announced || !lost {
-        for _ in 0..4 {
-            sender
-                .transmit(h, host.io().unwrap().0, Lane::Original)
-                .unwrap();
+    // Late-capture cases start HEALTHY: the peer has no missing reference or
+    // announcement from which it could discover the host's later local failure.
+    if !mode.starts_with("late") {
+        // Lose an actual sender reference before handing both peers to their normal
+        // running loops. No test host drives the recovery handshake or creates a
+        // replacement sender. Every remaining recovery stage is production code.
+        sender
+            .enqueue_capture(source.capture_if_changed(&control, false).await.unwrap())
+            .unwrap();
+        let mut announced = false;
+        let mut lost = false;
+        while !announced || !lost {
+            for _ in 0..4 {
+                sender
+                    .transmit(h, host.io().unwrap().0, Lane::Original)
+                    .unwrap();
+            }
+            let (a, b) = Box::pin(support::both(
+                host.drive(
+                    Duration::from_millis(1),
+                    || super::super::tests::nonce(&mut entropy),
+                    super::super::tests::block,
+                ),
+                viewer.drive(Duration::from_millis(1), super::super::tests::block),
+            ))
+            .await;
+            a.unwrap();
+            b.unwrap();
+            vm.receive_ready(
+                c,
+                viewer.io().unwrap().0,
+                || true,
+                |channel, bytes| {
+                    if channel == Channel::Video {
+                        lost = true;
+                    } else {
+                        receiver.receive(channel, bytes, now(c).unwrap()).unwrap();
+                        announced = true;
+                    }
+                    Ok(Disposition::Consumed)
+                },
+            )
+            .unwrap();
         }
-        let (a, b) = Box::pin(support::both(
-            host.drive(
-                Duration::from_millis(1),
-                || super::super::tests::nonce(&mut entropy),
-                super::super::tests::block,
-            ),
-            viewer.drive(Duration::from_millis(1), super::super::tests::block),
-        ))
-        .await;
-        a.unwrap();
-        b.unwrap();
-        vm.receive_ready(
-            c,
-            viewer.io().unwrap().0,
-            || true,
-            |channel, bytes| {
-                if channel == Channel::Video {
-                    lost = true;
-                } else {
-                    receiver.receive(channel, bytes, now(c).unwrap()).unwrap();
-                    announced = true;
-                }
-                Ok(Disposition::Consumed)
-            },
-        )
-        .unwrap();
     }
     let stream = Stream {
         source,
@@ -515,3 +519,4 @@ fn only_negotiation_decides_automatic_recovery_also_with_control_intent() {
 }
 
 mod namespace;
+mod late_capture;

@@ -41,10 +41,12 @@ impl Policy {
         Ok(())
     }
 }
-/// Counts actual admissions, not delivered, decoded or displayed pictures.
+/// Counts actual admissions and drops, not delivered, decoded or displayed pictures.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Statistics {
     pub encoded_updates: u64,
+    /// Native results discarded because their capture-anchored send time expired.
+    pub expired_capture_updates: u64,
     pub unchanged_observations: u64,
     pub admitted_records: u64,
     pub repair_requests: u64,

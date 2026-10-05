@@ -43,7 +43,12 @@ fn progress(frame: u64, reference: Option<u64>, capture_micros: u64) -> Progress
 }
 fn bootstrap(cache: &mut SendCache) -> PacketOffer {
     cache
-        .push(progress(0, None, 0), vec![7; 128], DeliveryMode::Recovery, 0)
+        .push(
+            progress(0, None, 0),
+            vec![7; 128],
+            DeliveryMode::Recovery,
+            0,
+        )
         .unwrap();
     let mut bytes = [0; 1150];
     let offer = cache.next_packet(0, &mut bytes).unwrap().unwrap();

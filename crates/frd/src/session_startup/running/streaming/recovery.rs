@@ -155,6 +155,24 @@ fn install_evidence(host: &mut StreamingHost) -> Result<(), Error> {
     Ok(())
 }
 
+pub(super) fn expired_original(error: &crate::media_quic::Error) -> bool {
+    matches!(
+        error,
+        crate::media_quic::Error::Media(crate::media::Error::Send(
+            fr_media::delivery::SendError::OriginalExpired
+        ))
+    )
+}
+
+/// A local failure is admitted immediately, but must not replace a healthy
+/// peer's decoder unannounced. Retain its original budget while the reliable
+/// Failed progress record elicits the peer's ordinary bound recovery request.
+pub(super) struct LocalFailure {
+    demand: RecoveryDemand,
+    progress: fr_wire::Progress,
+    notified: bool,
+}
+
 /// Every round's services: without negotiated recovery (`media` absent) a
 /// plain pass-through to the video services.
 pub(super) struct Admission<'a, S> {
@@ -163,6 +181,76 @@ pub(super) struct Admission<'a, S> {
     pub(super) routes: ControlRoutes,
     pub(super) parent: ControlBinding,
     pub(super) pending: Option<RecoveryDemand>,
+    pub(super) local_failure: Option<LocalFailure>,
+}
+impl<S: Services> Admission<'_, S> {
+    fn recovering(&self) -> bool {
+        self.pending.is_some() || self.local_failure.is_some()
+    }
+    fn maintain_video<N: FnMut() -> Result<u128, ()>>(
+        &mut self,
+        q: &mut QuicRecords,
+        nonce: &mut N,
+        media: &NegotiatedMedia,
+    ) -> Result<(), Error> {
+        // Keep only the last real descriptor, not its payload. The expired
+        // enqueue fences/clears the cache before returning its error.
+        let previous = self
+            .video
+            .sender
+            .source_progress()
+            .map_err(Error::MediaTransport)?;
+        match self.video.maintain(q, nonce) {
+            Err(Error::MediaTransport(error)) if expired_original(&error) => {
+                let progress = previous.ok_or(Error::MediaTransport(error))?;
+                let demand = media
+                    .admit_sender_failure(q, self.routes, self.parent, self.video.sender)
+                    .map_err(Error::MediaTransport)?;
+                self.local_failure = Some(LocalFailure {
+                    demand,
+                    progress,
+                    notified: false,
+                });
+                Ok(())
+            }
+            result => result,
+        }
+    }
+    fn maintain_failure<N: FnMut() -> Result<u128, ()>>(
+        &mut self,
+        q: &mut QuicRecords,
+        nonce: &mut N,
+        media: &NegotiatedMedia,
+    ) -> Result<(), Error> {
+        self.video.other.maintain(q, nonce)?;
+        if !self.permitted() {
+            return Err(Error::Expired);
+        }
+        if let Some(local) = &mut self.local_failure
+            && !local.notified
+        {
+            local.notified = media
+                .notify_sender_failure(
+                    &self.video.control.context(),
+                    q,
+                    self.video.sender,
+                    local.progress,
+                    local.demand.deadline_micros(),
+                )
+                .map_err(Error::MediaTransport)?;
+        }
+        if self.video.in_flight.is_some() {
+            match self.video.results.try_recv() {
+                Ok(obsolete) => {
+                    drop(obsolete);
+                    self.video.in_flight = None;
+                }
+                Err(mpsc::RecvError::Empty) => {}
+                Err(_) => return Err(Error::Closed),
+            }
+        }
+        Ok(())
+    }
 }
 impl<S: Services> Services for Admission<'_, S> {
     // Not a defaulted no-op: a controlled session's collected input wakes an
@@ -172,12 +260,16 @@ impl<S: Services> Services for Admission<'_, S> {
     }
     fn permitted(&mut self) -> bool {
         self.video.permitted()
-            && self.pending.as_ref().is_none_or(|p| {
-                self.video
-                    .control
-                    .check()
-                    .is_ok_and(|n| n.as_micros() < p.deadline_micros())
-            })
+            && self
+                .pending
+                .as_ref()
+                .or_else(|| self.local_failure.as_ref().map(|local| &local.demand))
+                .is_none_or(|p| {
+                    self.video
+                        .control
+                        .check()
+                        .is_ok_and(|n| n.as_micros() < p.deadline_micros())
+                })
     }
     fn maintain<N: FnMut() -> Result<u128, ()>>(
         &mut self,
@@ -220,36 +312,31 @@ impl<S: Services> Services for Admission<'_, S> {
         if len != 0 {
             match media.admit_recovery_request(q, self.routes, self.parent, sender, &bytes[..len]) {
                 Ok(Some(demand)) => {
-                    if pending.is_some() {
+                    if pending.is_some() || self.local_failure.is_some() {
                         return Err(Error::Order);
                     }
                     *pending = Some(demand);
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    // Only an actually received and fully validated peer request
+                    // may release a locally admitted demand to the handoff.
+                    if let Some(local) = self.local_failure.take() {
+                        if pending.is_some() {
+                            return Err(Error::Order);
+                        }
+                        *pending = Some(local.demand);
+                    }
+                }
                 Err(error) => failure = Some(Error::MediaTransport(error)),
             }
         }
         if let Some(error) = failure {
             return Err(error);
         }
-        if self.pending.is_some() {
-            self.video.other.maintain(q, nonce)?;
-            if !self.permitted() {
-                return Err(Error::Expired);
-            }
-            if self.video.in_flight.is_some() {
-                match self.video.results.try_recv() {
-                    Ok(obsolete) => {
-                        drop(obsolete);
-                        self.video.in_flight = None;
-                    }
-                    Err(mpsc::RecvError::Empty) => {}
-                    Err(_) => return Err(Error::Closed),
-                }
-            }
-            Ok(())
+        if self.recovering() {
+            self.maintain_failure(q, nonce, media)
         } else {
-            self.video.maintain(q, nonce)
+            self.maintain_video(q, nonce, media)
         }
     }
     fn receive(&mut self, route: Route, bytes: &[u8]) -> Result<Disposition, ()> {
@@ -259,7 +346,7 @@ impl<S: Services> Services for Admission<'_, S> {
         if route == Route::Stream(self.routes.inbound) && is_request(bytes) {
             return Ok(Disposition::Blocked);
         }
-        if self.pending.is_some()
+        if self.recovering()
             && obsolete_metadata(
                 route,
                 bytes,
@@ -269,7 +356,7 @@ impl<S: Services> Services for Admission<'_, S> {
         {
             return Ok(Disposition::Consumed);
         }
-        if self.pending.is_some() {
+        if self.recovering() {
             self.video.other.receive(route, bytes)
         } else {
             self.video.receive(route, bytes)

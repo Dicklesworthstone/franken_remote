@@ -477,6 +477,7 @@ impl StreamingHost {
             routes,
             parent,
             pending: None,
+            local_failure: None,
             video: VideoServices {
                 control: &stream.control,
                 sender: &mut stream.sender,
@@ -669,15 +670,16 @@ async fn produce(
             .capture_if_changed(control, false)
             .await
             .map_err(Error::Media)?;
-        // Exactly one issued credit exists; no second native operation can run
-        // until this result has transferred to the canonical cache.
-        completed.try_send(update).map_err(|_| Error::Order)?;
         // Same credit and cadence, separate from pixels: a moving pointer over
         // a static desktop needs no new picture and is not freshness.
         if let Some(cursor) = cursor {
             control.check().map_err(Error::Media)?;
             cursor.sample(source, control).await?;
         }
+        // Publish completion only after ALL native work for this credit has
+        // drained. Recovery may drop this producer as soon as it collects the
+        // result; publishing before cursor sampling would abandon live IPC.
+        completed.try_send(update).map_err(|_| Error::Order)?;
     }
 }
 struct VideoServices<'a, S> {
@@ -723,10 +725,16 @@ impl<S> VideoServices<'_, S> {
                 Ok(update) => {
                     let unchanged = update.is_unchanged();
                     let observed = update.observed_micros();
-                    self.sender
-                        .enqueue_capture(update)
-                        .map_err(Error::MediaTransport)?;
+                    // Receiving the result drained its native operation even
+                    // when the encoded output is now too old to admit. Recovery
+                    // must not wait for a second result which will never arrive.
                     self.in_flight = None;
+                    let admitted = self.sender.enqueue_capture(update);
+                    if admitted.as_ref().is_err_and(recovery::expired_original) {
+                        self.statistics.expired_capture_updates =
+                            self.statistics.expired_capture_updates.saturating_add(1);
+                    }
+                    admitted.map_err(Error::MediaTransport)?;
                     let collected = now(cx)?;
                     self.last_work = Some((
                         collected,

@@ -28,9 +28,12 @@ try:
         if k==5: reply(h,262); break
         assert k in (2,7)
         frame,observed,forced=struct.unpack('>QQB',b)
-        if frame==2 and not forced:
+        if MODE.startswith('late'):
+            if frame==1 and not forced:
+                time.sleep(.35)
+        elif frame==2 and not forced:
             time.sleep(60 if MODE=='stall' else .35)
-        is_idr=last is None or (forced and MODE!='ignore-force')
+        is_idr=last is None or (forced and MODE not in ('ignore-force','late-ignore-force'))
         reference=0 if is_idr else last
         payload=PARAMETERS if is_idr else b'synthetic-dependent'
         reply(h,258,struct.pack('>QQQQB7x',frame,observed,generation,reference,int(not is_idr))+payload)
