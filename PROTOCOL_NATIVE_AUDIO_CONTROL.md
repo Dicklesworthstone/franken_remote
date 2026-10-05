@@ -29,3 +29,62 @@ On session end, revoke the original authority first, close the audio lane and di
 ## Verification boundary
 
 The source includes capability, route/epoch, acknowledgement, deadline and scheduling regressions. Those tests do not certify speakers, a physical microphone, an installed desktop audio server, live-tailnet interoperability, or audio/input timing under impairment. Bead `fr-rc2-audio-during-control-35e3` remains open until the real controlled-session audio and independent-input acceptance tests pass with retained evidence.
+
+## Experimental Linux CLI path
+
+The executable connection is wired in source by `305c4eb` (host service and
+combined offer) and `761faab` (CLI and completion reporting). This supersedes
+older descriptions of `--control --audio` as a parser refusal; it is not a
+passing build or end-to-end qualification claim.
+
+On the host, explicitly enable both capabilities:
+
+```sh
+frd run --software-explicit --input-agent /opt/fr/fr-input-agent --audio
+```
+
+On the controlling machine, explicitly request playback:
+
+```sh
+fr connect NODE --control --audio --experimental-native --display only
+```
+
+`NODE` is the selected installed-tailnet node. Use matching installed binaries;
+the client needs `linux-desktop,linux-audio` and its sibling `fr-opus-worker`.
+The host needs the existing X11 capture and input workers. Each side can specify
+its own local `--audio-server /absolute/path/native` and `--audio-sink NAME`;
+these are not peer-selectable paths. Clipboard and explicit `--send` selections
+remain independent opt-ins, with their existing host-side enables. No microphone
+capability or hardware HEVC qualification is added.
+
+Controlled-session completion now includes the existing playback report:
+`audio_requested`, `audio_active`, `audio_frames_submitted`,
+`audio_output_resets`, `audio_absence`, and `audibility_proven: false`.
+`audio_active` records acknowledged playback with at least one submitted frame
+during the attempt, not proof that a device is still playing after closure.
+An older host without the extension continues control with typed audio absence.
+
+## Combined-session acceptance tests
+
+`crates/frd/tests/native_host_linux_serial/real_audio/controlled.rs` extends the
+existing real-audio fixture, leaving its three observation tests registered.
+The new cases require actual host tone detection and independently observed
+XTest input; they cover sustained playback across lease renewal, a host without
+audio enabled, a scoped SIGSTOP of the client's original Opus child while input
+continues, and local host revoke stopping both input and newly introduced sound.
+The namespace runner already executes these explicitly ignored tests:
+
+```sh
+cargo build -p fr-native --features linux-desktop,linux-displays,linux-input,linux-clipboard,linux-audio
+cargo build -p frd --bin frd
+cargo test -p frd --test native_host_linux_serial --no-run
+FR_NS_SUDO=1 scripts/test_linux_serial_lifecycle.sh /absolute/path/to/native_host_linux_serial-TEST_HASH
+```
+
+The final argument is the test executable printed by `cargo test --no-run`.
+Run only in the script's isolated namespace. The new Rust tests have not been
+executed in the implementation environment. The independent X11 driver scripts
+alone passed a local Xvfb smoke check (pointer position and key/button
+press/release); that is fixture validation, not FrankenRemote, audio, transport,
+physical-device or live-tailnet evidence. Planted-negative runs, the complete
+namespace suite and revision-bound acceptance artifacts are still required.

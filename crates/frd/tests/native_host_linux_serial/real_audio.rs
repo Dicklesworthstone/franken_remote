@@ -387,7 +387,7 @@ fn options(
     }
 }
 
-/// The shipped client, view-only with `--audio`, playing into `pulse`.
+/// The shipped client, with an explicit role and `--audio`, playing into `pulse`.
 fn connect_audio(
     fr: &Path,
     api: &Path,
@@ -395,13 +395,14 @@ fn connect_audio(
     display: &str,
     worker: &Path,
     pulse: &Pulse,
+    control: bool,
 ) -> Child {
     let port = address().port().to_string();
     Command::new(fr)
         .args([
             "connect",
             "n-host",
-            "--view-only",
+            if control { "--control" } else { "--view-only" },
             "--audio",
             "--experimental-native",
         ])
@@ -447,6 +448,25 @@ fn share(
     audio: Option<AudioOptions>,
     observe: impl FnOnce(&Recorder) -> Result<(), String>,
 ) -> (serde_json::Value, Result<(), String>, String) {
+    share_session(host_pulse, client_pulse, audio, false, |recorder, _, _, _| {
+        observe(recorder)
+    })
+}
+
+/// The SAME real source, client, recorder and cleanup, with optional real input
+/// observers. Existing view-only scenarios keep their original wrapper above.
+fn share_session(
+    host_pulse: &Pulse,
+    client_pulse: &Pulse,
+    audio: Option<AudioOptions>,
+    control: bool,
+    observe: impl FnOnce(
+        &Recorder,
+        Option<&mut controlled::Controls>,
+        &mut Child,
+        &StopHandle,
+    ) -> Result<(), String>,
+) -> (serde_json::Value, Result<(), String>, String) {
     private_root_home();
     let (fr, worker) = (sibling("fr"), sibling("fr-media-worker"));
     let host = Xvfb::start("640x480x24");
@@ -454,11 +474,16 @@ fn share(
     set_root(&host.display, COLOUR);
     // The viewer draws the forwarded host cursor; keep it off the sampled centre.
     warp_pointer(&host.display, 16, 16);
+    let mut controls =
+        control.then(|| controlled::Controls::start(&host.display, &viewer.display));
     let recorder = Recorder::start(client_pulse);
     let api = fixture::Api::new();
     let tools = Tools::new();
     let roots = fixture::pki().join("ca.pem");
-    let options = options(&api, &tools, &worker, &host.display, &roots, audio);
+    let mut options = options(&api, &tools, &worker, &host.display, &roots, audio);
+    if control {
+        options.input_agent = Some(sibling("fr-input-agent"));
+    }
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();
     let report: Reporter = Arc::new(move |event| sink.lock().unwrap().push(event));
@@ -482,18 +507,26 @@ fn share(
         &viewer.display,
         &worker,
         client_pulse,
+        control,
     );
     let window = await_window(&viewer.display, &mut client);
     let observed = match window {
-        Some(_) => observe(&recorder),
+        Some(window) => {
+            let ready = controls
+                .as_mut()
+                .map_or(Ok(()), |c| c.ready(window, &mut client));
+            ready.and_then(|()| observe(&recorder, controls.as_mut(), &mut client, &stop))
+        }
         None => Err("no host picture reached the viewer window".into()),
     };
-    if let Some(window) = window {
-        close_window(&viewer.display, window);
-    } else if client.try_wait().unwrap().is_none() {
-        let _ = Command::new("kill")
-            .args(["-INT", &client.id().to_string()])
-            .status();
+    if client.try_wait().unwrap().is_none() {
+        if let Some(window) = window {
+            close_window(&viewer.display, window);
+        } else {
+            let _ = Command::new("kill")
+                .args(["-INT", &client.id().to_string()])
+                .status();
+        }
     }
     let output = wait_for(client, Duration::from_secs(30));
     stop.request();
@@ -516,6 +549,12 @@ fn share(
         "{events:?}"
     );
     assert!(matches!(events.last(), Some(Event::Stopped)), "{events:?}");
+    if let Some(controls) = &mut controls {
+        assert!(
+            controls.stopped(),
+            "executor survived share cleanup: {diagnostics}"
+        );
+    }
     (completion, observed, diagnostics)
 }
 
@@ -672,3 +711,5 @@ fn a_missing_host_monitor_is_a_typed_stop_while_video_continues() {
         "{diagnostics}"
     );
 }
+
+mod controlled;
