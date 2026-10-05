@@ -44,8 +44,6 @@ const PULL_TIMEOUT: Duration = Duration::from_millis(500);
 const STOP_TIMEOUT: Duration = Duration::from_secs(1);
 /// Reliable-record retention for configuration and stop records.
 const CONTROL_SEND_US: u64 = 2_000_000;
-/// Admission window for one packet datagram.
-const PACKET_SEND_US: u64 = 40_000;
 /// Records per viewer service turn: bounded, no catch-up burst.
 const RECORDS_PER_TURN: usize = 4;
 const FRAME_MS: u16 = 20;
@@ -193,6 +191,16 @@ impl EntryAudio {
                     report.pending = true;
                     return Ok(());
                 }
+                // Allocation/authority checks may consume the last instant of
+                // this packet's original lifetime. An admission-only expiry
+                // leaves QUIC open and admitted no bytes: next turn the lane
+                // drops/counts the obsolete packet. A transport deadline that
+                // closed QUIC is still a session failure, never swallowed here.
+                Err(quic::Error::Expired)
+                    if matches!(action, LaneAction::Packet { .. }) && !transport.is_closed() =>
+                {
+                    return Ok(());
+                }
                 Err(error) => {
                     return Err(Error::Transport(crate::media_quic::Error::Transport(error)));
                 }
@@ -314,7 +322,13 @@ fn audio_record(
             sequence,
             generation,
         } => {
-            let packet = ring.get(sequence).ok_or(Error::Closed)?.unit;
+            let stamped = ring.get(sequence).ok_or(Error::Closed)?;
+            let Some(deadline) = stamped.send_deadline(now) else {
+                // Obsolete work is dropped, not given another transport lifetime
+                // and not promoted to a video/session failure.
+                return Ok(None);
+            };
+            let packet = stamped.unit;
             let bytes = wire::packet_record_bytes(packet.payload().len())
                 .filter(|&n| n <= lanes.packet_maximum)
                 .ok_or(Error::InvalidBudget)?;
@@ -332,11 +346,7 @@ fn audio_record(
                 &mut record,
             )
             .map_err(|_| Error::InvalidBudget)?;
-            Some((
-                Route::Datagram(lanes.packets),
-                record,
-                now.saturating_add(PACKET_SEND_US),
-            ))
+            Some((Route::Datagram(lanes.packets), record, deadline))
         }
     })
 }
@@ -582,3 +592,6 @@ impl Drop for AudioSource {
 fn media(error: worker::Error) -> Error {
     Error::Media(crate::media::Error::Worker(error))
 }
+
+#[cfg(test)]
+mod deadlines;

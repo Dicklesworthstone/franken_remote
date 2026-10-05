@@ -115,6 +115,7 @@ fn huge_gaps_skip_in_bounded_work_and_keep_source_sequences() {
     let distant = 1_u64 << 60;
     ring.push(packet(0, 10), 10).unwrap();
     ring.push(packet(distant, 10), 10).unwrap();
+    assert_eq!(lane.next(&ring, 10), expected(0));
     lane.packet_sent(0).unwrap();
     assert_eq!(lane.next(&ring, 10), expected(distant));
     assert_eq!(lane.counters().dropped_missing, distant - 1);
@@ -217,4 +218,36 @@ fn final_sequence_before_ack_cannot_reopen_at_zero() {
     assert_terminal_stop(&mut lane, &ring, 1);
     assert_eq!(lane.counters().skipped_before_ack, 1);
     assert_eq!(lane.counters().sent, 0);
+}
+
+#[test]
+fn packet_deadlines_are_anchored_to_capture_not_each_service_turn() {
+    let mut ring = ring();
+    ring.push(packet(0, 10), 100).unwrap();
+    let stamped = ring.get(0).unwrap();
+    let until = 100 + MAX_PACKET_AGE_US;
+    assert_eq!(stamped.send_deadline(100), Some(until));
+    assert_eq!(stamped.send_deadline(until - 1), Some(until));
+    assert_eq!(stamped.send_deadline(until), None);
+    assert_eq!(stamped.send_deadline(until + 1), None);
+}
+
+#[test]
+fn impossible_capture_clocks_do_not_manufacture_fresh_audio() {
+    let mut ring = ring();
+    ring.push(packet(0, 10), 100).unwrap();
+    assert_eq!(ring.get(0).unwrap().send_deadline(99), None);
+    ring.push(packet(1, 10), u64::MAX - 1).unwrap();
+    assert_eq!(ring.get(1).unwrap().send_deadline(u64::MAX), None);
+}
+
+#[test]
+fn exact_expiry_skips_the_packet_and_keeps_the_viewer_active() {
+    let mut ring = ring();
+    let mut lane = active(&ring);
+    ring.push(packet(0, 10), 0).unwrap();
+    ring.push(packet(1, 10), MAX_PACKET_AGE_US).unwrap();
+    assert_eq!(lane.next(&ring, MAX_PACKET_AGE_US), expected(1));
+    assert_eq!(lane.counters().dropped_obsolete, 1);
+    assert!(lane.is_active());
 }

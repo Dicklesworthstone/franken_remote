@@ -99,6 +99,15 @@ pub struct Stamped {
     pub unit: AudioAccessUnit,
     pub captured_us: u64,
 }
+impl Stamped {
+    /// Original host-clock send deadline, never a new lifetime at dequeue.
+    /// Future capture times, overflow and the exact expiry boundary all refuse.
+    /// The transport must keep this deadline while retaining the encoded record.
+    pub fn send_deadline(&self, now_us: u64) -> Option<u64> {
+        let until = self.captured_us.checked_add(MAX_PACKET_AGE_US)?;
+        (self.captured_us <= now_us && now_us < until).then_some(until)
+    }
+}
 
 /// Content-free source accounting.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -310,7 +319,7 @@ pub struct LaneCounters {
     pub sent: u64,
     /// Captured before this viewer's acknowledgement: never sent.
     pub skipped_before_ack: u64,
-    /// Older than [`MAX_PACKET_AGE_US`] when the lane reached them.
+    /// No safe send lifetime remains (expired or invalid capture clock).
     pub dropped_obsolete: u64,
     /// Sequence positions before the oldest retained packet. Some may have
     /// been lost upstream; this is not proof that every position was captured.
@@ -491,7 +500,7 @@ impl AudioLane {
                             next: sequence,
                         };
                     }
-                    if now_us.saturating_sub(packet.captured_us) > MAX_PACKET_AGE_US {
+                    if packet.send_deadline(now_us).is_none() {
                         self.counters.dropped_obsolete += 1;
                         self.advance_past(stream, epoch, sequence);
                         continue;
