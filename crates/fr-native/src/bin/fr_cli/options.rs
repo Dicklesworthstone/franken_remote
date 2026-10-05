@@ -91,7 +91,7 @@ pub struct Connection {
     /// `--clipboard` (with `--control` only): let the UTF-8 text clipboard
     /// follow the control lease, both directions, when the host enables it too.
     pub clipboard: bool,
-    /// `--audio`: explicitly ask for host playback audio (view-only only).
+    /// `--audio`: explicitly ask for host playback audio in either role.
     /// `None` offers no audio capability at all.
     pub audio: Option<AudioRequest>,
     /// `--send PATH` (repeatable, with `--control` only): regular files the
@@ -628,13 +628,6 @@ fn parse_command(
                 2,
             ));
         }
-        if audio && control {
-            return Err(Failure::new(
-                "audio_control_unsupported",
-                "Host audio is view-only in this build: its in-process decode never shares the controlling session. Use --view-only --audio, or --control without --audio.",
-                2,
-            ));
-        }
         if !experimental {
             return Err(Failure::new(
                 "native_transport_unqualified",
@@ -771,7 +764,7 @@ mod tests {
         }
     }
     #[test]
-    fn audio_is_an_explicit_view_only_request_with_local_selection() {
+    fn audio_is_an_explicit_request_with_local_selection_in_either_role() {
         let base = "n-host --experimental-native --worker /opt/fr/worker --display only";
         let Command::Connect(plain) = options(&format!("connect {base} --view-only"))
             .unwrap()
@@ -795,14 +788,30 @@ mod tests {
                 sink: Some("speakers".into()),
             })
         );
-        // Audio never rides a controlling session in this build.
+        // Control uses the same isolated output; neither role enables audio
+        // implicitly or lets an audio flag substitute for an explicit role.
+        let Command::Connect(controlled) = options(&format!(
+            "connect {base} --control --audio --audio-server /run/native --audio-sink speakers"
+        ))
+        .unwrap()
+        .command
+        else {
+            unreachable!("connection required");
+        };
+        assert!(controlled.control);
         assert_eq!(
-            options(&format!("connect {base} --control --audio"))
-                .err()
-                .unwrap()
-                .code,
-            "audio_control_unsupported"
+            controlled.audio,
+            Some(AudioRequest {
+                server: Some(PathBuf::from("/run/native")),
+                sink: Some("speakers".into()),
+            })
         );
+        let Command::Connect(plain_control) =
+            options(&format!("connect {base} --control")).unwrap().command
+        else {
+            unreachable!("connection required");
+        };
+        assert!(plain_control.audio.is_none());
         for refused in [
             format!("connect {base} --view-only --audio-sink speakers"),
             format!("connect {base} --view-only --audio-server /run/native"),
@@ -1297,6 +1306,59 @@ mod robot_tests {
             "status extra_positional",
         ] {
             assert!(parse(&to_args(s)).is_err(), "{s}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod controlled_audio_tests {
+    use super::*;
+
+    fn args(text: &str) -> Vec<String> {
+        text.split_whitespace().map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn audio_clipboard_and_files_are_independent_explicit_control_choices() {
+        let base = "connect n-host --control --experimental-native --display only --worker /opt/fr/fr-media-worker";
+        for extra in [
+            "--audio",
+            "--audio --clipboard",
+            "--audio --send /a",
+            "--audio --clipboard --send /a",
+        ] {
+            let Command::Connect(connection) = parse(&args(&format!("{base} {extra}")))
+                .unwrap()
+                .command
+            else {
+                unreachable!("connection required");
+            };
+            assert!(connection.control && connection.audio.is_some());
+            assert_eq!(connection.clipboard, extra.contains("--clipboard"));
+            assert_eq!(connection.send.len(), usize::from(extra.contains("--send")));
+        }
+    }
+
+    #[test]
+    fn audio_cannot_bypass_role_transport_or_argument_guards() {
+        for (text, code) in [
+            ("connect n-host --audio", "connection_role_required"),
+            (
+                "connect n-host --control --view-only --audio",
+                "connection_role_required",
+            ),
+            ("connect n-host --control --audio", "native_transport_unqualified"),
+            ("connect n-host --control --audio --audio", "invalid_arguments"),
+            (
+                "connect n-host --control --audio-server /run/native",
+                "invalid_arguments",
+            ),
+            (
+                "connect n-host --control --audio --audio-server relative",
+                "invalid_arguments",
+            ),
+        ] {
+            assert_eq!(parse(&args(text)).err().unwrap().code, code, "{text}");
         }
     }
 }

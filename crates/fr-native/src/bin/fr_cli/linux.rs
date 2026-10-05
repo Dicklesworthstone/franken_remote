@@ -333,12 +333,21 @@ fn connect(
         ..Default::default()
     };
     let result = if connection.control {
+        let offer = if connection.audio.is_some() {
+            fr_client::native::control_offer_with_auxiliary(
+                connection.clipboard,
+                !connection.send.is_empty(),
+                true,
+            )
+        } else {
+            files::offer(connection.clipboard, !connection.send.is_empty())
+        };
         let operation = client.run_control_capable(
             cx.clone(),
             runtime.handle(),
             selector,
             cfg,
-            files::offer(connection.clipboard, !connection.send.is_empty()),
+            offer,
             policy,
             &mut application,
         );
@@ -589,7 +598,7 @@ struct Interface {
     attempt: Option<control::Attempt>,
     /// Some only with `--clipboard`: configured afresh on every attempt.
     clipboard: Option<control::Clipboard>,
-    /// `--audio`: the resolved local server and request (view-only).
+    /// `--audio`: the resolved local server and request for either role.
     audio: Option<(std::path::PathBuf, super::options::AudioRequest)>,
 }
 #[cfg(feature = "linux-desktop")]
@@ -787,6 +796,37 @@ fn media_json(media: Option<&frd::session_startup::ViewerStatistics>) -> String 
         },
     )
 }
+/// The controller uses the same content-free audio report as an observer.
+/// Configuration alone is not playback, and submitted PCM is not audibility.
+#[cfg(feature = "linux-desktop")]
+fn control_audio_completion(progress: &Progress, json: bool) -> String {
+    let audio = progress.audio.as_ref().map(|report| report.borrow());
+    let (requested, active, played, resets, absence) =
+        audio.as_ref().map_or((false, false, 0, 0, None), |report| {
+            (
+                true,
+                report.active(),
+                report.submitted,
+                report.resets,
+                report.absence,
+            )
+        });
+    if json {
+        let absence = absence.map_or_else(|| "null".to_owned(), |a| format!("\"{a}\""));
+        format!(
+            ",\"audio_requested\":{requested},\"audio_active\":{active},\"audio_frames_submitted\":{played},\"audio_output_resets\":{resets},\"audio_absence\":{absence},\"audibility_proven\":false"
+        )
+    } else {
+        match (requested, active, absence) {
+            (false, ..) => String::new(),
+            (true, true, _) => format!(
+                " Host audio: {played} decoded frame(s) submitted to the local audio server (not audibility proof)."
+            ),
+            (true, false, Some(reason)) => format!(" Host audio absent: {reason}."),
+            (true, false, None) => " Host audio: requested but no playback confirmed.".to_owned(),
+        }
+    }
+}
 /// Counts are host-reported stages, not local effect proof; visibility stays
 /// the X11 submission witness described in `control.rs`, never optical proof.
 /// Clipboard fields are content-free: requested, became active, host items
@@ -797,6 +837,7 @@ fn control_completion(progress: &Progress, control: control::Counters, json: boo
         .files
         .as_ref()
         .map_or_else(files::Summary::not_requested, files::Local::summary);
+    let audio = control_audio_completion(progress, json);
     let clipboard = control.clipboard.unwrap_or_default();
     let absence = control
         .clipboard
@@ -804,7 +845,7 @@ fn control_completion(progress: &Progress, control: control::Counters, json: boo
         .unwrap_or("not_requested");
     if json {
         format!(
-            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{},\"control_requested\":{},\"control_granted\":{},\"control_capabilities_granted\":{},\"wheel_unavailable\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"input_suspensions\":{},\"input_suspended_ms\":{},\"input_dropped_aged\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{}{},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false}}\n",
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{},\"control_requested\":{},\"control_granted\":{},\"control_capabilities_granted\":{},\"wheel_unavailable\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"input_suspensions\":{},\"input_suspended_ms\":{},\"input_dropped_aged\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{}{}{audio},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false}}\n",
             output::timestamp(),
             progress.attempts,
             progress.opened,
@@ -841,7 +882,7 @@ fn control_completion(progress: &Progress, control: control::Counters, json: boo
         )
     } else {
         format!(
-            "Control session stopped; {} attempt(s), {} opened session(s), control {}, {} host input result(s) ({} submitted to the host OS), clipboard {}, cleanup confirmed.{} Native transport/hardware remain unqualified.\n",
+            "Control session stopped; {} attempt(s), {} opened session(s), control {}, {} host input result(s) ({} submitted to the host OS), clipboard {}, cleanup confirmed.{}{audio} Native transport/hardware remain unqualified.\n",
             progress.attempts,
             progress.opened,
             match (control.requested, control.granted) {
@@ -1387,3 +1428,7 @@ mod tests {
         assert_eq!(result.unwrap_err().code, "gui_unavailable");
     }
 }
+
+#[cfg(all(test, feature = "linux-desktop"))]
+#[path = "linux/controlled_audio_tests.rs"]
+mod controlled_audio_tests;
