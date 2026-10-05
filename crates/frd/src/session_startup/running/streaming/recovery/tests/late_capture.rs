@@ -59,7 +59,10 @@ fn late_unannounced_capture_recovers_on_the_same_workers_and_connection() {
                 .transport
                 .is_bound_to(&connection)
         );
-        assert!(!frames.borrow().contains(&1), "expired output must never be presented");
+        assert!(
+            !frames.borrow().contains(&1),
+            "expired output must never be presented"
+        );
         for frame in [2, 3, 4] {
             assert!(
                 frames.borrow().contains(&frame),
@@ -67,6 +70,90 @@ fn late_unannounced_capture_recovers_on_the_same_workers_and_connection() {
                 frames.borrow()
             );
         }
+        host.reap_media(
+            &cleanup,
+            Deadline::after(&cleanup, Duration::from_secs(1)).unwrap(),
+        )
+        .await
+        .unwrap();
+        viewer
+            .reap_media(
+                &cleanup,
+                Deadline::after(&cleanup, Duration::from_secs(1)).unwrap(),
+            )
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
+fn repeated_late_captures_exhaust_the_original_subscription_not_a_fresh_allowance() {
+    run(|c, h| async move {
+        let cleanup = Cx::current().unwrap();
+        let Fixture {
+            mut host,
+            viewer,
+            media,
+            receiver,
+            presenter,
+            initial,
+        } = Box::pin(fixture(
+            &c,
+            &h,
+            "late-repeat",
+            2_000_000,
+            Role::Observe,
+            true,
+        ))
+        .await;
+        let host_worker = host.worker_id();
+        let viewer_worker = presenter.worker_id();
+        let mut viewer =
+            StreamingViewer::from_test_parts(viewer, media, presenter, receiver, initial);
+        let stop = viewer.control();
+        let frames = Rc::new(RefCell::new(Vec::new()));
+        let seen = frames.clone();
+        let started = Instant::now();
+        let mut entropy = 12_000;
+        let (server, client) = Box::pin(support::both(
+            host.serve(|| nonce(&mut entropy), || None, block),
+            viewer.serve(
+                |_, event| {
+                    if let Some(event) = event {
+                        seen.borrow_mut().push(event.frame.as_raw());
+                    }
+                    // A broken implementation that refills the allowance must
+                    // fail this test, not run an infinite recovery loop.
+                    if started.elapsed() > Duration::from_secs(6) {
+                        stop.stop();
+                    }
+                    Ok(())
+                },
+                |_| {},
+                block,
+            ),
+        ))
+        .await;
+        assert!(
+            matches!(
+                &server,
+                Err(Error::MediaTransport(crate::media_quic::Error::Media(
+                    crate::media::Error::Send(
+                        fr_media::delivery::SendError::RecoveryLimitExceeded
+                    )
+                )))
+            ),
+            "the second failed generation must be refused: {server:?}"
+        );
+        assert!(client.is_err());
+        assert_eq!(host.statistics().expired_capture_updates, 2);
+        assert_eq!(host.statistics().recovered_streams, 1);
+        assert_eq!(viewer.statistics().recovered_streams, 1);
+        assert_eq!(host.worker_id(), host_worker);
+        assert_eq!(viewer.worker_id(), viewer_worker);
+        assert!(frames.borrow().contains(&2), "{:?}", frames.borrow());
+        assert!(frames.borrow().iter().all(|frame| [0, 2].contains(frame)));
+        assert!(host.stream.control.check().is_err());
         host.reap_media(
             &cleanup,
             Deadline::after(&cleanup, Duration::from_secs(1)).unwrap(),

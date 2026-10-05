@@ -29,7 +29,7 @@ try:
         assert k in (2,7)
         frame,observed,forced=struct.unpack('>QQB',b)
         if MODE.startswith('late'):
-            if frame==1 and not forced:
+            if (frame==1 or MODE=='late-repeat') and not forced:
                 time.sleep(.35)
         elif frame==2 and not forced:
             time.sleep(60 if MODE=='stall' else .35)

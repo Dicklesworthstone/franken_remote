@@ -168,15 +168,18 @@ async fn fixture_features(
     let vm = NegotiatedMedia::new(viewer.io().unwrap().0, &selected, &vc, &vr, &vv).unwrap();
     let control = host.observation().unwrap();
     let mut source = source(&control, mode).await;
+    let mut send_policy = SendPolicy {
+        recovery_horizon_micros: budget,
+        ..SendPolicy::default()
+    };
+    if mode == "late-repeat" {
+        // One completed recovery followed by refusal BEFORE another attachment
+        // allocation. Do not raise the separate connection namespace limit.
+        send_policy.max_recoveries_per_window = 1;
+        send_policy.recovery_window_micros = 60_000_000;
+    }
     let mut sender = hm
-        .sender(
-            host.io().unwrap().0,
-            control.clone(),
-            SendPolicy {
-                recovery_horizon_micros: budget,
-                ..SendPolicy::default()
-            },
-        )
+        .sender(host.io().unwrap().0, control.clone(), send_policy)
         .unwrap();
     let config = vm
         .receiver_config(
@@ -518,5 +521,5 @@ fn only_negotiation_decides_automatic_recovery_also_with_control_intent() {
     }
 }
 
-mod namespace;
 mod late_capture;
+mod namespace;
