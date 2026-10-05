@@ -10,6 +10,7 @@ use fr_client::audio::{
         decoder::PolledDecoder,
     },
 };
+use fr_client::input::ClientInstant;
 use fr_core::audio::{AudioStopReason, AudioStreamConfig};
 use fr_media::audio::{AudioAccessUnit, AudioMediaError, AudioPcmFrame};
 use fr_wire::{
@@ -120,6 +121,20 @@ impl<D: PolledDecoder> OpusPlayout<D> {
         bytes: &[u8],
         clock: PlayoutClock,
     ) -> Result<ReceiveResult, Error> {
+        self.receive_record_at(bytes, clock.now, clock)
+    }
+
+    /// Admit a record from a bounded worker inbox without renewing its lifetime.
+    /// `arrived` is the original LOCAL receipt instant on the same clock as
+    /// `clock.now`; it is neither a host timestamp nor the worker's dequeue time.
+    /// Binding, epoch and negotiated resource checks still apply. A matching stop
+    /// always retires the owner, even when it waited longer than a packet budget.
+    pub fn receive_record_at(
+        &mut self,
+        bytes: &[u8],
+        arrived: ClientInstant,
+        clock: PlayoutClock,
+    ) -> Result<ReceiveResult, Error> {
         let packet = match audio::decode_packet(bytes, self.binding) {
             Ok(packet) => packet,
             Err(WireError::UnsupportedKind) => {
@@ -153,7 +168,10 @@ impl<D: PolledDecoder> OpusPlayout<D> {
             packet.payload,
         )
         .map_err(Error::Media)?;
-        let queued = self.owner.receive(packet, clock).map_err(Error::Playout)?;
+        let queued = self
+            .owner
+            .receive_at(packet, arrived, clock)
+            .map_err(Error::Playout)?;
         Ok(if queued {
             ReceiveResult::Queued
         } else {
