@@ -239,11 +239,13 @@ impl AudioRing {
         Ok(())
     }
     pub fn get(&self, sequence: u64) -> Option<&Stamped> {
-        let first = self.packets.front()?.unit.sequence();
-        let index = usize::try_from(sequence.checked_sub(first)?).ok()?;
-        self.packets
-            .get(index)
-            .filter(|p| p.unit.sequence() == sequence)
+        // Capture/IPC loss may leave holes even though admission is ordered.
+        // Sequence distance is not a VecDeque index. The scan is bounded by
+        // RING_PACKETS, including after a ring wrap or an arbitrarily large gap.
+        self.packets.iter().find(|p| p.unit.sequence() == sequence)
+    }
+    fn at_or_after(&self, sequence: u64) -> Option<&Stamped> {
+        self.packets.iter().find(|p| p.unit.sequence() >= sequence)
     }
     fn oldest(&self) -> Option<u64> {
         self.packets.front().map(|p| p.unit.sequence())
@@ -310,8 +312,11 @@ pub struct LaneCounters {
     pub skipped_before_ack: u64,
     /// Older than [`MAX_PACKET_AGE_US`] when the lane reached them.
     pub dropped_obsolete: u64,
-    /// Evicted from the bounded ring before this lane sent them.
+    /// Sequence positions before the oldest retained packet. Some may have
+    /// been lost upstream; this is not proof that every position was captured.
     pub dropped_evicted: u64,
+    /// Missing sequence positions inside the retained span (capture/IPC gaps).
+    pub dropped_missing: u64,
     /// Viewer records naming a stale or unknown generation.
     pub stale_refused: u64,
     pub stops: u64,
@@ -350,6 +355,7 @@ impl AudioLane {
                 skipped_before_ack: 0,
                 dropped_obsolete: 0,
                 dropped_evicted: 0,
+                dropped_missing: 0,
                 stale_refused: 0,
                 stops: 0,
                 restarts: 0,
@@ -457,7 +463,10 @@ impl AudioLane {
                     if let Some(oldest) = ring.oldest()
                         && next < oldest
                     {
-                        self.counters.dropped_evicted += oldest - next;
+                        self.counters.dropped_evicted = self
+                            .counters
+                            .dropped_evicted
+                            .saturating_add(oldest - next);
                         self.state = LaneState::Active {
                             stream,
                             epoch,
@@ -465,25 +474,51 @@ impl AudioLane {
                         };
                         continue;
                     }
-                    let Some(packet) = ring.get(next) else {
+                    let Some(packet) = ring.at_or_after(next) else {
                         return LaneAction::Nothing;
                     };
-                    if now_us.saturating_sub(packet.captured_us) > MAX_PACKET_AGE_US {
-                        self.counters.dropped_obsolete += 1;
+                    let sequence = packet.unit.sequence();
+                    if sequence > next {
+                        // Jump directly to retained work, never loop through
+                        // missing sequence numbers on the session executor.
+                        self.counters.dropped_missing = self
+                            .counters
+                            .dropped_missing
+                            .saturating_add(sequence - next);
                         self.state = LaneState::Active {
                             stream,
                             epoch,
-                            next: next + 1,
+                            next: sequence,
                         };
+                    }
+                    if now_us.saturating_sub(packet.captured_us) > MAX_PACKET_AGE_US {
+                        self.counters.dropped_obsolete += 1;
+                        self.advance_past(stream, epoch, sequence);
                         continue;
                     }
                     return LaneAction::Packet {
-                        sequence: next,
+                        sequence,
                         generation: epoch,
                     };
                 }
             }
         }
+    }
+    /// Sequence exhaustion is terminal for this lane, never wrap/replay. The
+    /// stop retains the current epoch and follows the last admitted packet.
+    fn advance_past(&mut self, stream: SourceStream, epoch: AudioGeneration, sequence: u64) {
+        self.state = sequence.checked_add(1).map_or(
+            LaneState::Stopping {
+                epoch,
+                reason: AudioStopReason::SessionEnded,
+                then: Then::Stop,
+            },
+            |next| LaneState::Active {
+                stream,
+                epoch,
+                next,
+            },
+        );
     }
     /// A source that ended or restarted under this lane: stop first.
     fn superseded(
@@ -533,11 +568,7 @@ impl AudioLane {
                 next,
             } if next == sequence => {
                 self.counters.sent += 1;
-                self.state = LaneState::Active {
-                    stream,
-                    epoch,
-                    next: next + 1,
-                };
+                self.advance_past(stream, epoch, sequence);
                 Ok(())
             }
             _ => Err(Error::WrongState),
@@ -592,13 +623,16 @@ impl AudioLane {
             };
             return Err(Error::Invalid);
         }
-        let next = ring.newest().map_or(0, |n| n + 1);
         self.counters.skipped_before_ack += u64::try_from(ring.len()).unwrap_or(u64::MAX);
-        self.state = LaneState::Active {
-            stream,
-            epoch,
-            next,
-        };
+        if let Some(newest) = ring.newest() {
+            self.advance_past(stream, epoch, newest);
+        } else {
+            self.state = LaneState::Active {
+                stream,
+                epoch,
+                next: 0,
+            };
+        }
         Ok(())
     }
     /// The viewer's own `AudioStop`: fences this lane immediately. A stop for
