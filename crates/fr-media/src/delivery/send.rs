@@ -413,6 +413,12 @@ impl SendCache {
         }
         let send_by = deadline(d.capture_micros, lifetime)?;
         if now >= send_by {
+            // The encoder has already advanced its reference chain. Rejecting
+            // these bytes alone would leave later pictures depending on a frame
+            // this subscriber never received. Use the same fence as tick's
+            // unsent-original expiry, including the existing recovery allowance.
+            self.clear();
+            self.needs_recovery = true;
             return Err(SendError::OriginalExpired);
         }
         let index = self
