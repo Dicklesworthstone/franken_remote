@@ -222,9 +222,26 @@ impl<D: PolledDecoder> AudioPlayout<D> {
         packet: AudioAccessUnit,
         clock: PlayoutClock,
     ) -> Result<bool, PlayoutError> {
+        self.receive_at(packet, clock.now, clock)
+    }
+    /// Admit work handed off from a bounded network-to-audio worker inbox.
+    /// `arrived` is the ORIGINAL local receipt instant on the same clock as
+    /// `clock.now`, not the worker's dequeue time or a host timestamp. Queueing
+    /// consumes the existing age budget; it never grants another full lifetime.
+    /// An already obsolete packet is dropped without starting a device schedule.
+    /// Current device/clock checks still run, including expiry of earlier work.
+    pub fn receive_at(
+        &mut self,
+        packet: AudioAccessUnit,
+        arrived: ClientInstant,
+        clock: PlayoutClock,
+    ) -> Result<bool, PlayoutError> {
         self.check(clock)?;
-        let until = clock
-            .now
+        if arrived.0 > clock.now.0 {
+            self.retire(PlayoutError::ClockRegression);
+            return Err(PlayoutError::ClockRegression);
+        }
+        let until = arrived
             .0
             .checked_add(MAX_AGE_US)
             .ok_or(PlayoutError::ClockOverflow);
@@ -235,6 +252,9 @@ impl<D: PolledDecoder> AudioPlayout<D> {
                 return Err(error);
             }
         };
+        if clock.now.0 >= until {
+            return Ok(false);
+        }
         match self.jitter.try_push_packet(packet) {
             Ok(false) => return Ok(false),
             Err(error) => {
