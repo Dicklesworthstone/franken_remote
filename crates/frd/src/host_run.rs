@@ -19,6 +19,7 @@ pub mod audio;
 pub mod encoder;
 pub use encoder::Encoder;
 pub mod policy;
+pub mod video;
 pub use audio::AudioOptions;
 
 use crate::{
@@ -456,14 +457,12 @@ fn retire_session_monitor(mut monitor: Monitor, report: &Reporter) {
     });
 }
 
-/// Capture pacing: at most 20 captures per second, and never shorter than one
-/// encoded frame (the shared publisher refuses a cadence above the codec fps).
+/// One admitted encoder period, rounded up to the source clock resolution.
+/// Backpressure may reduce actual capture; missed opportunities never queue.
 fn capture_interval(fps: u16) -> Option<Duration> {
-    if fps == 0 {
-        return None;
-    }
-    let frame = 1_000_000_u64.div_ceil(u64::from(fps));
-    Some(Duration::from_micros(frame.max(50_000)))
+    video::Profile::new(fps, video::DEFAULT_BITRATE)
+        .ok()
+        .map(video::Profile::capture_interval)
 }
 
 /// 1s, 2s, 4s ... capped at 30s; wakes early when stop is requested.
@@ -704,8 +703,7 @@ fn local_action(
 fn check(options: &Options) -> Result<(), Error> {
     if !options.worker.is_absolute()
         || options.display.is_empty()
-        || options.fps == 0
-        || options.bitrate == 0
+        || video::Profile::new(options.fps, options.bitrate).is_err()
         || options
             .input_agent
             .as_ref()
@@ -1361,6 +1359,15 @@ mod tests {
         let report: Reporter = Arc::new(|_| {});
         let stop = Arc::new(StopHandle::default());
         assert_eq!(run(&options, &report, &stop), Err(Error::Configuration));
+        for (fps, bitrate) in [(0, 8_000_000), (241, 8_000_000), (30, 9_999), (30, 200_000_001)] {
+            let mut invalid_video = options.clone();
+            invalid_video.worker = PathBuf::from("/unprovisioned/fr-media-worker");
+            invalid_video.input_agent = Some(PathBuf::from("/unprovisioned/fr-input-agent"));
+            invalid_video.fps = fps;
+            invalid_video.bitrate = bitrate;
+            // Configuration refusal must precede even the local executor probe.
+            assert_eq!(run(&invalid_video, &report, &stop), Err(Error::Configuration));
+        }
         let mut relative_agent = options.clone();
         relative_agent.worker = PathBuf::from("/usr/bin/fr-media-worker");
         relative_agent.input_agent = Some(PathBuf::from("fr-input-agent"));
@@ -1498,7 +1505,7 @@ mod tests {
 
     #[test]
     fn capture_pacing_never_outruns_the_encoder_frame_rate() {
-        assert_eq!(capture_interval(30), Some(Duration::from_millis(50)));
+        assert_eq!(capture_interval(30), Some(Duration::from_micros(33_334)));
         assert_eq!(capture_interval(15), Some(Duration::from_micros(66_667)));
         assert_eq!(capture_interval(1), Some(Duration::from_secs(1)));
         assert_eq!(capture_interval(0), None);
