@@ -7,7 +7,9 @@
 //! The source timeline counts delivered samples plus explicit server holes.
 //! A hole drops the partial frame (counted as a gap) and the next packet's
 //! timestamp jumps, so a discontinuity is never hidden or filled with
-//! invented sound. Frames beyond one batch are dropped the same way. A pull
+//! invented sound. A pull drains the bounded native queue before encoding,
+//! retaining only its newest complete PCM frames. Superseded raw frames are
+//! counted as gaps; superseded work never spends Opus encoding time. A pull
 //! that finds the bounded server queue full is counted as a possible overrun:
 //! the server may already have discarded older audio there.
 use super::{
@@ -24,15 +26,21 @@ use std::path::Path;
 
 /// Stereo 20 ms at 48 kHz.
 const MAX_FRAME_VALUES: usize = 2 * 960;
-/// Frames requested from the server per pull; one oversized server fragment
-/// can overshoot this, and the batch bound then drops (and counts) the excess.
+/// Complete raw frames retained per pull, independently of the read budget.
+/// Same maximum encoder work as the former normal four-frame pull.
 const PULL_FRAMES: usize = 4;
+const _: () = assert!(PULL_FRAMES <= MAX_BATCH_PACKETS);
+
+mod recent;
+use recent::Recent;
 
 pub struct PlaybackSource {
     device: CaptureDevice,
     encoder: Encoder,
     capture: Capture,
     frame: Box<[i16; MAX_FRAME_VALUES]>,
+    /// Fixed scratch, emptied on every pull; never a cross-pull PCM FIFO.
+    recent: Recent,
     filled: usize,
     carry: Option<u8>,
     /// Source-timeline sample index of `frame[0]`.
@@ -77,6 +85,7 @@ impl PlaybackSource {
             encoder,
             capture,
             frame: Box::new([0; MAX_FRAME_VALUES]),
+            recent: Recent::new(),
             filled: 0,
             carry: None,
             start: 0,
@@ -96,20 +105,30 @@ impl PlaybackSource {
     fn frame_values(&self) -> usize {
         usize::from(self.capture.frame_samples()) * self.channels()
     }
-    /// Drain and encode what the server already recorded.
+    /// Drain the bounded queue, then encode only its newest complete frames.
+    /// No codec call runs while a `PulseAudio` fragment is borrowed. Error or
+    /// normal return empties the scratch; failure permanently retires the source.
     pub fn pull(&mut self, now_us: u64) -> Result<(Vec<AudioAccessUnit>, CaptureCounters), Error> {
+        self.recent.clear();
+        let result = self.pull_inner(now_us);
+        self.recent.clear();
+        if result.is_err() {
+            self.disconnect();
+        }
+        result
+    }
+    fn pull_inner(&mut self, now_us: u64) -> Result<(Vec<AudioAccessUnit>, CaptureCounters), Error> {
         let values = self.frame_values();
         let channels = self.channels();
-        let budget = (PULL_FRAMES * values * 2)
-            .saturating_sub(self.filled * 2 + usize::from(self.carry.is_some()));
-        let mut packets = Vec::with_capacity(MAX_BATCH_PACKETS);
-        let mut dropped = 0_u32;
-        let mut failure = None;
+        // Do not leave newer server audio behind merely because four OLD
+        // frames were read. CaptureDevice validates this negotiated byte bound.
+        let budget = usize::try_from(self.device.queue_bytes()).map_err(|_| Error::BufferLimit)?;
         let Self {
             device,
             encoder,
             capture,
             frame,
+            recent,
             filled,
             carry,
             start,
@@ -124,39 +143,37 @@ impl PlaybackSource {
             channels,
         };
         let (_, full) = device.read(now_us, budget, |chunk| {
+            let bytes = match chunk {
+                Chunk::Bytes(bytes) => bytes.len(),
+                Chunk::Hole(bytes) => bytes,
+            };
+            // Bound work even if a native fragment violates the queue contract.
+            // The read loop itself stops after budget bytes plus one fragment.
+            if bytes > budget {
+                return Err(Error::BufferLimit);
+            }
             if let Chunk::Hole(_) = chunk {
                 counters.gaps = counters.gaps.saturating_add(1);
             }
-            state.push(chunk, &mut |pcm, timestamp| {
-                if packets.len() >= MAX_BATCH_PACKETS {
-                    // Explicit gap: the next packet's timestamp jumps.
-                    dropped = dropped.saturating_add(1);
-                    return Ok(());
-                }
-                match encode(encoder, capture, pcm, timestamp) {
-                    Ok(unit) => {
-                        packets.push(unit);
-                        Ok(())
-                    }
-                    Err(error) => {
-                        failure = Some(error);
-                        Err(error)
-                    }
-                }
-            })
+            state.push(chunk, &mut |pcm, timestamp| recent.push(pcm, timestamp))
         })?;
-        if let Some(error) = failure {
-            return Err(error);
-        }
-        counters.gaps = counters.gaps.saturating_add(dropped);
+        counters.gaps = counters.gaps.saturating_add(recent.dropped());
         if full {
             counters.overruns = counters.overruns.saturating_add(1);
+        }
+        let mut packets = Vec::with_capacity(PULL_FRAMES);
+        for (pcm, timestamp) in recent.iter() {
+            packets.push(encode(encoder, capture, pcm, timestamp)?);
         }
         Ok((packets, *counters))
     }
     pub fn disconnect(&mut self) {
         self.device.disconnect();
         self.encoder.close();
+        self.recent.clear();
+        self.frame.fill(0);
+        self.filled = 0;
+        self.carry = None;
     }
 }
 fn encode(
@@ -235,3 +252,6 @@ impl Accumulator<'_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;
