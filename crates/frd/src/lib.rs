@@ -61,6 +61,10 @@ pub mod native_files;
 #[cfg(target_os = "linux")]
 pub mod local_sharing;
 
+// Parent-owned terminal consent; no authority, capture or native input here.
+#[cfg(target_os = "linux")]
+pub mod local_approval;
+
 #[cfg(target_os = "linux")]
 pub mod broker;
 
