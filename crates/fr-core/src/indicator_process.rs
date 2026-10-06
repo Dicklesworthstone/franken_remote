@@ -1,7 +1,7 @@
-//! Private read-only observation-indicator IPC over inherited socketpairs.
-//! This is NOT the input executor protocol and carries no input operations,
-//! consent decisions, paths, text, or network authority. An old input-agent
-//! image or a cross-role message fails closed instead of being reinterpreted.
+//! Private session-UI IPC over inherited socketpairs. Observation indication
+//! and one-use approval are different locally selected child roles. Neither
+//! carries input operations, paths, text, or network authority. A UI decision
+//! is not a grant: the parent must recheck its ORIGINAL pending capability.
 use core::fmt;
 
 pub const FRAME_BYTES: usize = 32;
@@ -14,22 +14,32 @@ pub enum Kind {
     Open = 1,
     Check = 2,
     Stop = 3,
+    ApproveView = 4,
+    ApproveControl = 5,
+    ApprovalCheck = 6,
     Ready = 129,
     Stopped = 130,
     Refused = 131,
+    Allowed = 132,
+    Denied = 133,
 }
 impl Kind {
     pub const fn is_request(self) -> bool {
-        matches!(self, Self::Open | Self::Check | Self::Stop)
+        matches!(self, Self::Open | Self::Check | Self::Stop | Self::ApproveView | Self::ApproveControl | Self::ApprovalCheck)
     }
     const fn parse(value: u8) -> Result<Self, Error> {
         match value {
             1 => Ok(Self::Open),
             2 => Ok(Self::Check),
             3 => Ok(Self::Stop),
+            4 => Ok(Self::ApproveView),
+            5 => Ok(Self::ApproveControl),
+            6 => Ok(Self::ApprovalCheck),
             129 => Ok(Self::Ready),
             130 => Ok(Self::Stopped),
             131 => Ok(Self::Refused),
+            132 => Ok(Self::Allowed),
+            133 => Ok(Self::Denied),
             _ => Err(Error),
         }
     }
@@ -97,7 +107,9 @@ impl Frame {
         }
         match (request.kind, self.kind) {
             (Kind::Open | Kind::Check, Kind::Ready | Kind::Refused)
-            | (Kind::Stop, Kind::Stopped | Kind::Refused) => Ok(self.kind),
+            | (Kind::Stop, Kind::Stopped | Kind::Refused)
+            | (Kind::ApproveView | Kind::ApproveControl | Kind::ApprovalCheck,
+               Kind::Ready | Kind::Refused | Kind::Allowed | Kind::Denied) => Ok(self.kind),
             _ => Err(Error),
         }
     }
@@ -112,7 +124,8 @@ mod tests {
     }
     #[test]
     fn all_records_round_trip_with_constant_space() {
-        for kind in [Kind::Open, Kind::Check, Kind::Stop, Kind::Ready, Kind::Stopped, Kind::Refused] {
+        for kind in [Kind::Open, Kind::Check, Kind::Stop, Kind::Ready, Kind::Stopped, Kind::Refused,
+            Kind::ApproveView, Kind::ApproveControl, Kind::ApprovalCheck, Kind::Allowed, Kind::Denied] {
             for sequence in [1, 2, u64::MAX] {
                 for epoch in [1, 29, u128::MAX] {
                     let frame = Frame { kind, sequence, epoch };
@@ -171,5 +184,32 @@ mod tests {
         assert_eq!(stop.reply(Kind::Stopped).response_to(stop), Ok(Kind::Stopped));
         assert_eq!(ready.response_to(ready), Err(Error));
         assert!(!format!("{ready:?}").contains("29"));
+    }
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_indicator_commands_can_never_accept_positive_consent() {
+        for kind in [Kind::Open, Kind::Check, Kind::Stop] {
+            let request = Frame { kind, sequence: 17, epoch: 23 };
+            for decision in [Kind::Allowed, Kind::Denied] {
+                assert_eq!(request.reply(decision).response_to(request), Err(Error));
+            }
+        }
+    }
+    #[test]
+    fn approval_has_distinct_polling_and_exact_one_request_correlation() {
+        for kind in [Kind::ApproveView, Kind::ApproveControl, Kind::ApprovalCheck] {
+            let request = Frame { kind, sequence: 17, epoch: 23 };
+            for decision in [Kind::Ready, Kind::Refused, Kind::Allowed, Kind::Denied] {
+                let reply = request.reply(decision);
+                assert_eq!(reply.response_to(request), Ok(decision));
+                assert_eq!(Frame { epoch: 24, ..reply }.response_to(request), Err(Error));
+                assert_eq!(Frame { sequence: 18, ..reply }.response_to(request), Err(Error));
+            }
+        }
     }
 }

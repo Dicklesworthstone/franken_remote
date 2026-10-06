@@ -97,3 +97,7 @@ pub mod display_picker;
 
 #[cfg(all(target_os = "linux", feature = "linux-logind"))]
 pub mod logind;
+
+// Positive decisions remain confined to the supervised native session child.
+#[cfg(all(target_os = "linux", feature = "linux-input"))]
+pub mod approval_surface;

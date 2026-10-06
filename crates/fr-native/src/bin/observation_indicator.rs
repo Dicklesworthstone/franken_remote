@@ -1,7 +1,8 @@
 #![forbid(unsafe_code)]
 //! Read-only, parent-bound "Stop sharing" surface for an observation cohort.
 //! Uses the existing device-attributed X11 indicator. This process has no input
-//! executor, capture, clipboard, consent-decision, or network-protocol path.
+//! executor, capture, clipboard, or network-protocol path. A separate initial
+//! approval record selects its one-use device-attributed consent role.
 //! The inherited sockets use a distinct fixed-size protocol; input-executor
 //! records are never accepted. Process exit closes all native UI resources.
 #[cfg(target_os = "linux")]
@@ -47,7 +48,7 @@ mod linux {
         })();
         channels.map_or(CHANNEL, |(command, signals)| serve(command, signals))
     }
-    fn read(command: &mut UnixStream, budget: Duration) -> Result<Frame, i32> {
+    pub(crate) fn read(command: &mut UnixStream, budget: Duration) -> Result<Frame, i32> {
         let until = Instant::now().checked_add(budget).ok_or(CHANNEL)?;
         let mut bytes = [0; FRAME_BYTES];
         let mut filled = 0;
@@ -67,7 +68,7 @@ mod linux {
         }
         Frame::decode(&bytes).map_err(|_| PROTOCOL)
     }
-    fn send(command: &mut UnixStream, request: Frame, kind: Kind) -> Result<(), i32> {
+    pub(crate) fn send(command: &mut UnixStream, request: Frame, kind: Kind) -> Result<(), i32> {
         command.set_write_timeout(Some(IDLE_WAIT)).map_err(|_| CHANNEL)?;
         command.write_all(&request.reply(kind).encode().map_err(|_| PROTOCOL)?)
             .map_err(|_| CHANNEL)
@@ -95,6 +96,8 @@ mod linux {
     }
     fn serve(mut command: UnixStream, signals: UnixDatagram) -> i32 {
         let hello = match read(&mut command, OPEN_WAIT) {
+            Ok(frame) if matches!(frame.kind, Kind::ApproveView | Kind::ApproveControl)
+                && frame.sequence == 1 => return crate::approval::serve(command, signals, frame),
             Ok(frame) if frame.kind == Kind::Open && frame.sequence == 1 => frame,
             Ok(_) => return PROTOCOL,
             Err(error) => return error,
@@ -185,6 +188,10 @@ mod linux {
         }
     }
 }
+
+#[cfg(target_os = "linux")]
+#[path = "observation_indicator/approval.rs"]
+mod approval;
 
 fn main() {
     #[cfg(target_os = "linux")]
