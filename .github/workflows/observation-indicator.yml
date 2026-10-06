@@ -45,6 +45,8 @@ jobs:
         run: cargo test -p fr-core indicator_process --locked
       - name: Original host lifetime and real subprocess regressions
         run: cargo test -p frd --lib host_indicator --locked
+      - name: Explicit encoder selection without fallback
+        run: cargo test -p frd --lib encoder --locked
       - name: Strict CLI selection and daemon build
         run: |
           cargo test -p frd --lib observation_indicator --locked

@@ -100,8 +100,14 @@ OPTIONS:
     --interface IF  Tailscale interface for ingress enforcement (default: tailscale0)
     --trust-roots P PEM CA bundle for the host certificate chain (default: system)
     --once          Serve one sharing session, then exit
-    --software-explicit  Encode HEVC on the CPU (developer profile; required by
-                    frd run until hardware encoder selection exists)
+    --encoder NAME  Select 'nvenc', 'vaapi' or 'software' explicitly. Hardware
+                    paths are experimental, retain CPU-staged X11 capture and
+                    never silently fall back. Actual native startup and HEVC
+                    validation must succeed; selection is not qualification.
+                    See docs/hardware-encoder-selection.md
+    --software-explicit  Legacy alias for --encoder software (CPU developer
+                    profile). Do not combine the two selectors. Without either
+                    selector, frd run refuses rather than choosing implicitly
     --user          Manage user-level service (systemd user unit / launchd agent; default)
     --system        Manage system-wide service
     --dry-run       Preview service generation without modifying filesystem
@@ -323,6 +329,7 @@ struct Profile {
     control: bool,
     session_lifetime: bool,
     observation_indicator: bool,
+    encoder: frd::host_run::Encoder,
 }
 
 #[cfg(target_os = "linux")]
@@ -337,6 +344,7 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                 "address": address.to_string(),
                 "control": profile.control,
                 "observation_indicator": profile.observation_indicator,
+                "encoder_selection": profile.encoder.as_str(),
                 "session_lifetime": if profile.session_lifetime { "monitored" } else { "unmonitored" },
             }),
             Event::PeerFinished {
@@ -367,6 +375,15 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                     "view-only"
                 };
                 println!("frd: sharing this desktop ({mode}) on {address}; Ctrl-C to stop");
+                println!(
+                    "frd: encoder selection: {}; availability is checked at capture startup; no automatic fallback",
+                    profile.encoder.as_str()
+                );
+                if profile.encoder.is_hardware() {
+                    println!(
+                        "frd: experimental hardware HEVC with CPU-staged X11 capture; selection is not hardware qualification"
+                    );
+                }
                 if profile.observation_indicator {
                     println!("frd: the desktop Stop sharing window is required while this run is enabled; closing or losing it ends the run");
                 }
@@ -481,15 +498,20 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
             2,
         );
     }
-    if !options.software_explicit {
-        return run_refusal(
-            json,
-            "hardware_hevc_unavailable",
-            "frd run has no hardware HEVC encoder selection yet; pass --software-explicit to \
-             share with the CPU software profile (docs/decisions/0004-software-encoder-profile.md)",
-            2,
-        );
-    }
+    let encoder = match options.selected_encoder() {
+        Ok(Some(encoder)) => encoder,
+        Ok(None) => {
+            return run_refusal(
+                json,
+                "hardware_hevc_unavailable",
+                "no automatic encoder selection: pass --encoder nvenc or --encoder vaapi for \
+                 an explicit experimental hardware attempt, or --software-explicit / --encoder \
+                 software for the CPU developer profile; no automatic fallback is performed",
+                2,
+            );
+        }
+        Err(error) => return local_policy::refusal(error, json),
+    };
     if options.clipboard && options.input_agent.is_none() {
         return run_refusal(
             json,
@@ -577,6 +599,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         control: run_options.input_agent.is_some(),
         session_lifetime: run_options.session_monitor.is_some(),
         observation_indicator: options.observation_indicator.is_some(),
+        encoder,
     };
     let report: Reporter = Arc::new(move |event: Event| print_event(json, profile, &event));
     let stop = Arc::new(host_run::StopHandle::default());
@@ -585,10 +608,14 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
     // defeat later approval/scope changes. Every revision still fences old grants.
     let policy = run_policy(&options, effective);
     let result = match options.observation_indicator.as_deref() {
-        Some(image) => frd::host_indicator::run_with_policy(&run_options, &report, &stop, policy, image)
-            .map_err(|error| (error.code(), error.to_string())),
-        None => host_run::run_with_policy(&run_options, &report, &stop, policy)
-            .map_err(|error| (error.code(), error.to_string())),
+        Some(image) => frd::host_indicator::run_with_policy_and_encoder(
+            &run_options, &report, &stop, policy, image, encoder,
+        )
+        .map_err(|error| (error.code(), error.to_string())),
+        None => host_run::run_with_policy_and_encoder(
+            &run_options, &report, &stop, policy, encoder,
+        )
+        .map_err(|error| (error.code(), error.to_string())),
     };
     drop(headless);
     match result {

@@ -1,5 +1,6 @@
 //! Strict local command parsing and startup resolution. No filesystem mutation.
 use super::{Approval, Change, Error, Policy, Sharing, Store, default_path};
+use crate::host_run::Encoder;
 use std::path::PathBuf;
 
 /// Effective startup options; overrides never modify the saved policy.
@@ -33,9 +34,12 @@ pub struct RunOptions {
     pub trust_roots: Option<PathBuf>,
     /// Serve one OS-share lifetime, then exit.
     pub once: bool,
-    /// Opt into the CPU software HEVC developer profile (ADR 0004); frd run
-    /// has no hardware encoder selection yet and refuses without it.
+    /// Legacy explicit CPU HEVC developer profile (ADR 0004). Equivalent to
+    /// `--encoder software`, but supplying both selectors is refused.
     pub software_explicit: bool,
+    /// Exact local backend selection, never a codec name received from a peer.
+    /// Hardware remains experimental until qualified on the actual host.
+    pub encoder: Option<Encoder>,
     /// Absolute `fr-input-agent` path. Absent: observation only (unchanged).
     /// Present: a first viewer may take the exclusive controlled share.
     pub input_agent: Option<PathBuf>,
@@ -134,6 +138,10 @@ impl RunOptions {
                 "--display" => set(&mut options.display, value.to_owned())?,
                 "--interface" => set(&mut options.interface, value.to_owned())?,
                 "--trust-roots" => set(&mut options.trust_roots, PathBuf::from(value))?,
+                "--encoder" => set(
+                    &mut options.encoder,
+                    Encoder::parse(value).ok_or(Error::InvalidArgument)?,
+                )?,
                 "--input-agent" => set(&mut options.input_agent, PathBuf::from(value))?,
                 "--audio-server" => set(&mut options.audio_server, PathBuf::from(value))?,
                 "--audio-sink" => set(&mut options.audio_sink, value.to_owned())?,
@@ -153,6 +161,7 @@ impl RunOptions {
                 _ => return Err(Error::InvalidArgument),
             }
         }
+        let _ = options.selected_encoder()?;
         // Control retains its existing mandatory per-lease indicator. The two
         // native window lifetimes are not silently combined in this slice.
         if options.observation_indicator.is_some() && options.input_agent.is_some() {
@@ -176,7 +185,18 @@ impl RunOptions {
         }
         Ok(options)
     }
+    /// Resolve only explicit operator input; absence never selects hardware or
+    /// software implicitly. Recheck contradictory programmatically built options.
+    pub fn selected_encoder(&self) -> Result<Option<Encoder>, Error> {
+        match (self.encoder, self.software_explicit) {
+            (Some(_), true) => Err(Error::InvalidArgument),
+            (Some(encoder), false) => Ok(Some(encoder)),
+            (None, true) => Ok(Some(Encoder::SoftwareExplicit)),
+            (None, false) => Ok(None),
+        }
+    }
     pub fn resolve(&self) -> Result<Effective, Error> {
+        let _ = self.selected_encoder()?;
         if self.port == Some(0) {
             return Err(Error::InvalidArgument);
         }
@@ -255,6 +275,9 @@ fn value<'a>(iter: &mut std::slice::Iter<'a, String>) -> Result<&'a str, Error> 
         .filter(|s| !s.is_empty() && !s.starts_with('-'))
         .ok_or(Error::InvalidArgument)
 }
+
+#[cfg(test)]
+mod encoder_tests;
 
 #[cfg(test)]
 mod tests {

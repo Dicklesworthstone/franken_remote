@@ -10,7 +10,7 @@
 mod process;
 pub use process::Error as IndicatorError;
 use crate::{
-    host_run::{self, Options, Reporter, StopHandle, policy},
+    host_run::{self, Encoder, Options, Reporter, StopHandle, policy},
     input_process::ProcessLaunch,
 };
 use process::{Owner, Status};
@@ -57,12 +57,27 @@ impl std::error::Error for Error {}
 /// view-only host, with optional playback audio. A control-capable host retains
 /// its separate mandatory per-lease indicator and is refused by this slice.
 /// Missing/unresponsive UI refuses rather than silently disabling the option.
+/// This legacy entry point retains the explicit software encoder profile.
 pub fn run_with_policy(
     options: &Options,
     report: &Reporter,
     stop: &Arc<StopHandle>,
     policy: policy::Configuration,
     image: &Path,
+) -> Result<(), Error> {
+    run_with_policy_and_encoder(options, report, stop, policy, image, Encoder::SoftwareExplicit)
+}
+
+/// Preserve the exact local encoder selection through the indicator gate.
+/// Requiring the UI neither resets hardware to software nor grants permission
+/// to try another backend on native failure. Other host policy is unchanged.
+pub fn run_with_policy_and_encoder(
+    options: &Options,
+    report: &Reporter,
+    stop: &Arc<StopHandle>,
+    policy: policy::Configuration,
+    image: &Path,
+    encoder: Encoder,
 ) -> Result<(), Error> {
     if stop.is_requested() { return Ok(()); }
     if options.input_agent.is_some() { return Err(Error::Configuration); }
@@ -73,7 +88,9 @@ pub fn run_with_policy(
     ).map_err(|_| Error::Configuration)?;
     let stopped = stop.clone();
     let mut owner = Owner::start(launch, move || stopped.request()).map_err(Error::Indicator)?;
-    let result = drive(&owner, stop, || host_run::run_with_policy(options, report, stop, policy));
+    let result = drive(&owner, stop, || {
+        host_run::run_with_policy_and_encoder(options, report, stop, policy, encoder)
+    });
     // Keep the UI through normal host teardown. Joining the I/O worker proves
     // its exact child was reaped; a timeout retains the original worker handle.
     owner.stop();
