@@ -56,8 +56,26 @@ fn the_supervisor_requires_the_exact_response_not_merely_a_ready_byte() {
     assert_eq!(io::response(request, &[0; 32]), Err(Error::Protocol));
     assert_eq!(io::response(request, &request.reply(Kind::Refused).encode().unwrap()), Err(Error::Unavailable));
 }
+#[test]
+fn failure_cause_is_available_without_a_lock_before_waking_the_host() {
+    let observed = Arc::new(AtomicBool::new(false));
+    let reported = observed.clone();
+    let shared = Arc::new_cyclic(|weak: &std::sync::Weak<Shared>| {
+        let weak = weak.clone();
+        Shared {
+            on_stop: Box::new(move || {
+                let owner = weak.upgrade().unwrap();
+                reported.store(owner.state.try_lock().is_ok_and(|s| s.status == Status::Stopped(Error::Unavailable)), Ordering::Release);
+            }),
+            state: Mutex::new(opening(Instant::now())),
+        }
+    });
+    shared.stop(Error::Unavailable);
+    assert!(observed.load(Ordering::Acquire));
+}
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn real_child_faults_gate_startup_stop_the_original_host_and_drain_before_return() {
     use crate::host_run::StopHandle;
     use std::os::unix::fs::PermissionsExt;
@@ -78,6 +96,9 @@ while True:
         raise SystemExit(1)
     if mode == 'exit':
         raise SystemExit(0)
+    if mode == 'early-revoke':
+        socket.socket(fileno=1).send(bytes([@SIGNAL@]))
+        time.sleep(30)
     if data[5] == 2:
         checks += 1
         if mode == 'stall' or (mode == 'later-stall' and checks > 1):
@@ -97,7 +118,7 @@ while True:
         s.sendall(data)
 "#;
     let signal = encode_signal(Signal::LocalRevoke).iter().map(u8::to_string).collect::<Vec<_>>().join(",");
-    for mode in ["ready", "wrong-sequence", "wrong-epoch", "exit", "stall", "fragmented", "later-stall", "revoke"] {
+    for mode in ["ready", "wrong-sequence", "wrong-epoch", "exit", "stall", "fragmented", "later-stall", "revoke", "early-revoke"] {
         let stop = Arc::new(StopHandle::default());
         let on_stop = stop.clone();
         let path = std::env::temp_dir().join(format!("fr-indicator-fixture-{}-{mode}.py", std::process::id()));
@@ -116,7 +137,7 @@ while True:
                     thread::sleep(TURN);
                 }
                 // Simulated host teardown AFTER its original stop, not a
-                // cancelled/dropped future. The production wrapper must join it.
+                // cancelled/dropped future. The wrapper must let this complete.
                 thread::sleep(TURN);
             }
             drained.store(true, Ordering::Release);

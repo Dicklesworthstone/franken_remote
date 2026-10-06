@@ -63,6 +63,9 @@ pub struct RunOptions {
     pub logind_seat: Option<String>,
     /// Absolute `fr-session-monitor` image (default: next to frd).
     pub session_monitor: Option<PathBuf>,
+    /// Optional read-only Stop sharing child, required before listening when
+    /// selected. This slice covers observation-only hosts, with optional audio.
+    pub observation_indicator: Option<PathBuf>,
 }
 impl RunOptions {
     /// Arguments after `run`. Unknown, duplicate or valueless options refuse
@@ -142,8 +145,18 @@ impl RunOptions {
                 "--logind-session" => set(&mut options.logind_session, value.to_owned())?,
                 "--logind-seat" => set(&mut options.logind_seat, value.to_owned())?,
                 "--session-monitor" => set(&mut options.session_monitor, PathBuf::from(value))?,
+                "--observation-indicator" => {
+                    let path = PathBuf::from(value);
+                    if !path.is_absolute() { return Err(Error::InvalidArgument); }
+                    set(&mut options.observation_indicator, path)?;
+                }
                 _ => return Err(Error::InvalidArgument),
             }
+        }
+        // Control retains its existing mandatory per-lease indicator. The two
+        // native window lifetimes are not silently combined in this slice.
+        if options.observation_indicator.is_some() && options.input_agent.is_some() {
+            return Err(Error::InvalidArgument);
         }
         // A seat or monitor image without the selected session selects nothing.
         if options.logind_session.is_none()
@@ -377,6 +390,23 @@ mod tests {
                 matches!(parse(refused), Err(Error::InvalidArgument)),
                 "{refused:?}"
             );
+        }
+    }
+    #[test]
+    fn observation_indicator_is_explicit_absolute_and_cannot_change_approval() {
+        assert!(parse(&[]).unwrap().observation_indicator.is_none());
+        let on = parse(&["--observation-indicator", "/usr/libexec/fr-observation-indicator", "--approval", "local", "--audio"]).unwrap();
+        assert_eq!(on.approval, Some(Approval::Local));
+        assert!(on.audio && on.input_agent.is_none());
+        assert_eq!(on.observation_indicator, Some(PathBuf::from("/usr/libexec/fr-observation-indicator")));
+        for refused in [
+            &["--observation-indicator"][..],
+            &["--observation-indicator", "--once"][..],
+            &["--observation-indicator", "relative"][..],
+            &["--observation-indicator", "/a", "--observation-indicator", "/b"][..],
+            &["--observation-indicator", "/a", "--input-agent", "/b"][..],
+        ] {
+            assert!(matches!(parse(refused), Err(Error::InvalidArgument)), "{refused:?}");
         }
     }
 }

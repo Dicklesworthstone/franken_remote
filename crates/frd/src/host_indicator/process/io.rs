@@ -84,13 +84,12 @@ impl Process<'_> {
             }
         }
     }
-    fn check(&mut self) -> Result<(), Error> {
+    fn check(&self) -> Result<(), Error> {
         self.shared.check()?;
-        if self.child.as_mut().ok_or(Error::Stopped)?.try_wait()
-            .map_err(|_| Error::Unavailable)?.is_some()
-        {
-            return Err(Error::Unavailable);
-        }
+        if self.child.is_none() { return Err(Error::Stopped); }
+        // Do not call try_wait here: reaping would allow PID/process-group ID
+        // reuse before finish sends its signal. EOF and bounded missing replies
+        // detect death while the original child remains unreaped and owned.
         let mut bytes = [0; process::SIGNAL_BYTES + 1];
         match self.signals.recv(&mut bytes) {
             Ok(n) if n == process::SIGNAL_BYTES

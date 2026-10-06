@@ -75,17 +75,24 @@ struct Shared {
 }
 impl Shared {
     fn stop(&self, error: Error) {
-        (self.on_stop)();
-        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !matches!(state.status, Status::Stopped(_)) {
-            state.status = Status::Stopped(error);
+        {
+            let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !matches!(state.status, Status::Stopped(_)) {
+                state.status = Status::Stopped(error);
+            }
         }
+        // Store the cause BEFORE waking the original host. Otherwise startup
+        // could mistake this native refusal for an unrelated normal stop.
+        // No mutex is held during the callback or any ensuing native cleanup.
+        (self.on_stop)();
     }
     fn status(&self) -> Status {
         let status = self.state.lock().map_or(Status::Stopped(Error::Panicked), |mut state| {
             state.check_at(Instant::now())
         });
         if let Status::Stopped(error) = status {
+            // The original stop has been requested before callers observe a
+            // terminal return, even when THEY detect a worker's missed deadline.
             self.stop(error);
         }
         status

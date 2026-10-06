@@ -56,6 +56,12 @@ OPTIONS:
     --headless      Share a private headless Xvfb display (cookie-authenticated)
     --display :N    X11 display to share (default: $DISPLAY)
     --worker PATH   Absolute fr-media-worker path (default: next to frd)
+    --observation-indicator PATH  Absolute fr-observation-indicator image: require
+                    a live on-desktop Stop sharing window before listening,
+                    including for view-only audio. UI loss ends this host run.
+                    Off by default; cannot combine with --input-agent (control
+                    keeps its own mandatory indicator). Build fr-native with
+                    --features linux-input; see docs/observation-indicator.md
     --input-agent PATH  Absolute fr-input-agent path: lets the first viewer take
                     exclusive, unattended control (requires approval none; the
                     agent shows a mandatory local indicator). Probed once at
@@ -316,6 +322,7 @@ fn run_refusal(json: bool, code: &str, detail: &str, status: u8) -> ExitCode {
 struct Profile {
     control: bool,
     session_lifetime: bool,
+    observation_indicator: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -329,6 +336,7 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                 "event": "listening",
                 "address": address.to_string(),
                 "control": profile.control,
+                "observation_indicator": profile.observation_indicator,
                 "session_lifetime": if profile.session_lifetime { "monitored" } else { "unmonitored" },
             }),
             Event::PeerFinished {
@@ -359,6 +367,9 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                     "view-only"
                 };
                 println!("frd: sharing this desktop ({mode}) on {address}; Ctrl-C to stop");
+                if profile.observation_indicator {
+                    println!("frd: the desktop Stop sharing window is required while this run is enabled; closing or losing it ends the run");
+                }
                 if profile.session_lifetime {
                     println!(
                         "frd: locking, logging out of, switching away from or suspending the \
@@ -565,6 +576,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
     let profile = Profile {
         control: run_options.input_agent.is_some(),
         session_lifetime: run_options.session_monitor.is_some(),
+        observation_indicator: options.observation_indicator.is_some(),
     };
     let report: Reporter = Arc::new(move |event: Event| print_event(json, profile, &event));
     let stop = Arc::new(host_run::StopHandle::default());
@@ -572,14 +584,16 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
     // are overrides: copying saved effective values here would freeze them and
     // defeat later approval/scope changes. Every revision still fences old grants.
     let policy = run_policy(&options, effective);
-    let result = host_run::run_with_policy(&run_options, &report, &stop, policy);
+    let result = match options.observation_indicator.as_deref() {
+        Some(image) => frd::host_indicator::run_with_policy(&run_options, &report, &stop, policy, image)
+            .map_err(|error| (error.code(), error.to_string())),
+        None => host_run::run_with_policy(&run_options, &report, &stop, policy)
+            .map_err(|error| (error.code(), error.to_string())),
+    };
     drop(headless);
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            let detail = error.to_string();
-            run_refusal(json, error.code(), &detail, 1)
-        }
+        Err((code, detail)) => run_refusal(json, code, &detail, 1),
     }
 }
 

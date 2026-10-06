@@ -1,18 +1,26 @@
 //! Opt-in desktop "Stop sharing" surface around the canonical host run.
 //! One read-only child stays visible while this run is enabled, including idle
 //! listening between peers. It must be mapped and responsive BEFORE the host
-//! listener starts. It never approves a peer or alters admission, input, audio,
-//! file, or clipboard policy. Losing it stops the original run and all shares.
+//! listener starts. It never approves a peer or changes admission policy.
 //!
-//! The caller thread checks native liveness independently of both the child-I/O
-//! thread and the EXISTING host runtime. The scoped host coordinator creates no
-//! second async runtime. On stop the original host is driven through its normal
-//! teardown; its future, media children and firewall owner are never abandoned.
+//! The original host runtime stays on its caller's thread and original stack.
+//! A scoped liveness watcher checks the native-I/O worker independently. UI
+//! loss requests the original host's stop and normal teardown; neither the
+//! host future nor its media/firewall cleanup is cancelled and abandoned.
 mod process;
 pub use process::Error as IndicatorError;
-use crate::{host_run::{self, Options, Reporter, StopHandle, policy}, input_process::ProcessLaunch};
+use crate::{
+    host_run::{self, Options, Reporter, StopHandle, policy},
+    input_process::ProcessLaunch,
+};
 use process::{Owner, Status};
-use std::{fmt, path::Path, sync::Arc, thread, time::{Duration, Instant}};
+use std::{
+    fmt,
+    path::Path,
+    sync::{Arc, atomic::{AtomicBool, Ordering}},
+    thread,
+    time::{Duration, Instant},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -20,7 +28,7 @@ pub enum Error {
     Entropy,
     Indicator(IndicatorError),
     Host(host_run::Error),
-    HostPanicked,
+    WatchdogPanicked,
     Cleanup,
 }
 impl Error {
@@ -33,7 +41,7 @@ impl Error {
             Self::Indicator(IndicatorError::Protocol) => "observation_indicator_protocol",
             Self::Indicator(_) => "observation_indicator_unavailable",
             Self::Host(error) => error.code(),
-            Self::HostPanicked => "host_panicked",
+            Self::WatchdogPanicked => "observation_indicator_failed",
             Self::Cleanup => "cleanup_incomplete",
         }
     }
@@ -45,9 +53,10 @@ impl fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 
-/// The locally installed `fr-observation-indicator` image; never a peer path.
-/// Missing/unresponsive UI refuses rather than silently sharing without it.
-/// Without this opt-in the caller continues to use `host_run::run_with_policy`.
+/// Require the locally installed `fr-observation-indicator` before serving a
+/// view-only host, with optional playback audio. A control-capable host retains
+/// its separate mandatory per-lease indicator and is refused by this slice.
+/// Missing/unresponsive UI refuses rather than silently disabling the option.
 pub fn run_with_policy(
     options: &Options,
     report: &Reporter,
@@ -56,14 +65,16 @@ pub fn run_with_policy(
     image: &Path,
 ) -> Result<(), Error> {
     if stop.is_requested() { return Ok(()); }
+    if options.input_agent.is_some() { return Err(Error::Configuration); }
     let mut bytes = [0; 16];
     getrandom::fill(&mut bytes).map_err(|_| Error::Entropy)?;
-    let launch = ProcessLaunch::new(image, &options.display, options.xauthority.as_deref(), u128::from_ne_bytes(bytes))
-        .map_err(|_| Error::Configuration)?;
+    let launch = ProcessLaunch::new(
+        image, &options.display, options.xauthority.as_deref(), u128::from_ne_bytes(bytes),
+    ).map_err(|_| Error::Configuration)?;
     let stopped = stop.clone();
     let mut owner = Owner::start(launch, move || stopped.request()).map_err(Error::Indicator)?;
     let result = drive(&owner, stop, || host_run::run_with_policy(options, report, stop, policy));
-    // Keep the UI through host teardown. Joining the native-I/O worker proves
+    // Keep the UI through normal host teardown. Joining the I/O worker proves
     // its exact child was reaped; a timeout retains the original worker handle.
     owner.stop();
     let until = Instant::now() + Duration::from_secs(1);
@@ -76,6 +87,8 @@ pub fn run_with_policy(
         }
     }
 }
+/// Once running, a local UI revocation is a normal stop. Before first readiness
+/// EVERY stopped UI is a refusal: an opening failure must not exit as success.
 fn fault(status: Status) -> Option<IndicatorError> {
     match status {
         Status::Stopped(IndicatorError::LocalRevoke | IndicatorError::Stopped) => None,
@@ -86,32 +99,39 @@ fn fault(status: Status) -> Option<IndicatorError> {
 fn drive(
     owner: &Owner,
     stop: &StopHandle,
-    serve: impl FnOnce() -> Result<(), host_run::Error> + Send,
+    serve: impl FnOnce() -> Result<(), host_run::Error>,
 ) -> Result<(), Error> {
     let control = owner.control();
     loop {
         let status = control.status();
-        if let Some(error) = fault(status) { return Err(Error::Indicator(error)); }
-        if stop.is_requested() || matches!(status, Status::Stopped(_)) { return Ok(()); }
+        if let Status::Stopped(error) = status { return Err(Error::Indicator(error)); }
+        if stop.is_requested() { return Ok(()); }
         if status == Status::Ready { break; }
         thread::sleep(Duration::from_millis(5));
     }
+    let done = AtomicBool::new(false);
     thread::scope(|scope| {
-        // Unwinding also asks the ORIGINAL host to stop before scope joins it.
-        let _fence = Fence(stop);
-        let host = scope.spawn(serve);
-        let mut failure = None;
-        loop {
-            let status = control.status();
-            if let Some(error) = fault(status) {
-                failure.get_or_insert(error);
+        // Unwind stops the ORIGINAL host and releases the watcher before the
+        // scope joins it. No runtime coordinator is moved onto a smaller stack.
+        let _finish = Finish { done: &done, stop };
+        let watcher = scope.spawn(|| {
+            // A watcher panic also requests host stop before its thread exits.
+            let _fence = Fence(stop);
+            let mut failure = None;
+            while !done.load(Ordering::Acquire) {
+                let status = control.status();
+                if let Some(error) = fault(status) { failure.get_or_insert(error); }
+                if matches!(status, Status::Stopped(_)) { stop.request(); }
+                thread::sleep(Duration::from_millis(5));
             }
-            if matches!(status, Status::Stopped(_)) { stop.request(); }
-            if host.is_finished() { break; }
-            thread::sleep(Duration::from_millis(5));
-        }
-        // A failed host teardown is not hidden by a local click or native fault.
-        host.join().map_err(|_| Error::HostPanicked)?.map_err(Error::Host)?;
+            failure
+        });
+        let result = serve().map_err(Error::Host);
+        done.store(true, Ordering::Release);
+        let failure = watcher.join().map_err(|_| Error::WatchdogPanicked);
+        // Preserve a failed host teardown even if native liveness also failed.
+        result?;
+        let failure = failure?.or_else(|| fault(control.status()));
         failure.map_or(Ok(()), |error| Err(Error::Indicator(error)))
     })
 }
@@ -119,12 +139,22 @@ struct Fence<'a>(&'a StopHandle);
 impl Drop for Fence<'_> {
     fn drop(&mut self) { self.0.request(); }
 }
+struct Finish<'a> {
+    done: &'a AtomicBool,
+    stop: &'a StopHandle,
+}
+impl Drop for Finish<'_> {
+    fn drop(&mut self) {
+        self.stop.request();
+        self.done.store(true, Ordering::Release);
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn native_failure_is_distinct_from_an_operator_stop_and_host_cleanup() {
+    fn native_failure_is_distinct_from_local_revocation_and_host_cleanup() {
         assert_eq!(fault(Status::Stopped(IndicatorError::LocalRevoke)), None);
         assert_eq!(fault(Status::Stopped(IndicatorError::Stopped)), None);
         assert_eq!(fault(Status::Stopped(IndicatorError::Expired)), Some(IndicatorError::Expired));
