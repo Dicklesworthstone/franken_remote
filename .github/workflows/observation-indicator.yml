@@ -1,0 +1,62 @@
+name: Observation indicator
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/fr-core/**'
+      - 'crates/frd/**'
+      - 'crates/fr-native/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/observation-indicator.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: observation-indicator-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-indicator:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_INCREMENTAL: 0
+      RUST_MIN_STACK: 16777216
+    steps:
+      - name: Check out the exact commit
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Install repository-pinned toolchain
+        run: rustup show active-toolchain
+      - name: Install native X11 test prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxcb1-dev libxtst6 libxi6 xvfb xauth xfonts-base pkg-config
+      - name: Fixed-size read-only IPC regressions
+        run: cargo test -p fr-core indicator_process --locked
+      - name: Original host lifetime and real subprocess regressions
+        run: cargo test -p frd --lib host_indicator --locked
+      - name: Strict CLI selection and daemon build
+        run: |
+          cargo test -p frd --lib observation_indicator --locked
+          cargo check -p frd --bin frd --locked
+      - name: Native event-worker liveness and child channel regressions
+        run: |
+          cargo test -p fr-native --no-default-features --features linux-input --lib sharing_indicator::responsiveness --locked
+          cargo test -p fr-native --no-default-features --features linux-input --bin fr-observation-indicator --locked
+      - name: Require real native child mapping and process retirement
+        run: |
+          FR_OBSERVATION_INDICATOR_REQUIRED=1 xvfb-run -a -s '-screen 0 1280x1024x24 -noreset -nolisten tcp' \
+            cargo test -p fr-native --no-default-features --features linux-input --test observation_indicator_process --locked -- --nocapture
+
+# This focused lane does not replace or weaken rust-verification.yml. It runs
+# the new native feature even when an unrelated all-targets fixture is broken.
