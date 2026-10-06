@@ -243,79 +243,55 @@ fn a_controller_keeps_input_when_the_host_did_not_enable_audio() {
     assert_eq!(report["audio_absence"], "host_did_not_offer", "{diagnostics}");
 }
 
-/// Scope signals to the original decoder child of THIS fr process, never an
-/// unscoped name match. Keep its start ticks so PID reuse cannot target a new
-/// process during cleanup; the supervisor may legitimately kill a stopped child.
+/// Pin the original decoder child of THIS fr process with a pidfd. Checking a
+/// PID's start ticks before `kill` still races exit/reuse between check and signal.
+/// The helper resumes the pinned process on stdin EOF, including test unwinding;
+/// a supervisor-killed decoder cannot redirect that cleanup to a replacement.
 struct FrozenDecoder {
-    pid: u32,
-    parent: u32,
-    start: u64,
-}
-fn decoder_identity(pid: u32, parent: u32) -> Option<u64> {
-    let path = PathBuf::from(format!("/proc/{pid}"));
-    if fs::read_link(path.join("exe")).ok()?.file_name()? != "fr-opus-worker" {
-        return None;
-    }
-    let stat = fs::read_to_string(path.join("stat")).ok()?;
-    let (_, rest) = stat.rsplit_once(')')?;
-    let fields: Vec<_> = rest.split_whitespace().collect();
-    (fields.get(1)?.parse::<u32>().ok()? == parent)
-        .then(|| fields.get(19)?.parse::<u64>().ok())?
+    helper: Child,
+    input: Option<ChildStdin>,
 }
 impl FrozenDecoder {
     fn stop(client: &Child) -> Result<Self, String> {
-        let parent = client.id();
-        let mut found = None;
-        let ready = eventually(Duration::from_secs(5), || {
-            found = fs::read_dir("/proc").ok().and_then(|entries| {
-                entries.filter_map(Result::ok).find_map(|entry| {
-                    let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
-                    let start = decoder_identity(pid, parent)?;
-                    Some(Self { pid, parent, start })
-                })
-            });
-            found.is_some()
-        });
-        if !ready {
-            return Err("no original client Opus decoder child to freeze".into());
+        let mut helper = Command::new("python3")
+            .args([
+                "-u",
+                "-c",
+                include_str!("freeze_decoder.py"),
+                &client.id().to_string(),
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|_| "could not start pidfd decoder fault helper")?;
+        let mut stdout = helper.stdout.take().expect("piped helper stdout");
+        let input = helper.stdin.take();
+        // Install cleanup BEFORE any fallible acknowledgement wait. EOF also
+        // resumes a child stopped while this caller times out or unwinds.
+        let frozen = Self { helper, input };
+        let (send, receive) = mpsc::sync_channel(1);
+        thread::Builder::new()
+            .name("fr-decoder-fault-reply".into())
+            .spawn(move || {
+                // One fixed-size reply: no unbounded line or payload buffer.
+                let mut reply = [0; 8];
+                let result = stdout.read_exact(&mut reply).map(|()| reply);
+                let _ = send.send(result);
+            })
+            .map_err(|_| "could not observe pidfd decoder fault helper")?;
+        match receive.recv_timeout(Duration::from_secs(8)) {
+            Ok(Ok(reply)) if reply == *b"STOPPED\n" => Ok(frozen),
+            _ => Err("decoder stop was not independently observed".into()),
         }
-        let frozen = found.ok_or("no decoder child")?;
-        if !frozen.matches()
-            || !Command::new("kill")
-                .args(["-STOP", &frozen.pid.to_string()])
-                .status()
-                .map_err(|_| "signal unavailable")?
-                .success()
-        {
-            return Err("could not freeze the original decoder child".into());
-        }
-        // kill success is signal submission, not observed process state.
-        // Watch the exact child briefly; never call an already reaped or
-        // replaced process "stalled" merely because a signal was sent.
-        let until = Instant::now() + Duration::from_millis(250);
-        loop {
-            let stopped = fs::read_to_string(format!("/proc/{}/status", frozen.pid))
-                .is_ok_and(|s| s.lines().any(|l| l.starts_with("State:") && l.contains('T')));
-            if frozen.matches() && stopped {
-                return Ok(frozen);
-            }
-            if !frozen.matches() || Instant::now() >= until {
-                return Err("decoder stop was not independently observed".into());
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
-    }
-    fn matches(&self) -> bool {
-        decoder_identity(self.pid, self.parent) == Some(self.start)
     }
 }
 impl Drop for FrozenDecoder {
     fn drop(&mut self) {
-        if self.matches() {
-            let _ = Command::new("kill")
-                .args(["-CONT", &self.pid.to_string()])
-                .status();
-        }
+        drop(self.input.take());
+        // Join the helper, never the foreign decoder. Its finally block uses
+        // the original pidfd even when the decoder exited during the test.
+        let _ = self.helper.wait();
     }
 }
 
