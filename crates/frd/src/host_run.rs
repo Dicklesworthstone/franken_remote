@@ -9,12 +9,15 @@
 //! operator passes an input agent (then a first viewer may take the exclusive
 //! controlled share, unattended by that choice, with the child's mandatory
 //! indicator), local approval is refused until the separate session-agent
-//! process exists, and the encoder is the explicit software HEVC profile. The
+//! process exists. Encoder selection is explicit local policy; legacy entry
+//! points retain software, and hardware never silently falls back. The
 //! controller's text clipboard is a further, separate operator opt-in
 //! (`clipboard`, requires the input agent); it follows the controller's lease.
 //! So is the controller's drop directory (`files`, requires the input agent):
 //! explicit viewer-to-host file sends land there only under the live lease.
 pub mod audio;
+pub mod encoder;
+pub use encoder::Encoder;
 pub mod policy;
 pub use audio::AudioOptions;
 
@@ -54,7 +57,7 @@ use fr_core::{
 };
 use fr_media::{
     delivery::SharedFramePool,
-    worker::{Backend, Configuration as Codec, Role as WorkerRole},
+    worker::{Configuration as Codec, Role as WorkerRole},
 };
 use fr_tailnet::{CertificatePolicy, GrantPolicy, LocalApi, Scope, ingress, trust::TrustError};
 use fr_transport::native_accept;
@@ -342,7 +345,12 @@ fn request(
 }
 
 /// Pick the only display, or the one at the desktop origin when several exist.
-fn choose(catalog: &Catalog, fps: u16, bitrate: u32) -> Result<(Select, Codec), ()> {
+fn choose(
+    catalog: &Catalog,
+    fps: u16,
+    bitrate: u32,
+    encoder: Encoder,
+) -> Result<(Select, Codec), ()> {
     let displays = catalog.displays();
     let display = match displays {
         [only] => only,
@@ -358,7 +366,7 @@ fn choose(catalog: &Catalog, fps: u16, bitrate: u32) -> Result<(Select, Codec), 
             width: display.pixel_width,
             height: display.pixel_height,
             fps,
-            backend: Backend::SoftwareExplicit,
+            backend: encoder.backend(),
             bitrate,
             max_access_unit_bytes: ProtocolLimits::ABSOLUTE.max_encoded_access_unit_bytes(),
             generation: CodecConfigurationGeneration::INITIAL,
@@ -471,7 +479,7 @@ async fn backoff(cx: &Cx, stop: &StopHandle, failures: u32) {
 
 /// Run until stopped. Returns after the last share is torn down.
 pub fn run(options: &Options, report: &Reporter, stop: &Arc<StopHandle>) -> Result<(), Error> {
-    run_inner(options, report, stop, None)
+    run_inner(options, report, stop, None, Encoder::SoftwareExplicit)
 }
 
 /// Serve with live saved policy on the original listener and independent source.
@@ -484,7 +492,22 @@ pub fn run_with_policy(
     stop: &Arc<StopHandle>,
     policy: policy::Configuration,
 ) -> Result<(), Error> {
-    run_inner(options, report, stop, Some(policy))
+    run_with_policy_and_encoder(options, report, stop, policy, Encoder::SoftwareExplicit)
+}
+
+/// Explicit local encoder selection for observation AND controlled shares.
+/// The existing worker must still configure the chosen codec, produce admitted
+/// HEVC and complete decoder startup. No hardware-availability claim is made by
+/// selecting a name, and failure never substitutes software or another device
+/// backend. This selection is retained across policy revisions and share retries.
+pub fn run_with_policy_and_encoder(
+    options: &Options,
+    report: &Reporter,
+    stop: &Arc<StopHandle>,
+    policy: policy::Configuration,
+    encoder: Encoder,
+) -> Result<(), Error> {
+    run_inner(options, report, stop, Some(policy), encoder)
 }
 
 fn run_inner(
@@ -492,6 +515,7 @@ fn run_inner(
     report: &Reporter,
     stop: &Arc<StopHandle>,
     policy: Option<policy::Configuration>,
+    encoder: Encoder,
 ) -> Result<(), Error> {
     check(options)?;
     let control = probe_control(options)?;
@@ -503,7 +527,7 @@ fn run_inner(
         None => None,
     };
     let lifetime = monitor.as_ref().map(Monitor::control);
-    let result = serve_run(options, report, stop, policy, lifetime.as_ref(), control);
+    let result = serve_run(options, report, stop, policy, lifetime.as_ref(), control, encoder);
     // Sampled before our own stop: only a native end is a session end.
     let ended = session_ended(lifetime.as_ref());
     if let Some(monitor) = monitor {
@@ -522,6 +546,7 @@ fn serve_run(
     policy: Option<policy::Configuration>,
     lifetime: Option<&session_monitor::Control>,
     control: Option<Capabilities>,
+    encoder: Encoder,
 ) -> Result<(), Error> {
     // One Seat per run: an uncertain release keeps later control refused.
     let seat = Seat::default();
@@ -587,6 +612,7 @@ fn serve_run(
                         seat: seat.clone(),
                         lifetime,
                         control,
+                        encoder,
                     };
                     match share.serve(&broker).await? {
                         Ended::Served => failures = 0,
@@ -782,6 +808,8 @@ struct Share<'a> {
     lifetime: Option<&'a session_monitor::Control>,
     /// Some only with `--input-agent`: the probed grantable operations.
     control: Option<Capabilities>,
+    /// Immutable for the run; policy refresh or a native failure cannot switch it.
+    encoder: Encoder,
 }
 impl Share<'_> {
     fn cx(&self) -> Result<Cx, Error> {
@@ -852,7 +880,7 @@ impl Share<'_> {
                 capabilities,
                 fps,
                 self.options.bitrate,
-                Backend::SoftwareExplicit,
+                self.encoder.backend(),
             )
             .map_err(|_| Error::Configuration)?;
             let profile = if self.options.clipboard {
@@ -989,6 +1017,7 @@ impl Share<'_> {
         let retirement = Arc::new(Mutex::new(None));
         let factory = self.factory(source, retirement.clone());
         let (fps, bitrate) = (self.options.fps, self.options.bitrate);
+        let encoder = self.encoder;
         let (host_boot, scope) = (self.host_boot, self.options.sharing);
         let control = (
             self.control,
@@ -1033,7 +1062,7 @@ impl Share<'_> {
                     },
                 },
                 factory,
-                move |catalog| choose(catalog, fps, bitrate),
+                move |catalog| choose(catalog, fps, bitrate, encoder),
                 move |_, _| {
                     Ok(local_action(
                         &stop,
@@ -1126,7 +1155,7 @@ mod tests {
         assert_eq!(grantable(everything), Ok(control_capabilities()));
         // Several X screens or unmapped wheel buttons: the core, no wheel.
         assert_eq!(grantable(core()), Ok(core()));
-        // A missing core operation is named instead of failing every grant.
+        // A missing core operation is named; a missing optional one is unoffered.
         for missing in REQUIRED_CONTROL {
             let probed = all
                 .into_iter()
