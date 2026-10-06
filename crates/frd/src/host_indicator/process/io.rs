@@ -7,11 +7,8 @@ use fr_core::{
 };
 use std::{
     io::{self, Read, Write},
-    os::{
-        fd::OwnedFd,
-        unix::{net::{UnixDatagram, UnixStream}, process::CommandExt},
-    },
-    process::{Child, Command, Stdio},
+    os::unix::net::{UnixDatagram, UnixStream},
+    process::Child,
     thread,
     time::Instant,
 };
@@ -21,7 +18,7 @@ pub(super) fn run(launch: &ProcessLaunch, shared: &Shared) -> Result<(), Error> 
         shared.stop(error);
         return Ok(());
     }
-    let (child, command, signals) = match spawn(launch) {
+    let (child, command, signals) = match crate::session_ui_process::spawn(launch).map_err(|_| Error::Unavailable) {
         Ok(created) => created,
         Err(error) => {
             shared.stop(error);
@@ -32,26 +29,6 @@ pub(super) fn run(launch: &ProcessLaunch, shared: &Shared) -> Result<(), Error> 
     let error = process.serve(launch.epoch).err().unwrap_or(Error::Stopped);
     shared.stop(error);
     process.finish()
-}
-/// Same validated local package/display context as the input process family,
-/// but a distinct image and protocol with no input executor operations.
-fn spawn(launch: &ProcessLaunch) -> Result<(Child, UnixStream, UnixDatagram), Error> {
-    let (command, child_command) = UnixStream::pair().map_err(|_| Error::Unavailable)?;
-    let (signals, child_signals) = UnixDatagram::pair().map_err(|_| Error::Unavailable)?;
-    command.set_nonblocking(true).map_err(|_| Error::Unavailable)?;
-    signals.set_nonblocking(true).map_err(|_| Error::Unavailable)?;
-    let mut command_builder = Command::new(&launch.image);
-    command_builder.env_clear().env("DISPLAY", &launch.display)
-        .arg("--parent-pid").arg(std::process::id().to_string())
-        .stdin(Stdio::from(OwnedFd::from(child_command)))
-        .stdout(Stdio::from(OwnedFd::from(child_signals)))
-        .stderr(Stdio::null()).process_group(0);
-    if let Some(path) = &launch.xauthority {
-        command_builder.env("XAUTHORITY", path);
-    }
-    let child = command_builder.spawn().map_err(|_| Error::Unavailable)?;
-    drop(command_builder);
-    Ok((child, command, signals))
 }
 struct Process<'a> {
     child: Option<Child>,

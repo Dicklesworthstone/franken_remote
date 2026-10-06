@@ -946,3 +946,6 @@ pub(crate) fn confirm_visible<T, E: std::fmt::Debug>(result: Result<T, E>) {
 
 /// Service multiple original shared-viewer connections without per-viewer capture.
 pub use running::hub as shared_viewers;
+
+/// Device-attributed desktop decisions for one original startup capability.
+pub mod desktop_approval;

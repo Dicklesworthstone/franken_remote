@@ -85,3 +85,7 @@ pub mod session_monitor;
 // `frd ingress-helper`: root owner of the ingress rule for an unprivileged run.
 #[cfg(target_os = "linux")]
 pub mod ingress_helper;
+
+// Private launcher shared by read-only and one-use consent UI children.
+#[cfg(target_os = "linux")]
+mod session_ui_process;
