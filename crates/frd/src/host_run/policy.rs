@@ -41,15 +41,15 @@ impl Owner {
         self.handle.as_ref()
     }
     /// No credentials, listener or capture before first complete local evidence.
-    /// Watch itself bounds opening and every later read by its original clock.
-    pub(super) async fn ready(&self, cx: &Cx) -> Result<(), Error> {
+    /// Availability names validated local UI configuration, not positive consent.
+    pub(super) async fn ready_with_approval(&self, cx: &Cx, available: bool) -> Result<(), Error> {
         let Some(handle) = &self.handle else {
             return Ok(());
         };
         loop {
             match handle.status() {
                 live::Status::Opening => sleep(cx.now(), Duration::from_millis(10)).await,
-                live::Status::Active(_) => return lease(Some(handle)).map(|_| ()),
+                live::Status::Active(_) => return lease_with_approval(Some(handle), available).map(|_| ()),
                 live::Status::Stopped(error) => return Err(Error::Policy(error)),
             }
         }
@@ -80,17 +80,34 @@ impl Owner {
 
 /// Snapshot one source epoch. A source never adopts a new revision in place,
 /// even if command-line overrides keep its effective settings unchanged.
-pub(super) fn lease(handle: Option<&live::Handle>) -> Result<Option<live::Lease>, Error> {
+pub(super) fn lease_with_approval(handle: Option<&live::Handle>, available: bool) -> Result<Option<live::Lease>, Error> {
     handle
         .map(|handle| {
             let lease = handle.lease().map_err(Error::Policy)?;
             let policy = lease.check().map_err(Error::Policy)?;
-            if policy.approval_mode == Approval::Local {
-                // The installed observation-only host has no prompt process yet.
-                // Never silently turn this new local requirement into unattended.
-                return Err(Error::LocalApprovalUnavailable);
-            }
+            require_backend(policy.approval_mode, available)?;
             Ok(lease)
         })
         .transpose()
+}
+fn require_backend(mode: Approval, available: bool) -> Result<(), Error> {
+    if mode == Approval::Local && !available {
+        // A caller without a configured device-attributed UI still refuses.
+        // Never turn a new local requirement into unattended sharing.
+        Err(Error::LocalApprovalUnavailable)
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn local_policy_cannot_become_unattended_when_the_native_backend_is_missing() {
+        assert_eq!(require_backend(Approval::Local, false), Err(Error::LocalApprovalUnavailable));
+        assert_eq!(require_backend(Approval::Local, true), Ok(()));
+        assert_eq!(require_backend(Approval::None, false), Ok(()));
+        assert_eq!(require_backend(Approval::None, true), Ok(()));
+    }
 }

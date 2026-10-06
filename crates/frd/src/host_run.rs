@@ -8,14 +8,15 @@
 //! Profile limits, stated rather than faked: observation only unless the
 //! operator passes an input agent (then a first viewer may take the exclusive
 //! controlled share, unattended by that choice, with the child's mandatory
-//! indicator), local approval is refused until the separate session-agent
-//! process exists. Encoder selection is explicit local policy; legacy entry
+//! indicator). An explicitly configured desktop UI can require one-use
+//! local consent before any observation; legacy callers refuse that mode. Encoder selection is explicit local policy; legacy entry
 //! points retain software, and hardware never silently falls back. The
 //! controller's text clipboard is a further, separate operator opt-in
 //! (`clipboard`, requires the input agent); it follows the controller's lease.
 //! So is the controller's drop directory (`files`, requires the input agent):
 //! explicit viewer-to-host file sends land there only under the live lease.
 pub mod audio;
+pub mod approval;
 pub mod encoder;
 pub use encoder::Encoder;
 pub mod policy;
@@ -478,7 +479,7 @@ async fn backoff(cx: &Cx, stop: &StopHandle, failures: u32) {
 
 /// Run until stopped. Returns after the last share is torn down.
 pub fn run(options: &Options, report: &Reporter, stop: &Arc<StopHandle>) -> Result<(), Error> {
-    run_inner(options, report, stop, None, Encoder::SoftwareExplicit)
+    run_inner(options, report, stop, None, Encoder::SoftwareExplicit, None)
 }
 
 /// Serve with live saved policy on the original listener and independent source.
@@ -506,7 +507,21 @@ pub fn run_with_policy_and_encoder(
     policy: policy::Configuration,
     encoder: Encoder,
 ) -> Result<(), Error> {
-    run_inner(options, report, stop, Some(policy), encoder)
+    run_inner(options, report, stop, Some(policy), encoder, None)
+}
+
+/// Local desktop consent backed by the installed UI child and an explicitly
+/// monitored OS session. Saved policy still decides whether a prompt is required;
+/// this supplies a capability to display it, not approval or unattended fallback.
+pub fn run_with_desktop_approval(
+    options: &Options,
+    report: &Reporter,
+    stop: &Arc<StopHandle>,
+    policy: policy::Configuration,
+    encoder: Encoder,
+    approval: approval::Configuration,
+) -> Result<(), Error> {
+    run_inner(options, report, stop, Some(policy), encoder, Some(approval))
 }
 
 fn run_inner(
@@ -515,8 +530,10 @@ fn run_inner(
     stop: &Arc<StopHandle>,
     policy: Option<policy::Configuration>,
     encoder: Encoder,
+    approval: Option<approval::Configuration>,
 ) -> Result<(), Error> {
     check(options)?;
+    if let Some(approval) = &approval { approval.validate(options)?; }
     let control = probe_control(options)?;
     // Started before anything is bound; kept for the whole run.
     let monitor = match &options.session_monitor {
@@ -526,7 +543,7 @@ fn run_inner(
         None => None,
     };
     let lifetime = monitor.as_ref().map(Monitor::control);
-    let result = serve_run(options, report, stop, policy, lifetime.as_ref(), control, encoder);
+    let result = serve_run(options, report, stop, policy, lifetime.as_ref(), control, encoder, approval.as_ref());
     // Sampled before our own stop: only a native end is a session end.
     let ended = session_ended(lifetime.as_ref());
     if let Some(monitor) = monitor {
@@ -538,6 +555,7 @@ fn run_inner(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn serve_run(
     options: &Options,
     report: &Reporter,
@@ -546,6 +564,7 @@ fn serve_run(
     lifetime: Option<&session_monitor::Control>,
     control: Option<Capabilities>,
     encoder: Encoder,
+    approval: Option<&approval::Configuration>,
 ) -> Result<(), Error> {
     // One Seat per run: an uncertain release keeps later control refused.
     let seat = Seat::default();
@@ -580,7 +599,7 @@ fn serve_run(
             };
             let roots =
                 fr_tailnet::trust::root_store(&options.trust_roots).map_err(Error::Trust)?;
-            let Some(ready) = unless_stopped(policy.ready(&broker), stop, &mut signals).await
+            let Some(ready) = unless_stopped(policy.ready_with_approval(&broker, approval.is_some()), stop, &mut signals).await
             else {
                 return Ok(());
             };
@@ -612,6 +631,7 @@ fn serve_run(
                         lifetime,
                         control,
                         encoder,
+                        approval,
                     };
                     match share.serve(&broker).await? {
                         Ended::Served => failures = 0,
@@ -808,6 +828,7 @@ struct Share<'a> {
     control: Option<Capabilities>,
     /// Immutable for the run; policy refresh or a native failure cannot switch it.
     encoder: Encoder,
+    approval: Option<&'a approval::Configuration>,
 }
 impl Share<'_> {
     fn cx(&self) -> Result<Cx, Error> {
@@ -996,7 +1017,21 @@ impl Share<'_> {
     /// Outer error: fatal to the host. `Failed`: this share's source failed
     /// (retried with backoff by the caller). `Peer`: its viewer ended it.
     async fn serve(self, broker: &Cx) -> Result<Ended, Error> {
-        let epoch = policy::lease(self.policy)?;
+        let epoch = policy::lease_with_approval(self.policy, self.approval.is_some())?;
+        let required = approval::required(epoch.as_ref())?;
+        let mut consent = approval::Owner::new(if required { self.approval } else { None }, self.options);
+        let result = self.serve_with_consent(broker, epoch, &mut consent).await;
+        let cleanup = consent.finish(&self.cx()?).await;
+        if cleanup.is_err() { (self.report)(Event::CleanupFailed { stage: "approval" }); }
+        cleanup.and(result)
+    }
+
+    async fn serve_with_consent(
+        &self,
+        broker: &Cx,
+        epoch: Option<crate::host_policy::live::Lease>,
+        consent: &mut approval::Owner,
+    ) -> Result<Ended, Error> {
         let mut linux = self.bind(broker).await?;
         (self.report)(Event::Listening {
             address: linux.address(),
@@ -1027,6 +1062,8 @@ impl Share<'_> {
         let stop = self.stop.clone();
         let source_epoch = epoch.clone();
         let lifetime = self.lifetime.cloned();
+        let notify = consent.notify();
+        let require_approval = consent.enabled();
         let end = linux
             .serve_desktop(
                 &mut driver,
@@ -1035,10 +1072,13 @@ impl Share<'_> {
                 serial::Policy::default(),
                 Connections {
                     request: move |attempt| {
-                        request(attempt, host_boot, os_session, scope, control, audio)
+                        let mut request = request(attempt, host_boot, os_session, scope, control, audio)?;
+                        if require_approval {
+                            approval::require(&mut request);
+                        }
+                        Ok(request)
                     },
-                    // require_approval is false: no notification is ever delivered.
-                    approval: |_, _| Err(()),
+                    approval: move |original, role| notify.submit(original, role),
                     completed: move |stats: serial::Statistics, outcome: PeerResult| {
                         // An accept window that closed before any Initial arrived
                         // had no peer; it is idle listening, not a refusal.
@@ -1061,15 +1101,20 @@ impl Share<'_> {
                 },
                 factory,
                 move |catalog| choose(catalog, fps, bitrate, encoder),
-                move |_, _| {
-                    Ok(local_action(
+                |_, _| {
+                    // Local stop, lock/logout/switch and saved-policy revision
+                    // beat any delivered positive reply. Host::open independently
+                    // rechecks current peer admission before authorizing pixels.
+                    Ok(consent.turn(local_action(
                         &stop,
                         lifetime.as_ref(),
                         source_epoch.as_ref(),
-                    ))
+                    )))
                 },
             )
             .await;
+        // Fence outstanding consent before media/ingress cleanup can await.
+        consent.close();
         (self.report)(Event::ShareEnded {
             outcome: format!("{end:?}"),
         });
