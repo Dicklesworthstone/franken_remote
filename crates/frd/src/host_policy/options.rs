@@ -1,6 +1,6 @@
 //! Strict local command parsing and startup resolution. No filesystem mutation.
 use super::{Approval, Change, Error, Policy, Sharing, Store, default_path};
-use crate::host_run::Encoder;
+use crate::host_run::{Encoder, video};
 use std::path::PathBuf;
 
 /// Effective startup options; overrides never modify the saved policy.
@@ -40,6 +40,11 @@ pub struct RunOptions {
     /// Exact local backend selection, never a codec name received from a peer.
     /// Hardware remains experimental until qualified on the actual host.
     pub encoder: Option<Encoder>,
+    /// Local maximum capture/codec frame rate; absent retains 30 fps.
+    pub fps: Option<u16>,
+    /// Local encoder target bits/s; absent retains 8,000,000. Not a hard
+    /// instantaneous transport ceiling or an automatic bandwidth estimate.
+    pub bitrate: Option<u32>,
     /// Absolute `fr-input-agent` path. Absent: observation only (unchanged).
     /// Present: a first viewer may take the exclusive controlled share.
     pub input_agent: Option<PathBuf>,
@@ -142,6 +147,14 @@ impl RunOptions {
                     &mut options.encoder,
                     Encoder::parse(value).ok_or(Error::InvalidArgument)?,
                 )?,
+                "--fps" => set(
+                    &mut options.fps,
+                    u16::try_from(bytes(value)?).map_err(|_| Error::InvalidArgument)?,
+                )?,
+                "--bitrate" => set(
+                    &mut options.bitrate,
+                    u32::try_from(bytes(value)?).map_err(|_| Error::InvalidArgument)?,
+                )?,
                 "--input-agent" => set(&mut options.input_agent, PathBuf::from(value))?,
                 "--audio-server" => set(&mut options.audio_server, PathBuf::from(value))?,
                 "--audio-sink" => set(&mut options.audio_sink, value.to_owned())?,
@@ -162,6 +175,7 @@ impl RunOptions {
             }
         }
         let _ = options.selected_encoder()?;
+        let _ = options.video_profile()?;
         // Control retains its existing mandatory per-lease indicator. The two
         // native window lifetimes are not silently combined in this slice.
         if options.observation_indicator.is_some() && options.input_agent.is_some() {
@@ -195,8 +209,18 @@ impl RunOptions {
             (None, false) => Ok(None),
         }
     }
+    /// Resolve the same validated settings used by the capture scheduler and
+    /// native encoder. Rates do not imply an encoder or enable any authority.
+    pub fn video_profile(&self) -> Result<video::Profile, Error> {
+        video::Profile::new(
+            self.fps.unwrap_or(video::DEFAULT_FPS),
+            self.bitrate.unwrap_or(video::DEFAULT_BITRATE),
+        )
+        .map_err(|_| Error::InvalidArgument)
+    }
     pub fn resolve(&self) -> Result<Effective, Error> {
         let _ = self.selected_encoder()?;
+        let _ = self.video_profile()?;
         if self.port == Some(0) {
             return Err(Error::InvalidArgument);
         }
@@ -259,7 +283,7 @@ fn set<T>(slot: &mut Option<T>, value: T) -> Result<(), Error> {
     *slot = Some(value);
     Ok(())
 }
-/// A positive decimal byte count; no units, signs or separators.
+/// A positive decimal count; no units, signs or separators.
 fn bytes(value: &str) -> Result<u64, Error> {
     if !value.bytes().all(|b| b.is_ascii_digit()) {
         return Err(Error::InvalidArgument);
@@ -278,6 +302,8 @@ fn value<'a>(iter: &mut std::slice::Iter<'a, String>) -> Result<&'a str, Error> 
 
 #[cfg(test)]
 mod encoder_tests;
+#[cfg(test)]
+mod video_tests;
 
 #[cfg(test)]
 mod tests {

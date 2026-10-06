@@ -82,10 +82,13 @@ client decoder implementation or the transport. The native bridge's existing
 default-device selection remains; this change adds no GPU index or render-node
 selector. It adds no codec, runtime, native library or Rust dependency.
 
-Frame pacing and bitrate defaults are also unchanged: the CLI configures a
-30 fps codec and the host's existing capture scheduler is capped at 20 captures
-per second. There is no new 60 fps, latency, quality or CPU-utilization claim.
-`--approval local` remains unavailable; no approval or admission check is relaxed.
+The defaults remain 30 fps and an 8,000,000 bits/s encoder target. Local
+`--fps` and `--bitrate` controls now configure both the codec and the host's
+admission cadence, without the former fixed 20-capture-per-second floor.
+See [video rate controls](video-rate-controls.md) for bounds, service use and
+no-catch-up scheduling. These settings are not measured throughput, quality,
+latency or CPU-utilization claims. `--approval local` remains unavailable;
+no approval or admission check is relaxed.
 
 ## Validation and remaining qualification
 

@@ -50,6 +50,11 @@ jobs:
           cargo test -p frd --lib encoder --locked
           cargo test -p frd --lib service_install --locked
           cargo test -p frd --test encoder_cli --locked
+      - name: Configured video rates and bounded capture cadence
+        run: |
+          cargo test -p frd --lib video --locked
+          cargo test -p frd --lib shared_publisher::service --locked
+          cargo test -p frd --lib host_run::tests --locked
       - name: Strict CLI selection and daemon build
         run: |
           cargo test -p frd --lib observation_indicator --locked

@@ -105,6 +105,12 @@ OPTIONS:
                     never silently fall back. Actual native startup and HEVC
                     validation must succeed; selection is not qualification.
                     See docs/hardware-encoder-selection.md
+    --fps FPS       Maximum capture/codec frame rate, integer 1..240 (default 30).
+                    Native backpressure skips opportunities; this is not measured
+                    throughput. No queued catch-up frames
+    --bitrate BPS   Encoder target bits per second, integer 10000..200000000
+                    (default 8000000). Not a hard network ceiling or automatic
+                    adaptation. See docs/video-rate-controls.md
     --software-explicit  Legacy alias for --encoder software (CPU developer
                     profile). Do not combine the two selectors. Without either
                     selector, frd run refuses rather than choosing implicitly
@@ -330,6 +336,7 @@ struct Profile {
     session_lifetime: bool,
     observation_indicator: bool,
     encoder: frd::host_run::Encoder,
+    video: frd::host_run::video::Profile,
 }
 
 #[cfg(target_os = "linux")]
@@ -345,6 +352,8 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                 "control": profile.control,
                 "observation_indicator": profile.observation_indicator,
                 "encoder_selection": profile.encoder.as_str(),
+                "video_fps_limit": profile.video.fps(),
+                "encoder_bitrate_target_bps": profile.video.bitrate(),
                 "session_lifetime": if profile.session_lifetime { "monitored" } else { "unmonitored" },
             }),
             Event::PeerFinished {
@@ -378,6 +387,10 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                 println!(
                     "frd: encoder selection: {}; availability is checked at capture startup; no automatic fallback",
                     profile.encoder.as_str()
+                );
+                println!(
+                    "frd: video configuration: up to {} fps, encoder target {} bits/s; actual delivery depends on source and transport",
+                    profile.video.fps(), profile.video.bitrate()
                 );
                 if profile.encoder.is_hardware() {
                     println!(
@@ -470,6 +483,10 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
 
     let options = match RunOptions::parse(args) {
         Ok(options) => options,
+        Err(error) => return local_policy::refusal(error, json),
+    };
+    let video = match options.video_profile() {
+        Ok(video) => video,
         Err(error) => return local_policy::refusal(error, json),
     };
     let effective = match options.resolve() {
@@ -584,8 +601,8 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
             Sharing::OwnUser => fr_tailnet::Scope::OwnUser,
             Sharing::Tailnet => fr_tailnet::Scope::Tailnet,
         },
-        fps: 30,
-        bitrate: 8_000_000,
+        fps: video.fps(),
+        bitrate: video.bitrate(),
         ingress_tools: None,
         once: options.once,
         handle_signals: true,
@@ -600,6 +617,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         session_lifetime: run_options.session_monitor.is_some(),
         observation_indicator: options.observation_indicator.is_some(),
         encoder,
+        video,
     };
     let report: Reporter = Arc::new(move |event: Event| print_event(json, profile, &event));
     let stop = Arc::new(host_run::StopHandle::default());

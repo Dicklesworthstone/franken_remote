@@ -160,3 +160,45 @@ fn encoder_selection_does_not_replace_the_installed_tailnet_requirement() {
         assert_eq!(missing.run(&["--encoder", encoder])["code"], "tailscale_unavailable");
     }
 }
+
+#[test]
+fn real_cli_accepts_video_rate_targets_for_all_encoders_without_starting_native_work() {
+    let fixture = Fixture::new(Approval::None, true);
+    for encoder in ["software", "nvenc", "vaapi"] {
+        for (fps, bitrate) in [("1", "10000"), ("60", "12000000"), ("240", "200000000")] {
+            assert_eq!(
+                fixture.run(&["--encoder", encoder, "--fps", fps, "--bitrate", bitrate])["code"],
+                "worker_unavailable"
+            );
+        }
+    }
+    assert_eq!(fixture.run(&["--fps", "60", "--bitrate", "12000000"])["code"], "hardware_hevc_unavailable");
+}
+
+#[test]
+fn real_cli_refuses_invalid_or_ambiguous_video_rates_before_native_or_network_work() {
+    let fixture = Fixture::new(Approval::None, true);
+    for args in [
+        &["--fps", "0"][..],
+        &["--fps", "241"][..],
+        &["--fps", "59.94"][..],
+        &["--fps", "60", "--fps", "30"][..],
+        &["--bitrate", "9999"][..],
+        &["--bitrate", "200000001"][..],
+        &["--bitrate", "8M"][..],
+        &["--bitrate", "8000000", "--bitrate", "8000000"][..],
+    ] {
+        let value = fixture.run(args);
+        assert_eq!(value["code"], "invalid_host_policy", "{args:?}");
+        assert_eq!(value["reason"], "InvalidArgument", "{args:?}");
+    }
+}
+
+#[test]
+fn video_rates_cannot_bypass_local_approval_or_the_installed_tailnet_requirement() {
+    let local = Fixture::new(Approval::Local, true);
+    let missing = Fixture::new(Approval::None, false);
+    let args = ["--encoder", "nvenc", "--fps", "60", "--bitrate", "12000000"];
+    assert_eq!(local.run(&args)["code"], "local_approval_unavailable");
+    assert_eq!(missing.run(&args)["code"], "tailscale_unavailable");
+}
