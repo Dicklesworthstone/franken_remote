@@ -50,8 +50,10 @@ OPTIONS:
     --port PORT     Ingress port for the native QUIC listener (default: 8443; no
                     HTTPS/browser listener exists yet)
     --socket PATH   Path to tailscaled.sock
-    --approval MODE Process override: 'none' (unattended) or 'local' (a prompt;
-                    frd run refuses it until the approval prompt is hosted)
+    --approval MODE Process override: 'none' (unattended) or 'local' (one-use
+                    device-attributed desktop consent before capture). Local
+                    requires --logind-session and fr-observation-indicator next
+                    to frd; no terminal or unattended fallback. See docs/desktop-approval.md
     --sharing SCOPE Process override: 'own-user' (default) or 'tailnet'
     --headless      Share a private headless Xvfb display (cookie-authenticated)
     --display :N    X11 display to share (default: $DISPLAY)
@@ -63,8 +65,8 @@ OPTIONS:
                     keeps its own mandatory indicator). Build fr-native with
                     --features linux-input; see docs/observation-indicator.md
     --input-agent PATH  Absolute fr-input-agent path: lets the first viewer take
-                    exclusive, unattended control (requires approval none; the
-                    agent shows a mandatory local indicator). Probed once at
+                    exclusive control after the current admission/approval policy;
+                    the agent shows a mandatory local indicator. Probed once at
                     startup: no keys/pointer/buttons on this display refuses
                     (control_capability_missing); no line scrolling (several
                     X screens, wheel buttons unmapped) offers control without
@@ -191,6 +193,9 @@ fn execute_status(args: &[String], json: bool) -> ExitCode {
 #[cfg(target_os = "linux")]
 #[path = "frd/policy.rs"]
 mod local_policy;
+#[cfg(target_os = "linux")]
+#[path = "frd/approval.rs"]
+mod desktop_approval;
 
 fn execute_policy(args: &[String], approval: bool, json: bool) -> ExitCode {
     #[cfg(target_os = "linux")]
@@ -379,7 +384,7 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
             ),
             Event::Listening { address } => {
                 let mode = if profile.control {
-                    "a first viewer may take unattended remote control (--input-agent)"
+                    "a first viewer may request remote control under the current approval policy (--input-agent)"
                 } else {
                     "view-only"
                 };
@@ -477,7 +482,7 @@ fn select_desktop(
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_lines)]
 fn execute_run(args: &[String], json: bool) -> ExitCode {
-    use frd::host_policy::{Approval, Sharing, options::RunOptions};
+    use frd::host_policy::{Sharing, options::RunOptions};
     use frd::host_run::{self, Event, Options, Reporter};
     use std::sync::Arc;
 
@@ -506,15 +511,10 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
             1,
         );
     }
-    if effective.approval == Approval::Local {
-        return run_refusal(
-            json,
-            "local_approval_unavailable",
-            "local approval needs the interactive session-agent process, which frd run does not \
-             host yet; set `frd approval set none` to share unattended (scope stays as configured)",
-            2,
-        );
-    }
+    let local_ui = match desktop_approval::configuration(&options, effective.approval) {
+        Ok(configuration) => configuration,
+        Err(detail) => return run_refusal(json, "local_approval_unavailable", detail, 2),
+    };
     let encoder = match options.selected_encoder() {
         Ok(Some(encoder)) => encoder,
         Ok(None) => {
@@ -625,15 +625,22 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
     // are overrides: copying saved effective values here would freeze them and
     // defeat later approval/scope changes. Every revision still fences old grants.
     let policy = run_policy(&options, effective);
-    let result = match options.observation_indicator.as_deref() {
-        Some(image) => frd::host_indicator::run_with_policy_and_encoder(
-            &run_options, &report, &stop, policy, image, encoder,
+    let result = if let Some(approval) = local_ui {
+        host_run::run_with_desktop_approval(
+            &run_options, &report, &stop, policy, encoder, approval,
         )
-        .map_err(|error| (error.code(), error.to_string())),
-        None => host_run::run_with_policy_and_encoder(
-            &run_options, &report, &stop, policy, encoder,
-        )
-        .map_err(|error| (error.code(), error.to_string())),
+        .map_err(|error| (error.code(), error.to_string()))
+    } else {
+        match options.observation_indicator.as_deref() {
+            Some(image) => frd::host_indicator::run_with_policy_and_encoder(
+                &run_options, &report, &stop, policy, image, encoder,
+            )
+            .map_err(|error| (error.code(), error.to_string())),
+            None => host_run::run_with_policy_and_encoder(
+                &run_options, &report, &stop, policy, encoder,
+            )
+            .map_err(|error| (error.code(), error.to_string())),
+        }
     };
     drop(headless);
     match result {

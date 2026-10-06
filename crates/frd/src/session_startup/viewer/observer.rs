@@ -55,6 +55,8 @@ impl std::error::Error for Error {}
 
 /// One total budget includes unpolled time, approval, local choice, attachments,
 /// configuration and first decode. Existing shorter stage deadlines still apply.
+/// The default includes human consent before capture; approval notices and
+/// replies never refresh it. Active observation/input lifetimes are separate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Policy {
     pub timeout: Duration,
@@ -63,7 +65,7 @@ pub struct Policy {
 impl Default for Policy {
     fn default() -> Self {
         Self {
-            timeout: Duration::from_secs(10),
+            timeout: Duration::from_secs(30),
             network_turn: Duration::from_millis(5),
         }
     }
@@ -1027,3 +1029,5 @@ async fn send_decoder(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod consent_budget;

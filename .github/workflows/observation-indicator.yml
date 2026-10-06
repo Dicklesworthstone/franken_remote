@@ -45,6 +45,13 @@ jobs:
         run: cargo test -p fr-core indicator_process --locked
       - name: Original host lifetime and real subprocess regressions
         run: cargo test -p frd --lib host_indicator --locked
+      - name: Original desktop consent and unchanged active-session deadlines
+        run: |
+          cargo test -p frd --lib desktop_approval --locked
+          cargo test -p frd --lib host_run::approval --locked
+          cargo test -p frd --lib host_run::policy --locked
+          cargo test -p frd --lib consent_budget --locked
+          cargo test -p frd --bin frd desktop_approval --locked
       - name: Explicit encoder selection without fallback
         run: |
           cargo test -p frd --lib encoder --locked
@@ -62,6 +69,7 @@ jobs:
       - name: Native event-worker liveness and child channel regressions
         run: |
           cargo test -p fr-native --no-default-features --features linux-input --lib sharing_indicator::responsiveness --locked
+          cargo test -p fr-native --no-default-features --features linux-input --lib approval_surface --locked
           cargo test -p fr-native --no-default-features --features linux-input --bin fr-observation-indicator --locked
       - name: Require real native child mapping and process retirement
         run: |
