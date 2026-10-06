@@ -75,6 +75,10 @@ pub mod host_policy;
 #[cfg(target_os = "linux")]
 pub mod host_run;
 
+// Opt-in read-only desktop indicator around the original host run lifetime.
+#[cfg(target_os = "linux")]
+pub mod host_indicator;
+
 #[cfg(target_os = "linux")]
 pub mod session_monitor;
 
