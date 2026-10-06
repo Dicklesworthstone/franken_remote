@@ -25,10 +25,21 @@ impl Cadence {
         let next = now.checked_add(interval).ok_or(Error::InvalidBudget)?;
         Ok(Self { interval, next })
     }
-    fn after_turn(&mut self, now: u64) -> Result<(), Error> {
-        // Backpressure, slow capture and a delayed callback discard missed raw
-        // opportunities. Never accumulate a catch-up burst of codec work.
-        self.next = now.checked_add(self.interval).ok_or(Error::Closed)?;
+    fn after_turn(&mut self, started: u64, completed: u64) -> Result<(), Error> {
+        if started < self.next || completed < started {
+            return Err(Error::Closed);
+        }
+        // Work consumes this turn's interval rather than being added to it.
+        // Anchor to ACTUAL admission, not an older scheduled wake: lateness
+        // must never permit two captures less than one interval apart.
+        // Skip every elapsed slot in constant time, including exact expiry;
+        // there is always a future wake and no retained catch-up obligation.
+        let slots = (completed - started)
+            .checked_div(self.interval)
+            .and_then(|slots| slots.checked_add(1))
+            .ok_or(Error::Closed)?;
+        let advance = self.interval.checked_mul(slots).ok_or(Error::Closed)?;
+        self.next = started.checked_add(advance).ok_or(Error::Closed)?;
         Ok(())
     }
     fn wake(&self, now: u64, media_deadline: Option<u64>) -> Result<u64, Error> {
@@ -109,7 +120,7 @@ impl Publisher {
                 // Same cadence, separate from pixels: a moving pointer over a
                 // static desktop needs no new picture and is not freshness.
                 publisher.sample_cursor().await?;
-                cadence.after_turn(owner.check().map_err(Error::Media)?.as_micros())?;
+                cadence.after_turn(now, owner.check().map_err(Error::Media)?.as_micros())?;
             }
         }
     }
@@ -145,10 +156,46 @@ mod tests {
     #[test]
     fn stalled_and_backpressured_turns_do_not_accumulate_catchup_work() {
         let mut cadence = Cadence::new(Duration::from_millis(50), 30, 0).unwrap();
-        cadence.after_turn(900_000).unwrap();
+        cadence.after_turn(50_000, 900_000).unwrap();
         assert_eq!(cadence.next, 950_000);
-        cadence.after_turn(1_950_000).unwrap();
+        cadence.after_turn(950_000, 1_950_000).unwrap();
         assert_eq!(cadence.next, 2_000_000);
+    }
+    #[test]
+    fn healthy_native_work_consumes_the_interval_instead_of_halving_the_rate() {
+        for fps in [1, 15, 30, 60, 120, 240] {
+            let interval = 1_000_000_u64.div_ceil(u64::from(fps));
+            let mut cadence = Cadence::new(Duration::from_micros(interval), fps, 0).unwrap();
+            for turn in 1..=500 {
+                let started = cadence.next;
+                assert_eq!(started, turn * interval);
+                cadence.after_turn(started, started + interval - 1).unwrap();
+                assert_eq!(cadence.next, (turn + 1) * interval);
+            }
+        }
+    }
+    #[test]
+    fn late_wakes_reanchor_to_actual_admission_not_the_missed_schedule() {
+        let mut cadence = Cadence::new(Duration::from_millis(50), 30, 0).unwrap();
+        cadence.after_turn(99_999, 100_001).unwrap();
+        assert_eq!(cadence.next, 149_999);
+        assert_eq!(cadence.wake(100_001, None).unwrap(), 110_001);
+    }
+    #[test]
+    fn exact_expiry_and_long_native_stalls_skip_all_elapsed_slots() {
+        let mut cadence = Cadence::new(Duration::from_millis(50), 30, 0).unwrap();
+        cadence.after_turn(50_000, 100_000).unwrap();
+        assert_eq!(cadence.next, 150_000);
+        cadence.after_turn(150_000, 1_000_000_000_001).unwrap();
+        assert_eq!(cadence.next, 1_000_000_050_000);
+    }
+    #[test]
+    fn native_or_admission_clock_regression_never_rearms_capture() {
+        let mut cadence = Cadence::new(Duration::from_millis(50), 30, 0).unwrap();
+        for (started, completed) in [(49_999, 70_000), (50_000, 49_999)] {
+            assert_eq!(cadence.after_turn(started, completed), Err(Error::Closed));
+            assert_eq!(cadence.next, 50_000);
+        }
     }
     #[test]
     fn idle_wait_services_earlier_media_deadlines_and_bounded_consent_checks() {
@@ -161,7 +208,8 @@ mod tests {
     fn overflow_refuses_instead_of_wrapping_into_an_immediate_timer() {
         assert!(Cadence::new(Duration::from_millis(50), 30, u64::MAX).is_err());
         let mut cadence = Cadence::new(Duration::from_millis(50), 30, 0).unwrap();
-        assert_eq!(cadence.after_turn(u64::MAX), Err(Error::Closed));
+        assert_eq!(cadence.after_turn(50_000, u64::MAX), Err(Error::Closed));
+        assert_eq!(cadence.next, 50_000);
         assert_eq!(cadence.wake(u64::MAX, None), Err(Error::Closed));
     }
 }
