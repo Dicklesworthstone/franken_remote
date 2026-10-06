@@ -35,6 +35,7 @@ use std::{
 };
 
 mod exclusive;
+mod pull;
 
 /// Pull cadence: half of the 20 ms packet duration.
 const PULL_US: u64 = 10_000;
@@ -441,6 +442,7 @@ pub struct AudioSource {
     worker: Option<Worker>,
     stream: Option<SourceStream>,
     next_generation: u64,
+    admission: Option<pull::Admission>,
     unreaped: bool,
     failed: bool,
 }
@@ -449,6 +451,7 @@ impl std::fmt::Debug for AudioSource {
         f.debug_struct("AudioSource")
             .field("live", &self.worker.is_some())
             .field("failed", &self.failed)
+            .field("admission", &self.admission)
             .finish_non_exhaustive()
     }
 }
@@ -460,6 +463,7 @@ impl AudioSource {
             worker: None,
             stream: None,
             next_generation: 1,
+            admission: None,
             unreaped: false,
             failed: false,
         }
@@ -511,6 +515,7 @@ impl AudioSource {
         };
         self.worker = Some(worker);
         self.stream = Some(stream);
+        self.admission = Some(pull::Admission::new(stream));
         self.feed
             .with_ring(|ring| ring.start(stream))?
             .map_err(|_| Error::Closed)
@@ -519,6 +524,14 @@ impl AudioSource {
         let (Some(worker), Some(stream)) = (self.worker.as_mut(), self.stream) else {
             return Ok(());
         };
+        // Fix the admission anchor BEFORE worker IPC/encoding. A slow reply
+        // consumes this budget; successful receipt cannot refresh old sound.
+        let requested = self
+            .feed
+            .owner()?
+            .check()
+            .map_err(Error::Media)?
+            .as_micros();
         let capture = self.profile.capture(stream.generation);
         let deadline = Deadline::after(cx, PULL_TIMEOUT).map_err(media)?;
         let batch = worker
@@ -537,15 +550,18 @@ impl AudioSource {
             return self.stop(cx, AudioStopReason::DeviceChanged).await;
         };
         let owner = self.feed.owner()?;
-        let pulled = owner.check().map_err(Error::Media)?.as_micros();
-        let count = u64::try_from(batch.packets.len()).map_err(|_| Error::InvalidBudget)?;
-        let frame_us = u64::from(FRAME_MS) * 1000;
-        self.feed.with_ring(|ring| {
-            for (index, unit) in (0_u64..).zip(batch.packets) {
-                let captured = pulled.saturating_sub((count - 1 - index) * frame_us);
-                let _ = ring.push(unit, captured);
-            }
-        })
+        let completed = owner.check().map_err(Error::Media)?.as_micros();
+        let admission = self.admission.as_mut().ok_or(Error::Closed)?;
+        let result = self
+            .feed
+            .with_ring(|ring| admission.admit(batch, ring, requested, completed))?;
+        if result.is_err() {
+            // Invalid chronology is an audio-source failure, never a clock
+            // repair or a fresh generation invented from the offending bytes.
+            self.failed = true;
+            return self.stop(cx, AudioStopReason::DeviceChanged).await;
+        }
+        Ok(())
     }
     async fn stop(&mut self, cx: &Cx, reason: AudioStopReason) -> Result<(), Error> {
         // Fence lanes BEFORE native cleanup: queued packets are discarded now.
@@ -557,6 +573,7 @@ impl AudioSource {
             }
         })?;
         self.stream = None;
+        self.admission = None;
         if let Some(mut worker) = self.worker.take() {
             if let Ok(deadline) = Deadline::after(cx, STOP_TIMEOUT) {
                 if worker
