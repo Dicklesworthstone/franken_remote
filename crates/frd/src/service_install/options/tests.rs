@@ -220,13 +220,13 @@ fn selected_policy_path_and_explicit_overrides_reach_startup_resolution() {
 #[test]
 #[cfg(target_os = "linux")]
 fn systemd_install_refuses_units_that_frd_run_would_refuse() {
-    // Without the explicit software profile, frd run exits at every start and
-    // Restart=always would loop forever.
+    // Without an explicit encoder, frd run exits at every start and the
+    // service would never run. The legacy software flag remains supported.
     assert_eq!(
         parse(&["--dry-run"]).err(),
         Some(ServiceError::HostProfileUnavailable {
             code: "hardware_hevc_unavailable",
-            detail: "frd run has no hardware HEVC encoder selection yet; pass --software-explicit to install the CPU software profile",
+            detail: "frd run needs an explicit encoder: pass --software-explicit or pass -- --encoder nvenc|vaapi|software; no automatic selection or fallback",
         })
     );
     let local = parse(&["--software-explicit", "--approval", "local", "--dry-run"]).err();

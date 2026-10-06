@@ -11,7 +11,7 @@ pub enum Encoder {
     Vaapi,
 }
 impl Encoder {
-    /// Exact local CLI names, not peer input or an arbitrary FFmpeg codec name.
+    /// Exact local CLI names, not peer input or an arbitrary `FFmpeg` codec name.
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "software" => Some(Self::SoftwareExplicit),

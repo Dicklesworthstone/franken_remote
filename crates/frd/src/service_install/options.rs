@@ -61,15 +61,18 @@ impl InstallOptions {
         {
             return Err(ServiceError::InvalidOptions);
         }
+        let encoder_selected = self.validate_run_args()?;
         if matches!(
             self.kind,
             ServiceKind::SystemdUser | ServiceKind::SystemdSystem
         ) {
-            // Refuse a unit that `frd run` would refuse at every (re)start.
-            if !self.software_explicit {
+            // Reject missing/contradictory selection, not a hardware choice
+            // merely because the CPU legacy flag is absent. Native hardware
+            // availability still has to be established by the actual worker.
+            if !self.software_explicit && !encoder_selected {
                 return Err(ServiceError::HostProfileUnavailable {
                     code: "hardware_hevc_unavailable",
-                    detail: "frd run has no hardware HEVC encoder selection yet; pass --software-explicit to install the CPU software profile",
+                    detail: "frd run needs an explicit encoder: pass --software-explicit or pass -- --encoder nvenc|vaapi|software; no automatic selection or fallback",
                 });
             }
             if self.approval_mode == "local" {
@@ -79,7 +82,6 @@ impl InstallOptions {
                 });
             }
         }
-        self.validate_run_args()?;
         for path in std::iter::once(&self.exec_path)
             .chain(self.socket_path.iter())
             .chain(self.config_path.iter())
@@ -110,13 +112,14 @@ impl InstallOptions {
     }
 }
 impl InstallOptions {
-    /// `frd run` flags carried into the unit are parsed by `frd run`'s own parser
-    /// and refused here when every (re)start would refuse them, so a unit never
-    /// restart-loops on a configuration it cannot run.
-    fn validate_run_args(&self) -> Result<(), ServiceError> {
+    /// Parse carried flags with the real host parser and return whether they
+    /// explicitly select an encoder. The renderer retains those original args;
+    /// this never inserts a software flag, changes authority policy or probes GPU
+    /// availability at installation time.
+    fn validate_run_args(&self) -> Result<bool, ServiceError> {
         use crate::host_policy::options::RunOptions;
         if self.run_args.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         if !matches!(
             self.kind,
@@ -127,7 +130,13 @@ impl InstallOptions {
             });
         }
         let run = RunOptions::parse(&self.run_args).map_err(|_| ServiceError::InvalidOptions)?;
+        let encoder_selected = run
+            .selected_encoder()
+            .map_err(|_| ServiceError::InvalidOptions)?
+            .is_some();
         // Set by the installer's own flags; a service never runs `--once`.
+        // `--encoder` is the explicit host-side alternative to the legacy
+        // installer software flag, never permission to emit both selectors.
         if run.port.is_some()
             || run.socket.is_some()
             || run.config.is_some()
@@ -135,6 +144,7 @@ impl InstallOptions {
             || run.sharing.is_some()
             || run.software_explicit
             || run.once
+            || (self.software_explicit && encoder_selected)
         {
             return Err(ServiceError::InvalidOptions);
         }
@@ -161,6 +171,7 @@ impl InstallOptions {
             &run.input_agent,
             &run.files,
             &run.session_monitor,
+            &run.observation_indicator,
             &run.audio_server,
             &run.trust_roots,
         ]
@@ -169,7 +180,7 @@ impl InstallOptions {
         {
             validate_path(path)?;
         }
-        Ok(())
+        Ok(encoder_selected)
     }
 }
 fn value<'a>(iter: &mut std::slice::Iter<'a, String>) -> Result<&'a str, ServiceError> {
@@ -201,3 +212,5 @@ const fn system_kind() -> ServiceKind {
 
 #[cfg(test)]
 mod tests;
+#[cfg(all(test, target_os = "linux"))]
+mod encoder_tests;

@@ -46,7 +46,10 @@ jobs:
       - name: Original host lifetime and real subprocess regressions
         run: cargo test -p frd --lib host_indicator --locked
       - name: Explicit encoder selection without fallback
-        run: cargo test -p frd --lib encoder --locked
+        run: |
+          cargo test -p frd --lib encoder --locked
+          cargo test -p frd --lib service_install --locked
+          cargo test -p frd --test encoder_cli --locked
       - name: Strict CLI selection and daemon build
         run: |
           cargo test -p frd --lib observation_indicator --locked

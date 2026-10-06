@@ -45,6 +45,27 @@ case, with an explanation that no automatic encoder selection exists. The
 listening JSON adds `encoder_selection`, which names the operator's choice,
 not successful hardware initialization or qualification.
 
+## Installed service configuration
+
+Pass the explicit encoder through the installer's existing `--` boundary:
+
+```sh
+frd install --user --dry-run --approval none -- \
+  --encoder nvenc --display :0 --worker /absolute/path/fr-media-worker
+```
+
+The generated systemd command preserves exactly that selection, without adding
+`--software-explicit`. Do not combine the legacy installer software flag with an
+encoder in the carried run arguments, even `--encoder software`: the contradictory
+unit is refused. An omitted encoder still refuses. Existing service constraints
+remain, including separate control/clipboard/file enables, the local-approval
+refusal and the requirement for headless mode when carrying run options into a
+system-wide unit. Other platforms do not silently discard the hardware flags.
+
+This preview renders configuration; it does not start a service, probe a GPU,
+change saved admission policy or qualify the selected encoder. The service
+account still needs the existing local desktop, device and ingress permissions.
+
 ## What a hardware selection proves
 
 By itself, nothing about the hardware. Native codec initialization still runs
@@ -71,10 +92,15 @@ per second. There is no new 60 fps, latency, quality or CPU-utilization claim.
 The selection regressions exercise exact parsing, contradictory flags, display
 selection, private worker configuration roundtrip and the existing codec bounds.
 They also check that selecting hardware cannot enable control, audio, clipboard,
-files or change approval/sharing policy.
+files or change approval/sharing policy. Service tests roundtrip the rendered
+systemd arguments through the real host parser. The real-binary preflight tests
+stop before native work, assert that local approval and missing Tailscale still
+refuse, and verify the saved policy remains unchanged.
 
 ```sh
 cargo test -p frd --lib encoder --locked
+cargo test -p frd --lib service_install --locked
+cargo test -p frd --test encoder_cli --locked
 cargo check -p frd --bin frd --locked
 ```
 
