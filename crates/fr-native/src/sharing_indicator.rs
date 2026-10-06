@@ -1,6 +1,6 @@
 //! Real X11 indicators, each backed by the ORIGINAL owner it can revoke: the
-//! host's observation owner (`SharingIndicator`), or a per-lease input
-//! executor's local revoke callback (`start_with` / `LocalIndicator`).
+//! host's observation owner (`SharingIndicator`), or a session child's local
+//! revoke callback (`start_with` / `start_observation_with` / `LocalIndicator`).
 //!
 //! This is a revocation-only surface, never an approval mechanism. The selected
 //! desktop user, X server and window manager remain trusted. A mapped X11 window
@@ -14,7 +14,7 @@ use std::{
     fmt,
     ptr::NonNull,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU8, AtomicU32, Ordering},
     },
     thread::{self, JoinHandle},
@@ -24,9 +24,10 @@ use std::{
 const TURN_EVENTS: usize = 32;
 const TURN: Duration = Duration::from_millis(10);
 const MAP_TIMEOUT: Duration = Duration::from_secs(2);
+/// A mapped but stuck native event worker cannot remain positive evidence.
+const PROGRESS_TIMEOUT: Duration = Duration::from_millis(250);
 
 unsafe extern "C" {
-    #[cfg(feature = "linux-session-ui")]
     fn fr_indicator_open(display: *const c_char, window: *mut u32) -> *mut c_void;
     fn fr_indicator_open_control(display: *const c_char, window: *mut u32) -> *mut c_void;
     fn fr_indicator_close(handle: *mut c_void);
@@ -103,8 +104,7 @@ impl Owner {
 }
 #[derive(Clone, Copy)]
 enum Mode {
-    /// Host observation indicator (core X11 input, unchanged behavior).
-    #[cfg(feature = "linux-session-ui")]
+    /// Observation-only labels; the same device-attributed stop controls.
     Sharing,
     /// Remote-control indicator: only `XInput2` events from non-XTEST source
     /// devices can stop it; the remote controller injects through `XTest`.
@@ -114,6 +114,9 @@ struct Shared {
     owner: Owner,
     state: AtomicU8,
     window: AtomicU32,
+    // Written only after a bounded native event/draw turn completes. The
+    // separate child supervisor may inspect this while XCB itself is stuck.
+    last_turn: Mutex<Instant>,
 }
 impl Shared {
     fn stop(&self, reason: StopReason) {
@@ -152,6 +155,25 @@ impl IndicatorControl {
             value => Status::Stopped(StopReason::from_state(value).expect("private state")),
         }
     }
+    /// Positive mapping AND recent native event-loop progress. A lost progress
+    /// bound permanently revokes this original owner; later native completion
+    /// cannot restore it. This is liveness, not proof of physical visibility.
+    pub fn responsive(&self) -> bool {
+        if self.status() != Status::Mapped {
+            return false;
+        }
+        let recent = self
+            .0
+            .last_turn
+            .lock()
+            .is_ok_and(|last| last.elapsed() < PROGRESS_TIMEOUT);
+        if !recent {
+            // No progress lock may be held while invoking the owner's revoke.
+            self.0.stop(StopReason::NativeFailure);
+            return false;
+        }
+        self.status() == Status::Mapped
+    }
     /// Local X resource ID for window-manager integration. Not a network route,
     /// session identity, authorization token, or permission to attach input.
     pub fn window(&self) -> Option<u32> {
@@ -186,6 +208,7 @@ fn launch(
         owner,
         state: AtomicU8::new(0),
         window: AtomicU32::new(0),
+        last_turn: Mutex::new(Instant::now()),
     }));
     let shared = control.0.clone();
     let started = Instant::now();
@@ -298,6 +321,20 @@ pub fn start_with(
         task: Some(task),
     })
 }
+/// The same revocation-only surface with observation labels ("Stop sharing"),
+/// for a read-only session child. No input executor, capture, approval, or
+/// observation permission is created. Device attribution is identical to the
+/// existing indicator; synthetic input is not an alternate stop path.
+pub fn start_observation_with(
+    display: &str,
+    on_revoke: impl Fn() + Send + Sync + 'static,
+) -> Result<LocalIndicator, Error> {
+    let (control, task) = launch(display, Owner::Local(Box::new(on_revoke)), Mode::Sharing)?;
+    Ok(LocalIndicator {
+        control,
+        task: Some(task),
+    })
+}
 /// The executor's indicator owner; shown for the whole lease. Same explicit
 /// cleanup contract as `SharingIndicator`.
 #[must_use]
@@ -359,7 +396,6 @@ fn run(shared: &Shared, display: &CString, started: Instant, mode: Mode) {
     // C retains neither pointer. Handle is created/used/dropped on this thread.
     let handle = unsafe {
         match mode {
-            #[cfg(feature = "linux-session-ui")]
             Mode::Sharing => fr_indicator_open(display.as_ptr(), &raw mut window),
             Mode::Control => fr_indicator_open_control(display.as_ptr(), &raw mut window),
         }
@@ -428,12 +464,21 @@ fn run(shared: &Shared, display: &CString, started: Instant, mode: Mode) {
                 shared.stop(StopReason::NativeFailure);
                 return;
             }
-            if mapped {
-                // A concurrent stop can never be overwritten by map completion.
-                let _ = shared
-                    .state
-                    .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
-            }
+        }
+        if !shared.live() {
+            return;
+        }
+        if let Ok(mut progress) = shared.last_turn.lock() {
+            *progress = Instant::now();
+        } else {
+            shared.stop(StopReason::NativeFailure);
+            return;
+        }
+        if mapped {
+            // A concurrent stop can never be overwritten by map completion.
+            let _ = shared
+                .state
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
         }
         thread::sleep(TURN);
     }
@@ -464,3 +509,6 @@ impl frd::local_sharing::Surface for SharingIndicator {
 
 #[cfg(feature = "linux-session-ui")]
 mod mapping;
+
+#[cfg(test)]
+mod responsiveness;

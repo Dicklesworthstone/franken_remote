@@ -18,6 +18,7 @@ pub mod clipboard;
 pub mod dos;
 pub mod held_state;
 pub mod ids;
+pub mod indicator_process;
 pub mod input;
 pub mod input_sequence;
 pub mod input_submission;

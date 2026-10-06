@@ -97,6 +97,12 @@ name = "fr-input-agent"
 path = "src/bin/input_agent.rs"
 required-features = ["linux-input"]
 
+# Read-only observation UI child; shares the indicator binding, not input authority.
+[[bin]]
+name = "fr-observation-indicator"
+path = "src/bin/observation_indicator.rs"
+required-features = ["linux-input"]
+
 # Host-provided Opus is decoded only in this restricted, per-epoch child.
 [[bin]]
 name = "fr-opus-worker"
