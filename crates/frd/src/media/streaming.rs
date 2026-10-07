@@ -169,3 +169,41 @@ impl Drop for Stream {
         self.close();
     }
 }
+
+impl super::Subscription {
+    /// Preserve a locally failed sender for the existing negotiated recovery
+    /// handoff. The exact cache owns the deadline and allowance; the authority
+    /// lock fences input against its failed view before the error is returned.
+    /// This cannot grant or renew control, fabricate a peer request, or retract
+    /// an admitted write. Egress supplies only its own unadmitted pending offer.
+    pub(crate) fn preserve_reference_failure(
+        &mut self,
+        offer: Option<&fr_media::delivery::PacketOffer>,
+    ) -> Result<(), super::Error> {
+        self.control.check()?;
+        let mut authority = self
+            .control
+            .authority
+            .lock()
+            .map_err(|_| super::Error::Poisoned)?;
+        let now = super::host_now(&self.control.cx)?;
+        authority
+            .authorize_observation_delivery(now)
+            .map_err(super::Error::Authority)?;
+        let result = if self.cache.needs_recovery() {
+            self.cache.await_recovery_request(now.as_micros())
+        } else if let Some(offer) = offer {
+            // A final prepared fragment may look complete to the packetizer
+            // and already have been evicted. It was NOT admitted to transport.
+            self.cache.abandon_expired_offer(offer, now.as_micros())
+        } else {
+            Err(fr_media::delivery::SendError::Delivery(
+                fr_media::delivery::DeliveryError::WrongState,
+            ))
+        };
+        if result.is_ok() || self.cache.needs_recovery() {
+            authority.mark_view_stale();
+        }
+        result.map_err(super::Error::Send)
+    }
+}

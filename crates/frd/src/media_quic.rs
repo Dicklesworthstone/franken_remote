@@ -130,7 +130,7 @@ pub struct QuicEgress {
     view: Option<fr_wire::decoder::Binding>,
 }
 impl std::fmt::Debug for QuicEgress {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("QuicEgress")
             .field("egress", &self.egress)
             .field("routes", &self.routes)
@@ -313,11 +313,22 @@ impl QuicEgress {
             }) {
                 Ok(()) => Ok(Admission::Accepted),
                 Err(quic::Error::Backpressure) => Ok(Admission::Backpressure),
+                // send's pre-admission deadline checks leave QUIC open. An
+                // expired retained/partial write instead closes it in check().
+                Err(quic::Error::Expired) if !transport.is_closed() => Ok(Admission::Expired),
                 Err(error) => Err(Error::Transport(error)),
             }
         });
         match result {
             Ok(progress) => Ok(progress),
+            Err(EgressError::Media(error @ media::Error::Send(
+                SendError::OriginalExpired | SendError::NeedsRecovery,
+            ))) if !self.egress.is_closed() && !transport.is_closed() => {
+                // Egress fenced the view and retained the ORIGINAL bounded
+                // cache. The session's negotiated local-failure notification
+                // and recovery handoff now own continuation, not a new socket.
+                Err(Error::Media(error))
+            }
             Err(error) => {
                 // An uncertain/partial reliable write is never continued on a
                 // new lifetime. The session observes this close and revokes input.

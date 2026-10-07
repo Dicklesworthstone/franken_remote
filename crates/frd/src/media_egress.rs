@@ -5,7 +5,10 @@
 //! This owner joins that cursor to transport backpressure without owning the
 //! shared capture worker, input lease, or transport's connection lifetime.
 use crate::media::{CaptureUpdate, Error, Subscription};
-use fr_media::{access_unit::EncodedAccessUnit, delivery::PacketOffer};
+use fr_media::{
+    access_unit::EncodedAccessUnit,
+    delivery::{PacketOffer, SendError},
+};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +20,9 @@ pub enum Lane {
 pub enum Admission {
     Accepted,
     Backpressure,
+    /// The original deadline passed before ANY bytes were admitted. The caller
+    /// must know this precisely; an uncertain/partial write is a transport error.
+    Expired,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Progress {
@@ -179,10 +185,28 @@ impl Egress {
             }
             Ok(())
         });
-        if result.is_err() {
-            self.close();
+        result.map_err(|error| self.media_failure(error))
+    }
+    /// Retain only a bounded failed chain, never its obsolete packet or input
+    /// readiness. The caller still receives the failure: only a session with
+    /// negotiated recovery may notify the peer and continue its control loop.
+    fn media_failure(&mut self, mut error: Error) -> Error {
+        if matches!(
+            error,
+            Error::Send(SendError::OriginalExpired | SendError::NeedsRecovery)
+        ) && let Some(subscription) = self.subscription.as_mut()
+        {
+            match subscription.preserve_reference_failure(self.pending.as_ref()) {
+                Ok(()) => {
+                    self.pending = None;
+                    self.buffer.fill(0);
+                    return error;
+                }
+                Err(terminal) => error = terminal,
+            }
         }
-        result
+        self.close();
+        error
     }
     pub fn next_deadline(&self) -> Option<fr_core::time::HostInstant> {
         self.subscription
@@ -256,19 +280,18 @@ impl Egress {
             match result {
                 Ok(None) => return Ok(Progress::Idle),
                 Ok(Some(offer)) => self.pending = Some(offer),
-                Err(error) => {
-                    self.close();
-                    return Err(EgressError::Media(error));
-                }
+                Err(error) => return Err(EgressError::Media(self.media_failure(error))),
             }
         }
         let offer = self.pending.as_ref().expect("prepared above");
         if let Err(error) = subscription.authorize_write(offer) {
-            self.close();
-            return Err(EgressError::Media(error));
+            return Err(EgressError::Media(self.media_failure(error)));
         }
         let mut guard = || subscription.authorize_write(offer);
         match send(offer, &self.buffer[..offer.byte_len()], &mut guard) {
+            Ok(Admission::Expired) => Err(EgressError::Media(
+                self.media_failure(Error::Send(SendError::OriginalExpired)),
+            )),
             Ok(Admission::Backpressure) => Ok(Progress::Pending(offer.clone())),
             Ok(Admission::Accepted) => Ok(Progress::Accepted(
                 self.pending.take().expect("prepared above"),
