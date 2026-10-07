@@ -388,20 +388,36 @@ impl QuicEgress {
         self.repair(route, bytes)
     }
     pub fn repair(&mut self, route: Route, bytes: &[u8]) -> Result<RepairAdmission, Error> {
-        self.tick()?;
         if route != Route::Stream(self.routes.repair) {
             return Err(Error::InvalidRoutes);
         }
-        match self.egress.queue_repair(bytes) {
-            Ok(()) => Ok(RepairAdmission::Queued),
+        // Parse the actual record before interpreting a local expiry. Malformed
+        // requests remain terminal even when this sender needs recovery.
+        let admission = match self.egress.queue_repair(bytes) {
+            Ok(()) => RepairAdmission::Queued,
             Err(media::Error::Send(
                 SendError::FrameUnavailable
                 | SendError::RepairBusy
                 | SendError::RepairNotReady
                 | SendError::RepairRateLimited
-                | SendError::RepairBudgetExceeded,
-            )) => Ok(RepairAdmission::Refused),
-            Err(error) => Err(Error::Media(error)),
+                | SendError::RepairBudgetExceeded
+                | SendError::OriginalExpired
+                | SendError::NeedsRecovery,
+            )) => RepairAdmission::Refused,
+            Err(error) => return Err(Error::Media(error)),
+        };
+        // A cache failure is NOT a malformed receive-handler result. Service
+        // the pending offer too: its final fragment may have been packetized
+        // but never admitted. tick fences input and retains the original bounded
+        // recovery owner before this valid (now useless) repair is consumed.
+        // Normal media service still returns NeedsRecovery outside QUIC dispatch;
+        // only a positively negotiated session can continue through that state.
+        match self.tick() {
+            Ok(()) => Ok(admission),
+            Err(Error::Media(media::Error::Send(
+                SendError::OriginalExpired | SendError::NeedsRecovery,
+            ))) if !self.is_closed() => Ok(RepairAdmission::Refused),
+            Err(error) => Err(error),
         }
     }
 }

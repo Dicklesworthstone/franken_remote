@@ -164,6 +164,19 @@ pub(super) fn expired_original(error: &crate::media_quic::Error) -> bool {
     )
 }
 
+// Repair dispatch can discover/fence the expiry before normal video service
+// observes it. The same failed chain then reports NeedsRecovery. Neither form
+// admits recovery after an authority, transport or bounded-recovery failure.
+fn local_reference_failure(error: &crate::media_quic::Error) -> bool {
+    expired_original(error)
+        || matches!(
+            error,
+            crate::media_quic::Error::Media(crate::media::Error::Send(
+                fr_media::delivery::SendError::NeedsRecovery
+            ))
+        )
+}
+
 /// A local failure is admitted immediately, but must not replace a healthy
 /// peer's decoder unannounced. Retain its original budget while the reliable
 /// Failed progress record elicits the peer's ordinary bound recovery request.
@@ -201,7 +214,11 @@ impl<S: Services> Admission<'_, S> {
             .source_progress()
             .map_err(Error::MediaTransport)?;
         match self.video.maintain(q, nonce) {
-            Err(Error::MediaTransport(error)) if expired_original(&error) => {
+            Err(Error::MediaTransport(error))
+                if local_reference_failure(&error)
+                    && !q.is_closed()
+                    && !self.video.sender.is_closed() =>
+            {
                 let progress = previous.ok_or(Error::MediaTransport(error))?;
                 let demand = media
                     .admit_sender_failure(q, self.routes, self.parent, self.video.sender)
@@ -441,3 +458,35 @@ impl<S: Services> Services for Waiting<'_, S> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod local_failure_tests {
+    use super::{expired_original, local_reference_failure};
+    use crate::{media, media_quic::Error};
+    use fr_media::delivery::{DeliveryError, SendError};
+
+    #[test]
+    fn dispatch_fenced_references_recover_but_terminal_failures_do_not() {
+        for cause in [SendError::OriginalExpired, SendError::NeedsRecovery] {
+            let error = Error::Media(media::Error::Send(cause));
+            assert!(local_reference_failure(&error));
+        }
+        // The expired-capture counter still means an actually expired capture,
+        // not every subsequent observation of a failed reference chain.
+        assert!(!expired_original(&Error::Media(media::Error::Send(
+            SendError::NeedsRecovery,
+        ))));
+        for error in [
+            Error::Closed,
+            Error::Transport(fr_transport::quic::Error::Expired),
+            Error::Transport(fr_transport::quic::Error::Unauthorized),
+            Error::Media(media::Error::Send(SendError::Closed)),
+            Error::Media(media::Error::Send(SendError::RecoveryLimitExceeded)),
+            Error::Media(media::Error::Send(SendError::Delivery(
+                DeliveryError::RecoveryExpired,
+            ))),
+        ] {
+            assert!(!local_reference_failure(&error));
+        }
+    }
+}
