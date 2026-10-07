@@ -171,6 +171,10 @@ impl Drop for Stream {
 }
 
 impl super::Subscription {
+    pub(crate) fn recovery_progress(&self) -> Option<fr_wire::Progress> {
+        self.cache.recovery_progress()
+    }
+
     /// Preserve a locally failed sender for the existing negotiated recovery
     /// handoff. The exact cache owns the deadline and allowance; the authority
     /// lock fences input against its failed view before the error is returned.

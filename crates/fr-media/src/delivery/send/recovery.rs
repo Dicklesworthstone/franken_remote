@@ -110,8 +110,7 @@ impl SendCache {
             return Err(DeliveryError::WrongState.into());
         }
         if !self.needs_recovery {
-            self.clear();
-            self.needs_recovery = true;
+            self.fail_reference();
         }
         self.await_recovery_request(now)
     }

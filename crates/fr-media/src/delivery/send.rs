@@ -417,8 +417,7 @@ impl SendCache {
             // these bytes alone would leave later pictures depending on a frame
             // this subscriber never received. Use the same fence as tick's
             // unsent-original expiry, including the existing recovery allowance.
-            self.clear();
-            self.needs_recovery = true;
+            self.fail_reference();
             return Err(SendError::OriginalExpired);
         }
         let index = self
@@ -650,8 +649,7 @@ impl SendCache {
             .flatten()
             .any(|p| now >= p.send_by && !p.original_complete())
         {
-            self.clear();
-            self.needs_recovery = true;
+            self.fail_reference();
             return Err(SendError::OriginalExpired);
         }
         // Expired source metadata is replaceable, not a broken codec reference.
@@ -748,6 +746,16 @@ impl SendCache {
         *slot = Some(now);
         self.recovery_charged_epoch = Some(self.epoch);
         Ok(())
+    }
+    /// Release payloads and repairs while retaining only the last actual source
+    /// descriptor for a Failed notification. Repair dispatch may discover this
+    /// loss before the streaming turn begins; a caller-local snapshot is too late.
+    /// The existing fixed metadata slot owns this evidence, not another queue.
+    fn fail_reference(&mut self) {
+        let progress = self.last_progress;
+        self.clear();
+        self.last_progress = progress;
+        self.needs_recovery = true;
     }
     pub fn close(&mut self) {
         self.clear();

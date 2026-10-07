@@ -10,7 +10,26 @@ impl SendCache {
     /// Last admitted source observation, retaining its ORIGINAL host timestamp.
     /// This is neither proof of peer receipt nor permission to extend its age.
     pub const fn latest_progress(&self) -> Option<Progress> {
-        self.last_progress
+        if self.closed || self.needs_recovery {
+            None
+        } else {
+            self.last_progress
+        }
+    }
+
+    /// The last real source descriptor, exclusively for notifying a local
+    /// reference failure. It is never new freshness or a claim of peer receipt.
+    /// Preserve its capture/observation times, but always report Failed. No
+    /// descriptor is invented if the sender never admitted a source picture.
+    /// Request admission, replacement and terminal close retire this metadata.
+    pub fn recovery_progress(&self) -> Option<Progress> {
+        if self.closed || !self.needs_recovery {
+            return None;
+        }
+        self.last_progress.map(|progress| Progress {
+            pipeline: PipelineState::Failed,
+            ..progress
+        })
     }
 
     /// Queue an actual full-source comparison of the LAST inserted picture.

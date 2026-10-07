@@ -206,20 +206,21 @@ impl<S: Services> Admission<'_, S> {
         nonce: &mut N,
         media: &NegotiatedMedia,
     ) -> Result<(), Error> {
-        // Keep only the last real descriptor, not its payload. The expired
-        // enqueue fences/clears the cache before returning its error.
-        let previous = self
-            .video
-            .sender
-            .source_progress()
-            .map_err(Error::MediaTransport)?;
         match self.video.maintain(q, nonce) {
             Err(Error::MediaTransport(error))
                 if local_reference_failure(&error)
                     && !q.is_closed()
                     && !self.video.sender.is_closed() =>
             {
-                let progress = previous.ok_or(Error::MediaTransport(error))?;
+                // The cache owns the failed descriptor even if a previous
+                // repair-dispatch turn already cleared the reference payloads.
+                // Ordinary source_progress deliberately reports no fresh view.
+                let progress = self
+                    .video
+                    .sender
+                    .recovery_progress()
+                    .map_err(Error::MediaTransport)?
+                    .ok_or(Error::MediaTransport(error))?;
                 let until = media
                     .admit_sender_failure(q, self.routes, self.parent, self.video.sender)
                     .map_err(Error::MediaTransport)?;
