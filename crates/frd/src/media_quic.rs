@@ -130,7 +130,7 @@ pub struct QuicEgress {
     view: Option<fr_wire::decoder::Binding>,
 }
 impl std::fmt::Debug for QuicEgress {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("QuicEgress")
             .field("egress", &self.egress)
             .field("routes", &self.routes)
@@ -308,6 +308,12 @@ impl QuicEgress {
                 return Ok(Admission::Backpressure);
             }
             let route = routes.outbound(offer.channel())?;
+            // Preflight is still before ANY transport admission. Keep a typed
+            // media expiry here instead of turning it into a false authority
+            // callback that closes QUIC. The final native guard stays strict.
+            if !media_preflight(&mut source_live, guard)? {
+                return Ok(Admission::Expired);
+            }
             match transport.send(cx, route, bytes, offer.send_by_micros(), || {
                 source_live() && guard().is_ok()
             }) {
@@ -321,9 +327,9 @@ impl QuicEgress {
         });
         match result {
             Ok(progress) => Ok(progress),
-            Err(EgressError::Media(error @ media::Error::Send(
-                SendError::OriginalExpired | SendError::NeedsRecovery,
-            ))) if !self.egress.is_closed() && !transport.is_closed() => {
+            Err(EgressError::Media(
+                error @ media::Error::Send(SendError::OriginalExpired | SendError::NeedsRecovery),
+            )) if !self.egress.is_closed() && !transport.is_closed() => {
                 // Egress fenced the view and retained the ORIGINAL bounded
                 // cache. The session's negotiated local-failure notification
                 // and recovery handoff now own continuation, not a new socket.
@@ -399,6 +405,24 @@ impl QuicEgress {
         }
     }
 }
+/// A downward-only source refusal takes precedence over recoverable media
+/// expiry. `false` means definitely unadmitted media, never permission to send.
+/// An expiry inside QUIC's final callback remains terminal; this helper cannot
+/// certify a partially admitted write or replace that final authorization gate.
+fn media_preflight(
+    source_live: &mut impl FnMut() -> bool,
+    guard: &mut dyn FnMut() -> Result<(), media::Error>,
+) -> Result<bool, Error> {
+    if !source_live() {
+        return Err(Error::Transport(quic::Error::Unauthorized));
+    }
+    match guard() {
+        Ok(()) => Ok(true),
+        Err(media::Error::Send(SendError::OriginalExpired | SendError::NeedsRecovery)) => Ok(false),
+        Err(error) => Err(Error::Media(error)),
+    }
+}
+
 struct DriveGuard<'a> {
     egress: &'a mut Egress,
     transport: &'a mut QuicRecords,
@@ -414,3 +438,44 @@ impl Drop for DriveGuard<'_> {
 }
 
 mod shared_publisher;
+
+#[cfg(test)]
+mod preflight_tests {
+    use super::{Error, SendError, media, media_preflight, quic};
+
+    #[test]
+    fn source_revocation_precedes_media_expiry_and_never_calls_the_media_guard() {
+        assert_eq!(
+            media_preflight(&mut || false, &mut || panic!("revoked source reached media")),
+            Err(Error::Transport(quic::Error::Unauthorized))
+        );
+    }
+
+    #[test]
+    fn only_unadmitted_reference_failure_is_recoverable() {
+        for error in [SendError::OriginalExpired, SendError::NeedsRecovery] {
+            assert_eq!(
+                media_preflight(&mut || true, &mut || Err(media::Error::Send(error))),
+                Ok(false)
+            );
+        }
+        assert_eq!(media_preflight(&mut || true, &mut || Ok(())), Ok(true));
+    }
+
+    #[test]
+    fn authority_refusal_and_exhausted_or_expired_recovery_remain_terminal() {
+        for error in [
+            media::Error::Authority(fr_core::authority::AuthorityError::NoLease),
+            media::Error::Send(SendError::Closed),
+            media::Error::Send(SendError::RecoveryLimitExceeded),
+            media::Error::Send(SendError::Delivery(
+                fr_media::delivery::DeliveryError::RecoveryExpired,
+            )),
+        ] {
+            assert_eq!(
+                media_preflight(&mut || true, &mut || Err(error)),
+                Err(Error::Media(error))
+            );
+        }
+    }
+}
