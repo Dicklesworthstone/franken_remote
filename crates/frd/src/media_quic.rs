@@ -308,19 +308,27 @@ impl QuicEgress {
                 return Ok(Admission::Backpressure);
             }
             let route = routes.outbound(offer.channel())?;
-            // Preflight is still before ANY transport admission. Keep a typed
-            // media expiry here instead of turning it into a false authority
-            // callback that closes QUIC. The final native guard stays strict.
+            // Both the initial and final record gates preserve typed expiry.
+            // Source authority is still independent and terminal on refusal.
             if !media_preflight(&mut source_live, guard)? {
                 return Ok(Admission::Expired);
             }
-            match transport.send(cx, route, bytes, offer.send_by_micros(), || {
-                source_live() && guard().is_ok()
-            }) {
-                Ok(()) => Ok(Admission::Accepted),
+            match transport.send_prepared(
+                cx,
+                route,
+                bytes,
+                offer.send_by_micros(),
+                &mut source_live,
+                &mut *guard,
+            ) {
+                Ok(quic::SendAdmission::Accepted) => Ok(Admission::Accepted),
+                Ok(quic::SendAdmission::Refused(media::Error::Send(
+                    SendError::OriginalExpired | SendError::NeedsRecovery,
+                ))) => Ok(Admission::Expired),
+                Ok(quic::SendAdmission::Refused(error)) => Err(Error::Media(error)),
                 Err(quic::Error::Backpressure) => Ok(Admission::Backpressure),
-                // send's pre-admission deadline checks leave QUIC open. An
-                // expired retained/partial write instead closes it in check().
+                // Only this record's pre-admission expiry leaves QUIC open.
+                // Retained-record expiry and authority loss stay terminal.
                 Err(quic::Error::Expired) if !transport.is_closed() => Ok(Admission::Expired),
                 Err(error) => Err(Error::Transport(error)),
             }
@@ -423,8 +431,8 @@ impl QuicEgress {
 }
 /// A downward-only source refusal takes precedence over recoverable media
 /// expiry. `false` means definitely unadmitted media, never permission to send.
-/// An expiry inside QUIC's final callback remains terminal; this helper cannot
-/// certify a partially admitted write or replace that final authorization gate.
+/// QUIC repeats the typed record gate after allocation and still checks source
+/// authority. Neither gate can retract an admitted or uncertain write.
 fn media_preflight(
     source_live: &mut impl FnMut() -> bool,
     guard: &mut dyn FnMut() -> Result<(), media::Error>,

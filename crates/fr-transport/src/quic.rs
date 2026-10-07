@@ -19,6 +19,9 @@ use std::{
     time::Duration,
 };
 
+mod admission;
+pub use admission::SendAdmission;
+
 mod lifetime;
 pub use lifetime::terminal::{
     CloseOutcome, ClosedRegistration, ClosedReport, ControlCloseRegistration, ControlCloseReport,
@@ -668,8 +671,35 @@ impl QuicRecords {
         route: Route,
         bytes: &[u8],
         send_by_micros: u64,
-        mut authorize: impl FnMut() -> bool,
+        authorize: impl FnMut() -> bool,
     ) -> Result<(), Error> {
+        match self.send_prepared(cx, route, bytes, send_by_micros, authorize, || {
+            Ok::<(), core::convert::Infallible>(())
+        })? {
+            SendAdmission::Accepted => Ok(()),
+            SendAdmission::Refused(never) => match never {},
+        }
+    }
+    /// Admit one prepared record only while both connection authority and its
+    /// application-specific validity still hold. The record check runs before
+    /// copying and again after allocation, immediately before the final
+    /// connection/deadline check. It must be synchronous and nonblocking.
+    ///
+    /// A typed record refusal admits no bytes and does not close the connection.
+    /// Cancellation, lost authority and expired RETAINED records still close it,
+    /// taking precedence even when the record callback also refuses. Previously
+    /// admitted bytes are never retracted, replayed, or given a fresh deadline.
+    /// Callers must retain the same absolute send-by across backpressure retries.
+    #[allow(clippy::too_many_lines)]
+    pub fn send_prepared<E>(
+        &mut self,
+        cx: &Cx,
+        route: Route,
+        bytes: &[u8],
+        send_by_micros: u64,
+        mut authorize: impl FnMut() -> bool,
+        mut prepared: impl FnMut() -> Result<(), E>,
+    ) -> Result<SendAdmission<E>, Error> {
         let current = self.check(cx, &mut authorize)?;
         if current >= send_by_micros {
             return Err(Error::Expired);
@@ -719,6 +749,11 @@ impl QuicRecords {
                 }
             }
         }
+        if let Err(refusal) = prepared() {
+            // A record callback cannot conceal cancellation or connection loss.
+            self.check(cx, &mut authorize)?;
+            return Ok(SendAdmission::Refused(refusal));
+        }
         let mut storage = Vec::new();
         storage
             .try_reserve_exact(bytes.len())
@@ -727,17 +762,27 @@ impl QuicRecords {
             return Err(Error::Allocation);
         }
         storage.extend_from_slice(bytes);
-        if self.check(cx, &mut authorize)? >= send_by_micros {
+        // Finish application-owned allocations before the final record and
+        // connection gates, including the reliable queue's metadata allocation.
+        let storage = Bytes::from(storage);
+        if matches!(route, Route::Stream(_)) {
+            self.pending_writes
+                .try_reserve(1)
+                .map_err(|_| Error::Allocation)?;
+        }
+        let record_check = prepared();
+        let current = self.check(cx, &mut authorize)?;
+        if let Err(refusal) = record_check {
+            return Ok(SendAdmission::Refused(refusal));
+        }
+        if current >= send_by_micros {
             return Err(Error::Expired);
         }
         match route {
             Route::Stream(route) => {
-                self.pending_writes
-                    .try_reserve(1)
-                    .map_err(|_| Error::Allocation)?;
                 self.pending_writes.push_back(PendingWrite {
                     route,
-                    bytes: Bytes::from(storage),
+                    bytes: storage,
                     offset: 0,
                     deliver_by,
                     in_epoch: false,
@@ -757,7 +802,7 @@ impl QuicRecords {
                     .as_mut()
                     .ok_or(Error::Closed)?
                     .connection_mut()
-                    .send_datagram(cx, Bytes::from(storage))
+                    .send_datagram(cx, storage)
                     .is_err()
                 {
                     self.close();
@@ -765,7 +810,7 @@ impl QuicRecords {
                 }
             }
         }
-        Ok(())
+        Ok(SendAdmission::Accepted)
     }
     /// Flush at most eight small bulk prefixes or one critical prefix, then wait
     /// at most `wait` for incoming I/O. Each prefix rechecks authority, deadlines, native congestion
