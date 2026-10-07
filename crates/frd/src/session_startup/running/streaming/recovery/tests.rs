@@ -1,5 +1,6 @@
 //! Both canonical host and viewer loops, actual TLS/UDP and supervised child IPC.
 //! Only the source/decoder payloads are fixtures; no hardware/HEVC claim is made.
+mod sender_wait;
 use super::*;
 use crate::session_startup::running::{controlled::tests::attach, tests::run};
 use crate::session_startup::tests::support;

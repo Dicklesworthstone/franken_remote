@@ -172,6 +172,22 @@ impl Egress {
             .ok_or(Error::Send(fr_media::delivery::SendError::Closed))?
             .queue_repair(request)
     }
+    /// Fence local failure without constructing a peer request or encoder
+    /// demand. Only the real bound request may release work to the shared source.
+    pub(crate) fn await_sender_recovery(&mut self) -> Result<u64, Error> {
+        let result = self
+            .subscription
+            .as_mut()
+            .ok_or(Error::Send(SendError::Closed))?
+            .preserve_reference_failure(self.pending.as_ref());
+        if let Err(error) = result {
+            self.close();
+            return Err(error);
+        }
+        self.pending = None;
+        self.buffer.fill(0);
+        self.stream_subscription()?.recovery_deadline()
+    }
     /// Service even without capture or network traffic. Expiry retires pending
     /// work; no later send or repair may extend the original cache lifetime.
     pub fn tick(&mut self) -> Result<(), Error> {

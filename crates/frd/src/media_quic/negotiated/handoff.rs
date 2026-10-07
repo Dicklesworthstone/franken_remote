@@ -4,7 +4,7 @@ use crate::media::{CaptureSource, decoder_startup::Setup};
 use asupersync::{cx::Cx, net::quic_native::StreamRole};
 use fr_media::delivery::RecoveryDemand;
 use fr_transport::quic::{ControlRoutes, QuicRecords, Route};
-use fr_wire::{negotiation::ControlBinding, recovery_request};
+use fr_wire::negotiation::ControlBinding;
 use std::time::Duration;
 
 impl NegotiatedMedia {
@@ -70,23 +70,18 @@ impl NegotiatedMedia {
             .map_err(Error::Media)
     }
 
-    /// Admit a sender-discovered broken chain under the SAME allowance and
-    /// authority fence as a peer request. The fixed record below is local
-    /// admission input, never received from or attributed to the peer and never
-    /// transmitted. Unknown peer decode progress remains unknown.
-    ///
-    /// The caller must notify the peer and wait for its actual bound request
-    /// before replacing channels. That request coalesces with this demand and
-    /// cannot restart the failure budget while the old capture drains.
+    /// Fence a sender-discovered broken chain and retain its existing deadline
+    /// and recovery allowance. Local discovery does not construct a peer record
+    /// or issue an encoder demand. The real authenticated request must arrive
+    /// before channel replacement and inherits this same absolute deadline.
     pub(crate) fn admit_sender_failure(
         &self,
         q: &QuicRecords,
         control: ControlRoutes,
         parent: ControlBinding,
         sender: &mut QuicEgress,
-    ) -> Result<RecoveryDemand, Error> {
-        let view =
-            self.check_recovery_host(q, control, parent, sender, Route::Stream(control.inbound))?;
+    ) -> Result<u64, Error> {
+        self.check_recovery_host(q, control, parent, sender, Route::Stream(control.inbound))?;
         if !sender
             .egress
             .stream_subscription()
@@ -95,24 +90,7 @@ impl NegotiatedMedia {
         {
             return Err(Error::InvalidRoutes);
         }
-        let mut bytes = [0; recovery_request::REQUEST_BYTES];
-        let len = recovery_request::encode(
-            recovery_request::Request {
-                reason: recovery_request::Reason::ReferenceExpired,
-                last_useful_frame: None,
-            },
-            view,
-            self.limits.protocol(),
-            &mut bytes,
-            fr_wire::input::InputDirection::ViewerToHost,
-            fr_wire::input::InputDelivery::Reliable,
-        )
-        .map_err(|_| Error::InvalidRoutes)?;
-        sender
-            .egress
-            .admit_recovery_request(&bytes[..len], view)
-            .map_err(Error::Media)?
-            .ok_or(Error::InvalidRoutes)
+        sender.egress.await_sender_recovery().map_err(Error::Media)
     }
 
     /// Signal an actually failed sender through the existing reliable progress

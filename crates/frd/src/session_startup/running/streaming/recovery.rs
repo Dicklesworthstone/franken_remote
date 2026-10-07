@@ -177,11 +177,11 @@ fn local_reference_failure(error: &crate::media_quic::Error) -> bool {
         )
 }
 
-/// A local failure is admitted immediately, but must not replace a healthy
-/// peer's decoder unannounced. Retain its original budget while the reliable
-/// Failed progress record elicits the peer's ordinary bound recovery request.
+/// Local discovery fences the failed view immediately, but owns no encoder
+/// demand. Retain its original budget while the reliable Failed progress record
+/// elicits the peer's ordinary, fully validated bound recovery request.
 pub(super) struct LocalFailure {
-    demand: RecoveryDemand,
+    until: u64,
     progress: fr_wire::Progress,
     notified: bool,
 }
@@ -220,11 +220,11 @@ impl<S: Services> Admission<'_, S> {
                     && !self.video.sender.is_closed() =>
             {
                 let progress = previous.ok_or(Error::MediaTransport(error))?;
-                let demand = media
+                let until = media
                     .admit_sender_failure(q, self.routes, self.parent, self.video.sender)
                     .map_err(Error::MediaTransport)?;
                 self.local_failure = Some(LocalFailure {
-                    demand,
+                    until,
                     progress,
                     notified: false,
                 });
@@ -252,7 +252,7 @@ impl<S: Services> Admission<'_, S> {
                     q,
                     self.video.sender,
                     local.progress,
-                    local.demand.deadline_micros(),
+                    local.until,
                 )
                 .map_err(Error::MediaTransport)?;
         }
@@ -280,12 +280,13 @@ impl<S: Services> Services for Admission<'_, S> {
             && self
                 .pending
                 .as_ref()
-                .or_else(|| self.local_failure.as_ref().map(|local| &local.demand))
-                .is_none_or(|p| {
+                .map(RecoveryDemand::deadline_micros)
+                .or_else(|| self.local_failure.as_ref().map(|local| local.until))
+                .is_none_or(|until| {
                     self.video
                         .control
                         .check()
-                        .is_ok_and(|n| n.as_micros() < p.deadline_micros())
+                        .is_ok_and(|n| n.as_micros() < until)
                 })
     }
     fn maintain<N: FnMut() -> Result<u128, ()>>(
@@ -329,19 +330,23 @@ impl<S: Services> Services for Admission<'_, S> {
         if len != 0 {
             match media.admit_recovery_request(q, self.routes, self.parent, sender, &bytes[..len]) {
                 Ok(Some(demand)) => {
-                    if pending.is_some() || self.local_failure.is_some() {
+                    if pending.is_some() {
+                        return Err(Error::Order);
+                    }
+                    // This is the first real bound peer request, not a locally
+                    // fabricated one. Admission must preserve the failure clock.
+                    if let Some(local) = self.local_failure.take()
+                        && local.until != demand.deadline_micros()
+                    {
                         return Err(Error::Order);
                     }
                     *pending = Some(demand);
                 }
                 Ok(None) => {
-                    // Only an actually received and fully validated peer request
-                    // may release a locally admitted demand to the handoff.
-                    if let Some(local) = self.local_failure.take() {
-                        if pending.is_some() {
-                            return Err(Error::Order);
-                        }
-                        *pending = Some(local.demand);
+                    // Only duplicate requests coalesce. Local discovery alone
+                    // has no demand that can be released to the encoder.
+                    if self.local_failure.is_some() {
+                        return Err(Error::Order);
                     }
                 }
                 Err(error) => failure = Some(Error::MediaTransport(error)),
