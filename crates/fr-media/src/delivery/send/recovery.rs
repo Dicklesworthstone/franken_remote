@@ -1,5 +1,5 @@
 //! Per-subscription admission and fencing of bound recovery requests.
-use super::{DeliveryError, OfferOrigin, SendCache, SendError, deadline};
+use super::{DeliveryError, OfferOrigin, PacketOffer, SendCache, SendError, deadline};
 use fr_wire::{
     decoder::Binding,
     input::{InputDelivery, InputDirection},
@@ -7,8 +7,10 @@ use fr_wire::{
 };
 
 pub(super) struct PendingRecovery {
-    pub(super) request: Request,
-    pub(super) binding: Binding,
+    // None while a locally failed sender waits for an authenticated request.
+    // That request inherits `until`; it never starts a second recovery budget.
+    pub(super) request: Option<Request>,
+    pub(super) binding: Option<Binding>,
     pub(super) until: u64,
 }
 /// One accepted request. Not cloneable: a shared encoder coalescer consumes it
@@ -34,7 +36,7 @@ impl RecoveryDemand {
             || cache
                 .recovery_request
                 .as_ref()
-                .is_none_or(|p| p.until != self.until || p.request != self.request)
+                .is_none_or(|p| p.until != self.until || p.request != Some(self.request))
         {
             return Err(DeliveryError::StaleGeneration);
         }
@@ -50,6 +52,70 @@ pub enum RecoveryDisposition {
     Coalesced,
 }
 impl SendCache {
+    /// Bound a locally detected reference failure while the original control
+    /// stream remains available for the viewer's recovery request. This neither
+    /// fabricates a peer request nor issues an encoder demand. The caller must
+    /// suspend input against the failed view before continuing the session.
+    /// Repeated service, request admission and replacement share one deadline
+    /// and one charge against this subscription's existing recovery allowance.
+    pub fn await_recovery_request(&mut self, now: u64) -> Result<(), SendError> {
+        self.check_clock(now)?;
+        if self.closed {
+            return Err(SendError::Closed);
+        }
+        self.check_recovery_deadline(now)?;
+        if !self.needs_recovery {
+            return Err(DeliveryError::WrongState.into());
+        }
+        if self.recovery_request.is_some() {
+            return Ok(());
+        }
+        let until = match deadline(now, self.policy.recovery_horizon_micros) {
+            Ok(until) => until,
+            Err(error) => {
+                self.close();
+                return Err(error.into());
+            }
+        };
+        self.admit_recovery(now)?;
+        self.recovery_request = Some(PendingRecovery {
+            request: None,
+            binding: None,
+            until,
+        });
+        Ok(())
+    }
+
+    /// Fence an expired offer that the transport definitely did NOT admit.
+    /// Packetization has already advanced its cursor, including for the final
+    /// fragment; cache eviction alone therefore cannot prove delivery. Never
+    /// call this to retract an admitted or uncertain/partial reliable write.
+    /// Foreign, replaced and still-useful offers cannot fence this cache.
+    pub fn abandon_expired_offer(
+        &mut self,
+        offer: &PacketOffer,
+        now: u64,
+    ) -> Result<(), SendError> {
+        self.check_clock(now)?;
+        if self.closed {
+            return Err(SendError::Closed);
+        }
+        self.check_recovery_deadline(now)?;
+        if !std::sync::Arc::ptr_eq(&self.owner, &offer.origin.owner)
+            || self.epoch != offer.origin.epoch
+        {
+            return Err(DeliveryError::StaleGeneration.into());
+        }
+        if now < offer.send_by_micros {
+            return Err(DeliveryError::WrongState.into());
+        }
+        if !self.needs_recovery {
+            self.clear();
+            self.needs_recovery = true;
+        }
+        self.await_recovery_request(now)
+    }
+
     /// The authenticated control route supplies this subscription's INSTALLED
     /// full view binding, never a peer-proposed tuple. The session must still
     /// fence input/readiness and admit fresh channel bindings before replacement.
@@ -84,17 +150,22 @@ impl SendCache {
             return Err(SendError::InvalidSequence);
         }
         if let Some(pending) = &self.recovery_request {
-            if pending.binding != binding {
+            if pending.binding.is_some_and(|installed| installed != binding) {
                 return Err(DeliveryError::StaleGeneration.into());
             }
-            return Ok(RecoveryDisposition::Coalesced);
-        }
-        let until = match deadline(now, self.policy.recovery_horizon_micros) {
-            Ok(until) => until,
-            Err(error) => {
-                self.close();
-                return Err(error.into());
+            if pending.request.is_some() {
+                return Ok(RecoveryDisposition::Coalesced);
             }
+        }
+        let until = match self.recovery_request.as_ref() {
+            Some(pending) => pending.until,
+            None => match deadline(now, self.policy.recovery_horizon_micros) {
+                Ok(until) => until,
+                Err(error) => {
+                    self.close();
+                    return Err(error.into());
+                }
+            },
         };
         // A chronically failing subscription is refused BEFORE issuing another
         // unique demand to the shared encoder. Replacement recognizes this epoch
@@ -105,8 +176,8 @@ impl SendCache {
         self.clear();
         self.needs_recovery = true;
         self.recovery_request = Some(PendingRecovery {
-            request,
-            binding,
+            request: Some(request),
+            binding: Some(binding),
             until,
         });
         Ok(RecoveryDisposition::Accepted(RecoveryDemand {
@@ -314,5 +385,154 @@ mod tests {
             request(&mut cache, 1_000_002),
             Err(SendError::RecoveryLimitExceeded)
         ));
+    }
+
+    fn last_offer(cache: &mut SendCache) -> PacketOffer {
+        cache
+            .push(
+                fr_wire::Progress {
+                    descriptor: fr_wire::FrameDescriptor {
+                        frame: 1,
+                        reference: None,
+                        total_bytes: 16,
+                        stride: cache.limits.fragment_stride(),
+                        capture_micros: 0,
+                    },
+                    observed_micros: 0,
+                    observation: fr_wire::SourceObservation::Captured,
+                    pipeline: fr_wire::PipelineState::Running,
+                },
+                vec![1; 16],
+                super::super::DeliveryMode::Recovery,
+                0,
+            )
+            .unwrap();
+        let mut bytes = vec![0; cache.limits.record_bytes()];
+        let announcement = cache.next_packet(0, &mut bytes).unwrap().unwrap();
+        assert_eq!(announcement.channel(), Channel::MediaConfig);
+        let last = cache.next_packet(0, &mut bytes).unwrap().unwrap();
+        assert_eq!(last.channel(), Channel::Recovery);
+        assert!(!cache.originals_pending());
+        last
+    }
+    #[test]
+    fn expired_final_offer_fences_even_after_payload_eviction() {
+        let mut cache = cache();
+        let offer = last_offer(&mut cache);
+        let failed_at = offer.send_by_micros();
+        cache.tick(failed_at).unwrap();
+        assert!(!cache.needs_recovery());
+        cache.abandon_expired_offer(&offer, failed_at).unwrap();
+        assert!(cache.needs_recovery());
+        assert_eq!(cache.used_bytes, 0);
+        assert_eq!(cache.used_pictures, 0);
+        assert_eq!(cache.tick(failed_at + 1), Err(SendError::NeedsRecovery));
+        assert_eq!(
+            cache.authorize_write(&offer, failed_at + 1),
+            Err(SendError::NeedsRecovery)
+        );
+        let until = cache.next_deadline().unwrap();
+        assert_eq!(until, failed_at + cache.policy.recovery_horizon_micros);
+        cache.abandon_expired_offer(&offer, failed_at + 2).unwrap();
+        let demand = accepted(&mut cache, failed_at + 3);
+        assert_eq!(demand.deadline_micros(), until);
+        demand.check(&cache, failed_at + 3).unwrap();
+        assert!(matches!(
+            request(&mut cache, failed_at + 4),
+            Ok(RecoveryDisposition::Coalesced)
+        ));
+        assert_eq!(cache.recoveries.iter().flatten().count(), 1);
+        assert_eq!(cache.next_deadline(), Some(until));
+        replace(&mut cache, failed_at + 5);
+        assert!(!cache.needs_recovery());
+        assert_eq!(cache.recoveries.iter().flatten().count(), 1);
+        assert!(demand.check(&cache, failed_at + 5).is_err());
+    }
+    #[test]
+    fn local_wait_expires_without_a_peer_and_cannot_be_restarted() {
+        let mut cache = cache();
+        let offer = last_offer(&mut cache);
+        let failed_at = offer.send_by_micros();
+        cache.abandon_expired_offer(&offer, failed_at).unwrap();
+        let until = cache.next_deadline().unwrap();
+        for now in [failed_at + 1, until - 1] {
+            cache.await_recovery_request(now).unwrap();
+            assert_eq!(cache.next_deadline(), Some(until));
+        }
+        assert_eq!(
+            cache.tick(until),
+            Err(SendError::Delivery(DeliveryError::RecoveryExpired))
+        );
+        assert_eq!(cache.next_deadline(), None);
+        assert_eq!(cache.await_recovery_request(until), Err(SendError::Closed));
+        assert!(matches!(request(&mut cache, until), Err(SendError::Closed)));
+    }
+    #[test]
+    fn malformed_request_cannot_renew_a_local_wait_or_issue_a_demand() {
+        let mut cache = cache();
+        let offer = last_offer(&mut cache);
+        let now = offer.send_by_micros();
+        cache.abandon_expired_offer(&offer, now).unwrap();
+        let until = cache.next_deadline().unwrap();
+        let installed = binding(&cache);
+        assert!(cache.request_recovery(b"bad", installed, now + 1).is_err());
+        assert!(cache.recovery_request.as_ref().unwrap().request.is_none());
+        assert_eq!(cache.next_deadline(), Some(until));
+        assert!(matches!(
+            request(&mut cache, until),
+            Err(SendError::Delivery(DeliveryError::RecoveryExpired))
+        ));
+    }
+    #[test]
+    fn foreign_replaced_and_unexpired_offers_cannot_fence_a_healthy_cache() {
+        let mut original = cache();
+        let offer = last_offer(&mut original);
+        assert_eq!(
+            original.abandon_expired_offer(&offer, 1),
+            Err(SendError::Delivery(DeliveryError::WrongState))
+        );
+        assert!(!original.needs_recovery());
+        let mut foreign = cache();
+        assert_eq!(
+            foreign.abandon_expired_offer(&offer, offer.send_by_micros()),
+            Err(SendError::Delivery(DeliveryError::StaleGeneration))
+        );
+        assert!(!foreign.needs_recovery());
+        replace(&mut original, 2);
+        assert_eq!(
+            original.abandon_expired_offer(&offer, offer.send_by_micros()),
+            Err(SendError::Delivery(DeliveryError::StaleGeneration))
+        );
+        assert!(!original.needs_recovery());
+    }
+    #[test]
+    fn local_wait_requires_a_failed_chain_and_preserves_chronic_failure_limits() {
+        let mut cache = cache();
+        assert_eq!(
+            cache.await_recovery_request(0),
+            Err(SendError::Delivery(DeliveryError::WrongState))
+        );
+        for now in [1, 3] {
+            // Model the existing tick/push unsent-original failure transition.
+            cache.needs_recovery = true;
+            cache.await_recovery_request(now).unwrap();
+            replace(&mut cache, now + 1);
+        }
+        cache.needs_recovery = true;
+        assert_eq!(
+            cache.await_recovery_request(5),
+            Err(SendError::RecoveryLimitExceeded)
+        );
+        assert_eq!(cache.tick(6), Err(SendError::Closed));
+    }
+    #[test]
+    fn overflowing_local_wait_is_terminal() {
+        let mut cache = cache();
+        cache.needs_recovery = true;
+        assert_eq!(
+            cache.await_recovery_request(u64::MAX),
+            Err(SendError::Delivery(DeliveryError::ClockOverflow))
+        );
+        assert_eq!(cache.tick(u64::MAX), Err(SendError::Closed));
     }
 }
