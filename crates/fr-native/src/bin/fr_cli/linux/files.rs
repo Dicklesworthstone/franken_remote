@@ -1,9 +1,9 @@
 //! `fr connect --control --send PATH...`: the local half of the drop lane.
 //!
-//! Every path is classified by type BEFORE any network I/O: symbolic links,
-//! directories and special files refuse (typed, by 1-based position, never by
-//! name). Accepted files stay open; each opened attempt hands frd a fresh
-//! duplicate of the same descriptors, and only an attempt that is granted
+//! Every path is classified by type BEFORE any network I/O: symbolic links
+//! and special files refuse (typed, by 1-based position, never by name).
+//! Regular files and portable directory roots stay open. Each opened attempt
+//! hands frd a fresh duplicate, and only an attempt that is granted
 //! control ever reads one (an attempt that asked for control ends
 //! reconnection, so a selection is never resent). The completion record is
 //! content-free: indices, local sizes, host-reported outcomes, typed reasons.
@@ -31,7 +31,7 @@ pub(super) fn offer(clipboard: bool, send: bool) -> fr_wire::negotiation::Offer 
 /// The explicit selection and the current attempt's content-free handle.
 pub(super) struct Local {
     selection: Selection,
-    sizes: Vec<u64>,
+    sizes: Vec<Option<u64>>,
     attempt: Option<Attempt>,
 }
 enum Attempt {
@@ -46,20 +46,20 @@ pub(super) fn select(paths: &[PathBuf]) -> Result<Option<Local>, Failure> {
     }
     let selection = Selection::select(paths).map_err(|refusal| {
         let what = match refusal.reason {
-            SelectReason::TooMany => "is beyond the 8-file limit",
+            SelectReason::TooMany => "is beyond the 8-selection limit",
             SelectReason::Missing => "does not exist",
             SelectReason::Symlink => {
-                "is a symbolic link; name the regular file it points to explicitly"
+                "is a symbolic link; name the file or directory it points to explicitly"
             }
-            SelectReason::Directory => "is a directory; only regular files are sent",
+            SelectReason::Directory => "cannot be selected as a portable directory",
             SelectReason::SpecialFile => {
-                "is not a regular file (device, FIFO or socket); only regular files are sent"
+                "is a device, FIFO or socket; only regular files and directories are sent"
             }
             SelectReason::NotPortable => {
                 "has a file name that is not portable UTF-8 (no : \\ < > \" | ? * or control characters, no trailing dot or space, no reserved device name); rename it locally"
             }
             SelectReason::DuplicateName => {
-                "has the same file name as an earlier --send; the host keeps one name per file"
+                "has the same file name as an earlier --send; the host keeps one name per selection"
             }
             SelectReason::Unreadable => "cannot be opened for reading",
             SelectReason::Changed => "changed while it was being opened; select it again",
@@ -144,12 +144,12 @@ pub(super) struct Summary {
     pub(super) requested: usize,
     /// (index, host-reported published bytes, durable).
     pub(super) sent: Vec<(usize, u64, bool)>,
-    /// (index, local size, typed reason).
-    pub(super) refused: Vec<(usize, u64, &'static str)>,
+    /// (index, known local size, typed reason); unmeasured directory sizes are None.
+    pub(super) refused: Vec<(usize, Option<u64>, &'static str)>,
     /// Why no lane carried the selection; `None` once the batch started.
     pub(super) absence: Option<&'static str>,
 }
-fn summary(sizes: &[u64], status: Result<&SendStatus, &'static str>) -> Summary {
+fn summary(sizes: &[Option<u64>], status: Result<&SendStatus, &'static str>) -> Summary {
     let mut out = Summary {
         requested: sizes.len(),
         ..Summary::default()
@@ -217,6 +217,7 @@ impl Summary {
         }
         out.push_str("],\"files_refused\":[");
         for (n, (index, bytes, reason)) in self.refused.iter().enumerate() {
+            let bytes = bytes.map_or_else(|| "null".to_owned(), |n| n.to_string());
             let comma = if n == 0 { "" } else { "," };
             let _ = write!(
                 out,
@@ -258,7 +259,7 @@ mod tests {
     use frd::native_files::SendStatus;
     #[test]
     fn absence_accounts_for_every_index_without_names() {
-        let sizes = [10, 0, 7];
+        let sizes = [Some(10), Some(0), Some(7)];
         let absent = summary(
             &sizes,
             Ok(&SendStatus {
@@ -271,7 +272,11 @@ mod tests {
         assert_eq!(absent.sent, []);
         assert_eq!(
             absent.refused,
-            [(0, 10, "not_sent"), (1, 0, "not_sent"), (2, 7, "not_sent")]
+            [
+                (0, Some(10), "not_sent"),
+                (1, Some(0), "not_sent"),
+                (2, Some(7), "not_sent")
+            ]
         );
         assert_eq!(absent.absence, Some("host_files_unavailable"));
         let json = format!("{{\"x\":1{}}}", absent.json());
@@ -333,7 +338,7 @@ mod tests {
         let text = Summary {
             requested: 2,
             sent: vec![(0, 5, true)],
-            refused: vec![(1, 3, "host_conflict")],
+            refused: vec![(1, Some(3), "host_conflict")],
             absence: None,
         }
         .text();
@@ -348,14 +353,23 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let chosen = dir.join("chosen-name.txt");
         std::fs::write(&chosen, b"x").unwrap();
-        let failure = select(&[chosen.clone(), dir.clone()]).err().unwrap();
-        assert_eq!(failure.code, "send_directory");
-        assert!(failure.next.starts_with("--send #2 is a directory"));
+        let alias = dir.join("private-alias");
+        std::os::unix::fs::symlink(&dir, &alias).unwrap();
+        let failure = select(&[chosen.clone(), alias.clone()]).err().unwrap();
+        assert_eq!(failure.code, "send_symlink");
+        assert!(failure.next.starts_with("--send #2 is a symbolic link"));
         assert!(!failure.next.contains("chosen") && !failure.next.contains("fr-cli-send"));
         assert!(select(&[]).unwrap().is_none());
         let local = select(std::slice::from_ref(&chosen)).unwrap().unwrap();
-        assert_eq!(local.sizes, [1]);
+        assert_eq!(local.sizes, [Some(1)]);
         assert_eq!(local.summary().absence, Some("files_not_started"));
+        let tree = select(std::slice::from_ref(&dir)).unwrap().unwrap();
+        assert_eq!(tree.sizes, [None]);
+        let json = format!("{{{}}}", tree.summary().json().trim_start_matches(','));
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(value["files_refused"][0]["bytes"].is_null());
+        assert_eq!(value["files_requested"], 1);
+        let _ = std::fs::remove_file(&alias);
         let _ = std::fs::remove_file(&chosen);
         let _ = std::fs::remove_dir(&dir);
     }

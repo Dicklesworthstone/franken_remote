@@ -246,7 +246,7 @@ fn no_byte_lands_without_the_controllers_live_lease() {
 }
 
 #[test]
-fn selection_refuses_links_directories_and_special_files_by_type() {
+fn selection_refuses_links_and_special_files_by_type() {
     let scratch = Scratch::new(0o700);
     let name = "résumé-データ λ.bin";
     let regular = scratch.0.join(name);
@@ -268,10 +268,9 @@ fn selection_refuses_links_directories_and_special_files_by_type() {
 
     let selection = Selection::select(std::slice::from_ref(&regular)).unwrap();
     assert_eq!(selection.len(), 1);
-    assert_eq!(selection.sizes().collect::<Vec<_>>(), [5]);
+    assert_eq!(selection.sizes().collect::<Vec<_>>(), [Some(5)]);
     // Refusal index is the position of the offending argument.
     for (path, reason) in [
-        (scratch.0.join("folder"), SelectReason::Directory),
         (scratch.0.join("alias.bin"), SelectReason::Symlink),
         (scratch.0.join("socket"), SelectReason::SpecialFile),
         (scratch.0.join("fifo"), SelectReason::SpecialFile),
@@ -330,4 +329,59 @@ fn names_and_contents_never_reach_debug_or_error_output() {
     }
     assert_eq!(refusal.reason, SelectReason::DuplicateName);
     assert_eq!(refused_dir, DirectoryRefusal::NotDirectory);
+}
+
+#[test]
+fn directory_selection_pins_the_root_and_defers_tree_io_until_control() {
+    let scratch = Scratch::new(0o700);
+    let tree = scratch.0.join("project");
+    fs::create_dir(&tree).unwrap();
+    // Selecting the root must not walk even an unsupported nested entry. The
+    // authorized source will refuse this link before offering or sending bytes.
+    symlink("../outside", tree.join("link")).unwrap();
+    let file = scratch.0.join("plain");
+    fs::write(&file, b"file").unwrap();
+    let selection = Selection::select(&[tree.clone(), file]).unwrap();
+    assert_eq!(selection.sizes().collect::<Vec<_>>(), [None, Some(4)]);
+    assert!(matches!(selection.files[0].kind, SelectedKind::Directory));
+    let pinned = selection.files[0].file.metadata().unwrap();
+    fs::rename(&tree, scratch.0.join("original")).unwrap();
+    fs::create_dir(&tree).unwrap();
+    let still_pinned = selection.files[0].file.metadata().unwrap();
+    assert_eq!(
+        (pinned.dev(), pinned.ino()),
+        (still_pinned.dev(), still_pinned.ino())
+    );
+    assert_ne!(still_pinned.ino(), fs::metadata(&tree).unwrap().ino());
+    let request = selection.request().unwrap();
+    assert_eq!(request.selection.len(), 2);
+    assert!(!format!("{selection:?} {request:?}").contains("project"));
+}
+
+#[test]
+fn files_and_directories_share_duplicate_name_and_symlink_refusals() {
+    let scratch = Scratch::new(0o700);
+    let other = Scratch::new(0o700);
+    let tree = scratch.0.join("same");
+    fs::create_dir(&tree).unwrap();
+    let file = other.0.join("same");
+    fs::write(&file, b"original").unwrap();
+    for paths in [[tree.clone(), file.clone()], [file, tree.clone()]] {
+        assert_eq!(
+            Selection::select(&paths).unwrap_err(),
+            SelectRefusal {
+                index: 1,
+                reason: SelectReason::DuplicateName
+            }
+        );
+    }
+    let alias = scratch.0.join("alias");
+    symlink(&tree, &alias).unwrap();
+    assert_eq!(
+        Selection::select(&[alias]).unwrap_err(),
+        SelectRefusal {
+            index: 0,
+            reason: SelectReason::Symlink
+        }
+    );
 }

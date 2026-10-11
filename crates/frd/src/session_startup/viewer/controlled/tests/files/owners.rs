@@ -35,21 +35,49 @@ fn pseudo_random(len: usize, seed: u64) -> Vec<u8> {
 }
 
 #[test]
-#[allow(clippy::too_many_lines)]
 fn the_offer_waits_for_renewal_then_publishes_in_order_and_refuses_a_taken_name() {
-    run(|c, h| async move {
+    selected_objects_through_original_owners(false);
+}
+
+#[test]
+fn selected_directory_uses_the_native_controlled_owners_and_keeps_input_live() {
+    selected_objects_through_original_owners(true);
+}
+
+#[allow(clippy::too_many_lines)]
+fn selected_objects_through_original_owners(directory_source: bool) {
+    run(move |c, h| async move {
         let mut state = drop_fixture(&c, &h).await;
         let dest = Disk::new();
         let source = Disk::new();
         // The host already holds a file under the second selection's name.
         fs::write(dest.0.join("taken.txt"), b"original host bytes").unwrap();
         let first = pseudo_random(120_007, 0x5eed);
-        let first_name = "photo-ü λ.bin";
-        fs::write(source.0.join(first_name), &first).unwrap();
+        let first_name = if directory_source {
+            "project-ü λ"
+        } else {
+            "photo-ü λ.bin"
+        };
+        let payload = if directory_source {
+            fs::create_dir_all(source.0.join(first_name).join("nested")).unwrap();
+            fs::write(source.0.join(first_name).join("empty"), []).unwrap();
+            std::path::PathBuf::from(first_name).join("nested/data")
+        } else {
+            std::path::PathBuf::from(first_name)
+        };
+        fs::write(source.0.join(&payload), &first).unwrap();
         fs::write(source.0.join("taken.txt"), b"would overwrite").unwrap();
         let directory = Directory::open(&dest.0, Limits::default()).unwrap();
         let selection =
             Selection::select(&[source.0.join(first_name), source.0.join("taken.txt")]).unwrap();
+        assert_eq!(
+            selection.sizes().next().unwrap(),
+            if directory_source {
+                None
+            } else {
+                Some(first.len() as u64)
+            }
+        );
         let mut host = HostLane::new(&directory);
         let control = SendControl::new();
         let mut viewer = ViewerLane::new(selection.request().unwrap(), control.clone());
@@ -109,7 +137,16 @@ fn the_offer_waits_for_renewal_then_publishes_in_order_and_refuses_a_taken_name(
                 );
                 // Identical bytes under the exact selected basename; the taken
                 // name keeps its original bytes; no staging file is left.
-                assert_eq!(fs::read(dest.0.join(first_name)).unwrap(), first);
+                assert_eq!(fs::read(dest.0.join(&payload)).unwrap(), first);
+                if directory_source {
+                    assert!(dest.0.join(first_name).is_dir());
+                    assert_eq!(
+                        fs::metadata(dest.0.join(first_name).join("empty"))
+                            .unwrap()
+                            .len(),
+                        0
+                    );
+                }
                 assert_eq!(
                     fs::read(dest.0.join("taken.txt")).unwrap(),
                     b"original host bytes"

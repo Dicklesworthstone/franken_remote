@@ -5,8 +5,8 @@
 //! This module holds only local decisions and content-free status. The lane is
 //! the existing one-use `native-file-receive` attachment with `file-channel-scope`
 //! v1 (both OPTIONAL capabilities), opened only under the controller's ACTIVE
-//! input attachment. Bytes travel the existing ATP full-object profile through
-//! `fr_files` (bounded disk worker, staging file, no-replace atomic rename). The
+//! input attachment. Bytes travel the existing ATP full-object profiles through
+//! `fr_files` (bounded disk worker, private staging, no-replace atomic rename). The
 //! host's receipt checks the controller's input lease before every write and
 //! immediately before publication; a revoked or expired lease fences the
 //! transfer and its private staging file is removed, never published.
@@ -15,8 +15,9 @@
 //! per connection, sent in order, stopping at the first failure (existing
 //! batch semantics). Clipboard has independent consent, tickets and workers on
 //! the same controlling session; neither lane grants permission to the other;
-//! no resumption, directories, downloads, synchronization or picker UI. File
-//! names and contents never appear in `Debug`, errors or status.
+//! no resumption, downloads, synchronization or picker UI. Explicit directories
+//! use the existing portable full-tree profile, with no implicit child transfers.
+//! Names and contents never appear in `Debug`, errors or status.
 use fr_files::{
     receive::{DropDirectory, Limits as DirectoryLimits},
     sender::{self, batch},
@@ -195,6 +196,7 @@ pub enum SelectReason {
     TooMany,
     Missing,
     Symlink,
+    /// Legacy refusal code; portable directories are now selectable.
     Directory,
     SpecialFile,
     NotPortable,
@@ -224,12 +226,16 @@ pub struct SelectRefusal {
     pub reason: SelectReason,
 }
 
+enum SelectedKind {
+    File(u64),
+    Directory,
+}
 struct Selected {
     file: File,
     name: String,
-    bytes: u64,
+    kind: SelectedKind,
 }
-/// The user's explicit local selection: open regular-file descriptors and
+/// The user's explicit local selection: open regular-file/directory descriptors and
 /// their portable basenames (the host name is the final path component,
 /// unchanged; a non-portable name is refused, never rewritten).
 pub struct Selection {
@@ -249,11 +255,12 @@ fn portable(name: &str) -> bool {
 }
 impl Selection {
     /// Classify every path by type with `lstat` BEFORE opening anything:
-    /// symbolic links, directories and special files refuse by type. Then
-    /// open with `O_NOFOLLOW | O_NONBLOCK` (a racing FIFO cannot block us)
-    /// and require the opened descriptor to be the same regular file.
-    /// Nothing is read here; hashing and reading happen on the sender's own
-    /// bounded disk thread after control is granted.
+    /// symbolic links and special files refuse by type. Open directories with
+    /// `O_DIRECTORY`, and every selection with `O_NOFOLLOW | O_NONBLOCK` (a
+    /// racing FIFO cannot block us). Require the descriptor to retain its
+    /// classified type and identity. No file content or directory is read here;
+    /// tree traversal, structural bounds, link rejection and hashing run on the
+    /// sender's bounded disk thread only after control is granted.
     pub fn select(paths: &[PathBuf]) -> Result<Self, SelectRefusal> {
         if paths.is_empty() || paths.len() > MAX_SENDS {
             return Err(SelectRefusal {
@@ -275,10 +282,7 @@ impl Selection {
             if kind.is_symlink() {
                 return Err(refuse(SelectReason::Symlink));
             }
-            if kind.is_dir() {
-                return Err(refuse(SelectReason::Directory));
-            }
-            if !kind.is_file() {
+            if !kind.is_file() && !kind.is_dir() {
                 return Err(refuse(SelectReason::SpecialFile));
             }
             let name = path
@@ -289,18 +293,18 @@ impl Selection {
             if files.iter().any(|selected| selected.name == name) {
                 return Err(refuse(SelectReason::DuplicateName));
             }
+            let mut flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+            if kind.is_dir() {
+                flags |= OFlags::DIRECTORY;
+            }
             let file = File::from(
-                rustix::fs::open(
-                    path,
-                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )
-                .map_err(|_| refuse(SelectReason::Unreadable))?,
+                rustix::fs::open(path, flags, Mode::empty())
+                    .map_err(|_| refuse(SelectReason::Unreadable))?,
             );
             let after = file
                 .metadata()
                 .map_err(|_| refuse(SelectReason::Unreadable))?;
-            if !after.file_type().is_file()
+            if after.file_type() != kind
                 || (after.dev(), after.ino()) != (before.dev(), before.ino())
             {
                 return Err(refuse(SelectReason::Changed));
@@ -308,7 +312,11 @@ impl Selection {
             files.push(Selected {
                 file,
                 name: name.to_owned(),
-                bytes: after.len(),
+                kind: if kind.is_dir() {
+                    SelectedKind::Directory
+                } else {
+                    SelectedKind::File(after.len())
+                },
             });
         }
         Ok(Self { files })
@@ -319,9 +327,14 @@ impl Selection {
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
     }
-    /// Local sizes at selection time, in selection order (content-free).
-    pub fn sizes(&self) -> impl ExactSizeIterator<Item = u64> + '_ {
-        self.files.iter().map(|selected| selected.bytes)
+    /// Local file sizes at selection time, in order (content-free). Directory
+    /// content sizes remain unknown until the authorized worker walks the tree;
+    /// a directory inode's metadata length is never reported as payload bytes.
+    pub fn sizes(&self) -> impl ExactSizeIterator<Item = Option<u64>> + '_ {
+        self.files.iter().map(|selected| match selected.kind {
+            SelectedKind::File(bytes) => Some(bytes),
+            SelectedKind::Directory => None,
+        })
     }
     /// A fresh request for ONE connection attempt: duplicated descriptors of
     /// the same selected files (the sender rewinds before hashing). Only an
@@ -335,7 +348,11 @@ impl Selection {
                 .file
                 .try_clone()
                 .map_err(|_| refuse(SelectReason::Unreadable))?;
-            selection.push(file, &selected.name).map_err(|error| {
+            let queued = match selected.kind {
+                SelectedKind::File(_) => selection.push(file, &selected.name),
+                SelectedKind::Directory => selection.push_directory(file, &selected.name),
+            };
+            queued.map_err(|error| {
                 refuse(match error {
                     sender::Error::Name => SelectReason::NotPortable,
                     _ => SelectReason::TooMany,
