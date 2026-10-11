@@ -201,7 +201,38 @@ impl Egress {
             }
             Ok(())
         });
-        result.map_err(|error| self.media_failure(error))
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) if self.retire_obsolete(error) => Ok(()),
+            Err(error) => Err(self.media_failure(error)),
+        }
+    }
+    /// Retire only proven pre-admission expiry of optional work. Neither the
+    /// caller's current lane nor the shared wire channel identifies a reference.
+    /// Authorization checks the whole cache first, so an expired original or
+    /// lost authority cannot be hidden by an obsolete repair/observation.
+    fn retire_obsolete(&mut self, error: Error) -> bool {
+        if let Error::Send(expiry @ (SendError::RepairExpired | SendError::ObservationExpired)) =
+            error
+            && self
+                .pending
+                .as_ref()
+                .is_some_and(|offer| offer.expiry_error() == expiry)
+        {
+            self.pending = None;
+            self.buffer.fill(0);
+            return true;
+        }
+        false
+    }
+    fn transmit_media_failure<E>(&mut self, error: Error) -> Result<Progress, EgressError<E>> {
+        if self.retire_obsolete(error) {
+            // Yield instead of recursively preparing another packet. The next
+            // scheduler turn admits fresh work under the same bounded owner.
+            Ok(Progress::Idle)
+        } else {
+            Err(EgressError::Media(self.media_failure(error)))
+        }
     }
     /// Retain only a bounded failed chain, never its obsolete packet or input
     /// readiness. The caller still receives the failure: only a session with
@@ -301,13 +332,22 @@ impl Egress {
         }
         let offer = self.pending.as_ref().expect("prepared above");
         if let Err(error) = subscription.authorize_write(offer) {
-            return Err(EgressError::Media(self.media_failure(error)));
+            return self.transmit_media_failure(error);
         }
         let mut guard = || subscription.authorize_write(offer);
         match send(offer, &self.buffer[..offer.byte_len()], &mut guard) {
-            Ok(Admission::Expired) => Err(EgressError::Media(
-                self.media_failure(Error::Send(SendError::OriginalExpired)),
-            )),
+            Ok(Admission::Expired) => {
+                // Recheck locally after transport preparation: a claimed expiry
+                // cannot drop useful work, hide authority loss, or turn a real
+                // reference failure into an optional discard. No bytes were
+                // admitted; partial/uncertain writes take the terminal Err arm.
+                let error = subscription.authorize_write(offer).err().unwrap_or(
+                    Error::Send(SendError::Delivery(
+                        fr_media::delivery::DeliveryError::WrongState,
+                    )),
+                );
+                self.transmit_media_failure(error)
+            }
             Ok(Admission::Backpressure) => Ok(Progress::Pending(offer.clone())),
             Ok(Admission::Accepted) => Ok(Progress::Accepted(
                 self.pending.take().expect("prepared above"),

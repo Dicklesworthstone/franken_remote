@@ -330,7 +330,10 @@ impl QuicEgress {
             ) {
                 Ok(quic::SendAdmission::Accepted) => Ok(Admission::Accepted),
                 Ok(quic::SendAdmission::Refused(media::Error::Send(
-                    SendError::OriginalExpired | SendError::NeedsRecovery,
+                    SendError::OriginalExpired
+                    | SendError::NeedsRecovery
+                    | SendError::RepairExpired
+                    | SendError::ObservationExpired,
                 ))) => Ok(Admission::Expired),
                 Ok(quic::SendAdmission::Refused(error)) => Err(Error::Media(error)),
                 Err(quic::Error::Backpressure) => Ok(Admission::Backpressure),
@@ -449,7 +452,12 @@ fn media_preflight(
     }
     match guard() {
         Ok(()) => Ok(true),
-        Err(media::Error::Send(SendError::OriginalExpired | SendError::NeedsRecovery)) => Ok(false),
+        Err(media::Error::Send(
+            SendError::OriginalExpired
+            | SendError::NeedsRecovery
+            | SendError::RepairExpired
+            | SendError::ObservationExpired,
+        )) => Ok(false),
         Err(error) => Err(Error::Media(error)),
     }
 }
@@ -491,6 +499,20 @@ mod preflight_tests {
             );
         }
         assert_eq!(media_preflight(&mut || true, &mut || Ok(())), Ok(true));
+    }
+
+    #[test]
+    fn obsolete_optional_records_are_refused_before_admission() {
+        for error in [SendError::RepairExpired, SendError::ObservationExpired] {
+            assert_eq!(
+                media_preflight(&mut || true, &mut || Err(media::Error::Send(error))),
+                Ok(false)
+            );
+            assert_eq!(
+                media_preflight(&mut || false, &mut || Err(media::Error::Send(error))),
+                Err(Error::Transport(quic::Error::Unauthorized))
+            );
+        }
     }
 
     #[test]
