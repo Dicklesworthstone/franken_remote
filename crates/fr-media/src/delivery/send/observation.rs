@@ -1,5 +1,5 @@
 //! Source observations do not own codec references or renew repair retention.
-use super::{OfferOrigin, PacketOffer, SendCache, SendError, deadline};
+use super::{OfferOrigin, OfferPurpose, PacketOffer, SendCache, SendError, deadline};
 use fr_wire::{Channel, PipelineState, Progress, SourceObservation, encode_progress};
 
 pub(super) struct PendingObservation {
@@ -96,6 +96,7 @@ impl SendCache {
                 owner: self.owner.clone(),
                 epoch: self.epoch,
             },
+            purpose: OfferPurpose::Observation,
         };
         self.observation = None;
         Ok(Some(offer))

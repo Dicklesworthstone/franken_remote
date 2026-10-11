@@ -87,6 +87,8 @@ pub enum SendError {
     RepairNotReady,
     RepairRateLimited,
     RepairBudgetExceeded,
+    /// A prepared repair outlived its reference horizon. No new reference was lost.
+    RepairExpired,
     OriginalExpired,
     InvalidObservation,
     ObservationExpired,
@@ -127,6 +129,16 @@ pub struct PacketOffer {
     frame: u64,
     send_by_micros: u64,
     origin: OfferOrigin,
+    purpose: OfferPurpose,
+}
+// Channels do not identify dependency semantics: announcements and observations
+// share MediaConfig, while originals and retransmissions share Video. Keep the
+// purpose with the prepared offer across backpressure and caller lane changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OfferPurpose {
+    Original,
+    Repair,
+    Observation,
 }
 impl PacketOffer {
     pub const fn channel(&self) -> Channel {
@@ -140,6 +152,18 @@ impl PacketOffer {
     }
     pub const fn send_by_micros(&self) -> u64 {
         self.send_by_micros
+    }
+    /// Classify a proven pre-admission expiry of this exact record. This does
+    /// not check time, authority or generation and cannot retract an admitted
+    /// or uncertain write. Adapters must still run the final authorization gate.
+    /// Only an expired original loses a new codec reference; obsolete repairs
+    /// and source observations may be retired without requesting an IDR.
+    pub const fn expiry_error(&self) -> SendError {
+        match self.purpose {
+            OfferPurpose::Original => SendError::OriginalExpired,
+            OfferPurpose::Repair => SendError::RepairExpired,
+            OfferPurpose::Observation => SendError::ObservationExpired,
+        }
     }
 }
 #[derive(Debug, Clone)]
@@ -517,6 +541,7 @@ impl SendCache {
                 owner: self.owner.clone(),
                 epoch: self.epoch,
             },
+            purpose: OfferPurpose::Original,
         }))
     }
     /// Accept one bounded repair job from an already authorized control channel.
@@ -605,6 +630,7 @@ impl SendCache {
                 owner: self.owner.clone(),
                 epoch: self.epoch,
             },
+            purpose: OfferPurpose::Repair,
         };
         self.repair_spent += n;
         let job = self.repair.as_mut().expect("present");
@@ -628,7 +654,7 @@ impl SendCache {
             return Err(DeliveryError::StaleGeneration.into());
         }
         if now >= offer.send_by_micros {
-            return Err(SendError::OriginalExpired);
+            return Err(offer.expiry_error());
         }
         Ok(())
     }
@@ -999,3 +1025,6 @@ mod recovery_limit_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod expiry_tests;
