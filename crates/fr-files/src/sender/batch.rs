@@ -1,4 +1,4 @@
-//! Explicit local multi-selection on the original sender, never a sync job.
+//! Explicit local file/tree multi-selection on the original sender, never a sync job.
 //! One source thread and one transfer at a time; no new wire profile or channel.
 use super::{Error, Outcome, Receipt, Sender, Stage, micros};
 use crate::receive::Publication;
@@ -14,6 +14,7 @@ const MAX_NAME_BYTES: usize = 255;
 struct Selected {
     file: File,
     name: String,
+    directory: bool,
 }
 /// Only already selected local descriptors can enter a batch. Construction does
 /// not inspect, hash or read them. Names are destination basenames, never paths.
@@ -42,6 +43,17 @@ impl Selection {
     /// files or chooses a conflict policy for the user. The receiver still owns
     /// case/normalization conflicts and its no-overwrite publication rule.
     pub fn push(&mut self, file: File, name: &str) -> Result<(), Error> {
+        self.push_selected(file, name, false)
+    }
+    /// Explicitly select a directory as one atomic ATP tree, not separate child
+    /// transfers. Traversal, no-follow checks, aggregate size and tree limits run
+    /// on the original bounded disk source only after live authorization. Merely
+    /// queuing a descriptor cannot read it or start a worker. Files and trees
+    /// share the same name, count, deadline, receipt and stop-on-failure domains.
+    pub fn push_directory(&mut self, directory: File, name: &str) -> Result<(), Error> {
+        self.push_selected(directory, name, true)
+    }
+    fn push_selected(&mut self, file: File, name: &str, directory: bool) -> Result<(), Error> {
         if self.files.len() == MAX_FILES {
             return Err(Error::Limits);
         }
@@ -58,7 +70,11 @@ impl Selection {
             .map_err(|_| Error::Limits)?;
         owned.push_str(name);
         self.files.try_reserve_exact(1).map_err(|_| Error::Limits)?;
-        self.files.push_back(Selected { file, name: owned });
+        self.files.push_back(Selected {
+            file,
+            name: owned,
+            directory,
+        });
         Ok(())
     }
 }
@@ -223,7 +239,13 @@ impl Sender<'_> {
         let Some(selected) = batch.selection.files.pop_front() else {
             return Ok(());
         };
-        if let Err(error) = self.begin_until(q, selected.file, &selected.name, Some(deadline)) {
+        if let Err(error) = self.begin_selected(
+            q,
+            selected.file,
+            &selected.name,
+            Some(deadline),
+            selected.directory,
+        ) {
             self.fail(error);
             let _ = self.retire(q);
             self.settle_batch();
