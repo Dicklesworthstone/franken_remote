@@ -48,13 +48,18 @@ impl MediaBudget {
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A picture which cannot fit even in an empty ledger is not temporary
+        // pressure. Never turn it into an IDR loop by releasing other pictures.
+        if bytes > ledger.max_bytes {
+            return Err(DeliveryError::ResourceLimit);
+        }
         let next = ledger
             .used
             .bytes
             .checked_add(bytes)
             .ok_or(DeliveryError::ResourceLimit)?;
         if next > ledger.max_bytes || ledger.used.pictures >= ledger.max_pictures {
-            return Err(DeliveryError::ResourceLimit);
+            return Err(DeliveryError::ReferenceCapacityExceeded);
         }
         ledger.used.bytes = next;
         ledger.used.pictures += 1;
@@ -95,18 +100,25 @@ impl Reservation {
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Apply the same distinction to allocator/metadata capacity growth.
+        // Neither a refused growth nor its subsequent Drop may refund bytes
+        // owned by another picture (including an old decoder generation).
+        let own = self
+            .bytes
+            .checked_add(extra)
+            .ok_or(DeliveryError::ResourceLimit)?;
+        if own > ledger.max_bytes {
+            return Err(DeliveryError::ResourceLimit);
+        }
         let next = ledger
             .used
             .bytes
             .checked_add(extra)
             .ok_or(DeliveryError::ResourceLimit)?;
         if next > ledger.max_bytes {
-            return Err(DeliveryError::ResourceLimit);
+            return Err(DeliveryError::ReferenceCapacityExceeded);
         }
-        self.bytes = self
-            .bytes
-            .checked_add(extra)
-            .ok_or(DeliveryError::ResourceLimit)?;
+        self.bytes = own;
         ledger.used.bytes = next;
         Ok(())
     }
@@ -142,3 +154,6 @@ impl fmt::Debug for TrackedBytes {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod capacity_tests;
