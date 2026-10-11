@@ -123,13 +123,24 @@ impl RecoveryRequestor {
             return Err(DeliveryError::WrongState);
         }
         if self.pending.is_none() {
-            let until = match deadline(now, self.config.policy.recovery_budget_micros) {
+            // The receiver already fenced the failed chain. Time spent before
+            // this owner is serviced (including native cleanup) consumes the
+            // SAME budget, not a fresh timeout at first packet preparation.
+            let until = match receiver
+                .failure_observed_micros()
+                .ok_or(DeliveryError::WrongState)
+                .and_then(|at| deadline(at, self.config.policy.recovery_budget_micros))
+            {
                 Ok(until) => until,
                 Err(error) => {
-                    self.closed = true;
+                    self.close();
                     return Err(error);
                 }
             };
+            if now >= until {
+                self.close();
+                return Err(DeliveryError::RecoveryExpired);
+            }
             self.pending = Some(Pending {
                 request: Request {
                     reason,

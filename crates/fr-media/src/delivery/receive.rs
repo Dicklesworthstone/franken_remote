@@ -433,6 +433,9 @@ pub struct ReceivePipeline {
     budget: MediaBudget,
     state: ReceiveState,
     failure: Option<DeliveryError>,
+    // Receiver-local detection time, retained across failed-state service.
+    // Preparing the first recovery request later must not restart its budget.
+    failure_at: Option<u64>,
     // Negotiated storage is a ceiling. The decoder's admitted frame rate
     // narrows active dependency retention before any media is accepted.
     active_slots: usize,
@@ -467,6 +470,7 @@ impl ReceivePipeline {
             budget,
             state: ReceiveState::AwaitingConfiguration,
             failure: None,
+            failure_at: None,
             active_slots: usize::from(config.limits.protocol().reassembly_window_pictures()),
             slots: core::array::from_fn(|_| None),
             last_now: None,
@@ -504,6 +508,9 @@ impl ReceivePipeline {
     }
     pub const fn failure(&self) -> Option<DeliveryError> {
         self.failure
+    }
+    pub(crate) const fn failure_observed_micros(&self) -> Option<u64> {
+        self.failure_at
     }
     pub const fn latest_progress(&self) -> Option<Progress> {
         self.progress
@@ -1093,6 +1100,7 @@ impl ReceivePipeline {
     }
     fn clear(&mut self) {
         self.scope.store(false, Ordering::Release);
+        self.failure_at = None;
         for slot in &mut self.slots {
             *slot = None;
         }
@@ -1105,6 +1113,7 @@ impl ReceivePipeline {
     fn fail<T>(&mut self, error: DeliveryError) -> Result<T, DeliveryError> {
         self.clear();
         self.failure = Some(error);
+        self.failure_at = self.last_now;
         if self.state != ReceiveState::Closed {
             self.state = ReceiveState::NeedsRecovery;
         }
