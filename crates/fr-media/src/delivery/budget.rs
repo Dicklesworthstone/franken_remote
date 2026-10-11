@@ -43,6 +43,27 @@ impl MediaBudget {
         u64::try_from(ledger.max_bytes).is_ok_and(|n| n <= limits.per_viewer_compressed_bytes())
             && ledger.max_pictures <= usize::from(limits.reassembly_window_pictures())
     }
+    /// Check an individual allocation before inspecting aggregate slot pressure.
+    /// Otherwise a full queue could disguise an impossible picture as recoverable.
+    /// This takes no credit; allocate still reserves atomically and charges actual
+    /// allocator capacity before publishing a buffer.
+    pub(crate) fn check_allocation(
+        &self,
+        length: usize,
+        metadata: usize,
+    ) -> Result<(), DeliveryError> {
+        let bytes = length
+            .checked_add(metadata)
+            .ok_or(DeliveryError::ResourceLimit)?;
+        let ledger = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if bytes > ledger.max_bytes {
+            return Err(DeliveryError::ResourceLimit);
+        }
+        Ok(())
+    }
     fn reserve(&self, bytes: usize) -> Result<Reservation, DeliveryError> {
         let mut ledger = self
             .0

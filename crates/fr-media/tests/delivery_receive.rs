@@ -513,7 +513,7 @@ fn picture_count_includes_completed_but_not_released_decoder_inputs() {
     let packets = fragments(descriptor(2, Some(1)), &payload(), c);
     assert_eq!(
         receiver.receive(Channel::Video, &packets[0], 3),
-        Err(DeliveryError::ResourceLimit)
+        Err(DeliveryError::ReferenceCapacityExceeded)
     );
     drop(idr);
     drop(next);
@@ -679,3 +679,6 @@ fn delivery_handoff_checks_all_bindings_generations_and_limits() {
 
 #[path = "delivery_receive/independent.rs"]
 mod independent;
+
+#[path = "delivery_receive/capacity.rs"]
+mod capacity;

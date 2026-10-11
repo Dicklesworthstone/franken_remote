@@ -7,6 +7,7 @@ pub(super) fn recoverable(error: DeliveryError) -> bool {
     matches!(
         error,
         DeliveryError::ReferenceExpired
+            | DeliveryError::ReferenceCapacityExceeded
             | DeliveryError::RecoveryExpired
             | DeliveryError::DecodeFailed
     )
@@ -135,3 +136,6 @@ pub(super) fn admit<T>(
         Err(error) => Err(Error::Media(error)),
     }
 }
+
+#[cfg(test)]
+mod capacity_tests;

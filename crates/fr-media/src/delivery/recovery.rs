@@ -90,8 +90,9 @@ impl RecoveryRequestor {
         self.last_useful = Some(number);
         Ok(())
     }
-    /// Tick the real pipeline even without packets. Only reference expiry,
-    /// recovery expiry and a reported decoder failure can request recovery.
+    /// Tick the real pipeline even without packets. Expired reference retention
+    /// (time or established-chain capacity), recovery expiry and a reported
+    /// decoder failure can request recovery.
     /// Protocol violations, cancellation and clock failure remain terminal.
     /// An undersized output retains the FIRST failure deadline, but sends nothing.
     pub fn offer(
@@ -103,7 +104,13 @@ impl RecoveryRequestor {
         self.check(receiver, now)?;
         let reason = match receiver.tick(now) {
             Ok(()) => return Ok(None),
-            Err(DeliveryError::ReferenceExpired) => Reason::ReferenceExpired,
+            // v1's reference-expiry request abandons an unusable dependency
+            // chain. A count/byte ceiling also ends reference retention (plan
+            // 12.3); keep its distinct local cause instead of claiming a decoder
+            // failure or emitting a new, unnegotiated wire reason.
+            Err(DeliveryError::ReferenceExpired | DeliveryError::ReferenceCapacityExceeded) => {
+                Reason::ReferenceExpired
+            }
             Err(DeliveryError::RecoveryExpired) => Reason::RecoveryExpired,
             Err(DeliveryError::DecodeFailed) => Reason::DecodeFailed,
             Err(error) => {

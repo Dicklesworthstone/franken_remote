@@ -261,24 +261,8 @@ impl Assembly {
         reliable_until: Option<u64>,
     ) -> Result<Self, DeliveryError> {
         descriptor.validate(&config.limits)?;
-        let count = descriptor.fragment_count()?;
-        let words = if reliable_until.is_some() {
-            0
-        } else {
-            usize::try_from(count.div_ceil(64)).map_err(|_| DeliveryError::ResourceLimit)?
-        };
-        let metadata = words
-            .checked_mul(8)
-            .and_then(|n| {
-                n.checked_add(
-                    core::mem::size_of::<Self>() + core::mem::size_of::<ReceivedPicture>(),
-                )
-            })
-            .ok_or(DeliveryError::ResourceLimit)?;
-        let mut bytes = budget.allocate(
-            usize::try_from(descriptor.total_bytes).map_err(|_| DeliveryError::ResourceLimit)?,
-            metadata,
-        )?;
+        let (length, words, metadata) = Self::storage(descriptor, reliable_until.is_some())?;
+        let mut bytes = budget.allocate(length, metadata)?;
         let mut seen = Vec::new();
         seen.try_reserve_exact(words)
             .map_err(|_| DeliveryError::AllocationFailed)?;
@@ -303,6 +287,31 @@ impl Assembly {
             next_repair: deadline(now, config.policy.repair_delay_micros)?,
             repair_attempts: 0,
         })
+    }
+    /// One checked layout for admission preflight and the actual allocation.
+    /// The bitset and both queued/in-flight descriptors count against the same
+    /// compressed budget; a full slot table cannot bypass this size check.
+    fn storage(
+        descriptor: FrameDescriptor,
+        reliable: bool,
+    ) -> Result<(usize, usize, usize), DeliveryError> {
+        let length =
+            usize::try_from(descriptor.total_bytes).map_err(|_| DeliveryError::ResourceLimit)?;
+        let count = descriptor.fragment_count()?;
+        let words = if reliable {
+            0
+        } else {
+            usize::try_from(count.div_ceil(64)).map_err(|_| DeliveryError::ResourceLimit)?
+        };
+        let metadata = words
+            .checked_mul(8)
+            .and_then(|n| {
+                n.checked_add(
+                    core::mem::size_of::<Self>() + core::mem::size_of::<ReceivedPicture>(),
+                )
+            })
+            .ok_or(DeliveryError::ResourceLimit)?;
+        Ok((length, words, metadata))
     }
     fn complete(&self) -> bool {
         self.received == self.descriptor.total_bytes
@@ -624,6 +633,14 @@ impl ReceivePipeline {
         match result {
             Ok(update) => Ok(update),
             Err(DeliveryError::WrongState) => Err(DeliveryError::WrongState),
+            // Only an established chain can abandon bounded dependency work.
+            // Startup/recovery which cannot fit its own admitted work is still a
+            // terminal resource refusal, not another recursive recovery attempt.
+            Err(DeliveryError::ReferenceCapacityExceeded)
+                if self.state != ReceiveState::Streaming =>
+            {
+                self.fail(DeliveryError::ResourceLimit)
+            }
             Err(error) => self.fail(error),
         }
     }
@@ -678,12 +695,14 @@ impl ReceivePipeline {
             }
             return Ok(index);
         }
+        let (length, _, metadata) = Assembly::storage(descriptor, reliable)?;
+        self.budget.check_allocation(length, metadata)?;
         let index = self
             .slots
             .iter()
             .take(self.active_slots)
             .position(Option::is_none)
-            .ok_or(DeliveryError::ResourceLimit)?;
+            .ok_or(DeliveryError::ReferenceCapacityExceeded)?;
         let until = if reliable {
             Some(self.recovery_until.ok_or(DeliveryError::WrongState)?)
         } else {

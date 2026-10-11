@@ -126,7 +126,7 @@ fn active_window_not_static_ceiling_bounds_incomplete_picture_metadata() {
         } else {
             assert_eq!(
                 r.receive(Channel::Video, &packet[..n], frame),
-                Err(DeliveryError::ResourceLimit)
+                Err(DeliveryError::ReferenceCapacityExceeded)
             );
             // The normal receiver failure path fences and releases partial work.
             assert_eq!(budget.usage().pictures, 0);
