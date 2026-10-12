@@ -15,6 +15,7 @@ use fr_transport::quic::{self, QuicRecords, Route};
 use fr_wire::audio::{self as wire, AudioConfiguration};
 
 mod acknowledgement;
+mod reply;
 
 /// Reliable-record retention for this viewer's replies.
 const REPLY_SEND_US: u64 = 2_000_000;
@@ -26,7 +27,7 @@ pub enum AudioEnd {
     Host(AudioStopReason),
     /// No local output was configured for a selected channel.
     NoOutput,
-    /// The local output failed or refused; the host was told to stop.
+    /// The local output or its bounded reply path failed or refused.
     Local,
 }
 
@@ -54,12 +55,25 @@ pub trait AudioOutput {
     fn configure(&mut self, binding: u32, offer: AudioConfiguration) -> Result<(), OutputRefused>;
     /// Bounded progress: startup, then decode/render. Once the local output
     /// and decoder are ready, pass exactly one `AudioConfigured` record to
-    /// `acknowledge`; its `Ok` is local send admission, not remote receipt.
+    /// `acknowledge`. Its `Ok` transfers the exact validated reply to this
+    /// session's one bounded pending slot; do not emit it again. It is NOT
+    /// transport admission or remote receipt. This owner withholds all packets
+    /// until the original reply is actually admitted by the transport.
     fn service(
         &mut self,
         live: &mut dyn FnMut() -> bool,
         acknowledge: &mut dyn FnMut(&[u8]) -> Result<(), OutputRefused>,
     ) -> Result<(), OutputRefused>;
+    /// The original configuration reply has actually entered transport, once.
+    /// This is distinct from the callback's bounded custody and from remote
+    /// receipt or audibility. Implementations may update local status here.
+    fn configuration_admitted(
+        &mut self,
+        _binding: u32,
+        _offer: AudioConfiguration,
+    ) -> Result<(), OutputRefused> {
+        Ok(())
+    }
     /// One validated `AudioPacket` or matching `AudioStop` record.
     fn receive(
         &mut self,
@@ -104,6 +118,7 @@ pub(crate) struct ViewerAudio {
     /// A local stop to send to the host before anything else.
     stop: Option<(AudioGeneration, AudioStopReason)>,
     statistics: AudioStatistics,
+    pending_reply: Option<reply::Pending>,
 }
 impl std::fmt::Debug for ViewerAudio {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -126,6 +141,7 @@ impl ViewerAudio {
             last: None,
             stop: None,
             statistics: AudioStatistics::default(),
+            pending_reply: None,
         }))
     }
     /// Install the local output once, before the first configuration.
@@ -142,6 +158,7 @@ impl ViewerAudio {
     pub(super) fn close(&mut self) {
         self.state = State::Ended;
         self.stop = None;
+        self.pending_reply = None;
         drop(self.output.take());
     }
     pub(crate) const fn statistics(&self) -> AudioStatistics {
@@ -154,6 +171,7 @@ impl ViewerAudio {
     }
     fn end(&mut self, end: AudioEnd) {
         self.state = State::Ended;
+        self.pending_reply = None;
         if let Some(output) = &mut self.output {
             output.ended(end);
         }
@@ -162,6 +180,7 @@ impl ViewerAudio {
     /// drop the failed epoch's device/decoder at once, and wait for a fresh
     /// epoch. Old samples are never replayed into the next output.
     fn fail_locally(&mut self, generation: AudioGeneration) {
+        self.pending_reply = None;
         self.stop = Some((generation, AudioStopReason::DeviceChanged));
         if self.statistics.restarts < MAX_RESTARTS {
             self.statistics.restarts += 1;
@@ -271,7 +290,8 @@ impl ViewerAudio {
             _ => {}
         }
     }
-    /// Bounded: output progress, the one acknowledgement, a pending stop.
+    /// Native replies enter one bounded slot; only actual transport admission
+    /// enables packets. Congestion neither resets the output nor buys more time.
     pub(super) fn service(
         &mut self,
         q: &mut QuicRecords,
@@ -279,77 +299,11 @@ impl ViewerAudio {
         now_us: u64,
         live: &mut dyn FnMut() -> bool,
     ) -> Result<(), Error> {
-        if let Some((generation, reason)) = self.stop {
-            let mut record = [0; wire::AUDIO_STOP_RECORD_BYTES];
-            wire::encode_stop(
-                &wire::AudioStop {
-                    direction: AudioDirection::Downlink,
-                    generation,
-                    reason,
-                },
-                self.lanes.binding,
-                &mut record,
-            )
-            .map_err(Error::Wire)?;
-            match q.send(
-                cx,
-                Route::Stream(self.lanes.replies),
-                &record,
-                now_us.saturating_add(REPLY_SEND_US),
-                &mut *live,
-            ) {
-                Ok(()) => self.stop = None,
-                Err(quic::Error::Backpressure) => return Ok(()),
-                Err(error) => return Err(Error::Transport(error)),
-            }
-        }
-        // After an end the output still gets bounded turns to finish its own
-        // device cork/flush; it can never acknowledge or play again.
-        let offer = match self.state {
-            State::Configuring(offer) | State::Active(offer) => Some(offer),
-            State::Idle | State::Ended => None,
-        };
-        let Some(output) = &mut self.output else {
-            return Ok(());
-        };
-        let replies = Route::Stream(self.lanes.replies);
-        let mut gate = acknowledgement::Gate::new(self.state, self.lanes.binding);
-        let mut transport_error = None;
-        let result = {
-            // Both callbacks are synchronous and nonoverlapping. The output's
-            // own permission checks do not replace the session's check at the
-            // actual send boundary (in particular after a worker handoff).
-            let permission = std::cell::RefCell::new(live);
-            let mut checkpoint = || (permission.borrow_mut())();
-            let mut acknowledge = |record: &[u8]| {
-                gate.admit(record, || {
-                    match q.send(
-                        cx,
-                        replies,
-                        record,
-                        now_us.saturating_add(REPLY_SEND_US),
-                        || cx.checkpoint().is_ok() && (permission.borrow_mut())(),
-                    ) {
-                        Ok(()) => Ok(()),
-                        Err(error) => {
-                            transport_error = Some(error);
-                            Err(OutputRefused)
-                        }
-                    }
-                })
-            };
-            output.service(&mut checkpoint, &mut acknowledge)
-        };
-        if let Some(offer) = offer {
-            if gate.admitted() {
-                self.state = State::Active(offer);
-            }
-            // A faulty output cannot hide its refused callback by returning Ok.
-            if result.is_err() || gate.failed() || transport_error.is_some() {
-                self.fail_locally(offer.generation);
-            }
-        }
-        Ok(())
+        self.service_reply(
+            now_us,
+            &mut || cx.checkpoint().is_ok() && live(),
+            &mut |route, bytes, until, permitted| q.send(cx, route, bytes, until, permitted),
+        )
     }
 }
 

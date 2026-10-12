@@ -13,7 +13,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
         mpsc::{self, Receiver, SyncSender, TryRecvError},
     },
     thread::{self, JoinHandle},
@@ -301,6 +301,7 @@ impl ViewerAudioOutput for Output {
         self.job = Some(job);
         self.last = Some(offer.generation);
         self.current = Some((binding, offer));
+        self.report.borrow_mut().acknowledged = false;
         Ok(())
     }
     fn service(
@@ -324,9 +325,10 @@ impl ViewerAudioOutput for Output {
                     job.shared.fail(Fault::Acknowledgement);
                     return Err(ViewerAudioRefused);
                 }
-                // Actual local transport acceptance, not insertion into the worker outbox.
+                // Session custody releases the worker's one reply. Actual
+                // transport acceptance is reported separately below; frd does
+                // not deliver any packets until that admission succeeds.
                 job.acknowledged = true;
-                self.report.borrow_mut().acknowledged = true;
                 if !live() || !job.shared.live_at(now(self.origin).0) {
                     job.stop();
                     return Err(ViewerAudioRefused);
@@ -340,6 +342,21 @@ impl ViewerAudioOutput for Output {
                 return Err(ViewerAudioRefused);
             }
         }
+        Ok(())
+    }
+    fn configuration_admitted(
+        &mut self,
+        binding: u32,
+        offer: AudioConfiguration,
+    ) -> Result<(), ViewerAudioRefused> {
+        if self.current != Some((binding, offer))
+            || self.job.as_ref().is_none_or(|job| {
+                !job.acknowledged || !job.shared.live_at(now(self.origin).0)
+            })
+        {
+            return Err(ViewerAudioRefused);
+        }
+        self.report.borrow_mut().acknowledged = true;
         Ok(())
     }
     fn receive(
@@ -395,6 +412,7 @@ impl ViewerAudioOutput for Output {
         self.account();
         let mut report = self.report.borrow_mut();
         report.resets = report.resets.saturating_add(1);
+        report.acknowledged = false;
         // Keep the original job until its thread AND decoder have retired.
     }
 }
@@ -470,10 +488,9 @@ fn native(
                 shared.fail(Fault::Permission);
                 return Err(ViewerAudioRefused);
             }
-            output.service(
-                &mut || shared.live_at(now(config.origin).0),
-                &mut |bytes| forward_ack(shared, config.origin, replies, bytes),
-            )?;
+            output.service(&mut || shared.live_at(now(config.origin).0), &mut |bytes| {
+                forward_ack(shared, config.origin, replies, bytes)
+            })?;
             shared
                 .progress
                 .store(now(config.origin).0, Ordering::Release);

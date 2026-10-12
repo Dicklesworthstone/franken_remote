@@ -85,6 +85,7 @@ fn owner() -> (ViewerAudio, Rc<RefCell<Calls>>) {
         last: None,
         stop: None,
         statistics: AudioStatistics::default(),
+        pending_reply: None,
     };
     audio.configure(Box::new(Recording(calls.clone()))).unwrap();
     (audio, calls)
@@ -275,6 +276,7 @@ fn a_viewer_without_an_output_refuses_the_configuration_by_type() {
         last: None,
         stop: None,
         statistics: AudioStatistics::default(),
+        pending_reply: None,
     };
     audio.receive(control(), &configuration(1), &mut live());
     assert_eq!(
@@ -308,3 +310,6 @@ fn local_session_close_drops_output_once_without_inventing_host_end_or_failure()
     drop(audio);
     assert_eq!(calls.borrow().dropped, 2);
 }
+
+#[path = "reply_tests.rs"]
+mod reply_tests;
