@@ -49,7 +49,9 @@ impl Owner {
         loop {
             match handle.status() {
                 live::Status::Opening => sleep(cx.now(), Duration::from_millis(10)).await,
-                live::Status::Active(_) => return lease_with_approval(Some(handle), available).map(|_| ()),
+                live::Status::Active(_) => {
+                    return lease_with_approval(Some(handle), available).map(|_| ());
+                }
                 live::Status::Stopped(error) => return Err(Error::Policy(error)),
             }
         }
@@ -80,7 +82,10 @@ impl Owner {
 
 /// Snapshot one source epoch. A source never adopts a new revision in place,
 /// even if command-line overrides keep its effective settings unchanged.
-pub(super) fn lease_with_approval(handle: Option<&live::Handle>, available: bool) -> Result<Option<live::Lease>, Error> {
+pub(super) fn lease_with_approval(
+    handle: Option<&live::Handle>,
+    available: bool,
+) -> Result<Option<live::Lease>, Error> {
     handle
         .map(|handle| {
             let lease = handle.lease().map_err(Error::Policy)?;
@@ -105,7 +110,10 @@ mod tests {
     use super::*;
     #[test]
     fn local_policy_cannot_become_unattended_when_the_native_backend_is_missing() {
-        assert_eq!(require_backend(Approval::Local, false), Err(Error::LocalApprovalUnavailable));
+        assert_eq!(
+            require_backend(Approval::Local, false),
+            Err(Error::LocalApprovalUnavailable)
+        );
         assert_eq!(require_backend(Approval::Local, true), Ok(()));
         assert_eq!(require_backend(Approval::None, false), Ok(()));
         assert_eq!(require_backend(Approval::None, true), Ok(()));

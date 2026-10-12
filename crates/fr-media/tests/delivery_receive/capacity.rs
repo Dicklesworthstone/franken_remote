@@ -50,7 +50,14 @@ fn binding(c: ReceiveConfig) -> Binding {
     }
 }
 
-fn ready(c: ReceiveConfig) -> (ReceivePipeline, MediaBudget, DecoderBinding, RecoveryRequestor) {
+fn ready(
+    c: ReceiveConfig,
+) -> (
+    ReceivePipeline,
+    MediaBudget,
+    DecoderBinding,
+    RecoveryRequestor,
+) {
     let budget = MediaBudget::new(c.limits.protocol()).unwrap();
     let mut receiver = ReceivePipeline::new(c, budget.clone()).unwrap();
     let decoder = receiver
@@ -59,8 +66,8 @@ fn ready(c: ReceiveConfig) -> (ReceivePipeline, MediaBudget, DecoderBinding, Rec
     let mut requestor = RecoveryRequestor::new(&receiver, binding(c)).unwrap();
     recovery(&mut receiver, c, 0);
     let idr = receiver.take_decodable(0).unwrap().unwrap();
-    let decoded = receiver.complete_decode(&idr, 0).unwrap();
-    requestor.observe_decoded(&decoded).unwrap();
+    let completed = receiver.complete_decode(&idr, 0).unwrap();
+    requestor.observe_decoded(&completed).unwrap();
     drop(idr);
     (receiver, budget, decoder, requestor)
 }
@@ -146,7 +153,10 @@ fn replacement_reuses_the_original_budget_and_fences_the_old_decoder() {
         Err(DeliveryError::ReferenceCapacityExceeded)
     );
     let mut bytes = [0; recovery_request::REQUEST_BYTES];
-    let offer = requestor.offer(&mut receiver, 4, &mut bytes).unwrap().unwrap();
+    let offer = requestor
+        .offer(&mut receiver, 4, &mut bytes)
+        .unwrap()
+        .unwrap();
     let until = offer.send_by_micros();
     requestor.mark_sent(&receiver, &offer, 5).unwrap();
     let next = ReceiveConfig {
@@ -318,7 +328,7 @@ fn startup_and_unfinished_recovery_cannot_recursively_recover_capacity_failures(
             requestor.offer(&mut receiver, 2, &mut [0; recovery_request::REQUEST_BYTES]),
             Err(DeliveryError::ResourceLimit)
         ));
-        assert_eq!(budget.usage().pictures, if decoding { 1 } else { 0 });
+        assert_eq!(budget.usage().pictures, usize::from(decoding));
         drop(held);
         assert_eq!(budget.usage(), BudgetUsage::default());
     }
@@ -368,7 +378,9 @@ fn malformed_and_conflicting_records_remain_terminal_with_a_full_window() {
         if malformed {
             assert!(packet.pop().is_some());
         }
-        let error = receiver.receive(Channel::MediaConfig, &packet, 3).unwrap_err();
+        let error = receiver
+            .receive(Channel::MediaConfig, &packet, 3)
+            .unwrap_err();
         if malformed {
             assert!(matches!(error, DeliveryError::Wire(_)));
         } else {
@@ -407,7 +419,11 @@ fn capacity_recovery_wait_expires_without_a_fresh_budget_or_duplicate_request() 
         requestor.authorize_write(&receiver, &offer, until),
         Err(DeliveryError::RecoveryExpired)
     );
-    assert!(requestor.offer(&mut receiver, until + 1, &mut bytes).is_err());
+    assert!(
+        requestor
+            .offer(&mut receiver, until + 1, &mut bytes)
+            .is_err()
+    );
     assert_eq!(requestor.next_deadline(), None);
     assert_eq!(receiver.state(), ReceiveState::NeedsRecovery);
 }

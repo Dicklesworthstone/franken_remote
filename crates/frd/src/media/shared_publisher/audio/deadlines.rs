@@ -82,19 +82,27 @@ fn egress_keeps_capture_deadline_and_maps_only_the_viewer_epoch() {
 fn expired_prepared_actions_never_get_a_second_send_budget() {
     let ring = ring(100);
     for now in [100 + MAX_PACKET_AGE_US, 101 + MAX_PACKET_AGE_US, u64::MAX] {
-        assert!(audio_record(action(), &ring, lanes(), now).unwrap().is_none());
+        assert!(
+            audio_record(action(), &ring, lanes(), now)
+                .unwrap()
+                .is_none()
+        );
     }
     assert_eq!(ring.len(), 1); // Read-only validation, no hidden queue or mutation.
 }
 
 #[test]
 fn future_or_overflowed_capture_clocks_produce_no_record() {
-    assert!(audio_record(action(), &ring(100), lanes(), 99)
-        .unwrap()
-        .is_none());
-    assert!(audio_record(action(), &ring(u64::MAX - 1), lanes(), u64::MAX)
-        .unwrap()
-        .is_none());
+    assert!(
+        audio_record(action(), &ring(100), lanes(), 99)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        audio_record(action(), &ring(u64::MAX - 1), lanes(), u64::MAX)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]

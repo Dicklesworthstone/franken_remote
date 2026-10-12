@@ -7,9 +7,7 @@ use fr_core::{
 use fr_media::delivery::{
     DeliveryError, DeliveryMode, MediaBindings, MediaEpoch, SendCache, SendError, SendPolicy,
 };
-use fr_wire::{
-    Channel, FrameDescriptor, MediaLimits, PipelineState, Progress, SourceObservation,
-};
+use fr_wire::{Channel, FrameDescriptor, MediaLimits, PipelineState, Progress, SourceObservation};
 
 fn cache() -> SendCache {
     SendCache::new(
@@ -133,7 +131,12 @@ fn late_native_output_not_admitted_to_the_cache_cannot_replace_notification_evid
 fn replacement_and_terminal_close_retire_failed_metadata() {
     let mut cache = bootstrapped();
     cache
-        .push(progress(1, Some(0), 100), vec![9; 64], DeliveryMode::Datagrams, 100)
+        .push(
+            progress(1, Some(0), 100),
+            vec![9; 64],
+            DeliveryMode::Datagrams,
+            100,
+        )
         .unwrap();
     assert_eq!(cache.tick(250_100), Err(SendError::OriginalExpired));
     cache.await_recovery_request(250_100).unwrap();
@@ -164,7 +167,12 @@ fn replacement_and_terminal_close_retire_failed_metadata() {
 fn an_expired_first_picture_never_manufactures_a_source_descriptor() {
     let mut cache = cache();
     assert_eq!(
-        cache.push(progress(0, None, 0), vec![7; 64], DeliveryMode::Recovery, 2_000_000),
+        cache.push(
+            progress(0, None, 0),
+            vec![7; 64],
+            DeliveryMode::Recovery,
+            2_000_000
+        ),
         Err(SendError::OriginalExpired)
     );
     assert!(cache.needs_recovery());
@@ -177,7 +185,12 @@ fn an_expired_first_picture_never_manufactures_a_source_descriptor() {
 fn silent_peer_expiry_releases_metadata_without_renewing_the_failure_window() {
     let mut cache = bootstrapped();
     cache
-        .push(progress(1, Some(0), 100), vec![9; 64], DeliveryMode::Datagrams, 100)
+        .push(
+            progress(1, Some(0), 100),
+            vec![9; 64],
+            DeliveryMode::Datagrams,
+            100,
+        )
         .unwrap();
     assert_eq!(cache.tick(250_100), Err(SendError::OriginalExpired));
     cache.await_recovery_request(250_100).unwrap();

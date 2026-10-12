@@ -402,6 +402,7 @@ impl AudioLane {
     }
     /// The next action. Obsolete and evicted packets are skipped and counted
     /// here, so the caller never sends one; a lane never jumps backwards.
+    #[allow(clippy::too_many_lines)] // One exhaustive lane state machine; splitting it scatters its transitions.
     pub fn next(&mut self, ring: &AudioRing, now_us: u64) -> LaneAction {
         loop {
             match self.state {
@@ -472,10 +473,8 @@ impl AudioLane {
                     if let Some(oldest) = ring.oldest()
                         && next < oldest
                     {
-                        self.counters.dropped_evicted = self
-                            .counters
-                            .dropped_evicted
-                            .saturating_add(oldest - next);
+                        self.counters.dropped_evicted =
+                            self.counters.dropped_evicted.saturating_add(oldest - next);
                         self.state = LaneState::Active {
                             stream,
                             epoch,

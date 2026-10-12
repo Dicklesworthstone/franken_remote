@@ -161,9 +161,11 @@ fn coalesces_fixed_metadata_and_never_slides_a_prepared_deadline() {
     let offer = &updates[0].0;
     assert_eq!(offer.send_by_micros(), 2_251_000);
     tx.authorize_write(offer, 2_250_999).unwrap();
+    // An unsent observation that reached its own deadline is obsolete optional
+    // work, not a lost reference original (0b32af8).
     assert_eq!(
         tx.authorize_write(offer, 2_251_000),
-        Err(SendError::OriginalExpired)
+        Err(SendError::ObservationExpired)
     );
     assert!(!tx.observe_unchanged(0, 2_001_000, 2_251_000).unwrap());
     assert_eq!(packets(&mut tx, 2_251_000).len(), 0);

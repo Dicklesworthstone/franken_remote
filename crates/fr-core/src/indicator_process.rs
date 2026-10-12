@@ -25,7 +25,15 @@ pub enum Kind {
 }
 impl Kind {
     pub const fn is_request(self) -> bool {
-        matches!(self, Self::Open | Self::Check | Self::Stop | Self::ApproveView | Self::ApproveControl | Self::ApprovalCheck)
+        matches!(
+            self,
+            Self::Open
+                | Self::Check
+                | Self::Stop
+                | Self::ApproveView
+                | Self::ApproveControl
+                | Self::ApprovalCheck
+        )
     }
     const fn parse(value: u8) -> Result<Self, Error> {
         match value {
@@ -93,6 +101,7 @@ impl Frame {
         }
         Ok(frame)
     }
+    #[must_use]
     pub const fn reply(self, kind: Kind) -> Self {
         Self { kind, ..self }
     }
@@ -108,8 +117,10 @@ impl Frame {
         match (request.kind, self.kind) {
             (Kind::Open | Kind::Check, Kind::Ready | Kind::Refused)
             | (Kind::Stop, Kind::Stopped | Kind::Refused)
-            | (Kind::ApproveView | Kind::ApproveControl | Kind::ApprovalCheck,
-               Kind::Ready | Kind::Refused | Kind::Allowed | Kind::Denied) => Ok(self.kind),
+            | (
+                Kind::ApproveView | Kind::ApproveControl | Kind::ApprovalCheck,
+                Kind::Ready | Kind::Refused | Kind::Allowed | Kind::Denied,
+            ) => Ok(self.kind),
             _ => Err(Error),
         }
     }
@@ -120,15 +131,34 @@ mod tests {
     use super::*;
 
     fn request() -> Frame {
-        Frame { kind: Kind::Open, sequence: 1, epoch: 29 }
+        Frame {
+            kind: Kind::Open,
+            sequence: 1,
+            epoch: 29,
+        }
     }
     #[test]
     fn all_records_round_trip_with_constant_space() {
-        for kind in [Kind::Open, Kind::Check, Kind::Stop, Kind::Ready, Kind::Stopped, Kind::Refused,
-            Kind::ApproveView, Kind::ApproveControl, Kind::ApprovalCheck, Kind::Allowed, Kind::Denied] {
+        for kind in [
+            Kind::Open,
+            Kind::Check,
+            Kind::Stop,
+            Kind::Ready,
+            Kind::Stopped,
+            Kind::Refused,
+            Kind::ApproveView,
+            Kind::ApproveControl,
+            Kind::ApprovalCheck,
+            Kind::Allowed,
+            Kind::Denied,
+        ] {
             for sequence in [1, 2, u64::MAX] {
                 for epoch in [1, 29, u128::MAX] {
-                    let frame = Frame { kind, sequence, epoch };
+                    let frame = Frame {
+                        kind,
+                        sequence,
+                        epoch,
+                    };
                     assert_eq!(Frame::decode(&frame.encode().unwrap()), Ok(frame));
                 }
             }
@@ -159,7 +189,15 @@ mod tests {
     #[test]
     fn zero_identity_and_sequence_refuse_in_both_directions() {
         for (sequence, epoch, range) in [(0, 29, 8..16), (1, 0, 16..32)] {
-            assert_eq!(Frame { sequence, epoch, ..request() }.encode(), Err(Error));
+            assert_eq!(
+                Frame {
+                    sequence,
+                    epoch,
+                    ..request()
+                }
+                .encode(),
+                Err(Error)
+            );
             let mut bytes = request().encode().unwrap();
             bytes[range].fill(0);
             assert_eq!(Frame::decode(&bytes), Err(Error));
@@ -170,9 +208,15 @@ mod tests {
         let open = request();
         let ready = open.reply(Kind::Ready);
         assert_eq!(ready.response_to(open), Ok(Kind::Ready));
-        assert_eq!(open.reply(Kind::Refused).response_to(open), Ok(Kind::Refused));
+        assert_eq!(
+            open.reply(Kind::Refused).response_to(open),
+            Ok(Kind::Refused)
+        );
         for foreign in [
-            Frame { sequence: 2, ..ready },
+            Frame {
+                sequence: 2,
+                ..ready
+            },
             Frame { epoch: 30, ..ready },
             open,
             open.reply(Kind::Stopped),
@@ -181,7 +225,10 @@ mod tests {
         }
         let stop = open.reply(Kind::Stop);
         assert_eq!(ready.response_to(stop), Err(Error));
-        assert_eq!(stop.reply(Kind::Stopped).response_to(stop), Ok(Kind::Stopped));
+        assert_eq!(
+            stop.reply(Kind::Stopped).response_to(stop),
+            Ok(Kind::Stopped)
+        );
         assert_eq!(ready.response_to(ready), Err(Error));
         assert!(!format!("{ready:?}").contains("29"));
     }
@@ -194,7 +241,11 @@ mod approval_tests {
     #[test]
     fn ordinary_indicator_commands_can_never_accept_positive_consent() {
         for kind in [Kind::Open, Kind::Check, Kind::Stop] {
-            let request = Frame { kind, sequence: 17, epoch: 23 };
+            let request = Frame {
+                kind,
+                sequence: 17,
+                epoch: 23,
+            };
             for decision in [Kind::Allowed, Kind::Denied] {
                 assert_eq!(request.reply(decision).response_to(request), Err(Error));
             }
@@ -203,12 +254,26 @@ mod approval_tests {
     #[test]
     fn approval_has_distinct_polling_and_exact_one_request_correlation() {
         for kind in [Kind::ApproveView, Kind::ApproveControl, Kind::ApprovalCheck] {
-            let request = Frame { kind, sequence: 17, epoch: 23 };
+            let request = Frame {
+                kind,
+                sequence: 17,
+                epoch: 23,
+            };
             for decision in [Kind::Ready, Kind::Refused, Kind::Allowed, Kind::Denied] {
                 let reply = request.reply(decision);
                 assert_eq!(reply.response_to(request), Ok(decision));
-                assert_eq!(Frame { epoch: 24, ..reply }.response_to(request), Err(Error));
-                assert_eq!(Frame { sequence: 18, ..reply }.response_to(request), Err(Error));
+                assert_eq!(
+                    Frame { epoch: 24, ..reply }.response_to(request),
+                    Err(Error)
+                );
+                assert_eq!(
+                    Frame {
+                        sequence: 18,
+                        ..reply
+                    }
+                    .response_to(request),
+                    Err(Error)
+                );
             }
         }
     }

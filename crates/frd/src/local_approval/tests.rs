@@ -1,7 +1,12 @@
-use super::*;
 use super::terminal::Presentation;
+use super::*;
 use fr_core::ids::{HostBootId, OsSessionId, RemoteSessionId};
-use std::{cell::Cell, collections::VecDeque, io::{self, Read, Write}, rc::Rc};
+use std::{
+    cell::Cell,
+    collections::VecDeque,
+    io::{self, Read, Write},
+    rc::Rc,
+};
 
 fn question() -> Question {
     Question::Observation {
@@ -18,7 +23,10 @@ fn question() -> Question {
 fn handle() -> Handle {
     Handle {
         shared: Arc::new(Shared {
-            state: Mutex::new(State { status: Status::Ready, pending: None }),
+            state: Mutex::new(State {
+                status: Status::Ready,
+                pending: None,
+            }),
         }),
     }
 }
@@ -40,9 +48,13 @@ struct Tty {
 impl Tty {
     fn new(text: &str) -> Self {
         Self {
-            input: text.bytes().collect(), output: Vec::new(),
-            max_write: usize::MAX, max_read: usize::MAX, reads: 0,
-            eof: false, after_read: None,
+            input: text.bytes().collect(),
+            output: Vec::new(),
+            max_write: usize::MAX,
+            max_read: usize::MAX,
+            reads: 0,
+            eof: false,
+            after_read: None,
         }
     }
 }
@@ -52,17 +64,27 @@ impl Write for Tty {
         self.output.extend_from_slice(&bytes[..count]);
         Ok(count)
     }
-    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 impl Read for Tty {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
         self.reads += 1;
-        if let Some((clock, next)) = &self.after_read { clock.set(*next); }
+        if let Some((clock, next)) = &self.after_read {
+            clock.set(*next);
+        }
         if self.input.is_empty() {
-            return if self.eof { Ok(0) } else { Err(io::ErrorKind::WouldBlock.into()) };
+            return if self.eof {
+                Ok(0)
+            } else {
+                Err(io::ErrorKind::WouldBlock.into())
+            };
         }
         let count = self.input.len().min(bytes.len()).min(self.max_read);
-        for byte in &mut bytes[..count] { *byte = self.input.pop_front().unwrap(); }
+        for byte in &mut bytes[..count] {
+            *byte = self.input.pop_front().unwrap();
+        }
         Ok(count)
     }
 }
@@ -74,7 +96,10 @@ fn exact_receipt_is_single_use_and_holds_capacity_until_consumed() {
     assert_eq!(ticket.question(), question());
     let mut tty = Tty::new(&format!("approve {:032x}\n", 5));
     presentation.turn(&mut tty, || now).unwrap();
-    assert!(matches!(handle.ask_at(question(), 6, now), Err(Error::Busy)));
+    assert!(matches!(
+        handle.ask_at(question(), 6, now),
+        Err(Error::Busy)
+    ));
     assert_eq!(ticket.take_at(now), Ok(Some(true)));
     assert_eq!(ticket.take_at(now), Err(Error::Closed));
     let output = String::from_utf8(tty.output).unwrap();
@@ -85,9 +110,14 @@ fn exact_receipt_is_single_use_and_holds_capacity_until_consumed() {
 #[test]
 fn typeahead_old_challenge_and_generic_yes_never_approve() {
     let now = Instant::now();
-    for answer in ["y\n".to_owned(), "yes\n".to_owned(), "\n".to_owned(),
-        format!("approve {:032x}\n", 8), format!("approve {:032x} \n", 9),
-        format!("\x1b[2Japprove {:032x}\n", 9)] {
+    for answer in [
+        "y\n".to_owned(),
+        "yes\n".to_owned(),
+        "\n".to_owned(),
+        format!("approve {:032x}\n", 8),
+        format!("approve {:032x} \n", 9),
+        format!("\x1b[2Japprove {:032x}\n", 9),
+    ] {
         let (_, mut ticket, mut presentation) = setup(now, 9);
         presentation.turn(&mut Tty::new(&answer), || now).unwrap();
         assert_eq!(ticket.take_at(now), Ok(Some(false)));
@@ -104,9 +134,11 @@ fn abandoned_and_stopped_tickets_cannot_receive_a_late_yes() {
     presentation.turn(&mut tty, || now).unwrap();
     assert_eq!(pending.state_at(now), CANCELLED);
     assert_eq!(tty.reads, 0);
-    assert!(tty.output.is_empty());
+    assert_eq!(tty.output, [] as [u8; 0]);
     let (handle, mut ticket, mut presentation) = setup(now, 7);
-    presentation.turn(&mut Tty::new(&format!("approve {:032x}\n", 7)), || now).unwrap();
+    presentation
+        .turn(&mut Tty::new(&format!("approve {:032x}\n", 7)), || now)
+        .unwrap();
     handle.shared.stop(Error::Closed);
     assert_eq!(ticket.take_at(now), Err(Error::Closed));
     assert!(handle.ask_at(question(), 8, now).is_err());
@@ -117,7 +149,9 @@ fn expiry_fences_even_a_yes_already_delivered_by_the_worker() {
     let now = Instant::now();
     let end = now + PROMPT_TIMEOUT;
     let (_, mut ticket, mut presentation) = setup(now, 5);
-    presentation.turn(&mut Tty::new(&format!("approve {:032x}\n", 5)), || now).unwrap();
+    presentation
+        .turn(&mut Tty::new(&format!("approve {:032x}\n", 5)), || now)
+        .unwrap();
     assert_eq!(ticket.take_at(end), Err(Error::Expired));
     let (_, mut ticket, mut presentation) = setup(now, 6);
     let mut tty = Tty::new(&format!("approve {:032x}\n", 6));
@@ -148,7 +182,9 @@ fn partial_output_finishes_before_input_and_fragmented_answer_works() {
     assert_eq!(tty.reads, 0);
     for _ in 0..2200 {
         presentation.turn(&mut tty, || now).unwrap();
-        if ticket.pending.state_at(now) == ALLOWED { break; }
+        if ticket.pending.state_at(now) == ALLOWED {
+            break;
+        }
     }
     assert_eq!(ticket.take_at(now), Ok(Some(true)));
 }

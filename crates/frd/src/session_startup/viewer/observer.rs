@@ -1028,6 +1028,6 @@ async fn send_decoder(
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod consent_budget;
+#[cfg(test)]
+mod tests;

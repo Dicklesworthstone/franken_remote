@@ -149,7 +149,10 @@ impl SendCache {
             return Err(SendError::InvalidSequence);
         }
         if let Some(pending) = &self.recovery_request {
-            if pending.binding.is_some_and(|installed| installed != binding) {
+            if pending
+                .binding
+                .is_some_and(|installed| installed != binding)
+            {
                 return Err(DeliveryError::StaleGeneration.into());
             }
             if pending.request.is_some() {

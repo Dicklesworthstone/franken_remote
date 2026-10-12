@@ -138,9 +138,7 @@ fn repeated_late_captures_exhaust_the_original_subscription_not_a_fresh_allowanc
             matches!(
                 &server,
                 Err(Error::MediaTransport(crate::media_quic::Error::Media(
-                    crate::media::Error::Send(
-                        fr_media::delivery::SendError::RecoveryLimitExceeded
-                    )
+                    crate::media::Error::Send(fr_media::delivery::SendError::RecoveryLimitExceeded)
                 )))
             ),
             "the second failed generation must be refused: {server:?}"

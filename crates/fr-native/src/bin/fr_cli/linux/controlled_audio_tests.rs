@@ -82,8 +82,7 @@ fn audio_readiness_is_not_a_control_grant_or_audibility_evidence() {
         }),
         false,
     );
-    let json: serde_json::Value =
-        serde_json::from_str(&completion(&progress, true, None)).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&completion(&progress, true, None)).unwrap();
     assert_eq!(json["control_granted"], false);
     assert_eq!(json["audio_active"], true);
     assert_eq!(json["audibility_proven"], false);

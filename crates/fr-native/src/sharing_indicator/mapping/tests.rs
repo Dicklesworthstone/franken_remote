@@ -15,10 +15,11 @@ use frd::media::ObservationControl;
 use std::{
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU8, AtomicU32},
     },
     task::{Context, Poll, Waker},
+    time::Instant,
 };
 fn fixture(
     status: Status,
@@ -54,6 +55,7 @@ fn fixture(
             }),
             owner: Owner::Observation(Box::new(observation.clone())),
             window: AtomicU32::new(0),
+            last_turn: Mutex::new(Instant::now()),
         })),
         task: None,
         observation: observation.clone(),

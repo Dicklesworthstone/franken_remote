@@ -806,8 +806,9 @@ mod tests {
                 sink: Some("speakers".into()),
             })
         );
-        let Command::Connect(plain_control) =
-            options(&format!("connect {base} --control")).unwrap().command
+        let Command::Connect(plain_control) = options(&format!("connect {base} --control"))
+            .unwrap()
+            .command
         else {
             unreachable!("connection required");
         };
@@ -1327,9 +1328,8 @@ mod controlled_audio_tests {
             "--audio --send /a",
             "--audio --clipboard --send /a",
         ] {
-            let Command::Connect(connection) = parse(&args(&format!("{base} {extra}")))
-                .unwrap()
-                .command
+            let Command::Connect(connection) =
+                parse(&args(&format!("{base} {extra}"))).unwrap().command
             else {
                 unreachable!("connection required");
             };
@@ -1347,8 +1347,14 @@ mod controlled_audio_tests {
                 "connect n-host --control --view-only --audio",
                 "connection_role_required",
             ),
-            ("connect n-host --control --audio", "native_transport_unqualified"),
-            ("connect n-host --control --audio --audio", "invalid_arguments"),
+            (
+                "connect n-host --control --audio",
+                "native_transport_unqualified",
+            ),
+            (
+                "connect n-host --control --audio --audio",
+                "invalid_arguments",
+            ),
             (
                 "connect n-host --control --audio-server /run/native",
                 "invalid_arguments",

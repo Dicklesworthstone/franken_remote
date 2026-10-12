@@ -20,7 +20,11 @@ fn emitted(options: &InstallOptions) -> RunOptions {
         .lines()
         .find_map(|line| line.strip_prefix("ExecStart=:"))
         .unwrap();
-    let args = line.split_whitespace().skip(2).map(str::to_owned).collect::<Vec<_>>();
+    let args = line
+        .split_whitespace()
+        .skip(2)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     RunOptions::parse(&args).unwrap()
 }
 
@@ -32,17 +36,31 @@ fn encoder_selection_survives_the_rendered_systemd_command_without_fallback() {
         ("software", Encoder::SoftwareExplicit),
     ] {
         let options = parse(&[
-            "--user", "--dry-run", "--approval", "none", "--sharing", "own-user",
-            "--", "--encoder", name, "--worker", "/usr/libexec/fr-media-worker",
-            "--display", ":0",
-        ]).unwrap();
+            "--user",
+            "--dry-run",
+            "--approval",
+            "none",
+            "--sharing",
+            "own-user",
+            "--",
+            "--encoder",
+            name,
+            "--worker",
+            "/usr/libexec/fr-media-worker",
+            "--display",
+            ":0",
+        ])
+        .unwrap();
         assert!(!options.software_explicit);
         assert!(!render_systemd_unit(&options).contains("--software-explicit"));
         let run = emitted(&options);
         assert_eq!(run.selected_encoder().unwrap(), Some(encoder));
         assert_eq!(run.approval, Some(Approval::None));
         assert_eq!(run.sharing, Some(Sharing::OwnUser));
-        assert_eq!(run.worker, Some(PathBuf::from("/usr/libexec/fr-media-worker")));
+        assert_eq!(
+            run.worker,
+            Some(PathBuf::from("/usr/libexec/fr-media-worker"))
+        );
         assert_eq!(run.display.as_deref(), Some(":0"));
         assert!(run.input_agent.is_none() && !run.audio && !run.clipboard && run.files.is_none());
     }
@@ -52,7 +70,12 @@ fn encoder_selection_survives_the_rendered_systemd_command_without_fallback() {
 fn legacy_software_and_explicit_backend_cannot_both_enter_a_unit() {
     for name in ["software", "nvenc", "vaapi"] {
         let conflicting = parse(&[
-            "--user", "--software-explicit", "--dry-run", "--", "--encoder", name,
+            "--user",
+            "--software-explicit",
+            "--dry-run",
+            "--",
+            "--encoder",
+            name,
         ]);
         assert!(matches!(conflicting, Err(ServiceError::InvalidOptions)));
         let mut programmatic = InstallOptions {
@@ -66,7 +89,10 @@ fn legacy_software_and_explicit_backend_cannot_both_enter_a_unit() {
         assert!(programmatic.validate().is_ok());
     }
     let legacy = parse(&["--user", "--software-explicit", "--dry-run"]).unwrap();
-    assert_eq!(emitted(&legacy).selected_encoder().unwrap(), Some(Encoder::SoftwareExplicit));
+    assert_eq!(
+        emitted(&legacy).selected_encoder().unwrap(),
+        Some(Encoder::SoftwareExplicit)
+    );
 }
 
 #[test]
@@ -81,22 +107,41 @@ fn malformed_or_duplicate_encoder_flags_are_refused_before_installation() {
         vec!["--encoder", "nvenc", "--approval", "none"],
     ] {
         let args = ["--user", "--dry-run", "--"]
-            .into_iter().chain(tail.iter().copied()).collect::<Vec<_>>();
-        assert!(matches!(parse(&args), Err(ServiceError::InvalidOptions)), "{tail:?}");
+            .into_iter()
+            .chain(tail.iter().copied())
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(parse(&args), Err(ServiceError::InvalidOptions)),
+            "{tail:?}"
+        );
     }
     assert!(matches!(
         parse(&["--user", "--dry-run"]),
-        Err(ServiceError::HostProfileUnavailable { code: "hardware_hevc_unavailable", .. })
+        Err(ServiceError::HostProfileUnavailable {
+            code: "hardware_hevc_unavailable",
+            ..
+        })
     ));
 }
 
 #[test]
 fn encoder_selection_preserves_authority_policy_and_other_explicit_features() {
     let options = parse(&[
-        "--user", "--dry-run", "--", "--encoder", "vaapi",
-        "--input-agent", "/input", "--clipboard", "--audio", "--files", "/drop",
-        "--logind-session", "c2",
-    ]).unwrap();
+        "--user",
+        "--dry-run",
+        "--",
+        "--encoder",
+        "vaapi",
+        "--input-agent",
+        "/input",
+        "--clipboard",
+        "--audio",
+        "--files",
+        "/drop",
+        "--logind-session",
+        "c2",
+    ])
+    .unwrap();
     assert!(options.approval_mode.is_empty() && options.sharing_scope.is_empty());
     let run = emitted(&options);
     assert_eq!(run.selected_encoder().unwrap(), Some(Encoder::Vaapi));
@@ -106,8 +151,19 @@ fn encoder_selection_preserves_authority_policy_and_other_explicit_features() {
     assert_eq!(run.files, Some(PathBuf::from("/drop")));
     assert_eq!(run.logind_session.as_deref(), Some("c2"));
     assert!(matches!(
-        parse(&["--user", "--dry-run", "--approval", "local", "--", "--encoder", "nvenc"]),
-        Err(ServiceError::HostProfileUnavailable { code: "local_approval_unavailable", .. })
+        parse(&[
+            "--user",
+            "--dry-run",
+            "--approval",
+            "local",
+            "--",
+            "--encoder",
+            "nvenc"
+        ]),
+        Err(ServiceError::HostProfileUnavailable {
+            code: "local_approval_unavailable",
+            ..
+        })
     ));
 }
 
@@ -115,32 +171,68 @@ fn encoder_selection_preserves_authority_policy_and_other_explicit_features() {
 fn hardware_selection_cannot_bypass_system_service_or_platform_restrictions() {
     assert!(matches!(
         parse(&["--system", "--dry-run", "--", "--encoder", "nvenc"]),
-        Err(ServiceError::HostProfileUnavailable { code: "system_service_requires_headless", .. })
+        Err(ServiceError::HostProfileUnavailable {
+            code: "system_service_requires_headless",
+            ..
+        })
     ));
     let options = parse(&[
-        "--system", "--dry-run", "--", "--encoder", "nvenc", "--headless",
-    ]).unwrap();
+        "--system",
+        "--dry-run",
+        "--",
+        "--encoder",
+        "nvenc",
+        "--headless",
+    ])
+    .unwrap();
     let run = emitted(&options);
     assert!(run.headless);
     assert_eq!(run.selected_encoder().unwrap(), Some(Encoder::Nvenc));
     for kind in [ServiceKind::LaunchdAgent, ServiceKind::WindowsService] {
-        let options = InstallOptions { kind, ..options.clone() };
-        assert!(matches!(options.validate(), Err(ServiceError::UnsupportedPlatform { .. })));
+        let options = InstallOptions {
+            kind,
+            ..options.clone()
+        };
+        assert!(matches!(
+            options.validate(),
+            Err(ServiceError::UnsupportedPlatform { .. })
+        ));
     }
 }
 
 #[test]
 fn a_hardware_view_only_service_retains_the_validated_observation_indicator() {
     let options = parse(&[
-        "--user", "--dry-run", "--", "--encoder", "vaapi",
-        "--observation-indicator", "/usr/libexec/fr-observation-indicator",
-    ]).unwrap();
+        "--user",
+        "--dry-run",
+        "--",
+        "--encoder",
+        "vaapi",
+        "--observation-indicator",
+        "/usr/libexec/fr-observation-indicator",
+    ])
+    .unwrap();
     let run = emitted(&options);
     assert_eq!(run.selected_encoder().unwrap(), Some(Encoder::Vaapi));
-    assert_eq!(run.observation_indicator, Some(PathBuf::from("/usr/libexec/fr-observation-indicator")));
-    for path in ["relative", "/tmp/../indicator", "/tmp/indicator\nOther=thing"] {
+    assert_eq!(
+        run.observation_indicator,
+        Some(PathBuf::from("/usr/libexec/fr-observation-indicator"))
+    );
+    for path in [
+        "relative",
+        "/tmp/../indicator",
+        "/tmp/indicator\nOther=thing",
+    ] {
         assert!(matches!(
-            parse(&["--user", "--dry-run", "--", "--encoder", "vaapi", "--observation-indicator", path]),
+            parse(&[
+                "--user",
+                "--dry-run",
+                "--",
+                "--encoder",
+                "vaapi",
+                "--observation-indicator",
+                path
+            ]),
             Err(ServiceError::InvalidOptions)
         ));
     }

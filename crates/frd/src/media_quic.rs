@@ -485,7 +485,9 @@ mod preflight_tests {
     #[test]
     fn source_revocation_precedes_media_expiry_and_never_calls_the_media_guard() {
         assert_eq!(
-            media_preflight(&mut || false, &mut || panic!("revoked source reached media")),
+            media_preflight(&mut || false, &mut || panic!(
+                "revoked source reached media"
+            )),
             Err(Error::Transport(quic::Error::Unauthorized))
         );
     }

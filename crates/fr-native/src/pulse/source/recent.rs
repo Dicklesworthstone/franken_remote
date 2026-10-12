@@ -53,7 +53,7 @@ impl Recent {
         })
     }
     pub(super) fn clear(&mut self) {
-        for frame in self.frames.iter_mut() {
+        for frame in &mut self.frames {
             frame.fill(0);
         }
         self.timestamps.fill(0);

@@ -11,9 +11,13 @@ use rustix::{
     termios::{LocalModes, tcgetattr, tcgetpgrp},
 };
 use std::{
+    fmt::Write as _,
     fs::File,
     io::{self, IsTerminal, Read, Write},
-    sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -33,25 +37,32 @@ pub struct Owner {
 impl Owner {
     pub fn start() -> Result<Self, Error> {
         reap_retired()?;
-        OCCUPIED.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        OCCUPIED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| Error::Busy)?;
         let shared = Arc::new(Shared {
-            state: Mutex::new(State { status: Status::Opening, pending: None }),
+            state: Mutex::new(State {
+                status: Status::Opening,
+                pending: None,
+            }),
         });
         let worker_shared = shared.clone();
-        let worker = match thread::Builder::new().name("fr-local-approval".into()).spawn(move || {
-            let _guard = Guard(worker_shared.clone());
-            if let Err(error) = serve(&worker_shared) {
-                worker_shared.stop(error);
-            }
-        }) {
-            Ok(worker) => worker,
-            Err(_) => {
-                OCCUPIED.store(false, Ordering::Release);
-                return Err(Error::Unavailable);
-            }
+        let Ok(worker) = thread::Builder::new()
+            .name("fr-local-approval".into())
+            .spawn(move || {
+                let _guard = Guard(worker_shared.clone());
+                if let Err(error) = serve(&worker_shared) {
+                    worker_shared.stop(error);
+                }
+            })
+        else {
+            OCCUPIED.store(false, Ordering::Release);
+            return Err(Error::Unavailable);
         };
-        Ok(Self { handle: Handle { shared }, worker: Some(worker) })
+        Ok(Self {
+            handle: Handle { shared },
+            worker: Some(worker),
+        })
     }
     pub fn handle(&self) -> Handle {
         self.handle.clone()
@@ -66,7 +77,11 @@ impl Owner {
     /// None means the ORIGINAL worker still owns native work. Never start a
     /// replacement on that evidence. A joined native refusal is clean cleanup.
     pub fn try_finish(&mut self) -> Option<Result<(), Error>> {
-        if self.worker.as_ref().is_some_and(|worker| !worker.is_finished()) {
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+        {
             return None;
         }
         Some(self.worker.take().map_or(Ok(()), |worker| {
@@ -80,7 +95,9 @@ impl Drop for Owner {
     fn drop(&mut self) {
         self.stop();
         if let Some(worker) = self.worker.take() {
-            let mut retired = RETIRED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut retired = RETIRED
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             // OCCUPIED permits exactly one live or retired owner.
             debug_assert!(retired.is_none());
             *retired = Some(worker);
@@ -102,13 +119,20 @@ fn reap_retired() -> Result<(), Error> {
 struct Guard(Arc<Shared>);
 impl Drop for Guard {
     fn drop(&mut self) {
-        self.0.stop(if thread::panicking() { Error::Panicked } else { Error::Closed });
+        self.0.stop(if thread::panicking() {
+            Error::Panicked
+        } else {
+            Error::Closed
+        });
     }
 }
 fn foreground(tty: &File) -> Result<(), Error> {
     if !tty.is_terminal()
         || tcgetpgrp(tty).map_err(|_| Error::Unavailable)? != getpgrp()
-        || !tcgetattr(tty).map_err(|_| Error::Unavailable)?.local_modes.contains(LocalModes::ICANON)
+        || !tcgetattr(tty)
+            .map_err(|_| Error::Unavailable)?
+            .local_modes
+            .contains(LocalModes::ICANON)
     {
         return Err(Error::Unavailable);
     }
@@ -117,8 +141,12 @@ fn foreground(tty: &File) -> Result<(), Error> {
 fn serve(shared: &Shared) -> Result<(), Error> {
     // No autoselected path, stdin fallback, shell, terminal-setting change or
     // controlling-terminal acquisition. The descriptor never escapes this worker.
-    let fd = open("/dev/tty", OFlags::RDWR | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY,
-        Mode::empty()).map_err(|_| Error::Unavailable)?;
+    let fd = open(
+        "/dev/tty",
+        OFlags::RDWR | OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY,
+        Mode::empty(),
+    )
+    .map_err(|_| Error::Unavailable)?;
     let mut tty = File::from(fd);
     foreground(&tty)?;
     {
@@ -143,12 +171,19 @@ fn serve(shared: &Shared) -> Result<(), Error> {
                 CANCELLED | CONSUMED => {
                     showing = None;
                     let mut state = shared.state.lock().map_err(|_| Error::Poisoned)?;
-                    if state.pending.as_ref().is_some_and(|old| Arc::ptr_eq(old, &pending)) {
+                    if state
+                        .pending
+                        .as_ref()
+                        .is_some_and(|old| Arc::ptr_eq(old, &pending))
+                    {
                         state.pending = None;
                     }
                 }
                 WAITING => {
-                    if showing.as_ref().is_none_or(|old| !Arc::ptr_eq(&old.pending, &pending)) {
+                    if showing
+                        .as_ref()
+                        .is_none_or(|old| !Arc::ptr_eq(&old.pending, &pending))
+                    {
                         showing = Some(Presentation::new(pending)?);
                     }
                     if let Some(showing) = &mut showing {
@@ -174,14 +209,21 @@ pub(super) struct Presentation {
 impl Presentation {
     pub(super) fn new(pending: Arc<Pending>) -> Result<Self, Error> {
         let mut output = description(pending.question);
-        output.push_str(&format!(
+        // Writing to a String cannot fail.
+        let _ = write!(
+            output,
             "\nType approve {:032x} then Enter to allow; any other line denies.\n> ",
             pending.challenge,
-        ));
+        );
         if output.len() > MAX_PROMPT_BYTES {
             return Err(Error::Unavailable);
         }
-        Ok(Self { pending, output, written: 0, line: Line::new() })
+        Ok(Self {
+            pending,
+            output,
+            written: 0,
+            line: Line::new(),
+        })
     }
     pub(super) fn turn(
         &mut self,
@@ -222,7 +264,10 @@ impl Presentation {
     }
 }
 fn retry(error: &io::Error) -> bool {
-    matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted)
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+    )
 }
 struct Line {
     bytes: [u8; MAX_LINE_BYTES],
@@ -230,7 +275,10 @@ struct Line {
 }
 impl Line {
     fn new() -> Self {
-        Self { bytes: [0; MAX_LINE_BYTES], len: 0 }
+        Self {
+            bytes: [0; MAX_LINE_BYTES],
+            len: 0,
+        }
     }
     fn push(&mut self, byte: u8, challenge: u128) -> Option<bool> {
         if matches!(byte, b'\n' | b'\r') {
@@ -247,31 +295,52 @@ impl Line {
 }
 fn description(question: Question) -> String {
     match question {
-        Question::Observation { peer, binding, role } => format!(
+        Question::Observation {
+            peer,
+            binding,
+            role,
+        } => format!(
             "\nFrankenRemote LOCAL APPROVAL\nAuthenticated tailnet endpoint: {peer}\nSession: {:032x}\nAllow this peer to VIEW this desktop?{}\nThis does NOT grant input control. Closing this host ends sharing.",
             binding.remote_session.as_raw(),
             if role == Role::RequestControl {
                 " A separate prompt will ask for its exact input-control request."
-            } else { "" },
+            } else {
+                ""
+            },
         ),
         Question::Control(request) => {
             let target = request.target;
             let view = target.view;
             let operations = [
-                (Capability::Keys, "keys"), (Capability::Repeat, "key-repeat"),
-                (Capability::Absolute, "pointer"), (Capability::Buttons, "buttons"),
-                (Capability::Relative, "relative-pointer"), (Capability::PixelScroll, "pixel-scroll"),
-                (Capability::LineScroll, "line-scroll"), (Capability::Text, "text"),
-            ].into_iter().filter_map(|(capability, name)| {
+                (Capability::Keys, "keys"),
+                (Capability::Repeat, "key-repeat"),
+                (Capability::Absolute, "pointer"),
+                (Capability::Buttons, "buttons"),
+                (Capability::Relative, "relative-pointer"),
+                (Capability::PixelScroll, "pixel-scroll"),
+                (Capability::LineScroll, "line-scroll"),
+                (Capability::Text, "text"),
+            ]
+            .into_iter()
+            .filter_map(|(capability, name)| {
                 target.capabilities.contains(capability).then_some(name)
-            }).collect::<Vec<_>>().join(", ");
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
             format!(
                 "\nFrankenRemote LOCAL INPUT APPROVAL\nPreviously admitted session: {:032x}\nRequest: {} / channel {} / display {}\nView generations: geometry={} viewport={} codec={} recovery={}\nDesktop: ({}, {}) {}x{}\nAllow remote operations: {operations}?\nOnly this exact request is covered; changed or lost view evidence cancels it.",
-                request.parent.remote_session.as_raw(), request.sequence, request.parent.id,
-                target.display_binding, view.geometry.as_raw(), view.viewport.as_raw(),
-                view.configuration.as_raw(), view.recovery.as_raw(),
-                target.bounds.origin().x, target.bounds.origin().y,
-                target.bounds.width(), target.bounds.height(),
+                request.parent.remote_session.as_raw(),
+                request.sequence,
+                request.parent.id,
+                target.display_binding,
+                view.geometry.as_raw(),
+                view.viewport.as_raw(),
+                view.configuration.as_raw(),
+                view.recovery.as_raw(),
+                target.bounds.origin().x,
+                target.bounds.origin().y,
+                target.bounds.width(),
+                target.bounds.height(),
             )
         }
     }

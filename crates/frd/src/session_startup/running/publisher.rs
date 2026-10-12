@@ -754,7 +754,16 @@ async fn bootstrap(
     // Playback is independently opt-in and consumes its own one-use attachment.
     // Neither successful audio attachment nor decoder readiness grants input.
     let audio_channel = if controlled && native_control::audio_selected(host.selection()) {
-        Some(attach(&mut host, &mut selected, MediaRole::AudioDown, budget, entropy).await?)
+        Some(
+            attach(
+                &mut host,
+                &mut selected,
+                MediaRole::AudioDown,
+                budget,
+                entropy,
+            )
+            .await?,
+        )
     } else {
         None
     };

@@ -238,7 +238,11 @@ fn matching_stop_fences_even_with_an_unusable_receipt_clock() {
         Ok(ReceiveResult::Stopped(AudioStopReason::SessionEnded))
     );
     assert_eq!(output.queued_packets(), 0);
-    assert!(output.receive_record(&packet(BINDING, 1, 1, PAYLOAD), clock(1)).is_err());
+    assert!(
+        output
+            .receive_record(&packet(BINDING, 1, 1, PAYLOAD), clock(1))
+            .is_err()
+    );
 }
 
 #[test]

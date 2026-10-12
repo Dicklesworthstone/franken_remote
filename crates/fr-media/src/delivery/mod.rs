@@ -36,7 +36,7 @@ pub enum DeliveryError {
     ResourceLimit,
     /// An individually admissible picture cannot fit beside retained compressed
     /// work. Only an established receiver may turn this into reference recovery.
-    /// Impossible single allocations remain ResourceLimit; malformed input keeps
+    /// Impossible single allocations remain `ResourceLimit`; malformed input keeps
     /// its wire error rather than gaining another recovery attempt.
     ReferenceCapacityExceeded,
     AllocationFailed,

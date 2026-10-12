@@ -21,7 +21,11 @@ impl Future for Source {
         this.polls.set(this.polls.get() + 1);
         match this.result {
             Some(result) => {
-                assert_eq!(this.polls.get(), 1, "completed source must not be polled again");
+                assert_eq!(
+                    this.polls.get(),
+                    1,
+                    "completed source must not be polled again"
+                );
                 Poll::Ready(result)
             }
             None => Poll::Pending,
@@ -107,7 +111,9 @@ fn ready_session_precedes_even_a_ready_audio_source() {
     let (audio, polls, drops) = source(Some(Err(Error::Closed)));
     let mut joined = Box::pin(alongside(ready(11), Some(audio)));
     assert_eq!(
-        joined.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+        joined
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop())),
         Poll::Ready(11)
     );
     assert_eq!(polls.get(), 0);
@@ -127,10 +133,12 @@ fn dropping_unpolled_service_does_not_start_the_source() {
 fn dropping_pending_service_retires_the_original_source_once() {
     let (audio, polls, drops) = source(None);
     let mut joined = Box::pin(alongside(std::future::pending::<()>(), Some(audio)));
-    assert!(joined
-        .as_mut()
-        .poll(&mut Context::from_waker(Waker::noop()))
-        .is_pending());
+    assert!(
+        joined
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()))
+            .is_pending()
+    );
     assert_eq!(polls.get(), 1);
     drop(joined);
     assert_eq!(drops.get(), 1);
@@ -140,7 +148,9 @@ fn dropping_pending_service_retires_the_original_source_once() {
 fn absence_of_an_audio_profile_adds_no_pending_work() {
     let mut joined = Box::pin(alongside(ready(19), None::<Source>));
     assert_eq!(
-        joined.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+        joined
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop())),
         Poll::Ready(19)
     );
 }

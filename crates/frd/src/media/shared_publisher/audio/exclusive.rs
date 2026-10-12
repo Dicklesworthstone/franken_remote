@@ -1,8 +1,6 @@
 //! The exclusive publisher's subscription to the SAME bounded audio source.
 //! There is no second codec loop, packet queue, epoch machine or renewal owner.
-use super::{
-    AudioFeed, AudioRing, EntryAudio, Error, FeedTarget, ObservationControl, SendReport,
-};
+use super::{AudioFeed, AudioRing, EntryAudio, Error, FeedTarget, ObservationControl, SendReport};
 use crate::media_quic::{AudioLanes, NegotiatedMedia};
 use fr_core::audio::AudioStopReason;
 use fr_transport::quic::{ConnectionBinding, Disposition, QuicRecords, Route};

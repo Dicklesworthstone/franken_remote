@@ -10,11 +10,17 @@ mod terminal;
 #[cfg(test)]
 mod tests;
 
-use fr_wire::{control::Request, negotiation::{ControlBinding, Role}};
+use fr_wire::{
+    control::Request,
+    negotiation::{ControlBinding, Role},
+};
 use std::{
     fmt,
     net::SocketAddr,
-    sync::{Arc, Mutex, atomic::{AtomicU8, Ordering}},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU8, Ordering},
+    },
     time::{Duration, Instant},
 };
 pub use terminal::Owner;
@@ -70,9 +76,11 @@ impl Pending {
     fn state_at(&self, now: Instant) -> u8 {
         if now >= self.until {
             // Even a delivered but unconsumed yes expires at the ORIGINAL time.
-            let _ = self.state.fetch_update(Ordering::AcqRel, Ordering::Acquire, |s| {
-                matches!(s, WAITING | ALLOWED | DENIED).then_some(CANCELLED)
-            });
+            let _ = self
+                .state
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |s| {
+                    matches!(s, WAITING | ALLOWED | DENIED).then_some(CANCELLED)
+                });
         }
         self.state.load(Ordering::Acquire)
     }
@@ -87,9 +95,11 @@ impl Pending {
         }
     }
     fn cancel(&self) {
-        let _ = self.state.fetch_update(Ordering::AcqRel, Ordering::Acquire, |s| {
-            (s != CONSUMED).then_some(CANCELLED)
-        });
+        let _ = self
+            .state
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |s| {
+                (s != CONSUMED).then_some(CANCELLED)
+            });
     }
 }
 struct State {
@@ -101,7 +111,10 @@ struct Shared {
 }
 impl Shared {
     fn stop(&self, error: Error) {
-        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !matches!(state.status, Status::Stopped(_)) {
             state.status = Status::Stopped(error);
         }
@@ -123,7 +136,10 @@ impl fmt::Debug for Handle {
 }
 impl Handle {
     pub fn status(&self) -> Status {
-        self.shared.state.lock().map_or(Status::Stopped(Error::Poisoned), |s| s.status)
+        self.shared
+            .state
+            .lock()
+            .map_or(Status::Stopped(Error::Poisoned), |s| s.status)
     }
     /// Install one question. Replacement waits until the worker releases the old
     /// display slot; no prompt queue or catch-up burst is permitted.
@@ -151,7 +167,10 @@ impl Handle {
             state: AtomicU8::new(WAITING),
         });
         state.pending = Some(pending.clone());
-        Ok(Ticket { pending, shared: self.shared.clone() })
+        Ok(Ticket {
+            pending,
+            shared: self.shared.clone(),
+        })
     }
 }
 
@@ -185,9 +204,12 @@ impl Ticket {
         let current = self.pending.state_at(now);
         match current {
             WAITING => Ok(None),
-            ALLOWED | DENIED => self.pending.state.compare_exchange(
-                current, CONSUMED, Ordering::AcqRel, Ordering::Acquire,
-            ).map(|_| Some(current == ALLOWED)).map_err(|_| Error::Closed),
+            ALLOWED | DENIED => self
+                .pending
+                .state
+                .compare_exchange(current, CONSUMED, Ordering::AcqRel, Ordering::Acquire)
+                .map(|_| Some(current == ALLOWED))
+                .map_err(|_| Error::Closed),
             _ if now >= self.pending.until => Err(Error::Expired),
             _ => Err(Error::Closed),
         }

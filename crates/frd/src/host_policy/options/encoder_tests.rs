@@ -35,7 +35,10 @@ fn encoder_selection_rejects_ambiguity_in_both_argument_orders() {
             vec!["--encoder", encoder, "--encoder", encoder],
             vec!["--encoder", encoder, "--encoder", "software"],
         ] {
-            assert!(matches!(parse(&args), Err(Error::InvalidArgument)), "{args:?}");
+            assert!(
+                matches!(parse(&args), Err(Error::InvalidArgument)),
+                "{args:?}"
+            );
         }
     }
 }
@@ -55,7 +58,10 @@ fn encoder_selection_does_not_accept_automatic_or_arbitrary_codec_names() {
         vec!["--encoder", "vaapi "],
         vec!["--encoder=nvenc"],
     ] {
-        assert!(matches!(parse(&args), Err(Error::InvalidArgument)), "{args:?}");
+        assert!(
+            matches!(parse(&args), Err(Error::InvalidArgument)),
+            "{args:?}"
+        );
     }
 }
 
@@ -77,19 +83,36 @@ fn hardware_selection_never_enables_control_audio_or_disables_approval() {
 #[test]
 fn encoder_choice_is_orthogonal_to_other_explicit_features() {
     let controlled = parse(&[
-        "--encoder", "nvenc", "--input-agent", "/input", "--clipboard", "--audio",
-        "--files", "/drop", "--logind-session", "c2",
-    ]).unwrap();
+        "--encoder",
+        "nvenc",
+        "--input-agent",
+        "/input",
+        "--clipboard",
+        "--audio",
+        "--files",
+        "/drop",
+        "--logind-session",
+        "c2",
+    ])
+    .unwrap();
     assert_eq!(controlled.selected_encoder().unwrap(), Some(Encoder::Nvenc));
     assert!(controlled.clipboard && controlled.audio);
     assert_eq!(controlled.input_agent, Some(PathBuf::from("/input")));
     assert_eq!(controlled.files, Some(PathBuf::from("/drop")));
     assert_eq!(controlled.logind_session.as_deref(), Some("c2"));
     let observed = parse(&[
-        "--encoder", "vaapi", "--observation-indicator", "/indicator", "--audio",
-    ]).unwrap();
+        "--encoder",
+        "vaapi",
+        "--observation-indicator",
+        "/indicator",
+        "--audio",
+    ])
+    .unwrap();
     assert_eq!(observed.selected_encoder().unwrap(), Some(Encoder::Vaapi));
-    assert_eq!(observed.observation_indicator, Some(PathBuf::from("/indicator")));
+    assert_eq!(
+        observed.observation_indicator,
+        Some(PathBuf::from("/indicator"))
+    );
     assert!(observed.audio && observed.input_agent.is_none());
 }
 
@@ -104,7 +127,10 @@ fn programmatic_conflicts_fail_before_loading_saved_policy() {
             config: Some(PathBuf::from("relative-policy")),
             ..RunOptions::default()
         };
-        assert!(matches!(options.selected_encoder(), Err(Error::InvalidArgument)));
+        assert!(matches!(
+            options.selected_encoder(),
+            Err(Error::InvalidArgument)
+        ));
         assert!(matches!(options.resolve(), Err(Error::InvalidArgument)));
     }
 }

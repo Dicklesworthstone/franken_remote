@@ -545,7 +545,20 @@ fn host_audio_is_offered_only_with_the_local_enable_and_only_optionally() {
         assert_eq!(off, host_offer(control));
         let on = host_offer_with_audio(control, false, true);
         assert!(on.validate().is_ok());
-        assert_eq!(on.capabilities.len(), off.capabilities.len() + 1);
+        // A control-capable host also offers the optional native-audio-control
+        // extension (b547521), so audio during control is negotiable.
+        assert_eq!(
+            on.capabilities.len(),
+            off.capabilities.len() + 1 + usize::from(control)
+        );
+        assert_eq!(
+            on.capabilities
+                .iter()
+                .any(|c| c.name == fr_wire::audio_control::CAPABILITY
+                    && c.version == fr_wire::audio_control::VERSION
+                    && !c.required),
+            control
+        );
         assert!(
             on.capabilities
                 .iter()

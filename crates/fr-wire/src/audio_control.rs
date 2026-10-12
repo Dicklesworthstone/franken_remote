@@ -2,10 +2,10 @@
 //! Explicit extension of native playback audio to control-capable sessions.
 //!
 //! `native-audio-down` alone retains its legacy observer-only meaning. Both
-//! peers must ALSO select `native-audio-control` v1 for AudioDown on a
-//! RequestControl session. This prevents a new client waiting for a fifth
+//! peers must ALSO select `native-audio-control` v1 for `AudioDown` on a
+//! `RequestControl` session. This prevents a new client waiting for a fifth
 //! attachment from an older host which advertises playback but cannot serve
-//! it with control. See PROTOCOL_NATIVE_AUDIO_CONTROL.md.
+//! it with control. See `PROTOCOL_NATIVE_AUDIO_CONTROL.md`.
 //!
 //! This is capability selection, not observation approval, a local audio enable,
 //! an input grant, microphone consent or codec/device qualification.
@@ -85,23 +85,40 @@ mod tests {
         )));
         for capabilities in [
             vec![(CAPABILITY, VERSION)],
-            vec![(crate::audio::CAPABILITY, crate::audio::VERSION), (CAPABILITY, VERSION + 1)],
-            vec![(crate::audio::CAPABILITY, crate::audio::VERSION + 1), (CAPABILITY, VERSION)],
+            vec![
+                (crate::audio::CAPABILITY, crate::audio::VERSION),
+                (CAPABILITY, VERSION + 1),
+            ],
+            vec![
+                (crate::audio::CAPABILITY, crate::audio::VERSION + 1),
+                (CAPABILITY, VERSION),
+            ],
         ] {
-            assert!(!downlink_selected(&selection(Role::RequestControl, &capabilities)));
+            assert!(!downlink_selected(&selection(
+                Role::RequestControl,
+                &capabilities
+            )));
         }
     }
     #[test]
     fn extension_alone_never_enables_observer_audio_either() {
-        assert!(!downlink_selected(&selection(Role::Observe, &[(CAPABILITY, VERSION)])));
+        assert!(!downlink_selected(&selection(
+            Role::Observe,
+            &[(CAPABILITY, VERSION)]
+        )));
     }
     #[test]
     fn duplicate_capabilities_are_not_permission() {
         let mut selected = selection(
             Role::RequestControl,
-            &[(crate::audio::CAPABILITY, crate::audio::VERSION), (CAPABILITY, VERSION)],
+            &[
+                (crate::audio::CAPABILITY, crate::audio::VERSION),
+                (CAPABILITY, VERSION),
+            ],
         );
-        selected.capabilities.insert(0, selected.capabilities[0].clone());
+        selected
+            .capabilities
+            .insert(0, selected.capabilities[0].clone());
         assert!(selected.validate().is_err());
         assert!(!downlink_selected(&selected));
     }

@@ -15,7 +15,10 @@ fn video_defaults_and_individual_overrides_are_independent() {
     let rate = parse(&["--fps", "60"]).unwrap().video_profile().unwrap();
     assert_eq!(rate.fps(), 60);
     assert_eq!(rate.bitrate(), video::DEFAULT_BITRATE);
-    let bitrate = parse(&["--bitrate", "2000000"]).unwrap().video_profile().unwrap();
+    let bitrate = parse(&["--bitrate", "2000000"])
+        .unwrap()
+        .video_profile()
+        .unwrap();
     assert_eq!(bitrate.fps(), video::DEFAULT_FPS);
     assert_eq!(bitrate.bitrate(), 2_000_000);
 }
@@ -29,11 +32,32 @@ fn video_limits_are_enforced_without_rounding_clamping_or_implicit_units() {
         assert_eq!(profile.bitrate().to_string(), bitrate);
     }
     for (flag, values) in [
-        ("--fps", &["0", "241", "65536", "60fps", "59.94", "1e2", " 60", "+60", "-1"][..]),
-        ("--bitrate", &["0", "9999", "200000001", "4294967296", "8M", "8_000_000", "8.0", "+8000000", "8000000 "][..]),
+        (
+            "--fps",
+            &[
+                "0", "241", "65536", "60fps", "59.94", "1e2", " 60", "+60", "-1",
+            ][..],
+        ),
+        (
+            "--bitrate",
+            &[
+                "0",
+                "9999",
+                "200000001",
+                "4294967296",
+                "8M",
+                "8_000_000",
+                "8.0",
+                "+8000000",
+                "8000000 ",
+            ][..],
+        ),
     ] {
         for value in values {
-            assert!(matches!(parse(&[flag, value]), Err(Error::InvalidArgument)), "{flag} {value}");
+            assert!(
+                matches!(parse(&[flag, value]), Err(Error::InvalidArgument)),
+                "{flag} {value}"
+            );
         }
     }
 }
@@ -49,7 +73,10 @@ fn video_duplicate_and_valueless_flags_refuse_in_either_order() {
             vec![flag, first, flag, second],
             vec![flag, second, flag, first],
         ] {
-            assert!(matches!(parse(&args), Err(Error::InvalidArgument)), "{args:?}");
+            assert!(
+                matches!(parse(&args), Err(Error::InvalidArgument)),
+                "{args:?}"
+            );
         }
     }
 }
@@ -57,22 +84,37 @@ fn video_duplicate_and_valueless_flags_refuse_in_either_order() {
 #[test]
 fn video_options_do_not_select_a_codec_or_enable_authority_and_optional_lanes() {
     for encoder in ["software", "nvenc", "vaapi"] {
-        let options = parse(&["--encoder", encoder, "--fps", "60", "--bitrate", "12000000"]).unwrap();
+        let options =
+            parse(&["--encoder", encoder, "--fps", "60", "--bitrate", "12000000"]).unwrap();
         assert_eq!(options.selected_encoder().unwrap(), Encoder::parse(encoder));
-        assert_eq!(options.video_profile().unwrap(), video::Profile::new(60, 12_000_000).unwrap());
+        assert_eq!(
+            options.video_profile().unwrap(),
+            video::Profile::new(60, 12_000_000).unwrap()
+        );
         assert!(options.approval.is_none() && options.sharing.is_none());
         assert!(!options.audio && !options.clipboard && options.files.is_none());
         assert!(options.input_agent.is_none() && options.logind_session.is_none());
         let local = parse(&["--encoder", encoder, "--fps", "60", "--approval", "local"]).unwrap();
         assert_eq!(local.approval, Some(Approval::Local));
     }
-    assert_eq!(parse(&["--fps", "60", "--bitrate", "12000000"]).unwrap().selected_encoder().unwrap(), None);
+    assert_eq!(
+        parse(&["--fps", "60", "--bitrate", "12000000"])
+            .unwrap()
+            .selected_encoder()
+            .unwrap(),
+        None
+    );
     assert!(parse(&["--encoder", "nvenc", "--software-explicit", "--fps", "60"]).is_err());
 }
 
 #[test]
 fn video_programmatic_invalid_options_refuse_before_policy_resolution() {
-    for (fps, bitrate) in [(0, 8_000_000), (241, 8_000_000), (30, 9_999), (30, 200_000_001)] {
+    for (fps, bitrate) in [
+        (0, 8_000_000),
+        (241, 8_000_000),
+        (30, 9_999),
+        (30, 200_000_001),
+    ] {
         let options = RunOptions {
             // Were policy resolution reached, this is an InvalidPath, not an
             // InvalidArgument. No filesystem or display call is needed here.
@@ -94,15 +136,27 @@ fn video_rate_targets_survive_systemd_render_and_the_actual_host_parser() {
             exec_path: PathBuf::from("/usr/bin/frd"),
             approval_mode: "none".into(),
             run_args: ["--encoder", encoder, "--fps", "60", "--bitrate", "12000000"]
-                .into_iter().map(str::to_owned).collect(),
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
             ..InstallOptions::default()
         };
         options.validate().unwrap();
         let unit = render_systemd_unit(&options);
-        let command = unit.lines().find_map(|line| line.strip_prefix("ExecStart=:")).unwrap();
-        let args = command.split_whitespace().skip(2).map(str::to_owned).collect::<Vec<_>>();
+        let command = unit
+            .lines()
+            .find_map(|line| line.strip_prefix("ExecStart=:"))
+            .unwrap();
+        let args = command
+            .split_whitespace()
+            .skip(2)
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
         let parsed = RunOptions::parse(&args).unwrap();
-        assert_eq!(parsed.video_profile().unwrap(), video::Profile::new(60, 12_000_000).unwrap());
+        assert_eq!(
+            parsed.video_profile().unwrap(),
+            video::Profile::new(60, 12_000_000).unwrap()
+        );
         assert_eq!(parsed.selected_encoder().unwrap(), Encoder::parse(encoder));
         assert_eq!(parsed.approval, Some(Approval::None));
         assert!(!command.contains("--software-explicit"));
@@ -117,12 +171,19 @@ fn video_rates_in_service_args_retain_legacy_software_and_existing_restrictions(
         kind: ServiceKind::SystemdUser,
         exec_path: PathBuf::from("/usr/bin/frd"),
         software_explicit: true,
-        run_args: ["--fps", "15", "--bitrate", "2000000"].into_iter().map(str::to_owned).collect(),
+        run_args: ["--fps", "15", "--bitrate", "2000000"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
         ..InstallOptions::default()
     };
     options.validate().unwrap();
-    assert!(render_systemd_unit(&options).contains("--software-explicit --fps 15 --bitrate 2000000"));
-    options.run_args.extend(["--fps", "30"].into_iter().map(str::to_owned));
+    assert!(
+        render_systemd_unit(&options).contains("--software-explicit --fps 15 --bitrate 2000000")
+    );
+    options
+        .run_args
+        .extend(["--fps", "30"].into_iter().map(str::to_owned));
     assert!(options.validate().is_err());
     options.run_args = ["--fps", "241"].into_iter().map(str::to_owned).collect();
     assert!(options.validate().is_err());

@@ -448,9 +448,13 @@ fn share(
     audio: Option<AudioOptions>,
     observe: impl FnOnce(&Recorder) -> Result<(), String>,
 ) -> (serde_json::Value, Result<(), String>, String) {
-    share_session(host_pulse, client_pulse, audio, false, |recorder, _, _, _| {
-        observe(recorder)
-    })
+    share_session(
+        host_pulse,
+        client_pulse,
+        audio,
+        false,
+        |recorder, _, _, _| observe(recorder),
+    )
 }
 
 /// The SAME real source, client, recorder and cleanup, with optional real input
@@ -474,8 +478,7 @@ fn share_session(
     set_root(&host.display, COLOUR);
     // The viewer draws the forwarded host cursor; keep it off the sampled centre.
     warp_pointer(&host.display, 16, 16);
-    let mut controls =
-        control.then(|| controlled::Controls::start(&host.display, &viewer.display));
+    let mut controls = control.then(|| controlled::Controls::start(&host.display, &viewer.display));
     let recorder = Recorder::start(client_pulse);
     let api = fixture::Api::new();
     let tools = Tools::new();
@@ -712,4 +715,5 @@ fn a_missing_host_monitor_is_a_typed_stop_while_video_continues() {
     );
 }
 
+#[path = "real_audio/controlled.rs"]
 mod controlled;

@@ -53,7 +53,11 @@ impl AudioOutput for Output {
         self.script.borrow_mut().admitted += 1;
         Ok(())
     }
-    fn receive(&mut self, bytes: &[u8], live: &mut dyn FnMut() -> bool) -> Result<(), OutputRefused> {
+    fn receive(
+        &mut self,
+        bytes: &[u8],
+        live: &mut dyn FnMut() -> bool,
+    ) -> Result<(), OutputRefused> {
         self.recording.receive(bytes, live)
     }
     fn ended(&mut self, end: AudioEnd) {
@@ -122,7 +126,7 @@ fn congestion_keeps_one_exact_reply_without_restarting_the_decoder() {
         assert_eq!(audio.state, State::Configuring(offer(1)));
         audio.receive(datagram(), &packet(1, now, 40), &mut live());
     }
-    assert!(calls.borrow().received.is_empty());
+    assert_eq!(calls.borrow().received, [] as [std::vec::Vec<u8>; 0]);
     assert_eq!(calls.borrow().configured, [offer(1)]);
     assert_eq!(calls.borrow().resets, 0);
     assert_eq!(audio.statistics().restarts, 0);
@@ -132,7 +136,10 @@ fn congestion_keeps_one_exact_reply_without_restarting_the_decoder() {
     assert!(audio.pending_reply.is_none());
     audio.receive(datagram(), &packet(1, 2_000_000, 40), &mut live());
     assert_eq!(calls.borrow().received.len(), 1);
-    assert!(turn(&mut audio, 1_500_001, true).is_empty());
+    assert_eq!(
+        turn(&mut audio, 1_500_001, true),
+        [] as [(std::vec::Vec<u8>, u64); 0]
+    );
     assert_eq!(script.borrow().services, 6);
     assert_eq!(script.borrow().admitted, 1);
 }
@@ -142,7 +149,10 @@ fn pending_ack_expiry_is_audio_only_and_cannot_reopen_or_send_late() {
     for late in [0, 1] {
         let (mut audio, calls, _) = configured();
         turn(&mut audio, 10, false);
-        assert!(turn(&mut audio, 10 + REPLY_SEND_US + late, true).is_empty());
+        assert_eq!(
+            turn(&mut audio, 10 + REPLY_SEND_US + late, true),
+            [] as [(std::vec::Vec<u8>, u64); 0]
+        );
         assert_eq!(audio.state, State::Ended);
         assert!(audio.pending_reply.is_none() && audio.stop.is_none());
         assert_eq!(calls.borrow().ended, [AudioEnd::Local]);
@@ -150,7 +160,10 @@ fn pending_ack_expiry_is_audio_only_and_cannot_reopen_or_send_late() {
         assert_eq!(audio.statistics().restarts, 0);
         audio.receive(control(), &configuration(2), &mut live());
         assert_eq!(calls.borrow().configured.len(), 1);
-        assert!(turn(&mut audio, 20 + REPLY_SEND_US, true).is_empty());
+        assert_eq!(
+            turn(&mut audio, 20 + REPLY_SEND_US, true),
+            [] as [(std::vec::Vec<u8>, u64); 0]
+        );
     }
 }
 
@@ -161,7 +174,10 @@ fn stop_congestion_does_not_refresh_its_first_send_deadline() {
     let expected = vec![(stop(1, AudioStopReason::DeviceChanged), 40 + REPLY_SEND_US)];
     assert_eq!(turn(&mut audio, 40, false), expected);
     assert_eq!(turn(&mut audio, 200, false), expected);
-    assert!(turn(&mut audio, 40 + REPLY_SEND_US, true).is_empty());
+    assert_eq!(
+        turn(&mut audio, 40 + REPLY_SEND_US, true),
+        [] as [(std::vec::Vec<u8>, u64); 0]
+    );
     assert_eq!(audio.state, State::Ended);
     assert!(audio.stop.is_none() && audio.pending_reply.is_none());
     assert_eq!(audio.statistics().restarts, 1);
@@ -171,11 +187,21 @@ fn stop_congestion_does_not_refresh_its_first_send_deadline() {
 fn host_stop_discards_the_unsent_ack_before_any_transport_admission() {
     let (mut audio, calls, _) = configured();
     turn(&mut audio, 1, false);
-    audio.receive(control(), &stop(1, AudioStopReason::HostDisabled), &mut live());
+    audio.receive(
+        control(),
+        &stop(1, AudioStopReason::HostDisabled),
+        &mut live(),
+    );
     assert!(audio.pending_reply.is_none());
-    assert!(turn(&mut audio, 2, true).is_empty());
+    assert_eq!(
+        turn(&mut audio, 2, true),
+        [] as [(std::vec::Vec<u8>, u64); 0]
+    );
     assert_eq!(audio.state, State::Ended);
-    assert_eq!(calls.borrow().ended, [AudioEnd::Host(AudioStopReason::HostDisabled)]);
+    assert_eq!(
+        calls.borrow().ended,
+        [AudioEnd::Host(AudioStopReason::HostDisabled)]
+    );
 }
 
 #[test]
@@ -183,18 +209,24 @@ fn output_failure_retires_pending_ack_and_only_new_epoch_can_play() {
     let (mut audio, calls, script) = configured();
     turn(&mut audio, 1, false);
     script.borrow_mut().fail = true;
-    assert!(turn(&mut audio, 2, true).is_empty());
+    assert_eq!(
+        turn(&mut audio, 2, true),
+        [] as [(std::vec::Vec<u8>, u64); 0]
+    );
     assert_eq!(audio.state, State::Idle);
     assert!(audio.pending_reply.is_none());
     assert_eq!(calls.borrow().resets, 1);
     script.borrow_mut().fail = false;
-    assert_eq!(turn(&mut audio, 3, true)[0].0, stop(1, AudioStopReason::DeviceChanged));
+    assert_eq!(
+        turn(&mut audio, 3, true)[0].0,
+        stop(1, AudioStopReason::DeviceChanged)
+    );
     audio.receive(control(), &configuration(2), &mut live());
     script.borrow_mut().turns.push_back(vec![ack(2)]);
     assert_eq!(turn(&mut audio, 4, true)[0].0, ack(2));
     assert_eq!(audio.state, State::Active(offer(2)));
     audio.receive(datagram(), &packet(1, 0, 40), &mut live());
-    assert!(calls.borrow().received.is_empty());
+    assert_eq!(calls.borrow().received, [] as [std::vec::Vec<u8>; 0]);
     audio.receive(datagram(), &packet(2, 0, 40), &mut live());
     assert_eq!(calls.borrow().received.len(), 1);
 }
@@ -209,7 +241,10 @@ fn duplicate_native_callbacks_cannot_be_hidden_by_a_successful_return() {
             turn(&mut audio, 1, false);
             script.borrow_mut().turns.push_back(vec![ack(1)]);
         }
-        assert!(turn(&mut audio, 2, true).is_empty());
+        assert_eq!(
+            turn(&mut audio, 2, true),
+            [] as [(std::vec::Vec<u8>, u64); 0]
+        );
         assert_eq!(audio.state, State::Idle);
         assert!(audio.pending_reply.is_none());
         assert_eq!(calls.borrow().resets, 1);
@@ -221,7 +256,10 @@ fn malformed_and_foreign_native_replies_never_reach_the_send_boundary() {
     for record in [vec![], ack(2), ack(3), ack(1)[..10].to_vec()] {
         let (mut audio, calls, script) = configured();
         script.borrow_mut().turns = VecDeque::from([vec![record]]);
-        assert!(turn(&mut audio, 1, true).is_empty());
+        assert_eq!(
+            turn(&mut audio, 1, true),
+            [] as [(std::vec::Vec<u8>, u64); 0]
+        );
         assert!(audio.pending_reply.is_none());
         assert_eq!(audio.state, State::Idle);
         assert_eq!(calls.borrow().resets, 1);
@@ -232,7 +270,10 @@ fn malformed_and_foreign_native_replies_never_reach_the_send_boundary() {
 fn a_native_failure_after_custody_never_admits_the_prepared_reply() {
     let (mut audio, _, script) = configured();
     script.borrow_mut().fail = true;
-    assert!(turn(&mut audio, 1, true).is_empty());
+    assert_eq!(
+        turn(&mut audio, 1, true),
+        [] as [(std::vec::Vec<u8>, u64); 0]
+    );
     assert!(audio.pending_reply.is_none());
     assert_eq!(audio.state, State::Idle);
 }
@@ -275,7 +316,10 @@ fn reply_deadline_overflow_and_pending_clock_regression_are_terminal() {
             turn(&mut audio, 100, false);
         }
         let at = if regression { 99 } else { u64::MAX - 1 };
-        assert!(turn(&mut audio, at, true).is_empty());
+        assert_eq!(
+            turn(&mut audio, at, true),
+            [] as [(std::vec::Vec<u8>, u64); 0]
+        );
         assert_eq!(audio.state, State::Ended);
         assert!(audio.pending_reply.is_none() && audio.stop.is_none());
         assert_eq!(calls.borrow().dropped, 1);

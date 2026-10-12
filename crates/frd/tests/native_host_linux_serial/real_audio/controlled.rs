@@ -1,6 +1,6 @@
 //! Real control and playback on the same production session. The only synthetic
-//! services are the parent harness's LocalAPI, CA and ingress fixtures. Input
-//! effects come from an independent X client, audio from independent PulseAudio
+//! services are the parent harness's `LocalAPI`, CA and ingress fixtures. Input
+//! effects come from an independent X client, audio from independent `PulseAudio`
 //! monitor recordings, never from a protocol acknowledgement or a test counter.
 use super::super::real_control::{Harness, eventually, host_pointer, indicator};
 use super::*;
@@ -88,7 +88,9 @@ impl Controls {
         Ok(())
     }
     pub(super) fn stopped(&mut self) -> bool {
-        eventually(Duration::from_secs(5), || indicator(&mut self.host).is_none())
+        eventually(Duration::from_secs(5), || {
+            indicator(&mut self.host).is_none()
+        })
     }
 }
 
@@ -221,12 +223,8 @@ fn a_controller_keeps_input_when_the_host_did_not_enable_audio() {
     let host = Pulse::start("fr_host");
     let client = Pulse::start("fr_view");
     let _player = Player::start(&host, WARMUP_HZ);
-    let (report, observed, diagnostics) = share_session(
-        &host,
-        &client,
-        None,
-        true,
-        |recorder, controls, _, _| {
+    let (report, observed, diagnostics) =
+        share_session(&host, &client, None, true, |recorder, controls, _, _| {
             let controls = controls.ok_or("missing real input observers")?;
             controls.exercise()?;
             let (seen, total) = recorder.count_tone(WARMUP_HZ, Duration::from_secs(4));
@@ -236,11 +234,13 @@ fn a_controller_keeps_input_when_the_host_did_not_enable_audio() {
                 ));
             }
             controls.exercise()
-        },
-    );
+        });
     assert_eq!(observed, Ok(()), "{diagnostics}");
     completion(&report, &diagnostics, false);
-    assert_eq!(report["audio_absence"], "host_did_not_offer", "{diagnostics}");
+    assert_eq!(
+        report["audio_absence"], "host_did_not_offer",
+        "{diagnostics}"
+    );
 }
 
 /// Pin the original decoder child of THIS fr process with a pidfd. Checking a
@@ -319,9 +319,7 @@ fn a_stalled_opus_child_cannot_stop_control_or_lease_renewal() {
                 if indicator(&mut controls.host) != Some(original_indicator)
                     || client.try_wait().unwrap().is_some()
                 {
-                    return Err(
-                        "decoder stall replaced or ended the original control lease".into(),
-                    );
+                    return Err("decoder stall replaced or ended the original control lease".into());
                 }
                 thread::sleep(Duration::from_millis(150));
             }
@@ -388,5 +386,8 @@ fn local_host_stop_fences_control_and_audio_together() {
     // Host effects and tone absence above are the evidence; require a typed
     // client ending rather than substituting a success receipt for those checks.
     assert_eq!(report["outcome"], "revoked", "{diagnostics}");
-    assert_eq!(report["error"]["code"], "host_session_ended", "{diagnostics}");
+    assert_eq!(
+        report["error"]["code"], "host_session_ended",
+        "{diagnostics}"
+    );
 }

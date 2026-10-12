@@ -164,12 +164,9 @@ impl Job {
                 };
                 exit.clean = work(&exit.shared, inbox, replies);
             });
-        let thread = match thread {
-            Ok(thread) => thread,
-            Err(_) => {
-                slot.store(false, Ordering::Release);
-                return Err(ViewerAudioRefused);
-            }
+        let Ok(thread) = thread else {
+            slot.store(false, Ordering::Release);
+            return Err(ViewerAudioRefused);
         };
         Ok(Self {
             shared,
@@ -350,9 +347,10 @@ impl ViewerAudioOutput for Output {
         offer: AudioConfiguration,
     ) -> Result<(), ViewerAudioRefused> {
         if self.current != Some((binding, offer))
-            || self.job.as_ref().is_none_or(|job| {
-                !job.acknowledged || !job.shared.live_at(now(self.origin).0)
-            })
+            || self
+                .job
+                .as_ref()
+                .is_none_or(|job| !job.acknowledged || !job.shared.live_at(now(self.origin).0))
         {
             return Err(ViewerAudioRefused);
         }

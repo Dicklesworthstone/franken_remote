@@ -76,7 +76,10 @@ struct Shared {
 impl Shared {
     fn stop(&self, error: Error) {
         {
-            let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if !matches!(state.status, Status::Stopped(_)) {
                 state.status = Status::Stopped(error);
             }
@@ -87,9 +90,12 @@ impl Shared {
         (self.on_stop)();
     }
     fn status(&self) -> Status {
-        let status = self.state.lock().map_or(Status::Stopped(Error::Panicked), |mut state| {
-            state.check_at(Instant::now())
-        });
+        let status = self
+            .state
+            .lock()
+            .map_or(Status::Stopped(Error::Panicked), |mut state| {
+                state.check_at(Instant::now())
+            });
         if let Status::Stopped(error) = status {
             // The original stop has been requested before callers observe a
             // terminal return, even when THEY detect a worker's missed deadline.
@@ -104,9 +110,10 @@ impl Shared {
         }
     }
     fn ready(&self, issued: Instant) -> Result<(), Error> {
-        let ready = self.state.lock().is_ok_and(|mut state| {
-            state.ready_at(issued, Instant::now())
-        });
+        let ready = self
+            .state
+            .lock()
+            .is_ok_and(|mut state| state.ready_at(issued, Instant::now()));
         if ready {
             Ok(())
         } else {
@@ -127,7 +134,9 @@ impl Control {
 }
 impl fmt::Debug for Control {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("ObservationIndicatorControl").field(&self.status()).finish()
+        f.debug_tuple("ObservationIndicatorControl")
+            .field(&self.status())
+            .finish()
     }
 }
 
@@ -155,21 +164,22 @@ impl Owner {
             }),
         });
         let running = shared.clone();
-        let worker = thread::Builder::new().name("fr-observation-ui".into()).spawn(move || {
-            let _guard = Guard(running.clone());
-            io::run(&launch, &running)
-        });
-        match worker {
-            Ok(worker) => Ok(Self {
+        let worker = thread::Builder::new()
+            .name("fr-observation-ui".into())
+            .spawn(move || {
+                let _guard = Guard(running.clone());
+                io::run(&launch, &running)
+            });
+        if let Ok(worker) = worker {
+            Ok(Self {
                 control: Control(shared),
                 worker: Some(worker),
                 finished: None,
-            }),
-            Err(_) => {
-                shared.stop(Error::Unavailable);
-                OCCUPIED.store(false, Ordering::Release);
-                Err(Error::Unavailable)
-            }
+            })
+        } else {
+            shared.stop(Error::Unavailable);
+            OCCUPIED.store(false, Ordering::Release);
+            Err(Error::Unavailable)
         }
     }
     pub fn control(&self) -> Control {
@@ -184,11 +194,18 @@ impl Owner {
         if let Some(finished) = self.finished {
             return Some(finished);
         }
-        if self.worker.as_ref().is_some_and(|worker| !worker.is_finished()) {
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+        {
             return None;
         }
         let result = self.worker.take().map_or(Ok(()), |worker| {
-            worker.join().map_err(|_| Error::Panicked).and_then(|result| result)
+            worker
+                .join()
+                .map_err(|_| Error::Panicked)
+                .and_then(|result| result)
         });
         // Never release capacity on uncertain cleanup, including a panic.
         if result.is_ok() {
@@ -202,7 +219,9 @@ impl Drop for Owner {
     fn drop(&mut self) {
         self.stop();
         if let Some(worker) = self.worker.take() {
-            let mut retired = RETIRED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut retired = RETIRED
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             debug_assert!(retired.is_none());
             *retired = Some(worker);
         }
@@ -217,12 +236,18 @@ fn claim() -> Result<(), Error> {
         worker.join().map_err(|_| Error::Panicked)??;
         OCCUPIED.store(false, Ordering::Release);
     }
-    OCCUPIED.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .map(|_| ()).map_err(|_| Error::Busy)
+    OCCUPIED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .map(|_| ())
+        .map_err(|_| Error::Busy)
 }
 struct Guard(Arc<Shared>);
 impl Drop for Guard {
     fn drop(&mut self) {
-        self.0.stop(if thread::panicking() { Error::Panicked } else { Error::Stopped });
+        self.0.stop(if thread::panicking() {
+            Error::Panicked
+        } else {
+            Error::Stopped
+        });
     }
 }

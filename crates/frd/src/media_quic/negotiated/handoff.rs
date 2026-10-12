@@ -135,7 +135,11 @@ impl NegotiatedMedia {
             Route::Stream(self.video.outbound),
             &bytes[..len],
             until,
-            || subscription.recovery_deadline().is_ok_and(|deadline| deadline == until),
+            || {
+                subscription
+                    .recovery_deadline()
+                    .is_ok_and(|deadline| deadline == until)
+            },
         );
         match result {
             Ok(()) => Ok(true),

@@ -69,7 +69,11 @@ fn final_record_refusal_preserves_admitted_records_and_the_original_connection()
         );
         assert_eq!(checks, 2, "must reach the post-allocation record gate");
         assert!(!p.server.is_closed());
-        assert_eq!(p.server.usage(), usage, "refusal must not admit queue ownership");
+        assert_eq!(
+            p.server.usage(),
+            usage,
+            "refusal must not admit queue ownership"
+        );
         p.server.send(&cx, route, &next, until, || true).unwrap();
         let mut received = Vec::new();
         for _ in 0..500 {
@@ -157,7 +161,10 @@ fn final_datagram_refusal_never_enters_the_native_datagram_queue() {
                     &cx,
                     || true,
                     |route, bytes| {
-                        assert!(matches!(route, Route::Stream(_)), "rejected datagram escaped");
+                        assert!(
+                            matches!(route, Route::Stream(_)),
+                            "rejected datagram escaped"
+                        );
                         assert_eq!(bytes, sentinel);
                         received += 1;
                         Ok(Disposition::Consumed)
@@ -245,7 +252,13 @@ fn expired_retained_record_cannot_be_hidden_by_an_application_refusal() {
         let mut p = pair(&cx, Policy::default()).await;
         let route = Route::Stream(p.host_routes[1]);
         p.server
-            .send(&cx, route, &recovery_packet(41), clock(&cx) + 2_000_000, || true)
+            .send(
+                &cx,
+                route,
+                &recovery_packet(41),
+                clock(&cx) + 2_000_000,
+                || true,
+            )
             .unwrap();
         // Do not drive or acknowledge this admitted record. The production
         // delivery allowance is bounded above by two seconds, not refreshed.

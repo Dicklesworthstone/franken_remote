@@ -210,7 +210,7 @@ const fn system_kind() -> ServiceKind {
     }
 }
 
-#[cfg(test)]
-mod tests;
 #[cfg(all(test, target_os = "linux"))]
 mod encoder_tests;
+#[cfg(test)]
+mod tests;

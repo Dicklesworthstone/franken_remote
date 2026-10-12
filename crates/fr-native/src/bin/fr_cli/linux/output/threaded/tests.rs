@@ -39,7 +39,10 @@ fn fixture(
 fn retired(shared: &Shared) {
     let until = Instant::now() + Duration::from_secs(2);
     while !shared.retired.load(Ordering::Acquire) {
-        assert!(Instant::now() < until, "released fixture worker must retire");
+        assert!(
+            Instant::now() < until,
+            "released fixture worker must retire"
+        );
         thread::sleep(TICK);
     }
 }
@@ -71,7 +74,10 @@ fn expired_permission_is_terminal_even_before_the_worker_notices() {
     assert!(shared.authorize_at(PERMISSION_US).is_err());
     shared.progress.store(PERMISSION_US, Ordering::Release);
     assert!(shared.authorize_at(PERMISSION_US + 1).is_err());
-    assert_eq!(shared.fault.load(Ordering::Acquire), Fault::Permission as u8);
+    assert_eq!(
+        shared.fault.load(Ordering::Acquire),
+        Fault::Permission as u8
+    );
 }
 
 #[test]
@@ -183,15 +189,20 @@ fn ack_record() -> Ack {
 fn queued_ack_is_not_success_until_the_session_accepts_the_exact_bytes() {
     let origin = Instant::now();
     let (result, completion) = mpsc::sync_channel(1);
+    // The worker keeps playing after its acknowledgement, as in production,
+    // until the test releases it.
+    let (release, released) = mpsc::sync_channel::<()>(1);
     let (mut output, shared, _) = fixture(move |shared, _, replies| {
         let accepted = forward_ack(shared, origin, &replies, &ack_record()).is_ok();
         result.send(accepted).unwrap();
+        let _ = released.recv_timeout(Duration::from_secs(5));
         true
     });
     assert!(!output.report.borrow().acknowledged);
     assert_eq!(shared.ack.load(Ordering::Acquire), ACK_PENDING);
     let until = Instant::now() + Duration::from_secs(2);
-    while !output.report.borrow().acknowledged {
+    // The session takes custody of the worker's one reply...
+    while shared.ack.load(Ordering::Acquire) != ACK_ACCEPTED {
         output
             .service(&mut || true, &mut |bytes| {
                 assert_eq!(bytes, &ack_record());
@@ -203,6 +214,14 @@ fn queued_ack_is_not_success_until_the_session_accepts_the_exact_bytes() {
         thread::sleep(TICK);
     }
     assert!(completion.recv_timeout(Duration::from_secs(1)).unwrap());
+    // ...but custody is not success (596da32): only the session's transport
+    // admission of THIS configuration reports it acknowledged.
+    assert!(!output.report.borrow().acknowledged);
+    assert!(output.configuration_admitted(74, offer()).is_err());
+    assert!(!output.report.borrow().acknowledged);
+    output.configuration_admitted(73, offer()).unwrap();
+    assert!(output.report.borrow().acknowledged);
+    release.send(()).unwrap();
     retired(&shared);
 }
 

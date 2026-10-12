@@ -1,6 +1,6 @@
 //! The shared/exclusive transport adapter against the real bounded lane owner.
 //! These are deterministic record/state tests, not codec or device evidence.
-use super::super::{audio_record, wire, EntryAudio};
+use super::super::{EntryAudio, audio_record, wire};
 use super::*;
 use asupersync::net::quic_native::StreamId;
 use fr_core::audio::{AudioChannels, AudioDirection, AudioGeneration};
@@ -90,17 +90,31 @@ fn push(ring: &mut AudioRing, sequence: u64, at: u64) {
 fn only_the_original_reply_route_and_epoch_activate_the_lane() {
     let ring = ring();
     let mut audio = endpoint(&ring);
-    assert!(audio
-        .receive(&ring, Route::Stream(lanes().control), &acknowledgement(1, 9))
-        .is_none());
+    assert!(
+        audio
+            .receive(
+                &ring,
+                Route::Stream(lanes().control),
+                &acknowledgement(1, 9)
+            )
+            .is_none()
+    );
     assert!(!audio.lane.is_active());
     assert_eq!(
-        audio.receive(&ring, Route::Stream(lanes().replies), &acknowledgement(2, 9)),
+        audio.receive(
+            &ring,
+            Route::Stream(lanes().replies),
+            &acknowledgement(2, 9)
+        ),
         Some(Disposition::Consumed)
     );
     assert!(!audio.lane.is_active());
     assert_eq!(audio.lane.counters().stale_refused, 1);
-    audio.receive(&ring, Route::Stream(lanes().replies), &acknowledgement(1, 9));
+    audio.receive(
+        &ring,
+        Route::Stream(lanes().replies),
+        &acknowledgement(1, 9),
+    );
     assert!(audio.lane.is_active());
 }
 
@@ -114,7 +128,11 @@ fn malformed_or_misbound_replies_fence_only_the_audio_lane() {
             Some(Disposition::Consumed)
         );
         assert!(audio.lane.is_stopped());
-        audio.receive(&ring, Route::Stream(lanes().replies), &acknowledgement(1, 9));
+        audio.receive(
+            &ring,
+            Route::Stream(lanes().replies),
+            &acknowledgement(1, 9),
+        );
         assert!(audio.lane.is_stopped());
         assert!(matches!(audio.lane.next(&ring, 10), LaneAction::Nothing));
     }
@@ -126,7 +144,11 @@ fn acknowledgement_discards_pre_ack_sound_and_packets_use_the_viewer_epoch() {
     let mut audio = endpoint(&ring);
     push(&mut ring, 0, 0);
     assert!(matches!(audio.lane.next(&ring, 1), LaneAction::Nothing));
-    audio.receive(&ring, Route::Stream(lanes().replies), &acknowledgement(1, 9));
+    audio.receive(
+        &ring,
+        Route::Stream(lanes().replies),
+        &acknowledgement(1, 9),
+    );
     assert!(matches!(audio.lane.next(&ring, 2), LaneAction::Nothing));
     push(&mut ring, 1, 20_000);
     let action = audio.lane.next(&ring, 20_000);
@@ -146,7 +168,11 @@ fn acknowledgement_discards_pre_ack_sound_and_packets_use_the_viewer_epoch() {
 fn stale_stop_does_not_mute_a_newer_lane_but_matching_stop_is_terminal() {
     let ring = ring();
     let mut audio = endpoint(&ring);
-    audio.receive(&ring, Route::Stream(lanes().replies), &acknowledgement(1, 9));
+    audio.receive(
+        &ring,
+        Route::Stream(lanes().replies),
+        &acknowledgement(1, 9),
+    );
     for generation in [2, 1] {
         let mut bytes = [0; wire::AUDIO_STOP_RECORD_BYTES];
         wire::encode_stop(
@@ -169,7 +195,11 @@ fn stale_stop_does_not_mute_a_newer_lane_but_matching_stop_is_terminal() {
 fn source_failure_uses_the_reliable_stop_lane_not_a_video_error() {
     let mut ring = ring();
     let mut audio = endpoint(&ring);
-    audio.receive(&ring, Route::Stream(lanes().replies), &acknowledgement(1, 9));
+    audio.receive(
+        &ring,
+        Route::Stream(lanes().replies),
+        &acknowledgement(1, 9),
+    );
     push(&mut ring, 0, 1);
     ring.end(AudioStopReason::DeviceChanged);
     assert!(ring.is_empty());

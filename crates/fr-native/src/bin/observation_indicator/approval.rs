@@ -22,7 +22,9 @@ fn fenced(signals: &UnixDatagram) -> bool {
     !matches!(signals.recv(&mut bytes), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
 }
 fn intent(frame: Frame) -> Result<Role, i32> {
-    if frame.sequence != 1 { return Err(PROTOCOL); }
+    if frame.sequence != 1 {
+        return Err(PROTOCOL);
+    }
     match frame.kind {
         Kind::ApproveView => Ok(Role::Observe),
         Kind::ApproveControl => Ok(Role::RequestControl),
@@ -48,18 +50,25 @@ fn final_reply(
     // Destroying native resources never gives a late positive decision new time.
     let decision = if decision == Kind::Allowed && (Instant::now() >= until || fenced(signals)) {
         Kind::Denied
-    } else { decision };
+    } else {
+        decision
+    };
     send(command, request, decision).map_or(CHANNEL, |()| {
-        if decision == Kind::Allowed { 0 } else { REFUSED }
+        if decision == Kind::Allowed {
+            0
+        } else {
+            REFUSED
+        }
     })
 }
-pub(crate) fn serve(mut command: UnixStream, signals: UnixDatagram, hello: Frame) -> i32 {
+pub(crate) fn serve(mut command: UnixStream, signals: &UnixDatagram, hello: Frame) -> i32 {
     let role = match intent(hello) {
         Ok(role) => role,
         Err(error) => return error,
     };
     let until = Instant::now() + PROMPT_WAIT;
-    let opened = std::env::var("DISPLAY").ok()
+    let opened = std::env::var("DISPLAY")
+        .ok()
         .and_then(|display| Surface::open(&display, role, until).ok());
     let Some(mut surface) = opened else {
         let _ = send(&mut command, hello, Kind::Refused);
@@ -68,12 +77,25 @@ pub(crate) fn serve(mut command: UnixStream, signals: UnixDatagram, hello: Frame
     let mut request = hello;
     let mut expected = 2_u64;
     loop {
-        if Instant::now() >= until || fenced(&signals) {
-            return final_reply(&mut command, &signals, &mut surface, request, Kind::Denied, until);
+        if Instant::now() >= until || fenced(signals) {
+            return final_reply(
+                &mut command,
+                signals,
+                &mut surface,
+                request,
+                Kind::Denied,
+                until,
+            );
         }
-        let state = match surface.poll() {
-            Ok(state) => state,
-            Err(_) => return final_reply(&mut command, &signals, &mut surface, request, Kind::Refused, until),
+        let Ok(state) = surface.poll() else {
+            return final_reply(
+                &mut command,
+                signals,
+                &mut surface,
+                request,
+                Kind::Refused,
+                until,
+            );
         };
         if state == State::Opening {
             // No Ready response until real native mapping. Parent opening and
@@ -83,15 +105,22 @@ pub(crate) fn serve(mut command: UnixStream, signals: UnixDatagram, hello: Frame
         }
         let reply = progress(state);
         if reply != Kind::Ready {
-            return final_reply(&mut command, &signals, &mut surface, request, reply, until);
+            return final_reply(&mut command, signals, &mut surface, request, reply, until);
         }
-        if send(&mut command, request, Kind::Ready).is_err() { return CHANNEL; }
-        request = match read(&mut command, IDLE_WAIT.min(until.saturating_duration_since(Instant::now()))) {
+        if send(&mut command, request, Kind::Ready).is_err() {
+            return CHANNEL;
+        }
+        request = match read(
+            &mut command,
+            IDLE_WAIT.min(until.saturating_duration_since(Instant::now())),
+        ) {
             Ok(next) if next.epoch == hello.epoch && next.sequence == expected => next,
             Ok(_) => return PROTOCOL,
             Err(error) => return error,
         };
-        let Some(next) = expected.checked_add(1) else { return PROTOCOL; };
+        let Some(next) = expected.checked_add(1) else {
+            return PROTOCOL;
+        };
         expected = next;
         match request.kind {
             Kind::ApprovalCheck => {}
@@ -109,16 +138,40 @@ pub(crate) fn serve(mut command: UnixStream, signals: UnixDatagram, hello: Frame
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn frame(kind: Kind) -> Frame { Frame { kind, sequence: 1, epoch: 7 } }
+    fn frame(kind: Kind) -> Frame {
+        Frame {
+            kind,
+            sequence: 1,
+            epoch: 7,
+        }
+    }
     #[test]
     fn no_indication_or_reply_record_selects_a_consent_role() {
-        for kind in [Kind::Open, Kind::Check, Kind::Stop, Kind::ApprovalCheck,
-            Kind::Ready, Kind::Stopped, Kind::Refused, Kind::Allowed, Kind::Denied] {
+        for kind in [
+            Kind::Open,
+            Kind::Check,
+            Kind::Stop,
+            Kind::ApprovalCheck,
+            Kind::Ready,
+            Kind::Stopped,
+            Kind::Refused,
+            Kind::Allowed,
+            Kind::Denied,
+        ] {
             assert_eq!(intent(frame(kind)), Err(PROTOCOL));
         }
         assert_eq!(intent(frame(Kind::ApproveView)), Ok(Role::Observe));
-        assert_eq!(intent(frame(Kind::ApproveControl)), Ok(Role::RequestControl));
-        assert_eq!(intent(Frame { sequence: 2, ..frame(Kind::ApproveView) }), Err(PROTOCOL));
+        assert_eq!(
+            intent(frame(Kind::ApproveControl)),
+            Ok(Role::RequestControl)
+        );
+        assert_eq!(
+            intent(Frame {
+                sequence: 2,
+                ..frame(Kind::ApproveView)
+            }),
+            Err(PROTOCOL)
+        );
     }
     #[test]
     fn native_mapping_is_not_positive_consent() {

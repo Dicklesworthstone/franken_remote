@@ -48,7 +48,10 @@ impl Profile {
 }
 impl Default for Profile {
     fn default() -> Self {
-        Self { fps: DEFAULT_FPS, bitrate: DEFAULT_BITRATE }
+        Self {
+            fps: DEFAULT_FPS,
+            bitrate: DEFAULT_BITRATE,
+        }
     }
 }
 
@@ -83,7 +86,10 @@ mod tests {
         for bitrate in [0, MIN_BITRATE - 1, MAX_BITRATE + 1, u32::MAX] {
             assert_eq!(Profile::new(DEFAULT_FPS, bitrate), Err(Error::Bitrate));
         }
-        assert_eq!(Profile::default(), Profile::new(DEFAULT_FPS, DEFAULT_BITRATE).unwrap());
+        assert_eq!(
+            Profile::default(),
+            Profile::new(DEFAULT_FPS, DEFAULT_BITRATE).unwrap()
+        );
     }
 
     #[test]
@@ -91,21 +97,28 @@ mod tests {
         let display = Display {
             handle: 17,
             geometry: DisplayGeometryGeneration::INITIAL,
-            x: 0, y: 0,
-            pixel_width: 1920, pixel_height: 1080,
-            logical_width: 1920, logical_height: 1080,
-            scale_numerator: 1, scale_denominator: 1, rotation: 0,
+            x: 0,
+            y: 0,
+            pixel_width: 1920,
+            pixel_height: 1080,
+            logical_width: 1920,
+            logical_height: 1080,
+            scale_numerator: 1,
+            scale_denominator: 1,
+            rotation: 0,
         };
         let catalog = Catalog::new(1, &[display], &ProtocolLimits::ABSOLUTE).unwrap();
         for encoder in [Encoder::SoftwareExplicit, Encoder::Nvenc, Encoder::Vaapi] {
             for (fps, bitrate) in [(1, MIN_BITRATE), (60, 12_000_000), (MAX_FPS, MAX_BITRATE)] {
                 let profile = Profile::new(fps, bitrate).unwrap();
-                let (selection, codec) = choose(&catalog, profile.fps(), profile.bitrate(), encoder).unwrap();
+                let (selection, codec) =
+                    choose(&catalog, profile.fps(), profile.bitrate(), encoder).unwrap();
                 assert_eq!(selection, catalog.selection(17).unwrap());
                 assert_eq!(codec.fps, fps);
                 assert_eq!(codec.bitrate, bitrate);
                 assert_eq!(codec.backend, encoder.backend());
-                let decoded = fr_media::worker::Configuration::decode(&codec.encode().unwrap()).unwrap();
+                let decoded =
+                    fr_media::worker::Configuration::decode(&codec.encode().unwrap()).unwrap();
                 assert_eq!(decoded, codec);
                 assert!(codec.codec().is_ok());
             }

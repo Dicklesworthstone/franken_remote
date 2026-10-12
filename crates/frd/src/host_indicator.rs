@@ -8,16 +8,19 @@
 //! loss requests the original host's stop and normal teardown; neither the
 //! host future nor its media/firewall cleanup is cancelled and abandoned.
 mod process;
-pub use process::Error as IndicatorError;
 use crate::{
     host_run::{self, Encoder, Options, Reporter, StopHandle, policy},
     input_process::ProcessLaunch,
 };
+pub use process::Error as IndicatorError;
 use process::{Owner, Status};
 use std::{
     fmt,
     path::Path,
-    sync::{Arc, atomic::{AtomicBool, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -65,7 +68,14 @@ pub fn run_with_policy(
     policy: policy::Configuration,
     image: &Path,
 ) -> Result<(), Error> {
-    run_with_policy_and_encoder(options, report, stop, policy, image, Encoder::SoftwareExplicit)
+    run_with_policy_and_encoder(
+        options,
+        report,
+        stop,
+        policy,
+        image,
+        Encoder::SoftwareExplicit,
+    )
 }
 
 /// Preserve the exact local encoder selection through the indicator gate.
@@ -79,13 +89,21 @@ pub fn run_with_policy_and_encoder(
     image: &Path,
     encoder: Encoder,
 ) -> Result<(), Error> {
-    if stop.is_requested() { return Ok(()); }
-    if options.input_agent.is_some() { return Err(Error::Configuration); }
+    if stop.is_requested() {
+        return Ok(());
+    }
+    if options.input_agent.is_some() {
+        return Err(Error::Configuration);
+    }
     let mut bytes = [0; 16];
     getrandom::fill(&mut bytes).map_err(|_| Error::Entropy)?;
     let launch = ProcessLaunch::new(
-        image, &options.display, options.xauthority.as_deref(), u128::from_ne_bytes(bytes),
-    ).map_err(|_| Error::Configuration)?;
+        image,
+        &options.display,
+        options.xauthority.as_deref(),
+        u128::from_ne_bytes(bytes),
+    )
+    .map_err(|_| Error::Configuration)?;
     let stopped = stop.clone();
     let mut owner = Owner::start(launch, move || stopped.request()).map_err(Error::Indicator)?;
     let result = drive(&owner, stop, || {
@@ -98,9 +116,8 @@ pub fn run_with_policy_and_encoder(
     loop {
         match owner.try_finish() {
             Some(Ok(())) => return result,
-            Some(Err(_)) => return Err(Error::Cleanup),
             None if Instant::now() < until => thread::sleep(Duration::from_millis(5)),
-            None => return Err(Error::Cleanup),
+            Some(Err(_)) | None => return Err(Error::Cleanup),
         }
     }
 }
@@ -108,9 +125,10 @@ pub fn run_with_policy_and_encoder(
 /// EVERY stopped UI is a refusal: an opening failure must not exit as success.
 fn fault(status: Status) -> Option<IndicatorError> {
     match status {
-        Status::Stopped(IndicatorError::LocalRevoke | IndicatorError::Stopped) => None,
+        Status::Opening
+        | Status::Ready
+        | Status::Stopped(IndicatorError::LocalRevoke | IndicatorError::Stopped) => None,
         Status::Stopped(error) => Some(error),
-        Status::Opening | Status::Ready => None,
     }
 }
 fn drive(
@@ -121,9 +139,15 @@ fn drive(
     let control = owner.control();
     loop {
         let status = control.status();
-        if let Status::Stopped(error) = status { return Err(Error::Indicator(error)); }
-        if stop.is_requested() { return Ok(()); }
-        if status == Status::Ready { break; }
+        if let Status::Stopped(error) = status {
+            return Err(Error::Indicator(error));
+        }
+        if stop.is_requested() {
+            return Ok(());
+        }
+        if status == Status::Ready {
+            break;
+        }
         thread::sleep(Duration::from_millis(5));
     }
     let done = AtomicBool::new(false);
@@ -137,8 +161,12 @@ fn drive(
             let mut failure = None;
             while !done.load(Ordering::Acquire) {
                 let status = control.status();
-                if let Some(error) = fault(status) { failure.get_or_insert(error); }
-                if matches!(status, Status::Stopped(_)) { stop.request(); }
+                if let Some(error) = fault(status) {
+                    failure.get_or_insert(error);
+                }
+                if matches!(status, Status::Stopped(_)) {
+                    stop.request();
+                }
                 thread::sleep(Duration::from_millis(5));
             }
             failure
@@ -154,7 +182,9 @@ fn drive(
 }
 struct Fence<'a>(&'a StopHandle);
 impl Drop for Fence<'_> {
-    fn drop(&mut self) { self.0.request(); }
+    fn drop(&mut self) {
+        self.0.request();
+    }
 }
 struct Finish<'a> {
     done: &'a AtomicBool,
@@ -174,8 +204,17 @@ mod tests {
     fn native_failure_is_distinct_from_local_revocation_and_host_cleanup() {
         assert_eq!(fault(Status::Stopped(IndicatorError::LocalRevoke)), None);
         assert_eq!(fault(Status::Stopped(IndicatorError::Stopped)), None);
-        assert_eq!(fault(Status::Stopped(IndicatorError::Expired)), Some(IndicatorError::Expired));
-        assert_eq!(Error::Indicator(IndicatorError::Expired).code(), "observation_indicator_evidence_lost");
-        assert_eq!(Error::Host(host_run::Error::Cleanup("source")).code(), "cleanup_incomplete");
+        assert_eq!(
+            fault(Status::Stopped(IndicatorError::Expired)),
+            Some(IndicatorError::Expired)
+        );
+        assert_eq!(
+            Error::Indicator(IndicatorError::Expired).code(),
+            "observation_indicator_evidence_lost"
+        );
+        assert_eq!(
+            Error::Host(host_run::Error::Cleanup("source")).code(),
+            "cleanup_incomplete"
+        );
     }
 }

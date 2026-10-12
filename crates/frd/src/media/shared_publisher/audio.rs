@@ -210,12 +210,7 @@ impl EntryAudio {
         Ok(())
     }
     /// Only the original reliable reply route may change this lane's state.
-    fn receive(
-        &mut self,
-        ring: &AudioRing,
-        route: Route,
-        bytes: &[u8],
-    ) -> Option<Disposition> {
+    fn receive(&mut self, ring: &AudioRing, route: Route, bytes: &[u8]) -> Option<Disposition> {
         let lanes = self.lanes?;
         if route != Route::Stream(lanes.replies) {
             return None;

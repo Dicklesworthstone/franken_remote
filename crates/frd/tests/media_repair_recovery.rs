@@ -267,7 +267,11 @@ fn wrong_route_does_not_consume_the_pending_offer_or_start_recovery() {
         assert_eq!(sender.cache_usage(), usage);
         assert!(control.view_ready().unwrap());
         control.revoke();
-        assert!(sender.repair(Route::Stream(pair.host_routes[2]), &repair()).is_err());
+        assert!(
+            sender
+                .repair(Route::Stream(pair.host_routes[2]), &repair())
+                .is_err()
+        );
         assert!(sender.tick().is_err());
         assert!(sender.is_closed());
     });
@@ -282,7 +286,10 @@ fn valid_repairs_cannot_extend_the_terminal_recovery_deadline() {
         let (mut sender, _, until) = sender(&cx, &pair, true, 100_000);
         after(&cx, until).await;
         let route = Route::Stream(pair.host_routes[2]);
-        assert_eq!(sender.repair(route, &repair()), Ok(RepairAdmission::Refused));
+        assert_eq!(
+            sender.repair(route, &repair()),
+            Ok(RepairAdmission::Refused)
+        );
         let recovery_until = sender.next_deadline().unwrap();
         after(&cx, recovery_until.as_micros()).await;
         assert_eq!(

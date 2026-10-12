@@ -191,11 +191,11 @@ fn execute_status(args: &[String], json: bool) -> ExitCode {
 }
 
 #[cfg(target_os = "linux")]
-#[path = "frd/policy.rs"]
-mod local_policy;
-#[cfg(target_os = "linux")]
 #[path = "frd/approval.rs"]
 mod desktop_approval;
+#[cfg(target_os = "linux")]
+#[path = "frd/policy.rs"]
+mod local_policy;
 
 fn execute_policy(args: &[String], approval: bool, json: bool) -> ExitCode {
     #[cfg(target_os = "linux")]
@@ -395,7 +395,8 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                 );
                 println!(
                     "frd: video configuration: up to {} fps, encoder target {} bits/s; actual delivery depends on source and transport",
-                    profile.video.fps(), profile.video.bitrate()
+                    profile.video.fps(),
+                    profile.video.bitrate()
                 );
                 if profile.encoder.is_hardware() {
                     println!(
@@ -403,7 +404,9 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                     );
                 }
                 if profile.observation_indicator {
-                    println!("frd: the desktop Stop sharing window is required while this run is enabled; closing or losing it ends the run");
+                    println!(
+                        "frd: the desktop Stop sharing window is required while this run is enabled; closing or losing it ends the run"
+                    );
                 }
                 if profile.session_lifetime {
                     println!(
@@ -627,19 +630,29 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
     let policy = run_policy(&options, effective);
     let result = if let Some(approval) = local_ui {
         host_run::run_with_desktop_approval(
-            &run_options, &report, &stop, policy, encoder, approval,
+            &run_options,
+            &report,
+            &stop,
+            policy,
+            encoder,
+            &approval,
         )
         .map_err(|error| (error.code(), error.to_string()))
     } else {
         match options.observation_indicator.as_deref() {
             Some(image) => frd::host_indicator::run_with_policy_and_encoder(
-                &run_options, &report, &stop, policy, image, encoder,
+                &run_options,
+                &report,
+                &stop,
+                policy,
+                image,
+                encoder,
             )
             .map_err(|error| (error.code(), error.to_string())),
-            None => host_run::run_with_policy_and_encoder(
-                &run_options, &report, &stop, policy, encoder,
-            )
-            .map_err(|error| (error.code(), error.to_string())),
+            None => {
+                host_run::run_with_policy_and_encoder(&run_options, &report, &stop, policy, encoder)
+                    .map_err(|error| (error.code(), error.to_string()))
+            }
         }
     };
     drop(headless);

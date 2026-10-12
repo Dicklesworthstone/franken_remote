@@ -17,11 +17,15 @@ pub fn configuration(
         && !options.headless
         && options.observation_indicator.is_none();
     // A host without lifecycle evidence must not even try an ambient UI.
-    let image = eligible.then(|| {
-        std::env::current_exe().ok().and_then(|exe| {
-            exe.parent().map(|directory| directory.join("fr-observation-indicator"))
+    let image = eligible
+        .then(|| {
+            std::env::current_exe().ok().and_then(|exe| {
+                exe.parent()
+                    .map(|directory| directory.join("fr-observation-indicator"))
+            })
         })
-    }).flatten().filter(|path| path.is_absolute() && path.is_file());
+        .flatten()
+        .filter(|path| path.is_absolute() && path.is_file());
     selected(mode, eligible, image.as_deref())
 }
 fn selected(
@@ -51,11 +55,17 @@ mod tests {
     fn desktop_approval_missing_or_unmonitored_ui_never_becomes_unattended() {
         for (eligible, image) in [
             (false, None),
-            (false, Some(Path::new("/installed/fr-observation-indicator"))),
+            (
+                false,
+                Some(Path::new("/installed/fr-observation-indicator")),
+            ),
             (true, None),
             (true, Some(Path::new("relative-ui"))),
         ] {
-            assert_eq!(selected(Approval::Local, eligible, image).err(), Some(REQUIRED));
+            assert_eq!(
+                selected(Approval::Local, eligible, image).err(),
+                Some(REQUIRED)
+            );
             assert!(selected(Approval::None, eligible, image).unwrap().is_none());
         }
     }
@@ -63,8 +73,15 @@ mod tests {
     #[test]
     fn desktop_approval_availability_preserves_current_and_future_policy_choices() {
         for mode in [Approval::None, Approval::Local] {
-            assert!(selected(mode, true, Some(Path::new("/installed/fr-observation-indicator")))
-                .unwrap().is_some());
+            assert!(
+                selected(
+                    mode,
+                    true,
+                    Some(Path::new("/installed/fr-observation-indicator"))
+                )
+                .unwrap()
+                .is_some()
+            );
         }
     }
 
@@ -72,7 +89,11 @@ mod tests {
     fn desktop_approval_incompatible_profiles_refuse_before_ui_discovery() {
         for (headless, indicator, session) in [
             (true, None, Some("c2")),
-            (false, Some("/installed/fr-observation-indicator"), Some("c2")),
+            (
+                false,
+                Some("/installed/fr-observation-indicator"),
+                Some("c2"),
+            ),
             (false, None, None),
         ] {
             let options = RunOptions {
@@ -81,7 +102,10 @@ mod tests {
                 logind_session: session.map(Into::into),
                 ..RunOptions::default()
             };
-            assert_eq!(configuration(&options, Approval::Local).err(), Some(REQUIRED));
+            assert_eq!(
+                configuration(&options, Approval::Local).err(),
+                Some(REQUIRED)
+            );
             assert!(configuration(&options, Approval::None).unwrap().is_none());
         }
     }

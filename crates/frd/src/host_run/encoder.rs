@@ -70,7 +70,18 @@ mod tests {
         for encoder in ENCODERS {
             assert_eq!(Encoder::parse(encoder.as_str()), Some(encoder));
         }
-        for value in ["", "auto", "hardware", "h264", "libx265", "videotoolbox", "NVENC", " vaapi", "vaapi ", "nvenc,software"] {
+        for value in [
+            "",
+            "auto",
+            "hardware",
+            "h264",
+            "libx265",
+            "videotoolbox",
+            "NVENC",
+            " vaapi",
+            "vaapi ",
+            "nvenc,software",
+        ] {
             assert_eq!(Encoder::parse(value), None, "{value}");
         }
         assert!(!Encoder::SoftwareExplicit.is_hardware());
@@ -81,7 +92,11 @@ mod tests {
     #[test]
     fn chosen_backend_survives_display_selection_and_private_worker_encoding() {
         let catalog = Catalog::new(7, &[display(11, 0)], &ProtocolLimits::ABSOLUTE).unwrap();
-        for (encoder, expected) in ENCODERS.into_iter().zip([Backend::SoftwareExplicit, Backend::Nvenc, Backend::Vaapi]) {
+        for (encoder, expected) in
+            ENCODERS
+                .into_iter()
+                .zip([Backend::SoftwareExplicit, Backend::Nvenc, Backend::Vaapi])
+        {
             let (selected, configuration) = choose(&catalog, 30, 8_000_000, encoder).unwrap();
             assert_eq!(selected, catalog.selection(11).unwrap());
             assert_eq!(configuration.backend, expected);
@@ -91,16 +106,27 @@ mod tests {
             assert_eq!(configuration.fps, 30);
             assert_eq!(configuration.bitrate, 8_000_000);
             let bytes = configuration.encode().unwrap();
-            assert_eq!(fr_media::worker::Configuration::decode(&bytes).unwrap(), configuration);
+            assert_eq!(
+                fr_media::worker::Configuration::decode(&bytes).unwrap(),
+                configuration
+            );
         }
     }
 
     #[test]
     fn backend_choice_never_changes_display_preference_or_empty_catalog_refusal() {
-        let catalog = Catalog::new(1, &[display(11, -1920), display(22, 0)], &ProtocolLimits::ABSOLUTE).unwrap();
+        let catalog = Catalog::new(
+            1,
+            &[display(11, -1920), display(22, 0)],
+            &ProtocolLimits::ABSOLUTE,
+        )
+        .unwrap();
         let empty = Catalog::new(2, &[], &ProtocolLimits::ABSOLUTE).unwrap();
         for encoder in ENCODERS {
-            assert_eq!(choose(&catalog, 60, 12_000_000, encoder).unwrap().0, catalog.selection(22).unwrap());
+            assert_eq!(
+                choose(&catalog, 60, 12_000_000, encoder).unwrap().0,
+                catalog.selection(22).unwrap()
+            );
             assert!(choose(&empty, 30, 8_000_000, encoder).is_err());
         }
     }

@@ -79,6 +79,7 @@ pub struct RunOptions {
 impl RunOptions {
     /// Arguments after `run`. Unknown, duplicate or valueless options refuse
     /// BEFORE the runtime or `LocalAPI` is opened. Typos cannot disable approval.
+    #[allow(clippy::too_many_lines)] // One flat flag table; splitting it hides duplicate/conflict checks.
     pub fn parse(args: &[String]) -> Result<Self, Error> {
         let mut options = Self::default();
         let mut iter = args.iter();
@@ -168,7 +169,9 @@ impl RunOptions {
                 "--session-monitor" => set(&mut options.session_monitor, PathBuf::from(value))?,
                 "--observation-indicator" => {
                     let path = PathBuf::from(value);
-                    if !path.is_absolute() { return Err(Error::InvalidArgument); }
+                    if !path.is_absolute() {
+                        return Err(Error::InvalidArgument);
+                    }
                     set(&mut options.observation_indicator, path)?;
                 }
                 _ => return Err(Error::InvalidArgument),
@@ -444,18 +447,36 @@ mod tests {
     #[test]
     fn observation_indicator_is_explicit_absolute_and_cannot_change_approval() {
         assert!(parse(&[]).unwrap().observation_indicator.is_none());
-        let on = parse(&["--observation-indicator", "/usr/libexec/fr-observation-indicator", "--approval", "local", "--audio"]).unwrap();
+        let on = parse(&[
+            "--observation-indicator",
+            "/usr/libexec/fr-observation-indicator",
+            "--approval",
+            "local",
+            "--audio",
+        ])
+        .unwrap();
         assert_eq!(on.approval, Some(Approval::Local));
         assert!(on.audio && on.input_agent.is_none());
-        assert_eq!(on.observation_indicator, Some(PathBuf::from("/usr/libexec/fr-observation-indicator")));
+        assert_eq!(
+            on.observation_indicator,
+            Some(PathBuf::from("/usr/libexec/fr-observation-indicator"))
+        );
         for refused in [
             &["--observation-indicator"][..],
             &["--observation-indicator", "--once"][..],
             &["--observation-indicator", "relative"][..],
-            &["--observation-indicator", "/a", "--observation-indicator", "/b"][..],
+            &[
+                "--observation-indicator",
+                "/a",
+                "--observation-indicator",
+                "/b",
+            ][..],
             &["--observation-indicator", "/a", "--input-agent", "/b"][..],
         ] {
-            assert!(matches!(parse(refused), Err(Error::InvalidArgument)), "{refused:?}");
+            assert!(
+                matches!(parse(refused), Err(Error::InvalidArgument)),
+                "{refused:?}"
+            );
         }
     }
 }

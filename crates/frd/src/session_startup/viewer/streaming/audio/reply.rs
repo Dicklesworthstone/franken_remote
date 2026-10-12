@@ -59,12 +59,7 @@ impl ViewerAudio {
         &mut self,
         now: u64,
         live: &mut dyn FnMut() -> bool,
-        send: &mut impl FnMut(
-            Route,
-            &[u8],
-            u64,
-            &mut dyn FnMut() -> bool,
-        ) -> Result<(), quic::Error>,
+        send: &mut impl FnMut(Route, &[u8], u64, &mut dyn FnMut() -> bool) -> Result<(), quic::Error>,
     ) -> Result<(), Error> {
         if !live() {
             self.close();
@@ -160,12 +155,7 @@ impl ViewerAudio {
         &mut self,
         now: u64,
         live: &mut dyn FnMut() -> bool,
-        send: &mut impl FnMut(
-            Route,
-            &[u8],
-            u64,
-            &mut dyn FnMut() -> bool,
-        ) -> Result<(), quic::Error>,
+        send: &mut impl FnMut(Route, &[u8], u64, &mut dyn FnMut() -> bool) -> Result<(), quic::Error>,
     ) -> Result<bool, Error> {
         if !live() {
             self.close();
@@ -198,7 +188,9 @@ impl ViewerAudio {
                     Completion::Configured(offer) => {
                         self.state = State::Active(offer);
                         if self.output.as_mut().is_none_or(|output| {
-                            output.configuration_admitted(self.lanes.binding, offer).is_err()
+                            output
+                                .configuration_admitted(self.lanes.binding, offer)
+                                .is_err()
                         }) {
                             self.fail_locally(offer.generation);
                         }

@@ -113,7 +113,10 @@ fn failure_time_survives_idle_service_before_first_request_preparation() {
         .offer(&mut r, 20_000, &mut [0; recovery_request::REQUEST_BYTES])
         .unwrap()
         .unwrap();
-    assert_eq!(offer.send_by_micros(), 100 + c.policy.recovery_budget_micros);
+    assert_eq!(
+        offer.send_by_micros(),
+        100 + c.policy.recovery_budget_micros
+    );
 }
 
 #[test]
@@ -163,7 +166,10 @@ fn decode_failure_time_precedes_delayed_requestor_service() {
     );
     let charged = r.budget_usage();
     let offer = q.offer(&mut r, 20_000, &mut out).unwrap().unwrap();
-    assert_eq!(offer.send_by_micros(), 203 + c.policy.recovery_budget_micros);
+    assert_eq!(
+        offer.send_by_micros(),
+        203 + c.policy.recovery_budget_micros
+    );
     assert_eq!(r.budget_usage(), charged);
     assert_eq!(picture.bytes(), &[8; 16]);
     drop(picture);

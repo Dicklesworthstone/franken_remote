@@ -15,8 +15,8 @@
 //! (`clipboard`, requires the input agent); it follows the controller's lease.
 //! So is the controller's drop directory (`files`, requires the input agent):
 //! explicit viewer-to-host file sends land there only under the live lease.
-pub mod audio;
 pub mod approval;
+pub mod audio;
 pub mod encoder;
 pub use encoder::Encoder;
 pub mod policy;
@@ -519,7 +519,7 @@ pub fn run_with_desktop_approval(
     stop: &Arc<StopHandle>,
     policy: policy::Configuration,
     encoder: Encoder,
-    approval: approval::Configuration,
+    approval: &approval::Configuration,
 ) -> Result<(), Error> {
     run_inner(options, report, stop, Some(policy), encoder, Some(approval))
 }
@@ -530,10 +530,12 @@ fn run_inner(
     stop: &Arc<StopHandle>,
     policy: Option<policy::Configuration>,
     encoder: Encoder,
-    approval: Option<approval::Configuration>,
+    approval: Option<&approval::Configuration>,
 ) -> Result<(), Error> {
     check(options)?;
-    if let Some(approval) = &approval { approval.validate(options)?; }
+    if let Some(approval) = approval {
+        approval.validate(options)?;
+    }
     let control = probe_control(options)?;
     // Started before anything is bound; kept for the whole run.
     let monitor = match &options.session_monitor {
@@ -543,7 +545,16 @@ fn run_inner(
         None => None,
     };
     let lifetime = monitor.as_ref().map(Monitor::control);
-    let result = serve_run(options, report, stop, policy, lifetime.as_ref(), control, encoder, approval.as_ref());
+    let result = serve_run(
+        options,
+        report,
+        stop,
+        policy,
+        lifetime.as_ref(),
+        control,
+        encoder,
+        approval,
+    );
     // Sampled before our own stop: only a native end is a session end.
     let ended = session_ended(lifetime.as_ref());
     if let Some(monitor) = monitor {
@@ -555,7 +566,7 @@ fn run_inner(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn serve_run(
     options: &Options,
     report: &Reporter,
@@ -599,7 +610,12 @@ fn serve_run(
             };
             let roots =
                 fr_tailnet::trust::root_store(&options.trust_roots).map_err(Error::Trust)?;
-            let Some(ready) = unless_stopped(policy.ready_with_approval(&broker, approval.is_some()), stop, &mut signals).await
+            let Some(ready) = unless_stopped(
+                policy.ready_with_approval(&broker, approval.is_some()),
+                stop,
+                &mut signals,
+            )
+            .await
             else {
                 return Ok(());
             };
@@ -1019,13 +1035,17 @@ impl Share<'_> {
     async fn serve(self, broker: &Cx) -> Result<Ended, Error> {
         let epoch = policy::lease_with_approval(self.policy, self.approval.is_some())?;
         let required = approval::required(epoch.as_ref())?;
-        let mut consent = approval::Owner::new(if required { self.approval } else { None }, self.options);
+        let mut consent =
+            approval::Owner::new(if required { self.approval } else { None }, self.options);
         let result = self.serve_with_consent(broker, epoch, &mut consent).await;
         let cleanup = consent.finish(&self.cx()?).await;
-        if cleanup.is_err() { (self.report)(Event::CleanupFailed { stage: "approval" }); }
+        if cleanup.is_err() {
+            (self.report)(Event::CleanupFailed { stage: "approval" });
+        }
         cleanup.and(result)
     }
 
+    #[allow(clippy::too_many_lines)] // One consent-gated serve loop; its fences stay in order in one place.
     async fn serve_with_consent(
         &self,
         broker: &Cx,
@@ -1072,13 +1092,14 @@ impl Share<'_> {
                 serial::Policy::default(),
                 Connections {
                     request: move |attempt| {
-                        let mut request = request(attempt, host_boot, os_session, scope, control, audio)?;
+                        let mut request =
+                            request(attempt, host_boot, os_session, scope, control, audio)?;
                         if require_approval {
                             approval::require(&mut request);
                         }
                         Ok(request)
                     },
-                    approval: move |original, role| notify.submit(original, role),
+                    approval: move |original, role| notify.submit(&original, role),
                     completed: move |stats: serial::Statistics, outcome: PeerResult| {
                         // An accept window that closed before any Initial arrived
                         // had no peer; it is idle listening, not a refusal.
@@ -1278,7 +1299,17 @@ mod tests {
                     .all(|c| c.name != fr_wire::audio::CAPABILITY)
             );
             let with = offer(control_offer.then(core), false, true, false);
-            assert_eq!(with.capabilities.len(), without.capabilities.len() + 1);
+            // Control also offers the optional native-audio-control extension.
+            assert_eq!(
+                with.capabilities.len(),
+                without.capabilities.len() + 1 + usize::from(control_offer)
+            );
+            assert_eq!(
+                with.capabilities
+                    .iter()
+                    .any(|c| { c.name == fr_wire::audio_control::CAPABILITY && !c.required }),
+                control_offer
+            );
             assert!(with.capabilities.iter().any(|c| {
                 c.name == fr_wire::audio::CAPABILITY
                     && c.version == fr_wire::audio::VERSION
@@ -1404,14 +1435,22 @@ mod tests {
         let report: Reporter = Arc::new(|_| {});
         let stop = Arc::new(StopHandle::default());
         assert_eq!(run(&options, &report, &stop), Err(Error::Configuration));
-        for (fps, bitrate) in [(0, 8_000_000), (241, 8_000_000), (30, 9_999), (30, 200_000_001)] {
+        for (fps, bitrate) in [
+            (0, 8_000_000),
+            (241, 8_000_000),
+            (30, 9_999),
+            (30, 200_000_001),
+        ] {
             let mut invalid_video = options.clone();
             invalid_video.worker = PathBuf::from("/unprovisioned/fr-media-worker");
             invalid_video.input_agent = Some(PathBuf::from("/unprovisioned/fr-input-agent"));
             invalid_video.fps = fps;
             invalid_video.bitrate = bitrate;
             // Configuration refusal must precede even the local executor probe.
-            assert_eq!(run(&invalid_video, &report, &stop), Err(Error::Configuration));
+            assert_eq!(
+                run(&invalid_video, &report, &stop),
+                Err(Error::Configuration)
+            );
         }
         let mut relative_agent = options.clone();
         relative_agent.worker = PathBuf::from("/usr/bin/fr-media-worker");

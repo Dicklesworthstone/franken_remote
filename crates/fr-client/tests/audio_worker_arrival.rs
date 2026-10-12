@@ -131,11 +131,7 @@ fn impossible_future_arrival_is_terminal_not_a_larger_budget() {
 fn arrival_deadline_overflow_is_terminal() {
     let mut owner = owner(u64::MAX - 1);
     assert_eq!(
-        owner.receive_at(
-            packet(0),
-            ClientInstant(u64::MAX - 1),
-            clock(u64::MAX - 1),
-        ),
+        owner.receive_at(packet(0), ClientInstant(u64::MAX - 1), clock(u64::MAX - 1),),
         Err(PlayoutError::ClockOverflow)
     );
     assert_eq!(owner.error(), Some(PlayoutError::ClockOverflow));

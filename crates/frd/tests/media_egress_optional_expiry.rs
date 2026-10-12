@@ -68,7 +68,9 @@ fn setup(cx: &Cx) -> (ObservationControl, Egress, u64) {
     authority.mark_capabilities_checked().unwrap();
     authority.authorize_observation(now).unwrap();
     authority.mark_view_ready(now).unwrap();
-    authority.grant_lease(InputLeaseId::from_raw(1), now).unwrap();
+    authority
+        .grant_lease(InputLeaseId::from_raw(1), now)
+        .unwrap();
     authority.mark_view_ready(now).unwrap();
     let control = ObservationControl::new(cx.clone(), authority).unwrap();
     let subscription = Subscription::new(

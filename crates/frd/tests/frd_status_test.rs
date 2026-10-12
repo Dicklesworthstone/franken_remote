@@ -841,8 +841,9 @@ fn unmeasured_status_reports_the_served_capacity_not_the_planned_one() {
     assert!(report.render_json().contains("\"max_viewers\":1"));
 }
 
-/// Help never advertises an unserved HTTPS listener or a working local prompt,
-/// and names the session-lifetime selection.
+/// Help never advertises an unserved HTTPS listener, states exactly what local
+/// approval needs (desktop consent bound to a monitored logind session, no
+/// terminal or unattended fallback), and names the session-lifetime selection.
 #[test]
 fn frd_help_states_the_served_listener_and_prompt_limits() {
     let help = wait_for_child(frd_command(&["--help"]).spawn().unwrap());
@@ -853,8 +854,10 @@ fn frd_help_states_the_served_listener_and_prompt_limits() {
         "{text}"
     );
     assert!(!text.contains("'local' (prompt)"), "{text}");
+    assert!(text.contains("desktop consent before capture"), "{text}");
+    assert!(text.contains("requires --logind-session"), "{text}");
     assert!(
-        text.contains("frd run refuses it until the approval prompt is hosted"),
+        text.contains("no terminal or unattended fallback"),
         "{text}"
     );
     assert!(text.contains("--logind-session ID"), "{text}");

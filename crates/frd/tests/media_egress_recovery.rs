@@ -39,7 +39,9 @@ fn setup(cx: &Cx) -> (ObservationControl, Egress) {
     // Synthetic readiness establishes the before/after authority assertion;
     // it is deliberately not evidence that an OS decoder presented anything.
     authority.mark_view_ready(now).unwrap();
-    authority.grant_lease(InputLeaseId::from_raw(1), now).unwrap();
+    authority
+        .grant_lease(InputLeaseId::from_raw(1), now)
+        .unwrap();
     authority.mark_view_ready(now).unwrap();
     let control = ObservationControl::new(cx.clone(), authority).unwrap();
     let subscription = Subscription::new(
@@ -161,7 +163,9 @@ fn expired_pending_send_never_calls_transport_and_silent_wait_is_bounded() {
         reach(&cx, until).await;
         assert_eq!(
             egress.tick(),
-            Err(Error::Send(SendError::Delivery(DeliveryError::RecoveryExpired)))
+            Err(Error::Send(SendError::Delivery(
+                DeliveryError::RecoveryExpired
+            )))
         );
         assert!(egress.is_closed());
         assert_eq!(egress.allocated_bytes(), 0);

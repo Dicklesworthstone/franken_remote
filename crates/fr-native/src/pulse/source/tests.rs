@@ -1,4 +1,4 @@
-//! Pure production accumulator/scratch checks, not PulseAudio or codec evidence.
+//! Pure production accumulator/scratch checks, not `PulseAudio` or codec evidence.
 use super::*;
 
 #[test]
@@ -6,7 +6,10 @@ fn overload_retains_newest_frames_in_order_without_changing_timestamps() {
     let mut recent = Recent::new();
     for sequence in 0_u16..20 {
         recent
-            .push(&[i16::try_from(sequence).unwrap(); 4], u64::from(sequence) * 960)
+            .push(
+                &[i16::try_from(sequence).unwrap(); 4],
+                u64::from(sequence) * 960,
+            )
             .unwrap();
     }
     let kept: Vec<_> = recent.iter().map(|(pcm, time)| (pcm[0], time)).collect();
@@ -84,10 +87,7 @@ fn fragmented_samples_preserve_channel_order_while_old_complete_frames_are_dropp
             assert_eq!(*timestamp, u64::try_from(index * samples).unwrap());
             assert_eq!(pcm.len(), values);
             for (n, value) in pcm.iter().enumerate() {
-                assert_eq!(
-                    *value,
-                    i16::try_from(index * 10 + n % channels).unwrap()
-                );
+                assert_eq!(*value, i16::try_from(index * 10 + n % channels).unwrap());
             }
         }
         assert_eq!(filled, 0);
@@ -111,12 +111,16 @@ fn partial_frames_survive_normal_pulls_but_completed_scratch_does_not() {
     let mut recent = Recent::new();
     let bytes: Vec<_> = (0_i16..960).flat_map(i16::to_ne_bytes).collect();
     state
-        .push(Chunk::Bytes(&bytes[..501]), &mut |pcm, time| recent.push(pcm, time))
+        .push(Chunk::Bytes(&bytes[..501]), &mut |pcm, time| {
+            recent.push(pcm, time)
+        })
         .unwrap();
     assert_eq!(recent.iter().count(), 0);
     recent.clear();
     state
-        .push(Chunk::Bytes(&bytes[501..]), &mut |pcm, time| recent.push(pcm, time))
+        .push(Chunk::Bytes(&bytes[501..]), &mut |pcm, time| {
+            recent.push(pcm, time)
+        })
         .unwrap();
     let kept: Vec<_> = recent.iter().collect();
     assert_eq!(kept.len(), 1);
@@ -139,13 +143,19 @@ fn server_hole_is_an_explicit_timeline_gap_not_invented_pcm() {
     let mut recent = Recent::new();
     let bytes: Vec<_> = [4_i16; 960].iter().flat_map(|v| v.to_ne_bytes()).collect();
     state
-        .push(Chunk::Bytes(&bytes[..480]), &mut |pcm, time| recent.push(pcm, time))
+        .push(Chunk::Bytes(&bytes[..480]), &mut |pcm, time| {
+            recent.push(pcm, time)
+        })
         .unwrap();
     state
-        .push(Chunk::Hole(480 * 4), &mut |pcm, time| recent.push(pcm, time))
+        .push(Chunk::Hole(480 * 4), &mut |pcm, time| {
+            recent.push(pcm, time)
+        })
         .unwrap();
     state
-        .push(Chunk::Bytes(&bytes), &mut |pcm, time| recent.push(pcm, time))
+        .push(Chunk::Bytes(&bytes), &mut |pcm, time| {
+            recent.push(pcm, time)
+        })
         .unwrap();
     let kept: Vec<_> = recent.iter().collect();
     assert_eq!(kept.len(), 1);

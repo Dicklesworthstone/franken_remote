@@ -110,7 +110,7 @@ impl NativePublisher {
 /// Session progress has priority, including the poll which observes terminal
 /// revocation. Source completion is audio-only; its own retiring owner publishes
 /// a typed stop and aborts its child. Native cleanup receipts stay in the local
-/// AudioProfile's retained slot, not discarded or relabelled as confirmed exit.
+/// `AudioProfile`'s retained slot, not discarded or relabelled as confirmed exit.
 async fn alongside<F, S, T>(session: F, source: Option<S>) -> T
 where
     F: Future<Output = T>,

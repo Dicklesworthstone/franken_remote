@@ -4,7 +4,10 @@ use super::*;
 use fr_core::indicator_process::{Frame, Kind};
 
 fn opening(now: Instant) -> State {
-    State { status: Status::Opening, until: now + OPEN_BUDGET }
+    State {
+        status: Status::Opening,
+        until: now + OPEN_BUDGET,
+    }
 }
 #[test]
 fn reply_latency_consumes_the_request_budget_instead_of_restarting_it() {
@@ -12,12 +15,21 @@ fn reply_latency_consumes_the_request_budget_instead_of_restarting_it() {
     let mut state = opening(start);
     assert!(state.ready_at(start, start + Duration::from_millis(200)));
     assert_eq!(state.until, start + CHECK_BUDGET);
-    assert_eq!(state.check_at(start + CHECK_BUDGET), Status::Stopped(Error::Expired));
+    assert_eq!(
+        state.check_at(start + CHECK_BUDGET),
+        Status::Stopped(Error::Expired)
+    );
 }
 #[test]
 fn an_expired_lease_or_opening_cannot_be_revived_by_a_fresh_reply() {
     let start = Instant::now();
-    for mut state in [opening(start), State { status: Status::Ready, until: start + CHECK_BUDGET }] {
+    for mut state in [
+        opening(start),
+        State {
+            status: Status::Ready,
+            until: start + CHECK_BUDGET,
+        },
+    ] {
         let ended = state.until;
         assert!(!state.ready_at(ended, ended));
         assert_eq!(state.status, Status::Stopped(Error::Expired));
@@ -35,26 +47,53 @@ fn future_issued_or_already_late_responses_never_report_ready() {
 #[test]
 fn stopped_owner_preserves_first_cause_across_late_progress() {
     let start = Instant::now();
-    for error in [Error::LocalRevoke, Error::Protocol, Error::Stopped, Error::Unavailable] {
-        let mut state = State { status: Status::Stopped(error), until: start + TURN };
+    for error in [
+        Error::LocalRevoke,
+        Error::Protocol,
+        Error::Stopped,
+        Error::Unavailable,
+    ] {
+        let mut state = State {
+            status: Status::Stopped(error),
+            until: start + TURN,
+        };
         assert!(!state.ready_at(start, start));
         assert_eq!(state.check_at(start + OPEN_BUDGET), Status::Stopped(error));
     }
 }
 #[test]
 fn the_supervisor_requires_the_exact_response_not_merely_a_ready_byte() {
-    let request = Frame { kind: Kind::Check, sequence: 8, epoch: 29 };
-    assert_eq!(io::response(request, &request.reply(Kind::Ready).encode().unwrap()), Ok(()));
+    let request = Frame {
+        kind: Kind::Check,
+        sequence: 8,
+        epoch: 29,
+    };
+    assert_eq!(
+        io::response(request, &request.reply(Kind::Ready).encode().unwrap()),
+        Ok(())
+    );
     for frame in [
         request,
         request.reply(Kind::Stopped),
-        Frame { sequence: 7, ..request.reply(Kind::Ready) },
-        Frame { epoch: 30, ..request.reply(Kind::Ready) },
+        Frame {
+            sequence: 7,
+            ..request.reply(Kind::Ready)
+        },
+        Frame {
+            epoch: 30,
+            ..request.reply(Kind::Ready)
+        },
     ] {
-        assert_eq!(io::response(request, &frame.encode().unwrap()), Err(Error::Protocol));
+        assert_eq!(
+            io::response(request, &frame.encode().unwrap()),
+            Err(Error::Protocol)
+        );
     }
     assert_eq!(io::response(request, &[0; 32]), Err(Error::Protocol));
-    assert_eq!(io::response(request, &request.reply(Kind::Refused).encode().unwrap()), Err(Error::Unavailable));
+    assert_eq!(
+        io::response(request, &request.reply(Kind::Refused).encode().unwrap()),
+        Err(Error::Unavailable)
+    );
 }
 #[test]
 fn failure_cause_is_available_without_a_lock_before_waking_the_host() {
@@ -65,7 +104,13 @@ fn failure_cause_is_available_without_a_lock_before_waking_the_host() {
         Shared {
             on_stop: Box::new(move || {
                 let owner = weak.upgrade().unwrap();
-                reported.store(owner.state.try_lock().is_ok_and(|s| s.status == Status::Stopped(Error::Unavailable)), Ordering::Release);
+                reported.store(
+                    owner
+                        .state
+                        .try_lock()
+                        .is_ok_and(|s| s.status == Status::Stopped(Error::Unavailable)),
+                    Ordering::Release,
+                );
             }),
             state: Mutex::new(opening(Instant::now())),
         }
@@ -78,9 +123,9 @@ fn failure_cause_is_available_without_a_lock_before_waking_the_host() {
 #[allow(clippy::too_many_lines)]
 fn real_child_faults_gate_startup_stop_the_original_host_and_drain_before_return() {
     use crate::host_run::StopHandle;
+    use fr_core::input_submission::process::{Signal, encode_signal};
     use std::os::unix::fs::PermissionsExt;
-    use fr_core::input_submission::process::{encode_signal, Signal};
-    const FIXTURE: &str = r#"#!/usr/bin/python3
+    const FIXTURE: &str = r"#!/usr/bin/python3
 import socket, time
 mode = '@MODE@'
 s = socket.socket(fileno=0)
@@ -116,13 +161,34 @@ while True:
             s.sendall(data[i:i+3])
     else:
         s.sendall(data)
-"#;
-    let signal = encode_signal(Signal::LocalRevoke).iter().map(u8::to_string).collect::<Vec<_>>().join(",");
-    for mode in ["ready", "wrong-sequence", "wrong-epoch", "exit", "stall", "fragmented", "later-stall", "revoke", "early-revoke"] {
+";
+    let signal = encode_signal(Signal::LocalRevoke)
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    for mode in [
+        "ready",
+        "wrong-sequence",
+        "wrong-epoch",
+        "exit",
+        "stall",
+        "fragmented",
+        "later-stall",
+        "revoke",
+        "early-revoke",
+    ] {
         let stop = Arc::new(StopHandle::default());
         let on_stop = stop.clone();
-        let path = std::env::temp_dir().join(format!("fr-indicator-fixture-{}-{mode}.py", std::process::id()));
-        std::fs::write(&path, FIXTURE.replace("@MODE@", mode).replace("@SIGNAL@", &signal)).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "fr-indicator-fixture-{}-{mode}.py",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            FIXTURE.replace("@MODE@", mode).replace("@SIGNAL@", &signal),
+        )
+        .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         let launch = ProcessLaunch::new(&path, ":0", None, 29).unwrap();
         let mut owner = Owner::start(launch, move || on_stop.request()).unwrap();
@@ -133,7 +199,10 @@ while True:
             called.store(true, Ordering::Release);
             if matches!(mode, "later-stall" | "revoke") {
                 while !stop.is_requested() {
-                    assert!(Instant::now() < until, "original host was not stopped: {mode}");
+                    assert!(
+                        Instant::now() < until,
+                        "original host was not stopped: {mode}"
+                    );
                     thread::sleep(TURN);
                 }
                 // Simulated host teardown AFTER its original stop, not a
@@ -144,9 +213,21 @@ while True:
             Ok(())
         });
         let admitted = matches!(mode, "ready" | "fragmented" | "later-stall" | "revoke");
-        assert_eq!(called.load(Ordering::Acquire), admitted, "startup gate: {mode}");
-        assert_eq!(drained.load(Ordering::Acquire), admitted, "host drain: {mode}");
-        assert_eq!(result.is_ok(), matches!(mode, "ready" | "fragmented" | "revoke"), "outcome: {mode}: {result:?}");
+        assert_eq!(
+            called.load(Ordering::Acquire),
+            admitted,
+            "startup gate: {mode}"
+        );
+        assert_eq!(
+            drained.load(Ordering::Acquire),
+            admitted,
+            "host drain: {mode}"
+        );
+        assert_eq!(
+            result.is_ok(),
+            matches!(mode, "ready" | "fragmented" | "revoke"),
+            "outcome: {mode}: {result:?}"
+        );
         owner.stop();
         assert!(stop.is_requested(), "stop must precede cleanup: {mode}");
         loop {

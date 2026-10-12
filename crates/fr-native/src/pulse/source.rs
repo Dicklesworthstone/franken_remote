@@ -117,7 +117,10 @@ impl PlaybackSource {
         }
         result
     }
-    fn pull_inner(&mut self, now_us: u64) -> Result<(Vec<AudioAccessUnit>, CaptureCounters), Error> {
+    fn pull_inner(
+        &mut self,
+        now_us: u64,
+    ) -> Result<(Vec<AudioAccessUnit>, CaptureCounters), Error> {
         let values = self.frame_values();
         let channels = self.channels();
         // Do not leave newer server audio behind merely because four OLD

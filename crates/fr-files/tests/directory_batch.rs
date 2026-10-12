@@ -1,6 +1,7 @@
 #![cfg(target_os = "linux")]
 //! Same real UDP/TLS/ATP/disk owners as single-file sends. Admission/input are
 //! explicitly local fixtures, not live-tailnet or graphical-selection evidence.
+#[allow(dead_code)] // Shared support module: native_quic uses the remaining helpers.
 mod native_support;
 use asupersync::cx::Cx;
 use fr_files::{

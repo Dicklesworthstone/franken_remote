@@ -4,6 +4,7 @@
 use super::*;
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn already_fenced_sender_notifies_a_healthy_peer_and_recovers_on_original_owners() {
     run(|c, h| async move {
         let cleanup = Cx::current().unwrap();
@@ -43,7 +44,7 @@ fn already_fenced_sender_notifies_a_healthy_peer_and_recovers_on_original_owners
             &[fr_wire::RepairRange { start: 0, end: 1 }],
             limits.max_fragments(),
             repair_stream.binding,
-            limits,
+            &limits,
             &mut bytes,
         )
         .unwrap();
@@ -80,8 +81,7 @@ fn already_fenced_sender_notifies_a_healthy_peer_and_recovers_on_original_owners
                     if let Some(event) = event {
                         seen.borrow_mut().push(event.frame.as_raw());
                     }
-                    if (start.elapsed() > Duration::from_millis(3300)
-                        && seen.borrow().len() >= 4)
+                    if (start.elapsed() > Duration::from_millis(3300) && seen.borrow().len() >= 4)
                         || start.elapsed() > Duration::from_secs(5)
                     {
                         stop.stop();
@@ -102,7 +102,10 @@ fn already_fenced_sender_notifies_a_healthy_peer_and_recovers_on_original_owners
         );
         assert_eq!(viewer.statistics().recovered_streams, 1);
         assert!(frames.borrow().len() >= 4);
-        assert!(!frames.borrow().contains(&1), "expired native output escaped");
+        assert!(
+            !frames.borrow().contains(&1),
+            "expired native output escaped"
+        );
         assert!(start.elapsed() >= Duration::from_millis(3300));
         assert_eq!(host.worker_id(), original_host);
         assert_eq!(viewer.worker_id(), original_viewer);

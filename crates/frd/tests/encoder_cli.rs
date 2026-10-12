@@ -30,7 +30,10 @@ impl Fixture {
         let root = std::env::temp_dir().join(format!(
             "frd-encoder-cli-{}-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
             NEXT.fetch_add(1, Ordering::Relaxed),
         ));
         fs::DirBuilder::new().mode(0o700).create(&root).unwrap();
@@ -53,7 +56,11 @@ impl Fixture {
             listener.set_nonblocking(true).unwrap();
             listener
         });
-        Self { root, policy, listener }
+        Self {
+            root,
+            policy,
+            listener,
+        }
     }
     fn run(&self, extra: &[&str]) -> Value {
         let mut child = Command::new(env!("CARGO_BIN_EXE_frd"))
@@ -84,11 +91,21 @@ impl Fixture {
         let output = child.wait_with_output().unwrap();
         let expected_code = if self.listener.is_some() { 2 } else { 1 };
         assert_eq!(output.status.code(), Some(expected_code));
-        assert!(output.stderr.is_empty(), "{}", String::from_utf8_lossy(&output.stderr));
-        assert!(output.stdout.len() <= 16_384, "bounded preflight diagnostic");
+        assert!(
+            output.stderr.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.len() <= 16_384,
+            "bounded preflight diagnostic"
+        );
         let value: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(value["outcome"], "refusal");
-        assert_eq!(fs::read(self.root.join("policy.json")).unwrap(), self.policy);
+        assert_eq!(
+            fs::read(self.root.join("policy.json")).unwrap(),
+            self.policy
+        );
         if let Some(listener) = &self.listener {
             assert!(matches!(
                 listener.accept(),
@@ -119,7 +136,12 @@ fn missing_ambiguous_or_invalid_encoder_selection_never_starts_the_host() {
     let fixture = Fixture::new(Approval::None, true);
     let absent = fixture.run(&[]);
     assert_eq!(absent["code"], "hardware_hevc_unavailable");
-    assert!(absent["detail"].as_str().unwrap().contains("no automatic encoder selection"));
+    assert!(
+        absent["detail"]
+            .as_str()
+            .unwrap()
+            .contains("no automatic encoder selection")
+    );
     for args in [
         &["--encoder", "auto"][..],
         &["--encoder", "nvenc", "--software-explicit"][..],
@@ -157,7 +179,10 @@ fn hardware_selection_cannot_bypass_saved_or_explicit_local_approval() {
 fn encoder_selection_does_not_replace_the_installed_tailnet_requirement() {
     let missing = Fixture::new(Approval::None, false);
     for encoder in ["software", "nvenc", "vaapi"] {
-        assert_eq!(missing.run(&["--encoder", encoder])["code"], "tailscale_unavailable");
+        assert_eq!(
+            missing.run(&["--encoder", encoder])["code"],
+            "tailscale_unavailable"
+        );
     }
 }
 
@@ -172,7 +197,10 @@ fn real_cli_accepts_video_rate_targets_for_all_encoders_without_starting_native_
             );
         }
     }
-    assert_eq!(fixture.run(&["--fps", "60", "--bitrate", "12000000"])["code"], "hardware_hevc_unavailable");
+    assert_eq!(
+        fixture.run(&["--fps", "60", "--bitrate", "12000000"])["code"],
+        "hardware_hevc_unavailable"
+    );
 }
 
 #[test]

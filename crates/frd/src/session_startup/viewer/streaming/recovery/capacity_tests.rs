@@ -132,7 +132,10 @@ fn resource_and_protocol_failures_are_not_added_to_the_recovery_allowlist() {
         DeliveryError::InvalidPolicy,
         DeliveryError::Wire(fr_wire::WireError::InvalidRanges),
     ] {
-        assert!(!recoverable(error), "terminal error was admitted: {error:?}");
+        assert!(
+            !recoverable(error),
+            "terminal error was admitted: {error:?}"
+        );
     }
     for error in [
         DeliveryError::ReferenceCapacityExceeded,

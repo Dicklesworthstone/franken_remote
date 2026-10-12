@@ -341,11 +341,12 @@ impl Egress {
                 // cannot drop useful work, hide authority loss, or turn a real
                 // reference failure into an optional discard. No bytes were
                 // admitted; partial/uncertain writes take the terminal Err arm.
-                let error = subscription.authorize_write(offer).err().unwrap_or(
-                    Error::Send(SendError::Delivery(
+                let error = subscription
+                    .authorize_write(offer)
+                    .err()
+                    .unwrap_or(Error::Send(SendError::Delivery(
                         fr_media::delivery::DeliveryError::WrongState,
-                    )),
-                );
+                    )));
                 self.transmit_media_failure(error)
             }
             Ok(Admission::Backpressure) => Ok(Progress::Pending(offer.clone())),
