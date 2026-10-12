@@ -136,6 +136,52 @@ fn changed_target_address_key_name_or_local_tailnet_never_refreshes_old_connecti
         });
     }
 }
+/// Live defect (2026-10-12): dialing an idle peer makes tailscaled establish a
+/// direct path mid-handshake (`CurAddr` "" -> endpoint), and the home DERP
+/// region (`Relay`) can change at any time. Neither is node identity; the
+/// post-handshake refresh must keep the same target. The sibling test above is
+/// the planted negative: key/address/name/tailnet changes still refuse.
+#[test]
+fn tailscale_path_changes_refresh_the_same_target() {
+    for change in ["direct", "derp", "self_derp"] {
+        let mut idle = status();
+        peer_mut(&mut idle)["CurAddr"] = json!("");
+        peer_mut(&mut idle)["Relay"] = json!("nyc");
+        idle["Self"]["Relay"] = json!("nyc");
+        let mut woken = idle.clone();
+        match change {
+            "direct" => {
+                peer_mut(&mut woken)["CurAddr"] = json!("192.168.1.107:41641");
+                peer_mut(&mut woken)["Active"] = json!(true);
+            }
+            "derp" => peer_mut(&mut woken)["Relay"] = json!("ord"),
+            _ => woken["Self"]["Relay"] = json!("ord"),
+        }
+        let server = Server::new(
+            vec![
+                response(&idle, false),
+                response(&idle, false),
+                response(&woken, false),
+            ],
+            Duration::ZERO,
+        );
+        runtime().block_on(async {
+            let cx = Cx::current().unwrap();
+            let target = server
+                .client
+                .peer_target(&cx, PeerSelector::StableId("n-peer"))
+                .await
+                .unwrap();
+            let next = server
+                .client
+                .revalidate_peer_target(&cx, &target)
+                .await
+                .unwrap_or_else(|error| panic!("{change}: {error:?}"));
+            assert!(target.same_identity(&next), "{change}");
+            assert_eq!(next.addresses(), target.addresses(), "{change}");
+        });
+    }
+}
 #[test]
 fn conflicting_or_shared_or_expired_nodes_never_select_a_destination() {
     for mode in 0..9 {

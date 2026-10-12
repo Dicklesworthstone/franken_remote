@@ -9,9 +9,11 @@ use std::{fmt, net::IpAddr, sync::atomic::Ordering, time::Duration};
 pub enum PeerTransportPath {
     /// Direct `WireGuard` UDP connection (optimal latency).
     Direct { cur_addr: String },
-    /// Relayed via Tailscale DERP region (elevated latency and potential jitter).
+    /// Recent traffic with no direct endpoint: relayed via this Tailscale DERP
+    /// region (elevated latency and potential jitter).
     DerpRelayed { relay: String },
-    /// Path not yet resolved or peer offline.
+    /// No current path: idle (no recent traffic), offline, or not yet resolved.
+    /// A home DERP region alone (`Relay`) is not evidence of relaying.
     Unknown,
 }
 
@@ -143,24 +145,20 @@ impl LocalApi {
                 .map_err(|_| Error::MalformedMetadata)?;
             let mut excluded = DiscoveryExclusions::default();
             for peer in status.peers.values() {
-                let transport_path = if let Some(ref relay) = peer.relay {
-                    if relay.0.is_empty() {
-                        PeerTransportPath::Unknown
-                    } else {
+                // `CurAddr` is the direct endpoint in use; `Relay` is only the
+                // peer's home DERP region and is set for nearly every peer.
+                // Traffic is relayed only when the path is active without a
+                // direct endpoint.
+                let transport_path = match (&peer.cur_addr, &peer.relay) {
+                    (Some(cur), _) if !cur.0.is_empty() => PeerTransportPath::Direct {
+                        cur_addr: cur.0.clone(),
+                    },
+                    (_, Some(relay)) if peer.active && !relay.0.is_empty() => {
                         PeerTransportPath::DerpRelayed {
                             relay: relay.0.clone(),
                         }
                     }
-                } else if let Some(ref cur) = peer.cur_addr {
-                    if cur.0.is_empty() {
-                        PeerTransportPath::Unknown
-                    } else {
-                        PeerTransportPath::Direct {
-                            cur_addr: cur.0.clone(),
-                        }
-                    }
-                } else {
-                    PeerTransportPath::Unknown
+                    _ => PeerTransportPath::Unknown,
                 };
 
                 let result =

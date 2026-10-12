@@ -988,6 +988,35 @@ fn unchanged_revalidation_extends_only_an_unexpired_owned_admission() {
         assert_eq!(server.calls.load(Ordering::SeqCst), 6);
     });
 }
+/// Host side of the same live defect: the admitted peer's path (`CurAddr`,
+/// `Relay`) changes between the admission snapshots and at refresh. That is
+/// not an identity change; it must neither fail the snapshot-consistency read
+/// nor close the admission. Identity changes still close it (test below).
+#[test]
+fn tailscale_path_changes_neither_break_admission_nor_close_it() {
+    let (idle, w) = fixtures();
+    let mut direct = idle.clone();
+    peer_mut(&mut direct)["CurAddr"] = json!("192.168.1.124:41641");
+    peer_mut(&mut direct)["Relay"] = json!("nyc");
+    let mut relayed = direct.clone();
+    peer_mut(&mut relayed)["CurAddr"] = json!("");
+    peer_mut(&mut relayed)["Relay"] = json!("ord");
+    let server = Server::responses(&[&idle, &w, &direct, &direct, &w, &relayed], Duration::ZERO);
+    run_async!(cx, {
+        let proof = server
+            .client
+            .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
+            .await
+            .unwrap();
+        let original = proof.expires_us();
+        let mut owner = crate::Admission::new(server.client.clone(), cx.clone(), proof).unwrap();
+        let gate = owner.lease();
+        sleep(cx.timer_driver().unwrap().now(), Duration::from_millis(15)).await;
+        owner.refresh().await.unwrap();
+        assert!(gate.observe().unwrap() > original);
+        assert_eq!(server.calls.load(Ordering::SeqCst), 6);
+    });
+}
 #[test]
 fn capability_removal_permission_changes_and_identity_switch_close_old_admission() {
     for change in 0..4 {

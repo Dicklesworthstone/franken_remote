@@ -64,7 +64,12 @@ impl<'de, const N: usize> Deserialize<'de> for Text<N> {
     }
 }
 
-#[derive(Deserialize, Clone, PartialEq, Eq)]
+/// Equality is IDENTITY equality: `CurAddr` and `Relay` are Tailscale path
+/// observations (direct endpoint, home DERP region) that change when a dial
+/// wakes an idle path or the path migrates, so they never decide whether a
+/// snapshot names the same node. Every other field still must match exactly.
+#[derive(Deserialize, Clone)]
+#[allow(clippy::struct_excessive_bools)] // Mirrors LocalAPI PeerStatus fields 1:1.
 pub(crate) struct Peer {
     #[serde(rename = "ID")]
     pub id: Text<128>,
@@ -90,11 +95,53 @@ pub(crate) struct Peer {
     pub expiry: Option<Text<40>>,
     #[serde(rename = "InNetworkMap")]
     pub in_map: bool,
+    /// Path observation: the direct endpoint in use, empty when relayed or idle.
     #[serde(rename = "CurAddr", default)]
     pub cur_addr: Option<Text<64>>,
+    /// Path observation: the peer's HOME DERP region. Populated for nearly
+    /// every peer; it does not mean traffic is currently relayed.
     #[serde(rename = "Relay", default)]
     pub relay: Option<Text<32>>,
+    /// Path observation: recent traffic exists to this peer.
+    #[serde(rename = "Active", default)]
+    pub active: bool,
 }
+impl PartialEq for Peer {
+    fn eq(&self, other: &Self) -> bool {
+        // Exhaustive destructuring: a new field must be classified here
+        // (identity or path observation) before this compiles.
+        let Self {
+            id,
+            dns_name,
+            node_id,
+            key,
+            user,
+            ips,
+            tags,
+            sharer,
+            sharee,
+            expired,
+            expiry,
+            in_map,
+            cur_addr: _,
+            relay: _,
+            active: _,
+        } = self;
+        *id == other.id
+            && *dns_name == other.dns_name
+            && *node_id == other.node_id
+            && *key == other.key
+            && *user == other.user
+            && *ips == other.ips
+            && *tags == other.tags
+            && *sharer == other.sharer
+            && *sharee == other.sharee
+            && *expired == other.expired
+            && *expiry == other.expiry
+            && *in_map == other.in_map
+    }
+}
+impl Eq for Peer {}
 #[derive(Deserialize, Clone, PartialEq, Eq)]
 pub(crate) struct Tailnet {
     #[serde(rename = "Name")]

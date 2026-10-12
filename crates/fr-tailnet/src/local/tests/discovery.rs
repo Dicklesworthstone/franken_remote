@@ -375,38 +375,71 @@ fn malformed_or_over_limit_snapshots_refuse_instead_of_partially_discovering() {
         );
     });
 }
+/// `Relay` is the home DERP region and is present for nearly every peer, so it
+/// never implies relaying on its own. Live evidence (2026-10-12): a LAN peer
+/// with `CurAddr` 192.168.1.124:41641 and `Relay` "nyc" was reported relayed.
 #[test]
-fn discovery_reports_transport_path_direct_and_derp_relay() {
-    let mut s = status();
-    peer_mut(&mut s)["Relay"] = json!("nyc");
-    peer_mut(&mut s)["CurAddr"] = json!("192.168.1.50:41641");
-    let server = Server::new(vec![response(&s, false)], Duration::ZERO);
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
-        let discovery = server.client.discover(&cx).await.unwrap();
-        assert_eq!(discovery.peers().len(), 1);
-        let peer = &discovery.peers()[0];
-        assert_eq!(
-            peer.transport_path(),
-            &PeerTransportPath::DerpRelayed {
-                relay: "nyc".to_string()
-            }
-        );
-    });
-
-    let mut s2 = status();
-    peer_mut(&mut s2)["CurAddr"] = json!("192.168.1.50:41641");
-    let server2 = Server::new(vec![response(&s2, false)], Duration::ZERO);
-    runtime().block_on(async {
-        let cx = Cx::current().unwrap();
-        let discovery = server2.client.discover(&cx).await.unwrap();
-        assert_eq!(discovery.peers().len(), 1);
-        let peer = &discovery.peers()[0];
-        assert_eq!(
-            peer.transport_path(),
-            &PeerTransportPath::Direct {
-                cur_addr: "192.168.1.50:41641".to_string()
-            }
-        );
-    });
+fn discovery_reports_transport_path_direct_relayed_and_idle() {
+    let cases = [
+        // Direct endpoint in use; the home region is irrelevant.
+        (
+            Some("192.168.1.50:41641"),
+            Some("nyc"),
+            true,
+            PeerTransportPath::Direct {
+                cur_addr: "192.168.1.50:41641".to_string(),
+            },
+        ),
+        (
+            Some("192.168.1.50:41641"),
+            None,
+            false,
+            PeerTransportPath::Direct {
+                cur_addr: "192.168.1.50:41641".to_string(),
+            },
+        ),
+        // Recent traffic without a direct endpoint: relayed through DERP.
+        (
+            Some(""),
+            Some("nyc"),
+            true,
+            PeerTransportPath::DerpRelayed {
+                relay: "nyc".to_string(),
+            },
+        ),
+        (
+            None,
+            Some("nyc"),
+            true,
+            PeerTransportPath::DerpRelayed {
+                relay: "nyc".to_string(),
+            },
+        ),
+        // Idle: a home region alone is not a path.
+        (Some(""), Some("nyc"), false, PeerTransportPath::Unknown),
+        (None, Some("nyc"), false, PeerTransportPath::Unknown),
+        (None, Some(""), true, PeerTransportPath::Unknown),
+        (None, None, true, PeerTransportPath::Unknown),
+    ];
+    for (cur_addr, relay, active, expected) in cases {
+        let mut s = status();
+        if let Some(cur_addr) = cur_addr {
+            peer_mut(&mut s)["CurAddr"] = json!(cur_addr);
+        }
+        if let Some(relay) = relay {
+            peer_mut(&mut s)["Relay"] = json!(relay);
+        }
+        peer_mut(&mut s)["Active"] = json!(active);
+        let server = Server::new(vec![response(&s, false)], Duration::ZERO);
+        runtime().block_on(async {
+            let cx = Cx::current().unwrap();
+            let discovery = server.client.discover(&cx).await.unwrap();
+            assert_eq!(discovery.peers().len(), 1);
+            assert_eq!(
+                discovery.peers()[0].transport_path(),
+                &expected,
+                "{cur_addr:?} {relay:?} active={active}"
+            );
+        });
+    }
 }
