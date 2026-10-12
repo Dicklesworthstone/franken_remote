@@ -34,7 +34,15 @@ use std::{
     time::Duration,
 };
 
-const MAX_DATAGRAM: usize = 1500;
+/// Largest UDP payload this listener sends, accepts or advertises. Tailscale's
+/// TUN MTU is 1280, so an IPv4 payload above 1252 bytes (IPv6: 1232) is never
+/// delivered, and the native dialer's endpoint receives at most 1200 bytes. A
+/// 1500-byte limit split the real Tailscale certificate chain into 1438-byte
+/// handshake datagrams that never arrived (live run, 2026-10-12). 1200 is
+/// also the QUIC minimum, so a compliant client Initial is exactly this size.
+pub(crate) const MAX_DATAGRAM: usize = 1200;
+// IPv6 over the 1280-byte tailnet MTU carries at most 1280 - 40 - 8 bytes.
+const _: () = assert!(MAX_DATAGRAM <= 1280 - 40 - 8);
 // Upper bound on datagrams one receive call may take from this socket. Discovery
 // still reads exactly one at a time (explicit `receive_batch(cx, 1)`), but the
 // SAME socket then carries the established connection. With a cap of one, each

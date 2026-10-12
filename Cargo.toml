@@ -19,10 +19,16 @@ repository = "https://github.com/Dicklesworthstone/franken_remote"
 # The sole async runtime (AGENTS.md section 3.1). Pinned here so every
 # consumer inherits one version; default-features off because FrankenRemote
 # enables only the Asupersync features it qualifies (plan section 4.1).
-# Use the published 0.5.0 release, never the mutable sibling checkout.
-# The standalone QUIC spike retains its separate immutable Git pin and
-# qualification evidence; selecting this version does not qualify transport.
-asupersync = { version = "=0.5.0", default-features = false }
+# Pinned to an immutable upstream Git revision, never the mutable sibling
+# checkout. Published 0.5.0 sends each TLS handshake segment as ONE datagram,
+# so a real Tailscale (Let's Encrypt) certificate chain (~3.6 KB flight) can
+# never complete a live handshake; ee72b665e (on asupersync main, 2026-10-09)
+# carries 82b3e34b3, which splits Handshake-level CRYPTO into packet-sized
+# datagrams. This exact revision completed live tailnet sessions on 2026-10-12.
+# Owner approval for a Git pin while 0.6.0 is unpublished: 2026-10-12
+# ("do everything you think is advisable"). Return to a crates.io release
+# once one contains the fix. Selecting this revision does not qualify transport.
+asupersync = { version = "=0.6.0", git = "https://github.com/Dicklesworthstone/asupersync.git", rev = "ee72b665ee87f6c811b1631136676fbc31ec0a88", default-features = false }
 # First-party crates, wired by path in exactly one place; consumers write
 # `fr-core.workspace = true`.
 fr-core = { path = "crates/fr-core" }

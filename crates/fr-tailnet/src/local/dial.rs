@@ -302,9 +302,11 @@ fn connection_ids() -> Result<(ConnectionId, ConnectionId), Error> {
     }
     Ok((a, b))
 }
+/// QUIC minimum datagram, below the tailnet MTU (1280) on IPv4 and IPv6.
+const DATAGRAM_BYTES: usize = 1200;
 pub(super) fn endpoint_config() -> QuicUdpEndpointConfig {
     QuicUdpEndpointConfig {
-        max_packet_size: 1200,
+        max_packet_size: DATAGRAM_BYTES,
         max_batch_size: 16,
         ..Default::default()
     }
@@ -335,6 +337,9 @@ pub(super) fn transport_parameters() -> Result<Vec<u8>, Error> {
         initial_max_streams_bidi: Some(0),
         initial_max_streams_uni: Some(8),
         max_datagram_frame_size: Some(1200),
+        // The endpoint receives at most this many bytes per datagram
+        // (`endpoint_config`); a peer must not send larger ones.
+        max_udp_payload_size: Some(DATAGRAM_BYTES as u64),
         ..Default::default()
     }
     .encode(&mut bytes)
@@ -388,4 +393,10 @@ fn native_application_credit_is_nonzero_without_admitting_bidirectional_streams(
     assert_eq!(parameters.initial_max_streams_bidi, Some(0));
     assert_eq!(connection_config().max_local_bidi, 0);
     assert_eq!(parameters.initial_max_data, Some(524_288));
+    // A peer is told the exact datagram size this endpoint can receive.
+    assert_eq!(
+        parameters.max_udp_payload_size,
+        Some(endpoint_config().max_packet_size as u64)
+    );
+    assert!(endpoint_config().max_packet_size <= 1280 - 40 - 8);
 }

@@ -211,3 +211,21 @@ fn configuration_is_bounded_and_matches_the_native_dial_profile() {
     assert_eq!(parameters.initial_max_streams_bidi, Some(0));
     assert!(parameters.disable_active_migration);
 }
+/// Live defect (2026-10-12): a 1500-byte bound split the real Tailscale chain
+/// into 1438-byte handshake datagrams that the tailnet (MTU 1280) and the
+/// 1200-byte dialer could not carry. Sends, accepts and the advertised limit
+/// share one bound that fits an IPv6 tailnet payload.
+#[test]
+fn datagram_bound_fits_the_tailnet_mtu_and_is_advertised() {
+    // The bound itself is a compile-time assertion beside `MAX_DATAGRAM`.
+    let parameters = TransportParameters::decode(&transport_parameters()).unwrap();
+    assert_eq!(parameters.max_udp_payload_size, Some(MAX_DATAGRAM as u64));
+    let bytes = valid();
+    assert_eq!(bytes.len(), MAX_DATAGRAM);
+    assert!(initial(&bytes).is_some());
+    // The receive buffer keeps one sentinel byte: a datagram that filled it
+    // was truncated and is never a candidate.
+    let mut truncated = bytes;
+    truncated.push(0);
+    assert!(initial(&truncated).is_none());
+}
