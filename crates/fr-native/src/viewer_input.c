@@ -281,11 +281,16 @@ int fr_viewer_input_held_poll(struct fr_viewer_input *h, struct fr_viewer_held *
     *out = h->held; h->held_pending = 0; return 1;
 }
 
+/* Why an open refused, so the caller can name it (or wait for focus) instead
+ * of reporting a generic native failure. Nothing is captured on any refusal. */
+enum { OPEN_NATIVE = 0, OPEN_NOT_FOCUSED = 1, OPEN_HELD = 2, OPEN_WINDOW = 3 };
+
 /* Setup only. Native event processing uses no synchronous X request/reply. */
 struct fr_viewer_input *fr_viewer_input_open(const char *display, uint32_t window,
                                            uint32_t width, uint32_t height,
-                                           uint8_t names[256][4]) {
-    if (!display || !window || !names || !width || !height || width > 32767 || height > 32767) return NULL;
+                                           uint8_t names[256][4], int *refusal) {
+    if (refusal) *refusal = OPEN_NATIVE;
+    if (!display || !window || !names || !refusal || !width || !height || width > 32767 || height > 32767) return NULL;
     struct fr_viewer_input *h = calloc(1, sizeof(*h));
     if (!h) return NULL;
     h->c = xcb_connect(display, NULL); h->window = window;
@@ -294,7 +299,7 @@ struct fr_viewer_input *fr_viewer_input_open(const char *display, uint32_t windo
      * so a resize during setup cannot establish a stale layout generation. */
     xcb_get_geometry_reply_t *initial = reply(h, xcb_get_geometry(h->c, window).sequence);
     int selected = initial && initial->root != window;
-    free(initial); if (!selected) goto fail;
+    free(initial); if (!selected) { *refusal = OPEN_WINDOW; goto fail; }
     const uint32_t mask = XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_KEY_RELEASE |
         XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE |
         XCB_EVENT_MASK_POINTER_MOTION | XCB_EVENT_MASK_FOCUS_CHANGE |
@@ -304,21 +309,26 @@ struct fr_viewer_input *fr_viewer_input_open(const char *display, uint32_t windo
     if (!g) goto fail;
     uint32_t root = g->root;
     int ok = window != root && g->width == width && g->height == height;
-    free(g); if (!ok) goto fail;
+    free(g); if (!ok) { *refusal = OPEN_WINDOW; goto fail; }
     xcb_get_window_attributes_reply_t *a = reply(h, xcb_get_window_attributes(h->c, window).sequence);
     ok = a && a->map_state == XCB_MAP_STATE_VIEWABLE && a->_class == XCB_WINDOW_CLASS_INPUT_OUTPUT;
-    free(a); if (!ok) goto fail;
+    int viewable = a != NULL;
+    free(a); if (!ok) { if (viewable) *refusal = OPEN_WINDOW; goto fail; }
     xcb_get_input_focus_reply_t *focus = reply(h, xcb_get_input_focus(h->c).sequence);
     ok = focus && focus->focus == window;
-    free(focus); if (!ok) goto fail;
+    int answered = focus != NULL;
+    free(focus); if (!ok) { if (answered) *refusal = OPEN_NOT_FOCUSED; goto fail; }
     xcb_query_keymap_reply_t *keys = reply(h, xcb_query_keymap(h->c).sequence);
     ok = keys != NULL;
-    if (keys) for (int i=0;i<32;i++) if (keys->keys[i]) ok = 0;
-    free(keys); if (!ok) goto fail;
+    int held = 0;
+    if (keys) for (int i=0;i<32;i++) if (keys->keys[i]) held = 1;
+    free(keys); if (!ok || held) { if (held) *refusal = OPEN_HELD; goto fail; }
     xcb_query_pointer_reply_t *p = reply(h, xcb_query_pointer(h->c, window).sequence);
     ok = p && !(p->mask & (XCB_BUTTON_MASK_1 | XCB_BUTTON_MASK_2 | XCB_BUTTON_MASK_3 |
                            XCB_BUTTON_MASK_4 | XCB_BUTTON_MASK_5));
-    free(p); if (!ok || !keyboard(h, names)) goto fail;
+    held = p && !ok;
+    free(p); if (!ok) { if (held) *refusal = OPEN_HELD; goto fail; }
+    if (!keyboard(h, names)) goto fail;
     h->clock = xcb_generate_id(h->c);
     uint32_t clockmask = XCB_EVENT_MASK_PROPERTY_CHANGE;
     if (!checked(h, xcb_create_window_checked(h->c, 0, h->clock, root, 0, 0, 1, 1, 0,

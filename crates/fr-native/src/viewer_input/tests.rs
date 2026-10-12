@@ -398,9 +398,10 @@ fn invalid_local_windows_and_preexisting_held_keys_refuse_before_event_forwardin
         probe: Arc::new(Probe::default()),
         caps: capabilities(),
     };
+    // A key held when capture would start is named, not a native failure.
     assert_eq!(
         run(&display, peer.window, &layout, &mut target),
-        Err(StopReason::NativeFailure)
+        Err(StopReason::InitialHeld)
     );
     peer.command("key 38 0");
     assert!(!target.probe.ready.load(Ordering::Acquire));
@@ -445,3 +446,78 @@ mod held;
 mod escape;
 
 mod wheel;
+
+/// Live defect (2026-10-12): a controller window that mapped without keyboard
+/// focus failed capture at once as `NativeFailure`, ending control within ~2 s
+/// on a desktop whose window manager did not focus it. Capture now waits,
+/// capturing nothing, until the window is focused...
+#[test]
+fn capture_waits_for_window_focus_before_opening() {
+    let _serial = SERIAL.lock().unwrap();
+    let Some((mut peer, display)) = Peer::new() else {
+        return;
+    };
+    peer.command("focus");
+    let probe = Arc::new(Probe::default());
+    let copied = probe.clone();
+    let (_, layout) = viewport();
+    let window = peer.window;
+    let task = thread::spawn(move || {
+        run_focused(
+            &display,
+            window,
+            &layout,
+            &mut Recording {
+                start: Instant::now(),
+                probe: copied,
+                caps: capabilities(),
+            },
+            Duration::from_secs(10),
+        )
+    });
+    thread::sleep(Duration::from_millis(300));
+    assert!(!task.is_finished());
+    assert!(!probe.ready.load(Ordering::Acquire));
+    assert!(probe.events.lock().unwrap().is_empty());
+    peer.command("restore");
+    wait(|| probe.ready.load(Ordering::Acquire) || task.is_finished());
+    assert!(
+        probe.ready.load(Ordering::Acquire),
+        "{:?}",
+        task.is_finished()
+    );
+    // Focus loss AFTER capture started still ends it, as before.
+    peer.command("focus");
+    assert_eq!(task.join().unwrap(), Err(StopReason::FocusLost));
+}
+/// ...but only for a bounded time: a window never focused ends as the named
+/// `FocusLost`, still without capturing anything.
+#[test]
+fn capture_never_focused_ends_as_focus_lost() {
+    let _serial = SERIAL.lock().unwrap();
+    let Some((mut peer, display)) = Peer::new() else {
+        return;
+    };
+    peer.command("focus");
+    let (_, layout) = viewport();
+    let mut target = Recording {
+        start: Instant::now(),
+        probe: Arc::new(Probe::default()),
+        caps: capabilities(),
+    };
+    let started = Instant::now();
+    assert_eq!(
+        run_focused(
+            &display,
+            peer.window,
+            &layout,
+            &mut target,
+            Duration::from_millis(400)
+        ),
+        Err(StopReason::FocusLost)
+    );
+    assert!(started.elapsed() >= Duration::from_millis(400));
+    assert!(!target.probe.ready.load(Ordering::Acquire));
+    assert!(target.probe.events.lock().unwrap().is_empty());
+    peer.command("restore");
+}

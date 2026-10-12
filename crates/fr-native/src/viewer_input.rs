@@ -37,6 +37,16 @@ use timing::Timeline;
 const MAX_NATIVE_EVENTS: usize = 64;
 const NATIVE_TURN_US: u64 = 50_000;
 const TURN: Duration = Duration::from_millis(1);
+/// `fr_viewer_input_open` refusals (`viewer_input.c`); anything else is native.
+const OPEN_NOT_FOCUSED: c_int = 1;
+const OPEN_HELD: c_int = 2;
+const OPEN_WINDOW: c_int = 3;
+/// A granted controller's window may map without keyboard focus (a window
+/// manager's focus-stealing prevention, or no click yet). Nothing is captured
+/// until it is focused; this bounds how long control waits for that, after
+/// which the attempt ends as `FocusLost` instead of a generic native failure.
+const FOCUS_WAIT: Duration = Duration::from_secs(30);
+const FOCUS_POLL: Duration = Duration::from_millis(50);
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct Raw {
@@ -53,6 +63,7 @@ unsafe extern "C" {
         width: u32,
         height: u32,
         names: *mut [[u8; 4]; 256],
+        refusal: *mut c_int,
     ) -> *mut c_void;
     fn fr_viewer_input_close(handle: *mut c_void);
     fn fr_viewer_input_barrier(handle: *mut c_void) -> c_int;
@@ -364,20 +375,49 @@ fn run(
     layout: &Layout,
     target: &mut impl Target,
 ) -> Result<(), StopReason> {
-    target.clock()?;
+    run_focused(display, window, layout, target, FOCUS_WAIT)
+}
+fn run_focused(
+    display: &CString,
+    window: Window,
+    layout: &Layout,
+    target: &mut impl Target,
+    focus_wait: Duration,
+) -> Result<(), StopReason> {
     let mut names = [[0; 4]; 256];
-    // SAFETY: valid NUL string/output array, C retains neither. Opaque owner is
-    // confined to this thread. Only bounded key names cross the FFI boundary.
-    let raw = unsafe {
-        fr_viewer_input_open(
-            display.as_ptr(),
-            window.id,
-            window.width,
-            window.height,
-            &raw mut names,
-        )
+    let deadline = std::time::Instant::now() + focus_wait;
+    let raw = loop {
+        // The original source fences every retry: a stopped or closed viewer
+        // never opens native capture.
+        target.clock()?;
+        let mut refusal: c_int = 0;
+        // SAFETY: valid NUL string/output array/refusal slot, C retains none.
+        // Opaque owner is confined to this thread. Only bounded key names
+        // cross the FFI boundary.
+        let raw = unsafe {
+            fr_viewer_input_open(
+                display.as_ptr(),
+                window.id,
+                window.width,
+                window.height,
+                &raw mut names,
+                &raw mut refusal,
+            )
+        };
+        if let Some(raw) = NonNull::new(raw) {
+            break raw;
+        }
+        match refusal {
+            OPEN_NOT_FOCUSED if std::time::Instant::now() < deadline => {
+                thread::sleep(FOCUS_POLL);
+            }
+            OPEN_NOT_FOCUSED => return Err(StopReason::FocusLost),
+            OPEN_HELD => return Err(StopReason::InitialHeld),
+            OPEN_WINDOW => return Err(StopReason::WindowChanged),
+            _ => return Err(StopReason::NativeFailure),
+        }
     };
-    let native = Native(NonNull::new(raw).ok_or(StopReason::NativeFailure)?);
+    let native = Native(raw);
     let guard = NativeRun { native, target };
     let result = run_events(&guard.native, window, layout, &names, guard.target);
     guard

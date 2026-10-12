@@ -68,6 +68,50 @@ use std::{cell::RefCell, rc::Rc};
 fn failure(code: &'static str, next: &'static str) -> Failure {
     Failure::new(code, next, 1)
 }
+/// Why local input capture ended control, as a stable code. `Local`/`Closed`
+/// are consequences of a stop that is reported elsewhere, never a cause.
+#[cfg(feature = "linux-desktop")]
+fn input_stopped(reason: fr_native::viewer_input::StopReason) -> Option<Failure> {
+    use fr_native::viewer_input::StopReason as R;
+    let (code, next) = match reason {
+        R::Local | R::Closed => return None,
+        R::FocusLost => (
+            "control_focus_lost",
+            "The viewer window was not keyboard-focused (or lost focus), so local input capture stopped and control ended; focus the FrankenRemote window and reconnect. Nothing is replayed.",
+        ),
+        R::WindowChanged => (
+            "control_window_changed",
+            "The viewer window was resized, hidden, obscured or unmapped, so control ended; reconnect to acquire control again.",
+        ),
+        R::InitialHeld => (
+            "control_input_held_at_start",
+            "A key or mouse button was held when control started; release every key and button, then reconnect.",
+        ),
+        R::KeymapChanged | R::InputDevicesChanged => (
+            "control_input_devices_changed",
+            "The local keyboard map or input devices changed during control, so it ended; reconnect to acquire control with the new layout.",
+        ),
+        R::SyntheticInput => (
+            "control_synthetic_input",
+            "Synthetic (sent-event) input reached the viewer window, so control ended; only real local input may drive the host.",
+        ),
+        R::LocalEscape => (
+            "control_released_locally",
+            "Control was released with the local escape; reconnect to acquire it again.",
+        ),
+        R::NativeFailure
+        | R::Overflow
+        | R::Expired
+        | R::Clock
+        | R::UnsupportedKey
+        | R::Queue
+        | R::EscapeUnavailable => (
+            "control_input_capture_failed",
+            "Local input capture stopped (native failure, overload or an unsupported key), so control ended; reconnect.",
+        ),
+    };
+    Some(failure(code, next))
+}
 fn tailnet(error: TailnetError) -> Failure {
     match error {
         TailnetError::Cancelled => Failure::new(
@@ -248,6 +292,7 @@ pub fn run(options: &Options) -> Result<String, Failure> {
     }
 }
 #[cfg(feature = "linux-desktop")]
+#[allow(clippy::too_many_lines)] // One CLI session owner: dial, desktop, completion in order.
 fn connect(
     runtime: &Runtime,
     cx: &Cx,
@@ -497,7 +542,17 @@ fn completed_result(
         // The typed chain is content-free (Copy enums: no addresses, names,
         // text or payloads), so an unnamed end stays diagnosable; stdout keeps
         // the stable code.
-        eprintln!("fr: session ended without a named reason: {error:?}");
+        // A local input-capture stop ends control by cancelling the session
+        // scope, so the connection itself only reports Cancelled. Name it.
+        if let Some(named) = application.last_input_stop().and_then(input_stopped) {
+            return Err(named);
+        }
+        // The local desktop error is often the real cause: a failed local
+        // component cancels the connection, which then reports Cancelled.
+        eprintln!(
+            "fr: session ended without a named reason: {error:?}; local: {:?}",
+            application.last_error()
+        );
         return Err(failure(
             "native_session_failed",
             "Verify host approval, selected display, worker/HEVC support and transport qualification; do not bypass admission checks.",

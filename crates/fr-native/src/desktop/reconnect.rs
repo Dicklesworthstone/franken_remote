@@ -94,6 +94,10 @@ pub struct Session<U> {
     cleanup_failure: Option<CleanupFailure>,
     disconnect: Option<ViewerCloseOutcome>,
     statistics: Option<ViewerStatistics>,
+    /// Why the last attempt's local input capture stopped, sampled before
+    /// cleanup closes it. Content-free; a capture stop otherwise reaches the
+    /// session only as a cancelled scope.
+    input_stop: Option<crate::viewer_input::StopReason>,
 }
 impl<U> Session<U> {
     pub const fn new(
@@ -115,6 +119,7 @@ impl<U> Session<U> {
             cleanup_failure: None,
             disconnect: None,
             statistics: None,
+            input_stop: None,
         }
     }
     pub fn desktop(&self) -> Option<&Desktop> {
@@ -122,6 +127,11 @@ impl<U> Session<U> {
     }
     pub const fn last_error(&self) -> Option<Error> {
         self.error
+    }
+    /// The last attempt's local input-capture stop reason, if capture ran
+    /// and stopped before cleanup (never a host or transport result).
+    pub const fn last_input_stop(&self) -> Option<crate::viewer_input::StopReason> {
+        self.input_stop
     }
     pub const fn last_cleanup(&self) -> Option<&Cleanup> {
         self.cleanup.as_ref()
@@ -176,6 +186,7 @@ impl<U: Ui> Application for Session<U> {
         self.cleanup_failure = None;
         self.disconnect = None;
         self.statistics = None;
+        self.input_stop = None;
         // Store before ANY await or callback so interrupted work stays owned.
         self.desktop = Some(Desktop::new(configuration));
         let desktop = self.desktop.as_mut().ok_or(ObserverError::Order)?;
@@ -262,6 +273,12 @@ impl<U: Ui> Application for Session<U> {
             // counters only grow, so this one is at least as complete.
             if let Some(statistics) = desktop.statistics() {
                 self.statistics = Some(statistics);
+            }
+            // Sample BEFORE close: closing records its own local stop.
+            if let Some(crate::viewer_input::Status::Stopped(reason)) =
+                desktop.input().map(|input| input.status())
+            {
+                self.input_stop = Some(reason);
             }
             desktop.close();
         }
