@@ -281,6 +281,46 @@ fn recovered(
     (shared, native, next)
 }
 #[test]
+fn a_recovered_generation_restarts_view_evidence_under_the_held_lease() {
+    // A reference recovery installs a new verifier while the controller's
+    // lease is held: that restarts evidence, it does not select it anew.
+    let mut sink = Sink::default();
+    let (shared, _native) = pressed(&mut sink);
+    let mut a = shared.lock().unwrap();
+    assert!(matches!(
+        a.control_status(at(150_000)),
+        Ok(ControlStatus::Live { .. })
+    ));
+    a.require_view_evidence(at(150_000)).unwrap();
+    // The lease is suspended, not ended and not replaced: input waits for the
+    // release of held keys and the new generation's fresh evidence.
+    assert!(matches!(
+        a.control_status(at(150_001)),
+        Ok(ControlStatus::Suspended {
+            released: false,
+            ..
+        })
+    ));
+    let next = RecoveryGeneration::INITIAL.next().unwrap();
+    a.advance_recovery(next).unwrap();
+    assert_eq!(a.recovery_generation(), Some(next));
+}
+#[test]
+fn evidence_backed_readiness_cannot_be_first_selected_under_a_held_lease() {
+    let c = credentials(InputTicketId::from_raw(3));
+    let mut a = SessionAuthority::new(c.session, AuthorityPolicy::plan_defaults());
+    a.mark_capabilities_checked().unwrap();
+    a.authorize_observation(at(0)).unwrap();
+    // The legacy (unbounded) readiness, then a lease: switching the held lease
+    // to evidence-backed readiness is refused.
+    a.mark_view_ready(at(0)).unwrap();
+    a.grant_lease(c.lease, at(0)).unwrap();
+    assert_eq!(
+        a.require_view_evidence(at(1)),
+        Err(AuthorityError::ControllerBusy)
+    );
+}
+#[test]
 fn a_recovery_generation_advances_only_on_a_fenced_view_and_only_forward() {
     let mut sink = Sink::default();
     let (shared, _native) = pressed(&mut sink);

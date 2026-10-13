@@ -1183,14 +1183,12 @@ impl Drop for Painter {
 /// P-frames reference it (AGENTS.md section 5). The host must drop it and
 /// recover with an IDR on the same session and lease, not end the session.
 ///
-/// This is the end-to-end acceptance of fr-4vf5 and FAILS today (2026-10-13).
-/// The host detects the late picture (`OriginalExpired`, ~400 ms old) and starts
-/// a local-failure recovery. The controller then ends with `Input(Closed)`:
-/// recovery replaces the configuration channel, and the input lane
-/// (`input_quic::NegotiatedInput`) stays bound to the original one.
-/// Before that, the client also ended on the host's failure notice
-/// (`StaleBinding` on the progress route); `PresentedInput::progress` now
-/// suspends for recovery instead.
+/// The end-to-end acceptance of fr-4vf5. Three things had to hold together:
+/// the controller suspends on the host's failure notice instead of ending
+/// (`PresentedInput::progress`), its input lane follows the configuration
+/// channel the recovery replaces (`NegotiatedInput::follow_recovery`), and the
+/// host may restart view evidence under the held lease
+/// (`SessionAuthority::require_view_evidence`).
 #[test]
 #[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays"]
 fn a_capture_stall_during_motion_recovers_with_an_idr_on_the_same_lease() {

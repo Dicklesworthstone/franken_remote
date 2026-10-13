@@ -340,10 +340,17 @@ impl SessionAuthority {
     /// Select finite, evidence-backed readiness before exposing a remote view.
     /// This cannot replace an already held lease, nor can the legacy readiness
     /// setter disable it later. Observation remains independent and live.
+    ///
+    /// A view that is ALREADY evidence-backed may restart its evidence under a
+    /// held lease: a reference recovery installs a new generation's verifier
+    /// (plan 12.3). That only marks the view stale, as `mark_view_stale` does,
+    /// so the lease stays suspended until the new generation's evidence is
+    /// fresh (plan 11.3). Selecting it for the first time under a held lease
+    /// is still refused.
     pub fn require_view_evidence(&mut self, now: HostInstant) -> Result<(), AuthorityError> {
         self.check_time(now)?;
         self.check_observation_live(now)?;
-        if self.lease.is_some() {
+        if self.lease.is_some() && !self.bounded_view {
             return Err(AuthorityError::ControllerBusy);
         }
         self.bounded_view = true;

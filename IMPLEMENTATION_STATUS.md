@@ -91,13 +91,17 @@ two runs of three on Ubuntu 26.04. XFixes returned a NULL cursor image while
 the cursor's owner disconnected, and the capture worker refused it as an
 allocation failure.
 
-**Controlled sessions do not survive a lost video reference yet.** A 68th test
-(f8bb0f7) stalls host capture for 400 ms during continuous motion and fails by
-design until fr-4vf5 is done. The host detects the late encoded picture and
-starts recovery. The controller then ends with `Input(Closed)`: recovery
-replaces the media configuration channel, and the input lane stays bound to
-the original one. An earlier client failure on the host's failure notice is
-fixed (1c0a989). View-only recovery is covered by unit and fixture tests.
+**Controlled sessions recover a lost video reference on the same lease**
+(fr-4vf5, 2026-10-13). A 68th namespace test stalls host capture for 400 ms
+during continuous motion: the late encoded picture is dropped, the host sends a
+recovery IDR on replaced channels, and the controller's input stays suspended
+until the recovered picture is shown. It passes 10/10 on ts1, with one recovery
+per run. The stale-view test, which hit the same path whenever its stalled
+capture was an encoded picture, went from about 9 of 14 to 10/10. Three fixes
+were needed: the client suspends on the host's failure notice (1c0a989), its
+input lane follows the replaced configuration channel (302f321), and the host
+authority lets an evidence-backed view restart its evidence under a held
+lease. Lossy network rows are a separate limit (fr-xfvs).
 
 ## Audited state (2026-09-27)
 
