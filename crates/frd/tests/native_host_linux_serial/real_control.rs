@@ -662,25 +662,32 @@ impl Controlled {
         let until = Instant::now() + Duration::from_secs(60);
         while found.is_none() && Instant::now() < until {
             self.alive();
-            if let Some(focused) = self.driver.notices("FOCUSED ").first() {
+            // The LATEST focus notice, and the window must hold focus NOW: a
+            // window that is briefly unviewable right after its first map
+            // reverts focus to the root until its next map is focused again.
+            // Asserting at the first notice failed about one run in five.
+            if let Some(focused) = self.driver.notices("FOCUSED ").last() {
                 let answer = self.driver.ask("window");
-                if answer[1] != "none" && answer[1] == focused[1] {
+                if answer[1] != "none"
+                    && answer[1] == focused[1]
+                    && self.driver.ask("focus")[1] == answer[1]
+                {
                     found = Some(answer);
                 }
             }
             thread::sleep(Duration::from_millis(50));
         }
-        let answer = found.unwrap_or_else(|| panic!("no viewer window: {}", self.daemon.dump()));
+        let answer = found.unwrap_or_else(|| {
+            panic!(
+                "no viewer window holding keyboard focus: {}",
+                self.daemon.dump()
+            )
+        });
         // Native pixels: the window is exactly the 640x480 host display.
         assert_eq!(
             (&answer[4][..], &answer[5][..]),
             ("640", "480"),
             "{answer:?}"
-        );
-        let focus = self.driver.ask("focus");
-        assert_eq!(
-            focus[1], answer[1],
-            "the viewer window holds keyboard focus"
         );
         (
             answer[1].parse().unwrap(),
