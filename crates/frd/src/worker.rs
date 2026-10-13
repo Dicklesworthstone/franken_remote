@@ -229,10 +229,19 @@ impl Launch {
                 return outcome;
             }
         };
-        let mut line = String::new();
-        if let Some(mut out) = child.stdout.take() {
-            let _ = out.by_ref().take(256).read_to_string(&mut line);
-        }
+        // A probe leaves nothing behind. The group id cannot be reused while
+        // any member lives, so ending it after the leader's exit is safe.
+        crate::input_process::kill_group(&child);
+        // The reply is already in the pipe. Read what is there without
+        // waiting, so a descendant holding the write end cannot stall startup.
+        let mut reply = [0; 256];
+        let read = child.stdout.take().map_or(0, |mut out| {
+            if rustix::io::ioctl_fionbio(&out, true).is_err() {
+                return 0;
+            }
+            out.read(&mut reply).unwrap_or(0)
+        });
+        let line = std::str::from_utf8(&reply[..read]).unwrap_or("");
         Ok(EncoderProbe::parse(status.success(), line.trim()))
     }
 }
@@ -911,7 +920,19 @@ mod tests {
             std::process::id(),
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        let source = path.with_extension("src");
+        std::fs::write(&source, format!("#!/bin/sh\n{script}\n")).unwrap();
+        // A separate process writes the executable: this multi-threaded test
+        // process never holds a writable descriptor to it, so a concurrent fork
+        // in another test cannot make its exec fail with ETXTBSY.
+        assert!(
+            std::process::Command::new("cp")
+                .arg(&source)
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         path
     }
@@ -920,6 +941,21 @@ mod tests {
         Launch::new(&image, ":0", None, Role::Capture, 7)
             .unwrap()
             .probe_encoder(backend, limit)
+    }
+
+    /// The process whose pid the stand-in wrote is gone (or a zombie) within 2 s.
+    fn assert_descendant_ended(marker: &std::path::Path) {
+        let descendant = std::fs::read_to_string(marker).unwrap();
+        let stat = format!("/proc/{}/stat", descendant.trim());
+        let until = std::time::Instant::now() + Duration::from_secs(2);
+        while std::fs::read_to_string(&stat).is_ok_and(|line| {
+            line.rsplit(") ")
+                .next()
+                .is_some_and(|s| !s.starts_with('Z'))
+        }) {
+            assert!(std::time::Instant::now() < until, "descendant survived");
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -973,28 +1009,6 @@ mod tests {
             Ok(EncoderProbe::TimedOut)
         );
         assert!(started.elapsed() < Duration::from_secs(5));
-        // The bound ends the probe's whole process group, not only the child.
-        let marker =
-            std::env::temp_dir().join(format!("fr-probe-{}-descendant.pid", std::process::id()));
-        assert_eq!(
-            probe(
-                &format!("sleep 30 & echo $! > '{}'; wait", marker.display()),
-                "nvenc",
-                Duration::from_millis(300)
-            ),
-            Ok(EncoderProbe::TimedOut)
-        );
-        let descendant = std::fs::read_to_string(&marker).unwrap();
-        let stat = format!("/proc/{}/stat", descendant.trim());
-        let until = std::time::Instant::now() + Duration::from_secs(2);
-        while std::fs::read_to_string(&stat).is_ok_and(|line| {
-            line.rsplit(") ")
-                .next()
-                .is_some_and(|s| !s.starts_with('Z'))
-        }) {
-            assert!(std::time::Instant::now() < until, "descendant survived");
-            std::thread::sleep(Duration::from_millis(10));
-        }
         // A missing image is a typed spawn failure, not a refusal.
         assert_eq!(
             Launch::new(
@@ -1017,6 +1031,56 @@ mod tests {
                 .probe_encoder("nvenc", second),
             Err(Error::InvalidLaunch)
         );
+    }
+
+    #[test]
+    fn encoder_probe_leaves_no_descendant_and_never_waits_on_one() {
+        let second = Duration::from_secs(5);
+        // The bound ends the probe's whole process group, not only the child.
+        let marker =
+            std::env::temp_dir().join(format!("fr-probe-{}-descendant.pid", std::process::id()));
+        assert_eq!(
+            probe(
+                &format!("sleep 30 & echo $! > '{}'; wait", marker.display()),
+                "nvenc",
+                Duration::from_millis(300)
+            ),
+            Ok(EncoderProbe::TimedOut)
+        );
+        assert_descendant_ended(&marker);
+        // A replying child that leaves a descendant holding its stdout neither
+        // stalls the probe nor leaves the descendant running.
+        let started = std::time::Instant::now();
+        assert_eq!(
+            probe(
+                &format!(
+                    "echo 'encoder_probe=admitted width=1 height=1'; sleep 30 & echo $! > '{}'",
+                    marker.display()
+                ),
+                "nvenc",
+                second
+            ),
+            Ok(EncoderProbe::Admitted {
+                width: 1,
+                height: 1
+            })
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_descendant_ended(&marker);
+        // One that escaped the group (its own session) still cannot stall it.
+        let started = std::time::Instant::now();
+        assert_eq!(
+            probe(
+                "echo 'encoder_probe=admitted width=1 height=1'; setsid sleep 4 &",
+                "nvenc",
+                second
+            ),
+            Ok(EncoderProbe::Admitted {
+                width: 1,
+                height: 1
+            })
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
