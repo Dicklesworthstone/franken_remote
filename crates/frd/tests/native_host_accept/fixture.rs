@@ -27,9 +27,29 @@ pub fn pki() -> &'static Path {
             let result = Command::new("openssl").current_dir(dir).args(args).output().unwrap();
             assert!(result.status.success(), "fixture openssl: {}", String::from_utf8_lossy(&result.stderr));
         };
+        // A Tailscale (Let's Encrypt) chain is FOUR certificates (~3.4 KB DER),
+        // so the host's TLS flight spans several datagrams. Issue the fixture
+        // through three intermediates and serve the whole chain: a transport
+        // that sends a handshake segment as one datagram, or datagrams larger
+        // than the dialer receives, fails every serial e2e instead of only the
+        // live tailnet (2026-10-12).
+        fs::write(dir.join("intermediate.ext"), "basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n").unwrap();
+        let mut issuer = "ca".to_string();
+        for n in 1..=3 {
+            let name = format!("int{n}");
+            run(&["req","-newkey","ec","-pkeyopt","ec_paramgen_curve:P-256","-nodes","-keyout",&format!("{name}.key"),"-out",&format!("{name}.csr"),"-subj",&format!("/CN=FrankenRemote fixture intermediate {n}")]);
+            run(&["x509","-req","-in",&format!("{name}.csr"),"-CA",&format!("{issuer}.pem"),"-CAkey",&format!("{issuer}.key"),"-CAcreateserial","-days","1","-extfile","intermediate.ext","-out",&format!("{name}.pem")]);
+            issuer = name;
+        }
         run(&["req","-newkey","ec","-pkeyopt","ec_paramgen_curve:P-256","-nodes","-keyout","host.key","-out","host.csr","-subj","/CN=Host fixture"]);
         fs::write(dir.join("host.ext"), format!("subjectAltName=DNS:{HOST}\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n")).unwrap();
-        run(&["x509","-req","-in","host.csr","-CA","ca.pem","-CAkey","ca.key","-CAcreateserial","-days","1","-extfile","host.ext","-out","host.pem"]);
+        run(&["x509","-req","-in","host.csr","-CA","int3.pem","-CAkey","int3.key","-CAcreateserial","-days","1","-extfile","host.ext","-out","host.pem"]);
+        // Leaf first, then each issuer, as the LocalAPI cert pair serves it.
+        let mut chain = Vec::new();
+        for part in ["host", "int3", "int2", "int1"] {
+            chain.extend(fs::read(dir.join(format!("{part}.pem"))).unwrap());
+        }
+        fs::write(dir.join("host-chain.pem"), chain).unwrap();
         dir.to_owned()
     })
 }
@@ -102,7 +122,7 @@ impl Api {
         let worker = thread::spawn(move || {
             let mut changed = false;
             let mut pair = fs::read(pki().join("host.key")).unwrap();
-            pair.extend(fs::read(pki().join("host.pem")).unwrap());
+            pair.extend(fs::read(pki().join("host-chain.pem")).unwrap());
             while !ended.load(Ordering::Acquire) {
                 let (mut socket, _) = match listener.accept() {
                     Ok(s) => s,
