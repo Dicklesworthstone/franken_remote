@@ -91,6 +91,10 @@ fn round_robin_budget_survives_backpressure_and_one_viewer_leaving() {
             v.complete_decode(&p, n).unwrap();
         }
         publish(&mut group, &mut source, &owner, &pool, false).await;
+        // A second picture: one 9000-byte picture (8 datagrams) fits a
+        // congestion window that slow start has already grown past its
+        // 12000-byte initial value, so it alone never backpressures A.
+        publish(&mut group, &mut source, &owner, &pool, false).await;
         // Do not drive A's socket: its bounded native datagram queue fills.
         let mut saw_pending = false;
         let mut b_admitted = 0;
