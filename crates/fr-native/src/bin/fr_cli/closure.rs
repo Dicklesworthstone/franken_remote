@@ -1,6 +1,7 @@
 //! Bounded content-free closing evidence, never an inferred remote cleanup result.
 use super::Failure;
 use fr_wire::closure::{Cleanup, Closed, OutstandingEffects};
+#[cfg(target_os = "linux")]
 use frd::session_startup::ViewerCloseOutcome;
 
 /// Keep exact peer stages but project transport errors to completion, not raw
@@ -11,6 +12,7 @@ pub(super) struct Report {
     transport_completed: bool,
     host: Option<Closed>,
 }
+#[cfg(target_os = "linux")]
 impl From<ViewerCloseOutcome> for Report {
     fn from(outcome: ViewerCloseOutcome) -> Self {
         Self {
@@ -122,7 +124,7 @@ pub(super) fn preserve<T>(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use fr_transport::quic::Error;

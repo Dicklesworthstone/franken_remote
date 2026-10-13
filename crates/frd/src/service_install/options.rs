@@ -117,10 +117,20 @@ impl InstallOptions {
     /// this never inserts a software flag, changes authority policy or probes GPU
     /// availability at installation time.
     fn validate_run_args(&self) -> Result<bool, ServiceError> {
-        use crate::host_policy::options::RunOptions;
         if self.run_args.is_empty() {
             return Ok(false);
         }
+        #[cfg(not(target_os = "linux"))]
+        return Err(ServiceError::UnsupportedPlatform {
+            detail: "frd run options are currently supported only by the Linux host".into(),
+        });
+        #[cfg(target_os = "linux")]
+        self.validate_linux_run_args()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn validate_linux_run_args(&self) -> Result<bool, ServiceError> {
+        use crate::host_policy::options::RunOptions;
         if !matches!(
             self.kind,
             ServiceKind::SystemdUser | ServiceKind::SystemdSystem

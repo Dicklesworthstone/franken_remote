@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![cfg(target_os = "linux")]
 //! Production offer/intersection coverage, not codec or live-device evidence.
 use fr_client::native;
 use fr_wire::{

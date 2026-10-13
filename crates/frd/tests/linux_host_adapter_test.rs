@@ -1,3 +1,4 @@
+#![cfg(target_os = "linux")]
 //! Tests for the Linux host adapters that remain after the Wayland portal,
 //! `PipeWire` and EIS models were removed (2026-09-24): the X11 adapter's
 //! security diagnostics and input pairing, and systemd graphical-session

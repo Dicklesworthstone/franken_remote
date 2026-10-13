@@ -125,3 +125,24 @@ jobs:
             exit 1
           fi
           echo "All lanes green"
+
+  # macOS is a v1 host and client platform with no implementation yet: every
+  # fr/frd command refuses `platform_unavailable`. This lane only keeps the
+  # workspace compiling, lint-clean and its platform-neutral tests green there,
+  # so Linux-only changes cannot silently break the macOS build again (they did:
+  # fr-tailnet trust, frd service_install and fr closure, found 2026-10-12).
+  # It is source evidence only, never capture/codec/input qualification.
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - name: Install repository-pinned toolchain
+        run: rustup show active-toolchain
+      - name: Check (all targets)
+        run: cargo check --workspace --all-targets --locked
+      - name: Clippy (all targets, deny warnings)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test (platform-neutral)
+        run: cargo test --workspace --locked --no-fail-fast

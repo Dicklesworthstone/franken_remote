@@ -3,6 +3,21 @@ use frd::service_install::{self, InstallOptions};
 use std::process::ExitCode;
 
 pub fn execute(args: &[String], json: bool) -> ExitCode {
+    // The service's only command is `frd run`, which refuses off Linux. A
+    // LaunchAgent/Windows service that can only ever refuse is not installed.
+    if !cfg!(target_os = "linux") {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({"outcome": "refusal", "code": "platform_unavailable"})
+            );
+        } else {
+            eprintln!(
+                "Service installation refused: frd run (the service's command) is currently implemented on Linux only."
+            );
+        }
+        return ExitCode::from(2);
+    }
     let options = match InstallOptions::parse_cli(args) {
         Ok(options) => options,
         Err(error) => {

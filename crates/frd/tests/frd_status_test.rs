@@ -384,6 +384,7 @@ fn wait_for_child(mut child: std::process::Child) -> std::process::Output {
     output
 }
 
+#[cfg(target_os = "linux")]
 const FIXTURE_VALUES: [&str; 4] = [
     "workstation-alpha",
     "laptop-controller",
@@ -391,11 +392,13 @@ const FIXTURE_VALUES: [&str; 4] = [
     "1700000000000",
 ];
 
+#[cfg(target_os = "linux")]
 fn missing_socket() -> PathBuf {
     std::env::temp_dir().join(format!("frd-status-missing-{}.sock", std::process::id()))
 }
 
 #[test]
+#[cfg(target_os = "linux")] // Linux LocalAPI / host runtime behavior.
 fn frd_status_binary_refuses_unreachable_localapi_json() {
     let socket = missing_socket();
     let output = wait_for_child(
@@ -440,6 +443,7 @@ fn frd_status_binary_refuses_unreachable_localapi_json() {
 }
 
 #[test]
+#[cfg(target_os = "linux")] // Linux LocalAPI / host runtime behavior.
 fn frd_status_binary_refuses_unreachable_localapi_human() {
     let socket = missing_socket();
     let output = wait_for_child(
@@ -655,6 +659,7 @@ fn probe_host_generates_valid_report_envelope() {
 }
 
 #[test]
+#[cfg(target_os = "linux")] // Linux LocalAPI / host runtime behavior.
 fn frd_run_cli_absent_tailscale_reports_typed_refusal() {
     let missing = std::env::temp_dir().join(format!("frd-missing-{}.sock", std::process::id()));
     let output = wait_for_child(
@@ -802,6 +807,7 @@ fn frd_run_refuses_software_encoding_without_explicit_opt_in() {
 }
 
 #[test]
+#[cfg(target_os = "linux")] // Linux LocalAPI / host runtime behavior.
 fn frd_headless_cli_option_accepted_in_help_and_run() {
     let help_out = wait_for_child(frd_command(&["--help"]).spawn().unwrap());
     assert!(help_out.status.success());

@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![cfg(target_os = "linux")]
 //! Comprehensive attack tests for browser origin security (plan §§16.4, 24.3).
 //!
 //! Evaluates defense-in-depth against:

@@ -1,4 +1,6 @@
 #![forbid(unsafe_code)]
+// Off Linux every command refuses before using the shared option/output code.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 //! Native CLI entry point. Hosting is never enabled by installing/running it.
 #[path = "fr_cli/closure.rs"]
 mod closure;

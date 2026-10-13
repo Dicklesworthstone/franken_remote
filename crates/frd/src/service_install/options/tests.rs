@@ -249,6 +249,7 @@ fn systemd_install_refuses_units_that_frd_run_would_refuse() {
 }
 
 #[test]
+#[cfg(target_os = "linux")] // frd run options are validated only for the Linux host.
 fn frd_run_options_after_double_dash_reach_the_unit_validated_by_frd_run() {
     let options = parse(&[
         "--user",
@@ -285,6 +286,7 @@ fn frd_run_options_after_double_dash_reach_the_unit_validated_by_frd_run() {
 }
 
 #[test]
+#[cfg(target_os = "linux")] // frd run options are validated only for the Linux host.
 fn frd_run_options_that_every_start_would_refuse_are_refused_at_install() {
     let base = ["--user", "--software-explicit", "--approval", "none", "--"];
     for (tail, code) in [

@@ -1,3 +1,5 @@
+// The socket-release oracle reads /proc/self/fd.
+#![cfg(target_os = "linux")]
 //! Real UDP/TLS and async local-factory boundaries. Synthetic CA and loopback
 //! are explicit fixtures, not installed-tailnet or interface qualification.
 #[allow(dead_code)]

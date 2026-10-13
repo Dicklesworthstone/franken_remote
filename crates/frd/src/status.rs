@@ -701,6 +701,7 @@ impl DaemonStatusReport {
 
         #[cfg(not(target_os = "linux"))]
         {
+            let _ = socket_override; // No LocalAPI adapter exists off Linux.
             let mut report = Self::unmeasured(timestamp_unix_ms);
             report.outcome = "refusal";
             report.refusal_code = Some("platform_unavailable");

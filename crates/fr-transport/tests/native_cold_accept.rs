@@ -1,3 +1,5 @@
+// The socket-release oracle reads /proc/self/fd.
+#![cfg(target_os = "linux")]
 //! Real UDP/TLS, with no out-of-band client CID supplied to the server. The CA
 //! is ephemeral test PKI; loopback is NOT tailnet ingress/admission evidence.
 #[allow(dead_code)]

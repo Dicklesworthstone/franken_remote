@@ -364,6 +364,8 @@ pub(crate) struct AdmissionGate {
     pub(crate) tailnet: Option<fr_tailnet::Lease>,
 }
 impl AdmissionGate {
+    // Off Linux there is no tailnet lease field to consult.
+    #[cfg_attr(not(target_os = "linux"), allow(clippy::unused_self))]
     pub(crate) fn permitted(&self) -> bool {
         #[cfg(target_os = "linux")]
         if let Some(lease) = &self.tailnet {

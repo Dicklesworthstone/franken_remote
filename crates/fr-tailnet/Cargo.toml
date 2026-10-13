@@ -10,7 +10,9 @@ publish = false
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
+# The trust-root reader is platform neutral (a client on any OS verifies the
+# host's Tailscale certificate); the LocalAPI adapters stay Linux-only.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 asupersync = { workspace = true, features = ["tls"] }
 
 [lints]

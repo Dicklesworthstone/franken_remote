@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![cfg(target_os = "linux")]
 //! Credential regressions against the real policy managers. These do not claim
 //! a browser listener, installed-tailnet admission or timing/hardware qualification.
 use fr_core::{ids::RemoteSessionId, time::HostInstant};

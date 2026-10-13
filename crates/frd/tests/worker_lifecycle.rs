@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![cfg(target_os = "linux")]
 //! Integration and unit tests for the media worker lifecycle state machine (plan §§5.4, 10.2, 11.1).
 //!
 //! Acceptance criteria:

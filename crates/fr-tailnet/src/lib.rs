@@ -1,4 +1,7 @@
 #![forbid(unsafe_code)]
+// Off Linux only the platform-neutral trust/endpoint helpers are reachable;
+// the LocalAPI adapters and their metadata parsers are intentionally inert.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 //! Installed Tailscale authority, not a VPN, identity database, or proxy.
 //! The Linux adapter implements exact installed-daemon membership admission and
 //! an explicit app-capability alternative. It never infers membership from names,
@@ -67,6 +70,9 @@ pub enum Error {
     InvalidTrustStore,
     NativeBind,
     NativeHandshake,
+    /// The dial deadline passed before the host completed the QUIC/TLS
+    /// handshake (distinct from a local `LocalAPI` lookup `Timeout`).
+    HandshakeTimeout,
     /// The peer's certificate failed verification for the selected tailnet name
     /// against the configured roots. The pinned TLS stack does not say whether
     /// the name, validity period or issuer failed.
