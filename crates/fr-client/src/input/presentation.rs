@@ -407,7 +407,21 @@ impl PresentedInput {
         now: ClientInstant,
     ) -> Result<(), Error> {
         self.input.tick(now)?;
+        // Awaiting the recovered generation: old-generation progress is not
+        // evidence for this grant and cannot end it.
+        if self.recovering.is_some() {
+            return Ok(());
+        }
         if let Err(error) = self.view.progress(bytes, limits, now.0) {
+            // A failed reference fenced the receiver's scope, met here first
+            // (live, by the host's own failure notice on the progress route)
+            // rather than by a tick. With negotiated recovery the grant
+            // suspends and awaits the recovered generation, as in `tick`.
+            if error == freshness::Error::StaleBinding && self.expects_recovery && self.active {
+                self.input.suspend(now);
+                self.recovering = Some(self.view.clock_correlation());
+                return Ok(());
+            }
             if self.view.is_closed() {
                 self.input.stop(StopReason::ViewChanged);
             }

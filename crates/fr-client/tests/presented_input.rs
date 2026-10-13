@@ -601,6 +601,74 @@ fn show_recovered_idr(
     input.visible(0, ClientInstant(27_000)).unwrap();
 }
 #[test]
+fn a_progress_record_after_a_lost_reference_suspends_for_recovery_instead_of_ending() {
+    let (mut receiver, mut input, limits, d) = shown();
+    input.expect_reference_recovery();
+    abandon_dependent_picture(&mut receiver, limits);
+    // Live, the host's own failure notice on the progress route was the first
+    // record to meet the fenced scope, before any tick (fr-4vf5).
+    assert_eq!(
+        progress(
+            &mut input,
+            limits,
+            d,
+            1_013_000,
+            SourceObservation::Captured,
+            23_300
+        ),
+        Ok(())
+    );
+    assert_eq!(input.stopped(), None);
+    assert_eq!(input.suspended_since(), Some(ClientInstant(23_300)));
+    // Old-generation progress while recovering is not evidence and ends nothing.
+    assert_eq!(
+        progress(
+            &mut input,
+            limits,
+            d,
+            1_013_500,
+            SourceObservation::Captured,
+            23_400
+        ),
+        Ok(())
+    );
+    assert_eq!(input.stopped(), None);
+    // The grant then follows the recovered receiver as usual.
+    let next = RecoveryGeneration::INITIAL.next().unwrap();
+    receiver
+        .replace(
+            MediaEpoch {
+                configuration: CodecConfigurationGeneration::INITIAL,
+                recovery: next,
+            },
+            MediaBindings::new(11, 12, 13, 14).unwrap(),
+            24_000,
+        )
+        .unwrap();
+    input
+        .follow_recovery(&receiver, ClientInstant(24_000))
+        .unwrap();
+    assert_eq!(input.input_view().recovery, next);
+    assert_eq!(input.stopped(), None);
+}
+#[test]
+fn without_negotiated_recovery_a_lost_reference_met_by_progress_still_ends_the_view() {
+    let (mut receiver, mut input, limits, d) = shown();
+    abandon_dependent_picture(&mut receiver, limits);
+    assert!(
+        progress(
+            &mut input,
+            limits,
+            d,
+            1_013_000,
+            SourceObservation::Captured,
+            23_300
+        )
+        .is_err()
+    );
+    assert_eq!(input.stopped(), Some(StopReason::ViewChanged));
+}
+#[test]
 fn a_reference_recovery_rebinds_the_suspended_grant_to_the_recovered_receiver() {
     let (mut receiver, mut input, limits, _) = shown();
     input.expect_reference_recovery();
