@@ -61,6 +61,12 @@ cargo profile directory as the test executable; `real_media` also needs Xvfb and
 default) can run the same fresh mount/network namespaces as real root with
 `FR_NS_SUDO=1`.
 
+The namespace loopback carries the live tailnet path: MTU 1280 (tailscale0) and
+an nftables rule in the fresh namespace that drops IP fragments, as Tailscale
+does, so a QUIC datagram above 1252 bytes is lost rather than reassembled. A
+host or client whose datagrams outgrow the tailnet MTU therefore fails here
+instead of only on a real tailnet. The runner refuses (exit 2) without `nft`.
+
 The runner uses a fresh user/mount/network namespace and executes every
 explicitly ignored test. It mounts synthetic `/sys` and `/run` only inside that
 namespace. IPv4 UDP/TLS, Host/Viewer negotiation, Unix peer-credential HTTP, the

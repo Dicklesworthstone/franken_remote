@@ -27,5 +27,15 @@ exec "${enter[@]}" bash -ec '
   ip link set lo up
   ip addr add 100.64.0.1/32 dev lo
   ip addr add 100.64.0.2/32 dev lo
+  # The live tailnet path: tailscale0 has MTU 1280 and Tailscale drops IP
+  # fragments, so a QUIC datagram above the path MTU is lost, not reassembled.
+  # The drop runs before conntrack defragmentation (priority -400).
+  command -v nft >/dev/null || { echo "nft is required to emulate the tailnet path (MTU 1280, fragments dropped)" >&2; exit 2; }
+  ip link set lo mtu 1280
+  printf "%s\n" "table ip fr_tailnet_path {" \
+    "  chain prerouting {" \
+    "    type filter hook prerouting priority -450; policy accept;" \
+    "    ip frag-off & 0x3fff != 0 counter drop" \
+    "  }" "}" | nft -f -
   exec "$1" --ignored --test-threads=1
 ' sh "$binary" "$parent_netns"
