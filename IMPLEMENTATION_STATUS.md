@@ -30,22 +30,37 @@ Ubuntu 26.04 on the same tailnet.
 - A bounded wait for the viewer window's focus, and named codes for every
   capture stop.
 
-**NVENC** (GTX 1070, offline): `hevc_nvenc` never opened. The fixes are `refs`
-left at the encoder default, encoder SEI (types 39/40) stripped on the host, and
-SPS short-term RPS tables and VUI HRD admitted under the same rules. Real
-encoder output now passes admission. No live NVENC session has run; VAAPI is
-untested.
+**NVENC** (GTX 1070): `hevc_nvenc` never opened. The fixes are `refs` left at
+the encoder default, encoder SEI (types 39/40) stripped on the host, and SPS
+short-term RPS tables and VUI HRD admitted under the same rules. Live, an
+NVENC-encoded desktop from ts2 was admitted, decoded and presented on trj
+(`nvidia-smi pmon` showed the host worker's CUDA context). No sustained NVENC
+session has run (see the client presenter below); VAAPI is untested.
+
+**Client presenter.** A fixed 200 ms limit per native decode/present request
+killed a healthy first 1080p decode on a busy client; each picture's own budget
+now binds (ff14b5a). Presenting still costs 48-200 ms per 1080p picture on
+that client (XPutImage over the socket, swscale), so sessions can end when a
+streamed picture outlives its 250 ms budget (bead
+fr-live-client-present-cost-tqu7).
 
 **macOS**: the workspace builds, lints and tests (new CI job). Every `fr`/`frd`
 command refuses with `platform_unavailable`.
 
-**Known regressions from the pin.** Six namespace e2e tests regress: peer-finished
-reporting after departing inspections, a refused peer's sibling, and two
-impairment rows. Bisected to the Asupersync pin alone. On ts1, 53 of 67 pass
-at this tree against 59 of 67 at the 0.5.0 baseline. The seven `real_audio`
-tests also fail on ts1, which has no working private PulseAudio; they pass on
-trj. Bead fr-asupersync06-drain-stall-3xan (P0) records the diagnosis: after the
-peer region cancels, the bounded closure drain is not polled again.
+**Regressions from the pin.** Six namespace e2e tests regressed when the pin
+landed. Four (peer-finished reporting after departing inspections, sequential
+viewers, a refused peer's sibling) were FrankenRemote's: a terminal desktop
+polled the peer's listener once and dropped it, which only worked while 0.5.0's
+timeouts elapsed instantly. That is fixed (a496ec9). The lossy impairment rows
+still pass or fail run to run (bead fr-xfvs).
+
+**Tailnet path in the namespace suite.** The runner gives the namespace
+loopback MTU 1280 and drops IP fragments, as Tailscale does (6a38a0b). A
+planted 1500-byte datagram limit passes on plain loopback and fails there.
+Under it, on ts1, 55 to 57 of 67 pass. The failures are the seven `real_audio`
+tests (no working PulseAudio on ts1; they pass on trj), `real_session_lifetime`
+(its fixture source path is absent on ts1), the lossy impairment rows and one
+flaky cursor-close step.
 
 ## Audited state (2026-09-27)
 
