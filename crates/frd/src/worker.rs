@@ -78,6 +78,18 @@ impl From<ProcessError> for SpawnFailure {
         }
     }
 }
+impl From<std::io::Error> for SpawnFailure {
+    fn from(error: std::io::Error) -> Self {
+        match error.kind() {
+            std::io::ErrorKind::NotFound => Self::NotFound,
+            std::io::ErrorKind::PermissionDenied => Self::PermissionDenied,
+            kind => Self::Io {
+                kind,
+                raw_os_error: error.raw_os_error(),
+            },
+        }
+    }
+}
 impl From<worker::Error> for Error {
     fn from(e: worker::Error) -> Self {
         Self::Protocol(e)
@@ -172,6 +184,7 @@ impl Launch {
     /// listener exists; the child is always ended and reaped.
     pub fn probe_encoder(&self, backend: &str, limit: Duration) -> Result<EncoderProbe, Error> {
         use std::io::Read;
+        use std::os::unix::process::CommandExt;
         use std::process::{Command as Probe, Stdio as ProbeStdio};
         if self.role != Role::Capture
             || self.retirement.is_some()
@@ -187,25 +200,34 @@ impl Launch {
             .arg(std::process::id().to_string())
             .stdin(ProbeStdio::null())
             .stdout(ProbeStdio::piped())
-            .stderr(ProbeStdio::null());
+            .stderr(ProbeStdio::null())
+            .process_group(0);
         if let Some(path) = &self.xauthority {
             command.env("XAUTHORITY", path);
         }
-        let mut child = command.spawn().map_err(|_| Error::InvalidLaunch)?;
+        let mut child = command
+            .spawn()
+            .map_err(|error| Error::SpawnFailed(error.into()))?;
         let until = std::time::Instant::now() + limit;
         let status = loop {
             match child.try_wait() {
-                Ok(Some(status)) => break Some(status),
+                Ok(Some(status)) => break Ok(status),
                 Ok(None) if std::time::Instant::now() < until => {
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                _ => break None,
+                Ok(None) => break Err(Ok(EncoderProbe::TimedOut)),
+                Err(error) => break Err(Err(Error::SpawnFailed(error.into()))),
             }
         };
-        let Some(status) = status else {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(EncoderProbe::TimedOut);
+        let status = match status {
+            Ok(status) => status,
+            Err(outcome) => {
+                // As for every worker: end the whole group, then reap.
+                crate::input_process::kill_group(&child);
+                let _ = child.kill();
+                let _ = child.wait();
+                return outcome;
+            }
         };
         let mut line = String::new();
         if let Some(mut out) = child.stdout.take() {
@@ -951,6 +973,41 @@ mod tests {
             Ok(EncoderProbe::TimedOut)
         );
         assert!(started.elapsed() < Duration::from_secs(5));
+        // The bound ends the probe's whole process group, not only the child.
+        let marker =
+            std::env::temp_dir().join(format!("fr-probe-{}-descendant.pid", std::process::id()));
+        assert_eq!(
+            probe(
+                &format!("sleep 30 & echo $! > '{}'; wait", marker.display()),
+                "nvenc",
+                Duration::from_millis(300)
+            ),
+            Ok(EncoderProbe::TimedOut)
+        );
+        let descendant = std::fs::read_to_string(&marker).unwrap();
+        let stat = format!("/proc/{}/stat", descendant.trim());
+        let until = std::time::Instant::now() + Duration::from_secs(2);
+        while std::fs::read_to_string(&stat).is_ok_and(|line| {
+            line.rsplit(") ")
+                .next()
+                .is_some_and(|s| !s.starts_with('Z'))
+        }) {
+            assert!(std::time::Instant::now() < until, "descendant survived");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // A missing image is a typed spawn failure, not a refusal.
+        assert_eq!(
+            Launch::new(
+                std::path::Path::new("/nonexistent/fr-media-worker"),
+                ":0",
+                None,
+                Role::Capture,
+                7
+            )
+            .unwrap()
+            .probe_encoder("nvenc", second),
+            Err(Error::SpawnFailed(SpawnFailure::NotFound))
+        );
         // Only a capture launch probes, and only the three local names.
         assert_eq!(probe("exit 0", "h264", second), Err(Error::InvalidLaunch));
         let image = probe_image("exit 0");
