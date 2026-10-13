@@ -39,6 +39,46 @@ The engineering thesis, from the plan:
 
 > **Tailscale owns connectivity and machine identity. Asupersync owns asynchronous lifetimes and transport integration. Platform APIs and existing codec implementations own capture and hardware acceleration. FrankenRemote owns the small amount of policy that makes those pieces behave like one excellent remote workstation.**
 
+## Try it on two Linux machines
+
+These are the steps that ran live on 2026-10-13 between Ubuntu 25.10/26.04 hosts on one tailnet.
+
+**Both machines.** Install the native build inputs (`sudo apt-get install libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxcb1-dev libxcb-render0-dev libxtst6 libxi6 libxdamage1 libxrandr2 libxfixes3 libx11-xcb1 libopus0 libpulse0 pkg-config`), then build with the pinned toolchain:
+
+```bash
+cargo build --release --locked -p frd --bin frd
+cargo build --release --locked -p fr-native \
+  --features linux-desktop,linux-displays,linux-input,linux-input-agent,linux-clipboard \
+  --bin fr --bin fr-media-worker --bin fr-input-agent
+```
+
+**Host prerequisites.**
+- Tailscale with its kernel interface (`tailscale0`) and HTTPS certificates enabled for the tailnet.
+- A tailnet policy that lets the client reach UDP 8443.
+- Executables owned by root or the running user, in directories nobody else can write (otherwise `frd` refuses an untrusted executable).
+- Root for the nftables ingress rule, or the `frd ingress-helper` service.
+
+**Run the host** on the X display you want to share:
+
+```bash
+sudo env DISPLAY=:0 XAUTHORITY="$XAUTHORITY" ./target/release/frd run --software-explicit --display :0 --json
+```
+
+Host options:
+- Add `--input-agent "$PWD/target/release/fr-input-agent"` to allow control, plus `--clipboard` for the text clipboard.
+- Add `--files DIR` to receive files. DIR must be owned by the user running `frd` and not writable by others.
+- Use `--encoder nvenc` instead of `--software-explicit` on an NVIDIA host. It is probed at startup.
+
+**Connect from the client:**
+
+```bash
+./target/release/fr hosts                      # node IDs, names and paths
+./target/release/fr connect NODE_ID --view-only --experimental-native --display only --json
+./target/release/fr connect NODE_ID --control --clipboard --experimental-native --display only --json
+```
+
+For control, the viewer window must hold keyboard focus. A window manager gives it focus; without one, capture waits 30 s and then ends with `control_focus_lost`. The JSON completion names why a session ended. Typical causes: `host_not_answering` (the host is not running, is busy with another viewer, or UDP 8443 is blocked), `encoder_unavailable` (host startup), and `control_focus_lost`.
+
 ---
 
 ## TL;DR
