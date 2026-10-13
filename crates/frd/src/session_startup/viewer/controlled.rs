@@ -253,12 +253,16 @@ impl ControlledViewer {
     pub(super) fn enter_recovery(&mut self) -> Result<(), Error> {
         let t = ClientInstant(now(&self.session.cx)?);
         self.input.suspend_for_recovery(t)?;
+        self.channels.begin_recovery();
         self.abandon_if_suspended()
     }
     /// Hand this stream's media to its reference recovery, suspending the
     /// grant's input first: the lost reference means the view cannot advance
     /// (plan 12.3). Renewals continue; no input is sent until resumed.
     pub(super) fn take_media_for_recovery(&mut self) -> Result<NegotiatedMedia, Error> {
+        // Before any check: the recovery may already have ended the original
+        // configuration channel (see `NegotiatedInput::begin_recovery`).
+        self.channels.begin_recovery();
         let t = self.check()?;
         self.input.suspend_for_recovery(t)?;
         self.abandon_if_suspended()?;
@@ -283,6 +287,11 @@ impl ControlledViewer {
         if v.recovery != b.recovery || v.configuration != b.configuration {
             return Err(Error::WrongBinding);
         }
+        // The recovery replaced the configuration channel the input lane was
+        // validated against; the lane follows it and the recovered generation.
+        self.channels
+            .follow_recovery(&self.session.transport, media.configuration_channel())
+            .map_err(Error::Input)?;
         self.media = Some(media);
         Ok(())
     }

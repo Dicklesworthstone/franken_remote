@@ -3,7 +3,7 @@
 use super::{Error, QuicInput, Routes};
 use crate::{input_agent::Agent, media::ObservationControl};
 use asupersync::cx::Cx;
-use fr_core::{input::InputView, limits::ProtocolLimits};
+use fr_core::{ids::RecoveryGeneration, input::InputView, limits::ProtocolLimits};
 use fr_transport::quic::{
     AttachedChannel, DatagramRoute, Disposition, MediaChannel, Messages, QuicRecords, Route,
     StreamRoute,
@@ -25,6 +25,13 @@ pub struct NegotiatedInput {
     configuration: AttachedChannel,
     parent: ControlBinding,
     limits: ProtocolLimits,
+    /// The reference-recovery generation input records must name: the original
+    /// attachment's, advanced only by [`NegotiatedInput::follow_recovery`].
+    recovery: RecoveryGeneration,
+    /// A reference recovery is replacing the media channels: the configuration
+    /// channel may end before its successor is followed. The grant's input is
+    /// suspended for the whole recovery (plan 11.3).
+    recovering: bool,
 }
 impl std::fmt::Debug for NegotiatedInput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -38,6 +45,17 @@ fn view(binding: Binding) -> InputView {
         configuration: binding.configuration,
         recovery: binding.recovery,
     }
+}
+/// `new` is the configuration a reference recovery installs after `old`: a new
+/// channel whose binding is otherwise identical, one recovery generation on.
+fn recovered_successor(old: Binding, new: Binding) -> bool {
+    let Some(next) = old.recovery.next() else {
+        return false;
+    };
+    let mut expected = old;
+    expected.recovery = next;
+    expected.parent.id = new.parent.id;
+    new.parent.id != old.parent.id && expected == new
 }
 impl NegotiatedInput {
     pub fn new(
@@ -86,13 +104,21 @@ impl NegotiatedInput {
             configuration,
             parent,
             limits: selection.limits,
+            recovery: a.recovery,
+            recovering: false,
         };
         owner.checked(q)?;
         Ok(owner)
     }
     fn checked(&self, q: &QuicRecords) -> Result<AttachedChannel, Error> {
         let a = self.input.completed_on(q).map_err(Error::Transport)?;
-        for pair in [a, self.configuration] {
+        let pairs = [a, self.configuration];
+        let checked = if self.recovering {
+            &pairs[..1]
+        } else {
+            &pairs[..]
+        };
+        for &pair in checked {
             if !q.has_route(Route::Stream(pair.outbound))
                 || !q.has_route(Route::Stream(pair.inbound))
                 || q.receive_ended(pair.inbound).map_err(Error::Transport)?
@@ -108,6 +134,47 @@ impl NegotiatedInput {
     }
     pub const fn limits(&self) -> ProtocolLimits {
         self.limits
+    }
+    /// The view input records must name: the attachment's, at the current
+    /// recovery generation.
+    fn current_view(&self) -> InputView {
+        let mut binding = self.input.descriptor().binding;
+        binding.recovery = self.recovery;
+        view(binding)
+    }
+    /// A reference recovery began: until [`Self::follow_recovery`], only this
+    /// lane's own input routes are checked, since the recovery may end the
+    /// original configuration channel before its successor exists.
+    pub fn begin_recovery(&mut self) {
+        self.recovering = true;
+    }
+    /// Follow a completed reference recovery (plan 12.3). The recovery replaced
+    /// the media configuration channel this lane was validated against, and the
+    /// grant's input now names the recovered generation. Only the exact
+    /// successor is accepted, on this connection with live routes; otherwise
+    /// nothing changes. The input attachment itself is unchanged.
+    pub fn follow_recovery(
+        &mut self,
+        q: &QuicRecords,
+        configuration: AttachedChannel,
+    ) -> Result<(), Error> {
+        if configuration.descriptor.role != MediaRole::Configuration
+            || !recovered_successor(
+                self.configuration.descriptor.binding,
+                configuration.descriptor.binding,
+            )
+        {
+            return Err(Error::InvalidRoutes);
+        }
+        let previous = (self.configuration, self.recovery, self.recovering);
+        self.configuration = configuration;
+        self.recovery = configuration.descriptor.binding.recovery;
+        self.recovering = false;
+        if let Err(error) = self.checked(q) {
+            (self.configuration, self.recovery, self.recovering) = previous;
+            return Err(error);
+        }
+        Ok(())
     }
     pub fn channel_binding(&self) -> u32 {
         self.input.descriptor().binding.parent.id
@@ -125,7 +192,7 @@ impl NegotiatedInput {
     pub(super) fn matches_request(&self, request: Request) -> bool {
         request.parent == self.parent
             && request.target.display_binding == self.configuration.descriptor.binding.parent.id
-            && request.target.view == view(self.input.descriptor().binding)
+            && request.target.view == self.current_view()
     }
     /// Validate the retained proof before the broker consumes its one-time
     /// observation attachment. Equal numeric routes are not a substitute.
@@ -161,13 +228,12 @@ impl NegotiatedInput {
     ) -> Result<QuicInput, Error> {
         let a = self.checked(q)?;
         let pointer = a.datagram.ok_or(Error::InvalidRoutes)?;
-        let binding = self.input.descriptor().binding;
         if pointer.outbound
             || agent.protocol_limits() != self.limits
             || !agent.matches_observation_view(
                 observation,
                 self.parent.remote_session,
-                view(binding),
+                self.current_view(),
             )
             || observation.check_control().is_err()
         {
@@ -236,7 +302,7 @@ impl NegotiatedInput {
             )
             .map_err(Error::Wire)?;
             if record.credentials.session != self.parent.remote_session
-                || record.credentials.view != view(self.input.descriptor().binding)
+                || record.credentials.view != self.current_view()
             {
                 return Err(Error::InvalidRoutes);
             }
@@ -266,5 +332,53 @@ impl NegotiatedInput {
             |_, bytes| deliver(bytes),
         )
         .map_err(Error::Transport)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fr_core::ids::{
+        CodecConfigurationGeneration, DisplayGeometryGeneration, HostBootId, OsSessionId,
+        RemoteSessionId, ViewportMappingGeneration,
+    };
+
+    fn binding(id: u32, recovery: RecoveryGeneration) -> Binding {
+        Binding {
+            parent: ControlBinding {
+                id,
+                host_boot: HostBootId::from_raw(1),
+                os_session: OsSessionId::from_raw(2),
+                remote_session: RemoteSessionId::from_raw(3),
+            },
+            display: 4,
+            geometry: DisplayGeometryGeneration::INITIAL,
+            configuration: CodecConfigurationGeneration::INITIAL,
+            recovery,
+            viewport: ViewportMappingGeneration::INITIAL,
+        }
+    }
+
+    #[test]
+    fn only_the_next_recovery_generation_on_a_new_channel_is_followed() {
+        let first = RecoveryGeneration::INITIAL;
+        let next = first.next().unwrap();
+        let old = binding(10, first);
+        assert!(recovered_successor(old, binding(20, next)));
+        // The same channel, the same generation, or a skipped generation is not
+        // a recovery of this configuration.
+        assert!(!recovered_successor(old, binding(10, next)));
+        assert!(!recovered_successor(old, binding(20, first)));
+        assert!(!recovered_successor(old, binding(20, next.next().unwrap())));
+        // Every other authority/display/codec field must be unchanged.
+        let mut other = binding(20, next);
+        other.parent.remote_session = RemoteSessionId::from_raw(9);
+        assert!(!recovered_successor(old, other));
+        let mut other = binding(20, next);
+        other.display = 5;
+        assert!(!recovered_successor(old, other));
+        let mut other = binding(20, next);
+        other.configuration = other.configuration.next().unwrap();
+        assert!(!recovered_successor(old, other));
     }
 }

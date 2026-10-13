@@ -48,6 +48,11 @@ fn same_view(a: Binding, mut b: Binding) -> bool {
     a == b
 }
 impl NegotiatedMedia {
+    /// The completed configuration attachment. A control grant's input lane
+    /// follows it across a reference recovery.
+    pub(crate) const fn configuration_channel(&self) -> AttachedChannel {
+        self.configuration
+    }
     #[cfg(test)]
     pub(crate) fn packet_route_for_test(&self, channel: Channel) -> Route {
         match channel {
