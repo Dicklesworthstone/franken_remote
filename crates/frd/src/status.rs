@@ -688,11 +688,12 @@ impl DaemonStatusReport {
             for c in &mut report.capabilities {
                 if c.name == "video_encode" {
                     c.detail = if render_node {
-                        "GPU device node present; hardware HEVC encode not probed (frd run uses \
-                         the explicit software profile)"
+                        "GPU device node present; hardware HEVC encode not probed (frd run \
+                         needs an explicit encoder: --software-explicit or --encoder nvenc|vaapi)"
                             .into()
                     } else {
-                        "No GPU device node; frd run uses the explicit software HEVC profile".into()
+                        "No GPU device node; frd run --software-explicit selects software HEVC"
+                            .into()
                     };
                 }
             }

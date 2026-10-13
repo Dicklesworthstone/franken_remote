@@ -1,5 +1,52 @@
 # Implementation status
 
+## Live state (2026-10-12)
+
+**First live two-machine sessions.** Release build of this tree, no patches:
+ts1 (`frd run --software-explicit`, real Tailscale certificate, real WhoIs
+admission, nftables ingress, Xvfb) served trj (`fr connect`, Xvfb), both
+Ubuntu 26.04 on the same tailnet.
+
+- View-only: first dial on an idle Tailscale path in 1.7 s; client pixels within
+  0.18% of the host's (10% fuzz) with the cursor overlay; tcpdump on tailscale0
+  saw no datagram above 1200 bytes.
+- Control: the host pointer, read by an independent X client, followed the
+  controller exactly, including a click. A controller window that never gets
+  keyboard focus ends `control_focus_lost` after 30 s (with and without a window
+  manager).
+- `fr hosts` reports direct, DERP-relayed and idle paths correctly; a host that
+  never completes the handshake ends `host_not_answering`.
+- Not exercised live yet: keys, wheel, clipboard, file sending, audio, local
+  approval, NVENC/VAAPI, macOS or Windows hosts or clients.
+
+**What it took** (each with unit tests and a planted negative):
+- Asupersync pinned to git `ee72b665e` (0.6.0). Published 0.5.0 sends each
+  handshake CRYPTO segment as one datagram and cannot send a real
+  four-certificate Let's Encrypt chain (`udp_send`). The namespace fixture now
+  serves such a chain.
+- A 1200-byte datagram policy on both ends (tailscale0 MTU 1280).
+- Peer identity that ignores Tailscale path fields (`CurAddr`, `Relay`,
+  `Active`); path changes had ended sessions with `identity_changed`.
+- A bounded wait for the viewer window's focus, and named codes for every
+  capture stop.
+
+**NVENC** (GTX 1070, offline): `hevc_nvenc` never opened. The fixes are `refs`
+left at the encoder default, encoder SEI (types 39/40) stripped on the host, and
+SPS short-term RPS tables and VUI HRD admitted under the same rules. Real
+encoder output now passes admission. No live NVENC session has run; VAAPI is
+untested.
+
+**macOS**: the workspace builds, lints and tests (new CI job). Every `fr`/`frd`
+command refuses with `platform_unavailable`.
+
+**Known regressions from the pin.** Six namespace e2e tests regress: peer-finished
+reporting after departing inspections, a refused peer's sibling, and two
+impairment rows. Bisected to the Asupersync pin alone. On ts1, 53 of 67 pass
+at this tree against 59 of 67 at the 0.5.0 baseline. The seven `real_audio`
+tests also fail on ts1, which has no working private PulseAudio; they pass on
+trj. Bead fr-asupersync06-drain-stall-3xan (P0) records the diagnosis: after the
+peer region cancels, the bounded closure drain is not polled again.
+
 ## Audited state (2026-09-27)
 
 **Early implementation; not an installable remote desktop.** A second reality

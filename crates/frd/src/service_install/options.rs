@@ -78,7 +78,7 @@ impl InstallOptions {
             if self.approval_mode == "local" {
                 return Err(ServiceError::HostProfileUnavailable {
                     code: "local_approval_unavailable",
-                    detail: "frd run cannot show local approval prompts yet; install with --approval none",
+                    detail: "an installed unit cannot select the logind session that local approval needs yet; install with --approval none or run frd run --approval local --logind-session ID directly",
                 });
             }
         }

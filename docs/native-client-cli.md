@@ -127,9 +127,10 @@ capability at all. With it, the view-only offer adds the OPTIONAL
 `native-audio-down` capability. The host must run `frd run --audio` (its own
 local enable); a host without it simply omits the capability, the session
 continues with video only, and the completion record reports
-`audio_absence: "host_did_not_offer"`. `--audio` with `--control` is refused
-before any connection (`audio_control_unsupported`): audio on controlled shares
-remains a separate integration. Builds without the `linux-audio` feature refuse `--audio`
+`audio_absence: "host_did_not_offer"`. `--audio` with `--control` adds the same
+optional capability to a controlled share; audio and input stay independent (a
+stalled Opus child cannot stop control or lease renewal, and a host without
+`--audio` keeps control without audio). Builds without the `linux-audio` feature refuse `--audio`
 (`audio_unavailable_in_build`).
 
 The attached `audio-down` channel carries `AudioConfiguration`/`AudioStop` on a
