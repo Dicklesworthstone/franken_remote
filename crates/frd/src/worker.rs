@@ -166,6 +166,87 @@ impl Launch {
         launch.fit_target = true;
         Ok(launch)
     }
+    /// One-shot startup probe of the locally selected encoder (`nvenc`,
+    /// `vaapi` or `software`): the worker opens it at the display's root size
+    /// and admits one real IDR. Synchronous and bounded, run before any
+    /// listener exists; the child is always ended and reaped.
+    pub fn probe_encoder(&self, backend: &str, limit: Duration) -> Result<EncoderProbe, Error> {
+        use std::io::Read;
+        use std::process::{Command as Probe, Stdio as ProbeStdio};
+        if self.role != Role::Capture
+            || self.retirement.is_some()
+            || !matches!(backend, "nvenc" | "vaapi" | "software")
+        {
+            return Err(Error::InvalidLaunch);
+        }
+        let mut command = Probe::new(&self.image);
+        command
+            .env_clear()
+            .env("DISPLAY", &self.display)
+            .args(["--probe-encoder", backend, "--parent-pid"])
+            .arg(std::process::id().to_string())
+            .stdin(ProbeStdio::null())
+            .stdout(ProbeStdio::piped())
+            .stderr(ProbeStdio::null());
+        if let Some(path) = &self.xauthority {
+            command.env("XAUTHORITY", path);
+        }
+        let mut child = command.spawn().map_err(|_| Error::InvalidLaunch)?;
+        let until = std::time::Instant::now() + limit;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if std::time::Instant::now() < until => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                _ => break None,
+            }
+        };
+        let Some(status) = status else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(EncoderProbe::TimedOut);
+        };
+        let mut line = String::new();
+        if let Some(mut out) = child.stdout.take() {
+            let _ = out.by_ref().take(256).read_to_string(&mut line);
+        }
+        Ok(EncoderProbe::parse(status.success(), line.trim()))
+    }
+}
+/// Outcome of [`Launch::probe_encoder`]. Content-free: dimensions and the
+/// worker's typed refusal name only, never pixels or bitstream bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EncoderProbe {
+    Admitted { width: u32, height: u32 },
+    Refused(String),
+    TimedOut,
+}
+impl EncoderProbe {
+    fn parse(success: bool, line: &str) -> Self {
+        let field = |name: &str| {
+            line.split(' ')
+                .find_map(|word| word.strip_prefix(name)?.strip_prefix('='))
+        };
+        match (success, field("encoder_probe")) {
+            (true, Some("admitted")) => match (
+                field("width").and_then(|v| v.parse().ok()),
+                field("height").and_then(|v| v.parse().ok()),
+            ) {
+                (Some(width), Some(height)) => Self::Admitted { width, height },
+                _ => Self::Refused("malformed_probe_reply".into()),
+            },
+            (false, Some("refused")) => Self::Refused(
+                field("reason")
+                    .filter(|r| {
+                        r.len() <= 64 && r.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                    })
+                    .unwrap_or("unnamed")
+                    .into(),
+            ),
+            _ => Self::Refused("no_probe_reply".into()),
+        }
+    }
 }
 /// One absolute deadline covers the complete write and reply, including a
 /// fragmented header/body. Receiving another byte never restarts the timeout.
@@ -798,6 +879,88 @@ mod tests {
         time::{TimerDriverHandle, VirtualClock},
     };
     use std::sync::Arc;
+
+    /// A stand-in worker image speaking only the probe's one-line reply.
+    fn probe_image(script: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "fr-probe-{}-{}.sh",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    }
+    fn probe(script: &str, backend: &str, limit: Duration) -> Result<EncoderProbe, Error> {
+        let image = probe_image(script);
+        Launch::new(&image, ":0", None, Role::Capture, 7)
+            .unwrap()
+            .probe_encoder(backend, limit)
+    }
+
+    #[test]
+    fn encoder_probe_reports_admission_typed_refusal_silence_and_timeout() {
+        let second = Duration::from_secs(5);
+        assert_eq!(
+            probe(
+                "echo 'encoder_probe=admitted width=1920 height=1080 idr_bytes=4096'",
+                "nvenc",
+                second
+            ),
+            Ok(EncoderProbe::Admitted {
+                width: 1920,
+                height: 1080
+            })
+        );
+        assert_eq!(
+            probe(
+                "echo 'encoder_probe=refused reason=Unsupported'; exit 2",
+                "vaapi",
+                second
+            ),
+            Ok(EncoderProbe::Refused("Unsupported".into()))
+        );
+        // A crash or a missing reply is a refusal, never an admission.
+        assert_eq!(
+            probe("exit 1", "nvenc", second),
+            Ok(EncoderProbe::Refused("no_probe_reply".into()))
+        );
+        assert_eq!(
+            probe(
+                "echo 'encoder_probe=admitted width=1920 height=1080'; exit 3",
+                "nvenc",
+                second
+            ),
+            Ok(EncoderProbe::Refused("no_probe_reply".into()))
+        );
+        // Untrusted reply text never reaches the refusal unfiltered.
+        assert_eq!(
+            probe(
+                "echo 'encoder_probe=refused reason=a/b'; exit 2",
+                "nvenc",
+                second
+            ),
+            Ok(EncoderProbe::Refused("unnamed".into()))
+        );
+        // A hung child is ended at the bound and reaped.
+        let started = std::time::Instant::now();
+        assert_eq!(
+            probe("sleep 30", "nvenc", Duration::from_millis(300)),
+            Ok(EncoderProbe::TimedOut)
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // Only a capture launch probes, and only the three local names.
+        assert_eq!(probe("exit 0", "h264", second), Err(Error::InvalidLaunch));
+        let image = probe_image("exit 0");
+        assert_eq!(
+            Launch::new(&image, ":0", None, Role::Present, 7)
+                .unwrap()
+                .probe_encoder("nvenc", second),
+            Err(Error::InvalidLaunch)
+        );
+    }
 
     #[test]
     fn audio_packets_answer_only_audio_pulls_and_never_other_roles() {

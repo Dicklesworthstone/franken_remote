@@ -62,19 +62,31 @@ remain, including separate control/clipboard/file enables, the local-approval
 refusal and the requirement for headless mode when carrying run options into a
 system-wide unit. Other platforms do not silently discard the hardware flags.
 
-This preview renders configuration; it does not start a service, probe a GPU,
+This preview renders configuration; it does not start a service, probe a GPU
+(the running service probes at its own startup),
 change saved admission policy or qualify the selected encoder. The service
 account still needs the existing local desktop, device and ingress permissions.
 
 ## What a hardware selection proves
 
-By itself, nothing about the hardware. Native codec initialization still runs
-in the capture worker after admission and media negotiation. The selected
-encoder must actually open, its output must pass the existing HEVC parameter-set
-and reference checks, and decoder startup must complete. An unavailable device,
-driver or incompatible bitstream follows the existing typed worker/share
-failure path. It never retries that work with software or another backend.
-The existing host restart budget and backoff are unchanged.
+`frd run --encoder nvenc|vaapi` probes the selection once at startup, before any
+certificate, listener or firewall rule exists. The capture worker
+(`fr-media-worker --probe-encoder BACKEND`) captures the X root window, opens
+the selected encoder at that size, encodes one forced IDR and passes it through
+the same encoder-SEI stripping and HEVC parameter-set/reference admission as a
+share. An encoder that cannot open, an inadmissible first IDR, or no reply
+within 15 seconds refuses the run with `encoder_unavailable` (the worker's
+typed reason, or `timed_out`, is in the detail). Before this, an unusable GPU
+encoder surfaced only when the first viewer's share failed. The explicit
+software profile is not probed. A failure never substitutes software or another
+backend.
+
+The probe proves that encoder can produce admitted HEVC on this display at
+startup, not that every later share will. Native codec initialization still
+runs again in each share's capture worker after admission and media
+negotiation, and decoder startup must still complete. A later device, driver or
+bitstream failure follows the existing typed worker/share failure path. The
+existing host restart budget and backoff are unchanged.
 
 The current adapters remain **CPU-staged X11 capture**. NVENC/VAAPI selection
 changes encoding, not capture ownership, zero-copy behavior, input authority,

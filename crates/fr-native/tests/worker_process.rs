@@ -749,3 +749,42 @@ fn unavailable_monitor_profile_refuses_without_falling_back_to_screen_capture() 
 
 #[path = "worker_process/presentation_target.rs"]
 mod presentation_target;
+
+/// `frd run --encoder nvenc|vaapi` probes the selected encoder once at startup.
+/// The probe opens the encoder at the real X root size and admits one forced
+/// IDR through the same SEI stripping and HEVC admission as a share.
+#[test]
+fn startup_encoder_probe_admits_a_real_idr_and_refuses_what_it_cannot_open() {
+    let display = Display::start();
+    let probe = |backend: &str| {
+        let output = Command::new(env!("CARGO_BIN_EXE_fr-media-worker"))
+            .env_clear()
+            .env("DISPLAY", &display.name)
+            .args(["--probe-encoder", backend, "--parent-pid"])
+            .arg(std::process::id().to_string())
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .unwrap();
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        )
+    };
+    let (admitted, line) = probe("software");
+    assert!(admitted, "{line}");
+    assert!(
+        line.starts_with("encoder_probe=admitted width=320 height=240 idr_bytes="),
+        "{line}"
+    );
+    // Not a backend name: refused before any native work, never a fallback.
+    let (admitted, line) = probe("h264");
+    assert!(!admitted);
+    assert!(line.starts_with("encoder_probe=refused reason="), "{line}");
+    // A host without a render node cannot open VAAPI: a typed refusal.
+    if !std::path::Path::new("/dev/dri/renderD128").exists() {
+        let (admitted, line) = probe("vaapi");
+        assert!(!admitted, "{line}");
+        assert!(line.starts_with("encoder_probe=refused reason="), "{line}");
+    }
+}

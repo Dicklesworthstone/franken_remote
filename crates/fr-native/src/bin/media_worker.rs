@@ -511,9 +511,91 @@ mod linux {
             }
         }
     }
+    /// `--probe-encoder BACKEND`: open the locally selected encoder at the X
+    /// root size, encode one forced IDR of a real capture, and pass it through
+    /// the same SEI stripping and HEVC admission as a share. One content-free
+    /// line on stdout; no protocol record, network or retained state.
+    fn probe_encoder(backend: &str) -> Result<(u32, u32, usize), Error> {
+        use fr_core::ids::CodecConfigurationGeneration;
+        use fr_media::access_unit::FrameId;
+        use std::time::{Duration, Instant};
+        let backend = match backend {
+            "nvenc" => Backend::Nvenc,
+            "vaapi" => Backend::Vaapi,
+            "software" => Backend::SoftwareExplicit,
+            _ => return Err(Error::Malformed),
+        };
+        let limits = ProtocolLimits::ABSOLUTE;
+        let surface = X11Surface::capture(None, limits).map_err(native)?;
+        let configuration = Configuration {
+            width: surface.width(),
+            height: surface.height(),
+            fps: 30,
+            backend,
+            bitrate: 8_000_000,
+            max_access_unit_bytes: limits.max_encoded_access_unit_bytes(),
+            generation: CodecConfigurationGeneration::INITIAL,
+        };
+        let Media::Capture(mut capture) = capture_media(surface, configuration)? else {
+            return Err(Error::WrongRole);
+        };
+        match capture
+            .capture(FrameId::from_raw(1), 1, true, false)
+            .map_err(native)?
+        {
+            CaptureOutput::Submitted => {}
+            CaptureOutput::Unchanged(_) => return Err(Error::WrongState),
+        }
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            match capture.poll_output() {
+                Ok(unit) => {
+                    return Ok((
+                        configuration.width,
+                        configuration.height,
+                        unit.bytes().len(),
+                    ));
+                }
+                Err(NativeError::NeedInput) if Instant::now() < until => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => return Err(native(error)),
+            }
+        }
+    }
+    /// The `--probe-encoder BACKEND --parent-pid PID` command line.
+    fn run_probe(mut args: impl Iterator<Item = String>) -> Result<(), Error> {
+        let backend = args.next().ok_or(Error::Malformed)?;
+        if args.next().as_deref() != Some("--parent-pid") {
+            return Err(Error::WrongState);
+        }
+        let parent = args
+            .next()
+            .ok_or(Error::WrongState)?
+            .parse::<u32>()
+            .map_err(|_| Error::WrongState)?;
+        bind_worker_parent(parent).map_err(native)?;
+        if args.next().is_some() {
+            return Err(Error::Malformed);
+        }
+        match probe_encoder(&backend) {
+            Ok((width, height, bytes)) => {
+                println!("encoder_probe=admitted width={width} height={height} idr_bytes={bytes}");
+                Ok(())
+            }
+            Err(error) => {
+                println!("encoder_probe=refused reason={error}");
+                Err(error)
+            }
+        }
+    }
     pub fn run() -> Result<(), Error> {
         let mut args = std::env::args().skip(1);
-        let role = match args.next().as_deref() {
+        let first = args.next();
+        if first.as_deref() == Some("--probe-encoder") {
+            return run_probe(args);
+        }
+        let role = match first.as_deref() {
             Some("--capture") => Role::Capture,
             Some("--present") => Role::Present,
             Some("--audio") => Role::Audio,

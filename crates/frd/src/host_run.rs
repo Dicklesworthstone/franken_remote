@@ -41,7 +41,7 @@ use crate::{
     },
     session_monitor::{self, Monitor, Status as Lifetime},
     session_startup::{Configuration, host_offer_with_files, shared_viewers, with_line_scroll},
-    worker::{Deadline, Launch, Retirement},
+    worker::{Deadline, EncoderProbe, Launch, Retirement},
 };
 use asupersync::{
     cx::Cx,
@@ -146,6 +146,11 @@ pub enum Error {
     /// needs on this display (named). Nothing was bound; observation-only
     /// sharing needs no input agent.
     ControlCapabilityMissing(Capability),
+    /// `--encoder nvenc|vaapi`: the startup probe could not open the selected
+    /// encoder at this display's size, or its first IDR was not admitted
+    /// (the worker's typed reason, or `timed_out`). Nothing was bound, and no
+    /// other backend is substituted.
+    EncoderUnavailable(String),
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -179,6 +184,7 @@ impl Error {
             Self::SessionEnded(cause) => session_ended_code(*cause),
             Self::InputAgentUnavailable(_) => "input_agent_unavailable",
             Self::ControlCapabilityMissing(_) => "control_capability_missing",
+            Self::EncoderUnavailable(_) => "encoder_unavailable",
         }
     }
 }
@@ -297,6 +303,31 @@ fn probe_control(options: &Options) -> Result<Option<Capabilities>, Error> {
     grantable(probed)
         .map(Some)
         .map_err(Error::ControlCapabilityMissing)
+}
+/// A hardware encoder is proved once at startup, before anything is bound: an
+/// unusable GPU encoder used to surface only when the first viewer's share
+/// failed (the viewer saw a renewal timeout). The explicit software profile is
+/// not probed, and a failure never substitutes another backend.
+fn probe_encoder(options: &Options, encoder: Encoder) -> Result<(), Error> {
+    if !encoder.is_hardware() {
+        return Ok(());
+    }
+    let launch = Launch::new(
+        &options.worker,
+        &options.display,
+        options.xauthority.as_deref(),
+        WorkerRole::Capture,
+        random_nonzero_u128()?,
+    )
+    .map_err(|_| Error::Configuration)?;
+    match launch
+        .probe_encoder(encoder.as_str(), std::time::Duration::from_secs(15))
+        .map_err(|_| Error::Configuration)?
+    {
+        EncoderProbe::Admitted { .. } => Ok(()),
+        EncoderProbe::Refused(reason) => Err(Error::EncoderUnavailable(reason)),
+        EncoderProbe::TimedOut => Err(Error::EncoderUnavailable("timed_out".into())),
+    }
 }
 /// The static host policy for this X11 slice: operations a controller may
 /// request if the local executor also has them. Discrete wheel input uses
@@ -537,6 +568,7 @@ fn run_inner(
         approval.validate(options)?;
     }
     let control = probe_control(options)?;
+    probe_encoder(options, encoder)?;
     // Started before anything is bound; kept for the whole run.
     let monitor = match &options.session_monitor {
         Some(configuration) => {
