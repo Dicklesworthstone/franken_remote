@@ -1,5 +1,5 @@
 //! One-use custody transfer on ordinary connection closure. This is not another
-//! send mode: the consumer can only run the existing bounded terminal drain.
+//! send mode: the consumer can only run a bounded terminal drain or close packet.
 use super::{Binding, Closed, Drain, Error, QuicRecords, Report, Revoked, StreamRoute};
 use crate::quic::ConnectionBinding;
 use asupersync::cx::Cx;
@@ -13,12 +13,39 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
+mod abrupt;
+use abrupt::ClosePacket;
+
+// Exactly one terminal owner. A close packet is not a delivered FRD0 report;
+// its successful flush deliberately retains the report's Backpressure result.
+enum Prepared {
+    Record(Box<Drain>),
+    Close(Box<ClosePacket>),
+}
+impl Prepared {
+    fn with_closed(mut self, report: Closed) -> Result<Self, Error> {
+        match &mut self {
+            Self::Record(drain) => {
+                drain.byte_len = Report::Closed(report).encode(drain.binding, &mut drain.bytes)?;
+            }
+            Self::Close(close) => close.replace_report(report)?,
+        }
+        Ok(self)
+    }
+    async fn run(self) -> Result<(), Error> {
+        match self {
+            Self::Record(drain) => drain.run().await,
+            Self::Close(close) => close.run().await,
+        }
+    }
+}
+
 #[derive(Default)]
 enum State {
     #[default]
     Unarmed,
     Armed,
-    Ready(Result<Box<Drain>, Error>),
+    Ready(Result<Prepared, Error>),
     Finished,
 }
 
@@ -42,10 +69,12 @@ impl RevocationReport {
     /// `None`, not a delivered report. An armed connection which was abandoned
     /// before closure cannot be recovered; its outcome is `Some(Err(Closed))`.
     /// The drain's fixed deadline was set at closure and is never restarted.
+    /// Native backlog permits only one protected close packet, not payload
+    /// draining. Even if flushed, the undelivered report returns Backpressure.
     pub fn finish(self) -> impl Future<Output = Option<Result<(), Error>>> + use<> {
         finish(self.take())
     }
-    fn take(self) -> Option<Result<Box<Drain>, Error>> {
+    fn take(self) -> Option<Result<Prepared, Error>> {
         let mut state = self
             .0
             .lock()
@@ -79,18 +108,18 @@ impl ClosedReport {
     /// native cleanup or receipt counts. The original 250-ms closure deadline
     /// includes time already spent cleaning up. Late completion cannot renew it.
     /// No registered/captured socket means no report, never a reconnect or retry.
+    /// A native-backlog fallback carries only this final reason, never guessed
+    /// cleanup/effect stages, and cannot return a successful report receipt.
     pub fn finish(self, report: Closed) -> impl Future<Output = Option<Result<(), Error>>> + use<> {
-        let prepared = self.0.take().map(|result| {
-            result.and_then(|mut drain| {
-                drain.byte_len = Report::Closed(report).encode(drain.binding, &mut drain.bytes)?;
-                Ok(drain)
-            })
-        });
+        let prepared = self
+            .0
+            .take()
+            .map(|result| result.and_then(|prepared| prepared.with_closed(report)));
         finish(prepared)
     }
 }
 
-async fn finish(prepared: Option<Result<Box<Drain>, Error>>) -> Option<Result<(), Error>> {
+async fn finish(prepared: Option<Result<Prepared, Error>>) -> Option<Result<(), Error>> {
     match prepared {
         None => None,
         Some(Err(error)) => Some(Err(error)),
@@ -166,9 +195,11 @@ impl QuicRecords {
     /// On close, `fence` MUST synchronously fence this exact input lease before
     /// returning its content-free reason. It must not block or re-enter this
     /// transport. Stages are always Fenced/Unknown: no native result is inferred.
-    /// Normal I/O errors and explicit close transfer at most ONE socket, subject
-    /// to the existing native-backlog refusal. Dropping an in-flight I/O future
-    /// still abandons that socket. The returned report never grants input.
+    /// Normal I/O errors and explicit close transfer at most ONE socket. Native
+    /// backlog still refuses the report; only a protected CONNECTION_CLOSE may
+    /// be flushed instead, without application payload or delivery confirmation.
+    /// Dropping an in-flight I/O future still abandons that socket. The returned
+    /// report never grants input.
     #[allow(clippy::too_many_arguments)]
     pub fn arm_revocation_report(
         &mut self,
@@ -260,6 +291,26 @@ impl QuicRecords {
         Ok(())
     }
 
+    fn prepare_registered_report(
+        &mut self,
+        cleanup: &Cx,
+        route: StreamRoute,
+        binding: Binding,
+        report: Report,
+    ) -> Result<Prepared, Error> {
+        // Freeze the fallback deadline before attempting the ordinary drain.
+        // A failed preparation cannot restart it or publish malformed metadata.
+        let started = super::now(cleanup)?;
+        let code = abrupt::report_code(&report, binding)?;
+        match self.prepare_report(cleanup, route, binding, report) {
+            Ok(drain) => Ok(Prepared::Record(Box::new(drain))),
+            Err(Error::Backpressure) => self
+                .prepare_close_packet(cleanup, route, binding, started, code)
+                .map(|close| Prepared::Close(Box::new(close))),
+            Err(error) => Err(error),
+        }
+    }
+
     pub(in crate::quic) fn capture_revocation(&mut self) {
         let Some(armed) = self.deferred_revocation.take() else {
             return;
@@ -278,9 +329,8 @@ impl QuicRecords {
         let Some(shared) = armed.registration.0.upgrade() else {
             return;
         };
-        let prepared = self
-            .prepare_report(&armed.cleanup, armed.route, armed.binding, report)
-            .map(Box::new);
+        let prepared =
+            self.prepare_registered_report(&armed.cleanup, armed.route, armed.binding, report);
         let mut state = shared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
