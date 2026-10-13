@@ -154,8 +154,9 @@ unsafe fn position(display: NonNull<c_void>, root: c_ulong) -> Option<(i32, i32)
 }
 
 /// Borrow only an existing capture connection; never reopen DISPLAY here.
-/// A cursor moving between the image and position queries yields typed `NeedInput`,
-/// not coordinates or pixels asserted to belong to another selected display.
+/// A cursor moving between the image and position queries, or an image XFIXES
+/// cannot produce at that moment, yields typed `NeedInput`, not coordinates or
+/// pixels asserted to belong to another selected display.
 pub(crate) unsafe fn snapshot(
     display: NonNull<c_void>,
     root: c_ulong,
@@ -177,13 +178,18 @@ pub(crate) unsafe fn snapshot(
     if !before.is_some_and(|(x, y)| area.contains(x, y)) {
         return Ok(None);
     }
+    // XFixes also returns NULL, without an X error, when it cannot produce the
+    // current image: observed on Ubuntu 26.04's Xvfb at nearly every teardown,
+    // as the client that owned the cursor disconnects. That is "no shape now",
+    // not an allocation failure, and refusing it ended the whole share as a host
+    // failure. The next observation retries.
     // SAFETY: XFixes returns one library-owned image plus its native pixel array.
     // The X server/library are a native trust boundary: their internal allocation
     // occurs before our checks, but no unchecked size reaches a Rust allocation.
-    let allocation = Allocation(
-        NonNull::new(unsafe { XFixesGetCursorImage(display.as_ptr()) })
-            .ok_or(NativeError::Allocation)?,
-    );
+    let Some(image) = NonNull::new(unsafe { XFixesGetCursorImage(display.as_ptr()) }) else {
+        return Err(NativeError::NeedInput);
+    };
+    let allocation = Allocation(image);
     // SAFETY: the non-null allocation contains the documented ABI prefix.
     let image = unsafe { allocation.0.as_ref() };
     // Check screen and position again, before copying/returning any shape bytes.
