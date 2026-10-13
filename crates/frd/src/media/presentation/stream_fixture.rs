@@ -2,11 +2,25 @@
 //! No production constructor accepts fabricated startup proof or decoded bytes.
 use super::*;
 impl Presenter {
+    /// A decoder that takes 90 ms per picture: tests of work during a pending
+    /// decode rely on that wait.
     pub(crate) async fn stream_fixture(
         cx: &Cx,
         q: &fr_transport::quic::QuicRecords,
         media: &crate::media_quic::NegotiatedMedia,
         receiver: &mut fr_media::delivery::ReceivePipeline,
+    ) -> Self {
+        Self::stream_fixture_decoding(cx, q, media, receiver, "0.09").await
+    }
+    /// The same fixture with an explicit per-picture decode time (seconds). A
+    /// decoder slower than the frame interval necessarily outlives reference
+    /// budgets, so tests of host-side recovery use one that keeps up.
+    pub(crate) async fn stream_fixture_decoding(
+        cx: &Cx,
+        q: &fr_transport::quic::QuicRecords,
+        media: &crate::media_quic::NegotiatedMedia,
+        receiver: &mut fr_media::delivery::ReceivePipeline,
+        decode_seconds: &str,
     ) -> Self {
         use fr_core::{ids::CodecConfigurationGeneration, limits::ProtocolLimits};
         use fr_media::{config::*, hevc::HevcGuard, worker::*};
@@ -41,7 +55,11 @@ impl Presenter {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::write(&image, include_str!("decoder_fixture.py")).unwrap();
+        std::fs::write(
+            &image,
+            include_str!("decoder_fixture.py").replace("@DECODE_SECONDS@", decode_seconds),
+        )
+        .unwrap();
         std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o700)).unwrap();
         let configuration = Configuration {
             width: 320,

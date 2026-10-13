@@ -332,9 +332,10 @@ impl Link {
                 break b;
             }
         };
-        let path = fixture(include_str!(
-            "../../src/media/presentation/decoder_fixture.py"
-        ));
+        let path = fixture(
+            &include_str!("../../src/media/presentation/decoder_fixture.py")
+                .replace("@DECODE_SECONDS@", "0.09"),
+        );
         let mut viewer = Viewer::start(
             cx.clone(),
             &self.c,

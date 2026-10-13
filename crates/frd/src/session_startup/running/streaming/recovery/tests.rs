@@ -195,8 +195,11 @@ async fn fixture_features(
         .unwrap();
     let mut receiver =
         ReceivePipeline::new(config, MediaBudget::new(config.limits.protocol()).unwrap()).unwrap();
+    // These tests exercise host-side late-capture recovery, not an overloaded
+    // viewer: its decoder must keep up with the 30 fps capture interval.
     let mut presenter =
-        Presenter::stream_fixture(c, viewer.io().unwrap().0, &vm, &mut receiver).await;
+        Presenter::stream_fixture_decoding(c, viewer.io().unwrap().0, &vm, &mut receiver, "0.02")
+            .await;
     sender
         .enqueue_capture(source.capture_if_changed(&control, true).await.unwrap())
         .unwrap();

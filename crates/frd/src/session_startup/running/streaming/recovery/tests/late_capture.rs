@@ -261,8 +261,15 @@ fn waiting_for_the_peers_request_is_inside_the_original_failure_budget() {
                 }
             }
         };
+        // Time the HOST's end: the peer loop only stops at its own 3 s cap,
+        // since this fixture keeps the host (and its connection) for reaping.
+        let host_ended = std::cell::Cell::new(None);
         let (server, client) = Box::pin(support::both(
-            host.serve(|| nonce(&mut entropy), || None, block),
+            async {
+                let served = host.serve(|| nonce(&mut entropy), || None, block).await;
+                host_ended.set(Some(started.elapsed()));
+                served
+            },
             peer,
         ))
         .await;
@@ -270,8 +277,9 @@ fn waiting_for_the_peers_request_is_inside_the_original_failure_budget() {
         assert!(client.is_err());
         assert_eq!(host.statistics().expired_capture_updates, 1);
         assert_eq!(host.statistics().recovered_streams, 0);
-        assert!(started.elapsed() >= Duration::from_millis(650));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        let host_ended = host_ended.get().expect("host serve returned");
+        assert!(host_ended >= Duration::from_millis(650), "{host_ended:?}");
+        assert!(host_ended < Duration::from_secs(2), "{host_ended:?}");
         assert!(host.stream.control.check().is_err());
         host.reap_media(
             &cleanup,

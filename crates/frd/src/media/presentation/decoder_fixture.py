@@ -15,7 +15,7 @@ try:
         b = read(int.from_bytes(h[32:36], 'big'))
         if kind == 8: k, out = 266, b
         elif kind in (4, 6):
-            time.sleep(.09)
+            time.sleep(@DECODE_SECONDS@)
             k, out = (261 if kind == 4 else 264), b[:8]
         elif kind == 5: k, out = 262, b''
         else: raise ValueError(kind)

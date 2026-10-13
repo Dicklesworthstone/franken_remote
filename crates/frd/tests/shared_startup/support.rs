@@ -333,7 +333,8 @@ pub(super) async fn source_variant(
 }
 pub(super) fn decoder() -> Launch {
     let image = fixture(
-        include_str!("../../src/media/presentation/decoder_fixture.py"),
+        &include_str!("../../src/media/presentation/decoder_fixture.py")
+            .replace("@DECODE_SECONDS@", "0.09"),
         "decoder",
     );
     Launch::new(&image, ":0", None, WorkerRole::Present, 46).unwrap()

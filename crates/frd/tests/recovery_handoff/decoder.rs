@@ -96,7 +96,7 @@ async fn initial(
     std::fs::write(
         &path,
         include_str!("../../src/media/presentation/decoder_fixture.py").replace(
-            "time.sleep(.09)",
+            "time.sleep(@DECODE_SECONDS@)",
             "time.sleep(.5 if int.from_bytes(b[:8], 'big') == 9 else .01)",
         ),
     )
