@@ -56,8 +56,20 @@ RSS, against 16 GB on the hosted runner, and `continue-on-error` reported the
 killed Tests step as successful. Tests committed "pending CI execution" had
 therefore never executed anywhere. A swap action (12186bf) lets every lane run.
 About a dozen never-run or stale tests have since been corrected; each commit
-names its cause. Nine workflows that pin historical source blobs fail by
-design and await an owner decision.
+names its cause. Since 9916648 every lane of the Rust verification run is green
+(fmt, check, clippy, tests, examples and the X11/HEVC/docs/count lanes). Nine
+workflows that pin historical source blobs fail by design and await an owner
+decision.
+
+**Idle host.** Measured on ts1 (release `frd run`, listening, nftables rule
+installed, 60 s of process CPU time):
+- Before b47a271: frd used 2.28% of a core, 3.38% with its reaped `ip`/`nft`
+  children. Four 10 ms safety-net pulses woke it 100 times a second.
+- After: 0.48% (1.58% with children); RSS 9.9 MB. Pulses are 250 ms while idle;
+  an accepted peer keeps the 10 ms re-check.
+The plan's target is under 0.1%. Most of what remains is the 500 ms ingress
+refresh, which spawns `ip` and `nft`. Its cadence is an owner decision (bead
+fr-idle-frd-cpu-icui).
 
 **Regressions from the pin.** Six namespace e2e tests regressed when the pin
 landed. Four (peer-finished reporting after departing inspections, sequential
@@ -69,10 +81,15 @@ still pass or fail run to run (bead fr-xfvs).
 **Tailnet path in the namespace suite.** The runner gives the namespace
 loopback MTU 1280 and drops IP fragments, as Tailscale does (6a38a0b). A
 planted 1500-byte datagram limit passes on plain loopback and fails there.
-Under it, on ts1, 55 to 57 of 67 pass. The failures are the seven `real_audio`
-tests (no working PulseAudio on ts1; they pass on trj), `real_session_lifetime`
-(its fixture source path is absent on ts1), the lossy impairment rows and one
-flaky cursor-close step.
+Under it, on ts1, 58 of 67 pass (b47a271). The failures are:
+- the seven `real_audio` tests (no working PulseAudio on ts1; they pass on
+  trj);
+- the lossy impairment row;
+- the cursor-close step, since fixed (5d25287).
+That step ended a normal controller close as `host_control_failure` in about
+two runs of three on Ubuntu 26.04. XFixes returned a NULL cursor image while
+the cursor's owner disconnected, and the capture worker refused it as an
+allocation failure.
 
 ## Audited state (2026-09-27)
 
