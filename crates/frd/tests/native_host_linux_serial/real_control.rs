@@ -1106,6 +1106,144 @@ fn a_stale_view_suspends_input_before_it_reaches_the_host() {
     s.daemon.finish();
 }
 
+/// An independent host-side X client that repaints its own raised window every
+/// 20 ms in a colour it never repeats, so every capture differs from the last
+/// and is an encoded picture. Drawing on the root window instead was hidden
+/// under the session's other host windows and every capture came back
+/// unchanged.
+struct Painter(Child);
+impl Painter {
+    const SCRIPT: &str = r#"
+import ctypes as c, sys, time
+x = c.CDLL("libX11.so.6")
+D, W = c.c_void_p, c.c_ulong
+class Attributes(c.Structure):
+    _fields_ = [("background_pixmap", W), ("background_pixel", W), ("border_pixmap", W),
+                ("border_pixel", W), ("bit_gravity", c.c_int), ("win_gravity", c.c_int),
+                ("backing_store", c.c_int), ("backing_planes", W), ("backing_pixel", W),
+                ("save_under", c.c_int), ("event_mask", c.c_long),
+                ("do_not_propagate_mask", c.c_long), ("override_redirect", c.c_int),
+                ("colormap", W), ("cursor", W)]
+x.XOpenDisplay.restype = D; x.XOpenDisplay.argtypes = [c.c_char_p]
+x.XDefaultRootWindow.restype = W; x.XDefaultRootWindow.argtypes = [D]
+x.XDefaultScreen.argtypes = [D]
+x.XDefaultGC.restype = c.c_void_p; x.XDefaultGC.argtypes = [D, c.c_int]
+x.XCreateSimpleWindow.restype = W
+x.XCreateSimpleWindow.argtypes = [D, W, c.c_int, c.c_int, c.c_uint, c.c_uint, c.c_uint, W, W]
+x.XChangeWindowAttributes.argtypes = [D, W, c.c_ulong, c.POINTER(Attributes)]
+x.XMapRaised.argtypes = [D, W]
+x.XSetForeground.argtypes = [D, c.c_void_p, c.c_ulong]
+x.XFillRectangle.argtypes = [D, W, c.c_void_p, c.c_int, c.c_int, c.c_uint, c.c_uint]
+x.XSync.argtypes = [D, c.c_int]
+d = x.XOpenDisplay(sys.argv[1].encode())
+assert d
+root = x.XDefaultRootWindow(d)
+gc = x.XDefaultGC(d, x.XDefaultScreen(d))
+# Its own raised window: other host clients' windows would clip root drawing.
+w = x.XCreateSimpleWindow(d, root, 420, 330, 200, 120, 0, 0, 0)
+attributes = Attributes(override_redirect=1)
+x.XChangeWindowAttributes(d, w, 1 << 9, c.byref(attributes))
+x.XMapRaised(d, w)
+i = 0
+while True:
+    x.XSetForeground(d, gc, (i * 2654435761) & 0xffffff)
+    x.XFillRectangle(d, w, gc, 0, 0, 200, 120)
+    x.XSync(d, 0)
+    i += 1
+    time.sleep(0.02)
+"#;
+    fn start(display: &str) -> Self {
+        Self(
+            Command::new("python3")
+                .args(["-u", "-c", Self::SCRIPT, display])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap(),
+        )
+    }
+}
+impl Drop for Painter {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A host capture stall DURING MOTION (fr-2kv8). The late result is then an
+/// encoded picture, which cannot be skipped like an unchanged one: later
+/// P-frames reference it (AGENTS.md section 5). The host must drop it and
+/// recover with an IDR on the same session and lease, not end the session.
+///
+/// This is the end-to-end acceptance of fr-4vf5 and FAILS today (2026-10-13).
+/// The host detects the late picture (`OriginalExpired`, ~400 ms old) and starts
+/// a local-failure recovery. The controller then ends with `Input(Closed)`:
+/// recovery replaces the configuration channel, and the input lane
+/// (`input_quic::NegotiatedInput`) stays bound to the original one.
+/// Before that, the client also ended on the host's failure notice
+/// (`StaleBinding` on the progress route); `PresentedInput::progress` now
+/// suspends for recovery instead.
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays"]
+fn a_capture_stall_during_motion_recovers_with_an_idr_on_the_same_lease() {
+    let mut s = Controlled::start();
+    let workers = capture_workers();
+    assert!(!workers.is_empty(), "no host capture worker found");
+    let painter = Painter::start(&s.host.display);
+    // Encoded pictures flow while the host screen changes continuously.
+    thread::sleep(Duration::from_millis(600));
+    // Freeze the capture worker for 400 ms, under the shortest capture
+    // deadline (see the stale-view test): the capture issued before or during
+    // the freeze completes past its reference horizon.
+    let frozen = Instant::now();
+    for pid in &workers {
+        assert!(
+            Command::new("kill")
+                .args(["-STOP", &pid.to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    if let Some(rest) = Duration::from_millis(400).checked_sub(frozen.elapsed()) {
+        thread::sleep(rest);
+    }
+    for pid in &workers {
+        let _ = Command::new("kill")
+            .args(["-CONT", &pid.to_string()])
+            .status();
+    }
+    // The same session and lease: control resumes once the recovery IDR has
+    // refreshed the view. No reconnect, no new grant, the same executor.
+    assert!(
+        s.pointer_follows((300, 250), Duration::from_secs(20)),
+        "control did not resume after a capture stall during motion: {}",
+        s.daemon.dump()
+    );
+    assert!(
+        indicator(&mut s.observer).is_some(),
+        "the lease ended instead of recovering: {}",
+        s.daemon.dump()
+    );
+    drop(painter);
+    s.close_viewer();
+    let output = wait_for(s.client, Duration::from_secs(30));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|_| panic!("fr: {stdout} {}", String::from_utf8_lossy(&output.stderr)));
+    println!("fr after a capture stall during motion: {report}");
+    assert_eq!(report["outcome"], "stopped", "{report}");
+    assert_eq!(report["attempts"], 1, "{report}");
+    assert!(
+        report["last_attempt_media"]["recovered_streams"]
+            .as_u64()
+            .is_some_and(|n| n >= 1),
+        "the late encoded picture was not recovered with an IDR: {report}"
+    );
+    s.daemon.finish();
+}
+
 #[test]
 #[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; one Xvfb display"]
 fn a_host_without_an_input_agent_refuses_fr_connect_control_by_type() {
