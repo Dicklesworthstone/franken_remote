@@ -19,39 +19,45 @@ fn layout(state: &mut Fixture) -> fr_client::input::viewport::Layout {
     layout
 }
 fn assert_captured_operations(operations: &[Op]) {
-    assert_eq!(
-        operations,
-        [
-            Op::Key {
-                key: PhysicalKey::new(4).unwrap(),
-                transition: KeyTransition::Press
-            },
-            Op::Key {
-                key: PhysicalKey::new(4).unwrap(),
-                transition: KeyTransition::Repeat
-            },
-            Op::Key {
-                key: PhysicalKey::new(4).unwrap(),
-                transition: KeyTransition::Release
-            },
-            Op::Absolute(DesktopPoint { x: 100, y: 50 }),
-            Op::Absolute(DesktopPoint { x: 110, y: 60 }),
-            Op::Button {
-                button: PointerButton::Primary,
-                pressed: true
-            },
-            Op::Absolute(DesktopPoint { x: 110, y: 60 }),
-            Op::Button {
-                button: PointerButton::Primary,
-                pressed: false
-            },
-            Op::Absolute(DesktopPoint { x: 110, y: 60 }),
-            Op::Scroll {
-                x: 0,
-                y: -1,
-                unit: ScrollUnit::Lines
-            },
-        ]
+    let expected = vec![
+        Op::Key {
+            key: PhysicalKey::new(4).unwrap(),
+            transition: KeyTransition::Press,
+        },
+        Op::Key {
+            key: PhysicalKey::new(4).unwrap(),
+            transition: KeyTransition::Repeat,
+        },
+        Op::Key {
+            key: PhysicalKey::new(4).unwrap(),
+            transition: KeyTransition::Release,
+        },
+        Op::Absolute(DesktopPoint { x: 100, y: 50 }),
+        Op::Absolute(DesktopPoint { x: 110, y: 60 }),
+        Op::Button {
+            button: PointerButton::Primary,
+            pressed: true,
+        },
+        Op::Absolute(DesktopPoint { x: 110, y: 60 }),
+        Op::Button {
+            button: PointerButton::Primary,
+            pressed: false,
+        },
+        Op::Absolute(DesktopPoint { x: 110, y: 60 }),
+        Op::Scroll {
+            x: 0,
+            y: -1,
+            unit: ScrollUnit::Lines,
+        },
+    ];
+    // The pointer-only motion travels as a replaceable datagram that the host
+    // tolerates missing (fr-client `InputClient::pointer`); every key, button
+    // and positioned move is reliable and must arrive exactly, in order.
+    let mut without_motion = expected.clone();
+    without_motion.remove(3);
+    assert!(
+        operations == expected.as_slice() || operations == without_motion.as_slice(),
+        "{operations:?}"
     );
 }
 #[test]
