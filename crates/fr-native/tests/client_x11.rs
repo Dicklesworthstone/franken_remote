@@ -44,7 +44,9 @@ impl Server {
                 "320x240x24",
                 "-nolisten",
                 "tcp",
-                "-noreset",
+                // Exit when the last client disconnects instead of being
+                // killed under a live connection (see Drop below).
+                "-terminate",
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -60,10 +62,14 @@ impl Server {
         }
     }
 }
+/// The in-process native input executor keeps an X connection's reader thread
+/// alive after its session ends (bead fr-x11-executor-thread-leak). Killing the
+/// server under it made Xlib's default I/O error handler exit the WHOLE test
+/// process. With `-terminate` the server exits itself once its last client,
+/// including that connection, goes away at the latest at process exit.
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.child.try_wait();
     }
 }
 fn credentials() -> InputCredentials {
@@ -264,10 +270,11 @@ fn client_bytes_native_drag_receipt_and_old_pointer_then_stale_view_cleanup() {
         client.result(&result_bytes, local(3)),
         Ok(ResultEvent::Duplicate(result))
     );
-    assert_eq!(
-        client.tick(local(250_000)),
-        Err(Error::Stopped(StopReason::ViewStale))
-    );
+    // A stale view SUSPENDS input (plan 11.3, 70a53a8): the client is not
+    // stopped, but no new input is accepted (below).
+    assert_eq!(client.tick(local(250_000)), Ok(()));
+    assert_eq!(client.stopped(), None);
+    assert!(client.suspended_since().is_some());
     assert!(
         client
             .pointer(DesktopPoint { x: 90, y: 90 }, &mut late, local(250_000))
@@ -281,9 +288,15 @@ fn client_bytes_native_drag_receipt_and_old_pointer_then_stale_view_cleanup() {
     assert_eq!(done.reason, HostStop::ViewInvalidated);
     assert!(!seat.is_occupied());
     assert_eq!(observer.query_pointer().unwrap().1 & 256, 0);
+    // Suspended rather than stopped, so a later ticket is accepted, but it
+    // resumes nothing while the view is still stale: input stays refused.
+    assert_eq!(
+        client.ticket(InputTicketId::from_raw(4), local(250_000)),
+        Ok(())
+    );
     assert!(
         client
-            .ticket(InputTicketId::from_raw(4), local(250_000))
+            .pointer(DesktopPoint { x: 90, y: 90 }, &mut late, local(250_000))
             .is_err()
     );
 }
