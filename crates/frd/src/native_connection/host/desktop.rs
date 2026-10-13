@@ -254,7 +254,7 @@ where
             Poll::Ready(result.clone())
         } else if this.ending.is_some() {
             this.poll_drain(task)
-        } else if this.finishing.is_some() && !this.fence.supervisor.is_cancel_requested() {
+        } else if this.finishing.is_some() {
             this.poll_finishing(task)
         } else if this.fence.supervisor.is_cancel_requested() {
             match this.begin_drain(End::Cancelled) {
@@ -331,13 +331,18 @@ where
         self.ending = Some((end, budget));
         Ok(())
     }
-    /// Bounded by the same fixed drain budget. Past it the peer is abandoned as
-    /// before (no completion is fabricated); its listener is never repolled.
+    /// Bounded by the same fixed drain budget. Past it, or on a requested stop,
+    /// the peer is abandoned as before (no completion is fabricated) and its
+    /// listener is never repolled. Either way the desktop's own result stands:
+    /// a stop must not turn its uncertain input cleanup into `Cancelled`.
     fn poll_finishing(&mut self, task: &mut Context<'_>) -> Poll<End>
     where
         N: Future<Output = Result<serial::Statistics, LinuxError>>,
     {
         let (result, budget) = self.finishing.as_mut().expect("finishing peer");
+        if self.fence.supervisor.is_cancel_requested() {
+            return Poll::Ready(End::Desktop(result.clone()));
+        }
         match budget.expired(task) {
             Ok(true) => return Poll::Ready(End::Desktop(result.clone())),
             Err(()) => return Poll::Ready(End::Desktop(Err(dispatch::Error::Clock))),

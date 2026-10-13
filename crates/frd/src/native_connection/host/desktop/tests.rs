@@ -300,3 +300,30 @@ fn idle_acceptance_is_never_polled_after_the_desktop_ends() {
         assert_eq!(end, End::Desktop(Ok(report())));
     });
 }
+
+#[test]
+fn a_stop_while_the_peer_finishes_keeps_the_desktops_uncertain_cleanup() {
+    let (runtime, supervisor, driver) = fixture();
+    runtime.block_on(async {
+        let clock = supervisor.timer_driver().unwrap();
+        let started = clock.now();
+        let cleanup = dispatch::Error::Desktop(Box::new(desktop::Error::InputCleanup));
+        let fenced = supervisor.clone();
+        let mut polls = 0;
+        let listener = poll_fn(
+            move |task| -> Poll<Result<serial::Statistics, LinuxError>> {
+                polls += 1;
+                assert_eq!(polls, 1, "an abandoned peer is never repolled");
+                // An operator stop arrives while the admitted peer is finishing.
+                fenced.cancel_fast(CancelKind::User);
+                task.waker().wake_by_ref();
+                Poll::Pending
+            },
+        );
+        let finished = cleanup.clone();
+        let serving = owner(&supervisor, &driver, async move { Err(finished) }, listener);
+        serving.completion.active.store(true, Ordering::Release);
+        assert_eq!(serving.await, End::Desktop(Err(cleanup)));
+        assert!(clock.now().as_nanos() < started.as_nanos() + 2_000_000_000);
+    });
+}
