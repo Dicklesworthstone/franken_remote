@@ -134,7 +134,9 @@ fn drain_does_not_hide_invalid_native_reply_or_extend_native_timeout() {
                     Err(Error::Worker(worker::Error::Deadline))
                 )),
             }
-            assert!(start.elapsed() < Duration::from_secs(1));
+            // Drain keeps the native ceiling (here the startup picture's 2 s
+            // recovery budget binds first); it never adds time on top of it.
+            assert!(start.elapsed() < NATIVE_REQUEST_CEILING + Duration::from_millis(500));
             assert_eq!(presenter.worker.state(), worker::State::Poisoned);
             assert_eq!(receiver.budget_usage(), BudgetUsage::default());
             assert!(receiver.tick(host_now(&cx).unwrap().as_micros()).is_err());

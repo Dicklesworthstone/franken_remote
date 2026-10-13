@@ -15,6 +15,13 @@ use std::{
     time::Duration,
 };
 
+/// Hung-worker ceiling for one native decode/present request. It is not a frame
+/// budget: each picture's own reference deadline is (at most 250 ms after the
+/// first fragment for datagram pictures, the recovery budget for reliable IDRs).
+/// A fixed 200 ms here ended healthy sessions: one 1080p IDR decode, BGRA
+/// conversion and X11 draw took over 200 ms on a busy client (live, 2026-10-12).
+pub(crate) const NATIVE_REQUEST_CEILING: Duration = Duration::from_secs(2);
+
 /// One reservation covers queued, executing AND uncollected decode. Dropping
 /// any of those stages invalidates the original receiver before freeing bytes.
 /// No stage can construct a successful completion without the native reply.
@@ -191,7 +198,7 @@ impl Presenter {
                 .checked_mul(1000)
                 .ok_or(Error::Worker(worker::Error::Deadline))?;
             let deadline =
-                Deadline::after(cx, Duration::from_millis(200))?.capped_at(Time::from_nanos(nanos));
+                Deadline::after(cx, NATIVE_REQUEST_CEILING)?.capped_at(Time::from_nanos(nanos));
             {
                 let mut native = pin!(run_native(
                     call.operation.worker,

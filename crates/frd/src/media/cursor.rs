@@ -92,7 +92,9 @@ impl Presenter {
             return Err(worker::Error::Unavailable.into());
         }
         let body = overlay::encode(update, &self.configuration.limits()?)?;
-        let deadline = worker::Deadline::after(cx, Duration::from_millis(200))?;
+        // Re-presenting the retained picture is the same native work as a
+        // present, so it has the same hung-worker ceiling.
+        let deadline = worker::Deadline::after(cx, super::presentation::NATIVE_REQUEST_CEILING)?;
         let mut operation = MediaOperation::new(&mut self.worker);
         let reply = operation
             .worker

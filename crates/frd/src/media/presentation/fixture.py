@@ -16,6 +16,7 @@ try:
     h=read(36); b=read(int.from_bytes(h[32:36],'big')); k=int.from_bytes(h[6:8],'big')
     assert k in (1,8)
     reply(h,257 if k==1 else 266,b)
+    first=True
     while True:
         h=read(36); b=read(int.from_bytes(h[32:36],'big')); k=int.from_bytes(h[6:8],'big')
         if k==5: reply(h,262); break
@@ -23,6 +24,8 @@ try:
         if MODE=='stall': time.sleep(60)
         if MODE=='slow': time.sleep(.04)
         if MODE=='drain': time.sleep(.09)
+        if MODE=='slow-first' and first: time.sleep(.35)
+        first=False
         if MODE=='bad-reply': b = (999).to_bytes(8, 'big')
         reply(h,261 if k==4 else 264,b[:8])
 except (EOFError,BrokenPipeError):

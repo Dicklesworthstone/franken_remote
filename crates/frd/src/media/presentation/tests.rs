@@ -180,6 +180,28 @@ fn receiver_accepts_next_picture_while_native_decode_is_pending() {
     });
 }
 #[test]
+fn a_slow_but_healthy_first_picture_is_presented_within_its_own_budget() {
+    // 350 ms for the first native request: a 1080p IDR decode, conversion and
+    // draw on a busy client. The reliable startup picture's budget is the 2 s
+    // recovery window, so this is presentation, not a hung worker.
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let (mut presenter, mut receiver, _) = fixture(&cx, "slow-first").await;
+        let job = presenter.take_next(&cx, &mut receiver).unwrap().unwrap();
+        let start = std::time::Instant::now();
+        let receipt = presenter
+            .decode_job(&cx, job)
+            .await
+            .unwrap()
+            .complete(&cx, &mut receiver)
+            .unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(350));
+        assert_eq!(receipt.frame.as_raw(), 0);
+        assert_eq!(receipt.stage, PresentationStage::SubmittedToCompositor);
+        assert_eq!(presenter.worker.state(), worker::State::Running);
+    });
+}
+#[test]
 fn queued_decode_uses_original_display_deadline_not_dequeue_freshness() {
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
