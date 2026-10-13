@@ -162,6 +162,8 @@ fn a_controlling_first_viewer_gets_the_exclusive_share_and_its_input_reaches_the
         ));
         let receipts = Cell::new(0);
         let busy = Cell::new(false);
+        // Set by the probe below once a later viewer was refused Busy.
+        let refused_later = Cell::new(false);
         let mut client = Box::pin(async {
             let _first = first;
             let mut observer = viewer
@@ -207,7 +209,11 @@ fn a_controlling_first_viewer_gets_the_exclusive_share_and_its_input_reaches_the
                                     let _ = input.action(key(true)).unwrap();
                                     pressed = true;
                                 }
-                                if receipts.get() == 1 && !busy.get() {
+                                // Stop only after the probe saw a later viewer
+                                // refused WHILE this share ran; stopping on the
+                                // first receipt raced that probe (it failed about
+                                // half of isolated runs, "no later viewer").
+                                if receipts.get() == 1 && refused_later.get() && !busy.get() {
                                     busy.set(true);
                                     stop.store(true, Ordering::Release);
                                 }
@@ -231,7 +237,6 @@ fn a_controlling_first_viewer_gets_the_exclusive_share_and_its_input_reaches_the
             std::future::pending::<()>().await;
         });
         // While the exclusive share runs, a later viewer is refused Busy.
-        let refused_later = Cell::new(false);
         let report = std::future::poll_fn(|task| {
             if let Poll::Ready(result) = running.as_mut().poll(task) {
                 return Poll::Ready(result);
