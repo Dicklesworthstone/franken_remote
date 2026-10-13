@@ -251,22 +251,36 @@ impl ControlledViewer {
     /// A reference loss was found: suspend this grant's input now and stop
     /// consulting the fenced view until the recovered generation is installed.
     pub(super) fn enter_recovery(&mut self) -> Result<(), Error> {
+        self.session.check()?;
+        if !self.session.opened.selection.capabilities.iter().any(|cap| {
+            cap.name == fr_wire::recovery_request::CAPABILITY
+                && cap.version == fr_wire::recovery_request::VERSION
+        }) {
+            return Err(Error::ControlNotNegotiated);
+        }
         let t = ClientInstant(now(&self.session.cx)?);
         self.input.suspend_for_recovery(t)?;
+        self.abandon_if_suspended()?;
         self.channels.begin_recovery();
-        self.abandon_if_suspended()
+        self.channels
+            .viewer_routes(&self.session.transport)
+            .map_err(Error::Input)?;
+        Ok(())
     }
     /// Hand this stream's media to its reference recovery, suspending the
     /// grant's input first: the lost reference means the view cannot advance
     /// (plan 12.3). Renewals continue; no input is sent until resumed.
     pub(super) fn take_media_for_recovery(&mut self) -> Result<NegotiatedMedia, Error> {
-        // Before any check: the recovery may already have ended the original
-        // configuration channel (see `NegotiatedInput::begin_recovery`).
-        self.channels.begin_recovery();
-        let t = self.check()?;
-        self.input.suspend_for_recovery(t)?;
-        self.abandon_if_suspended()?;
-        self.media.take().ok_or(Error::Closed)
+        self.enter_recovery()?;
+        // Recovery may already have retired the old media routes. Detach that
+        // failed owner BEFORE checking the live parent and input owners; their
+        // identity, cancellation and original deadlines remain mandatory.
+        let media = self.media.take().ok_or(Error::Closed)?;
+        media
+            .retiring_viewer_routes(&self.session.transport)
+            .map_err(Error::Media)?;
+        self.check()?;
+        Ok(media)
     }
     /// Install the recovered media and move this suspended grant to the
     /// recovered receiver's generation. Input resumes only on its fresh
@@ -279,12 +293,21 @@ impl ControlledViewer {
         if self.media.is_some() {
             return Err(Error::Closed);
         }
+        self.check()?;
         media.check(&self.session.transport).map_err(Error::Media)?;
+        if *media.limits().protocol() != self.channels.limits() {
+            return Err(Error::WrongBinding);
+        }
         let t = ClientInstant(now(&self.session.cx)?);
         self.input.follow_recovery(receiver, t)?;
         let b = media.binding();
         let v = self.input.input_view();
-        if v.recovery != b.recovery || v.configuration != b.configuration {
+        if v.recovery != b.recovery
+            || v.configuration != b.configuration
+            || v.geometry != b.geometry
+            || v.viewport != b.viewport
+            || self.input.media_bindings() != media.bindings()
+        {
             return Err(Error::WrongBinding);
         }
         // The recovery replaced the configuration channel the input lane was
@@ -807,7 +830,7 @@ fn gate(
     }
 }
 /// The earliest deadline the input owner imposes on this turn: its view
-/// deadline, or while suspended by a stale view, the suspension limit.
+/// deadline, or while suspended by stale view, the suspension limit.
 fn input_deadline(input: &mut PresentedInput, t: ClientInstant) -> Result<ClientInstant, Error> {
     match input.view_deadline(t) {
         Ok(until) => Ok(until),
