@@ -8,8 +8,8 @@ mod network;
 use asupersync::{cx::Cx, types::Budget};
 use fr_core::{ids::*, input::*, limits::ProtocolLimits};
 use fr_transport::quic::{
-    self, ChannelRequest, ChannelScope, ControlRoutes, Disposition, MediaChannel, Messages,
-    Policy, Priority, QuicRecords, Route, StreamRoute,
+    self, ChannelRequest, ChannelScope, ControlRoutes, Disposition, MediaChannel, Messages, Policy,
+    Priority, QuicRecords, Route, StreamRoute,
 };
 use fr_wire::{
     Kind,
@@ -244,7 +244,11 @@ async fn lane(cx: &Cx, recovery: bool) -> Lane {
         )
         .await;
     let (host_input, client_input) = pair
-        .attach(cx, MediaRole::Input, binding(10, RecoveryGeneration::INITIAL))
+        .attach(
+            cx,
+            MediaRole::Input,
+            binding(10, RecoveryGeneration::INITIAL),
+        )
         .await;
     let input = NegotiatedInput::new(
         &pair.client,
@@ -336,7 +340,10 @@ fn recovered_input_uses_the_original_stream_and_rejects_old_generation_actions()
             .retire_media(&mut f.pair.host, &cx)
             .unwrap();
         assert_eq!(f.input.viewer_routes(&f.pair.client).unwrap(), routes);
-        assert_eq!(f.input.viewer_scope(&f.pair.client), Err(Error::InvalidRoutes));
+        assert_eq!(
+            f.input.viewer_scope(&f.pair.client),
+            Err(Error::InvalidRoutes)
+        );
         let next = RecoveryGeneration::INITIAL.next().unwrap();
         let (_host, mut client) = f
             .pair
@@ -407,7 +414,10 @@ fn failed_follow_keeps_the_recovery_fence_and_can_accept_the_same_generation_lat
         client.retire_media(&mut f.pair.client, &cx).unwrap();
         assert!(f.input.follow_recovery(&f.pair.client, completed).is_err());
         assert_eq!(f.input.viewer_routes(&f.pair.client).unwrap(), routes);
-        assert_eq!(f.input.viewer_scope(&f.pair.client), Err(Error::InvalidRoutes));
+        assert_eq!(
+            f.input.viewer_scope(&f.pair.client),
+            Err(Error::InvalidRoutes)
+        );
         assert_sends_fenced(&mut f, &cx, next);
         let (_host, client) = f
             .pair
@@ -522,6 +532,9 @@ fn recovery_retains_feedback_delivery_without_reopening_input() {
         assert_eq!(received, 1);
         // Delivery of feedback is NOT resumption of input or a new grant.
         assert_sends_fenced(&mut f, &cx, RecoveryGeneration::INITIAL);
-        assert_eq!(f.input.viewer_scope(&f.pair.client), Err(Error::InvalidRoutes));
+        assert_eq!(
+            f.input.viewer_scope(&f.pair.client),
+            Err(Error::InvalidRoutes)
+        );
     });
 }

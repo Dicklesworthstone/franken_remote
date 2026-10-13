@@ -252,10 +252,17 @@ impl ControlledViewer {
     /// consulting the fenced view until the recovered generation is installed.
     pub(super) fn enter_recovery(&mut self) -> Result<(), Error> {
         self.session.check()?;
-        if !self.session.opened.selection.capabilities.iter().any(|cap| {
-            cap.name == fr_wire::recovery_request::CAPABILITY
-                && cap.version == fr_wire::recovery_request::VERSION
-        }) {
+        if !self
+            .session
+            .opened
+            .selection
+            .capabilities
+            .iter()
+            .any(|cap| {
+                cap.name == fr_wire::recovery_request::CAPABILITY
+                    && cap.version == fr_wire::recovery_request::VERSION
+            })
+        {
             return Err(Error::ControlNotNegotiated);
         }
         let t = ClientInstant(now(&self.session.cx)?);
