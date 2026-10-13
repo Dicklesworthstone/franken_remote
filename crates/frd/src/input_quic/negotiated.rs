@@ -1,7 +1,7 @@
 //! Join one completed input attachment to the existing native owner. Neither
 //! an attached stream nor a control-intent capability grants an input lease.
 use super::{Error, QuicInput, Routes};
-use crate::{input_agent::Agent, media::ObservationControl};
+use crate::{input_agent::Agent, media::ObservationControl, media_quic::NegotiatedMedia};
 use asupersync::cx::Cx;
 use fr_core::{ids::RecoveryGeneration, input::InputView, limits::ProtocolLimits};
 use fr_transport::quic::{
@@ -147,25 +147,49 @@ impl NegotiatedInput {
         binding.recovery = self.recovery;
         view(binding)
     }
-    /// A reference recovery began: until [`Self::follow_recovery`], only this
-    /// lane's own input routes are checked, since the recovery may end the
-    /// original configuration channel before its successor exists.
-    pub fn begin_recovery(&mut self) {
+    /// Begin the media-lifetime gap on the original viewer connection, after
+    /// negotiated reference loss. The caller suspends input authority first.
+    /// A failed check changes nothing; repetition cannot renew any deadline.
+    pub fn begin_recovery(&mut self, q: &QuicRecords) -> Result<(), Error> {
+        if !self.reference_recovery {
+            return Err(Error::InvalidRoutes);
+        }
+        let previous = self.recovering;
         self.recovering = true;
+        if let Err(error) = self.viewer_routes(q) {
+            self.recovering = previous;
+            return Err(error);
+        }
+        Ok(())
     }
-    /// Follow a completed reference recovery (plan 12.3). The recovery replaced
-    /// the media configuration channel this lane was validated against, and the
-    /// grant's input now names the recovered generation. Only the exact
-    /// successor is accepted, on this connection with live routes; otherwise
-    /// nothing changes. The input attachment itself is unchanged.
-    pub fn follow_recovery(
-        &mut self,
+    /// Validate the completed replacement without advancing the input view.
+    /// Use this before advancing a presentation owner. Success is neither
+    /// presentation evidence nor permission to send input.
+    pub fn check_recovery(&self, q: &QuicRecords, media: &NegotiatedMedia) -> Result<(), Error> {
+        self.recovery_configuration(q, media).map(|_| ())
+    }
+    fn recovery_configuration(
+        &self,
         q: &QuicRecords,
-        configuration: AttachedChannel,
-    ) -> Result<(), Error> {
+        media: &NegotiatedMedia,
+    ) -> Result<AttachedChannel, Error> {
         if !self.reference_recovery
             || !self.recovering
-            || configuration.descriptor.binding.parent.id == self.channel_binding()
+            || *media.limits().protocol() != self.limits
+        {
+            return Err(Error::InvalidRoutes);
+        }
+        // Both non-forgeable owners must belong to THIS connection. A copied
+        // AttachedChannel with matching numeric routes is not such a proof.
+        self.viewer_routes(q)?;
+        media.check(q).map_err(|_| Error::InvalidRoutes)?;
+        // This also checks viewer direction and positive recovery negotiation.
+        // The control role is retained by this original input attachment.
+        media
+            .retiring_viewer_routes(q)
+            .map_err(|_| Error::InvalidRoutes)?;
+        let configuration = media.configuration_channel();
+        if configuration.descriptor.binding.parent.id == self.channel_binding()
             || configuration.descriptor.role != MediaRole::Configuration
             || !recovered_successor(
                 self.configuration.descriptor.binding,
@@ -174,6 +198,13 @@ impl NegotiatedInput {
         {
             return Err(Error::InvalidRoutes);
         }
+        Ok(configuration)
+    }
+    /// Follow the exact successor from a live completed media owner. The
+    /// original input attachment, lease and sequence domain are unchanged.
+    /// Failed validation leaves the recovery fence and old binding intact.
+    pub fn follow_recovery(&mut self, q: &QuicRecords, media: &NegotiatedMedia) -> Result<(), Error> {
+        let configuration = self.recovery_configuration(q, media)?;
         let previous = (self.configuration, self.recovery, self.recovering);
         self.configuration = configuration;
         self.recovery = configuration.descriptor.binding.recovery;

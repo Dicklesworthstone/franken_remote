@@ -18,7 +18,10 @@ use fr_wire::{
     input::{InputDelivery, InputDirection, encode_input},
     negotiation::{Capability, ControlBinding, Role, Selection},
 };
-use frd::input_quic::{Error, NegotiatedInput};
+use frd::{
+    input_quic::{Error, NegotiatedInput},
+    media_quic::NegotiatedMedia,
+};
 use std::{future::Future, time::Duration};
 
 const LIMITS: ProtocolLimits = ProtocolLimits::ABSOLUTE;
@@ -226,6 +229,63 @@ impl Pair {
             }
         }
     }
+    async fn media(
+        &mut self,
+        cx: &Cx,
+        configuration: Binding,
+        recovery_id: u32,
+        video_id: u32,
+    ) -> Media {
+        let (_, configuration_channel) = self
+            .attach(cx, MediaRole::Configuration, configuration)
+            .await;
+        let (_, recovery) = self
+            .attach(
+                cx,
+                MediaRole::Recovery,
+                Binding {
+                    parent: ControlBinding {
+                        id: recovery_id,
+                        ..configuration.parent
+                    },
+                    ..configuration
+                },
+            )
+            .await;
+        let (_, video) = self
+            .attach(
+                cx,
+                MediaRole::Video,
+                Binding {
+                    parent: ControlBinding {
+                        id: video_id,
+                        ..configuration.parent
+                    },
+                    ..configuration
+                },
+            )
+            .await;
+        let owner = NegotiatedMedia::new(
+            &self.client,
+            &self.selection,
+            &configuration_channel,
+            &recovery,
+            &video,
+        )
+        .unwrap();
+        Media {
+            configuration: configuration_channel,
+            recovery,
+            video,
+            owner,
+        }
+    }
+}
+struct Media {
+    configuration: MediaChannel,
+    recovery: MediaChannel,
+    video: MediaChannel,
+    owner: NegotiatedMedia,
 }
 struct Lane {
     pair: Pair,
@@ -331,7 +391,7 @@ fn recovered_input_uses_the_original_stream_and_rejects_old_generation_actions()
     run(|cx| async move {
         let mut f = lane(&cx, true).await;
         let routes = f.input.viewer_routes(&f.pair.client).unwrap();
-        f.input.begin_recovery();
+        f.input.begin_recovery(&f.pair.client).unwrap();
         assert_sends_fenced(&mut f, &cx, RecoveryGeneration::INITIAL);
         f.client_configuration
             .retire_media(&mut f.pair.client, &cx)
@@ -345,12 +405,9 @@ fn recovered_input_uses_the_original_stream_and_rejects_old_generation_actions()
             Err(Error::InvalidRoutes)
         );
         let next = RecoveryGeneration::INITIAL.next().unwrap();
-        let (_host, mut client) = f
-            .pair
-            .attach(&cx, MediaRole::Configuration, binding(20, next))
-            .await;
+        let mut media = f.pair.media(&cx, binding(20, next), 30, 31).await;
         f.input
-            .follow_recovery(&f.pair.client, client.completed_on(&f.pair.client).unwrap())
+            .follow_recovery(&f.pair.client, &media.owner)
             .unwrap();
         assert_eq!(f.input.channel_binding(), 10);
         assert_eq!(f.input.viewer_routes(&f.pair.client).unwrap(), routes);
@@ -394,7 +451,10 @@ fn recovered_input_uses_the_original_stream_and_rejects_old_generation_actions()
                 .unwrap();
         }
         assert_eq!(received, 1);
-        client.retire_media(&mut f.pair.client, &cx).unwrap();
+        media
+            .configuration
+            .retire_media(&mut f.pair.client, &cx)
+            .unwrap();
         assert_eq!(f.input.viewer_routes(&f.pair.client), Err(Error::Closed));
     });
 }
@@ -405,14 +465,13 @@ fn failed_follow_keeps_the_recovery_fence_and_can_accept_the_same_generation_lat
         let mut f = lane(&cx, true).await;
         let routes = f.input.viewer_routes(&f.pair.client).unwrap();
         let next = RecoveryGeneration::INITIAL.next().unwrap();
-        f.input.begin_recovery();
-        let (_host, mut client) = f
-            .pair
-            .attach(&cx, MediaRole::Configuration, binding(20, next))
-            .await;
-        let completed = client.completed_on(&f.pair.client).unwrap();
-        client.retire_media(&mut f.pair.client, &cx).unwrap();
-        assert!(f.input.follow_recovery(&f.pair.client, completed).is_err());
+        f.input.begin_recovery(&f.pair.client).unwrap();
+        let mut media = f.pair.media(&cx, binding(20, next), 30, 31).await;
+        media
+            .configuration
+            .retire_media(&mut f.pair.client, &cx)
+            .unwrap();
+        assert!(f.input.follow_recovery(&f.pair.client, &media.owner).is_err());
         assert_eq!(f.input.viewer_routes(&f.pair.client).unwrap(), routes);
         assert_eq!(
             f.input.viewer_scope(&f.pair.client),
@@ -421,35 +480,51 @@ fn failed_follow_keeps_the_recovery_fence_and_can_accept_the_same_generation_lat
         assert_sends_fenced(&mut f, &cx, next);
         let (_host, client) = f
             .pair
-            .attach(&cx, MediaRole::Configuration, binding(21, next))
+            .attach(&cx, MediaRole::Configuration, binding(40, next))
             .await;
+        // Reuse the still-live same-generation recovery/video pair, never
+        // allocate another input lane or reset the original ordering domain.
+        let replacement = NegotiatedMedia::new(
+            &f.pair.client,
+            &f.pair.selection,
+            &client,
+            &media.recovery,
+            &media.video,
+        )
+        .unwrap();
         f.input
-            .follow_recovery(&f.pair.client, client.completed_on(&f.pair.client).unwrap())
+            .follow_recovery(&f.pair.client, &replacement)
             .unwrap();
         assert_eq!(
             f.input.viewer_scope(&f.pair.client).unwrap(),
-            (parent(), binding(21, next))
+            (parent(), binding(40, next))
         );
         assert_eq!(f.input.viewer_routes(&f.pair.client).unwrap(), routes);
     });
 }
 
 #[test]
-fn unnegotiated_recovery_cannot_install_a_successor_or_send_input() {
+fn unnegotiated_recovery_cannot_enter_or_install_a_successor() {
     run(|cx| async move {
         let mut f = lane(&cx, false).await;
+        let original = f.input.viewer_scope(&f.pair.client).unwrap();
         let next = RecoveryGeneration::INITIAL.next().unwrap();
-        f.input.begin_recovery();
-        let (_host, client) = f
-            .pair
-            .attach(&cx, MediaRole::Configuration, binding(20, next))
-            .await;
         assert_eq!(
-            f.input
-                .follow_recovery(&f.pair.client, client.completed_on(&f.pair.client).unwrap()),
+            f.input.begin_recovery(&f.pair.client),
+            Err(Error::InvalidRoutes)
+        );
+        assert_eq!(f.input.viewer_scope(&f.pair.client).unwrap(), original);
+        let media = f.pair.media(&cx, binding(20, next), 30, 31).await;
+        assert_eq!(
+            f.input.follow_recovery(&f.pair.client, &media.owner),
             Err(Error::InvalidRoutes)
         );
         assert_sends_fenced(&mut f, &cx, next);
+        // Refusing unnegotiated recovery must not bypass ordinary lifetimes.
+        f.client_configuration
+            .retire_media(&mut f.pair.client, &cx)
+            .unwrap();
+        assert_eq!(f.input.viewer_routes(&f.pair.client), Err(Error::Closed));
     });
 }
 
@@ -458,12 +533,14 @@ fn recovery_never_allows_a_foreign_connection_or_ordinary_configuration_loss() {
     run(|cx| async move {
         let mut f = lane(&cx, true).await;
         assert!(f.input.viewer_routes(&f.pair.host).is_err());
+        assert!(f.input.begin_recovery(&f.pair.host).is_err());
+        // A failed foreign entry did not change this lane's lifetime checks.
         // Capability selection alone is not entry into the recovery interval.
         f.client_configuration
             .retire_media(&mut f.pair.client, &cx)
             .unwrap();
         assert_eq!(f.input.viewer_routes(&f.pair.client), Err(Error::Closed));
-        f.input.begin_recovery();
+        f.input.begin_recovery(&f.pair.client).unwrap();
         assert!(f.input.viewer_routes(&f.pair.client).is_ok());
         assert!(f.input.viewer_routes(&f.pair.host).is_err());
         f.pair.client.close();
@@ -475,7 +552,7 @@ fn recovery_never_allows_a_foreign_connection_or_ordinary_configuration_loss() {
 fn recovery_retains_feedback_delivery_without_reopening_input() {
     run(|cx| async move {
         let mut f = lane(&cx, true).await;
-        f.input.begin_recovery();
+        f.input.begin_recovery(&f.pair.client).unwrap();
         f.client_configuration
             .retire_media(&mut f.pair.client, &cx)
             .unwrap();
@@ -536,5 +613,92 @@ fn recovery_retains_feedback_delivery_without_reopening_input() {
             f.input.viewer_scope(&f.pair.client),
             Err(Error::InvalidRoutes)
         );
+    });
+}
+
+#[test]
+fn a_foreign_media_owner_cannot_rebind_identical_numeric_routes() {
+    run(|cx| async move {
+        let mut local = lane(&cx, true).await;
+        let mut foreign = lane(&cx, true).await;
+        let next = RecoveryGeneration::INITIAL.next().unwrap();
+        let a = local.pair.media(&cx, binding(20, next), 30, 31).await;
+        let b = foreign.pair.media(&cx, binding(20, next), 30, 31).await;
+        assert_eq!(a.owner.binding(), b.owner.binding());
+        assert_eq!(
+            a.owner.progress_route(&local.pair.client).unwrap(),
+            b.owner.progress_route(&foreign.pair.client).unwrap()
+        );
+        let routes = local.input.viewer_routes(&local.pair.client).unwrap();
+        local.input.begin_recovery(&local.pair.client).unwrap();
+        assert_eq!(
+            local.input.check_recovery(&local.pair.client, &b.owner),
+            Err(Error::InvalidRoutes)
+        );
+        assert_eq!(
+            local.input.follow_recovery(&local.pair.client, &b.owner),
+            Err(Error::InvalidRoutes)
+        );
+        assert_eq!(local.input.viewer_routes(&local.pair.client).unwrap(), routes);
+        assert_sends_fenced(&mut local, &cx, next);
+        local
+            .input
+            .follow_recovery(&local.pair.client, &a.owner)
+            .unwrap();
+        assert_eq!(
+            local.input.viewer_scope(&local.pair.client).unwrap(),
+            (parent(), binding(20, next))
+        );
+    });
+}
+
+#[test]
+fn preflight_neither_resumes_input_nor_consumes_the_successor() {
+    run(|cx| async move {
+        let mut f = lane(&cx, true).await;
+        let next = RecoveryGeneration::INITIAL.next().unwrap();
+        let media = f.pair.media(&cx, binding(20, next), 30, 31).await;
+        f.input.begin_recovery(&f.pair.client).unwrap();
+        for _ in 0..2 {
+            f.input.check_recovery(&f.pair.client, &media.owner).unwrap();
+            assert_eq!(
+                f.input.viewer_scope(&f.pair.client),
+                Err(Error::InvalidRoutes)
+            );
+            assert_sends_fenced(&mut f, &cx, next);
+        }
+        f.input.follow_recovery(&f.pair.client, &media.owner).unwrap();
+        assert_eq!(
+            f.input.viewer_scope(&f.pair.client).unwrap(),
+            (parent(), binding(20, next))
+        );
+        // Installing the successor consumed this transition, not the input lane.
+        assert_eq!(
+            f.input.check_recovery(&f.pair.client, &media.owner),
+            Err(Error::InvalidRoutes)
+        );
+    });
+}
+
+#[test]
+fn a_live_configuration_does_not_hide_retired_replacement_video() {
+    run(|cx| async move {
+        let mut f = lane(&cx, true).await;
+        let next = RecoveryGeneration::INITIAL.next().unwrap();
+        let mut media = f.pair.media(&cx, binding(20, next), 30, 31).await;
+        let routes = f.input.viewer_routes(&f.pair.client).unwrap();
+        f.input.begin_recovery(&f.pair.client).unwrap();
+        media.video.retire_media(&mut f.pair.client, &cx).unwrap();
+        assert!(media.configuration.completed_on(&f.pair.client).is_ok());
+        assert_eq!(
+            f.input.check_recovery(&f.pair.client, &media.owner),
+            Err(Error::InvalidRoutes)
+        );
+        assert_eq!(
+            f.input.follow_recovery(&f.pair.client, &media.owner),
+            Err(Error::InvalidRoutes)
+        );
+        assert_eq!(f.input.viewer_routes(&f.pair.client).unwrap(), routes);
+        assert_sends_fenced(&mut f, &cx, next);
     });
 }

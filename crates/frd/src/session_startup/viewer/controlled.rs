@@ -268,9 +268,8 @@ impl ControlledViewer {
         let t = ClientInstant(now(&self.session.cx)?);
         self.input.suspend_for_recovery(t)?;
         self.abandon_if_suspended()?;
-        self.channels.begin_recovery();
         self.channels
-            .viewer_routes(&self.session.transport)
+            .begin_recovery(&self.session.transport)
             .map_err(Error::Input)?;
         Ok(())
     }
@@ -305,6 +304,11 @@ impl ControlledViewer {
         if *media.limits().protocol() != self.channels.limits() {
             return Err(Error::WrongBinding);
         }
+        // Reject a foreign, expired or non-successor media owner BEFORE the
+        // presentation tracker consumes its old generation.
+        self.channels
+            .check_recovery(&self.session.transport, &media)
+            .map_err(Error::Input)?;
         let t = ClientInstant(now(&self.session.cx)?);
         self.input.follow_recovery(receiver, t)?;
         let b = media.binding();
@@ -320,7 +324,7 @@ impl ControlledViewer {
         // The recovery replaced the configuration channel the input lane was
         // validated against; the lane follows it and the recovered generation.
         self.channels
-            .follow_recovery(&self.session.transport, media.configuration_channel())
+            .follow_recovery(&self.session.transport, &media)
             .map_err(Error::Input)?;
         self.media = Some(media);
         Ok(())
