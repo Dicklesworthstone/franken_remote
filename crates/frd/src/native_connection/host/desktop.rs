@@ -39,8 +39,9 @@ pub type PeerResult = Result<Result<(), dispatch::Error>, super::Error>;
 ///
 /// `completed` receives each result the listener actually obtained, before its
 /// transport-retirement wait. It cannot override fatal identity/ingress failures.
-/// A terminal desktop permits one final nonblocking poll of an admitted peer,
-/// with new requests fenced. Abandonment never fabricates a completion result.
+/// A terminal desktop lets an admitted peer finish its closure report and
+/// completion within the fixed drain budget, with new requests fenced.
+/// Abandonment never fabricates a completion result.
 pub struct Connections<R, N, C> {
     pub request: R,
     pub approval: N,
@@ -186,6 +187,7 @@ impl LinuxServer {
             listener: Some(Box::pin(listener)),
             result: None,
             ending: None,
+            finishing: None,
         }
     }
 }
@@ -220,12 +222,16 @@ struct Run<D, N> {
     listener: Option<Pin<Box<N>>>,
     result: Option<End>,
     ending: Option<(End, DrainBudget)>,
+    /// The desktop ended while a peer was admitted: its listener is finishing
+    /// that peer (closure report, `completed`, transport retirement).
+    finishing: Option<(Result<desktop::Report, dispatch::Error>, DrainBudget)>,
 }
 impl<D, N> Run<D, N> {
     fn stop(&mut self) {
         self.completion.ending.store(true, Ordering::Release);
         self.fence.stop();
         self.ending = None;
+        self.finishing = None;
         self.result.get_or_insert(End::Cancelled);
         // Release the desktop's hub-owned transport before listener cleanup.
         drop(self.desktop.take());
@@ -248,6 +254,8 @@ where
             Poll::Ready(result.clone())
         } else if this.ending.is_some() {
             this.poll_drain(task)
+        } else if this.finishing.is_some() && !this.fence.supervisor.is_cancel_requested() {
+            this.poll_finishing(task)
         } else if this.fence.supervisor.is_cancel_requested() {
             match this.begin_drain(End::Cancelled) {
                 Ok(()) => this.poll_drain(task),
@@ -263,29 +271,30 @@ where
             {
                 Poll::Ready(result) => {
                     // The original Driver has already fenced the source/peer.
-                    // Collect a ready authentic peer result before destroying
-                    // its future. Never poll idle acceptance, wait past this
-                    // turn, renew a deadline, or allow completed(Continue) to
-                    // open another connection into a terminal desktop.
+                    // Never poll idle acceptance, renew a deadline, or allow
+                    // completed(Continue) to open another connection into a
+                    // terminal desktop: `ending` refuses new requests and turns
+                    // completion into Stop. An ADMITTED peer still finishes its
+                    // one-record closure report and authentic completion, which
+                    // may yield on real timers; dropping it after one poll lost
+                    // both. Source authority ends first (as in `Fence::stop`),
+                    // then the desktop's hub-owned transport is released so the
+                    // listener's retirement wait can observe its destruction.
+                    // The supervisor stays live until the peer finishes.
                     this.completion.ending.store(true, Ordering::Release);
-                    let end = if this.completion.active.load(Ordering::Acquire)
-                        && let Poll::Ready(Err(error)) = this
-                            .listener
-                            .as_mut()
-                            .expect("active listener")
-                            .as_mut()
-                            .poll(task)
-                        && !matches!(
-                            error,
-                            LinuxError::Serial(serial::Error::Host(super::Error::Cancelled))
-                        ) {
-                        // The peer cancellation is induced by source teardown;
-                        // independent identity/ingress/retirement errors are not.
-                        End::Listener(Err(error))
+                    this.fence.incoming.close();
+                    drop(this.desktop.take());
+                    if this.completion.active.load(Ordering::Acquire) {
+                        match DrainBudget::new(&this.fence.supervisor) {
+                            Ok(budget) => {
+                                this.finishing = Some((result, budget));
+                                this.poll_finishing(task)
+                            }
+                            Err(()) => Poll::Ready(End::Desktop(Err(dispatch::Error::Clock))),
+                        }
                     } else {
-                        End::Desktop(result)
-                    };
-                    Poll::Ready(end)
+                        Poll::Ready(End::Desktop(result))
+                    }
                 }
                 Poll::Pending => match this
                     .listener
@@ -321,6 +330,41 @@ where
             DrainBudget::new(&self.fence.supervisor).map_err(|()| dispatch::Error::Clock)?;
         self.ending = Some((end, budget));
         Ok(())
+    }
+    /// Bounded by the same fixed drain budget. Past it the peer is abandoned as
+    /// before (no completion is fabricated); its listener is never repolled.
+    fn poll_finishing(&mut self, task: &mut Context<'_>) -> Poll<End>
+    where
+        N: Future<Output = Result<serial::Statistics, LinuxError>>,
+    {
+        let (result, budget) = self.finishing.as_mut().expect("finishing peer");
+        match budget.expired(task) {
+            Ok(true) => return Poll::Ready(End::Desktop(result.clone())),
+            Err(()) => return Poll::Ready(End::Desktop(Err(dispatch::Error::Clock))),
+            Ok(false) => {}
+        }
+        let Poll::Ready(listener) = self
+            .listener
+            .as_mut()
+            .expect("active listener")
+            .as_mut()
+            .poll(task)
+        else {
+            return Poll::Pending;
+        };
+        Poll::Ready(match listener {
+            // The peer cancellation is induced by source teardown;
+            // independent identity/ingress/retirement errors are not.
+            Err(error)
+                if !matches!(
+                    error,
+                    LinuxError::Serial(serial::Error::Host(super::Error::Cancelled))
+                ) =>
+            {
+                End::Listener(Err(error))
+            }
+            _ => End::Desktop(result.clone()),
+        })
     }
     fn poll_drain(&mut self, task: &mut Context<'_>) -> Poll<End> {
         let (end, budget) = self.ending.as_mut().expect("fixed drain budget");

@@ -498,6 +498,8 @@ fn frd_run_expires_a_connected_viewer_that_stops_answering_renewal() {
     );
     let lapsed = silent_since.elapsed();
     assert!(lapsed < Duration::from_secs(10), "{lapsed:?}: {}", dump());
+    // The admitted peer's completion is reported before its share ends.
+    assert!(wait_count(&events, share_ended, 1), "{}", dump());
     assert_eq!(count(&events, share_ended), 1, "{}", dump());
     // The daemon listens again for the next viewer.
     assert!(wait_count(&events, listening, 2), "{}", dump());

@@ -53,6 +53,7 @@ fn owner<D, N>(supervisor: &Cx, driver: &dispatch::Driver, desktop: D, listener:
         listener: Some(Box::pin(listener)),
         result: None,
         ending: None,
+        finishing: None,
     }
 }
 struct Dropped {
@@ -221,5 +222,81 @@ fn panic_during_drain_fences_and_drops_before_repoll_returns_cancelled() {
         );
         assert!(serving.desktop.is_none() && serving.listener.is_none());
         assert_eq!(serving.as_mut().poll(task), Poll::Ready(End::Cancelled));
+    });
+}
+
+#[test]
+fn an_admitted_peer_finishes_its_report_after_the_desktop_ends() {
+    // The peer's closure drain yields on real timers (asupersync 0.6). It must
+    // still reach `completed`; one final poll followed by a drop lost it.
+    struct Released(Arc<Mutex<Vec<&'static str>>>);
+    impl Drop for Released {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().push("desktop");
+        }
+    }
+    let (runtime, supervisor, driver) = fixture();
+    let trace = Arc::new(Mutex::new(Vec::new()));
+    let desktop_owner = Released(trace.clone());
+    runtime.block_on(async {
+        let cleanup = Cx::current().unwrap();
+        let desktop = async move {
+            let _owned = desktop_owner;
+            Ok(report())
+        };
+        let finished = trace.clone();
+        let fenced = supervisor.clone();
+        let completion = Arc::new(Completion::default());
+        let reported = completion.clone();
+        let listener = async move {
+            for _ in 0..3 {
+                asupersync::time::sleep(cleanup.now(), Duration::from_millis(20)).await;
+                // No new connection may open; the supervisor is not cancelled
+                // under the finishing peer.
+                assert!(reported.ending.load(Ordering::Acquire));
+                assert!(!fenced.is_cancel_requested());
+            }
+            reported.active.store(false, Ordering::Release);
+            finished.lock().unwrap().push("peer_completed");
+            Ok::<_, LinuxError>(serial::Statistics::default())
+        };
+        let mut serving = owner(&supervisor, &driver, desktop, listener);
+        serving.completion = completion.clone();
+        completion.active.store(true, Ordering::Release);
+        assert_eq!(serving.await, End::Desktop(Ok(report())));
+        assert!(supervisor.is_cancel_requested());
+    });
+    // The desktop's transport is released before the peer finishes retiring.
+    assert_eq!(*trace.lock().unwrap(), ["desktop", "peer_completed"]);
+}
+
+#[test]
+fn an_admitted_peer_that_never_finishes_is_abandoned_at_the_fixed_drain_deadline() {
+    let (runtime, supervisor, driver) = fixture();
+    runtime.block_on(async {
+        let clock = supervisor.timer_driver().unwrap();
+        let started = clock.now();
+        let serving = owner(
+            &supervisor,
+            &driver,
+            async { Ok(report()) },
+            pending::<Result<serial::Statistics, LinuxError>>(),
+        );
+        serving.completion.active.store(true, Ordering::Release);
+        assert_eq!(serving.await, End::Desktop(Ok(report())));
+        assert!(clock.now().as_nanos() >= started.as_nanos() + 2_000_000_000);
+        assert!(supervisor.is_cancel_requested());
+    });
+}
+
+#[test]
+fn idle_acceptance_is_never_polled_after_the_desktop_ends() {
+    let (runtime, supervisor, driver) = fixture();
+    runtime.block_on(async {
+        let listener = poll_fn(|_| -> Poll<Result<serial::Statistics, LinuxError>> {
+            panic!("no admitted peer: idle acceptance must not be polled")
+        });
+        let end = owner(&supervisor, &driver, async { Ok(report()) }, listener).await;
+        assert_eq!(end, End::Desktop(Ok(report())));
     });
 }
