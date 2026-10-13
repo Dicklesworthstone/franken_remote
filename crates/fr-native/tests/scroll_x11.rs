@@ -667,7 +667,7 @@ fn original_source_expiry_stops_native_scroll_even_when_ticket_and_lease_are_liv
 }
 
 #[test]
-fn readiness_watchdog_revokes_a_prepared_native_wheel_before_submission() {
+fn readiness_watchdog_refuses_a_prepared_native_wheel_before_submission() {
     struct Preparing<'a> {
         native: &'a mut X11Pointer,
         monitor: InputMonitor,
@@ -678,8 +678,15 @@ fn readiness_watchdog_revokes_a_prepared_native_wheel_before_submission() {
             self.native.prepare(op)?;
             if matches!(op, Operation::Wheel { pressed: true, .. }) {
                 self.clock.set(100);
-                assert!(self.monitor.deadline(at(100)).is_err());
-                assert!(self.monitor.is_revoked());
+                // The view lapsed: the lease is SUSPENDED (plan 11.3, 70a53a8),
+                // so the prepared notch is refused without revoking control.
+                assert_eq!(
+                    self.monitor.deadline(at(100)),
+                    Err(Refusal::Authority(
+                        fr_core::authority::AuthorityError::ViewUnready
+                    ))
+                );
+                assert!(!self.monitor.is_revoked());
             }
             Ok(())
         }
@@ -706,7 +713,12 @@ fn readiness_watchdog_revokes_a_prepared_native_wheel_before_submission() {
     };
     assert_eq!(result.outcome, InputOutcome::PartiallySubmittedToOs);
     assert_eq!(result.submitted_operations, 1);
-    assert_eq!(result.refusal, Some(Refusal::Revoked));
+    assert_eq!(
+        result.refusal,
+        Some(Refusal::Authority(
+            fr_core::authority::AuthorityError::ViewUnready
+        ))
+    );
     assert_eq!(host.held_count(), 0);
     assert!(matches!(
         acknowledge(&mut client, result, 2),

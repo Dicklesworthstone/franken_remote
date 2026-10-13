@@ -33,7 +33,8 @@ static void setup(void) {
     window = XCreateSimpleWindow(peer, DefaultRootWindow(peer), 0, 0, 320, 240, 0, 0, 0);
     XMapWindow(peer, window); XSetInputFocus(peer, window, RevertToParent, CurrentTime);
     XSync(peer, False);
-    capture = fr_viewer_input_open(getenv("DISPLAY"), (uint32_t)window, 320, 240, names);
+    int refusal = 0;
+    capture = fr_viewer_input_open(getenv("DISPLAY"), (uint32_t)window, 320, 240, names, &refusal);
     assert(capture);
     for (unsigned i = 8; i < 256; i++) if (!memcmp(names[i], "AC01", 4)) keycode = i;
     assert(keycode && capture->keymap_size <= FR_KEYMAP_BYTES);

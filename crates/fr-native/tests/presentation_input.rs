@@ -451,8 +451,11 @@ async fn drag_then_expire(
     // No further capture or codec frame. Idle service observes the old source
     // deadline, and the lifecycle signal ends the independent native lease.
     asupersync::time::sleep(cx.timer_driver().unwrap().now(), Duration::from_millis(260)).await;
-    assert!(client.tick(now(cx)).is_err());
-    assert_eq!(client.stopped(), Some(StopReason::ViewStale));
+    // A stale view SUSPENDS control input (plan 11.3, 70a53a8): no new input,
+    // but control and its lease are not ended by the lapse itself.
+    assert_eq!(client.tick(now(cx)), Ok(false));
+    assert_eq!(client.stopped(), None);
+    assert_eq!(client.suspension_totals(now(cx)).0, 1);
     agent.control().stop(HostStop::ViewInvalidated);
     let shutdown = running.finish();
     assert!(shutdown.handoff_safe());
@@ -819,10 +822,13 @@ async fn queued_input_fence(video: &mut Video, server: &Server, cx: &Cx, expire_
     let fence_trigger_at;
     if expire_ticket {
         sleep_until(cx, queued_at + 260_000).await;
-        assert!(video.client.tick(now(cx)).is_err());
-        assert_eq!(video.client.stopped(), Some(StopReason::ViewStale));
-        // Deliberately withhold the client's stop signal too. This isolates the
-        // host ticket check when stalled transport delays both action and stop.
+        // The stale view suspends the client's input (70a53a8) rather than
+        // stopping it, so nothing new is sent; the queued action is still held.
+        assert_eq!(video.client.tick(now(cx)), Ok(false));
+        assert_eq!(video.client.stopped(), None);
+        assert_eq!(video.client.suspension_totals(now(cx)).0, 1);
+        // No client stop reaches the host either. This isolates the host
+        // ticket check when stalled transport delays the action.
         sleep_until(cx, queued_at + 1_100_000).await;
         assert!(
             !agent.control().is_stopped(),
