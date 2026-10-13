@@ -1,0 +1,34 @@
+name: Build swap
+description: >-
+  Compiling frd's library tests peaks near 19 GB RSS (measured 2026-10-13,
+  debug info off, one job; frontend alone is 4 GB, so codegen dominates and
+  fewer codegen units do not lower it). Hosted runners have 16 GB, so the
+  runner was killed ("received a shutdown signal") before any test ran. This
+  adds a swapfile on the runner's largest disk and reports memory and disk.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+        # Linux runners only; the macOS job's crates are mostly cfg(linux)-gated.
+        [ "$(uname -s)" = Linux ] || exit 0
+        df -h / /mnt 2>/dev/null || df -h /
+        free -m
+        target=/
+        if [ -d /mnt ] && [ "$(df --output=avail -BG /mnt | tail -1 | tr -dc '0-9')" -gt "$(df --output=avail -BG / | tail -1 | tr -dc '0-9')" ]; then
+          target=/mnt
+        fi
+        avail=$(df --output=avail -BG "$target" | tail -1 | tr -dc '0-9')
+        # Leave room for the build itself (about 8 GB of artifacts on /).
+        if [ "$target" = / ]; then size=$(( avail - 12 )); else size=$(( avail - 4 )); fi
+        [ "$size" -gt 24 ] && size=24
+        if [ "$size" -lt 8 ]; then
+          echo "::warning::only ${avail}G free on ${target}; no build swap added, frd test builds may be killed"
+          exit 0
+        fi
+        sudo fallocate -l "${size}G" "${target%/}/fr-build-swap"
+        sudo chmod 600 "${target%/}/fr-build-swap"
+        sudo mkswap "${target%/}/fr-build-swap" >/dev/null
+        sudo swapon "${target%/}/fr-build-swap"
+        free -m

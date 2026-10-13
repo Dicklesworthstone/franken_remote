@@ -45,6 +45,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - name: Add build swap (frd test codegen peaks near 19 GB)
+        uses: ./.github/actions/build-swap
       - name: Install repository-pinned toolchain
         run: rustup show active-toolchain
       # fr-native links libXtst/Xdamage/Xrandr/Xfixes/X11-xcb/opus/pulse by exact
@@ -138,6 +140,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - name: Add build swap (frd test codegen peaks near 19 GB)
+        uses: ./.github/actions/build-swap
       - name: Install repository-pinned toolchain
         run: rustup show active-toolchain
       - name: Check (all targets)

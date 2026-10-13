@@ -18,6 +18,8 @@ jobs:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
           persist-credentials: false
+      - name: Add build swap (frd test codegen peaks near 19 GB)
+        uses: ./.github/actions/build-swap
       - name: Install native window and input prerequisites
         run: |
           rustup show active-toolchain
