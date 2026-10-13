@@ -96,12 +96,16 @@ fn a_lock_of_the_selected_session_ends_control_and_the_run_with_a_typed_cause() 
         completion.trim()
     );
     // The controller is told why, by the host's authenticated terminal report,
-    // not left to guess from a dropped connection.
+    // not left to guess from a dropped connection: the lock suspended the
+    // host session (not a logout, which reads `host_session_ended`).
     let report: serde_json::Value = serde_json::from_str(completion.trim()).unwrap();
     assert_eq!(report["outcome"], "revoked", "{report}");
-    assert_eq!(report["error"]["code"], "host_session_ended", "{report}");
     assert_eq!(
-        report["error"]["revocation"]["reason"], "session_ended",
+        report["error"]["code"], "host_session_suspended",
+        "{report}"
+    );
+    assert_eq!(
+        report["error"]["revocation"]["reason"], "suspended",
         "{report}"
     );
     let _ = std::fs::remove_file(&marker);

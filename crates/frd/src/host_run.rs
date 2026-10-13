@@ -26,6 +26,7 @@ pub use audio::AudioOptions;
 use crate::{
     input_agent::Seat,
     input_process::{self, ProcessLaunch},
+    input_watchdog::StopReason,
     media::{ObservationControl, host_now},
     native_connection::host::{
         LinuxError, LinuxServer, Request, Server,
@@ -186,6 +187,18 @@ impl Error {
             Self::ControlCapabilityMissing(_) => "control_capability_missing",
             Self::EncoderUnavailable(_) => "encoder_unavailable",
         }
+    }
+}
+
+/// What a controlled share's lease reports when the selected session stops,
+/// as the logind input agents do: a lock or a suspend SUSPENDS the session
+/// (`host_session_suspended` on the controller); a logout, switch, identity
+/// change or lost evidence ends its authority (`host_session_ended`).
+fn session_stop_reason(cause: session_monitor::Error) -> StopReason {
+    use session_monitor::{Error as E, State};
+    match cause {
+        E::Native(State::Locked | State::Suspending) => StopReason::Suspended,
+        _ => StopReason::AuthorityEnded,
     }
 }
 
@@ -1154,10 +1167,13 @@ impl Share<'_> {
                 },
                 factory,
                 move |catalog| choose(catalog, fps, bitrate, encoder),
-                |_, _| {
+                |agent, _| {
                     // Local stop, lock/logout/switch and saved-policy revision
                     // beat any delivered positive reply. Host::open independently
                     // rechecks current peer admission before authorizing pixels.
+                    if let Some(cause) = session_ended(lifetime.as_ref()) {
+                        agent.note_local_stop(session_stop_reason(cause));
+                    }
                     Ok(consent.turn(local_action(
                         &stop,
                         lifetime.as_ref(),
