@@ -19,6 +19,12 @@ use std::{
     time::Duration,
 };
 
+/// Safety-net re-check of the hosting boundary while the serial service is
+/// pending. While a peer is accepted, its scoped session re-polls this same task
+/// every 10 ms (`host::ADMITTED_PULSE`); idle, every arrival is checked before
+/// it can make progress, so a slow pulse only delays noticing a revocation.
+const GUARD_PULSE_NS: u64 = 250_000_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Configuration,
@@ -398,7 +404,7 @@ impl<F: Future<Output = Result<Statistics, Error>>> Future for Guard<F> {
                     driver,
                     handle: None,
                 });
-                timer.arm(now.saturating_add_nanos(10_000_000), task);
+                timer.arm(now.saturating_add_nanos(GUARD_PULSE_NS), task);
             }
             result
         })();

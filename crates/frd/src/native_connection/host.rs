@@ -20,10 +20,20 @@ use std::{
     future::Future,
     net::SocketAddr,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll},
     time::Duration,
 };
+
+/// Once a peer is accepted, even a parked application is re-checked this often.
+const ADMITTED_PULSE: Duration = Duration::from_millis(10);
+/// Idle acceptance exposes nothing to revoke: every arrival is checked before it
+/// can make progress. This pulse only bounds how soon an idle listener notices
+/// a revocation and ends; a 10 ms pulse here kept an idle host at ~2% of a core.
+const IDLE_PULSE: Duration = Duration::from_millis(250);
 
 /// Content-free failures. Certificate bytes, private names, addresses and local
 /// metadata never appear in errors or diagnostics.
@@ -125,7 +135,8 @@ impl Server {
     /// Every exit or abandonment fences it before dropping pending work. A
     /// retained transport check survives `Host` -> `HostSession` -> publishing and
     /// control handoffs; stopping credentials or ingress fences application I/O.
-    /// Even a parked application is checked on a bounded 10ms timer pulse.
+    /// Even a parked application is checked on a bounded 10ms timer pulse once
+    /// a peer is accepted; idle acceptance on a 250 ms pulse.
     ///
     /// One socket is consumed. The native acquisition deadline starts at CALL
     /// time. Fresh host metadata is obtained only after an Initial; TLS and local
@@ -270,10 +281,14 @@ impl Server {
                     .map_err(Error::Accept)
             });
         let inside = check.clone();
+        let accepted = Arc::new(AtomicBool::new(false));
+        let peer_accepted = accepted.clone();
         let operation = Scoped {
             cx: cx.clone(),
             check,
-            pulse: Box::pin(asupersync::time::sleep(cx.now(), Duration::from_millis(10))),
+            pulse: Box::pin(asupersync::time::sleep(cx.now(), IDLE_PULSE)),
+            accepted,
+            admitted_pulse: false,
             inner: Box::pin(async move {
                 let native = initial?.await.map_err(|error| {
                     state
@@ -282,6 +297,8 @@ impl Server {
                         .and_then(|state| state.failure)
                         .map_or(Error::Accept(error), Error::Tailnet)
                 })?;
+                // A peer is present from here on: re-check on the short pulse.
+                peer_accepted.store(true, Ordering::Release);
                 inside()?;
                 let original = state
                     .lock()
@@ -363,22 +380,48 @@ struct Scoped<F> {
     check: Check,
     inner: Pin<Box<F>>,
     pulse: Pin<Box<asupersync::time::Sleep>>,
+    /// Set by `inner` once the native accept returned a peer.
+    accepted: Arc<AtomicBool>,
+    /// The armed pulse is already the short, admitted one.
+    admitted_pulse: bool,
+}
+/// Re-arm the pulse from the current time and register this task with it.
+fn rearm(
+    cx: &Cx,
+    accepted: &AtomicBool,
+    pulse: &mut Pin<Box<asupersync::time::Sleep>>,
+    admitted_pulse: &mut bool,
+    task: &mut Context<'_>,
+) -> Result<(), Error> {
+    let Some(clock) = cx.timer_driver() else {
+        cx.cancel_fast(CancelKind::User);
+        return Err(Error::Clock);
+    };
+    *admitted_pulse = accepted.load(Ordering::Acquire);
+    let period = if *admitted_pulse {
+        ADMITTED_PULSE
+    } else {
+        IDLE_PULSE
+    };
+    *pulse = Box::pin(asupersync::time::sleep(clock.now(), period));
+    let _ = pulse.as_mut().poll(task);
+    Ok(())
 }
 impl<T, F: Future<Output = Result<T, Error>>> Future for Scoped<F> {
     type Output = Result<T, Error>;
     fn poll(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         let mut panic_fence = PanicFence(&this.cx, false);
-        if this.pulse.as_mut().poll(task).is_ready() {
-            let Some(clock) = this.cx.timer_driver() else {
-                this.cx.cancel_fast(CancelKind::User);
-                return Poll::Ready(Err(Error::Clock));
-            };
-            this.pulse = Box::pin(asupersync::time::sleep(
-                clock.now(),
-                Duration::from_millis(10),
-            ));
-            let _ = this.pulse.as_mut().poll(task);
+        if this.pulse.as_mut().poll(task).is_ready()
+            && let Err(error) = rearm(
+                &this.cx,
+                &this.accepted,
+                &mut this.pulse,
+                &mut this.admitted_pulse,
+                task,
+            )
+        {
+            return Poll::Ready(Err(error));
         }
         let result = match (this.check)() {
             Err(error) => Poll::Ready(Err(error)),
@@ -395,6 +438,24 @@ impl<T, F: Future<Output = Result<T, Error>>> Future for Scoped<F> {
         } else {
             result
         };
+        // A peer accepted during this poll gets the short pulse now, not after
+        // the idle one fires.
+        let result =
+            if result.is_pending() && !this.admitted_pulse && this.accepted.load(Ordering::Acquire)
+            {
+                match rearm(
+                    &this.cx,
+                    &this.accepted,
+                    &mut this.pulse,
+                    &mut this.admitted_pulse,
+                    task,
+                ) {
+                    Ok(()) => result,
+                    Err(error) => Poll::Ready(Err(error)),
+                }
+            } else {
+                result
+            };
         if result.is_ready() {
             this.cx.cancel_fast(CancelKind::User);
         }
@@ -423,3 +484,6 @@ pub mod serial;
 
 // Persistent protected acceptance through the original native desktop driver.
 pub mod desktop;
+
+#[cfg(test)]
+mod tests;

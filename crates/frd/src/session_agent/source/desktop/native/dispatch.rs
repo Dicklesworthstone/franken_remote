@@ -24,6 +24,11 @@ use std::{
     time::Duration,
 };
 
+/// Safety-net re-check while the desktop waits for its first peer: nothing is
+/// shared yet. Stops and session-lifetime changes wake it directly; a policy
+/// revision, revocation or closed route is noticed within this pulse.
+const FIRST_PEER_PULSE_NS: u64 = 250_000_000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     Busy,
@@ -441,7 +446,7 @@ impl Driver {
                                 timer.arm(
                                     Time::from_nanos(
                                         now.as_nanos()
-                                            .checked_add(10_000_000)
+                                            .checked_add(FIRST_PEER_PULSE_NS)
                                             .ok_or(Error::Clock)?,
                                     ),
                                     task,

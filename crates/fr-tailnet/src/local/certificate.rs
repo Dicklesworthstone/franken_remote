@@ -26,7 +26,10 @@ const PAIR_LIMIT: usize = 64 * 1024;
 const MAX_CERTIFICATES: usize = 8;
 const PARAMETER_LIMIT: usize = 4096;
 const ALPN: &[u8] = b"fr-remote/0";
-const SERVICE_PULSE: Duration = Duration::from_millis(10);
+/// Safety-net re-check of the renewal service's own status. Stop wakes it
+/// directly; this only bounds noticing a certificate's wall-clock expiry, and
+/// connection checks read the credential status themselves on every poll.
+const SERVICE_PULSE: Duration = Duration::from_millis(250);
 
 /// Explicit local provisioning policy. Calling the provisioning API can ask
 /// tailscaled to obtain/renew a public certificate; it is NOT an identity read.
