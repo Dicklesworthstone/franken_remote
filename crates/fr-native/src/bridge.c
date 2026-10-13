@@ -63,7 +63,11 @@ int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int gop,FrEncoder
     if (!e->ctx || !e->input || !e->packet) { fr_encoder_free(e); return FR_MEMORY; }
     AVCodecContext *c=e->ctx; c->width=w; c->height=h;
     c->time_base=(AVRational){1,fps}; c->framerate=(AVRational){fps,1};
-    c->bit_rate=bitrate; c->gop_size=gop; c->max_b_frames=0; c->refs=1;
+    c->bit_rate=bitrate; c->gop_size=gop; c->max_b_frames=0;
+    /* hevc_nvenc reads any explicit refs as a multiple-reference-frame request
+     * and Pascal-class NVENC refuses it ("No capable devices found"); its
+     * low-latency P1/ULL profile already uses one reference. */
+    if (backend!=0) c->refs=1;
     c->thread_count=1; c->flags|=AV_CODEC_FLAG_LOW_DELAY;
     c->color_primaries=AVCOL_PRI_BT709; c->color_trc=AVCOL_TRC_BT709;
     c->colorspace=AVCOL_SPC_BT709; c->color_range=AVCOL_RANGE_MPEG;

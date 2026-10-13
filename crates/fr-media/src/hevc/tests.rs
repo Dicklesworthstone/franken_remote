@@ -382,3 +382,108 @@ fn private_decoder_startup_binds_the_record_generation_and_geometry() {
         Err(crate::worker::Error::Unsupported)
     );
 }
+/// Live defect (2026-10-12): NVENC writes a prefix `pic_timing` SEI (payload
+/// type 1) on every picture, which admission rightly refuses, so the host
+/// rejected its own encoder output. The host strips encoder SEI first; the
+/// stripped unit is exactly the SEI-free unit and admission stays strict.
+#[test]
+fn encoder_sei_is_stripped_before_admission_without_widening_it() {
+    // nal_unit_type 39 (prefix SEI) / 40 (suffix SEI), payload type 1, 4 bytes.
+    let pic_timing = hex("4e01010412345678" /* type,size,payload */);
+    let pic_timing = [pic_timing.as_slice(), &[0x80]].concat();
+    let suffix = [hex("5001010412345678").as_slice(), &[0x80]].concat();
+    let with_sei = au(&[
+        &hex(VPS),
+        &hex(SPS),
+        &hex(PPS),
+        &pic_timing,
+        &hex(IDR),
+        &suffix,
+    ]);
+    assert_eq!(
+        guard().validate_annex_b(&with_sei, true).unwrap_err(),
+        HevcError::UnsupportedSyntax
+    );
+    let stripped = strip_encoder_sei(&with_sei).unwrap();
+    assert_eq!(stripped, startup());
+    assert!(guard().validate_annex_b(&stripped, true).unwrap().idr);
+    // Three-byte start codes grow by one byte per NAL; the up-front
+    // reservation covers it, so no push reallocates.
+    let short: Vec<u8> = [hex(VPS), hex(SPS), hex(PPS), hex(IDR)]
+        .iter()
+        .flat_map(|nal| [&[0u8, 0, 1][..], nal].concat())
+        .collect();
+    let widened = strip_encoder_sei(&short).unwrap();
+    assert_eq!(widened, startup());
+    assert_eq!(widened.len(), short.len() + 4);
+    assert!(widened.capacity() >= short.len() + nal::MAX_NALS);
+    // Units without SEI pass through unchanged; broken framing is refused.
+    assert_eq!(strip_encoder_sei(&startup()).unwrap(), startup());
+    assert_eq!(strip_encoder_sei(&[]).unwrap_err(), HevcError::Framing);
+    assert_eq!(
+        strip_encoder_sei(&[1, 2, 3]).unwrap_err(),
+        HevcError::Framing
+    );
+}
+// Real NVENC (GTX 1070, driver 580.159, FFmpeg 7.1.1 hevc_nvenc p1/ull, the
+// bridge's options) 1920x1080 coded 1088, VUI colour rewritten to the BT.709
+// the bridge's context requests. NVENC declares its one previous-picture
+// reference as an SPS RPS table (slices select it) and writes VUI HRD timing.
+const NVENC_VPS: &str = "40010c01ffff216000000300900000030000030078ac09";
+const NVENC_SPS: &str = "420101216000000300900000030000030078a003c0801107cb96b4a42592e3016a02020208000003000800000300f3002ef288000249f000001e848020";
+const NVENC_PPS: &str = "4401c0f7c0cc90";
+const NVENC_IDR: &str =
+    "2601af138079f0d1e39fdd01376c4ff3a7cc2cf2c9ffb1f304fc7221ba042ca3d97dc0df8e3e44f0";
+const NVENC_P1: &str =
+    "0201d00f22703e8b918ee40b27c43a487ffeac9ba67fffffff63806d0212f9ee381082bffffd8fea";
+const NVENC_P2: &str =
+    "0201d01722707cc6998788679f8791b313ef9bf97e8f51b4263db91b8b596a2d02f3c017e10df8d4";
+/// Live defect (2026-10-12): `--encoder nvenc` output was refused (`Limit`)
+/// because admission required inline slice RPS and no VUI HRD. SPS RPS sets
+/// are admitted under the same rules as inline ones (past pictures only, the
+/// first being the previous picture) and HRD is skipped field by field.
+#[test]
+fn real_nvenc_sps_rps_tables_and_vui_hrd_are_admitted_under_the_same_rules() {
+    let config = CodecConfiguration::new_baseline(
+        CodecConfigurationGeneration::INITIAL,
+        CodedGeometry::from_visible(&ProtocolLimits::ABSOLUTE, 1920, 1080, 16).unwrap(),
+        ColorInfo::sdr_bt709(),
+        GopPolicy::baseline_for_frame_rate(30).unwrap(),
+    )
+    .unwrap();
+    let mut g = HevcGuard::new(config, ProtocolLimits::ABSOLUTE, 4).unwrap();
+    let idr = au(&[
+        &hex(NVENC_VPS),
+        &hex(NVENC_SPS),
+        &hex(NVENC_PPS),
+        &hex(NVENC_IDR),
+    ]);
+    assert!(g.validate_annex_b(&idr, true).unwrap().idr);
+    assert_eq!(
+        g.validate_annex_b(&au(&[&hex(NVENC_P1)]), false)
+            .unwrap()
+            .poc_lsb,
+        1
+    );
+    assert_eq!(
+        g.validate_annex_b(&au(&[&hex(NVENC_P2)]), false)
+            .unwrap()
+            .poc_lsb,
+        2
+    );
+    // A P picture before any IDR still has no reference to select.
+    let mut cold = HevcGuard::new(config, ProtocolLimits::ABSOLUTE, 4).unwrap();
+    assert!(
+        cold.validate_annex_b(&au(&[&hex(NVENC_P1)]), false)
+            .is_err()
+    );
+    // Out-of-order POC is still a reference mismatch with SPS-selected sets.
+    let mut skipped = HevcGuard::new(config, ProtocolLimits::ABSOLUTE, 4).unwrap();
+    assert!(skipped.validate_annex_b(&idr, true).is_ok());
+    assert_eq!(
+        skipped
+            .validate_annex_b(&au(&[&hex(NVENC_P2)]), false)
+            .unwrap_err(),
+        HevcError::ReferenceMismatch
+    );
+}

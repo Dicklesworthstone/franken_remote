@@ -32,6 +32,96 @@ fn ordering(b: &mut Bits<'_>, max_dpb: u8) -> Result<u8, HevcError> {
     b.ue(u32::MAX - 1)?;
     u8::try_from(dpb).map_err(|_| HevcError::DpbLimit)
 }
+/// At most this many SPS short-term reference-picture sets are admitted.
+const MAX_SPS_RPS: usize = 4;
+const MAX_SPS_RPS_COUNT: u32 = 4;
+/// One short-term reference-picture set reduced to what admission checks:
+/// past pictures only (no reordering), the first being the previous picture.
+#[derive(Clone, Copy, Default)]
+pub(super) struct Rps {
+    past: u32,
+    max_distance: u32,
+    first_is_previous: bool,
+}
+impl Rps {
+    /// `st_ref_pic_set` without inter-RPS prediction (the caller has consumed
+    /// or ruled out that flag). Future (positive) pictures are refused.
+    fn parse(b: &mut Bits<'_>, dpb: u8) -> Result<Self, HevcError> {
+        let past = b.ue(u32::from(dpb) - 1)?;
+        if b.ue(15)? != 0 {
+            return Err(HevcError::ReferenceMismatch);
+        }
+        let mut set = Self {
+            past,
+            ..Self::default()
+        };
+        let mut distance = 0;
+        for index in 0..past {
+            distance += b.ue(32767)? + 1;
+            let used = b.flag()?;
+            if index == 0 {
+                set.first_is_previous = distance == 1 && used;
+            }
+            set.max_distance = distance;
+        }
+        Ok(set)
+    }
+    /// Additional retained entries are legal, but only L0[0] can be active:
+    /// PPS/slice active-count and list-modification checks enforce it.
+    fn check(self, available_history: u8) -> Result<(), HevcError> {
+        if self.past == 0
+            || !self.first_is_previous
+            || self.max_distance > u32::from(available_history)
+        {
+            return Err(HevcError::ReferenceMismatch);
+        }
+        Ok(())
+    }
+}
+/// VUI `hrd_parameters(1, 0)`: buffering-model metadata a decoder does not
+/// need. Parsed only to skip it exactly; every field stays range-checked.
+fn hrd(b: &mut Bits<'_>) -> Result<(), HevcError> {
+    let nal = b.flag()?;
+    let vcl = b.flag()?;
+    let mut sub_pic = false;
+    if nal || vcl {
+        sub_pic = b.flag()?;
+        if sub_pic {
+            b.read(8)?;
+            b.read(5)?;
+            b.read(1)?;
+            b.read(5)?;
+        }
+        b.read(8)?; // bit_rate_scale, cpb_size_scale
+        if sub_pic {
+            b.read(4)?;
+        }
+        b.read(15)?; // three delay lengths
+    }
+    // One temporal sub-layer (sps_max_sub_layers_minus1 == 0 is enforced).
+    let within_cvs = b.flag()? || b.flag()?;
+    let low_delay = if within_cvs {
+        b.ue(2047)?;
+        false
+    } else {
+        b.flag()?
+    };
+    let cpb_count = if low_delay { 0 } else { b.ue(31)? };
+    for present in [nal, vcl] {
+        if present {
+            for _ in 0..=cpb_count {
+                b.ue(u32::MAX - 1)?;
+                b.ue(u32::MAX - 1)?;
+                if sub_pic {
+                    b.ue(u32::MAX - 1)?;
+                    b.ue(u32::MAX - 1)?;
+                }
+                b.flag()?;
+            }
+        }
+    }
+    Ok(())
+}
 fn timing(b: &mut Bits<'_>) -> Result<(), HevcError> {
     if b.read(32)? == 0 || b.read(32)? == 0 {
         return Err(HevcError::UnsupportedSyntax);
@@ -77,6 +167,8 @@ pub(super) struct Sps {
     pub sao: bool,
     pub ctb_log2: u8,
     pub cb_depth: u32,
+    pub rps_count: u32,
+    pub rps: [Rps; MAX_SPS_RPS],
 }
 pub(super) fn sps(
     nal: Nal<'_>,
@@ -151,7 +243,16 @@ pub(super) fn sps(
     b.flag()?; // AMP.
     let sao = b.flag()?;
     b.expect(1, 0)?; // No PCM.
-    b.ue(0)?; // References are declared inline by each P slice, never predicted RPS tables.
+    // Low-delay references are declared inline by each P slice (x265) or as
+    // SPS sets the slice selects (NVENC); never with inter-RPS prediction.
+    let rps_count = b.ue(MAX_SPS_RPS_COUNT)?;
+    let mut rps = [Rps::default(); MAX_SPS_RPS];
+    for (index, set) in rps.iter_mut().take(rps_count as usize).enumerate() {
+        if index > 0 {
+            b.expect(1, 0)?;
+        }
+        *set = Rps::parse(&mut b, dpb)?;
+    }
     b.expect(1, 0)?; // No long-term references.
     let temporal_mvp = b.flag()?;
     b.flag()?; // Strong intra smoothing.
@@ -170,6 +271,8 @@ pub(super) fn sps(
         sao,
         ctb_log2: u8::try_from(ctb).map_err(|_| HevcError::Limit)?,
         cb_depth,
+        rps_count,
+        rps,
     })
 }
 fn vui(b: &mut Bits<'_>, config: CodecConfiguration) -> Result<(), HevcError> {
@@ -230,7 +333,9 @@ fn vui(b: &mut Bits<'_>, config: CodecConfiguration) -> Result<(), HevcError> {
     } // No second, hidden display crop.
     if b.flag()? {
         timing(b)?;
-        b.expect(1, 0)?;
+        if b.flag()? {
+            hrd(b)?;
+        }
     }
     if b.flag()? {
         b.read(3)?;
@@ -337,21 +442,26 @@ pub(super) fn slice(
     let mut poc = 0;
     if !idr {
         poc = b.read(sps.poc_bits)?;
-        b.expect(1, 0)?; // No SPS reference-picture set table.
-        let past = b.ue(u32::from(sps.dpb) - 1)?;
-        if past == 0 || b.ue(15)? != 0 {
-            return Err(HevcError::ReferenceMismatch);
-        }
-        let mut distance = 0;
-        for index in 0..past {
-            distance += b.ue(32767)? + 1;
-            let used = b.flag()?;
-            if distance > u32::from(available_history) || (index == 0 && (distance != 1 || !used)) {
-                return Err(HevcError::ReferenceMismatch);
+        let set = if b.flag()? {
+            // short_term_ref_pic_set_sps_flag: select one admitted SPS set.
+            let index = match sps.rps_count {
+                0 => return Err(HevcError::ReferenceMismatch),
+                1 => 0,
+                n => b.read(
+                    u8::try_from(32 - (n - 1).leading_zeros()).map_err(|_| HevcError::Limit)?,
+                )?,
+            };
+            *sps.rps
+                .get(usize::try_from(index).map_err(|_| HevcError::Limit)?)
+                .filter(|_| index < sps.rps_count)
+                .ok_or(HevcError::ReferenceMismatch)?
+        } else {
+            if sps.rps_count > 0 {
+                b.expect(1, 0)?; // No inter-RPS prediction for the inline set.
             }
-        }
-        // Additional retained RPS entries are legal, but only L0[0] can be
-        // active: PPS/slice active-count and list-modification checks enforce it.
+            Rps::parse(&mut b, sps.dpb)?
+        };
+        set.check(available_history)?;
         if sps.temporal_mvp {
             b.flag()?;
         }

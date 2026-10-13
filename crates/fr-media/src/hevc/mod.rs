@@ -105,6 +105,32 @@ impl fmt::Debug for HevcGuard {
             .finish_non_exhaustive()
     }
 }
+/// Normalize the HOST encoder's own Annex B access unit to the admitted subset
+/// by dropping SEI NAL units (prefix 39, suffix 40). Hardware encoders attach
+/// metadata SEI that decoding does not need (NVENC writes a `pic_timing` SEI on
+/// every picture); admission still refuses anything non-baseline that remains,
+/// so this never widens what a viewer accepts. Every retained NAL is
+/// re-framed with a four-byte start code, so output is at most the input plus
+/// one byte per NAL (a three-byte start code grows by one); the NAL count is
+/// already bounded by `MAX_NALS`, and the whole bound is reserved up front so
+/// no later push can allocate. Framing errors are returned.
+pub fn strip_encoder_sei(bytes: &[u8]) -> Result<Vec<u8>, HevcError> {
+    let mut units = AnnexB::new(bytes)?;
+    let mut out = Vec::new();
+    let bound = bytes
+        .len()
+        .checked_add(nal::MAX_NALS)
+        .ok_or(HevcError::Limit)?;
+    out.try_reserve_exact(bound).map_err(|_| HevcError::Limit)?;
+    while let Some(nal) = units.next()? {
+        if matches!(nal.kind, 39 | 40) {
+            continue;
+        }
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(nal.bytes);
+    }
+    Ok(out)
+}
 impl HevcGuard {
     /// The DPB cap is a decoded-surface budget, NOT the compressed reassembly
     /// window. The current contract admits 2..=12 decoded pictures.

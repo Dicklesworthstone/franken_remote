@@ -353,6 +353,12 @@ impl HevcEncoder {
         // SAFETY: destination has exactly the size returned by peek on this exclusively owned context.
         status(unsafe { fr_encoder_take(self.raw.as_ptr(), bytes.as_mut_ptr(), len) })?;
         let p = self.pending.pop_front().ok_or(NativeError::Codec)?;
+        // Drop encoder metadata SEI (NVENC pic_timing on every picture) before
+        // the unchanged strict admission; it is not needed to decode.
+        let Ok(bytes) = fr_media::hevc::strip_encoder_sei(&bytes) else {
+            self.closed = true;
+            return Err(NativeError::UnsupportedBitstream);
+        };
         let idr = match annex_b_idr(&bytes) {
             Ok(idr) => idr,
             Err(error) => {
