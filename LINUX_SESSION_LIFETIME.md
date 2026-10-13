@@ -143,6 +143,10 @@ inherited pipes, and every status check re-expires the child's evidence on
   `session_ended`, `session_identity_changed`, or `session_evidence_lost`. There
   is no automatic resume: a restarted `frd run` again needs fresh unlocked
   evidence.
+* A controller is told why in the host's authenticated revocation: a lock or a
+  suspend reads `host_session_suspended`; a switch, logout, identity change or
+  lost evidence reads `host_session_ended`. The share's own local action names
+  the cause before the run's supervisor fences it.
 * Without `--logind-session`, `frd run` states at every listen that locking or
   logging out does NOT end sharing. A private `--headless` Xvfb has no logind
   session; this limit applies there.
@@ -156,7 +160,7 @@ runs a real controlled session (`frd run --input-agent`, shipped `fr connect
 lifecycle fixture report Locked: the lease's executor and its indicator go
 away without further input, viewer motion no longer reaches the host, the
 controller's `fr` reports the host's authenticated revocation (`outcome: revoked`,
-`host_session_ended`) and the run ends with `session_locked`. Planted negative (the two evidence checks
+`host_session_suspended`) and the run ends with `session_locked`. Planted negative (the two evidence checks
 removed): control survives the lock and the test fails. This is frd's reaction
 to lock evidence; it is not qualification of any installed desktop locker or of
 real logind, which still needs per-desktop runs.

@@ -26,6 +26,7 @@ pub use audio::AudioOptions;
 use crate::{
     input_agent::Seat,
     input_process::{self, ProcessLaunch},
+    input_watchdog::StopReason,
     media::{ObservationControl, host_now},
     native_connection::host::{
         LinuxError, LinuxServer, Request, Server,
@@ -186,6 +187,18 @@ impl Error {
             Self::ControlCapabilityMissing(_) => "control_capability_missing",
             Self::EncoderUnavailable(_) => "encoder_unavailable",
         }
+    }
+}
+
+/// What a controlled share's lease reports when the selected session stops,
+/// as the logind input agents do: a lock or a suspend SUSPENDS the session
+/// (`host_session_suspended` on the controller); a logout, switch, identity
+/// change or lost evidence ends its authority (`host_session_ended`).
+fn session_stop_reason(cause: session_monitor::Error) -> StopReason {
+    use session_monitor::{Error as E, State};
+    match cause {
+        E::Native(State::Locked | State::Suspending) => StopReason::Suspended,
+        _ => StopReason::AuthorityEnded,
     }
 }
 
@@ -729,26 +742,25 @@ type Signals = (
     Option<asupersync::signal::Signal>,
 );
 
-/// A handled signal, or the end of the selected session's evidence (lock,
-/// logout, switch, suspend) even while idle, stops the run; the stop cancels
-/// the active share and its lease promptly.
+/// A handled signal stops the run. Returns whether the selected session's
+/// evidence has ended (lock, logout, switch, suspend), even while idle:
+/// `supervise` turns that into a stop after the share's own local action saw
+/// it, and the stop then cancels the active share and its lease promptly.
 fn local_stops(
     task: &mut std::task::Context<'_>,
     signals: &mut Signals,
     lifetime: Option<&session_monitor::Control>,
     stop: &StopHandle,
-) {
+) -> bool {
     for s in [&mut signals.0, &mut signals.1].into_iter().flatten() {
         if pin!(s.recv()).poll(task).is_ready() {
             stop.request();
         }
     }
-    if let Some(lifetime) = lifetime {
+    lifetime.is_some_and(|lifetime| {
         lifetime.register(task);
-        if session_ended(Some(lifetime)).is_some() {
-            stop.request();
-        }
-    }
+        session_ended(Some(lifetime)).is_some()
+    })
 }
 
 /// The share's local maintenance decision: a local stop, the end of the
@@ -829,18 +841,25 @@ async fn unless_stopped<T>(
 // Credential failure is a stop request, not permission to abandon a share's
 // cleanup await. Retain its first error while the ORIGINAL service fences and
 // reaps its resources. The cleanup context is independent and stays usable.
+//
+// `local` services signals (which request the stop themselves) and returns
+// whether the selected session's evidence has ended. That end is seen first by
+// the share's own local action, polled in the same turn: a controlled share
+// then ends its lease naming the cause (a lock suspends it). Only after that
+// turn does it become a stop that fences the supervisor; requesting it first
+// raced the named reason with a bare cancellation.
 async fn supervise(
     renewal: impl Future<Output = Result<(), Error>>,
     serving: impl Future<Output = Result<(), Error>>,
     active: &Mutex<Option<Cx>>,
     stop: &StopHandle,
-    mut signals: impl FnMut(&mut std::task::Context<'_>),
+    mut local: impl FnMut(&mut std::task::Context<'_>) -> bool,
 ) -> Result<(), Error> {
     let (mut renewal, mut serving) = (pin!(renewal), pin!(serving));
     let mut renewing = true;
     let mut failure = None;
     poll_fn(|task| {
-        signals(task);
+        let session_ended = local(task);
         if renewing && let Poll::Ready(outcome) = renewal.as_mut().poll(task) {
             renewing = false;
             failure = outcome.err();
@@ -854,7 +873,13 @@ async fn supervise(
         }
         match serving.as_mut().poll(task) {
             Poll::Ready(result) => Poll::Ready(failure.take().map_or(result, Err)),
-            Poll::Pending => Poll::Pending,
+            Poll::Pending => {
+                if session_ended && !stop.is_requested() {
+                    // Wakes this task: the next turn fences and drains.
+                    stop.request();
+                }
+                Poll::Pending
+            }
         }
     })
     .await
@@ -1154,10 +1179,13 @@ impl Share<'_> {
                 },
                 factory,
                 move |catalog| choose(catalog, fps, bitrate, encoder),
-                |_, _| {
+                |agent, _| {
                     // Local stop, lock/logout/switch and saved-policy revision
                     // beat any delivered positive reply. Host::open independently
                     // rechecks current peer admission before authorizing pixels.
+                    if let Some(cause) = session_ended(lifetime.as_ref()) {
+                        agent.note_local_stop(session_stop_reason(cause));
+                    }
                     Ok(consent.turn(local_action(
                         &stop,
                         lifetime.as_ref(),
@@ -1222,6 +1250,28 @@ mod tests {
             Error::SessionMonitor(E::OpeningExpired).code(),
             "session_monitor_unavailable"
         );
+    }
+
+    #[test]
+    fn only_a_lock_or_a_suspend_suspends_a_controlled_lease() {
+        use crate::session_monitor::{Error as E, State};
+        // What the controller reads as `host_session_suspended`.
+        for cause in [E::Native(State::Locked), E::Native(State::Suspending)] {
+            assert_eq!(session_stop_reason(cause), StopReason::Suspended);
+        }
+        // Everything else ends the lease's authority (`host_session_ended`):
+        // a switch or logout, a changed identity, and lost evidence, which is
+        // never reported as a lock.
+        for cause in [
+            E::Native(State::Inactive),
+            E::Native(State::SessionUnavailable),
+            E::Native(State::IdentityChanged),
+            E::Native(State::Failed),
+            E::EvidenceExpired,
+            E::ProcessExited,
+        ] {
+            assert_eq!(session_stop_reason(cause), StopReason::AuthorityEnded);
+        }
     }
 
     /// A probed executor with the whole required core but no line scrolling.
@@ -1566,7 +1616,7 @@ mod tests {
                 },
                 &active,
                 &stop,
-                |_| {},
+                |_| false,
             ));
             assert_eq!(result, expected);
             assert!(cleaned.get(), "credential failure must not abandon cleanup");
@@ -1590,9 +1640,48 @@ mod tests {
             },
             &active,
             &stop,
-            |_| stop.request(),
+            |_| {
+                stop.request();
+                false
+            },
         ));
         assert_eq!(result, Err(Error::Cleanup("source")));
+    }
+
+    #[test]
+    fn a_session_end_reaches_the_share_before_its_supervisor_is_fenced() {
+        use std::cell::Cell;
+        let runtime = RuntimeBuilder::current_thread()
+            .enable_platform_reactor(true)
+            .build()
+            .unwrap();
+        let peer = runtime.request_cx_with_budget(Budget::INFINITE);
+        let active = Mutex::new(Some(peer.clone()));
+        let stop = StopHandle::default();
+        let turns = Cell::new(0);
+        let result = runtime.block_on(supervise(
+            std::future::pending(),
+            poll_fn(|_| {
+                turns.set(turns.get() + 1);
+                if turns.get() == 1 {
+                    // The share's own local action runs in this turn and can
+                    // name the cause: nothing has stopped or fenced it yet.
+                    assert!(!stop.is_requested());
+                    assert!(!peer.is_cancel_requested());
+                    return Poll::Pending;
+                }
+                // Then the end is a stop like any other: fence before cleanup.
+                assert!(stop.is_requested());
+                assert!(peer.is_cancel_requested());
+                Poll::Ready(Ok(()))
+            }),
+            &active,
+            &stop,
+            // The selected session's evidence has ended.
+            |_| true,
+        ));
+        assert_eq!(result, Ok(()));
+        assert_eq!(turns.get(), 2);
     }
 
     #[test]

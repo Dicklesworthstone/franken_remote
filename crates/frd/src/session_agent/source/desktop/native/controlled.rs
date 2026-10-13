@@ -324,8 +324,13 @@ impl ControlledDesktop {
                     if action != Ok(LocalAction::Continue) {
                         // Local priority: revoke first; the service then drains
                         // its input owner and returns its original evidence.
+                        // A named local cause (a lock, a suspend) is the lease's
+                        // terminal reason; the revoke alone reads as its end.
                         stopped = true;
                         failed = action.is_err();
+                        if let Some(reason) = agent.local_stop_reason() {
+                            observation.stop_lease(reason);
+                        }
                         observation.revoke();
                     }
                 }

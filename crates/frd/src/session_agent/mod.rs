@@ -106,6 +106,9 @@ pub struct SessionAgent {
     local_priority: LocalInputPriority,
     bounds: InputBounds,
     revoked: Arc<AtomicBool>,
+    /// The named local cause of a local stop (lock, suspend, logout), first
+    /// wins. It becomes an active control lease's terminal reason.
+    local_stop: Option<StopReason>,
     #[cfg(target_os = "linux")]
     sources: Arc<std::sync::Mutex<source::Sources>>,
     /// Opt-in remote-control profile; None keeps the agent observation-only.
@@ -163,6 +166,7 @@ impl SessionAgent {
             local_priority: LocalInputPriority::default(),
             bounds,
             revoked,
+            local_stop: None,
         }
     }
 
@@ -216,6 +220,17 @@ impl SessionAgent {
 
     pub fn is_revoked(&self) -> bool {
         self.revoked.load(Ordering::Acquire)
+    }
+
+    /// Name why the local side is stopping the share (first wins), before its
+    /// local action stops it. A controlled share ends its lease with this
+    /// reason instead of the generic end of authority.
+    pub fn note_local_stop(&mut self, reason: StopReason) {
+        self.local_stop.get_or_insert(reason);
+    }
+
+    pub const fn local_stop_reason(&self) -> Option<StopReason> {
+        self.local_stop
     }
 
     /// Register an external `InputControl` with the indicator for synchronous revocation.
