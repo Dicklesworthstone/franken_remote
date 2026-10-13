@@ -610,7 +610,11 @@ async fn guarded<T>(
         }
         if timer.as_mut().poll(task).is_ready() {
             timer.as_mut().reset(after(at, WAKE)?);
-            let _ = timer.as_mut().poll(task);
+            // A scheduler pause may put the replacement past its deadline.
+            // Never discard its Ready and then poll a completed Sleep. Yield
+            // once so the next turn handles readiness and registers the timer,
+            // while continuing to poll the SAME attempt at most once per turn.
+            task.waker().wake_by_ref();
         }
         Poll::Pending
     })
@@ -648,3 +652,7 @@ mod tests;
 #[cfg(test)]
 #[path = "reconnect/recovery_tests.rs"]
 mod recovery_tests;
+
+#[cfg(test)]
+#[path = "reconnect/pulse_tests.rs"]
+mod pulse_tests;
