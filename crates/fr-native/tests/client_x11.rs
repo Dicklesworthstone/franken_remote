@@ -34,7 +34,11 @@ struct Server {
     display: String,
 }
 impl Server {
-    fn start() -> Self {
+    /// The server and its first client, the test's observer. Connecting it
+    /// here means a `-terminate` server always has had a client, so it always
+    /// exits once its clients are gone (see Drop); one that never got a client
+    /// is killed instead of left running.
+    fn start() -> (Self, X11Pointer) {
         let mut child = Command::new("Xvfb")
             .args([
                 "-displayfd",
@@ -56,9 +60,14 @@ impl Server {
         BufReader::new(child.stdout.take().unwrap().take(16))
             .read_line(&mut number)
             .unwrap();
-        Self {
-            child,
-            display: format!(":{}", number.trim().parse::<u16>().unwrap()),
+        let display = format!(":{}", number.trim().parse::<u16>().unwrap());
+        match X11Pointer::open(&display) {
+            Ok(observer) => (Self { child, display }, observer),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("observer could not connect to {display}: {error:?}");
+            }
         }
     }
 }
@@ -236,8 +245,7 @@ fn submitted(agent: &mut Agent, bytes: &[u8]) -> InputResult {
 }
 #[test]
 fn client_bytes_native_drag_receipt_and_old_pointer_then_stale_view_cleanup() {
-    let server = Server::start();
-    let mut observer = X11Pointer::open(&server.display).unwrap();
+    let (server, mut observer) = Server::start();
     let seat = Seat::default();
     let (mut client, mut agent, running) = launch(&server, &observer, &seat, Policy::default());
     let mut late = vec![0; MAX_INPUT_RECORD_BYTES];
@@ -302,8 +310,7 @@ fn client_bytes_native_drag_receipt_and_old_pointer_then_stale_view_cleanup() {
 }
 #[test]
 fn timed_out_client_collects_late_real_submission_without_reopening_or_losing_cleanup() {
-    let server = Server::start();
-    let mut observer = X11Pointer::open(&server.display).unwrap();
+    let (server, mut observer) = Server::start();
     let seat = Seat::default();
     let (mut client, mut agent, running) = launch(
         &server,
