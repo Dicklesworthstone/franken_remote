@@ -135,6 +135,10 @@ fn tailnet(error: TailnetError) -> Failure {
             "tailnet_lookup_timeout",
             "Check the installed Tailscale daemon before retrying.",
         ),
+        TailnetError::HandshakeTimeout => failure(
+            "host_not_answering",
+            "The host did not complete the connection in time: check that frd run is running there (it serves one viewer at a time, so another session may be active) and that tailnet policy allows UDP to its port; fr hosts shows the path.",
+        ),
         TailnetError::KeyExpired => failure(
             "tailnet_key_expired",
             "Reauthenticate the affected Tailscale node locally.",

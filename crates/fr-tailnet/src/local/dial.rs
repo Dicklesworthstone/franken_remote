@@ -134,12 +134,19 @@ impl NativeClient {
         Ok(async move {
             let _slot = slot;
             let remaining = end.checked_sub(now(cx)?).ok_or(Error::Timeout)?;
-            Box::pin(bounded(
+            let result = Box::pin(bounded(
                 cx,
                 Duration::from_micros(remaining),
                 self.connect(cx, target, route),
             ))
-            .await
+            .await;
+            // The dial's own deadline passed: the HOST did not complete the
+            // handshake (not running, serving another viewer, or UDP blocked).
+            // A LocalAPI lookup timeout inside the dial stays `Timeout`.
+            match result {
+                Err(Error::Timeout) if now(cx)? >= end => Err(Error::HandshakeTimeout),
+                other => other,
+            }
         })
     }
 
