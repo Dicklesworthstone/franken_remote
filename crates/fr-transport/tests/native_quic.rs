@@ -1575,12 +1575,15 @@ fn a_peer_that_stops_acknowledging_still_closes_the_connection_in_bounded_time()
                 measure_path(&cx, &mut p, route).await;
             }
             let admitted = clock(&cx);
+            // A send-by far below the 250 ms delivery allowance, yet wide
+            // enough that a preempted runner cannot pass it before the send
+            // (a 2 ms send-by failed as Expired on a swapping CI runner).
             p.server
                 .send(
                     &cx,
                     route,
                     &recovery_packet(2, 100),
-                    admitted + 2_000,
+                    admitted + 20_000,
                     || true,
                 )
                 .unwrap();
@@ -1591,7 +1594,7 @@ fn a_peer_that_stops_acknowledging_still_closes_the_connection_in_bounded_time()
             let elapsed = clock(&cx) - admitted;
             assert_eq!(result, Err(Error::Expired));
             assert!(p.server.is_closed());
-            // Not at the 2 ms send-by, and never later than the largest allowance.
+            // Not at the 20 ms send-by, and never later than the largest allowance.
             assert!(elapsed >= MIN_DELIVERY_ALLOWANCE_US - 10_000, "{elapsed}");
             assert!(elapsed < MAX_DELIVERY_ALLOWANCE_US + 500_000, "{elapsed}");
             // A measured loopback path gets the floor, far below the ceiling.
