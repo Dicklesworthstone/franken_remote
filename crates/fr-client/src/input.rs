@@ -174,6 +174,9 @@ pub struct InputClient {
     receipts: [Option<InputResult>; MAX_PENDING_ACTIONS],
     receipt_cursor: usize,
     ticket_state: Option<ticket::State>,
+    /// A recovered view needs its own wire ticket. Keep the old ticket's replay
+    /// high-water mark, but never authorize the new view with that old ticket.
+    awaiting_recovery_ticket: bool,
     control_response: Option<crate::authority::ObservationResponder>,
     keys: [bool; 256],
     buttons: [bool; 5],
@@ -237,6 +240,7 @@ impl InputClient {
             receipts: [None; MAX_PENDING_ACTIONS],
             receipt_cursor: 0,
             ticket_state: None,
+            awaiting_recovery_ticket: false,
             control_response: None,
             keys: [false; 256],
             buttons: [false; 5],
@@ -321,6 +325,7 @@ impl InputClient {
             return self.fail(StopReason::ViewChanged);
         }
         self.credentials.view.recovery = generation;
+        self.awaiting_recovery_ticket = true;
         self.observation = None;
         Ok(())
     }
@@ -509,7 +514,7 @@ impl InputClient {
     /// pending action identities nor reopens stopped or unready control.
     pub fn ticket(&mut self, ticket: InputTicketId, now: ClientInstant) -> Result<(), Error> {
         self.tick(now)?;
-        if self.ticket_state.is_some() {
+        if self.ticket_state.is_some() || self.awaiting_recovery_ticket {
             return self.fail(StopReason::InvalidTicket);
         }
         if ticket.as_raw() == 0 {
@@ -523,7 +528,7 @@ impl InputClient {
         if self.suspended_since.is_some() {
             return Err(Error::ViewSuspended);
         }
-        if self.ticket_state.is_some_and(|s| now.0 >= s.until_us) {
+        if self.awaiting_recovery_ticket || self.ticket_state.is_some_and(|s| now.0 >= s.until_us) {
             return Err(Error::TicketExpired);
         }
         if !self.mapped {

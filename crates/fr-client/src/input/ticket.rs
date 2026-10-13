@@ -74,7 +74,16 @@ impl InputClient {
             return self.fail(StopReason::InvalidControl);
         }
         self.credentials.ticket = c.ticket;
-        if let Some(since) = self.suspended_since {
+        if self.awaiting_recovery_ticket {
+            // Unlike a same-generation freshness lapse, this exact new view
+            // could not have had a ticket before the host installed recovery.
+            // Its timely, authenticated ticket proves that fence was crossed;
+            // waiting another source-age ceiling only delays usable control.
+            // Fresh presentation remains an independent prerequisite.
+            self.awaiting_recovery_ticket = false;
+            self.awaiting_ticket = false;
+            self.try_resume(now);
+        } else if let Some(since) = self.suspended_since {
             // Only a ticket issued after the HOST's own lapse can authorize
             // input again: the host invalidated every older one. That lapse
             // is at most the 1 s source-age ceiling after this suspension
@@ -92,6 +101,10 @@ impl InputClient {
         Ok(())
     }
     pub fn ticket_deadline(&self) -> Option<ClientInstant> {
-        self.ticket_state.map(|s| ClientInstant(s.until_us))
+        if self.awaiting_recovery_ticket {
+            None
+        } else {
+            self.ticket_state.map(|s| ClientInstant(s.until_us))
+        }
     }
 }
