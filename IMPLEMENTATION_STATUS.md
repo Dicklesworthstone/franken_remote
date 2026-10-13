@@ -49,6 +49,16 @@ fr-live-client-present-cost-tqu7).
 **macOS**: the workspace builds, lints and tests (new CI job). Every `fr`/`frd`
 command refuses with `platform_unavailable`.
 
+**CI had never run a test.** Every Rust verification run, the
+observation-indicator lane and every nightly verify lane died with "The runner
+has received a shutdown signal". Compiling frd's library tests peaks at 18.9 GB
+RSS, against 16 GB on the hosted runner, and `continue-on-error` reported the
+killed Tests step as successful. Tests committed "pending CI execution" had
+therefore never executed anywhere. A swap action (12186bf) lets every lane run.
+About a dozen never-run or stale tests have since been corrected; each commit
+names its cause. Nine workflows that pin historical source blobs fail by
+design and await an owner decision.
+
 **Regressions from the pin.** Six namespace e2e tests regressed when the pin
 landed. Four (peer-finished reporting after departing inspections, sequential
 viewers, a refused peer's sibling) were FrankenRemote's: a terminal desktop

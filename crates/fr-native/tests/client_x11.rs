@@ -63,7 +63,7 @@ impl Server {
     }
 }
 /// The in-process native input executor keeps an X connection's reader thread
-/// alive after its session ends (bead fr-x11-executor-thread-leak). Killing the
+/// alive after its session ends (bead fr-x11-executor-thread-leak-g6q8). Killing the
 /// server under it made Xlib's default I/O error handler exit the WHOLE test
 /// process. With `-terminate` the server exits itself once its last client,
 /// including that connection, goes away at the latest at process exit.
