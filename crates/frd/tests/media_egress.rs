@@ -271,8 +271,17 @@ fn packet_expiry_during_idle_tick_is_not_confused_with_live_authority() {
             .unwrap();
         sleep(cx.now(), Duration::from_millis(20)).await;
         assert!(control.check().is_ok());
-        assert!(egress.tick().is_err());
-        assert!(egress.is_closed());
+        // A picture that expired before any byte was admitted is obsolete
+        // work, not an uncertain write (109a8b0): the expiry is reported,
+        // its bytes are released, and the egress stays open, bounded by the
+        // recovery horizon, for negotiated recovery. Authority is untouched.
+        assert!(matches!(
+            egress.tick(),
+            Err(frd::media::Error::Send(SendError::OriginalExpired))
+        ));
+        assert!(!egress.is_closed());
+        assert!(egress.pending().is_none());
+        assert!(egress.next_deadline().is_some());
         assert_eq!(egress.cache_usage().bytes, 0);
         assert!(control.check().is_ok());
     });
