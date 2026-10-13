@@ -161,6 +161,7 @@ mod linux {
                     Ok((frame, pixels)) => {
                         let display = display_next.take().ok_or(Error::WrongState)?;
                         if !display {
+                            codec.recycle(pixels);
                             return Ok((Kind::Decoded, frame.as_raw().to_be_bytes().to_vec()));
                         }
                         let place = placement(fitted.as_ref());
@@ -184,8 +185,14 @@ mod linux {
                         {
                             return Err(Error::NativeFailure);
                         }
+                        // The previous retained picture (or a fitted frame's
+                        // source) is no longer referenced: reuse its buffer.
                         if fitted.is_none() {
-                            *last = Some(pixels);
+                            if let Some(previous) = last.replace(pixels) {
+                                codec.recycle(previous);
+                            }
+                        } else {
+                            codec.recycle(pixels);
                         }
                         *presented = true;
                         // This acknowledges X11 submission/synchronization, not optical visibility.

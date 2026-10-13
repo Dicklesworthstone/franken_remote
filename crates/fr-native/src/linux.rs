@@ -431,6 +431,9 @@ pub struct HevcDecoder {
     pending: VecDeque<FrameId>,
     last: Option<FrameId>,
     closed: bool,
+    /// One BGRA buffer of exactly the output size, reused instead of zeroing a
+    /// fresh allocation per poll. A successful receive overwrites every byte.
+    spare: Option<Vec<u8>>,
     _thread: PhantomData<Rc<()>>,
 }
 impl HevcDecoder {
@@ -470,8 +473,17 @@ impl HevcDecoder {
             pending: VecDeque::with_capacity(4),
             last: None,
             closed: false,
+            spare: None,
             _thread: PhantomData,
         })
+    }
+    /// Return a presented frame's buffer for the next decode. Only a buffer of
+    /// exactly this decoder's output size is kept; anything else is dropped.
+    pub fn recycle(&mut self, frame: BgraFrame) {
+        let g = self.config.geometry();
+        if (frame.width, frame.height) == (g.crop_width(), g.crop_height()) {
+            self.spare = Some(frame.bytes);
+        }
     }
     pub fn submit(&mut self, unit: &EncodedAccessUnit) -> Result<(), NativeError> {
         if self.closed {
@@ -533,17 +545,28 @@ impl HevcDecoder {
             return Err(NativeError::Closed);
         }
         let g = self.config.geometry();
-        let mut bytes = zeroed(frame_len(g.crop_width(), g.crop_height(), &self.limits)?)?;
+        let len = frame_len(g.crop_width(), g.crop_height(), &self.limits)?;
+        let mut bytes = match self.spare.take() {
+            Some(spare) if spare.len() == len => spare,
+            _ => zeroed(len)?,
+        };
         let mut pts = 0;
         // SAFETY: packed BGRA destination is exactly the admitted size; bridge rejects changed geometry.
-        status(unsafe {
+        let received = status(unsafe {
             fr_decoder_receive(
                 self.raw.as_ptr(),
                 bytes.as_mut_ptr(),
                 bytes.len(),
                 &raw mut pts,
             )
-        })?;
+        });
+        if let Err(error) = received {
+            // No picture was ready, so nothing was written: keep the buffer.
+            if error == NativeError::NeedInput {
+                self.spare = Some(bytes);
+            }
+            return Err(error);
+        }
         let id = self.pending.pop_front().ok_or(NativeError::Codec)?;
         if id.as_raw() != pts.cast_unsigned() {
             self.closed = true;
