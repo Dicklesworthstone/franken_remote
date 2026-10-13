@@ -424,6 +424,7 @@ impl InputClient {
     fn try_resume(&mut self, now: ClientInstant) {
         if let Some(since) = self.suspended_since
             && !self.awaiting_ticket
+            && !self.awaiting_recovery_ticket
             && self.view_until.is_some()
         {
             self.suspended_us = self

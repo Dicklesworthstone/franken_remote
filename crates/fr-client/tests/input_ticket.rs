@@ -307,3 +307,6 @@ fn initial_matching_ticket_is_bounded_once_and_cannot_be_retimed_by_replay() {
 
 #[path = "input_ticket/recovery.rs"]
 mod recovery;
+
+#[path = "input_ticket/obsolete.rs"]
+mod obsolete;

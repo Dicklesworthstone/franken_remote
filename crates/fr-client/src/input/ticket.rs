@@ -1,7 +1,7 @@
 //! Ticket delivery updates future actions only. Receipts and consumed action
 //! identities survive renewal and expiry; old actions are never re-encoded.
 use super::{ClientInstant, Error, InputClient, StopReason};
-use fr_core::ids::HostBootId;
+use fr_core::ids::{HostBootId, RecoveryGeneration};
 use fr_media::freshness::ClockCorrelation;
 use fr_wire::{
     input::{InputDelivery, InputDirection},
@@ -14,12 +14,15 @@ pub(super) struct State {
     sequence: u64,
     boot: HostBootId,
     issued_at_us: u64,
+    recovery: RecoveryGeneration,
 }
 impl InputClient {
     /// `clock` must come from this authenticated session's clock exchange. The
     /// record must arrive on its installed reliable input feedback route.
     /// Expiry pauses new input; a timely new ticket can recover only a still-live,
     /// fresh view. This cannot reopen any terminal lifecycle or input failure.
+    /// During a recovery, in-order tickets still naming a retired generation
+    /// are consumed as obsolete feedback, never installed as current authority.
     pub fn accept_ticket(
         &mut self,
         bytes: &[u8],
@@ -39,9 +42,21 @@ impl InputClient {
             Error::Wire(e)
         })?;
         let c = ticket.credentials;
+        // The reliable ticket stream is ordered independently of media
+        // replacement. A ticket queued before the host's recovery fence may
+        // arrive after this viewer has installed the recovered receiver. Drain
+        // it without reviving the retired view or killing the surviving lease.
+        let mut same_view = c.view;
+        same_view.recovery = self.credentials.view.recovery;
+        let obsolete = self.awaiting_recovery_ticket
+            && same_view == self.credentials.view
+            && self.credentials.view.recovery.supersedes(c.view.recovery)
+            && self
+                .ticket_state
+                .is_some_and(|s| c.view.recovery >= s.recovery);
         if c.session != self.credentials.session
             || c.lease != self.credentials.lease
-            || c.view != self.credentials.view
+            || (c.view != self.credentials.view && !obsolete)
             || (self.ticket_state.is_some() && c.ticket == self.credentials.ticket)
             || self.ticket_state.is_some_and(|s| {
                 ticket.sequence <= s.sequence
@@ -57,6 +72,18 @@ impl InputClient {
         let Ok(until) = clock.deadline_lower_us(ticket.expires_at_us, now.0) else {
             return self.fail(StopReason::InvalidTicket);
         };
+        if obsolete {
+            // Only replay metadata changes. In particular, neither deadline,
+            // ticket identity, held state, clipboard nor suspension is revived.
+            let state = self
+                .ticket_state
+                .as_mut()
+                .expect("validated obsolete ticket");
+            state.sequence = ticket.sequence;
+            state.issued_at_us = ticket.issued_at_us;
+            state.recovery = c.view.recovery;
+            return Ok(());
+        }
         // Record the consumed sequence even for late delivery. It cannot be
         // replayed after a later clock sample and be given a new lease on life.
         self.ticket_state = Some(State {
@@ -64,6 +91,7 @@ impl InputClient {
             sequence: ticket.sequence,
             boot: clock.host_boot(),
             issued_at_us: ticket.issued_at_us,
+            recovery: c.view.recovery,
         });
         if until <= now.0 {
             return Err(Error::TicketExpired);
