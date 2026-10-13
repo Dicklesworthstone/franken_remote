@@ -33,9 +33,11 @@ Ubuntu 26.04 on the same tailnet.
 **NVENC** (GTX 1070): `hevc_nvenc` never opened. The fixes are `refs` left at
 the encoder default, encoder SEI (types 39/40) stripped on the host, and SPS
 short-term RPS tables and VUI HRD admitted under the same rules. Live, an
-NVENC-encoded desktop from ts2 was admitted, decoded and presented on trj
-(`nvidia-smi pmon` showed the host worker's CUDA context). No sustained NVENC
-session has run (see the client presenter below); VAAPI is untested.
+NVENC-encoded desktop from ts2 was admitted, decoded and presented. A 5-minute
+NVENC session (ts2 to ts1) stayed within 0.13-0.19% of host pixels with an
+active encoder session. `frd run --encoder nvenc|vaapi` probes the encoder at
+startup and refuses `encoder_unavailable` before binding (15d4c21). VAAPI on
+VAAPI hardware is untested.
 
 **Client presenter.** A fixed 200 ms limit per native decode/present request
 killed a healthy first 1080p decode on a busy client; each picture's own budget
