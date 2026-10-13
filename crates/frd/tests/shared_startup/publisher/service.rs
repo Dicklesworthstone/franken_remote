@@ -161,7 +161,9 @@ fn slow_native_completion_does_not_trigger_catchup_captures() {
         assert_eq!(times.len(), 3);
         // The exact native fixture sleeps 50ms. The configured interval follows
         // completion instead of issuing two overdue operations back-to-back.
-        assert!(times.windows(2).all(|w| w[1] - w[0] >= 100_000));
+        // Measured gaps are 99.4-101.3 ms; an exact 100 ms floor failed on
+        // sub-millisecond timer jitter, while catch-up would show about 50 ms.
+        assert!(times.windows(2).all(|w| w[1] - w[0] >= 90_000), "{times:?}");
         stop_cohort(&mut cohort, &cx).await;
     });
 }
