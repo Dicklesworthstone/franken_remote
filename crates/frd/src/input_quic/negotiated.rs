@@ -25,6 +25,7 @@ pub struct NegotiatedInput {
     configuration: AttachedChannel,
     parent: ControlBinding,
     limits: ProtocolLimits,
+    reference_recovery: bool,
     /// The reference-recovery generation input records must name: the original
     /// attachment's, advanced only by [`NegotiatedInput::follow_recovery`].
     recovery: RecoveryGeneration,
@@ -55,7 +56,7 @@ fn recovered_successor(old: Binding, new: Binding) -> bool {
     let mut expected = old;
     expected.recovery = next;
     expected.parent.id = new.parent.id;
-    new.parent.id != old.parent.id && expected == new
+    new.parent.id != 0 && new.parent.id != old.parent.id && expected == new
 }
 impl NegotiatedInput {
     pub fn new(
@@ -104,6 +105,10 @@ impl NegotiatedInput {
             configuration,
             parent,
             limits: selection.limits,
+            reference_recovery: selection.capabilities.iter().any(|cap| {
+                cap.name == fr_wire::recovery_request::CAPABILITY
+                    && cap.version == fr_wire::recovery_request::VERSION
+            }),
             recovery: a.recovery,
             recovering: false,
         };
@@ -158,7 +163,10 @@ impl NegotiatedInput {
         q: &QuicRecords,
         configuration: AttachedChannel,
     ) -> Result<(), Error> {
-        if configuration.descriptor.role != MediaRole::Configuration
+        if !self.reference_recovery
+            || !self.recovering
+            || configuration.descriptor.binding.parent.id == self.channel_binding()
+            || configuration.descriptor.role != MediaRole::Configuration
             || !recovered_successor(
                 self.configuration.descriptor.binding,
                 configuration.descriptor.binding,
@@ -184,7 +192,7 @@ impl NegotiatedInput {
     /// still match that operation's locally selected, probed target.
     pub fn check_request(&self, q: &QuicRecords, request: Request) -> Result<(), Error> {
         self.checked(q)?;
-        if !self.matches_request(request) {
+        if self.recovering || !self.matches_request(request) {
             return Err(Error::InvalidRoutes);
         }
         Ok(())
@@ -202,7 +210,7 @@ impl NegotiatedInput {
         parent: ControlBinding,
         limits: ProtocolLimits,
     ) -> Result<Routes, Error> {
-        if parent != self.parent || limits != self.limits {
+        if self.recovering || parent != self.parent || limits != self.limits {
             return Err(Error::InvalidRoutes);
         }
         let attached = self.checked(q)?;
@@ -228,7 +236,8 @@ impl NegotiatedInput {
     ) -> Result<QuicInput, Error> {
         let a = self.checked(q)?;
         let pointer = a.datagram.ok_or(Error::InvalidRoutes)?;
-        if pointer.outbound
+        if self.recovering
+            || pointer.outbound
             || agent.protocol_limits() != self.limits
             || !agent.matches_observation_view(
                 observation,
@@ -259,9 +268,12 @@ impl NegotiatedInput {
         }
         Ok((a.outbound, a.inbound, pointer))
     }
-    /// Immutable checked session/configuration identity for the owning viewer.
+    /// Current checked configuration identity; unavailable during replacement.
     pub fn viewer_scope(&self, q: &QuicRecords) -> Result<(ControlBinding, Binding), Error> {
         self.viewer_routes(q)?;
+        if self.recovering {
+            return Err(Error::InvalidRoutes);
+        }
         Ok((self.parent, self.configuration.descriptor.binding))
     }
     /// Preserve the caller's original absolute deadline and exact record under
@@ -275,6 +287,11 @@ impl NegotiatedInput {
         authorize: impl FnMut() -> bool,
     ) -> Result<(), Error> {
         let (actions, _, pointer) = self.viewer_routes(q)?;
+        if self.recovering {
+            // The parent continues renewal/result service, never old input.
+            // This also fences pre-encoded actions and held-state records.
+            return Err(Error::InvalidRoutes);
+        }
         let delivery = if bytes.get(6..8) == Some(&0x0042_u16.to_be_bytes()) {
             InputDelivery::Datagram
         } else {
@@ -382,3 +399,6 @@ mod tests {
         assert!(!recovered_successor(old, other));
     }
 }
+
+#[cfg(test)]
+mod recovery_tests;
