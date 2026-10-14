@@ -17,6 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 mod changes;
+mod encoding;
 mod ffi;
 mod read;
 mod synchronize;

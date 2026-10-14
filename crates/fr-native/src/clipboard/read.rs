@@ -1,6 +1,7 @@
 //! Explicit X11 selection observation. No authority, automatic paste or network
 //! send is implied. All server operations belong on the native worker, outside
 //! the broker's authority lock; the X server remains an OS trust boundary.
+use super::encoding::Encoding;
 use super::{Atoms, CHUNK, Event, READER_LIFETIME, Stamp, Text, X11Clipboard, ffi};
 use core::fmt;
 use fr_core::clipboard::{MAX_CHUNKS, PlatformError};
@@ -76,6 +77,8 @@ pub(super) struct Capture {
     time: u32,
     timestamp: u32,
     revision: Option<u64>,
+    encoding: Encoding,
+    source_bytes: usize,
     lower_bound: usize,
     chunks: u32,
     text: Text,
@@ -112,7 +115,7 @@ impl Capture {
         match self.stage {
             Stage::Before => (atoms.timestamp, atoms.timestamp),
             Stage::After => (atoms.timestamp, atoms.clock),
-            _ => (atoms.utf8, atoms.utf8),
+            _ => (self.encoding.atom(atoms.utf8), atoms.utf8),
         }
     }
     fn current(&self, clipboard: &X11Clipboard) -> Result<(), ReadError> {
@@ -266,20 +269,7 @@ impl Capture {
                 self.timestamp = timestamp;
                 self.convert(clipboard, Stage::Selection)?;
             }
-            Stage::Selection => {
-                let Some(event) = self.signal.take() else {
-                    return Ok(false);
-                };
-                if event.property == 0 {
-                    return Err(ReadError::Unsupported);
-                }
-                let reply = self.property(clipboard, clipboard.atoms.utf8, 0, scratch)?;
-                if reply.kind == clipboard.atoms.incr {
-                    self.incremental(clipboard, &reply, scratch)?;
-                } else {
-                    self.data(clipboard, &reply, scratch, false, 0, None)?;
-                }
-            }
+            Stage::Selection => self.selection(clipboard, scratch)?,
             Stage::NextChunk(_) => {
                 if self.signal.take().is_none() {
                     return Ok(false);
@@ -302,6 +292,31 @@ impl Capture {
             }
         }
         Ok(false)
+    }
+    fn selection(
+        &mut self,
+        clipboard: &X11Clipboard,
+        scratch: &mut [u8; CHUNK],
+    ) -> Result<(), ReadError> {
+        let Some(event) = self.signal.take() else {
+            return Ok(());
+        };
+        if event.property == 0 {
+            // Only a clean, correlated UTF8 refusal selects STRING. A malformed
+            // UTF8 reply never gets reinterpreted, and this single conversion
+            // keeps the ORIGINAL requestor, owner/revision, time and deadline.
+            if self.encoding == Encoding::Utf8 {
+                self.encoding = Encoding::Latin1;
+                return self.convert(clipboard, Stage::Selection);
+            }
+            return Err(ReadError::Unsupported);
+        }
+        let reply = self.property(clipboard, clipboard.atoms.utf8, 0, scratch)?;
+        if reply.kind == clipboard.atoms.incr {
+            self.incremental(clipboard, &reply, scratch)
+        } else {
+            self.data(clipboard, &reply, scratch, false, 0, None)
+        }
     }
     fn incremental(
         &mut self,
@@ -329,7 +344,7 @@ impl Capture {
         Ok(())
     }
     fn validated(&self) -> Result<bool, ReadError> {
-        if self.text.0.len() < self.lower_bound {
+        if self.source_bytes < self.lower_bound {
             return Err(ReadError::Malformed);
         }
         std::str::from_utf8(&self.text.0).map_err(|_| ReadError::InvalidUtf8)?;
@@ -344,7 +359,10 @@ impl Capture {
         offset: u32,
         total: Option<usize>,
     ) -> Result<(), ReadError> {
-        if reply.kind != clipboard.atoms.utf8 || reply.format != 8 || reply.len as usize > CHUNK {
+        if reply.kind != self.encoding.atom(clipboard.atoms.utf8)
+            || reply.format != 8
+            || reply.len as usize > CHUNK
+        {
             return Err(ReadError::Malformed);
         }
         let len = reply.len as usize;
@@ -371,11 +389,11 @@ impl Capture {
         if incremental && self.chunks > MAX_CHUNKS && property_size != 0 {
             return Err(ReadError::Limit);
         }
-        self.text
-            .0
-            .try_reserve_exact(len)
-            .map_err(|_| ReadError::Allocation)?;
-        self.text.0.extend_from_slice(&scratch[..len]);
+        self.encoding
+            .append(&mut self.text.0, &scratch[..len], clipboard.limit)?;
+        // INCR's hint and GetProperty offsets are NATIVE byte counts, never
+        // expanded UTF-8 counts. Expansion cannot satisfy an incomplete hint.
+        self.source_bytes = self.source_bytes.checked_add(len).ok_or(ReadError::Limit)?;
         if remaining != 0 {
             self.stage = Stage::Data {
                 incremental,
@@ -410,7 +428,9 @@ impl Drop for Scratch {
 }
 
 impl X11Clipboard {
-    /// Start one bounded `UTF8_STRING` observation of the current CLIPBOARD.
+    /// Start one bounded text observation of the current CLIPBOARD. Prefer
+    /// `UTF8_STRING`; only explicit refusal tries lossless ICCCM `STRING`.
+    /// Both the native and converted UTF-8 bytes obey the selected item limit.
     /// The caller must authorize observation BEFORE calling, service polling,
     /// cancel on either off switch/revoke, and recheck authority before sending.
     /// A new native requestor window fences all old responses without allocating
@@ -457,6 +477,8 @@ impl X11Clipboard {
             time: 0,
             timestamp: 0,
             revision,
+            encoding: Encoding::Utf8,
+            source_bytes: 0,
             lower_bound: 0,
             chunks: 0,
             text: Text(Vec::new()),
