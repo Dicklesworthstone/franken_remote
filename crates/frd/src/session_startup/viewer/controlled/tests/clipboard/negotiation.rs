@@ -428,9 +428,15 @@ fn newly_negotiated_workers_transfer_full_item_limit_in_both_directions() {
                 let mut max_native_records = 0;
                 let _ = state.viewer.action(key(true)).unwrap();
                 copy(&os[from], &text);
-                let until = now(&c).unwrap() + 2_500_000;
+                // The item's own captured deadline bounds the transfer: expiry
+                // or any other failure ends a lane with a reason, checked every
+                // turn. The wall clock only guards against a hang; a fixed 2.5 s
+                // bound failed CI's two-job runner mid-transfer with no reason
+                // on either side.
+                let hang = now(&c).unwrap() + 15_000_000;
                 loop {
-                    assert!(now(&c).unwrap() < until, "full bounded item failed to transfer; sender={from}; host={:?}; viewer={:?}", state.host.clipboard_reason(), state.viewer.clipboard_reason());
+                    let (host, viewer) = (state.host.clipboard_reason(), state.viewer.clipboard_reason());
+                    assert!(host.is_none() && viewer.is_none() && now(&c).unwrap() < hang, "full bounded item failed to transfer; sender={from}; host={host:?}; viewer={viewer:?}");
                     drive(&mut state, &c, &h, &mut n, &mut t).await;
                     for usage in [state.host.io().unwrap().0.usage(), state.viewer.session.io().unwrap().0.usage()] {
                         let bulk = usage.retained_send_records - usage.critical_send_records;
