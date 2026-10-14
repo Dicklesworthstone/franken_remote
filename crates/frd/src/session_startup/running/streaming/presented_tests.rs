@@ -334,6 +334,9 @@ fn viewer_report_deadline_includes_time_between_view_sampling_and_service() {
         evidence.age_upper_us = bound - 10_000;
         asupersync::time::sleep(c.now(), Duration::from_millis(20)).await;
         let before = q.usage();
+        // The 20 ms between sampling and service is charged to the sample's
+        // age, which then exceeds the bound: nothing is reported, and (since
+        // 2b5ffcd) an unusable report is not a session failure.
         assert_eq!(
             reporter.service(
                 q,
@@ -341,7 +344,7 @@ fn viewer_report_deadline_includes_time_between_view_sampling_and_service() {
                 ViewSample::Visible(evidence, sampled_at),
                 now(&c).unwrap()
             ),
-            Err(presented::Error::Proof(fr_media::presented::Error::Expired))
+            Ok(())
         );
         assert_eq!(reporter.sent, 0);
         assert_eq!(q.usage(), before);
@@ -397,10 +400,12 @@ fn actual_critical_backpressure_does_not_extend_a_pending_presentation_deadline(
         let at = now(&c).unwrap();
         // Even a newer sample claiming more lifetime for the same source must
         // not reencode the already pending report or start another deadline.
+        // Since 2b5ffcd the expired, never-admitted report is discarded and
+        // its source tombstoned instead of ending the session.
         evidence.age_upper_us = 0;
         assert_eq!(
             reporter.service(q, &c, ViewSample::Visible(evidence, at), at),
-            Err(presented::Error::Proof(fr_media::presented::Error::Expired))
+            Ok(())
         );
         assert_eq!(reporter.sent, 0);
         assert_eq!(q.usage(), full);
