@@ -327,3 +327,6 @@ fn completed_picture_eviction_and_generation_replacement_retire_only_original_jo
         Err(SendError::Delivery(DeliveryError::StaleGeneration))
     );
 }
+
+#[path = "repair_window/budget.rs"]
+mod budget;

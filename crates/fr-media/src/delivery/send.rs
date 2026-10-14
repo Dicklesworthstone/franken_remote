@@ -229,6 +229,14 @@ impl CachedPicture {
                     .expect("validated descriptor"),
             }
     }
+    fn repair_packet_bytes(&self, index: u32) -> Result<usize, SendError> {
+        let overhead = if self.progress.descriptor.reference.is_some() {
+            fr_wire::FRAGMENT_OVERHEAD
+        } else {
+            fr_wire::FRAGMENT_OVERHEAD - 8
+        };
+        Ok(self.fragment(index)?.bytes.len() + overhead)
+    }
     fn fragment(&self, index: u32) -> Result<Fragment<'_>, SendError> {
         let descriptor = self.progress.descriptor;
         Ok(Fragment {
@@ -583,6 +591,14 @@ impl SendCache {
         if p.repair.is_some() {
             return Err(SendError::RepairBusy);
         }
+        // The first fragment of each range is its largest (only the final
+        // fragment may be shorter). Refuse a permanently impossible request
+        // before consuming a slot/round, not later on the native send path.
+        for range in &ranges[..count] {
+            if p.repair_packet_bytes(range.start)? > self.policy.repair_bytes_per_window {
+                return Err(SendError::RepairBudgetExceeded);
+            }
+        }
         if now < p.next_repair || p.repair_rounds >= self.policy.max_repair_rounds {
             return Err(SendError::RepairRateLimited);
         }
@@ -598,9 +614,10 @@ impl SendCache {
         Ok(())
     }
     /// Emit one requested original fragment from the earliest-deadline eligible
-    /// picture. Returns no packet when all jobs are done or await their originals.
-    /// Waiting consumes no repair bytes. Repair traffic has its own bounded offered-load
-    /// allowance AND must pass the transport's normal congestion admission.
+    /// picture. Returns no packet when jobs are done, await originals, or wait
+    /// for the shared repair-byte window. Waiting never consumes a new round,
+    /// drops the request, or extends a picture's original deadline. Service
+    /// `next_deadline` even on idle; transport congestion admission still applies.
     pub fn next_repair_packet(
         &mut self,
         now: u64,
@@ -628,17 +645,14 @@ impl SendCache {
         };
         let p = self.pictures[index].as_mut().expect("selected");
         let job = p.repair.as_ref().expect("selected job");
-        let fragment = p.fragment(job.fragment)?;
-        let charge = fragment.bytes.len()
-            + if fragment.descriptor.reference.is_some() {
-                73
-            } else {
-                65
-            };
-        if charge > self.policy.repair_bytes_per_window - self.repair_spent {
-            p.repair = None;
-            return Err(SendError::RepairBudgetExceeded);
+        if p.repair_packet_bytes(job.fragment)?
+            > self.policy.repair_bytes_per_window - self.repair_spent
+        {
+            // This is local pacing, not malformed media or a failed native
+            // write. Preserve the fixed job and all its accounting through it.
+            return Ok(None);
         }
+        let fragment = p.fragment(job.fragment)?;
         let n = encode_fragment(
             fragment,
             self.bindings.for_channel(Channel::Video),
@@ -734,7 +748,29 @@ impl SendCache {
             .flatten()
             .map(|p| p.send_by)
             .chain(self.observation.as_ref().map(|o| o.send_by))
+            .chain(self.repair_window_deadline())
             .min()
+    }
+    /// Wake only for a budget-blocked, otherwise eligible repair that can still
+    /// be useful at refill. Expiry takes precedence; no saturated clock or
+    /// unissued-original job can manufacture a past-due idle wakeup.
+    fn repair_window_deadline(&self) -> Option<u64> {
+        let refill = self
+            .repair_window_start
+            .checked_add(self.policy.repair_window_micros)?;
+        let remaining = self.policy.repair_bytes_per_window - self.repair_spent;
+        self.pictures
+            .iter()
+            .flatten()
+            .any(|p| {
+                p.repair.as_ref().is_some_and(|job| {
+                    job.ranges[job.count - 1].end <= p.next_original
+                        && refill < p.send_by
+                        && p.repair_packet_bytes(job.fragment)
+                            .is_ok_and(|charge| charge > remaining)
+                })
+            })
+            .then_some(refill)
     }
     pub fn replace(
         &mut self,

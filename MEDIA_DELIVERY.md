@@ -35,6 +35,19 @@ with real cache/reassembly/wire owners and deterministic packet/clock fixtures.
 
 The sender cache admits actual vector capacity and picture metadata, not just logical payload length. It has an explicit 32-picture default and 64-picture implementation ceiling, separate from receiver W: a 250-ms repair horizon at a 60-fps source cadence can require more than twelve sender pictures. A virtual-clock 180-frame regression exercises that distinction. It is not a throughput measurement. Expired fully emitted pictures leave the cache; an expired unsent reference fences dependent work instead of emitting a broken chain. On capacity refusal, the caller must preserve a valid dependency chain or recover, not silently skip that encoded reference.
 
+Repair-byte exhaustion is bounded pacing, not a fatal media failure. An
+otherwise valid request remains attached to its original picture, with its cursor,
+round charge and deadline unchanged; `next_repair_packet` returns no packet until
+the subscription-wide allowance refills. `next_deadline` exposes that refill only
+when an eligible repair can still be useful before its original expiry, including
+while idle. Missed windows do not accumulate a catch-up burst. A requested packet
+whose full framing can never fit even one complete allowance is refused during
+request admission, before consuming a job or round; it is never deferred forever
+or discovered as a fatal error on the native send path. Window refill does not
+bypass congestion, restore expired media, revive a closed owner, or replenish the
+per-picture attempt ledger. Recovery-generation replacement still does not reset
+spent subscription-wide bytes.
+
 ## Receiver integration
 
 Construct a `ReceivePipeline` only inside an admitted subscription, with four distinct installed bindings and a `MediaEpoch`. Call `decoder_configured` after the real decoder API and its resource admission succeed. Deliver reliable recovery chunks on the recovery channel; call `take_decodable` to obtain a complete picture, validate its HEVC syntax/reference contract, and report actual decode completion with `acknowledge_decode`. Neither configuration, byte completeness nor decode completion grants visible-readiness or control authority.

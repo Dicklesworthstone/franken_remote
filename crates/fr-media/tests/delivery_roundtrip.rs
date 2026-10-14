@@ -365,10 +365,10 @@ fn repair_byte_budget_survives_recovery_generation_replacement() {
             .byte_len(),
         1_150
     );
-    assert_eq!(
-        sender.next_repair_packet(20_001, &mut out),
-        Err(SendError::RepairBudgetExceeded)
-    );
+    out.fill(0xa5);
+    assert_eq!(sender.next_repair_packet(20_001, &mut out), Ok(None));
+    assert_eq!(out, [0xa5; 1_150]);
+    assert_eq!(sender.next_deadline(), Some(250_000));
     let mut next = c;
     next.epoch.recovery = RecoveryGeneration::from_raw(1);
     next.bindings = MediaBindings::new(5, 6, 7, 8).unwrap();
@@ -396,10 +396,20 @@ fn repair_byte_budget_survives_recovery_generation_replacement() {
     sender
         .queue_repair(&repair_packet(1, 0, 3, 3, next), 40_000)
         .unwrap();
-    assert_eq!(
-        sender.next_repair_packet(40_000, &mut out),
-        Err(SendError::RepairBudgetExceeded)
-    );
+    out.fill(0xa5);
+    assert_eq!(sender.next_repair_packet(40_000, &mut out), Ok(None));
+    assert_eq!(out, [0xa5; 1_150]);
+    assert_eq!(sender.next_deadline(), Some(250_000));
+    // The actual shared window boundary, not generation replacement, restores
+    // credit. The retained request resumes on the newly admitted channel only.
+    let resumed = sender
+        .next_repair_packet(250_000, &mut out)
+        .unwrap()
+        .unwrap();
+    assert_eq!(resumed.byte_len(), 1_150);
+    assert_eq!(resumed.send_by_micros(), 280_001);
+    sender.authorize_write(&resumed, 250_000).unwrap();
+    assert_eq!(sender.next_repair_packet(250_000, &mut out), Ok(None));
 }
 #[test]
 fn a_too_small_output_buffer_does_not_consume_an_original_packet() {
