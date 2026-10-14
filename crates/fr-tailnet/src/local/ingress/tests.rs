@@ -344,6 +344,7 @@ async fn fixture(cx: &Cx) -> Boundary {
             state: Arc::new(Mutex::new(State {
                 node: Arc::new(node),
                 active: true,
+                cause: None,
                 keepalive: None,
             })),
         },
@@ -442,8 +443,22 @@ fn expired_node_proof_is_terminal_without_any_native_io_or_refresh() {
             owner.lease.check(address()),
             Err(Error::Identity(IdentityError::Expired))
         );
-        assert_eq!(owner.lease.check(address()), Err(Error::Closed));
-        assert_eq!(owner.revalidate().await, Err(Error::Closed));
+        // Terminal, and every later holder learns why, not a bare Closed
+        // (live on a loaded host: the run reported only Ingress(Closed)).
+        assert_eq!(
+            owner.lease.check(address()),
+            Err(Error::Identity(IdentityError::Expired))
+        );
+        assert_eq!(
+            owner.revalidate().await,
+            Err(Error::Identity(IdentityError::Expired))
+        );
+        // An orderly close afterwards does not replace the recorded cause.
+        owner.close();
+        assert_eq!(
+            owner.lease.check(address()),
+            Err(Error::Identity(IdentityError::Expired))
+        );
     });
 }
 #[test]
@@ -457,6 +472,9 @@ fn cancellation_retires_without_leaving_a_renewable_lease() {
             lease.check(address()),
             Err(Error::Identity(IdentityError::Cancelled))
         );
-        assert_eq!(lease.check(address()), Err(Error::Closed));
+        assert_eq!(
+            lease.check(address()),
+            Err(Error::Identity(IdentityError::Cancelled))
+        );
     });
 }

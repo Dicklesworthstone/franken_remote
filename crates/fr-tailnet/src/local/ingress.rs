@@ -523,6 +523,9 @@ fn new_table(prefix: &str) -> Result<String, Error> {
 struct State {
     node: Arc<NodeIdentity>,
     active: bool,
+    /// The failure that retired this lifetime, reported by every later check
+    /// instead of a bare `Closed` (an orderly close or a fence records none).
+    cause: Option<Error>,
     /// A duplicate of the helper connection: the helper keeps the rule until
     /// the LAST lease and the owner are gone, never while a transport lives.
     keepalive: Option<std::os::unix::net::UnixStream>,
@@ -552,10 +555,18 @@ impl Lease {
             state.active = false;
         }
     }
+    /// Retire with a cause; the first recorded cause wins.
+    fn fail(&self, error: Error) -> Error {
+        if let Ok(mut state) = self.state.lock() {
+            state.active = false;
+            state.cause.get_or_insert(error);
+        }
+        error
+    }
     pub fn check(&self, address: SocketAddr) -> Result<(), Error> {
         let mut state = self.state.lock().map_err(|_| Error::Closed)?;
         if !state.active {
-            return Err(Error::Closed);
+            return Err(state.cause.unwrap_or(Error::Closed));
         }
         // Wrong destinations never borrow another listener's protection. They
         // also cannot revoke that otherwise healthy listener by probing it.
@@ -563,8 +574,10 @@ impl Lease {
             return Err(Error::InvalidConfiguration);
         }
         if let Err(error) = self.api.check_node(&self.cx, &state.node) {
+            let error = error.into();
             state.active = false;
-            return Err(error.into());
+            state.cause.get_or_insert(error);
+            return Err(error);
         }
         Ok(())
     }
@@ -643,6 +656,7 @@ impl Boundary {
                 state: Arc::new(Mutex::new(State {
                     node: Arc::new(node),
                     active: true,
+                    cause: None,
                     keepalive,
                 })),
             },
@@ -727,7 +741,7 @@ impl Boundary {
             owner.lease.api.check_node(&owner.lease.cx, &node)?;
             let mut state = owner.lease.state.lock().map_err(|_| Error::Closed)?;
             if !state.active {
-                return Err(Error::Closed);
+                return Err(state.cause.unwrap_or(Error::Closed));
             }
             state.node = Arc::new(node);
             drop(state);
@@ -767,7 +781,7 @@ impl Boundary {
                         // Revocation/expiry wins over another application poll.
                         let renewed = refresh.as_mut().poll(task);
                         if let Poll::Ready(Err(error)) = renewed {
-                            return Poll::Ready(Err(error));
+                            return Poll::Ready(Err(lease.fail(error)));
                         }
                         lease.check(lease.address)?;
                         let output = operation.as_mut().poll(task);

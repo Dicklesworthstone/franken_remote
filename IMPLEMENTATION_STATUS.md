@@ -36,6 +36,16 @@ Ubuntu 26.04 on the same tailnet.
 - 2026-10-14, later, the same live check at ed45e10 (after the day's renewal,
   clipboard-projection and visibility-gap changes) passed again: keys, wheel,
   clipboard both ways, file send with a matching sha256, orderly `stopped`.
+- 2026-10-14, evening, live at 12b8a18 (debug builds). ts1 (`frd run --encoder
+  software`) hosted and trj controlled. The full check passed: keys, wheel,
+  the host's pre-session copy and both later copies (`clipboard_received` 2,
+  `clipboard_ended` null), a 100 KB file with a matching sha256, `stopped`.
+  The same check against ts2 (NVENC) under load 55-190 from unrelated jobs
+  ended twice ~20 s in. The host reported `Ingress(Closed)` and the client
+  `transport_deadline_expired`; a third run ended `Ingress(Identity(Timeout))`
+  before admission. One ingress revalidation over its 1 s bound ends the share
+  (fr-ingress-revalidation-load-qelg). The run now reports that cause instead of
+  `Closed`.
 - Clipboard over delay (namespace, netem, xclip). A failed item with records
   still in flight used to close the whole session: a 40 KB copy at 120 ms RTT,
   `native_session_failed`, 3 of 3. Since 145df7c it retires only the
