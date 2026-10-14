@@ -127,6 +127,15 @@ impl ControlledViewer {
         Ok(())
     }
     pub(super) fn service_clipboard(&mut self) -> Result<(), ViewerError> {
+        // A stopped/expired optional worker must retire BEFORE the connection
+        // evaluates its I/O gate, including while input awaits visibility.
+        // This only fences and retires; it never opens, reads, sends or
+        // publishes clipboard content through an unconfirmed view.
+        if let Some(bridge) = &mut self.clipboard {
+            bridge
+                .maintain(&mut self.session.transport)
+                .map_err(ViewerError::Clipboard)?;
+        }
         // The lanes authorize every transport operation with the input view
         // gate, and the transport treats a refusal as lost authority: it
         // closes the connection. The gate also refuses in ordinary transient

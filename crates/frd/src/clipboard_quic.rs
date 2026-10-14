@@ -304,6 +304,25 @@ impl Bridge {
         }
         Ok(())
     }
+    /// Between I/O turns, retire a stopped or expired optional owner without
+    /// admitting any clipboard record or starting native work. This remains
+    /// necessary when presentation temporarily prevents payload servicing.
+    /// The original connection identity and retirement protocol still apply;
+    /// an error is never permission to continue a partially retired channel.
+    pub(crate) fn maintain(&mut self, q: &mut QuicRecords) -> Result<State, Error> {
+        self.bound(q)?;
+        if !self.retired
+            && let Err(reason) = self.admission()
+        {
+            self.reason = Some(reason);
+            self.retire(q)?;
+        }
+        Ok(if self.retired {
+            State::Retired
+        } else {
+            State::Active
+        })
+    }
     fn admission(&self) -> Result<(u64, HostInstant), Error> {
         let (local, host) = self.clock.sample(&self.cx)?;
         if !self.shared.gate.is_open() {
@@ -355,19 +374,12 @@ impl Bridge {
         q: &mut QuicRecords,
         mut authorize: impl FnMut() -> bool,
     ) -> Result<State, Error> {
-        self.bound(q)?;
-        if self.retired {
+        // Metadata-only retirement runs even when the containing viewer must
+        // pause clipboard payloads for an unconfirmed compositor candidate.
+        if self.maintain(q)? == State::Retired {
             return Ok(State::Retired);
         }
         let mut turn = Turn::new(&self.shared);
-        // Retire before q.tick evaluates an expired retained clipboard record,
-        // preserving input/media when the stop happens BETWEEN I/O operations.
-        if let Err(reason) = self.admission() {
-            self.reason = Some(reason);
-            self.retire(q)?;
-            turn.complete();
-            return Ok(State::Retired);
-        }
         q.tick(&self.cx, &mut authorize).map_err(Error::Transport)?;
         if self.lane.check(q).is_err() {
             self.reason = Some(Error::Closed);

@@ -279,3 +279,6 @@ fn network_maintenance_does_not_encode_captured_keys_from_an_unconfirmed_view() 
         assert!(source.control().is_stopped());
     });
 }
+
+#[path = "maintenance/clipboard.rs"]
+mod clipboard;
