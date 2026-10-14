@@ -46,6 +46,9 @@ pub enum Error {
     ClockNotReady,
     Backpressure,
     Expired,
+    /// The one input record the transport had not admitted reached its send
+    /// deadline, set by this bound. It was never sent and is not sent late.
+    Unsent(fr_client::input::presentation::SendLimit),
     Closed,
     Capture(events::Error),
     ControlRequest(fr_client::control_grant::Error),
@@ -83,6 +86,7 @@ struct Pending {
     bytes: [u8; MAX_INPUT_RECORD_BYTES],
     len: usize,
     until: u64,
+    limit: fr_client::input::presentation::SendLimit,
     /// The sequence this never-admitted record consumed, returned if a stale
     /// view suspends input before the transport admits it.
     unsent: Unsent,
@@ -396,8 +400,16 @@ impl ControlledViewer {
                 })
                 .map_err(Error::Capture)?;
         }
-        if self.pending.as_ref().is_some_and(|p| t.0 >= p.until) {
-            return Err(Error::Expired);
+        if let Some(pending) = self.pending.as_ref().filter(|p| t.0 >= p.until) {
+            if pending.unsent != Unsent::Pointer {
+                return Err(Error::Unsent(pending.limit));
+            }
+            // A pointer position is replaceable state: it is dropped, never
+            // sent late. The host already tolerates missing pointer datagrams,
+            // and every button and scroll action carries its own position.
+            // Keys, buttons, text, scrolls and held-state snapshots still end
+            // control: dropping one could leave a press without its release.
+            self.pending = None;
         }
         Ok(t)
     }
@@ -434,11 +446,12 @@ impl ControlledViewer {
     /// the same action by generating fresh credentials or sequence positions.
     pub fn action(&mut self, action: Action<'_>) -> Result<Encoded, Error> {
         let t = self.slot()?;
-        let until = self.input.send_deadline(t)?.0;
+        let (until, limit) = self.input.send_limit(t)?;
         let mut p = Pending {
             bytes: [0; MAX_INPUT_RECORD_BYTES],
             len: 0,
-            until,
+            until: until.0,
+            limit,
             unsent: Unsent::Pointer,
         };
         let result = self.input.action(action, &mut p.bytes, t)?;
@@ -450,11 +463,12 @@ impl ControlledViewer {
     }
     pub fn pointer(&mut self, position: DesktopPoint) -> Result<Encoded, Error> {
         let t = self.slot()?;
-        let until = self.input.send_deadline(t)?.0;
+        let (until, limit) = self.input.send_limit(t)?;
         let mut p = Pending {
             bytes: [0; MAX_INPUT_RECORD_BYTES],
             len: 0,
-            until,
+            until: until.0,
+            limit,
             unsent: Unsent::Pointer,
         };
         let result = self.input.pointer(position, &mut p.bytes, t)?;
@@ -475,6 +489,8 @@ impl ControlledViewer {
             bytes: [0; MAX_INPUT_RECORD_BYTES],
             len: 0,
             until,
+            // Held-state snapshots are bounded by the view alone.
+            limit: fr_client::input::presentation::SendLimit::View,
             unsent: Unsent::Pointer,
         };
         let Some(result) = self.input.reconcile_held(observed, &mut p.bytes, t)? else {
@@ -548,6 +564,14 @@ impl ControlledViewer {
             }) {
                 Ok(()) => self.pending = None,
                 Err(input_quic::Error::Transport(quic::Error::Backpressure)) => {}
+                // Its deadline passed between the check and this send, and
+                // admission refused it before taking any of it: drop a pointer
+                // position exactly as the check above would have.
+                Err(input_quic::Error::Transport(quic::Error::Expired))
+                    if p.unsent == Unsent::Pointer && !q.is_closed() =>
+                {
+                    self.pending = None;
+                }
                 // Suspended between the check and this send: admission refused
                 // it (all or nothing), so it was never admitted either.
                 Err(_) if self.input.suspended_since().is_some() && !self.control.is_stopped() => {

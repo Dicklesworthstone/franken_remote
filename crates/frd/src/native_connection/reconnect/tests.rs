@@ -438,11 +438,23 @@ fn a_lost_reference_is_named_but_decode_failure_and_local_ends_are_not() {
         ))),
         None
     );
-    // The controlled viewer's own Expired is a local send/response deadline.
-    assert_eq!(
-        lapse(observed(StreamingViewerError::Control(C::Expired))),
-        Some(Lapse::TransportDeadline)
-    );
+    // The controlled viewer's own Expired is a local response deadline; an
+    // unsent input record is named by the bound that expired it.
+    {
+        use fr_client::input::presentation::SendLimit;
+        for (error, named) in [
+            (C::Expired, Lapse::TransportDeadline),
+            (C::Unsent(SendLimit::Receipt), Lapse::TransportDeadline),
+            (C::Unsent(SendLimit::View), Lapse::ViewStale),
+            (C::Unsent(SendLimit::Ticket), Lapse::ControlRenewalFailed),
+        ] {
+            assert_eq!(
+                lapse(observed(StreamingViewerError::Control(error))),
+                Some(named),
+                "{error:?}"
+            );
+        }
+    }
     for failure in [
         observed(StreamingViewerError::Control(C::Session(S::Authority))),
         observed(StreamingViewerError::Control(C::Session(S::ClientRenewal(
@@ -475,6 +487,9 @@ fn observation_expiry_reconnects_but_input_expiry_and_revocation_do_not() {
     }
     for error in [
         C::Expired,
+        C::Unsent(fr_client::input::presentation::SendLimit::View),
+        C::Unsent(fr_client::input::presentation::SendLimit::Ticket),
+        C::Unsent(fr_client::input::presentation::SendLimit::Receipt),
         C::Closed,
         C::WrongBinding,
         C::ClockNotReady,

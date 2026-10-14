@@ -1070,6 +1070,64 @@ fn local_slot_backpressure_does_not_consume_action_or_pointer_identities() {
 }
 
 #[test]
+fn an_unsent_pointer_position_past_its_deadline_is_dropped_not_fatal() {
+    run(|client_cx, host_cx| async move {
+        let mut state = Box::pin(fixture(&client_cx, &host_cx)).await;
+        let limits = state.viewer.media.as_ref().unwrap().limits();
+        let first = state.viewer.pointer(DesktopPoint { x: 1, y: 1 }).unwrap();
+        let until = state.viewer.pending.as_ref().unwrap().until;
+        // Keep the view itself fresh past the position's own deadline, as a
+        // live session under loss does: only the unsent record is stale.
+        let halfway = now(&client_cx).unwrap() + (until - now(&client_cx).unwrap()) / 2;
+        while now(&client_cx).unwrap() < halfway {
+            asupersync::time::sleep(client_cx.now(), Duration::from_millis(1)).await;
+        }
+        let stamp = now(&client_cx).unwrap();
+        let mut progress = [0; 1150];
+        let length = encode_progress(
+            Progress {
+                descriptor: state.descriptor,
+                observed_micros: stamp,
+                observation: SourceObservation::QualifiedUnchanged,
+                pipeline: PipelineState::Idle,
+            },
+            state
+                .viewer
+                .media
+                .as_ref()
+                .unwrap()
+                .bindings()
+                .for_channel(Channel::MediaConfig),
+            &limits,
+            &mut progress,
+        )
+        .unwrap();
+        state
+            .receiver
+            .receive(Channel::MediaConfig, &progress[..length], stamp)
+            .unwrap();
+        state
+            .viewer
+            .input
+            .progress(&progress[..length], &limits, ClientInstant(stamp))
+            .unwrap();
+        while now(&client_cx).unwrap() < until {
+            asupersync::time::sleep(client_cx.now(), Duration::from_millis(1)).await;
+        }
+        // Never sent late, and not a session failure.
+        state.viewer.send().unwrap();
+        assert!(state.viewer.pending.is_none());
+        assert!(!state.viewer.is_closed());
+        // The one slot is free again for a fresh position. The dropped one
+        // keeps its sequence: the host already tolerates pointer gaps.
+        let next = state.viewer.pointer(DesktopPoint { x: 2, y: 2 }).unwrap();
+        assert_eq!(next.sequence, first.sequence + 1);
+        assert!(state.viewer.pending.is_some());
+        state.host.close();
+        assert!(state.driver.take().unwrap().await.handoff_safe());
+    });
+}
+#[test]
 fn real_send_backpressure_and_fresh_source_do_not_retime_an_encoded_action() {
     run(|client_cx, host_cx| async move {
         let mut state = Box::pin(fixture(&client_cx, &host_cx)).await;
@@ -1157,9 +1215,13 @@ fn real_send_backpressure_and_fresh_source_do_not_retime_an_encoded_action() {
         while now(&client_cx).unwrap() < until {
             asupersync::time::sleep(client_cx.now(), Duration::from_millis(1)).await;
         }
+        // Named by the bound set at encoding: the view the action was decided
+        // on, not the fresher source that arrived while it waited.
         assert_eq!(
             state.viewer.drive(Duration::ZERO, |_| {}, block).await,
-            Err(Error::Expired)
+            Err(Error::Unsent(
+                fr_client::input::presentation::SendLimit::View
+            ))
         );
         assert!(state.viewer.is_closed());
         assert_eq!(state.viewer.pending_actions(), 1);

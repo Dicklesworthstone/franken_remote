@@ -533,18 +533,27 @@ pub fn lapse(failure: Failure) -> Option<Lapse> {
                         | crate::media::clock::Error::Client(fr_client::clock::Error::Expired),
                     )
                     // After the controlled viewer named an expired view or host
-                    // silence, its own Expired is a pending input record or
-                    // response that could not be sent before its deadline.
-                    | C::Expired,
+                    // silence, its own Expired is a pending response that could
+                    // not be sent before its deadline. An unsent INPUT record is
+                    // named by the bound that expired it (below).
+                    | C::Expired
+                    | C::Unsent(fr_client::input::presentation::SendLimit::Receipt),
                 ),
             ),
         ) => Some(Lapse::TransportDeadline),
         // The presentation owner reports the source age; the input client that
         // met it first reports its own stop for the same reason.
-        Failure::Observation(ObserverError::Streaming(StreamingViewerError::Control(C::View(
-            P::Media(F::SourceStale | F::SourceUnknown)
-            | P::Input(fr_client::input::Error::Stopped(fr_client::input::StopReason::ViewStale)),
-        )))) => Some(Lapse::ViewStale),
+        Failure::Observation(ObserverError::Streaming(StreamingViewerError::Control(
+            C::View(
+                P::Media(F::SourceStale | F::SourceUnknown)
+                | P::Input(fr_client::input::Error::Stopped(
+                    fr_client::input::StopReason::ViewStale,
+                )),
+            )
+            // An action the transport could not take before the view it was
+            // decided on went stale: never sent, and never sent late.
+            | C::Unsent(fr_client::input::presentation::SendLimit::View),
+        ))) => Some(Lapse::ViewStale),
         Failure::Observation(ObserverError::Streaming(
             StreamingViewerError::Delivery(
                 fr_media::delivery::DeliveryError::ReferenceExpired
@@ -566,12 +575,15 @@ pub fn lapse(failure: Failure) -> Option<Lapse> {
         Failure::Observation(ObserverError::Streaming(StreamingViewerError::Startup(
             crate::media::decoder_startup::Error::Expired,
         ))) => Some(Lapse::VideoStartupExpired),
-        Failure::Observation(ObserverError::Streaming(StreamingViewerError::Control(C::View(
-            P::Input(
+        Failure::Observation(ObserverError::Streaming(StreamingViewerError::Control(
+            C::View(P::Input(
                 fr_client::input::Error::Stopped(fr_client::input::StopReason::InvalidControl)
                 | fr_client::input::Error::Control(fr_client::authority::Error::Expired),
-            ),
-        )))) => Some(Lapse::ControlRenewalFailed),
+            ))
+            // The host ticket that would carry it expired before a newer one
+            // arrived: the lease was not proven live in time.
+            | C::Unsent(fr_client::input::presentation::SendLimit::Ticket),
+        ))) => Some(Lapse::ControlRenewalFailed),
         Failure::Observation(ObserverError::Streaming(error))
             if streaming_transport(error) == Some(T::Expired) =>
         {

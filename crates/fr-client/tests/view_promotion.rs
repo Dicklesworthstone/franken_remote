@@ -112,6 +112,9 @@ fn shown(visible: bool) -> (ReceivePipeline, ViewTracker) {
     (receiver, view)
 }
 fn input(c: InputCredentials) -> InputClient {
+    input_expiring(c, 1_500_000)
+}
+fn input_expiring(c: InputCredentials, expires_at_us: u64) -> InputClient {
     let mut input = InputClient::new(
         c,
         7,
@@ -128,7 +131,7 @@ fn input(c: InputCredentials) -> InputClient {
             credentials: c,
             sequence: 0,
             issued_at_us: 1_000_000,
-            expires_at_us: 1_500_000,
+            expires_at_us,
         },
         &mut bytes,
         &ProtocolLimits::ABSOLUTE,
@@ -211,6 +214,33 @@ fn promotion_preserves_source_time_and_enforces_the_grants_stricter_age() {
     assert_eq!(input.tick(ClientInstant(255_000)), Ok(false));
     assert_eq!(input.suspended_since(), Some(ClientInstant(255_000)));
     assert_eq!(input.stopped(), None);
+}
+#[test]
+fn the_send_deadline_names_the_bound_that_set_it() {
+    use fr_client::input::presentation::SendLimit;
+    // A long ticket leaves the view as the binding bound; a short one binds.
+    for (expires_at_us, limit) in [(1_500_000, SendLimit::View), (1_150_000, SendLimit::Ticket)] {
+        let (receiver, view) = shown(true);
+        let now = ClientInstant(30_000);
+        let mut input = PresentedInput::from_view(
+            input_expiring(credentials(), expires_at_us),
+            &receiver,
+            view,
+            now,
+        )
+        .unwrap();
+        input
+            .confirm_mapping(credentials().session, credentials().view, now)
+            .unwrap();
+        let view_until = input.view_deadline(now).unwrap();
+        let ticket_until = input.ticket_deadline().unwrap();
+        // Each case really exercises its branch.
+        assert_eq!(ticket_until < view_until, limit == SendLimit::Ticket);
+        let (until, bound) = input.send_limit(now).unwrap();
+        assert_eq!(bound, limit);
+        assert_eq!(until, view_until.min(ticket_until));
+        assert_eq!(input.send_deadline(now), Ok(until));
+    }
 }
 #[test]
 fn decode_submission_without_visibility_and_hidden_views_cannot_promote() {

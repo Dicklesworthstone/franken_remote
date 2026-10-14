@@ -35,6 +35,17 @@ impl From<freshness::Error> for Error {
     }
 }
 
+/// Which bound set an input record's send deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendLimit {
+    /// The presented view the action was decided on stops being fresh.
+    View,
+    /// The current host ticket expires.
+    Ticket,
+    /// The receipt timeout from encoding.
+    Receipt,
+}
+
 /// One non-cloneable grant joined to one receiver/configuration. Every action
 /// rechecks current source evidence and receiver lifetime before producing bytes.
 /// On any terminal stop the enclosing session must signal the host's independent
@@ -299,6 +310,11 @@ impl PresentedInput {
     /// A network send requires a measured initial ticket expiry. The legacy
     /// opaque-ticket constructor is deliberately insufficient for this path.
     pub fn send_deadline(&mut self, now: ClientInstant) -> Result<ClientInstant, Error> {
+        self.send_limit(now).map(|(until, _)| until)
+    }
+    /// The send deadline and which bound set it (the earliest; ties go to the
+    /// view, then the ticket). A record still unsent then is never sent late.
+    pub fn send_limit(&mut self, now: ClientInstant) -> Result<(ClientInstant, SendLimit), Error> {
         let view = self.view_deadline(now)?;
         self.input.ready(now)?;
         let ticket = self
@@ -309,7 +325,15 @@ impl PresentedInput {
             .0
             .checked_add(self.input.policy.receipt_timeout_us)
             .ok_or(Error::Input(super::Error::InvalidConfiguration))?;
-        Ok(ClientInstant(view.0.min(ticket.0).min(receipt)))
+        Ok([
+            (view.0, SendLimit::View),
+            (ticket.0, SendLimit::Ticket),
+            (receipt, SendLimit::Receipt),
+        ]
+        .into_iter()
+        .min_by_key(|(until, _)| *until)
+        .map(|(until, limit)| (ClientInstant(until), limit))
+        .expect("three bounds"))
     }
     /// A network ticket still needs independent media-derived freshness. Late
     /// receipts can be collected after stop, but a ticket cannot clear that stop.

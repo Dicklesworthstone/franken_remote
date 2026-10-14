@@ -81,11 +81,10 @@ still pass or fail run to run (bead fr-xfvs).
 **Tailnet path in the namespace suite.** The runner gives the namespace
 loopback MTU 1280 and drops IP fragments, as Tailscale does (6a38a0b). A
 planted 1500-byte datagram limit passes on plain loopback and fails there.
-Under it, on ts1, 58 of 67 pass (b47a271). The failures are:
-- the seven `real_audio` tests (no working PulseAudio on ts1; they pass on
-  trj);
-- the lossy impairment row;
-- the cursor-close step, since fixed (5d25287).
+Under it, on ts1, 61 of 68 pass (2d216d1, 2026-10-13). The seven failures are
+the `real_audio` tests: ts1 has no working PulseAudio; they pass on trj.
+Earlier, at b47a271, 58 of 67 passed: the lossy busy-screen row and the
+cursor-close step (fixed in 5d25287) also failed.
 That step ended a normal controller close as `host_control_failure` in about
 two runs of three on Ubuntu 26.04. XFixes returned a NULL cursor image while
 the cursor's owner disconnected, and the capture worker refused it as an
@@ -102,6 +101,32 @@ were needed: the client suspends on the host's failure notice (1c0a989), its
 input lane follows the replaced configuration channel (302f321), and the host
 authority lets an evidence-backed view restart its evidence under a held
 lease. Lossy network rows are a separate limit (fr-xfvs).
+
+**Lossy paths** (fr-xfvs, 2026-10-13). On a path with 1-5% loss the pinned
+QUIC stack's congestion window sits at its two-packet floor, so a picture can
+miss its 250 ms send horizon. The shared view-only publisher used to end the
+viewer then, and with a sole viewer the whole share. It now fences that viewer,
+sends one Failed notice and recovers it in place when the viewer asks (379364c).
+The delivery allowance for reliable records is now seven probe timeouts instead
+of three (fe2edbc), since one tail loss alone costs about three on this stack.
+The host's terminal close code is now named on the client (c078b34).
+- The busy-screen view-only test passes 6 of 6 (it failed 3 of 6, before and
+  after the pin).
+- In the view-only impairment matrix, 16 of 17 optional rows show every
+  change; before, the 120 ms lossy rows at 5 Mbit/s and the 200 ms RTT row
+  ended after one or two.
+- Controlled sessions on lossy 40 and 120 ms rows still end within a few
+  steps, now always with a named code. A scratch client printing its final
+  error showed that the commonest end was the viewer's own unsent input
+  record passing its send deadline (fr-oj9u), mislabelled
+  `transport_deadline_expired`. Such an end is now named by the bound that
+  expired it (`view_stale`, `control_renewal_failed`), and an expired, never
+  sent pointer position is dropped instead of ending control: the host
+  tolerates missing pointer datagrams and every click and scroll carries its
+  own position. Keys, buttons, text and held-state records still end control.
+  Over the eight lossy 40/120 ms rows (64 steps) the controller held 22-32
+  steps before and 29-34 after, in three runs; `control_renewal_failed` is
+  now the commonest end.
 
 ## Audited state (2026-09-27)
 
