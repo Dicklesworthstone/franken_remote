@@ -51,6 +51,10 @@ does not have. `frd run` therefore calls `Enforcement::detect`. When the process
 holds effective `CAP_NET_ADMIN` (read from `CapEff` in `/proc/self/status`, never
 inferred from the uid), it keeps the direct path above. Otherwise it asks the root helper at
 `/run/frankenremote-ingress/helper.sock` and keeps that connection as the lease.
+An unprivileged run also needs LocalAPI permission to fetch the node's
+certificate. Unless its user is the node's Tailscale operator
+(`sudo tailscale set --operator=$USER`), it refuses `tailscale_permission_denied`
+(`LocalApiDenied`) before any rule or bind.
 Plan section 5.2 requires the privileged part to be a minimal broker with no
 arbitrary privileged RPC. The helper's **entire** API is three requests:
 
@@ -183,6 +187,23 @@ read the ruleset. The script shows:
 The LocalAPI node metadata is synthetic. **This is not a live-tailnet test.** A
 real `tailscale0` under `tailscaled`, a real second NIC on a real host, and the
 emitted systemd unit remain unqualified.
+
+**Live, 2026-10-14 (direct path).** ts1 is a real tailnet node: real
+`tailscale0` (index 84), real `tailscaled`, real nftables. A root `frd run`
+installed `ip daddr 100.74.254.33 udp dport 8443 iif != "tailscale0" drop` at
+priority `raw - 10`. A scratch veth from a second netns delivered UDP for the
+node's tailnet address over a non-tailscale interface, and a counting chain at
+priority -300 (after frd's) counted what got through:
+- before `frd run`: 20 of 20;
+- while it ran: 0 of 20;
+- after it stopped and its table was gone: 20 of 20.
+
+20 datagrams from another node over the tailnet passed. The helper path was not
+run live, because that node's user is not the Tailscale operator (above).
+Running the real helper idle there found that it ignored SIGTERM and SIGINT: a
+fresh signal `recv()` per poll dropped its waker, and an idle helper has no
+other wakeups. Fixed in `frd::signals`: it now logs `stopping`, reclaims, and
+exits about 2 s after either signal.
 
 ## Scope and qualification
 

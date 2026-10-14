@@ -81,6 +81,9 @@ pub mod host_indicator;
 
 #[cfg(target_os = "linux")]
 pub mod session_monitor;
+// One persistent SIGINT/SIGTERM wait for `frd run` and the ingress helper.
+#[cfg(target_os = "linux")]
+mod signals;
 
 // `frd ingress-helper`: root owner of the ingress rule for an unprivileged run.
 #[cfg(target_os = "linux")]

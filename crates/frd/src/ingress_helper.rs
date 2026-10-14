@@ -9,7 +9,7 @@ use asupersync::{
     types::Budget,
 };
 use fr_tailnet::ingress::helper::{self, Event, Settings, SettingsError};
-use std::{future::poll_fn, path::PathBuf, pin::pin, process::ExitCode, task::Poll};
+use std::{path::PathBuf, process::ExitCode};
 
 fn refusal(json: bool, code: &str, detail: &str) -> ExitCode {
     if json {
@@ -160,14 +160,9 @@ pub fn execute(args: &[String], json: bool) -> ExitCode {
             signal(SignalKind::interrupt()).ok(),
             signal(SignalKind::terminate()).ok(),
         );
-        let shutdown = poll_fn(move |task| {
-            for s in [&mut signals.0, &mut signals.1].into_iter().flatten() {
-                if pin!(s.recv()).poll(task).is_ready() {
-                    return Poll::Ready(());
-                }
-            }
-            Poll::Pending
-        });
+        // One persistent wait: the idle helper has no other wakeups, and a
+        // per-poll `recv()` left SIGTERM/SIGINT unable to stop it at all.
+        let shutdown = async move { crate::signals::first(&mut signals).await };
         helper::serve(&cx, &settings, shutdown, &report).await
     });
     match result {

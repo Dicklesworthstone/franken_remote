@@ -638,7 +638,8 @@ fn serve_run(
     runtime.block_on(async {
         let mut policy = policy::Owner::start(&broker, policy)?;
         let result = async {
-            let mut signals = signals(options.handle_signals);
+            let mut handled = signals(options.handle_signals);
+            let mut signals = Watch::new(&mut handled);
             // Fresh evidence for the selected session before any tailnet I/O
             // or binding; a locked or unverifiable session shares nothing.
             if let Some(lifetime) = lifetime {
@@ -737,10 +738,7 @@ fn serve_run(
     })
 }
 
-type Signals = (
-    Option<asupersync::signal::Signal>,
-    Option<asupersync::signal::Signal>,
-);
+use crate::signals::{Signals, Watch};
 
 /// A handled signal stops the run. Returns whether the selected session's
 /// evidence has ended (lock, logout, switch, suspend), even while idle:
@@ -748,14 +746,12 @@ type Signals = (
 /// it, and the stop then cancels the active share and its lease promptly.
 fn local_stops(
     task: &mut std::task::Context<'_>,
-    signals: &mut Signals,
+    signals: &mut Watch<'_>,
     lifetime: Option<&session_monitor::Control>,
     stop: &StopHandle,
 ) -> bool {
-    for s in [&mut signals.0, &mut signals.1].into_iter().flatten() {
-        if pin!(s.recv()).poll(task).is_ready() {
-            stop.request();
-        }
+    if signals.fired(task) {
+        stop.request();
     }
     lifetime.is_some_and(|lifetime| {
         lifetime.register(task);
@@ -796,12 +792,7 @@ fn check(options: &Options) -> Result<(), Error> {
     audio::check(options)
 }
 
-fn signals(
-    enabled: bool,
-) -> (
-    Option<asupersync::signal::Signal>,
-    Option<asupersync::signal::Signal>,
-) {
+fn signals(enabled: bool) -> Signals {
     if enabled {
         (
             signal(SignalKind::interrupt()).ok(),
@@ -817,17 +808,12 @@ fn signals(
 async fn unless_stopped<T>(
     work: impl Future<Output = T>,
     stop: &StopHandle,
-    signals: &mut (
-        Option<asupersync::signal::Signal>,
-        Option<asupersync::signal::Signal>,
-    ),
+    signals: &mut Watch<'_>,
 ) -> Option<T> {
     let mut work = pin!(work);
     poll_fn(|task| {
-        for s in [&mut signals.0, &mut signals.1].into_iter().flatten() {
-            if pin!(s.recv()).poll(task).is_ready() {
-                stop.request();
-            }
+        if signals.fired(task) {
+            stop.request();
         }
         stop.register(task.waker());
         if stop.is_requested() {
@@ -1702,7 +1688,8 @@ mod tests {
             .build()
             .unwrap();
         let stop = StopHandle::default();
-        let mut signals = (None, None);
+        let mut handled = (None, None);
+        let mut signals = Watch::new(&mut handled);
         let done = runtime.block_on(unless_stopped(async { 7 }, &stop, &mut signals));
         assert_eq!(done, Some(7));
         stop.request();
