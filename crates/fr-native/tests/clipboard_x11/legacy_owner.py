@@ -81,11 +81,16 @@ def event(e):
         requests += 1
         if r.target == timestamp and mode == "refuse":
             prop = 0
-        elif len(text) > 16384:
-            # The ordinary INCR declaration has a bounded lower-bound word.
+        elif len(text) > 16384 or mode.startswith("unknown"):
+            # xclip omits the advisory lower-bound word; malformed variants
+            # verify that this compatibility does not admit arbitrary headers.
             x.XSelectInput(d, r.requestor, 1 << 22)
-            x.XChangeProperty(d, r.requestor, prop, incr, 32, 0,
-                              (W * 1)(len(text)), 1)
+            words = 0 if mode.startswith("unknown") else 1
+            fmt = 8 if mode == "unknown-bad-format" else 32
+            if mode == "unknown-extra":
+                words = 2
+            x.XChangeProperty(d, r.requestor, prop, incr, fmt, 0,
+                              (W * 2)(len(text), len(text)), words)
             transfers[(r.requestor, prop)] = (text, 0)
         else:
             # xclip treats unknown targets like its selected UTF8 target.
@@ -100,7 +105,11 @@ def event(e):
         key = (e.prop.window, e.prop.atom)
         if key in transfers:
             data, offset = transfers[key]
-            chunk = data[offset:offset + 16384]
+            size = 1 if mode == "unknown-tiny" else 65537 if mode.startswith("unknown") else 16384
+            chunk = data[offset:offset + size]
+            if not chunk and mode == "unknown-unterminated":
+                del transfers[key]
+                return
             x.XChangeProperty(d, key[0], key[1], utf8, 8, 0,
                               c.c_char_p(chunk), len(chunk))
             x.XFlush(d)

@@ -6,13 +6,13 @@ use std::{
     process::{Child, ChildStdin, Command, Stdio},
 };
 
-struct Peer {
+pub(super) struct Peer {
     process: Child,
     input: ChildStdin,
     output: BufReader<UnixStream>,
 }
 impl Peer {
-    fn new(display: &str, mode: &str) -> Self {
+    pub(super) fn new(display: &str, mode: &str) -> Self {
         let (reader, writer) = UnixStream::pair().unwrap();
         reader
             .set_read_timeout(Some(Duration::from_secs(4)))
@@ -40,7 +40,7 @@ impl Peer {
         assert!(line.ends_with('\n'));
         line.trim().to_owned()
     }
-    fn copy(&mut self, text: &str, same_time: bool) {
+    pub(super) fn copy(&mut self, text: &str, same_time: bool) {
         use std::fmt::Write as _;
         let mut hex = String::new();
         for byte in text.bytes() {
@@ -55,7 +55,7 @@ impl Peer {
         .unwrap();
         assert_eq!(self.line(), "OWNED");
     }
-    fn requests(&mut self) -> usize {
+    pub(super) fn requests(&mut self) -> usize {
         writeln!(self.input, "stats").unwrap();
         self.line().parse().unwrap()
     }
@@ -171,3 +171,6 @@ fn ending_or_replacing_the_subscription_never_downgrades_an_active_read() {
         assert_eq!(complete(&mut reader).unwrap_err(), ReadError::LocalChanged);
     }
 }
+
+#[path = "incr_unknown.rs"]
+mod incr_unknown;

@@ -619,7 +619,12 @@ fn a_new_selection_retires_started_outbound_text_before_backpressure_clears() {
     assert_eq!(record.accepted, 1);
     // Losing the selection is not an empty string and cannot revive old text.
     app.close();
-    for _ in 0..10 {
+    // Disconnect is asynchronous on the independent X server. Wait for its
+    // real selection-loss notification, not ten unyielding local polls which
+    // can all finish before the server processes the disconnect. Backpressure
+    // stays in force throughout; no record may slip through during the wait.
+    let until = Instant::now() + Duration::from_secs(1);
+    while sync.retained_channel_bytes() != 0 {
         sync.poll(
             &mut scratch,
             &mut record,
@@ -627,7 +632,10 @@ fn a_new_selection_retires_started_outbound_text_before_backpressure_clears() {
             || panic!("no selection"),
         )
         .unwrap();
+        assert!(Instant::now() < until);
+        std::thread::sleep(Duration::from_micros(100));
     }
+    assert_eq!(record.accepted, 1);
     assert_eq!(sync.retained_channel_bytes(), 0);
     record.clear();
     let result = sync
@@ -713,3 +721,6 @@ mod publication;
 
 #[path = "synchronize/controller.rs"]
 mod controller;
+
+#[path = "synchronize/interoperability.rs"]
+mod interoperability;

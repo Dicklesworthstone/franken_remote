@@ -275,15 +275,7 @@ impl Capture {
                 }
                 let reply = self.property(clipboard, clipboard.atoms.utf8, 0, scratch)?;
                 if reply.kind == clipboard.atoms.incr {
-                    if reply.format != 32 || reply.len != 4 || reply.remaining != 0 {
-                        return Err(ReadError::Malformed);
-                    }
-                    self.lower_bound =
-                        u32::from_ne_bytes(scratch[..4].try_into().expect("four bytes")) as usize;
-                    if self.lower_bound > clipboard.limit {
-                        return Err(ReadError::Limit);
-                    }
-                    self.stage = Stage::NextChunk(self.delete(clipboard)?);
+                    self.incremental(clipboard, &reply, scratch)?;
                 } else {
                     self.data(clipboard, &reply, scratch, false, 0, None)?;
                 }
@@ -310,6 +302,31 @@ impl Capture {
             }
         }
         Ok(false)
+    }
+    fn incremental(
+        &mut self,
+        clipboard: &X11Clipboard,
+        reply: &ffi::Property,
+        scratch: &[u8; CHUNK],
+    ) -> Result<(), ReadError> {
+        if reply.format != 32 || reply.remaining != 0 {
+            return Err(ReadError::Malformed);
+        }
+        // Some native owners (notably xclip) omit the advisory
+        // lower-bound word. Absence means no size claim, not empty
+        // text: still require typed chunks and the terminator under
+        // the original byte/count/deadline bounds. Never allocate
+        // from the hint or interpret arbitrary header lengths.
+        self.lower_bound = match reply.len {
+            0 => 0,
+            4 => u32::from_ne_bytes(scratch[..4].try_into().expect("four bytes")) as usize,
+            _ => return Err(ReadError::Malformed),
+        };
+        if self.lower_bound > clipboard.limit {
+            return Err(ReadError::Limit);
+        }
+        self.stage = Stage::NextChunk(self.delete(clipboard)?);
+        Ok(())
     }
     fn validated(&self) -> Result<bool, ReadError> {
         if self.text.0.len() < self.lower_bound {
