@@ -8,10 +8,10 @@ Construct `SendCache` inside an admitted subscription with its actual transport-
 
 Call `next_packet` only when the Asupersync transport has resource/congestion admission for another packet. It emits the reliable progress announcement before the picture's payload, then one fragment or recovery chunk into caller-owned storage. An emitted `PacketOffer` is NOT a transport acknowledgement. Retain at most the admitted bounded pending packet and check `send_by_micros` again at actual send. If an offered packet must be abandoned, repair it within the original deadline or fence/recover the affected chain; never assume that clearing an application buffer retracts bytes already submitted to a transport.
 
-Forward incoming authenticated repair records to `queue_repair`, then ask `next_repair_packet` for one original cached fragment at a time. Actual cached fragment counts, sorted range bounds, one pending repair job, retry cadence, maximum rounds, and aggregate repair-byte allowance all apply. Repair traffic also passes the transport's normal congestion controller. Recovery-generation replacement does not replenish a session's repair-byte allowance. Retransmission never extends the original picture's retention deadline.
+Forward incoming authenticated repair records to `queue_repair`, then ask `next_repair_packet` for one original cached fragment at a time. Actual cached fragment counts, sorted range bounds, one precharged pending repair job per cached picture, retry cadence, maximum rounds, and aggregate repair-byte allowance all apply. Repair traffic also passes the transport's normal congestion controller. Recovery-generation replacement does not replenish a session's repair-byte allowance. Retransmission never extends the original picture's retention deadline.
 
-An announced datagram picture can retain an early repair request in its existing
-single job slot. That fixed job becomes eligible once all original fragments
+An announced datagram picture can retain an early repair request in its own
+inline job slot. That fixed job becomes eligible once all original fragments
 named in its ranges have been packetized; an unrelated tail no longer delays
 repairs of an already-observed prefix hole. Requests naming unissued data remain
 pending without consuming repair-byte allowance on repeated polls. The gate
@@ -19,6 +19,19 @@ uses the last validated range, not just the first, and does not expand, clip or
 replace the accepted request. Reliable recovery and unannounced pictures remain
 ineligible. The original packet cursor and final transport-admission checks are
 unchanged; packetization is not delivery evidence.
+
+Repair requests for different pictures coexist within the admitted cache window
+(default 32, hard maximum 64); a busy picture cannot discard another picture's
+only request. The full inline range storage is charged as picture metadata before
+capture admission, so requests allocate neither memory nor extra payload copies.
+One picture still admits only one job and keeps its consumed round/cadence ledger.
+At each packet, the earliest-deadline eligible reference wins, with frame order
+breaking ties. Requests naming unissued originals are skipped without consuming
+byte credit or delaying another eligible picture. Eviction, close and generation
+replacement destroy the original picture's jobs; no allowance is replenished.
+`repair_window` exercises burst losses across dependent pictures, reordered
+requests, precharged capacity, unchanged deadlines and the shared byte allowance
+with real cache/reassembly/wire owners and deterministic packet/clock fixtures.
 
 The sender cache admits actual vector capacity and picture metadata, not just logical payload length. It has an explicit 32-picture default and 64-picture implementation ceiling, separate from receiver W: a 250-ms repair horizon at a 60-fps source cadence can require more than twelve sender pictures. A virtual-clock 180-frame regression exercises that distinction. It is not a throughput measurement. Expired fully emitted pictures leave the cache; an expired unsent reference fences dependent work instead of emitting a broken chain. On capacity refusal, the caller must preserve a valid dependency chain or recover, not silently skip that encoded reference.
 

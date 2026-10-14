@@ -213,6 +213,9 @@ struct CachedPicture {
     next_original: u32,
     repair_rounds: u8,
     next_repair: u64,
+    // One inline, precharged request per admitted picture. A busy picture must
+    // not consume another picture's bounded receiver attempts by refusing it.
+    repair: Option<RepairJob>,
 }
 impl CachedPicture {
     fn original_complete(&self) -> bool {
@@ -236,7 +239,6 @@ impl CachedPicture {
     }
 }
 struct RepairJob {
-    frame: u64,
     ranges: [RepairRange; 64],
     count: usize,
     range: usize,
@@ -262,7 +264,6 @@ pub struct SendCache {
     last_progress: Option<Progress>,
     observation: Option<PendingObservation>,
     last_now: Option<u64>,
-    repair: Option<RepairJob>,
     repair_window_start: u64,
     repair_spent: usize,
     closed: bool,
@@ -305,7 +306,6 @@ impl SendCache {
             last_progress: None,
             observation: None,
             last_now: None,
-            repair: None,
             repair_window_start: 0,
             repair_spent: 0,
             closed: false,
@@ -459,6 +459,7 @@ impl SendCache {
             next_original: 0,
             repair_rounds: 0,
             next_repair: now,
+            repair: None,
         });
         self.used_bytes = used;
         self.used_pictures += 1;
@@ -544,10 +545,12 @@ impl SendCache {
             purpose: OfferPurpose::Original,
         }))
     }
-    /// Accept one bounded repair job from an already authorized control channel.
+    /// Accept one bounded repair job per cached picture from an already authorized
+    /// control channel. The inline job is charged with its picture at admission;
+    /// at most `max_cached_pictures` jobs exist, without a packet/payload queue.
     /// Queueing never extends the original cache deadline or bypasses pacing.
     /// An announced datagram picture may still be emitting originals when its
-    /// receiver asks for repair. Keep that request in the same single bounded
+    /// receiver asks for repair. Keep that request in its original picture
     /// slot instead of spending another receiver retry/round trip. Emission
     /// waits only for the requested original prefix, not unrelated tail data;
     /// the original horizon still bounds the job.
@@ -560,9 +563,6 @@ impl SendCache {
         )?;
         let request = decode_repair(record, self.limits.max_fragments(), &self.limits)?;
         self.tick(now)?;
-        if self.repair.is_some() {
-            return Err(SendError::RepairBusy);
-        }
         let index = self
             .index(request.frame)
             .ok_or(SendError::FrameUnavailable)?;
@@ -580,14 +580,16 @@ impl SendCache {
             ranges[count] = range;
             count += 1;
         }
+        if p.repair.is_some() {
+            return Err(SendError::RepairBusy);
+        }
         if now < p.next_repair || p.repair_rounds >= self.policy.max_repair_rounds {
             return Err(SendError::RepairRateLimited);
         }
         let next_repair = deadline(now, self.policy.minimum_repair_interval_micros)?;
         p.next_repair = next_repair;
         p.repair_rounds += 1;
-        self.repair = Some(RepairJob {
-            frame: request.frame,
+        p.repair = Some(RepairJob {
             fragment: ranges[0].start,
             ranges,
             count,
@@ -595,8 +597,8 @@ impl SendCache {
         });
         Ok(())
     }
-    /// Emits one original fragment from the cache. Returns no packet once the
-    /// job completes/expires or its requested originals are not yet emitted.
+    /// Emit one requested original fragment from the earliest-deadline eligible
+    /// picture. Returns no packet when all jobs are done or await their originals.
     /// Waiting consumes no repair bytes. Repair traffic has its own bounded offered-load
     /// allowance AND must pass the transport's normal congestion admission.
     pub fn next_repair_packet(
@@ -605,19 +607,27 @@ impl SendCache {
         out: &mut [u8],
     ) -> Result<Option<PacketOffer>, SendError> {
         self.tick(now)?;
-        let Some(job) = self.repair.as_ref() else {
+        // Earliest deadline/reference first, irrespective of request arrival.
+        // A job naming unissued originals must not block other eligible jobs.
+        let selected = self
+            .pictures
+            .iter()
+            .enumerate()
+            .filter_map(|(index, picture)| {
+                let p = picture.as_ref()?;
+                let job = p.repair.as_ref()?;
+                (job.ranges[job.count - 1].end <= p.next_original).then_some((
+                    index,
+                    p.send_by,
+                    p.progress.descriptor.frame,
+                ))
+            })
+            .min_by_key(|&(_, until, frame)| (until, frame));
+        let Some((index, _, frame)) = selected else {
             return Ok(None);
         };
-        let index = self.index(job.frame).ok_or(SendError::FrameUnavailable)?;
-        let p = self.pictures[index].as_ref().expect("located");
-        // Validated ranges are ordered and nonempty. Wait for the originals
-        // actually named by this fixed job, not the whole picture: an observed
-        // prefix hole can be repaired while unrelated tail fragments are paced.
-        // A request naming unissued data stays in the existing bounded slot;
-        // repeated polls consume no byte credit and never expand its ranges.
-        if job.ranges[job.count - 1].end > p.next_original {
-            return Ok(None);
-        }
+        let p = self.pictures[index].as_mut().expect("selected");
+        let job = p.repair.as_ref().expect("selected job");
         let fragment = p.fragment(job.fragment)?;
         let charge = fragment.bytes.len()
             + if fragment.descriptor.reference.is_some() {
@@ -626,7 +636,7 @@ impl SendCache {
                 65
             };
         if charge > self.policy.repair_bytes_per_window - self.repair_spent {
-            self.repair = None;
+            p.repair = None;
             return Err(SendError::RepairBudgetExceeded);
         }
         let n = encode_fragment(
@@ -638,7 +648,7 @@ impl SendCache {
         let offer = PacketOffer {
             channel: Channel::Video,
             byte_len: n,
-            frame: job.frame,
+            frame,
             send_by_micros: p.send_by,
             origin: OfferOrigin {
                 owner: self.owner.clone(),
@@ -647,12 +657,12 @@ impl SendCache {
             purpose: OfferPurpose::Repair,
         };
         self.repair_spent += n;
-        let job = self.repair.as_mut().expect("present");
+        let job = p.repair.as_mut().expect("present");
         job.fragment += 1;
         if job.fragment == job.ranges[job.range].end {
             job.range += 1;
             if job.range == job.count {
-                self.repair = None;
+                p.repair = None;
             } else {
                 job.fragment = job.ranges[job.range].start;
             }
@@ -705,13 +715,6 @@ impl SendCache {
                 self.used_bytes -= p.charged;
                 self.used_pictures -= 1;
             }
-        }
-        if self
-            .repair
-            .as_ref()
-            .is_some_and(|job| self.index(job.frame).is_none())
-        {
-            self.repair = None;
         }
         if now - self.repair_window_start >= self.policy.repair_window_micros {
             self.repair_window_start = now;
@@ -816,7 +819,6 @@ impl SendCache {
         }
         self.used_bytes = 0;
         self.used_pictures = 0;
-        self.repair = None;
     }
     fn check_clock(&mut self, now: u64) -> Result<(), SendError> {
         if self.last_now.is_some_and(|last| now < last) {
