@@ -13,17 +13,14 @@ use std::{sync::Arc, time::Duration};
 
 // PROTOCOL_TRANSPORT_CLOSE.md: namespaces for the existing reason enums.
 // Only a reason is carried. No lease, cleanup stage, receipt count or content.
-const CLOSED_REASON_BASE: u64 = 0x4652_0100;
-const REVOKED_REASON_BASE: u64 = 0x4652_0200;
-
 pub(super) fn report_code(report: &Report, binding: Binding) -> Result<u64, Error> {
     let (code, copy) = match report {
         Report::Closed(closed) => (
-            CLOSED_REASON_BASE + closed.reason as u64,
+            crate::quic::PeerClose::Session(closed.reason).code(),
             Report::Closed(*closed),
         ),
         Report::Revoked(revoked) => (
-            REVOKED_REASON_BASE + revoked.reason as u64,
+            crate::quic::PeerClose::Lease(revoked.reason).code(),
             Report::Revoked(*revoked),
         ),
     };

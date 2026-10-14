@@ -437,6 +437,35 @@ fn streaming_transport(error: StreamingViewerError) -> Option<fr_transport::quic
     }
 }
 
+pub use fr_transport::quic::PeerClose;
+
+/// The host's typed reason when it closed this connection with a recognized
+/// close code (the terminal close-packet fallback), through every wrapper that
+/// carries a session or streaming transport failure. For naming only: it is
+/// not a report, and it is not retryable (the host decided).
+pub fn peer_close(failure: Failure) -> Option<PeerClose> {
+    use crate::session_startup::{ControlledViewerError as C, Error as S};
+    use fr_transport::quic::Error as T;
+
+    let error = match failure {
+        Failure::Connection(ConnectionError::Session(S::Transport(e)))
+        | Failure::Observation(
+            ObserverError::Transport(e)
+            | ObserverError::Session(S::Transport(e))
+            | ObserverError::Streaming(
+                StreamingViewerError::Session(S::Transport(e))
+                | StreamingViewerError::Control(C::Session(S::Transport(e))),
+            ),
+        ) => e,
+        Failure::Observation(ObserverError::Streaming(error)) => streaming_transport(error)?,
+        _ => return None,
+    };
+    match error {
+        T::PeerClosed(peer) => Some(peer),
+        _ => None,
+    }
+}
+
 /// Why a session ended locally without an authenticated host report. For the
 /// user's diagnosis only: it never retries, grants or resumes anything, and a
 /// host refusal or revocation report takes precedence over it.

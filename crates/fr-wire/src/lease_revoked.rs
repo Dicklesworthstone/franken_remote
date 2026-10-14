@@ -28,6 +28,10 @@ pub enum Reason {
     Suspended = 9,
 }
 impl Reason {
+    /// The reason with this wire value, if any (zero and unassigned are None).
+    pub fn from_wire(value: u16) -> Option<Self> {
+        Self::parse(value).ok()
+    }
     fn parse(value: u16) -> Result<Self, WireError> {
         Ok(match value {
             1 => Self::LocalRevoke,

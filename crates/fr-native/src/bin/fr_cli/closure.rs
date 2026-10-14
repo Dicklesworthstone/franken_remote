@@ -114,19 +114,8 @@ const fn cleanup(stage: Cleanup) -> &'static str {
 /// successful completion of a local close exchange. Its stages remain exact.
 #[cfg(target_os = "linux")]
 pub(super) fn failure(value: Closed) -> Failure {
-    use fr_wire::closure::ClosedReason;
-    let code = match value.reason {
-        ClosedReason::ClientRequested => "host_session_closed",
-        ClosedReason::HostStopping => "host_stopping",
-        ClosedReason::AuthorityExpired => "host_authority_expired",
-        ClosedReason::PermissionLost => "host_permission_lost",
-        ClosedReason::ViewInvalidated => "host_view_invalidated",
-        ClosedReason::ProtocolError => "host_protocol_error",
-        ClosedReason::HostFailure => "host_failure",
-        ClosedReason::SessionReplaced => "host_session_replaced",
-    };
     let mut error = Failure::new(
-        code,
+        closed_code(value.reason),
         "The host ended this session. Check its reported reason, cleanup and outstanding effects before starting a new session; previously submitted actions are not rolled back.",
         1,
     );
@@ -136,6 +125,30 @@ pub(super) fn failure(value: Closed) -> Failure {
         host: Some(value),
     });
     error
+}
+/// The same reason carried only by the host's terminal close code: no Closed
+/// report arrived, so none is shown and its cleanup and effects are unknown.
+#[cfg(target_os = "linux")]
+pub(super) fn close_code_failure(reason: fr_wire::closure::ClosedReason) -> Failure {
+    Failure::new(
+        closed_code(reason),
+        "The host ended this session and closed the connection with this reason, but no Closed report arrived, so its cleanup and outstanding effects are unknown. Previously submitted actions are not rolled back.",
+        1,
+    )
+}
+#[cfg(target_os = "linux")]
+const fn closed_code(reason: fr_wire::closure::ClosedReason) -> &'static str {
+    use fr_wire::closure::ClosedReason;
+    match reason {
+        ClosedReason::ClientRequested => "host_session_closed",
+        ClosedReason::HostStopping => "host_stopping",
+        ClosedReason::AuthorityExpired => "host_authority_expired",
+        ClosedReason::PermissionLost => "host_permission_lost",
+        ClosedReason::ViewInvalidated => "host_view_invalidated",
+        ClosedReason::ProtocolError => "host_protocol_error",
+        ClosedReason::HostFailure => "host_failure",
+        ClosedReason::SessionReplaced => "host_session_replaced",
+    }
 }
 
 /// Local cleanup failure/cancellation must keep any already-collected host

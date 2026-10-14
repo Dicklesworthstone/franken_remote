@@ -29,17 +29,33 @@ impl Report {
         }
     }
     const fn code(self) -> &'static str {
-        match self.reason {
-            Reason::LocalRevoke => "host_control_revoked",
-            Reason::LeaseExpired => "host_control_lease_expired",
-            Reason::ObservationEnded => "host_observation_ended",
-            Reason::ViewInvalidated => "host_view_invalidated",
-            Reason::SessionEnded => "host_session_ended",
-            Reason::PermissionLost => "host_permission_lost",
-            Reason::HostFailure => "host_control_failure",
-            Reason::ClientRequested => "host_control_released",
-            Reason::Suspended => "host_session_suspended",
-        }
+        code(self.reason)
+    }
+}
+const fn code(reason: Reason) -> &'static str {
+    match reason {
+        Reason::LocalRevoke => "host_control_revoked",
+        Reason::LeaseExpired => "host_control_lease_expired",
+        Reason::ObservationEnded => "host_observation_ended",
+        Reason::ViewInvalidated => "host_view_invalidated",
+        Reason::SessionEnded => "host_session_ended",
+        Reason::PermissionLost => "host_permission_lost",
+        Reason::HostFailure => "host_control_failure",
+        Reason::ClientRequested => "host_control_released",
+        Reason::Suspended => "host_session_suspended",
+    }
+}
+
+/// The host closed the connection with this lease reason as its close code,
+/// because no `LeaseRevoked` report could be sent. Same code; no report, so
+/// cleanup and effects are unknown.
+pub(super) fn closed_by_code(reason: Reason) -> Failure {
+    Failure {
+        code: code(reason),
+        next: "Control has ended; it will not be reacquired automatically. The host closed the connection with this reason but sent no cleanup or effect report, so both are unknown. Previously submitted actions are not rolled back.",
+        exit: 1,
+        revocation: None,
+        closure: None,
     }
 }
 

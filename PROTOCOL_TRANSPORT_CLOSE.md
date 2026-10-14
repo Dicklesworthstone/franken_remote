@@ -63,7 +63,34 @@ abandonment. Admission/fencing are explicit fixtures, not native-input or tailne
 qualification. These tests were added without an available local Rust toolchain;
 execution remains unverified in the authoring environment.
 
-The application currently recognizes the peer's transport closure but still uses
-its generic Closed error rather than displaying these reason codes. Mapping the
-authenticated application code into CLI-specific diagnostics and qualification on
-the namespace/live-tailnet failure scenarios remain under bead `fr-t4lj`.
+## Receiving side (2026-10-13)
+
+`fr_transport::quic::PeerClose` decodes a code into its reason and is also the
+sender's encoder, so both sides share one table. When an established
+`QuicRecords` finds that its peer closed the connection, it returns
+`Error::PeerClosed(reason)` instead of `Error::Closed` only if
+`close_was_peer_initiated()` holds and the code is an assigned reason in either
+family. Every other close (local close, idle expiry, unknown or zero codes, and
+all QUIC transport error codes, which lie far below these values) stays
+`Error::Closed`. The pinned API does not expose whether the frame was 0x1c or
+0x1d; the value ranges cannot overlap the defined transport codes.
+
+`frd::native_connection::reconnect::peer_close` extracts the reason through
+every session and streaming transport wrapper. It is never retried. `fr`
+names it with the same codes as the corresponding report: a session reason
+like a `Closed` report (`host_stopping`, `host_failure`, ..., the table in
+`fr_cli/closure.rs` from 60158e8), a lease reason like a `LeaseRevoked` report
+(`host_control_revoked`, ...). No `host_report` or `revocation` object is
+printed, because none arrived; the next action says cleanup and effects are
+unknown.
+
+Tests: `peer_close` unit tests (every assigned reason round-trips, nothing
+else decodes); `terminal_close_packet` (the application peer now ends with
+`PeerClosed(Lease(LocalRevoke))`); frd `recovery_tests` (extraction through
+seven wrappers, never retried or relabelled as a local lapse); the CLI's
+`a_host_close_code_is_named_like_its_report_without_claiming_one`.
+
+Namespace evidence: before this, two optional impairment rows ended
+`native_session_failed` with `Transport(Closed)` once the host began sending
+this close (40 ms RTT with 5% loss, controlled; 200 ms RTT, view-only).
+Live-tailnet qualification remains under bead `fr-t4lj`.

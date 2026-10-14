@@ -92,3 +92,39 @@ fn ambiguous_recovery_closure_and_hung_native_work_do_not_trigger_new_sessions()
         assert!(!retryable(error));
     }
 }
+
+#[test]
+fn a_typed_peer_close_is_extracted_from_every_transport_wrapper_and_never_retried() {
+    use crate::session_startup::{ControlledViewerError as C, Error as S};
+    use fr_transport::quic::PeerClose;
+    use fr_wire::closure::ClosedReason;
+
+    let peer = PeerClose::Session(ClosedReason::HostFailure);
+    let closed = Transport::PeerClosed(peer);
+    for failure in [
+        Failure::Connection(ConnectionError::Session(S::Transport(closed))),
+        Failure::Observation(ObserverError::Transport(closed)),
+        Failure::Observation(ObserverError::Session(S::Transport(closed))),
+        observation(StreamingViewerError::Session(S::Transport(closed))),
+        observation(StreamingViewerError::Control(C::Session(S::Transport(
+            closed,
+        )))),
+        observation(StreamingViewerError::Recovery(recovery::Error::Transport(
+            closed,
+        ))),
+        observation(StreamingViewerError::Control(C::Input(
+            crate::input_quic::Error::Transport(closed),
+        ))),
+    ] {
+        assert_eq!(peer_close(failure), Some(peer), "{failure:?}");
+        assert!(!retryable(failure), "{failure:?}");
+        assert_eq!(lapse(failure), None, "{failure:?}");
+    }
+    // A bare closure carries no reason.
+    assert_eq!(
+        peer_close(observation(StreamingViewerError::Session(S::Transport(
+            Transport::Closed
+        )))),
+        None
+    );
+}

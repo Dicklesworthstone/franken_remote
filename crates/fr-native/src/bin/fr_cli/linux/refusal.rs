@@ -112,6 +112,14 @@ pub(super) fn observation(error: ObserverError) -> Option<Failure> {
 }
 #[cfg(any(test, feature = "linux-desktop"))]
 pub(super) fn reconnect(error: native_connection::reconnect::Failure) -> Option<Failure> {
+    use native_connection::reconnect::PeerClose;
+    match native_connection::reconnect::peer_close(error) {
+        Some(PeerClose::Session(reason)) => {
+            return Some(crate::closure::close_code_failure(reason));
+        }
+        Some(PeerClose::Lease(reason)) => return Some(crate::terminal::closed_by_code(reason)),
+        None => {}
+    }
     match error {
         native_connection::reconnect::Failure::Connection(error) => connection(error),
         native_connection::reconnect::Failure::Observation(error) => observation(error),
@@ -219,6 +227,41 @@ mod tests {
     }
 
     #[test]
+    fn a_host_close_code_is_named_like_its_report_without_claiming_one() {
+        use fr_transport::quic::{Error as Transport, PeerClose};
+        use fr_wire::{closure::ClosedReason, lease_revoked::Reason as Lease};
+        let cases = [
+            (
+                PeerClose::Session(ClosedReason::HostStopping),
+                "host_stopping",
+            ),
+            (
+                PeerClose::Session(ClosedReason::HostFailure),
+                "host_failure",
+            ),
+            (PeerClose::Lease(Lease::LocalRevoke), "host_control_revoked"),
+            (PeerClose::Lease(Lease::HostFailure), "host_control_failure"),
+            (PeerClose::Lease(Lease::Suspended), "host_session_suspended"),
+        ];
+        for (peer, expected) in cases {
+            let error = session_startup::Error::Transport(Transport::PeerClosed(peer));
+            for failure in [
+                native_connection::reconnect::Failure::Observation(ObserverError::Streaming(
+                    StreamingViewerError::Session(error),
+                )),
+                native_connection::reconnect::Failure::Observation(ObserverError::Streaming(
+                    StreamingViewerError::Control(ControlledViewerError::Session(error)),
+                )),
+            ] {
+                let named = reconnect(failure).unwrap();
+                assert_eq!((named.code, named.exit), (expected, 1));
+                // No report arrived: none is shown.
+                assert!(named.closure.is_none() && named.revocation.is_none());
+            }
+        }
+    }
+
+    #[test]
     fn operation_and_effect_receipts_are_not_relabelled_as_startup_refusals() {
         for stage in [
             None,
@@ -281,4 +324,7 @@ mod terminal_tests {
 }
 
 #[cfg(test)]
+// This file is loaded through #[path], so a bare `mod` would resolve to
+// linux/closed_tests.rs.
+#[path = "refusal/closed_tests.rs"]
 mod closed_tests;
