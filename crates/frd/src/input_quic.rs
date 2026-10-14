@@ -350,6 +350,9 @@ impl QuicInput {
     /// mints a ticket, replays an action, nor slides a receipt's send deadline.
     /// After connection loss, repeated service still collects the late native
     /// result into `last_reply`/`pending_receipt`, but cannot send it elsewhere.
+    /// An expired ticket that never entered transport is obsolete feedback,
+    /// not a failed action receipt or an expired lease. Drop only that ticket;
+    /// the original issuance cadence and consumed identities remain unchanged.
     pub fn service(
         &mut self,
         connection: &mut QuicRecords,
@@ -384,7 +387,8 @@ impl QuicInput {
             let now = self.cx.timer_driver().ok_or(Error::Clock)?.now().as_nanos() / 1000;
             if self.pending.as_ref().is_some_and(|p| now >= p.until) {
                 self.pending = None;
-                return Err(Error::TicketExpired);
+                io.complete = true;
+                return Ok(Progress::Idle);
             }
         }
         let control = self.control();
@@ -403,6 +407,16 @@ impl QuicInput {
                     progress
                 }
                 Err(quic::Error::Backpressure) => pending.backpressure(),
+                // Expiry between the sample above and final admission is also
+                // disposable ONLY for this never-admitted ticket. Expired
+                // transport-retained records close QUIC and remain terminal;
+                // action receipts are never discarded or relabelled as idle.
+                Err(quic::Error::Expired)
+                    if ticket && !io.connection.is_closed() && !control.is_stopped() =>
+                {
+                    self.pending = None;
+                    Progress::Idle
+                }
                 Err(e) => return Err(Error::Transport(e)),
             }
         } else if progress == Progress::Idle && self.control().is_stopped() {

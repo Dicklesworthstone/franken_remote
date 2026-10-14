@@ -203,7 +203,7 @@ fn send_backpressure_preserves_exact_ticket_and_original_native_expiry() {
 }
 
 #[test]
-fn unsent_ticket_expires_in_place_and_revokes_without_minting_replacement() {
+fn unsent_ticket_expires_without_ending_the_lease_or_minting_a_replacement() {
     let rt = network::runtime();
     let cx = rt.request_cx_with_budget(Budget::INFINITE);
     rt.block_on(async {
@@ -215,23 +215,33 @@ fn unsent_ticket_expires_in_place_and_revokes_without_minting_replacement() {
             let saved = collect_blocked_ticket(&mut f).await;
             let delay = saved.expires_at_us.saturating_sub(network::clock(&f.cx)) + 1_000;
             asupersync::time::sleep(f.cx.now(), Duration::from_micros(delay)).await;
-            assert_eq!(
-                f.input.service(&mut f.pair.server, || true),
-                Err(Error::TicketExpired)
-            );
-            assert!(f.input.control().is_stopped());
-            assert!(f.pair.server.is_closed());
-            assert!(f.input.pending_ticket().is_none());
-            assert_eq!(f.tickets, []);
-            assert!(
-                f.input
-                    .renew_ticket(
-                        &mut f.pair.server,
-                        || true,
-                        || panic!("closed session must not mint")
-                    )
-                    .is_err()
-            );
+            for _ in 0..3 {
+                assert_eq!(
+                    f.input.service(&mut f.pair.server, || true),
+                    Ok(Progress::Idle)
+                );
+                assert!(!f.input.control().is_stopped());
+                assert!(!f.pair.server.is_closed());
+                assert!(f.input.pending_ticket().is_none());
+                assert!(f.input.pending_receipt().is_none());
+                assert!(f.input.can_accept_input());
+                assert_eq!(f.tickets, []);
+                // Only the deliberately occupied slot entered transport.
+                assert_eq!(f.pair.server.usage().critical_send_records, 1);
+            }
+            // Service did not create another ticket. A later explicit cadence
+            // uses a new ID and sequence on the SAME original native lease.
+            assert_eq!(renew(&mut f, 11), Progress::NativePending);
+            until_tickets(&mut f, 1).await;
+            let next = f.tickets[0];
+            assert_eq!(next.sequence, saved.sequence + 1);
+            assert_eq!(next.credentials.session, saved.credentials.session);
+            assert_eq!(next.credentials.lease, saved.credentials.lease);
+            assert_eq!(next.credentials.ticket, InputTicketId::from_raw(11));
+            assert!(next.issued_at_us >= saved.expires_at_us);
+            assert_eq!(next.expires_at_us - next.issued_at_us, 1_000_000);
+            assert!(f.receipts.is_empty());
+            f.input.control().stop(StopReason::LocalRevoke);
             f.cleared().await;
         }))
         .await;
@@ -359,3 +369,6 @@ fn legacy_route_refuses_ticket_renewal_and_feedback_is_not_a_wildcard() {
         }
     });
 }
+
+#[path = "ticket/expiry.rs"]
+mod expiry;
