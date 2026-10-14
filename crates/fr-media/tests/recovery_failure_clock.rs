@@ -96,7 +96,7 @@ fn progress(r: &mut ReceivePipeline, c: ReceiveConfig, failed: bool, at: u64) {
     .unwrap();
     let result = r.receive(Channel::MediaConfig, &out[..n], at);
     if failed {
-        assert_eq!(result, Err(DeliveryError::DecodeFailed));
+        assert_eq!(result, Err(DeliveryError::ReferenceExpired));
     } else {
         result.unwrap();
     }
@@ -107,12 +107,14 @@ fn failure_time_survives_idle_service_before_first_request_preparation() {
     let (c, mut r, mut q) = ready();
     progress(&mut r, c, true, 100);
     for now in [101, 5_000, 10_000] {
-        assert_eq!(r.tick(now), Err(DeliveryError::DecodeFailed));
+        assert_eq!(r.tick(now), Err(DeliveryError::ReferenceExpired));
     }
     let offer = q
         .offer(&mut r, 20_000, &mut [0; recovery_request::REQUEST_BYTES])
         .unwrap()
         .unwrap();
+    // The sender's notice is an abandoned chain, never a local decode failure.
+    assert_eq!(offer.reason(), recovery_request::Reason::ReferenceExpired);
     assert_eq!(
         offer.send_by_micros(),
         100 + c.policy.recovery_budget_micros

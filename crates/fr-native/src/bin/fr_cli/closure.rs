@@ -101,6 +101,54 @@ impl Report {
         )
     }
 }
+/// A session the HOST ended, named by its authenticated final report. The
+/// report's cleanup and outstanding-effect stages ride along unchanged. This
+/// client sent no close request, so none is shown as acknowledged, and
+/// nothing is claimed undone, retried or replayed.
+#[cfg(target_os = "linux")]
+pub(super) fn host_closed(report: Closed) -> Option<Failure> {
+    use fr_wire::closure::ClosedReason;
+    let (code, next) = match report.reason {
+        // An answer to this client's own request is a completion, not an end
+        // the host chose.
+        ClosedReason::ClientRequested => return None,
+        ClosedReason::HostStopping => (
+            "host_stopped",
+            "The host ended this session: it stopped sharing or stopped serving this viewer. Nothing is replayed or retried. Start a new session once the host is sharing.",
+        ),
+        ClosedReason::AuthorityExpired => (
+            "host_authority_expired",
+            "The host's authority for this session expired without renewal, so the host ended it. Nothing is replayed. A new session needs the host's approval again.",
+        ),
+        ClosedReason::PermissionLost => (
+            "host_permission_lost",
+            "The host lost a permission this session depended on (its sharing scope, tailnet policy or ingress) and ended it. Check the host's sharing and Tailscale state; this client cannot restore it.",
+        ),
+        ClosedReason::ViewInvalidated => (
+            "host_view_invalidated",
+            "The host's shared display or configuration changed in a way this session could not follow, so the host ended it. Start a new session against the current display.",
+        ),
+        ClosedReason::ProtocolError => (
+            "host_protocol_error",
+            "The host ended the session on a protocol error. Check that the client and host builds are compatible; nothing is replayed.",
+        ),
+        ClosedReason::HostFailure => (
+            "host_failure",
+            "The host ended the session after a failure on its side (capture, encoder or its own service). Check the host's status before starting a new session; nothing is replayed.",
+        ),
+        ClosedReason::SessionReplaced => (
+            "host_session_replaced",
+            "Another session replaced this one on the host. Nothing is replayed; start a new session only if this viewer should take over.",
+        ),
+    };
+    let mut failure = Failure::new(code, next, 1);
+    failure.closure = Some(Report {
+        request_acknowledged: false,
+        transport_completed: false,
+        host: Some(report),
+    });
+    Some(failure)
+}
 const fn cleanup(stage: Cleanup) -> &'static str {
     match stage {
         Cleanup::Unconfirmed => "unconfirmed",

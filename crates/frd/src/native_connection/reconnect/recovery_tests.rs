@@ -15,11 +15,16 @@ fn exhausted_roles_retry_only_for_an_original_reference_or_recovery_horizon() {
         (Reason::RecoveryExpired, true),
         (Reason::DecodeFailed, false),
     ] {
+        let failure = observation(StreamingViewerError::Recovery(
+            recovery::Error::NamespaceExhausted(cause),
+        ));
+        assert_eq!(retryable(failure), allowed);
+        // The final attempt's end is named exactly when it was a lost chain;
+        // a decode failure is never relabelled as one.
         assert_eq!(
-            retryable(observation(StreamingViewerError::Recovery(
-                recovery::Error::NamespaceExhausted(cause)
-            ))),
-            allowed
+            lapse(failure),
+            allowed.then_some(Lapse::VideoReferenceLost),
+            "{cause:?}"
         );
     }
 }

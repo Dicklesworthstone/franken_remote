@@ -524,7 +524,15 @@ pub fn lapse(failure: Failure) -> Option<Lapse> {
             | StreamingViewerError::Media(crate::media::Error::Receiver(
                 fr_media::delivery::DeliveryError::ReferenceExpired
                 | fr_media::delivery::DeliveryError::RecoveryExpired,
-            )),
+            ))
+            // The same lost chain, on a connection with no fresh media
+            // channels left to recover it in place.
+            | StreamingViewerError::Recovery(
+                crate::media_quic::recovery::Error::NamespaceExhausted(
+                    fr_wire::recovery_request::Reason::ReferenceExpired
+                    | fr_wire::recovery_request::Reason::RecoveryExpired,
+                ),
+            ),
         )) => Some(Lapse::VideoReferenceLost),
         Failure::Observation(ObserverError::Streaming(StreamingViewerError::Startup(
             crate::media::decoder_startup::Error::Expired,
