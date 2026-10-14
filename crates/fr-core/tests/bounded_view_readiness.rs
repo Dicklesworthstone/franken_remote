@@ -172,7 +172,9 @@ fn independent_native_monitor_fences_even_without_any_authority_mutation() {
     let monitor = owner.monitor();
     let mut renewal = owner.take_control_lease().unwrap();
     assert_eq!(monitor.deadline(at(249_999)).unwrap(), at(250_000));
-    assert_eq!(renewal.deadline(at(249_999)).unwrap(), at(250_000));
+    // Renewal follows the lease, not the view (b8adb51); input submission is
+    // still bounded by the view through the monitor.
+    assert_eq!(renewal.deadline(at(249_999)).unwrap(), at(3_000_000));
     // The view deadline passes with no authority mutation: input is refused
     // and SUSPENDED, but the lease is not revoked (plan 11.3).
     assert_eq!(

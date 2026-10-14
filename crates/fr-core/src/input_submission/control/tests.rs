@@ -4,8 +4,8 @@ use super::*;
 use crate::{
     authority::AuthorityPolicy,
     ids::{
-        CodecConfigurationGeneration, DisplayGeometryGeneration, InputTicketId,
-        RecoveryGeneration, ViewportMappingGeneration,
+        CodecConfigurationGeneration, DisplayGeometryGeneration, InputTicketId, RecoveryGeneration,
+        ViewportMappingGeneration,
     },
     input::{DesktopPoint, InputBounds, InputCredentials, InputView},
     input_submission::Capabilities,
@@ -36,7 +36,9 @@ fn fixture(view_until: u64) -> Fixture {
         SessionAuthority::new(credentials.session, AuthorityPolicy::plan_defaults());
     authority.mark_capabilities_checked().unwrap();
     authority.authorize_observation(at(0)).unwrap();
-    authority.mark_view_ready_until(at(view_until), at(0)).unwrap();
+    authority
+        .mark_view_ready_until(at(view_until), at(0))
+        .unwrap();
     authority.grant_lease(credentials.lease, at(0)).unwrap();
     authority
         .issue_input_ticket(credentials.lease, credentials.ticket, at(0))

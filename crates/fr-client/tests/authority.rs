@@ -71,13 +71,15 @@ fn backpressure_keeps_exact_bytes_and_never_slides_deadline() {
         r.accept(&challenge(10, 100, Scope::Observation), ClientInstant(12)),
         Err(Error::Backpressure)
     );
-    assert_eq!(r.pending(ClientInstant(1_000_009)).unwrap().unwrap(), old);
-    assert_eq!(r.pending(ClientInstant(1_000_010)), Err(Error::Expired));
+    // The response is retained for 2 s (39245f5: the transport's maximum
+    // bounded reliable-record allowance), never longer.
+    assert_eq!(r.pending(ClientInstant(2_000_009)).unwrap().unwrap(), old);
+    assert_eq!(r.pending(ClientInstant(2_000_010)), Err(Error::Expired));
     assert!(r.stopped());
     assert_eq!(
         r.accept(
             &challenge(10, 100, Scope::Observation),
-            ClientInstant(1_000_011)
+            ClientInstant(2_000_011)
         ),
         Err(Error::Stopped)
     );

@@ -243,10 +243,7 @@ fn response_retention_survives_the_old_one_second_cutoff_without_extending_autho
     // The former fixed 1s retention would stop control here even though the
     // host's independently enforced challenge/lease deadline remains later.
     let delayed = ClientInstant(1_510_100);
-    assert_eq!(
-        v.pending_control_response(delayed).unwrap().unwrap(),
-        bytes
-    );
+    assert_eq!(v.pending_control_response(delayed).unwrap().unwrap(), bytes);
     assert_eq!(
         v.control_response_deadline(),
         Some(ClientInstant(2_010_100))
