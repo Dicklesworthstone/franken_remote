@@ -489,7 +489,7 @@ fn an_unsent_challenge_expires_in_place_instead_of_sliding_with_backpressure() {
             &cx,
             Route::Stream(routes.outbound),
             &marker,
-            network::clock(&cx) + 2_500_000,
+            network::clock(&cx) + 4_000_000,
             || true,
         )
         .unwrap();
@@ -499,6 +499,8 @@ fn an_unsent_challenge_expires_in_place_instead_of_sliding_with_backpressure() {
             owner.service(&mut s, || Ok(2)).unwrap(),
             Event::Backpressure
         );
+        // Past the one-second cadence the unsent challenge still waits while
+        // the observation it renews is live, with no new nonce (fr-6hbo).
         asupersync::time::sleep(cx.now(), Duration::from_millis(1020)).await;
         assert!(
             control.check().is_ok(),
@@ -506,7 +508,14 @@ fn an_unsent_challenge_expires_in_place_instead_of_sliding_with_backpressure() {
         );
         assert_eq!(
             owner.service(&mut s, || panic!("cannot replace a pending nonce")),
-            Err(Error::Expired)
+            Ok(Event::Backpressure)
+        );
+        // It never slides: the observation's own deadline ends it in place.
+        asupersync::time::sleep(cx.now(), Duration::from_millis(2100)).await;
+        assert!(
+            owner
+                .service(&mut s, || panic!("cannot replace a pending nonce"))
+                .is_err()
         );
         assert!(control.check().is_err());
         assert!(s.is_closed());
