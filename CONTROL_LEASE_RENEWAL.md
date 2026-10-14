@@ -63,9 +63,15 @@ No new capability or auxiliary stream is silently installed. Input tickets and
 actual action results keep their existing input-feedback route.
 
 `service` retains the exact nonce, bytes, issue-time expiry and original send
-window under real transport backpressure. The send window is bounded by one
-second and both the previous live lease and the issued challenge. Enqueue success
-is not renewal. Only a matching response to a queued challenge renews the still-
+window under real transport backpressure. The send window ends with the
+previous live lease or the issued challenge, whichever is first. Until
+2026-10-14 it also ended one second after issue. On lossy 40-120 ms paths
+per-picture records hold the connection's shared critical send budget for
+longer than that. The unsent challenge then expired and ended a session whose
+lease still had two seconds left (fr-6hbo). The observation challenge follows
+the same rule against the observation deadline. Peer admission is still checked
+at every send. New challenges wait while one is unsent, so the one-second
+cadence pauses rather than piling up. Enqueue success is not renewal. Only a matching response to a queued challenge renews the still-
 live lease, to the deadline fixed when the host issued that challenge. A late
 response never starts a new three-second duration, and expired authority cannot
 be resurrected. Observation renewal or ticket traffic alone cannot extend control.

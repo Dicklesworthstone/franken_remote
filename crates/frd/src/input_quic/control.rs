@@ -231,10 +231,9 @@ impl ControlRenewal {
             self.pending = Some(Pending {
                 nonce,
                 deadline,
-                send_by: self
-                    .next_issue
-                    .min(old_deadline.as_micros())
-                    .min(deadline.as_micros()),
+                // Not the one-second cadence: an unsent challenge stays useful
+                // while the lease it renews is live (fr-6hbo).
+                send_by: old_deadline.as_micros().min(deadline.as_micros()),
                 queued: false,
             });
             self.last_nonce = Some(nonce);

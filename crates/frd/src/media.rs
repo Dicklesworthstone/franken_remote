@@ -305,6 +305,16 @@ impl ObservationControl {
         }
         self.cx.cancel_fast(CancelKind::ParentCancelled);
     }
+    /// The live observation's own deadline. Peer admission is not folded in:
+    /// it is a short rolling validity that `check` enforces on every use.
+    pub fn observation_until(&self) -> Result<HostInstant, Error> {
+        self.check()?;
+        self.authority
+            .lock()
+            .map_err(|_| Error::Poisoned)?
+            .observation_deadline(host_now(&self.cx)?)
+            .map_err(Error::Authority)
+    }
     pub fn issue_challenge(&self, nonce: u128) -> Result<HostInstant, Error> {
         self.check()?;
         self.authority

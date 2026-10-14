@@ -6,8 +6,11 @@ use fr_wire::{
     stream::RecordStream,
 };
 use frd::{
-    input_quic::control::{ControlRenewal, Error as RenewalError},
-    media::{ObservationControl, renewal::ObservationRenewal},
+    input_quic::control::{ControlRenewal, Error as RenewalError, Event as ControlEvent},
+    media::{
+        ObservationControl,
+        renewal::{Event as ObservationEvent, ObservationRenewal},
+    },
 };
 
 async fn connections(cx: &Cx) -> (NativeQuicUdpConnection, QuicRecords, Routes, ControlRoutes) {
@@ -358,4 +361,178 @@ async fn close_control(
         }
     };
     assert_eq!(error, RenewalError::PeerClosed);
+}
+
+/// One input-result-sized record on the critical results route. Its content is
+/// never decoded: the peer does not read that stream in this test.
+fn filler() -> Vec<u8> {
+    let mut bytes = vec![0; INPUT_RESULT_BYTES];
+    bytes[..6].copy_from_slice(b"FRD0\0\0");
+    bytes[6..8].copy_from_slice(&0x48_u16.to_be_bytes());
+    let payload = u32::try_from(INPUT_RESULT_BYTES - 24).unwrap();
+    bytes[12..16].copy_from_slice(&payload.to_be_bytes());
+    bytes[16..20].copy_from_slice(&7_u32.to_be_bytes());
+    bytes
+}
+async fn renew_both(
+    cx: &Cx,
+    peer: &mut NativeQuicUdpConnection,
+    wire: &mut QuicRecords,
+    renewals: (&mut ControlRenewal, &mut ObservationRenewal),
+    control_routes: ControlRoutes,
+    nonce: &mut u128,
+) {
+    let (control, observe) = renewals;
+    let mut framing = RecordStream::new(512, 11, 1_000_000).unwrap();
+    let before = (control.renewed_until(), observe.renewed_until());
+    let end = Instant::now() + Duration::from_millis(500);
+    while control.renewed_until() == before.0 || observe.renewed_until() == before.1 {
+        assert!(Instant::now() < end, "renewal did not complete");
+        let mut fresh = || {
+            *nonce += 1;
+            Ok(*nonce)
+        };
+        observe.service(wire, &mut fresh).unwrap();
+        control.service(wire, &mut fresh).unwrap();
+        io(cx, peer, wire, control).await.unwrap();
+        echo_challenges(cx, peer, control_routes, &mut framing);
+        observe
+            .receive(wire, |_, _| Ok(Disposition::Blocked))
+            .unwrap();
+        control
+            .receive(wire, |_, _| Ok(Disposition::Blocked))
+            .unwrap();
+    }
+}
+
+/// Fill the shared critical budget with records the peer does not acknowledge
+/// yet, as a lost packet's recovery would hold them. Then run host-only turns
+/// until both next challenges have waited, unsent, beyond the former one-second
+/// send window.
+async fn hold_challenges_unsent(
+    cx: &Cx,
+    wire: &mut QuicRecords,
+    routes: Routes,
+    renewals: (&mut ControlRenewal, &mut ObservationRenewal),
+    nonce: &mut u128,
+) {
+    let (control, observe) = renewals;
+    let send_by = network::clock(cx) + 2_900_000;
+    let filler = filler();
+    let mut held = 0;
+    while wire
+        .send(
+            cx,
+            fr_transport::quic::Route::Stream(routes.results()),
+            &filler,
+            send_by,
+            || true,
+        )
+        .is_ok()
+    {
+        held += 1;
+    }
+    assert!(held > 0);
+    let mut waiting_since = None;
+    let end = Instant::now() + Duration::from_millis(2500);
+    loop {
+        assert!(Instant::now() < end, "no challenge became due");
+        let mut fresh = || {
+            *nonce += 1;
+            Ok(*nonce)
+        };
+        let observed = observe.service(wire, &mut fresh).unwrap();
+        let controlled = control.service(wire, &mut fresh).unwrap();
+        if controlled == ControlEvent::Backpressure && observed == ObservationEvent::Backpressure {
+            let since = *waiting_since.get_or_insert_with(Instant::now);
+            if since.elapsed() > Duration::from_millis(1200) {
+                return;
+            }
+        }
+        control.drive(wire, Duration::from_millis(1)).await.unwrap();
+    }
+}
+
+/// fr-6hbo: on a lossy path per-picture records can hold the shared critical
+/// send budget for longer than the one-second challenge cadence. A challenge
+/// that cannot be admitted yet must stay sendable while the lease and the
+/// observation it renews are live, then renew both once the budget frees.
+#[test]
+fn a_challenge_held_by_backpressure_past_its_cadence_still_renews_live_authority() {
+    let rt = network::runtime();
+    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    rt.block_on(async {
+        let (mut peer, mut wire, routes, control_routes) = connections(&cx).await;
+        let (session, _, observation) = shared_grant(&cx);
+        let (_resume, rx) = mpsc::sync_channel(1);
+        let seat = Seat::default();
+        let (agent, driver) = seat
+            .start(
+                cx.clone(),
+                session,
+                Route::new(7, ProtocolLimits::ABSOLUTE),
+                move || {
+                    Ok(Gate {
+                        state: Arc::new(Effects::default()),
+                        resume: rx,
+                        in_submit: false,
+                        waited: false,
+                    })
+                },
+                |_| true,
+            )
+            .unwrap();
+        let mut input = QuicInput::new(cx.clone(), agent, &wire, routes).unwrap();
+        let mut control = input
+            .control_renewal(observation.clone(), &wire, control_routes)
+            .unwrap();
+        let mut observe =
+            ObservationRenewal::new(observation, &wire, control_routes, ProtocolLimits::ABSOLUTE)
+                .unwrap();
+        let (shutdown, ()) = Box::pin(network::both(driver, async {
+            let mut nonce = 10;
+            renew_both(
+                &cx,
+                &mut peer,
+                &mut wire,
+                (&mut control, &mut observe),
+                control_routes,
+                &mut nonce,
+            )
+            .await;
+            let renewed = (control.renewed_until(), observe.renewed_until());
+            hold_challenges_unsent(
+                &cx,
+                &mut wire,
+                routes,
+                (&mut control, &mut observe),
+                &mut nonce,
+            )
+            .await;
+            assert_eq!((control.renewed_until(), observe.renewed_until()), renewed);
+            // The peer acknowledges the held records; the waiting challenges
+            // are then admitted, answered and renew the still-live authority.
+            renew_both(
+                &cx,
+                &mut peer,
+                &mut wire,
+                (&mut control, &mut observe),
+                control_routes,
+                &mut nonce,
+            )
+            .await;
+            assert!(control.renewed_until() > renewed.0);
+            assert!(observe.renewed_until() > renewed.1);
+            assert!(!input.control().is_stopped());
+            control.stop();
+            let end = Instant::now() + Duration::from_secs(1);
+            while seat.is_occupied() {
+                assert!(Instant::now() < end);
+                let _ = input.service(&mut wire, || true);
+                asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
+            }
+        }))
+        .await;
+        assert!(shutdown.handoff_safe());
+    });
 }

@@ -184,14 +184,14 @@ impl ObservationRenewal {
                 .as_micros()
                 .checked_add(CADENCE_MICROS)
                 .ok_or(Error::Clock)?;
+            // An unsent challenge stays useful while the observation it renews
+            // is live. A one-second window ended healthy sessions on lossy
+            // paths, where per-picture records hold the shared critical budget
+            // for longer than that (fr-6hbo). Admission and observation are
+            // still checked at every send; the cadence pauses while it waits.
+            let until = self.control.observation_until().map_err(Error::Media)?;
             let deadline = self.control.issue_challenge(nonce).map_err(Error::Media)?;
-            let send_by = self
-                .control
-                .deadline(Duration::from_secs(1))
-                .map_err(Error::Media)?
-                .time()
-                .as_nanos()
-                / 1000;
+            let send_by = until.as_micros();
             authority::encode(
                 Message::Challenge {
                     scope: Scope::Observation,

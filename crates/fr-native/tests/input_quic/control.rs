@@ -347,7 +347,7 @@ fn exact_backpressure_cannot_slide_challenge_or_mint_replacement_nonce() {
                     &f.cx,
                     Route::Stream(f.pair.auxiliary),
                     &filler(),
-                    network::clock(&f.cx) + 2_000_000,
+                    network::clock(&f.cx) + 4_000_000,
                     || true,
                 )
                 .unwrap();
@@ -355,12 +355,26 @@ fn exact_backpressure_cannot_slide_challenge_or_mint_replacement_nonce() {
                 r.service(&mut f.pair.server, || Ok(9)),
                 Ok(Event::Backpressure)
             );
+            // Past the one-second cadence the same unsent challenge still
+            // waits; no replacement nonce is minted (fr-6hbo).
             asupersync::time::sleep(f.cx.now(), Duration::from_millis(1010)).await;
             assert_eq!(
                 r.service(&mut f.pair.server, || panic!(
                     "must retain original challenge"
                 )),
-                Err(RenewalError::Expired)
+                Ok(Event::Backpressure)
+            );
+            // Its window ends with the lease it renews and never slides.
+            asupersync::time::sleep(f.cx.now(), Duration::from_millis(2100)).await;
+            let ended = r.service(&mut f.pair.server, || {
+                panic!("must retain original challenge")
+            });
+            assert!(
+                matches!(
+                    ended,
+                    Err(RenewalError::Expired | RenewalError::Stopped | RenewalError::Authority(_))
+                ),
+                "{ended:?}"
             );
             assert!(f.input.control().is_stopped());
             f.cleared().await;
