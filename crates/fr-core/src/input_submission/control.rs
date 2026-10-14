@@ -50,11 +50,14 @@ impl ControlLease {
     }
     /// The lease's live deadline for renewal. A stale view SUSPENDS input but
     /// not the lease (plan 11.3): renewals continue until the lease,
-    /// observation or suspension limit ends.
+    /// observation or suspension limit ends. The live view deadline bounds
+    /// input submission, not renewal traffic; sampling it here must not turn
+    /// a near-expiry picture into a near-zero challenge send budget.
     pub fn deadline(&mut self, now: HostInstant) -> Result<HostInstant, Refusal> {
         let result = self.monitor.with_time(&mut self.clock, now, |a, at| {
             match a.control_status(at)? {
-                ControlStatus::Live { until } | ControlStatus::Suspended { until, .. } => Ok(until),
+                ControlStatus::Live { .. } => a.lease_deadline(),
+                ControlStatus::Suspended { until, .. } => Ok(until),
             }
         });
         if result.is_err() {
@@ -90,3 +93,6 @@ impl std::fmt::Debug for ControlLease {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+mod tests;
