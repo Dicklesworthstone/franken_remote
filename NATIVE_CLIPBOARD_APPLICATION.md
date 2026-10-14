@@ -32,10 +32,11 @@ metadata when control becomes available; it never opens a clipboard or strands
 the peer's handshake. That one-use setup stays declined even after re-enabling.
 The switch fences final OS publication immediately. Network retirement occurs in
 the original service turn. A stopped/closed session cannot be re-enabled through
-an old handle. Clipboard lane retirement between I/O turns preserves input and
-viewing; authority loss or worker failure during active native QUIC I/O retains
-its existing conservative connection-wide fence. Incomplete attachment cancellation
-is also connection-wide. The API does not promise isolation for these cases.
+an old handle. Clipboard lane retirement preserves input and viewing, both
+between I/O turns and when authority loss, an item deadline, a local change, a
+switch or a worker stop is first seen during active native QUIC I/O (the
+connection retires the pair in that checked operation). Task cancellation
+during that I/O and incomplete attachment cancellation remain connection-wide.
 
 `Cleanup::Pending` is distinct from stopped admission. Closing a service fences
 its native worker but does not block on a foreign call or claim the thread ended.

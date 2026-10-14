@@ -127,6 +127,62 @@ fn retire_queued_clipboard_preserves_control_and_input_in_both_directions() {
     });
 }
 
+/// A clipboard fault seen INSIDE a connection check (an item that outlived its
+/// deadline, a newer local copy, a switch) retires only that pair, before the
+/// same checked operation's I/O. Before, the owner could only refuse the
+/// callback, which closed the connection and ended remote control with it.
+#[test]
+fn a_retirement_request_in_an_authorization_callback_retires_only_the_pair() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let mut l = Link::new(&cx).await;
+        enable(&mut l);
+        let (_hi, _ci, hi, ci) = attach(&mut l, &cx, 8, MediaRole::Input).await;
+        let (hp, cp, ha, ca) = attach(&mut l, &cx, 9, MediaRole::Clipboard).await;
+        let mut h = ClipboardChannel::new(&l.h, hp, scope()).unwrap();
+        let c = ClipboardChannel::new(&l.c, cp, scope()).unwrap();
+        quiet(&mut l, &cx).await;
+        let until = clock(&cx) + 1_000_000;
+        h.send(&mut l.h, &cx, &chunk(&h), until, || true).unwrap();
+        assert_eq!(l.h.usage().retained_send_records, 1);
+        l.h.tick(&cx, || {
+            h.request_retirement();
+            true
+        })
+        .unwrap();
+        // Retired within that one check: queued bytes gone, connection open.
+        assert!(!l.h.is_closed());
+        assert!(!l.h.has_route(Route::Stream(ha.outbound)));
+        assert_eq!(l.h.usage().retained_send_records, 0);
+        assert!(h.check(&l.h).is_err());
+        peer_retired(&mut l, &cx, ca.outbound).await;
+        assert!(c.check(&l.c).is_err());
+        let hr = l.hr;
+        let cr = l.cr;
+        for (host, send, receive, kind, binding) in [
+            (true, hr.outbound, cr.inbound, 0x12, 7),
+            (false, cr.outbound, hr.inbound, 0x12, 7),
+            (true, hi.outbound, ci.inbound, 0x17, 8),
+            (false, ci.outbound, hi.inbound, 0x40, 8),
+        ] {
+            input::transfer(
+                &mut l,
+                &cx,
+                host,
+                Route::Stream(send),
+                Route::Stream(receive),
+                &record(kind, binding, 96),
+            )
+            .await;
+        }
+        // The owner's own retirement afterwards is the idempotent tombstone.
+        h.retire(&mut l.h, &cx).unwrap();
+        drop((h, c));
+        l.h.tick(&cx, || true).unwrap();
+        l.c.tick(&cx, || true).unwrap();
+    });
+}
+
 #[test]
 fn retire_discards_native_prefix_and_partial_receive_without_replaying_on_ack() {
     runtime().block_on(async {

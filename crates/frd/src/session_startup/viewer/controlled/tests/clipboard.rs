@@ -249,6 +249,78 @@ fn running_sessions_transfer_both_directions_then_retire_without_stopping_input(
         }
     });
 }
+/// A clipboard fault that the session's own connection check sees first (an
+/// item outliving its deadline mid-drive, a newer local copy, a switch) ends
+/// the clipboard only. Before, the bridge refused that check and the transport
+/// closed the whole session: live at 120 ms RTT, a 40 KB copy ended control
+/// with `native_session_failed`.
+#[test]
+fn a_clipboard_fault_inside_a_session_drive_retires_only_the_clipboard() {
+    run(|c, h| async move {
+        let mut state = setup(&c, &h).await;
+        let (hc, vc) = state.clipboard_channels.take().unwrap();
+        let hs = state.host.attach_clipboard(hc, true).unwrap();
+        let vs = state.viewer.attach_clipboard(vc, true).unwrap();
+        let os = [
+            Arc::new(Mutex::new(Os::default())),
+            Arc::new(Mutex::new(Os::default())),
+        ];
+        let mut workers = [open(hs, &os[0]), open(vs, &os[1])];
+        let driver = state.driver.take().unwrap();
+        let ((), done) = Box::pin(support::both(
+            async {
+                let mut n = 80_000;
+                let mut t = 90_000;
+                copy(&os[1], "viewer copy");
+                let end = now(&c).unwrap() + 1_000_000;
+                while state.host.take_clipboard_received().unwrap().is_none() {
+                    assert!(
+                        now(&c).unwrap() < end,
+                        "clipboard did not cross before the fault"
+                    );
+                    drive(&mut state, &c, &h, &mut n, &mut t).await;
+                }
+                // After this turn's own maintenance, so the connection check
+                // inside the drive is the first to see the fault.
+                state
+                    .viewer
+                    .clipboard_switches()
+                    .unwrap()
+                    .0
+                    .set_enabled(false);
+                let viewer = &mut state.viewer;
+                let bridge = viewer.clipboard.as_ref().unwrap();
+                viewer
+                    .session
+                    .transport
+                    .drive(&viewer.session.cx, Duration::ZERO, || bridge.permits_io())
+                    .await
+                    .unwrap();
+                assert!(!viewer.session.transport.is_closed());
+                for _ in 0..20 {
+                    drive(&mut state, &c, &h, &mut n, &mut t).await;
+                }
+                assert!(state.viewer.clipboard_retired() && state.host.clipboard_retired());
+                assert!(!state.viewer.is_closed() && !state.host.control().is_stopped());
+                let _ = state.viewer.action(key(true)).unwrap();
+                let end = now(&c).unwrap() + 500_000;
+                while state.viewer.pending_actions() != 0 {
+                    assert!(now(&c).unwrap() < end);
+                    drive(&mut state, &c, &h, &mut n, &mut t).await;
+                }
+                assert_eq!(state.effects.lock().unwrap().keys, [true]);
+                state.viewer.close();
+                state.host.close();
+            },
+            driver,
+        ))
+        .await;
+        assert!(done.handoff_safe());
+        for worker in &mut workers {
+            worker.stop();
+        }
+    });
+}
 #[test]
 fn unpolled_session_drives_fence_clipboard_before_native_open() {
     for host in [true, false] {

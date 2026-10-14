@@ -19,7 +19,7 @@ use std::{
     fmt,
     sync::{
         Arc,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     time::Duration,
 };
@@ -38,6 +38,9 @@ const MAX_WAIT_US: u64 = 2_000_000;
 /// never re-enter the allocation pool. At most seven auxiliary pairs exist.
 pub(super) struct Reservation {
     state: Arc<AtomicU8>,
+    /// Set by the lane's owner to retire this optional pair at the
+    /// connection's next checked operation instead of fencing the connection.
+    retire: Arc<AtomicBool>,
     until: u64,
     ticket: Option<Ticket>,
     pub(super) inbound: StreamId,
@@ -107,6 +110,7 @@ enum Phase {
 pub struct MediaChannel {
     connection: ConnectionBinding,
     state: Arc<AtomicU8>,
+    retire: Arc<AtomicBool>,
     pub(super) host: bool,
     parent: ControlBinding,
     limits: ProtocolLimits,
@@ -430,7 +434,7 @@ impl QuicRecords {
         until: u64,
         ticket: Option<Ticket>,
         allowance: u64,
-    ) -> Result<(ControlRoutes, Arc<AtomicU8>), Error> {
+    ) -> Result<(ControlRoutes, Arc<AtomicU8>, Arc<AtomicBool>), Error> {
         let (role, local, peer) = self.validate_reservation(d, ticket, allowance)?;
         self.streams
             .try_reserve_exact(2)
@@ -518,6 +522,7 @@ impl QuicRecords {
         } else {
             PENDING
         }));
+        let retire = Arc::new(AtomicBool::new(false));
         self.streams.extend([outbound, inbound]);
         self.senders.push(Sender {
             route: outbound,
@@ -535,6 +540,7 @@ impl QuicRecords {
         });
         self.attachments.push(Reservation {
             state: state.clone(),
+            retire: retire.clone(),
             until,
             ticket,
             inbound: inbound.stream,
@@ -549,7 +555,7 @@ impl QuicRecords {
                     .min(self.policy.datagram_record_bytes),
             ),
         });
-        Ok((ControlRoutes { outbound, inbound }, state))
+        Ok((ControlRoutes { outbound, inbound }, state, retire))
     }
     /// Reserve actual native routes before exposing a binding or issuing a
     /// ticket. A second pending exchange refuses instead of growing a queue.
@@ -599,11 +605,11 @@ impl QuicRecords {
             picture_allowance: 0,
             credit_epoch: u64::from(descriptor.binding.parent.id),
         };
-        let (pair, state) =
+        let (pair, state, retire) =
             self.reserve_pair(cx, descriptor, until, Some(request.ticket), allowance)?;
         let mut owner = MediaChannel::new(
             self.binding(),
-            state,
+            (state, retire),
             scope,
             pair,
             descriptor,
@@ -649,10 +655,10 @@ impl QuicRecords {
             .ok_or(Error::Clock)?;
         validate_role(&scope, d.role)?;
         let allowance = self.attachment_allowance(&scope.selection.limits, d.role);
-        let (pair, state) = self.reserve_pair(cx, d, until, None, allowance)?;
+        let (pair, state, retire) = self.reserve_pair(cx, d, until, None, allowance)?;
         let mut owner = MediaChannel::new(
             self.binding(),
-            state,
+            (state, retire),
             scope,
             pair,
             d,
@@ -670,7 +676,7 @@ impl MediaChannel {
     #[allow(clippy::too_many_arguments)]
     fn new(
         connection: ConnectionBinding,
-        state: Arc<AtomicU8>,
+        (state, retire): (Arc<AtomicU8>, Arc<AtomicBool>),
         scope: ChannelScope<'_>,
         pair: ControlRoutes,
         descriptor: Descriptor,
@@ -682,6 +688,7 @@ impl MediaChannel {
         Self {
             connection,
             state,
+            retire,
             host,
             parent: scope.parent,
             limits: scope.selection.limits,
@@ -731,6 +738,14 @@ impl MediaChannel {
     }
     pub fn is_complete(&self) -> bool {
         self.phase == Phase::Complete && self.state.load(Ordering::Acquire) == ACTIVE
+    }
+    /// Ask the original connection to retire this completed optional pair at
+    /// its next checked operation, BEFORE that operation's framing, retained
+    /// record deadline or I/O work. Safe inside an authorization callback: no
+    /// connection is borrowed. It only narrows; retirement still resets the
+    /// pair's native send and retransmission state exactly as `retire_*` does.
+    pub fn request_retirement(&self) {
+        self.retire.store(true, Ordering::Release);
     }
     pub fn close(&mut self) {
         // A completed optional lane may already have been reset on its original

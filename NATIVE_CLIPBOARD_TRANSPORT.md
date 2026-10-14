@@ -124,10 +124,16 @@ The current network join is conservative: a switch transition (including
 an off/on cycle), expired queued work, or superseded in-flight payload retires
 the optional clipboard pair. It does not silently reopen the consumed channel
 or replay buffered text when a switch is re-enabled. Input and viewing continue
-when retirement is performed between I/O turns. Cancellation or authority loss
-inside an active QUIC future retains the existing whole-connection fail-closed
-behavior; even dropping an unpolled bridge-drive future fences its original
-connection and worker. No operation touches an equal-ID foreign connection.
+when retirement is performed between I/O turns. A clipboard loss first seen
+inside an active QUIC future (its authority, an item's deadline, a newer local
+copy, a switch, a stopped worker) retires the pair inside that same checked
+operation, before its I/O: the stream reset drops queued bytes and
+retransmissions as a closed connection would, and input and viewing continue.
+Until 2026-10-14 it closed the whole connection, so on a 120 ms path a 40 KB
+copy that outlived its deadline ended remote control. Task cancellation and a
+missing clock still fence the connection, and dropping an unpolled bridge-drive
+future still fences its original connection and worker. No operation touches
+an equal-ID foreign connection.
 
 `clipboard_network` runs two actual Xvfb desktops, separate native worker
 threads, the production clipboard protocol, and encrypted UDP/TLS connections.

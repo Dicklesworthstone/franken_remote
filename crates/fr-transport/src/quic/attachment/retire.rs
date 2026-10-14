@@ -89,6 +89,7 @@ impl MediaChannel {
 impl QuicRecords {
     /// Run before framing/retained-record deadline checks. A peer's reset/FIN
     /// cancels this media/optional pair; it is not EOF on the critical input stream.
+    /// So does the local owner's `request_retirement`.
     /// Retired reservations remain forever to prevent replay-ledger recreation.
     pub(crate) fn service_optional_retirements(&mut self, cx: &Cx) -> Result<(), Error> {
         for index in 0..self.attachments.len() {
@@ -106,7 +107,8 @@ impl QuicRecords {
                     .streams();
                 let outgoing = streams.stream(r.outbound).map_err(|_| Error::Native)?;
                 let incoming = streams.stream(r.inbound).map_err(|_| Error::Native)?;
-                if outgoing.stop_sending_error_code.is_some()
+                if r.retire.load(Ordering::Acquire)
+                    || outgoing.stop_sending_error_code.is_some()
                     || outgoing.send_reset.is_some()
                     || incoming.recv_reset.is_some()
                     || incoming.final_size.is_some()

@@ -2,6 +2,7 @@
 //! This is routing evidence, not an input grant or a native clipboard permission.
 use super::{
     AttachedChannel, Cx, Disposition, Error, MediaChannel, Messages, Priority, QuicRecords, Route,
+    SendAdmission,
 };
 use fr_core::{
     clipboard::Binding,
@@ -152,6 +153,13 @@ impl ClipboardChannel {
     pub fn retire(&mut self, q: &mut QuicRecords, cx: &Cx) -> Result<(), Error> {
         self.attachment.retire_clipboard(q, cx)
     }
+    /// Have the original connection retire this pair at its next checked
+    /// operation, before that operation's I/O. For a clipboard fault seen
+    /// inside an authorization callback: the clipboard's queued bytes and
+    /// retransmissions stop there, and the connection is not fenced for it.
+    pub fn request_retirement(&self) {
+        self.attachment.request_retirement();
+    }
     /// True only after the existing native empty-send witness has retired all
     /// queued, unsent and retransmittable bytes on this original route. This is
     /// not an application receipt. Keep the Egress permit until this is true.
@@ -183,6 +191,28 @@ impl ClipboardChannel {
             bytes,
             deadline_us,
             authorize,
+        )
+    }
+    /// `send` with a per-record validity check: a refusal admits no bytes and
+    /// leaves the connection open (`QuicRecords::send_prepared`).
+    pub fn send_prepared<E>(
+        &self,
+        q: &mut QuicRecords,
+        cx: &Cx,
+        bytes: &[u8],
+        deadline_us: u64,
+        authorize: impl FnMut() -> bool,
+        prepared: impl FnMut() -> Result<(), E>,
+    ) -> Result<SendAdmission<E>, Error> {
+        self.check(q)?;
+        clipboard::decode(bytes, self.outgoing, &self.limits).map_err(|_| Error::Malformed)?;
+        q.send_prepared(
+            cx,
+            Route::Stream(self.routes.outbound),
+            bytes,
+            deadline_us,
+            authorize,
+            prepared,
         )
     }
     /// Dispatch at most one exact-lane record. The callback must be bounded and

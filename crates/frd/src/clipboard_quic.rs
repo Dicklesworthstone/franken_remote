@@ -12,7 +12,7 @@ use fr_core::{
     time::HostInstant,
 };
 use fr_transport::quic::{
-    self, ConnectionBinding, Disposition, QuicRecords, clipboard::ClipboardChannel,
+    self, ConnectionBinding, Disposition, QuicRecords, SendAdmission, clipboard::ClipboardChannel,
 };
 use fr_wire::clipboard::{
     Role,
@@ -205,9 +205,23 @@ impl Bridge {
     }
     /// Called by a containing session's existing QUIC driver on every I/O poll.
     /// Between turns call `service` first so an optional stop can retire just
-    /// this lane. A loss DURING I/O retains connection-wide fail-closed behavior.
+    /// this lane. A clipboard loss DURING I/O (its authority, an item's
+    /// deadline, a newer local copy, a switch) is still fail-closed for the
+    /// clipboard: the connection retires this lane inside the same checked
+    /// operation, before any I/O, dropping its queued bytes and
+    /// retransmissions. Only cancellation and a missing clock still fence the
+    /// connection. Before, any of these closed the whole session, so one copy
+    /// that outlived its deadline on a slow path ended remote control.
     pub(crate) fn permits_io(&self) -> bool {
-        self.retired || self.admission().is_ok()
+        match self.admission() {
+            _ if self.retired => true,
+            Ok(_) => true,
+            Err(Error::Cancelled | Error::Clock) => false,
+            Err(_) => {
+                self.lane.request_retirement();
+                true
+            }
+        }
     }
     pub(crate) fn owns_inbound(&self, route: quic::Route) -> bool {
         self.lane.owns_inbound(route)
@@ -413,10 +427,21 @@ impl Bridge {
             }
         };
         if let Some(p) = &self.pending {
-            match self.lane.send(q, &self.cx, &p.bytes.0, p.until, || {
-                self.admission().is_ok() && authorize()
-            }) {
-                Ok(()) => {
+            // The item's own validity is a per-record refusal: if it lapses
+            // between this turn's admission and the enqueue, no byte is
+            // admitted and only this lane retires, not the connection.
+            match self
+                .lane
+                .send_prepared(q, &self.cx, &p.bytes.0, p.until, &mut authorize, || {
+                    self.admission().map(drop)
+                }) {
+                Ok(SendAdmission::Refused(reason)) => {
+                    self.reason = Some(reason);
+                    self.retire(q)?;
+                    turn.complete();
+                    return Ok(State::Retired);
+                }
+                Ok(SendAdmission::Accepted) => {
                     let p = self.pending.take().expect("accepted exact record");
                     let slot = self
                         .inflight
@@ -443,8 +468,9 @@ impl Bridge {
         Ok(State::Active)
     }
     /// Drives the EXISTING connection. Keep the containing session's admission
-    /// callback and service its other routes separately. Cancellation or authority
-    /// loss DURING an active native QUIC future remains connection-wide fail-closed.
+    /// callback and service its other routes separately. Cancellation DURING an
+    /// active native QUIC future remains connection-wide fail-closed; a clipboard
+    /// loss retires only this lane (`permits_io`).
     /// Even dropping this future unpolled fences the original worker/connection.
     pub fn drive<'a>(
         &'a mut self,
@@ -462,11 +488,9 @@ impl Bridge {
             bound?;
             let io = guard.as_mut().expect("bound connection");
             self.service(io.q, &mut authorize)?;
-            io.q.drive(&self.cx, wait, || {
-                (self.retired || self.admission().is_ok()) && authorize()
-            })
-            .await
-            .map_err(Error::Transport)?;
+            io.q.drive(&self.cx, wait, || self.permits_io() && authorize())
+                .await
+                .map_err(Error::Transport)?;
             let state = self.service(io.q, &mut authorize)?;
             io.complete = true;
             Ok(state)
