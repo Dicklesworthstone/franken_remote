@@ -1056,13 +1056,24 @@ impl Share<'_> {
         linux: &mut LinuxServer,
     ) -> Result<(), Error> {
         let cleanup = self.cx()?;
-        let deadline =
-            Deadline::after(&cleanup, Duration::from_secs(3)).map_err(|_| Error::Runtime)?;
+        // Each stage has its own bound, so a slow source cannot spend the
+        // launch and firewall stages' time. A hardware encoder's worker can
+        // take seconds to tear down: ~3.8 s measured live for NVENC (GTX 1070,
+        // host load ~75), past the former shared 3 s.
+        let source =
+            Deadline::after(&cleanup, Duration::from_secs(5)).map_err(|_| Error::Runtime)?;
         let mut failure = None;
-        if driver.reap(&cleanup, deadline).await.is_err() {
+        if driver.reap(&cleanup, source).await.is_err() {
             (self.report)(Event::CleanupFailed { stage: "source" });
             failure = Some(Error::Cleanup("source"));
+            // The failed reap aborted the worker. Release the desktop so its
+            // transports drop their ingress leases; otherwise the firewall
+            // owner refuses removal (InUse) and the rule outlives the run, and
+            // eight such runs lock the host out (ResidualRuleLimit).
+            driver.release();
         }
+        let deadline =
+            Deadline::after(&cleanup, Duration::from_secs(3)).map_err(|_| Error::Runtime)?;
         let pending = retirement.lock().ok().and_then(|mut slot| slot.take());
         if let Some(mut retirement) = pending
             && retirement.reap(&cleanup, deadline).await.is_err()

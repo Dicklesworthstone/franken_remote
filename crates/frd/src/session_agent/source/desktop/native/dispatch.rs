@@ -556,6 +556,14 @@ impl Driver {
         }
         drop(self.first.take());
     }
+    /// After a reap that timed out (which already aborted the worker): drop
+    /// the original desktop, so its transports and the ingress leases they
+    /// hold go away. The child stays with its launch retirement, which still
+    /// confirms its exit; nothing here reports the source as reaped.
+    pub fn release(&mut self) {
+        self.close();
+        self.desktop = None;
+    }
     pub fn worker_id(&self) -> Option<u32> {
         self.desktop.as_ref().and_then(Opened::worker_id)
     }
