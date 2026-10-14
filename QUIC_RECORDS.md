@@ -114,8 +114,10 @@ delay, control and view-only sessions ended with `transport_deadline_expired`
 while both peers were healthy. An admitted reliable record must now be staged
 and acknowledged by max(send-by, admission + `delivery_allowance_us`):
 
-- The allowance is three RFC 9002 probe timeouts, 3 x (smoothed RTT +
-  max(4 x RTT variation, 1 ms) + 25 ms maximum ACK delay).
+- The allowance is seven RFC 9002 probe timeouts, 7 x (smoothed RTT +
+  max(4 x RTT variation, 1 ms) + 25 ms maximum ACK delay): the span of three
+  consecutive backed-off probes (1 + 2 + 4). It was three until 2026-10-13
+  (below).
 - It is clamped to [250 ms, 2 s].
 - Before the first RTT sample, the RFC 9002 initial RTT (333 ms) gives the 2 s
   ceiling. The native handshake leaves no sample, so the first records get it.
@@ -136,6 +138,20 @@ the presented report's source age, and recovery deadlines.
 `native_bulk/epochs.rs` states that a later record never extends an earlier
 record's deadline. Planted negatives fail these tests: deliver-by = send-by, and
 ignoring the measured RTT.
+
+Seven probe timeouts (2026-10-13, fr-xfvs). Three probe timeouts were meant to
+cover the previous epoch, the record's own flight and one loss recovery. On the
+pinned stack one tail loss alone takes about that long: its probe timeout sends
+only a PING, so the lost data waits for the PING's acknowledgement before it
+is declared lost and resent. Instrumented namespace runs at 40 ms RTT and 1%
+loss showed a single 67-byte host progress record unacknowledged for 248 ms
+after one probe timeout, which closed a healthy connection at the 250 ms floor.
+At 40 ms RTT the allowance is now about 480 ms; at 120 ms about 1 s; 200 ms
+RTT reaches the 2 s ceiling. A silent peer still closes the connection within
+2 s, and content lateness is still enforced where the content is used. In one
+controlled matrix run each, the lossy 40 and 120 ms rows held 29 and 32 steps
+in total against 24 before, and the 40 ms, 1%, 5 Mbit/s row held. Most
+remaining lossy-row ends are not this deadline (fr-xfvs notes).
 
 This distinction matters on 0.4.10: attaching bounded windows in both directions
 can generate continuing ACK/window-update traffic, so total bytes-in-flight

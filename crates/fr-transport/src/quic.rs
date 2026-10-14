@@ -67,12 +67,15 @@ pub const MIN_DELIVERY_ALLOWANCE_US: u64 = 250_000;
 pub const MAX_DELIVERY_ALLOWANCE_US: u64 = 2_000_000;
 
 /// How long this path may take to deliver and acknowledge one admitted
-/// reliable record: three RFC 9002 probe timeouts (smoothed RTT + max(4 x
-/// RTT variation, 1 ms) + 25 ms maximum ACK delay). That covers waiting for
-/// the previous stop-and-wait epoch, the record's own flight and one loss
-/// recovery. Before any RTT sample the RFC 9002 initial RTT (333 ms, variation
-/// 166.5 ms) applies. Clamped to [`MIN_DELIVERY_ALLOWANCE_US`,
-/// `MAX_DELIVERY_ALLOWANCE_US`].
+/// reliable record: seven RFC 9002 probe timeouts (smoothed RTT + max(4 x
+/// RTT variation, 1 ms) + 25 ms maximum ACK delay), the span of three
+/// consecutive backed-off probes (1 + 2 + 4). The pinned stack probes with a
+/// PING, so one tail loss alone costs a probe timeout, a round trip for the
+/// probe's ACK and another for the retransmission: three probe timeouts were
+/// spent by a single loss behind the previous stop-and-wait epoch, and closed
+/// healthy connections at 1% loss (fr-xfvs). Before any RTT sample the RFC
+/// 9002 initial RTT (333 ms, variation 166.5 ms) applies. Clamped to
+/// [`MIN_DELIVERY_ALLOWANCE_US`, `MAX_DELIVERY_ALLOWANCE_US`].
 #[must_use]
 pub fn delivery_allowance_us(smoothed_rtt_us: Option<u64>, rtt_variation_us: Option<u64>) -> u64 {
     let (rtt, variation) = match smoothed_rtt_us {
@@ -83,7 +86,7 @@ pub fn delivery_allowance_us(smoothed_rtt_us: Option<u64>, rtt_variation_us: Opt
         .saturating_add(variation.saturating_mul(4).max(1_000))
         .saturating_add(25_000);
     probe
-        .saturating_mul(3)
+        .saturating_mul(7)
         .clamp(MIN_DELIVERY_ALLOWANCE_US, MAX_DELIVERY_ALLOWANCE_US)
 }
 

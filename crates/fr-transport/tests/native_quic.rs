@@ -1479,12 +1479,17 @@ fn the_delivery_allowance_follows_the_measured_path_within_its_bounds() {
         MIN_DELIVERY_ALLOWANCE_US
     );
     assert_eq!(delivery_allowance_us(None, None), MAX_DELIVERY_ALLOWANCE_US);
-    // 3 x (srtt + 4 x rttvar + 25 ms ACK delay).
-    assert_eq!(delivery_allowance_us(Some(60_000), Some(15_000)), 435_000);
-    assert_eq!(delivery_allowance_us(Some(120_000), Some(30_000)), 795_000);
+    // 7 x (srtt + 4 x rttvar + 25 ms ACK delay): three backed-off probes.
+    assert_eq!(delivery_allowance_us(Some(20_000), Some(2_000)), 371_000);
+    assert_eq!(delivery_allowance_us(Some(40_000), Some(1_000)), 483_000);
+    assert_eq!(delivery_allowance_us(Some(60_000), Some(15_000)), 1_015_000);
+    assert_eq!(
+        delivery_allowance_us(Some(120_000), Some(30_000)),
+        1_855_000
+    );
     assert_eq!(
         delivery_allowance_us(Some(200_000), Some(50_000)),
-        1_275_000
+        MAX_DELIVERY_ALLOWANCE_US
     );
     // A missing variation estimate is taken as half the RTT, never zero.
     assert_eq!(
