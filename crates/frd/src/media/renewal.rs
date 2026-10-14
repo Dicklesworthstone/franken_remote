@@ -409,6 +409,13 @@ impl<'a> IoGuard<'a> {
 impl Drop for IoGuard<'_> {
     fn drop(&mut self) {
         if !self.complete {
+            // A failed renewal turn is the connection's end, not a local
+            // revoke: name it before the revoke closes the authority. A turn
+            // failed by an earlier revoke keeps that revoke's meaning.
+            if !self.control.revoked() {
+                self.control
+                    .note_end(crate::input_watchdog::StopReason::ClientDisconnected);
+            }
             self.control.revoke();
             self.connection.close();
         }

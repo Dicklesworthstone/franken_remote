@@ -139,6 +139,10 @@ impl ObservationControl {
         match admission.observe() {
             Ok(until) => Ok(Some(until)),
             Err(error) => {
+                // Lost peer admission, not a local revoke (which reads Revoked).
+                if error != fr_tailnet::Error::Revoked {
+                    self.note_end(crate::input_watchdog::StopReason::AuthorityEnded);
+                }
                 self.revoke();
                 Err(Error::Admission(error))
             }

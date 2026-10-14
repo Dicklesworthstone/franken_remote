@@ -165,3 +165,31 @@ fn closing_one_session_does_not_revoke_another_owner_with_equal_numeric_ids() {
         assert!(sibling.check().is_ok());
     });
 }
+
+#[test]
+fn a_failed_renewal_turn_names_its_end_unless_a_local_revoke_came_first() {
+    use crate::input_watchdog::StopReason;
+    for local_first in [false, true] {
+        let runtime = network::runtime();
+        let c = runtime.request_cx_with_budget(Budget::INFINITE);
+        let h = runtime.request_cx_with_budget(Budget::INFINITE);
+        runtime.block_on(async {
+            let (mut host, _viewer) = pair(&c, &h).await;
+            let observation = host.observation().unwrap();
+            let (q, _) = host.io().unwrap();
+            // An incomplete renewal turn fences observation and the socket.
+            let turn = IoGuard::new(q, observation.clone());
+            if local_first {
+                observation.revoke();
+            }
+            drop(turn);
+            assert!(observation.revoked());
+            // Not reported as a local revoke unless one came first (fr-6hbo:
+            // the client was told `host_control_revoked` for a failed turn).
+            assert_eq!(
+                observation.end_reason(),
+                (!local_first).then_some(StopReason::ClientDisconnected)
+            );
+        });
+    }
+}

@@ -624,9 +624,11 @@ impl Fence {
     }
 }
 fn failure_reason(control: &ObservationControl) -> StopReason {
-    // A revoke also cancels the context, so it is read before `check`.
+    // A revoke also cancels the context, so it is read before `check`. A
+    // failure fence that had to revoke (a failed renewal turn, lost peer
+    // admission) names its cause first; only an unnamed revoke is local.
     if control.revoked() {
-        return StopReason::LocalRevoke;
+        return control.end_reason().unwrap_or(StopReason::LocalRevoke);
     }
     match control.check() {
         Ok(_) => StopReason::NativeFailure,
