@@ -34,10 +34,7 @@ struct Server {
     display: String,
 }
 impl Server {
-    /// The server and its first client, the test's observer. Connecting it
-    /// here means a `-terminate` server always has had a client, so it always
-    /// exits once its clients are gone (see Drop); one that never got a client
-    /// is killed instead of left running.
+    /// The server and its first client, the test's observer.
     fn start() -> (Self, X11Pointer) {
         let mut child = Command::new("Xvfb")
             .args([
@@ -48,9 +45,6 @@ impl Server {
                 "320x240x24",
                 "-nolisten",
                 "tcp",
-                // Exit when the last client disconnects instead of being
-                // killed under a live connection (see Drop below).
-                "-terminate",
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -71,14 +65,14 @@ impl Server {
         }
     }
 }
-/// The in-process native input executor keeps an X connection's reader thread
-/// alive after its session ends (bead fr-x11-executor-thread-leak-g6q8). Killing the
-/// server under it made Xlib's default I/O error handler exit the WHOLE test
-/// process. With `-terminate` the server exits itself once its last client,
-/// including that connection, goes away at the latest at process exit.
+/// Killed under any X connection the finished session still holds: Xlib's
+/// default I/O error handler would then exit the WHOLE test process. That is
+/// the guard for bead fr-x11-executor-thread-leak-g6q8, where an executor
+/// reader once outlived its session (deterministic on trj, 2026-10-13).
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = self.child.try_wait();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 fn credentials() -> InputCredentials {
