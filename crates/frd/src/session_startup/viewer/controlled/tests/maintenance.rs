@@ -203,7 +203,7 @@ fn an_authenticated_revocation_is_dispatched_before_the_visibility_callback() {
         .unwrap();
         let until = now(&h).unwrap() + 200_000;
         admit(&mut state, &h, &bytes, until).await;
-        state.viewer.action(key(true)).unwrap();
+        let _ = state.viewer.action(key(true)).unwrap();
         submit_successor(&mut state, &c);
         let mut received = false;
         let mut results = 0;
