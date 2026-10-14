@@ -549,7 +549,7 @@ impl ControlledViewer {
                     Route::Stream(self.session.routes.outbound),
                     &bytes,
                     until.0,
-                    || gate(&mut self.input, &self.control, cx, &view),
+                    || maintenance_gate(&mut self.input, &self.control, cx, &view),
                 ) {
                     Ok(()) => self.input.control_response_sent(ClientInstant(now(cx)?))?,
                     Err(quic::Error::Backpressure) => {}
@@ -559,10 +559,43 @@ impl ControlledViewer {
         }
         if let Some(p) = &self.pending {
             let view = std::cell::Cell::new(None);
-            match self.channels.send(cx, q, &p.bytes[..p.len], p.until, || {
-                gate(&mut self.input, &self.control, cx, &view)
-            }) {
-                Ok(()) => self.pending = None,
+            let admission = {
+                // Both checks are synchronous and run in this serialized owner.
+                // Keep the final input check inside transport admission, after
+                // allocation, without turning a per-record refusal into a
+                // connection-authority refusal.
+                let input = std::cell::RefCell::new(self.input.as_mut());
+                self.channels.send_prepared(
+                    cx,
+                    q,
+                    &p.bytes[..p.len],
+                    p.until,
+                    || maintenance_gate(&mut input.borrow_mut(), &self.control, cx, &view),
+                    || {
+                        let t = ClientInstant(now(cx)?);
+                        input
+                            .borrow_mut()
+                            .view_deadline(t)
+                            .map(|_| ())
+                            .map_err(Error::View)
+                    },
+                )
+            };
+            match admission {
+                Ok(quic::SendAdmission::Accepted) => self.pending = None,
+                Ok(quic::SendAdmission::Refused(error)) => {
+                    if self.input.suspended_since().is_some() && self.input.stopped().is_none() {
+                        self.abandon_if_suspended()?;
+                    } else if !matches!(
+                        error,
+                        Error::View(presentation::Error::Input(input::Error::NoPresentedView))
+                    ) || self.input.stopped().is_some()
+                    {
+                        return Err(error);
+                    }
+                    // A visibility gap keeps exactly this one unsent record,
+                    // with its original bytes, sequence and exclusive deadline.
+                }
                 Err(input_quic::Error::Transport(quic::Error::Backpressure)) => {}
                 // Its deadline passed between the check and this send, and
                 // admission refused it before taking any of it: drop a pointer
@@ -613,7 +646,13 @@ impl ControlledViewer {
                 .synchronize(sample, ClientInstant(now(&self.session.cx)?))?;
             self.clock_at = sample.received_at_us();
         }
-        self.dispatch_captured()?;
+        let t = ClientInstant(now(&self.session.cx)?);
+        if self.input.tick(t)? || self.input.suspended_since().is_some() {
+            // A compositor gap holds local events without encoding them. A
+            // genuine suspension still consumes/refuses them as before, so
+            // input captured on a stale view is never replayed on recovery.
+            self.dispatch_captured()?;
+        }
         self.send()?;
         let (_, feedback, _) = self
             .channels
@@ -755,7 +794,7 @@ impl ControlledViewer {
                 .check_pending()
                 .map_err(Error::Files)?;
             operation.viewer.service_clipboard()?;
-            let t = operation.viewer.check_inner()?;
+            operation.viewer.check_inner()?;
             // The source-age bound follows this path's measured round trip.
             let rtt = operation.viewer.session.transport.smoothed_rtt_us();
             operation
@@ -763,31 +802,10 @@ impl ControlledViewer {
                 .input
                 .follow_path_rtt(rtt)
                 .map_err(Error::View)?;
-            // A submitted frame is not yet a visible frame. Pause all network
-            // submission during this short callback gap, but do not make it
-            // impossible for the actual visibility callback to complete. The
-            // preceding view and every queued action keep their old deadlines.
-            // A SUSPENDED view (plan 11.3) instead keeps the session's I/O
-            // running below: fresh media, reports and renewals resume it.
-            if !operation.viewer.input.tick(t)?
-                && operation.viewer.input.suspended_since().is_none()
-            {
-                let viewer = &mut *operation.viewer;
-                let mut until = viewer.input.maintenance_deadline(t)?.0;
-                if let Some(deadline) = viewer.files.deadline_us() {
-                    until = until.min(deadline);
-                }
-                let remaining = until
-                    .checked_sub(now(&viewer.session.cx)?)
-                    .ok_or(Error::Expired)?;
-                let delay = wait.min(Duration::from_micros(remaining));
-                if !delay.is_zero() {
-                    asupersync::time::sleep(viewer.session.cx.now(), delay).await;
-                }
-                viewer.check_inner()?;
-                operation.complete = true;
-                return Ok(());
-            }
+            // Visibility gates INPUT admission, not the connection carrying
+            // renewal, revocation, receipts, clock and media. Keep servicing
+            // those while a compositor candidate awaits its callback. The
+            // pending input slot and captured events are fenced in `step`/`send`.
             operation.viewer.step(&mut result, &mut other)?;
             let viewer = &mut *operation.viewer;
             let cx = &viewer.session.cx;
@@ -825,7 +843,7 @@ impl ControlledViewer {
                             .as_ref()
                             .is_none_or(crate::clipboard_quic::Bridge::permits_io)
                         && viewer.clipboard_setup.permits_io()
-                        && gate(&mut viewer.input, &viewer.control, cx, &view)
+                        && maintenance_gate(&mut viewer.input, &viewer.control, cx, &view)
                 })
                 .await
                 .map_err(|e| gated(e, view.take()))?;
@@ -864,16 +882,33 @@ fn gate(
         }
     }
 }
-/// The earliest deadline the input owner imposes on this turn: its view
-/// deadline, or while suspended by stale view, the suspension limit.
-fn input_deadline(input: &mut PresentedInput, t: ClientInstant) -> Result<ClientInstant, Error> {
-    match input.view_deadline(t) {
-        Ok(until) => Ok(until),
-        Err(_) if input.suspended_since().is_some() && input.stopped().is_none() => {
-            input.maintenance_deadline(t).map_err(Error::View)
-        }
-        Err(error) => Err(Error::View(error)),
+/// Session maintenance uses the original view's deadline during a compositor
+/// gap, or the fixed suspension deadline after a genuine source lapse. Neither
+/// proves the candidate visible, creates a ticket, or permits input submission.
+fn maintenance_gate(
+    input: &mut PresentedInput,
+    control: &ViewerControl,
+    cx: &Cx,
+    view: &std::cell::Cell<Option<presentation::Error>>,
+) -> bool {
+    if control.is_stopped() {
+        return false;
     }
+    let Ok(t) = now(cx) else {
+        return false;
+    };
+    match input.maintenance_deadline(ClientInstant(t)) {
+        Ok(_) => true,
+        Err(error) => {
+            view.set(Some(error));
+            false
+        }
+    }
+}
+/// The previous view deadline remains binding during a compositor gap. A
+/// genuine stale view instead uses its existing bounded suspension lifetime.
+fn input_deadline(input: &mut PresentedInput, t: ClientInstant) -> Result<ClientInstant, Error> {
+    input.maintenance_deadline(t).map_err(Error::View)
 }
 /// Which local deadline had already passed: the view (its owner reports why),
 /// the session's host-silence bound, else a pending record or response.

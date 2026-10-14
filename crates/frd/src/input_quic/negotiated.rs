@@ -6,7 +6,7 @@ use asupersync::cx::Cx;
 use fr_core::{ids::RecoveryGeneration, input::InputView, limits::ProtocolLimits};
 use fr_transport::quic::{
     AttachedChannel, DatagramRoute, Disposition, MediaChannel, Messages, QuicRecords, Route,
-    StreamRoute,
+    SendAdmission, StreamRoute,
 };
 use fr_wire::{
     attachment::{self, MediaRole},
@@ -319,6 +319,27 @@ impl NegotiatedInput {
         deadline_us: u64,
         authorize: impl FnMut() -> bool,
     ) -> Result<(), Error> {
+        match self.send_prepared(cx, q, bytes, deadline_us, authorize, || {
+            Ok::<(), core::convert::Infallible>(())
+        })? {
+            SendAdmission::Accepted => Ok(()),
+            SendAdmission::Refused(never) => match never {},
+        }
+    }
+    /// Recheck a prepared input record independently of connection authority.
+    /// A temporary presentation gap admits no input bytes, but cannot close the
+    /// connection that carries lease maintenance and the visibility evidence.
+    /// The original record/deadline and all negotiated identity checks remain
+    /// mandatory. Cancellation and terminal connection loss take precedence.
+    pub fn send_prepared<E>(
+        &self,
+        cx: &Cx,
+        q: &mut QuicRecords,
+        bytes: &[u8],
+        deadline_us: u64,
+        authorize: impl FnMut() -> bool,
+        prepared: impl FnMut() -> Result<(), E>,
+    ) -> Result<SendAdmission<E>, Error> {
         let (actions, _, pointer) = self.viewer_routes(q)?;
         if self.recovering {
             // The parent continues renewal/result service, never old input.
@@ -362,7 +383,7 @@ impl NegotiatedInput {
         } else {
             Route::Stream(actions)
         };
-        q.send(cx, route, bytes, deadline_us, authorize)
+        q.send_prepared(cx, route, bytes, deadline_us, authorize, prepared)
             .map_err(Error::Transport)
     }
     /// Only this viewer's exact result/ticket stream is dispatched. Other

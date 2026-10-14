@@ -827,13 +827,26 @@ fn new_submission_pauses_sends_until_independent_visibility_without_retiming_act
         let original_bytes = before.bytes[..before.len].to_vec();
         let original_until = before.until;
         submit_successor(&mut state, &client_cx);
-        let before_wait = std::time::Instant::now();
         state
             .viewer
             .drive(Duration::from_millis(3), |_| {}, block)
             .await
             .unwrap();
-        assert!(before_wait.elapsed() >= Duration::from_millis(3));
+        // A network turn may finish early on real readiness; it must not sleep
+        // instead of servicing the connection. Only INPUT stays unadmitted.
+        let view = std::cell::Cell::new(None);
+        assert!(maintenance_gate(
+            &mut state.viewer.input,
+            &state.viewer.control,
+            &client_cx,
+            &view,
+        ));
+        assert!(!gate(
+            &mut state.viewer.input,
+            &state.viewer.control,
+            &client_cx,
+            &view,
+        ));
         assert!(!state.viewer.is_closed());
         let pending = state.viewer.pending.as_ref().unwrap();
         assert_eq!(pending.until, original_until);
@@ -1402,3 +1415,5 @@ fn original_context_stop_is_visible_to_the_promoted_input_owner_immediately() {
 }
 
 mod files;
+
+mod maintenance;
