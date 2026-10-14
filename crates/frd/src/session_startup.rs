@@ -313,8 +313,16 @@ struct Permit<'a> {
     shared_source: Option<&'a crate::media::shared_publisher::JoinQueue>,
 }
 impl Permit<'_> {
+    /// The I/O gate of an opening connection. A local DENIAL is not refused
+    /// here: it arrives asynchronously from the consent UI, usually while a turn
+    /// is driving, and refusing then closed the connection before the turn's own
+    /// `check` could turn it into `Error::Denied` and report
+    /// `Refused(LocalApprovalDenied)`; the viewer saw a bare failure instead.
+    /// A denial only ever replaces WAITING, so until that next check this
+    /// connection carries nothing but negotiation records: no observation opens
+    /// without ALLOWED. The host's fence (RETIRED) still refuses at once.
     fn check(&self) -> bool {
-        !matches!(self.decision.load(Ordering::Acquire), DENIED | RETIRED)
+        self.decision.load(Ordering::Acquire) != RETIRED
             && now(self.cx).is_ok_and(|n| n < self.until)
             && self.peer.check(self.cx, self.role).is_ok()
             && self

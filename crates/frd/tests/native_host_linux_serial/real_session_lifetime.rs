@@ -16,7 +16,7 @@ use std::{
 };
 
 /// The synthetic monitor image, compiled once, not group/other-writable.
-fn fixture_image() -> PathBuf {
+pub(super) fn fixture_image() -> PathBuf {
     let dir = std::env::temp_dir().join(format!("fr-session-lifetime-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let image = dir.join("fixture");
@@ -118,7 +118,7 @@ fn a_lock_of_the_selected_session_ends_control_and_the_run_with_a_typed_cause() 
     );
 }
 
-fn rand_token() -> u128 {
+pub(super) fn rand_token() -> u128 {
     let mut bytes = [0; 16];
     getrandom::fill(&mut bytes).unwrap();
     u128::from_le_bytes(bytes)

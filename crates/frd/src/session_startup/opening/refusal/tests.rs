@@ -21,6 +21,17 @@ fn offer() -> Offer {
 }
 
 fn exchange(client_offer: Offer, observer_only: bool, expected: Reason, local: Error) {
+    exchange_with(client_offer, observer_only, expected, local, false);
+}
+/// `asynchronous`: the consent UI decides from another thread while the host
+/// is inside a 50 ms transport wait, as the real desktop prompt does.
+fn exchange_with(
+    client_offer: Offer,
+    observer_only: bool,
+    expected: Reason,
+    local: Error,
+    asynchronous: bool,
+) {
     let runtime = network::runtime();
     let cx = runtime.request_cx_with_budget(Budget::INFINITE);
     let hcx = runtime.request_cx_with_budget(Budget::INFINITE);
@@ -49,9 +60,18 @@ fn exchange(client_offer: Offer, observer_only: bool, expected: Reason, local: E
         )
         .unwrap();
         let notices = Cell::new(0);
-        let host_run = host.open(Duration::from_millis(1), |approval, _| {
+        let wait = Duration::from_millis(if asynchronous { 50 } else { 1 });
+        let host_run = host.open(wait, |approval, _| {
             notices.set(notices.get() + 1);
-            approval.decide(false).unwrap();
+            if asynchronous {
+                let approval = approval.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(20));
+                    approval.decide(false).unwrap();
+                });
+            } else {
+                approval.decide(false).unwrap();
+            }
             Ok(())
         });
         let viewer_run = async {
@@ -90,6 +110,20 @@ fn native_viewer_receives_control_unavailable_without_a_consent_prompt() {
 #[test]
 fn native_viewer_receives_local_consent_denial_under_one_record_credit() {
     exchange(offer(), false, Reason::LocalApprovalDenied, Error::Denied);
+}
+
+/// The real consent UI denies asynchronously, usually during a host transport
+/// wait. Live (namespace e2e with the real prompt), that closed the connection as
+/// Unauthorized and the viewer reported a bare `native_session_failed`.
+#[test]
+fn native_viewer_receives_a_denial_made_during_a_host_wait() {
+    exchange_with(
+        offer(),
+        false,
+        Reason::LocalApprovalDenied,
+        Error::Denied,
+        true,
+    );
 }
 
 #[test]
