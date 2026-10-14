@@ -418,6 +418,70 @@ fn control_challenge(nonce: u128) -> Vec<u8> {
     bytes[..n].to_vec()
 }
 #[test]
+fn control_renewal_uses_the_preceding_visible_view_while_a_successor_awaits_visibility() {
+    let (mut receiver, mut input, limits, mut d) = shown();
+    input
+        .enable_control_renewal(11, ClientInstant(22_000))
+        .unwrap();
+
+    d.frame = 1;
+    d.reference = Some(0);
+    d.capture_micros = 1_006_000;
+    let mut bytes = [0; 1150];
+    let n = encode_fragment(
+        Fragment {
+            descriptor: d,
+            index: 0,
+            bytes: b"next",
+        },
+        4,
+        &limits,
+        &mut bytes,
+    )
+    .unwrap();
+    receiver.receive(Channel::Video, &bytes[..n], 23_000).unwrap();
+    let unit = receiver.take_decodable(23_000).unwrap().unwrap();
+    progress(
+        &mut input,
+        limits,
+        unit.descriptor(),
+        1_006_000,
+        SourceObservation::Captured,
+        23_000,
+    )
+    .unwrap();
+    input
+        .decoded(
+            receiver.complete_decode(&unit, 23_001).unwrap(),
+            true,
+            ClientInstant(23_001),
+        )
+        .unwrap();
+
+    // The successor has been submitted but is not yet visibly presented.
+    assert_eq!(input.tick(ClientInstant(23_002)), Ok(false));
+    assert_eq!(input.suspended_since(), None);
+
+    // Renewal is lease maintenance. It may use the still-fresh preceding
+    // visible view, but it must not make the successor input-authoritative.
+    input
+        .accept_control_challenge(&control_challenge(7), ClientInstant(23_003))
+        .unwrap();
+    assert!(
+        input
+            .pending_control_response(ClientInstant(23_004))
+            .unwrap()
+            .is_some()
+    );
+    input.control_response_sent(ClientInstant(23_005)).unwrap();
+    assert_eq!(input.stopped(), None);
+    assert_eq!(
+        input.action(key(), &mut [0; 512], ClientInstant(23_006)),
+        Err(Error::Input(input::Error::NoPresentedView))
+    );
+}
+
+#[test]
 fn control_renewal_continues_while_a_stale_view_suspends_input() {
     let (_receiver, mut input, limits, d) = shown();
     input

@@ -495,10 +495,19 @@ impl PresentedInput {
         }
         Ok(())
     }
-    /// Control renewal needs a presented view, never merely a live
-    /// connection, and continues while a stale view suspends input (plan 11.3).
+    /// Control renewal belongs to the lease, not the compositor candidate.
+    /// A newly submitted picture may await visibility while the preceding
+    /// presented view is still within its original freshness bound. Renewal
+    /// continues through that gap; it neither makes the candidate visible nor
+    /// authorizes input from it. Once the preceding view actually expires,
+    /// InputClient::tick suspends input and renewal still continues under the
+    /// bounded suspension policy (plan 11.3).
     fn renewal_ready(&mut self, now: ClientInstant) -> Result<(), Error> {
-        if self.tick(now)? || self.input.suspended_since().is_some() {
+        self.input.tick(now)?;
+        if !self.input.mapped {
+            return Err(Error::Input(super::Error::MappingUnconfirmed));
+        }
+        if self.input.view_until.is_some() || self.input.suspended_since().is_some() {
             Ok(())
         } else {
             Err(self.not_ready())
