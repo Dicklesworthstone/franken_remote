@@ -147,11 +147,16 @@ The host's terminal close code is now named on the client (c078b34).
   original media receiver, even with clipboard off. A lost reference fences
   that receiver, and the projection check ended control before the grant
   could suspend for reference recovery. A lapsed projection now ends only the
-  clipboard (7856d23). The 64 lossy-row steps went from 35/35/32 to 40/37/38
-  in three runs each, with no `control_renewal_failed`. The 40 ms 1% rows
-  held 8/8 throughout. The remaining ends are 5%-loss limits: host records
-  unacknowledged past the 2 s allowance, lease expiry, and reference or
-  decoder-restart recovery past its deadline.
+  clipboard (7856d23), and no run since has ended `control_renewal_failed`.
+  Steps held did not improve measurably: the 40/120 ms lossy rows (64 steps)
+  held 35/35/32 before and a mean of 34.6 over 8 runs after (range 22-40;
+  three runs are too few at this variance). The client now survives the
+  reference loss, but the host ends the session instead:
+  - `host_session_ended`, about 3 rows per run: a host record unacknowledged
+    past the 2 s allowance, or lease expiry;
+  - `host_control_failure`, about 1 per run.
+  `video_reference_lost` and `video_startup_expired` remain. The host side is
+  the next limit at 5% loss (fr-xfvs).
 
 ## Audited state (2026-09-27)
 
