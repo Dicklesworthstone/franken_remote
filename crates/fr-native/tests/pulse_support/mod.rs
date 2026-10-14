@@ -52,6 +52,10 @@ impl Server {
             .arg(&config)
             .env("PULSE_RUNTIME_PATH", &directory)
             .env("XDG_RUNTIME_DIR", &directory)
+            // Off any user session bus, as the namespace suite's server is: a
+            // second daemon on one bus exits ("org.PulseAudio1 already
+            // taken"), so parallel tests failed on a host with a login bus.
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
             .stdin(Stdio::null())
             .stdout(stdout)
             .stderr(stderr);
