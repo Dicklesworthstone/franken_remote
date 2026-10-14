@@ -197,10 +197,13 @@ fn an_unexpired_pulse_parks_without_waking_or_accumulating_timers() {
         assert_eq!(woken.0.load(Ordering::SeqCst), before);
         assert_eq!(driver.pending_count(), baseline + 1);
         source.advance_to(Time::from_millis(10));
+        // The runtime's own worker thread shares this driver and may fire the
+        // due pulse first; which thread fires it is not what this test checks.
+        assert!(driver.process_timers() <= 1);
         assert_eq!(
-            driver.process_timers(),
-            1,
-            "the supervisor's one pulse fires"
+            driver.pending_count(),
+            baseline,
+            "the supervisor's one pulse fired"
         );
         assert_eq!(work.as_mut().poll(&mut task), Poll::Pending);
         assert_eq!(work.as_mut().poll(&mut task), Poll::Pending);
