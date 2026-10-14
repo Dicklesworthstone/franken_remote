@@ -222,6 +222,37 @@ fn target_failure_fences_before_dropping_pending_application_work() {
     });
 }
 #[test]
+fn a_lease_the_application_stopped_while_finishing_is_the_reported_cause() {
+    let runtime = network::runtime();
+    let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    runtime.block_on(async {
+        // The application's transport check stops the destination lease and
+        // the application then ends with its own (unnamed) failure.
+        let stopped = Arc::new(AtomicBool::new(false));
+        let service = {
+            let stopped = stopped.clone();
+            std::future::poll_fn(move |_| {
+                if stopped.load(Ordering::Acquire) {
+                    Poll::Ready(Err(fr_tailnet::Error::Expired))
+                } else {
+                    Poll::Pending
+                }
+            })
+        };
+        let application = {
+            let stopped = stopped.clone();
+            async move {
+                stopped.store(true, Ordering::Release);
+                "transport unauthorized"
+            }
+        };
+        assert_eq!(
+            run_application(&cx, service, application).await,
+            Err(Error::Tailnet(fr_tailnet::Error::Expired))
+        );
+    });
+}
+#[test]
 fn returning_a_value_ends_target_scope_and_abandoned_scope_fences_before_drop() {
     let runtime = network::runtime();
     let cx = runtime.request_cx_with_budget(Budget::INFINITE);

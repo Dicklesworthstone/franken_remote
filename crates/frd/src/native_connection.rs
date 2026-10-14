@@ -226,12 +226,25 @@ async fn run_application<T>(
 ) -> Result<T, Error> {
     let mut service = pin!(service);
     let mut application = pin!(application);
+    let lost = |result: Result<(), fr_tailnet::Error>| {
+        Err(Error::Tailnet(
+            result.err().unwrap_or(fr_tailnet::Error::Revoked),
+        ))
+    };
     poll_fn(|task| {
         let result = match service.as_mut().poll(task) {
-            Poll::Ready(result) => Poll::Ready(Err(Error::Tailnet(
-                result.err().unwrap_or(fr_tailnet::Error::Revoked),
-            ))),
-            Poll::Pending => application.as_mut().poll(task).map(Ok),
+            Poll::Ready(result) => Poll::Ready(lost(result)),
+            Poll::Pending => match application.as_mut().poll(task) {
+                // The application meets a stopped destination lease first, as
+                // a refused transport authorization (an unnamed
+                // Transport(Unauthorized)). The lease's own cause is the
+                // reason: report it. A live lease leaves the result as is.
+                Poll::Ready(value) => Poll::Ready(match service.as_mut().poll(task) {
+                    Poll::Ready(result) => lost(result),
+                    Poll::Pending => Ok(value),
+                }),
+                Poll::Pending => Poll::Pending,
+            },
         };
         if result.is_ready() {
             cx.cancel_fast(CancelKind::User);
