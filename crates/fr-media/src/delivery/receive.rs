@@ -779,7 +779,11 @@ impl ReceivePipeline {
         now: u64,
     ) -> Result<ReceiveUpdate, DeliveryError> {
         if progress.pipeline == PipelineState::Failed {
-            return Err(DeliveryError::DecodeFailed);
+            // The sender abandoned its own reference chain: a picture it could
+            // not send in time. Nothing failed to decode here. It is an
+            // unusable dependency chain, as when a reference expires locally,
+            // and it is reported and retried as one.
+            return Err(DeliveryError::ReferenceExpired);
         }
         if self
             .progress
