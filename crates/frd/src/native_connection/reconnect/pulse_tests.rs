@@ -110,8 +110,8 @@ fn repeated_late_pulses_keep_one_attempt_alive_and_cancellable() {
     rt.block_on(async {
         let mut clock = Clock::new(&supervisor).unwrap();
         let state = Arc::new(State::default());
-        let wakes = Arc::new(Wakes::default());
-        let waker = Waker::from(wakes.clone());
+        let woken = Arc::new(Wakes::default());
+        let waker = Waker::from(woken.clone());
         let mut task = Context::from_waker(&waker);
         let baseline = driver.pending_count();
         let mut work = Box::pin(guarded(&supervisor, &mut clock, attempt(&child, &state)));
@@ -127,7 +127,7 @@ fn repeated_late_pulses_keep_one_attempt_alive_and_cancellable() {
                 assert!(!state.dropped.load(Ordering::SeqCst));
             }
         }
-        assert!(wakes.0.load(Ordering::SeqCst) >= 8);
+        assert!(woken.0.load(Ordering::SeqCst) >= 8);
         supervisor.cancel_fast(CancelKind::User);
         assert_eq!(
             work.as_mut().poll(&mut task),
@@ -182,22 +182,26 @@ fn an_unexpired_pulse_parks_without_waking_or_accumulating_timers() {
     rt.block_on(async {
         let mut clock = Clock::new(&supervisor).unwrap();
         let state = Arc::new(State::default());
-        let wakes = Arc::new(Wakes::default());
-        let waker = Waker::from(wakes.clone());
+        let woken = Arc::new(Wakes::default());
+        let waker = Waker::from(woken.clone());
         let mut task = Context::from_waker(&waker);
         let baseline = driver.pending_count();
         let mut work = Box::pin(guarded(&supervisor, &mut clock, attempt(&child, &state)));
         assert_eq!(work.as_mut().poll(&mut task), Poll::Pending);
         assert_eq!(work.as_mut().poll(&mut task), Poll::Pending);
-        let before = wakes.0.load(Ordering::SeqCst);
+        let before = woken.0.load(Ordering::SeqCst);
         assert_eq!(driver.pending_count(), baseline + 1);
         for _ in 0..16 {
             assert_eq!(work.as_mut().poll(&mut task), Poll::Pending);
         }
-        assert_eq!(wakes.0.load(Ordering::SeqCst), before);
+        assert_eq!(woken.0.load(Ordering::SeqCst), before);
         assert_eq!(driver.pending_count(), baseline + 1);
         source.advance_to(Time::from_millis(10));
-        driver.process_timers();
+        assert_eq!(
+            driver.process_timers(),
+            1,
+            "the supervisor's one pulse fires"
+        );
         assert_eq!(work.as_mut().poll(&mut task), Poll::Pending);
         assert_eq!(work.as_mut().poll(&mut task), Poll::Pending);
         assert_eq!(driver.pending_count(), baseline + 1);

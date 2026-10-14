@@ -23,8 +23,7 @@ fn delayed_service_charges_elapsed_age_without_moving_the_send_by() {
         serviced_at,
         wire::BASE_SOURCE_AGE_US,
     )
-    .unwrap()
-    else {
+    .unwrap() else {
         panic!("still-useful sample was lost");
     };
     assert_eq!(at, serviced_at);

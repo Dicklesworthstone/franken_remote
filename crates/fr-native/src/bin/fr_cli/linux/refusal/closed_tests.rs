@@ -46,7 +46,10 @@ fn every_host_closed_reason_reaches_cli_through_observation_control_and_reconnec
         assert!(expected.revocation.is_none());
         for failure in failures(error) {
             assert_eq!(reconnect(failure), Some(expected));
-            assert!(!retryable(failure), "host closure must not reacquire a session");
+            assert!(
+                !retryable(failure),
+                "host closure must not reacquire a session"
+            );
         }
         let rendered = crate::terminal::output(expected, true);
         let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
@@ -168,7 +171,10 @@ fn an_empty_later_close_exchange_cannot_erase_the_original_host_report() {
             assert_eq!(exchange["host_report"]["reason"], "host_failure");
             assert_eq!(exchange["host_report"]["cleanup_stage"], "incomplete");
             assert_eq!(exchange["host_report"]["outstanding_effects"]["pending"], 2);
-            assert_eq!(exchange["host_report"]["outstanding_effects"]["uncertain"], 9);
+            assert_eq!(
+                exchange["host_report"]["outstanding_effects"]["uncertain"],
+                9
+            );
         }
     }
 }

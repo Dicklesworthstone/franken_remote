@@ -356,9 +356,7 @@ impl ViewerPresentation {
                 ReportAdmission::Accepted => {
                     self.reporter.queued(now).map_err(Error::Proof)?;
                     self.sent = self.sent.saturating_add(1);
-                    if positive
-                        && let ViewSample::Visible(sample, _) = sample
-                    {
+                    if positive && let ViewSample::Visible(sample, _) = sample {
                         self.ages.record(sample.age_upper_us);
                     }
                 }

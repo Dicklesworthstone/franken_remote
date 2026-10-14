@@ -94,7 +94,8 @@ fn live_pending_metadata_keeps_exact_bytes_deadline_and_accounting() {
     let bytes = bytes.to_vec();
     for now in [130_000, 150_000, until - 1] {
         assert!(!r.discard_expired_positive(now).unwrap());
-        r.prepare(Some(value), now, wire::MAX_SOURCE_AGE_US).unwrap();
+        r.prepare(Some(value), now, wire::MAX_SOURCE_AGE_US)
+            .unwrap();
         assert_eq!(r.pending(now).unwrap(), Some((bytes.as_slice(), until)));
         assert!(!r.has_reported());
     }
@@ -123,7 +124,8 @@ fn discarding_positive_preserves_the_required_loss_report_and_its_deadline() {
     );
     assert_eq!(loss_until, until + REPORT_INTERVAL_US);
     assert!(!r.pending_is_positive());
-    r.prepare(Some(sample(until + 1)), until + 2, BOUND).unwrap();
+    r.prepare(Some(sample(until + 1)), until + 2, BOUND)
+        .unwrap();
     assert_eq!(pending(&mut r, until + 2), (loss, loss_until));
     assert_eq!(r.discard_expired_positive(loss_until), Err(Error::Expired));
     assert_eq!(r.prepare(None, loss_until, BOUND), Err(Error::Expired));
