@@ -96,8 +96,11 @@ still pass or fail run to run (bead fr-xfvs).
 **Tailnet path in the namespace suite.** The runner gives the namespace
 loopback MTU 1280 and drops IP fragments, as Tailscale does (6a38a0b). A
 planted 1500-byte datagram limit passes on plain loopback and fails there.
-Under it, on ts1, 61 of 68 pass (2d216d1, 2026-10-13). The seven failures are
-the `real_audio` tests: ts1 has no working PulseAudio; they pass on trj.
+Under it, on ts1, all 68 pass (80cdec2, 2026-10-14), including the seven
+`real_audio` tests now that ts1 has PulseAudio: the host playback tone reached
+the client's monitor 104 ms after the change (54 ms at the host's monitor).
+At 2d216d1 it was 61 of 68, missing only those seven. One later run at
+9cfb65d ended a lossy row with an unnamed `Transport(Handler)` (fr-xfvs).
 Earlier, at b47a271, 58 of 67 passed: the lossy busy-screen row and the
 cursor-close step (fixed in 5d25287) also failed.
 That step ended a normal controller close as `host_control_failure` in about
