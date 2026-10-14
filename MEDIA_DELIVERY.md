@@ -15,8 +15,8 @@ inline job slot. That fixed job becomes eligible once all original fragments
 named in its ranges have been packetized; an unrelated tail no longer delays
 repairs of an already-observed prefix hole. Requests naming unissued data remain
 pending without consuming repair-byte allowance on repeated polls. The gate
-uses the last validated range, not just the first, and does not expand, clip or
-replace the accepted request. Reliable recovery and unannounced pictures remain
+uses the last validated range, not just the first, and never adds unrequested
+fragments during packetization. Reliable recovery and unannounced pictures remain
 ineligible. The original packet cursor and final transport-admission checks are
 unchanged; packetization is not delivery evidence.
 
@@ -32,6 +32,27 @@ replacement destroy the original picture's jobs; no allowance is replenished.
 `repair_window` exercises burst losses across dependent pictures, reordered
 requests, precharged capacity, unchanged deadlines and the shared byte allowance
 with real cache/reassembly/wire owners and deterministic packet/clock fixtures.
+
+A newer valid request for a picture with a pending job may coalesce into that
+job's **unsent suffix**, rather than losing the receiver's last repair attempt
+because the picture is busy. The bounded sorted union retains every outstanding
+fragment and adds only explicitly requested work. An already emitted fragment
+is reintroduced only if the newer request explicitly asks for it (for example,
+a repair packet was itself lost). Adjacent ranges are normalized without
+spending a round when no new fragment was requested. Duplicates/subsets remain
+`RepairBusy`, without changing the pending cursor or its accounting.
+
+Coalescing consumes the normal per-picture round and cadence allowance; it
+never resets either ledger or the global byte window. A union exceeding the
+negotiated range count refuses atomically. An unissued extension which would
+raise the existing job's original-emission gate also refuses, so a peer cannot
+postpone already eligible repairs by appending a future tail. Invalid ranges,
+permanently oversized packets, clock failure and original expiry retain their
+existing checks. No queued transport packet, payload ownership, hard deadline,
+generation or authority is replaced. The `coalesced_repair` regressions exercise
+newly discovered holes and lost repair packets through admission pauses and a
+byte-window refill using the actual cache, reassembler and wire codecs. They do
+not establish a live QUIC loss envelope.
 
 The sender cache admits actual vector capacity and picture metadata, not just logical payload length. It has an explicit 32-picture default and 64-picture implementation ceiling, separate from receiver W: a 250-ms repair horizon at a 60-fps source cadence can require more than twelve sender pictures. A virtual-clock 180-frame regression exercises that distinction. It is not a throughput measurement. Expired fully emitted pictures leave the cache; an expired unsent reference fences dependent work instead of emitting a broken chain. On capacity refusal, the caller must preserve a valid dependency chain or recover, not silently skip that encoded reference.
 

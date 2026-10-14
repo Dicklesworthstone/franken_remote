@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 mod observation;
 mod recovery;
+mod repair;
 use observation::PendingObservation;
 use recovery::PendingRecovery;
 pub use recovery::{RecoveryDemand, RecoveryDisposition};
@@ -564,7 +565,9 @@ impl SendCache {
     /// receiver asks for repair. Keep that request in its original picture
     /// slot instead of spending another receiver retry/round trip. Emission
     /// waits only for the requested original prefix, not unrelated tail data;
-    /// the original horizon still bounds the job.
+    /// the original horizon still bounds the job. A newer request can add
+    /// fragments to the unsent suffix within the same range, round and cadence
+    /// bounds, but cannot delay that job by requesting an unissued later tail.
     pub fn queue_repair(&mut self, packet: &[u8], now: u64) -> Result<(), SendError> {
         let record = Record::decode(
             packet,
@@ -591,9 +594,6 @@ impl SendCache {
             ranges[count] = range;
             count += 1;
         }
-        if p.repair.is_some() {
-            return Err(SendError::RepairBusy);
-        }
         // The first fragment of each range is its largest (only the final
         // fragment may be shorter). Refuse a permanently impossible request
         // before consuming a slot/round, not later on the native send path.
@@ -602,18 +602,36 @@ impl SendCache {
                 return Err(SendError::RepairBudgetExceeded);
             }
         }
+        let job = if let Some(pending) = &p.repair {
+            // Coalescing must never postpone already accepted work by raising
+            // its original-emission gate. A new unissued suffix can retry once
+            // its originals have progressed; the existing job stays untouched.
+            if ranges[count - 1].end > p.next_original.max(pending.ranges[pending.count - 1].end) {
+                return Err(SendError::RepairBusy);
+            }
+            pending.coalesce(
+                &ranges[..count],
+                usize::from(self.limits.max_repair_ranges()),
+            )?
+        } else {
+            RepairJob {
+                fragment: ranges[0].start,
+                ranges,
+                count,
+                range: 0,
+            }
+        };
         if now < p.next_repair || p.repair_rounds >= self.policy.max_repair_rounds {
-            return Err(SendError::RepairRateLimited);
+            return Err(if p.repair.is_some() {
+                SendError::RepairBusy
+            } else {
+                SendError::RepairRateLimited
+            });
         }
         let next_repair = deadline(now, self.policy.minimum_repair_interval_micros)?;
         p.next_repair = next_repair;
         p.repair_rounds += 1;
-        p.repair = Some(RepairJob {
-            fragment: ranges[0].start,
-            ranges,
-            count,
-            range: 0,
-        });
+        p.repair = Some(job);
         Ok(())
     }
     /// Emit one requested original fragment from the earliest-deadline eligible
