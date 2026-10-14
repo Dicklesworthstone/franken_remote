@@ -10,6 +10,16 @@ Call `next_packet` only when the Asupersync transport has resource/congestion ad
 
 Forward incoming authenticated repair records to `queue_repair`, then ask `next_repair_packet` for one original cached fragment at a time. Actual cached fragment counts, sorted range bounds, one pending repair job, retry cadence, maximum rounds, and aggregate repair-byte allowance all apply. Repair traffic also passes the transport's normal congestion controller. Recovery-generation replacement does not replenish a session's repair-byte allowance. Retransmission never extends the original picture's retention deadline.
 
+An announced datagram picture can retain an early repair request in its existing
+single job slot. That fixed job becomes eligible once all original fragments
+named in its ranges have been packetized; an unrelated tail no longer delays
+repairs of an already-observed prefix hole. Requests naming unissued data remain
+pending without consuming repair-byte allowance on repeated polls. The gate
+uses the last validated range, not just the first, and does not expand, clip or
+replace the accepted request. Reliable recovery and unannounced pictures remain
+ineligible. The original packet cursor and final transport-admission checks are
+unchanged; packetization is not delivery evidence.
+
 The sender cache admits actual vector capacity and picture metadata, not just logical payload length. It has an explicit 32-picture default and 64-picture implementation ceiling, separate from receiver W: a 250-ms repair horizon at a 60-fps source cadence can require more than twelve sender pictures. A virtual-clock 180-frame regression exercises that distinction. It is not a throughput measurement. Expired fully emitted pictures leave the cache; an expired unsent reference fences dependent work instead of emitting a broken chain. On capacity refusal, the caller must preserve a valid dependency chain or recover, not silently skip that encoded reference.
 
 ## Receiver integration
@@ -19,6 +29,25 @@ Construct a `ReceivePipeline` only inside an admitted subscription, with four di
 Steady-state fragments can arrive out of order. The receiver retains complete dependents until their declared previous reference has decoded. Duplicates do not allocate again; conflicting duplicates and mutable frame descriptors fence the subscription. Initial recovery chunks must be contiguous, have immutable metadata, and fit a bounded chunk count. There is no partial-picture decoder output.
 
 Call `repair_request` when its `next_deadline` becomes due, and send the resulting bounded record through the admitted reliable control channel. The receiver emits one request per call, at a bounded per-picture cadence and attempt count. `tick` must also run on timers with no incoming traffic: an entirely lost final frame is announced on the reliable progress path, so loss before a static screen cannot hide forever. Repeated announcements/duplicates never extend a picture's original deadline.
+
+Repair scheduling distinguishes gaps before the highest received fragment from
+an unseen tail that is still making progress. While unique fragments keep
+arriving within the existing reorder allowance, requests cover only observed
+prefix gaps. After that allowance passes without a unique fragment, requests
+include the missing tail. An entirely lost announced picture still gets its
+initial timed probe. Duplicates and repeated announcements cannot postpone the
+soft probe; neither unique progress nor repair traffic extends the original hard
+reference deadline. The retry interval, attempt count, range limit and byte
+budgets remain unchanged. `next_deadline` follows the same rule rather than
+repeatedly waking at a past probe time during contiguous progress. The two fixed
+progress fields are charged through the existing assembly metadata accounting.
+
+The `progressive_repair` tests exercise paced arrivals, interior gaps, duplicate
+traffic, complete final-picture loss and hard reference expiry with actual
+sender/receiver/wire owners and synthetic compressed bytes. Prefix tests also
+reconstruct a 40-picture chain with lost originals and lost repairs, retaining
+upstream early-request waiting, limits and expiry tests unchanged. They are not native
+QUIC loss-envelope or hardware decode/presentation qualification.
 
 A picture can exceed the local display-queue budget and still be necessary to decode newer frames. `within_display_queue_budget` expresses only that receiver-local scheduling property, not end-to-end freshness. Reference usefulness is separately bounded (at most 250 ms in the initial policy); startup recovery has its own bounded deadline. Host capture timestamps are never subtracted directly from an unsynchronized receiver clock.
 

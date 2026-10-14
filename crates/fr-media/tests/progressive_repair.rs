@@ -257,3 +257,6 @@ fn a_late_tail_loss_can_be_repaired_on_the_same_chain_after_a_paced_flight() {
         .unwrap();
     assert!(!sender.needs_recovery());
 }
+
+#[path = "progressive_repair/prefix.rs"]
+mod prefix;

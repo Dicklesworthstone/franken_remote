@@ -549,7 +549,8 @@ impl SendCache {
     /// An announced datagram picture may still be emitting originals when its
     /// receiver asks for repair. Keep that request in the same single bounded
     /// slot instead of spending another receiver retry/round trip. Emission
-    /// waits for the originals; the original horizon still bounds the job.
+    /// waits only for the requested original prefix, not unrelated tail data;
+    /// the original horizon still bounds the job.
     pub fn queue_repair(&mut self, packet: &[u8], now: u64) -> Result<(), SendError> {
         let record = Record::decode(
             packet,
@@ -595,7 +596,7 @@ impl SendCache {
         Ok(())
     }
     /// Emits one original fragment from the cache. Returns no packet once the
-    /// job completes/expires or its originals are not yet fully emitted.
+    /// job completes/expires or its requested originals are not yet emitted.
     /// Waiting consumes no repair bytes. Repair traffic has its own bounded offered-load
     /// allowance AND must pass the transport's normal congestion admission.
     pub fn next_repair_packet(
@@ -609,10 +610,12 @@ impl SendCache {
         };
         let index = self.index(job.frame).ok_or(SendError::FrameUnavailable)?;
         let p = self.pictures[index].as_ref().expect("located");
-        // Do not turn an early request for a missing suffix into retransmission
-        // competing with that same suffix's first emission. Retain just the
-        // already validated job; tick above still fences an expired original.
-        if !p.original_complete() {
+        // Validated ranges are ordered and nonempty. Wait for the originals
+        // actually named by this fixed job, not the whole picture: an observed
+        // prefix hole can be repaired while unrelated tail fragments are paced.
+        // A request naming unissued data stays in the existing bounded slot;
+        // repeated polls consume no byte credit and never expand its ranges.
+        if job.ranges[job.count - 1].end > p.next_original {
             return Ok(None);
         }
         let fragment = p.fragment(job.fragment)?;
