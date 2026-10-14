@@ -491,10 +491,13 @@ pub enum Lapse {
     /// the session ended instead of showing an unverified picture.
     VideoStartupExpired,
     /// The control lease could not be kept: a renewal challenge was refused or
-    /// its response missed its deadline, or (under a live view) no newer
-    /// ticket proved the lease before the clipboard's projection of it
-    /// expired, so control ended.
+    /// its response missed its deadline, or no newer ticket proved the lease
+    /// before the one carrying it expired, so control ended. (A lapsed
+    /// clipboard projection ends only the clipboard since 7856d23.)
     ControlRenewalFailed,
+    /// The host sent an authenticated record that no lane of this session
+    /// claims. The session ends on the protocol fault instead of guessing.
+    UnexpectedRecord,
 }
 pub fn lapse(failure: Failure) -> Option<Lapse> {
     use crate::session_startup::{ControlledViewerError as C, Error as S};
@@ -584,6 +587,9 @@ pub fn lapse(failure: Failure) -> Option<Lapse> {
             // arrived: the lease was not proven live in time.
             | C::Unsent(fr_client::input::presentation::SendLimit::Ticket),
         ))) => Some(Lapse::ControlRenewalFailed),
+        Failure::Observation(ObserverError::Streaming(StreamingViewerError::UnclaimedRecord(_))) => {
+            Some(Lapse::UnexpectedRecord)
+        }
         Failure::Observation(ObserverError::Streaming(error))
             if streaming_transport(error) == Some(T::Expired) =>
         {

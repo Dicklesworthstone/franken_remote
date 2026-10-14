@@ -326,6 +326,94 @@ fn lost_final_picture(ack_stall: Duration) {
     });
 }
 
+/// A host record that no lane of this session claims ends it with a typed
+/// fault naming the record's kind, not a bare transport handler refusal (the
+/// client reported such an end as `native_session_failed`).
+#[test]
+fn an_unclaimed_host_record_ends_the_session_naming_its_kind() {
+    run(|c, h| async move {
+        let (mut host, mut viewer) = pair_initialized(&c, &h, capabilities(), |_| {}).await;
+        let mut attached = Vec::new();
+        for (role, channel) in [
+            (attachment::MediaRole::Configuration, 18),
+            (attachment::MediaRole::Recovery, 19),
+            (attachment::MediaRole::Video, 20),
+        ] {
+            attached.push(attach(&mut host, &mut viewer, &c, &h, role, channel).await);
+        }
+        let selection = host.selection().clone();
+        let [(_, vc), (_, vr), (_, vv)] = [&attached[0], &attached[1], &attached[2]];
+        let vm = NegotiatedMedia::new(viewer.io().unwrap().0, &selection, vc, vr, vv).unwrap();
+        let cfg = vm
+            .receiver_config(viewer.io().unwrap().0, ReceivePolicy::default())
+            .unwrap();
+        let mut receiver = running(cfg, now(&c).unwrap());
+        // ClipboardReady is a session-control kind; a view-only session has no
+        // clipboard lane to claim it.
+        let kind = 0x0054_u16;
+        let (q, routes) = host.io().unwrap();
+        let mut record = vec![0; 32];
+        record[..6].copy_from_slice(b"FRD0\0\0");
+        record[6..8].copy_from_slice(&kind.to_be_bytes());
+        record[12..16].copy_from_slice(&8_u32.to_be_bytes());
+        record[16..20].copy_from_slice(&routes.outbound.binding.to_be_bytes());
+        q.send(
+            &h,
+            Route::Stream(routes.outbound),
+            &record,
+            now(&h).unwrap() + 500_000,
+            || true,
+        )
+        .unwrap();
+        let mut peer = Peer::Observe {
+            session: viewer,
+            media: vm,
+        };
+        let (mut repair, mut stats, mut n) = (Repair::default(), Statistics::default(), 7000_u128);
+        let until = now(&c).unwrap() + 500_000;
+        let ended = loop {
+            assert!(
+                now(&c).unwrap() < until,
+                "the unclaimed record never ended the session"
+            );
+            let (a, b) = Box::pin(support::both(
+                host.drive(
+                    Duration::from_millis(1),
+                    || {
+                        n += 1;
+                        Ok(n)
+                    },
+                    block,
+                ),
+                network(
+                    &mut peer,
+                    None,
+                    None,
+                    &mut receiver,
+                    &mut repair,
+                    None,
+                    &mut stats,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &c,
+                    &mut |_| {},
+                    &mut |_, _| Err(()),
+                ),
+            ))
+            .await;
+            a.unwrap();
+            if let Err(error) = b {
+                break error;
+            }
+        };
+        assert_eq!(ended, Error::UnclaimedRecord(kind));
+        host.close();
+        peer.close();
+        receiver.close();
+    });
+}
 #[test]
 fn slow_real_decoder_process_reduces_remote_capture_without_stopping_session_service() {
     run(|c, h| async move {

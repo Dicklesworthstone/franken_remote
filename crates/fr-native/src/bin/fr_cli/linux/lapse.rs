@@ -26,6 +26,10 @@ pub(super) fn reconnect(error: reconnect::Failure) -> Option<Failure> {
             "host_not_heard",
             "The host's renewals did not arrive within this session's deadline, so the session ended instead of continuing unrenewed; nothing is replayed. Check the path's round-trip time and loss (tailscale ping) and that the host is still running.",
         ),
+        Lapse::UnexpectedRecord => failure(
+            "host_record_unexpected",
+            "The host sent a session record this client does not handle, so the session ended on the protocol fault; nothing is replayed. Check that host and client run the same FrankenRemote build, and report it if they do.",
+        ),
         Lapse::ControlRenewalFailed => failure(
             "control_renewal_failed",
             "The control lease could not be renewed, or proven live by a newer host ticket, before its deadline, so control ended; nothing is replayed and control is not reacquired automatically. Check the path's round-trip time and loss (tailscale ping) before starting a new session.",
@@ -62,6 +66,15 @@ mod tests {
             assert_eq!(failed.exit, 1);
             assert!(failed.next.contains("tailscale ping"));
         }
+    }
+    #[test]
+    fn an_unclaimed_host_record_is_named_not_generic() {
+        let failed = reconnect(observed(Streaming::UnclaimedRecord(0x0054))).unwrap();
+        assert_eq!(failed.code, "host_record_unexpected");
+        assert_eq!(failed.exit, 1);
+        // A transport handler refusal alone stays unnamed: only the session's
+        // own typed fault is this diagnosis.
+        assert!(reconnect(observed(Streaming::Transport(Transport::Handler))).is_none());
     }
     #[test]
     fn each_lapse_has_a_distinct_code_and_exit_one() {

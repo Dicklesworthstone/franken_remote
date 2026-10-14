@@ -54,6 +54,10 @@ pub enum Error {
     /// A malformed or hostile remote cursor record (typed, no pixels).
     Cursor(cursor::Fault),
     Wire(fr_wire::WireError),
+    /// An authenticated host record that no lane of this session claims, by
+    /// its FRD0 kind: a protocol fault, named instead of a bare transport
+    /// handler refusal.
+    UnclaimedRecord(u16),
     Application,
     RequestAlreadyStarted,
     Closed,
@@ -1057,7 +1061,12 @@ async fn network(
                 )?;
                 Ok(Disposition::Consumed)
             } else {
-                other(route, bytes)
+                other(route, bytes).map_err(|()| {
+                    let kind = bytes
+                        .get(6..8)
+                        .map_or(0, |k| u16::from_be_bytes([k[0], k[1]]));
+                    failure = Some(Error::UnclaimedRecord(kind));
+                })
             }
         })
         .await;
