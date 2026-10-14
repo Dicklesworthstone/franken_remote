@@ -264,7 +264,10 @@ pub struct SendCache {
     bindings: MediaBindings,
     epoch: MediaEpoch,
     policy: SendPolicy,
-    pictures: [Option<CachedPicture>; CACHE_SLOTS],
+    // Allocated once, at the fixed slot count: each slot carries an inline
+    // repair job, so inline storage made every future holding a cache tens of
+    // KB larger and overflowed 2 MiB thread stacks (frd's namespace e2e).
+    pictures: Box<[Option<CachedPicture>]>,
     used_bytes: usize,
     used_pictures: usize,
     last_inserted: Option<u64>,
@@ -307,7 +310,7 @@ impl SendCache {
             bindings,
             epoch,
             policy,
-            pictures: core::array::from_fn(|_| None),
+            pictures: (0..CACHE_SLOTS).map(|_| None).collect(),
             used_bytes: 0,
             used_pictures: 0,
             last_inserted: None,
