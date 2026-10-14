@@ -240,7 +240,7 @@ fn unsent_ticket_expires_without_ending_the_lease_or_minting_a_replacement() {
             assert_eq!(next.credentials.ticket, InputTicketId::from_raw(11));
             assert!(next.issued_at_us >= saved.expires_at_us);
             assert_eq!(next.expires_at_us - next.issued_at_us, 1_000_000);
-            assert!(f.receipts.is_empty());
+            assert_eq!(f.receipts, [] as [InputResult; 0]);
             f.input.control().stop(StopReason::LocalRevoke);
             f.cleared().await;
         }))

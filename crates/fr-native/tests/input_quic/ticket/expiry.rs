@@ -1,4 +1,4 @@
-//! Real existing UDP/TLS and XTest fixtures with explicit scheduling faults.
+//! Real existing UDP/TLS and `XTest` fixtures with explicit scheduling faults.
 //! Never-admitted tickets are disposable; authority loss and effect receipts
 //! keep their terminal behavior. No live-tailnet or impairment claim.
 use super::*;
@@ -43,7 +43,7 @@ fn ticket_expiry_during_the_transport_admission_check_does_not_revoke_control() 
             assert!(!f.input.control().is_stopped());
             assert!(!f.pair.server.is_closed());
             assert_eq!(f.pair.server.usage().critical_send_records, 0);
-            assert!(f.tickets.is_empty());
+            assert_eq!(f.tickets, [] as [fr_wire::input_ticket::Ticket; 0]);
             f.input.control().stop(StopReason::LocalRevoke);
             f.cleared().await;
         }))
@@ -80,7 +80,7 @@ fn expired_ticket_disposal_cannot_hide_local_revoke_or_connection_denial() {
                 );
                 assert!(f.input.control().is_stopped());
                 assert!(f.pair.server.is_closed());
-                assert!(f.tickets.is_empty());
+                assert_eq!(f.tickets, [] as [fr_wire::input_ticket::Ticket; 0]);
                 assert!(
                     f.input
                         .renew_ticket(
@@ -145,7 +145,7 @@ fn an_expired_action_receipt_is_retained_and_still_ends_the_connection() {
             assert_eq!(f.input.pending_receipt(), Some(saved));
             assert_eq!(f.input.last_reply(), Some(InputReply::Record(saved)));
             assert!(f.input.pending_ticket().is_none());
-            assert!(f.tickets.is_empty());
+            assert_eq!(f.tickets, [] as [fr_wire::input_ticket::Ticket; 0]);
             f.cleared().await;
             // Releasing held input is cleanup, not rollback of the receipt.
             assert_eq!(f.input.pending_receipt(), Some(saved));
