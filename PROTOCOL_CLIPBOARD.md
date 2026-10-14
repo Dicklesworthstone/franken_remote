@@ -129,9 +129,15 @@ approval paths, supported-platform OS change detection, and desktop integration 
 
 `fr_native::clipboard::X11Clipboard` supports explicit `begin_read`, `poll_read`
 and `cancel_read` operations alongside native publication. Reads accept bounded
-`UTF8_STRING` and `INCR` selections, use a fresh requestor window per operation,
-and check the current owner and selection `TIMESTAMP` before exposing complete
-UTF-8 text. Owners without the required timestamp target refuse explicitly.
+`UTF8_STRING` and `INCR` selections and use a fresh requestor window per operation.
+A standalone read checks the current owner and selection `TIMESTAMP` before and
+after reading; owners without that target still refuse explicitly. An already
+watched read instead binds the original server-authored `XFixes` revision and
+requires a correlated server barrier after the final property read. This supports
+owners without `TIMESTAMP`, including owners which answer an unknown target with
+text, without a guessed timestamp or an unfenced fallback. Same-owner/same-time
+reselection, subscription replacement, or stopping the watch invalidates that
+read. A full bounded event turn cannot publish a possibly superseded snapshot.
 Each turn reads at most 16 KiB; the selected item ceiling and a fixed three-second
 lifetime apply. Cancellation destroys only that read's requestor and private
 buffer, never a newer local selection. Native X server calls remain a local OS

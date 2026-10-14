@@ -200,3 +200,6 @@ mod changes;
 
 #[path = "clipboard_x11/synchronize.rs"]
 mod synchronize;
+
+#[path = "clipboard_x11/timestamp_optional.rs"]
+mod timestamp_optional;

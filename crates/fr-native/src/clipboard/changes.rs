@@ -1,5 +1,5 @@
 //! Coalesced server-authored `XFixes` notifications, never content polling.
-use super::{PlatformError, Stamp, X11Clipboard, ffi};
+use super::{PlatformError, ReadError, Stamp, X11Clipboard, ffi};
 use core::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +56,14 @@ pub(super) struct Changes {
     pending: Option<ClipboardChange>,
 }
 impl Changes {
+    /// A watched read retains this exact subscription revision. Exhaustion is
+    /// terminal evidence loss, never permission to downgrade to timestamp reads.
+    pub(super) fn read_revision(&self) -> Result<Option<u64>, ReadError> {
+        if self.exhausted {
+            return Err(ReadError::LocalChanged);
+        }
+        Ok(self.active.then_some(self.revision))
+    }
     pub(super) fn record(&mut self, owner: u32, time: u32) {
         if !self.active || self.exhausted {
             return;

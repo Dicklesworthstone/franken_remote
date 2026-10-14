@@ -56,6 +56,7 @@ impl fmt::Debug for ReadText {
 #[derive(Clone, Copy)]
 enum Stage {
     Clock(u32),
+    Fence(u32),
     Before,
     Selection,
     Data {
@@ -74,6 +75,7 @@ pub(super) struct Capture {
     signal: Option<Event>,
     time: u32,
     timestamp: u32,
+    revision: Option<u64>,
     lower_bound: usize,
     chunks: u32,
     text: Text,
@@ -82,7 +84,9 @@ pub(super) struct Capture {
 impl Capture {
     pub(super) fn observe(&mut self, event: Event, atoms: Atoms) {
         let expected = match self.stage {
-            Stage::Clock(sequence) => event.kind == 4 && event.sequence == sequence,
+            Stage::Clock(sequence) | Stage::Fence(sequence) => {
+                event.kind == 4 && event.sequence == sequence
+            }
             Stage::Before | Stage::Selection | Stage::After => {
                 let (target, property) = self.target(atoms);
                 event.kind == 6
@@ -114,6 +118,9 @@ impl Capture {
     fn current(&self, clipboard: &X11Clipboard) -> Result<(), ReadError> {
         if Instant::now() >= self.deadline {
             return Err(ReadError::Expired);
+        }
+        if self.revision.is_some() && clipboard.changes.read_revision()? != self.revision {
+            return Err(ReadError::LocalChanged);
         }
         let mut owner = 0;
         // SAFETY: live connection and synchronous, writable scalar output.
@@ -205,7 +212,29 @@ impl Capture {
                     return Err(ReadError::Malformed);
                 }
                 self.time = event.time;
-                self.convert(clipboard, Stage::Before)?;
+                // Automatic synchronization already owns a server-authored
+                // XFixes subscription. Do not require a peer TIMESTAMP target:
+                // common owners (including xclip) do not implement it.
+                self.convert(
+                    clipboard,
+                    if self.revision.is_some() {
+                        Stage::Selection
+                    } else {
+                        Stage::Before
+                    },
+                )?;
+            }
+            Stage::Fence(_) => {
+                let Some(event) = self.signal.take() else {
+                    return Ok(false);
+                };
+                if event.time == 0 || event.time.wrapping_sub(self.time) >= (1 << 31) {
+                    return Err(ReadError::Malformed);
+                }
+                // This correlated server event follows the final property read.
+                // All preceding ownership/reselection events have been serviced;
+                // current() checks the exact watched revision before and after.
+                return self.validated();
             }
             Stage::Before | Stage::After => {
                 let Some(event) = self.signal.take() else {
@@ -232,11 +261,7 @@ impl Capture {
                     if timestamp != self.timestamp {
                         return Err(ReadError::LocalChanged);
                     }
-                    if self.text.0.len() < self.lower_bound {
-                        return Err(ReadError::Malformed);
-                    }
-                    std::str::from_utf8(&self.text.0).map_err(|_| ReadError::InvalidUtf8)?;
-                    return Ok(true);
+                    return self.validated();
                 }
                 self.timestamp = timestamp;
                 self.convert(clipboard, Stage::Selection)?;
@@ -285,6 +310,13 @@ impl Capture {
             }
         }
         Ok(false)
+    }
+    fn validated(&self) -> Result<bool, ReadError> {
+        if self.text.0.len() < self.lower_bound {
+            return Err(ReadError::Malformed);
+        }
+        std::str::from_utf8(&self.text.0).map_err(|_| ReadError::InvalidUtf8)?;
+        Ok(true)
     }
     fn data(
         &mut self,
@@ -337,7 +369,18 @@ impl Capture {
             self.stage = Stage::NextChunk(self.delete(clipboard)?);
         } else {
             self.delete(clipboard)?;
-            self.convert(clipboard, Stage::After)?;
+            if self.revision.is_some() {
+                let mut sequence = 0;
+                // SAFETY: live thread-confined connection and writable scalar;
+                // the server creates the barrier, never an application reply.
+                if unsafe { ffi::fr_clip_tick(clipboard.handle()?, &raw mut sequence) } != 0 {
+                    return Err(PlatformError::Unavailable.into());
+                }
+                self.signal = None;
+                self.stage = Stage::Fence(sequence);
+            } else {
+                self.convert(clipboard, Stage::After)?;
+            }
         }
         Ok(())
     }
@@ -354,11 +397,15 @@ impl X11Clipboard {
     /// The caller must authorize observation BEFORE calling, service polling,
     /// cancel on either off switch/revoke, and recheck authority before sending.
     /// A new native requestor window fences all old responses without allocating
-    /// a new server atom per operation. Timestamp-less owners refuse explicitly.
+    /// a new server atom per operation. Watched reads fence the subscription's
+    /// exact revision through a final server barrier; even same-owner/same-time
+    /// reselection invalidates them. Without a watch, the original before/after
+    /// TIMESTAMP checks remain mandatory; there is no unfenced fallback.
     pub fn begin_read(&mut self) -> Result<(), ReadError> {
         if self.capture.is_some() {
             return Err(ReadError::Busy);
         }
+        let revision = self.changes.read_revision()?;
         let deadline = Instant::now() + READER_LIFETIME;
         let mut owner = 0;
         let handle = self.handle()?;
@@ -392,6 +439,7 @@ impl X11Clipboard {
             signal: None,
             time: 0,
             timestamp: 0,
+            revision,
             lower_bound: 0,
             chunks: 0,
             text: Text(Vec::new()),
@@ -411,15 +459,26 @@ impl X11Clipboard {
         if self.capture.is_none() {
             return Err(ReadError::NotReading);
         }
-        if let Err(error) = self.pump() {
-            self.cancel_read();
-            return Err(error.into());
-        }
+        let events = match self.pump() {
+            Ok(events) => events,
+            Err(error) => {
+                self.cancel_read();
+                return Err(error.into());
+            }
+        };
         let mut capture = self.capture.take().expect("active read");
         let mut scratch = Scratch([0; CHUNK]);
         let result = capture
             .current(self)
-            .and_then(|()| capture.step(self, &mut scratch.0))
+            .and_then(|()| {
+                // A full bounded turn may hide a queued reselection. Keep the
+                // barrier/read pending rather than exposing an old snapshot.
+                if capture.revision.is_some() && events == 32 {
+                    Ok(false)
+                } else {
+                    capture.step(self, &mut scratch.0)
+                }
+            })
             .and_then(|complete| capture.current(self).map(|()| complete));
         match result {
             Ok(false) => {
