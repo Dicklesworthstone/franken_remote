@@ -155,8 +155,13 @@ The host's terminal close code is now named on the client (c078b34).
   - `host_session_ended`, about 3 rows per run: a host record unacknowledged
     past the 2 s allowance, or lease expiry;
   - `host_control_failure`, about 1 per run.
-  `video_reference_lost` and `video_startup_expired` remain. The host side is
-  the next limit at 5% loss (fr-xfvs).
+  `video_reference_lost` and `video_startup_expired` remain. At 120 ms RTT
+  even 1% loss ends most controlled sessions within 4-6 steps (1 of 16 rows
+  held). A reference recovery that misses its deadline makes the host's
+  recovery services refuse I/O, which closes the connection. Raising the
+  client's 2 s recovery budget to 5 s changed nothing (A/B, 16 rows each).
+  The suspects are the host's own recovery deadlines and the pinned stack's
+  throughput under loss (fr-xfvs).
 
 ## Audited state (2026-09-27)
 
