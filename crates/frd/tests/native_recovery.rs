@@ -178,7 +178,7 @@ fn accepted_request_fences_actual_input_and_the_existing_capture_loop_forces_rec
         let (control, input) = control(&cx, 9);
         let (healthy, healthy_input) = self::control(&cx, 10);
         let mut source = source(&control, "healthy").await;
-        let mut subscription = subscription(&control, &mut source, 2_000_000).await;
+        let mut subscription = Box::pin(subscription(&control, &mut source, 2_000_000)).await;
         let mut bytes = [0; 1150];
         let old = subscription.next_packet(&mut bytes).unwrap().unwrap();
         let worker_id = source.worker_id();
@@ -242,7 +242,7 @@ fn malformed_foreign_source_and_foreign_session_requests_do_not_stale_a_healthy_
         let (control, input) = control(&cx, 9);
         let mut source = source(&control, "healthy").await;
         let mut foreign = self::source(&control, "healthy").await;
-        let mut subscription = subscription(&control, &mut source, 2_000_000).await;
+        let mut subscription = Box::pin(subscription(&control, &mut source, 2_000_000)).await;
         assert!(
             subscription
                 .request_recovery(&mut source, b"bad", binding())
@@ -289,7 +289,7 @@ fn a_stalled_unchanged_observation_is_dropped_without_ending_the_subscription() 
         let cx = Cx::current().unwrap();
         let (control, _input) = control(&cx, 9);
         let mut source = source(&control, "healthy").await;
-        let mut subscription = subscription(&control, &mut source, 2_000_000).await;
+        let mut subscription = Box::pin(subscription(&control, &mut source, 2_000_000)).await;
         let mut bytes = [0; 1150];
         while subscription.next_packet(&mut bytes).unwrap().is_some() {}
         // Evidence from a capture stalled past the 250 ms reference horizon is
@@ -314,7 +314,7 @@ fn worker_polling_and_delayed_capture_cannot_restart_the_original_recovery_deadl
         let cx = Cx::current().unwrap();
         let (control, input) = control(&cx, 9);
         let mut source = source(&control, "poll-forever").await;
-        let mut subscription = subscription(&control, &mut source, 400_000).await;
+        let mut subscription = Box::pin(subscription(&control, &mut source, 400_000)).await;
         subscription
             .request_recovery(&mut source, &request(binding()), binding())
             .unwrap();
@@ -351,7 +351,7 @@ fn a_worker_ignoring_force_idr_is_refused_not_used_as_a_recovery_picture() {
         let cx = Cx::current().unwrap();
         let (control, _) = control(&cx, 9);
         let mut source = source(&control, "ignore-force").await;
-        let mut subscription = subscription(&control, &mut source, 2_000_000).await;
+        let mut subscription = Box::pin(subscription(&control, &mut source, 2_000_000)).await;
         subscription
             .request_recovery(&mut source, &request(binding()), binding())
             .unwrap();
@@ -373,7 +373,7 @@ fn an_expired_failed_viewer_does_not_reset_the_shared_capture_worker() {
         let cx = Cx::current().unwrap();
         let (control, _) = control(&cx, 9);
         let mut source = source(&control, "healthy").await;
-        let mut subscription = subscription(&control, &mut source, 100_000).await;
+        let mut subscription = Box::pin(subscription(&control, &mut source, 100_000)).await;
         subscription
             .request_recovery(&mut source, &request(binding()), binding())
             .unwrap();

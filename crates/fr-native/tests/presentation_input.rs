@@ -348,7 +348,7 @@ async fn scenario(delay_receipt: bool) {
         mut client,
         mut observer,
         wire,
-    } = prepare(&source_server, &viewer_server, &cx).await;
+    } = Box::pin(prepare(&source_server, &viewer_server, &cx)).await;
     let limits = config().limits().unwrap();
     let unit = capture.capture(&control, true).await.unwrap();
     subscription.enqueue(unit).unwrap();
@@ -923,7 +923,7 @@ async fn recovery_case(loss: Loss, late_reference: bool) {
     let source = Server::start();
     let viewer = Server::start();
     let cx = Cx::current().unwrap();
-    let mut video = prepare(&source, &viewer, &cx).await;
+    let mut video = Box::pin(prepare(&source, &viewer, &cx)).await;
     let mut output = X11Surface::capture(Some(&viewer.name), config().limits().unwrap()).unwrap();
     let mut counts = RecoveryCounts::default();
     let bootstrap = video.capture.capture(&video.control, true).await.unwrap();
@@ -1116,7 +1116,7 @@ fn actual_hevc_partial_recovery_is_fenced_then_fresh_idr_and_dependent_are_visib
         let source = Server::start();
         let viewer = Server::start();
         let cx = Cx::current().unwrap();
-        let mut video = prepare(&source, &viewer, &cx).await;
+        let mut video = Box::pin(prepare(&source, &viewer, &cx)).await;
         let mut output =
             X11Surface::capture(Some(&viewer.name), config().limits().unwrap()).unwrap();
         let initial = video.capture.capture(&video.control, true).await.unwrap();
@@ -1233,7 +1233,7 @@ fn native_presenter_refuses_foreign_receiver_without_consuming_either_picture() 
         let source = Server::start();
         let viewer = Server::start();
         let cx = Cx::current().unwrap();
-        let mut video = prepare(&source, &viewer, &cx).await;
+        let mut video = Box::pin(prepare(&source, &viewer, &cx)).await;
         let c = receiver_config(video.wire);
         let mut foreign =
             ReceivePipeline::new(c, MediaBudget::new(c.limits.protocol()).unwrap()).unwrap();
@@ -1293,7 +1293,7 @@ fn dropping_native_decode_fences_receiver_and_forbids_recovery_on_dead_worker() 
         let source = Server::start();
         let viewer = Server::start();
         let cx = Cx::current().unwrap();
-        let mut video = prepare(&source, &viewer, &cx).await;
+        let mut video = Box::pin(prepare(&source, &viewer, &cx)).await;
         pause_decoder(&video.presenter);
         queue_first_picture(&mut video, &cx).await;
         {
@@ -1343,7 +1343,7 @@ fn failed_native_startup_never_configures_receiver_and_drop_invalidates_view() {
         let source = Server::start();
         let viewer = Server::start();
         let cx = Cx::current().unwrap();
-        let mut video = prepare(&source, &viewer, &cx).await;
+        let mut video = Box::pin(prepare(&source, &viewer, &cx)).await;
         let record = bootstrap_record(&mut video.capture, &video.control, config()).await;
         let c = receiver_config(video.wire);
         let mut receiver =
@@ -1382,7 +1382,7 @@ fn canceled_native_stop_cannot_rebind_before_receiver_watchdog_runs() {
         let source = Server::start();
         let viewer = Server::start();
         let cx = Cx::current().unwrap();
-        let mut video = prepare(&source, &viewer, &cx).await;
+        let mut video = Box::pin(prepare(&source, &viewer, &cx)).await;
         let cancel_runtime = runtime();
         let cancelled = cancel_runtime.request_cx_with_budget(Budget::INFINITE);
         let until = Deadline::after(&cancelled, Duration::from_millis(500)).unwrap();

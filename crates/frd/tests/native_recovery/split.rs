@@ -12,7 +12,7 @@ fn network_recovery_admission_does_not_wait_for_an_in_flight_native_capture() {
         let cx = Cx::current().unwrap();
         let (control, input) = control(&cx, 9);
         let mut source = source(&control, "delay-unchanged").await;
-        let mut subscription = subscription(&control, &mut source, 2_000_000).await;
+        let mut subscription = Box::pin(subscription(&control, &mut source, 2_000_000)).await;
         let target = subscription.recovery_target(&source).unwrap();
         let original_worker = source.worker_id();
         let mut bytes = [0; 1150];
@@ -91,7 +91,7 @@ fn unrestricted_worker_access_retires_existing_recovery_handles() {
         let cx = Cx::current().unwrap();
         let (control, input) = control(&cx, 9);
         let mut source = source(&control, "healthy").await;
-        let mut subscription = subscription(&control, &mut source, 2_000_000).await;
+        let mut subscription = Box::pin(subscription(&control, &mut source, 2_000_000)).await;
         let target = subscription.recovery_target(&source).unwrap();
         let worker = source.worker_id();
         let _ = source.worker_mut();
@@ -121,8 +121,8 @@ fn equal_numeric_frames_on_another_worker_do_not_authorize_a_target() {
         let (control, input) = control(&cx, 9);
         let mut source = source(&control, "healthy").await;
         let mut foreign = self::source(&control, "healthy").await;
-        let subscription = subscription(&control, &mut source, 2_000_000).await;
-        let mut other = self::subscription(&control, &mut foreign, 2_000_000).await;
+        let subscription = Box::pin(subscription(&control, &mut source, 2_000_000)).await;
+        let mut other = Box::pin(self::subscription(&control, &mut foreign, 2_000_000)).await;
         assert!(matches!(
             subscription.recovery_target(&foreign),
             Err(Error::InvalidFrame)
@@ -150,7 +150,7 @@ fn a_handle_cannot_keep_a_dropped_capture_owner_alive() {
         let cx = Cx::current().unwrap();
         let (control, input) = control(&cx, 9);
         let mut source = source(&control, "healthy").await;
-        let mut subscription = subscription(&control, &mut source, 2_000_000).await;
+        let mut subscription = Box::pin(subscription(&control, &mut source, 2_000_000)).await;
         let target = subscription.recovery_target(&source).unwrap();
         stop(&mut source, &cx).await;
         drop(source);

@@ -132,7 +132,7 @@ async fn reap(source: &mut CaptureSource, cx: &Cx) {
 fn failure_admission_during_native_borrow_fences_packets_before_capture_returns() {
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
-        let (control, mut source, mut sub) = fixture(&cx, 2_000_000).await;
+        let (control, mut source, mut sub) = Box::pin(fixture(&cx, 2_000_000)).await;
         let packet = sub.next_packet(&mut [0; 1150]).unwrap().unwrap();
         let mut native = Box::pin(source.capture_if_changed(&control, false));
         poll_fn(|task| {
@@ -174,7 +174,7 @@ fn failure_admission_during_native_borrow_fences_packets_before_capture_returns(
 fn a_different_source_cannot_consume_a_deferred_demand() {
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
-        let (control, mut original, mut sub) = fixture(&cx, 2_000_000).await;
+        let (control, mut original, mut sub) = Box::pin(fixture(&cx, 2_000_000)).await;
         let mut foreign = source(&control).await;
         assert!(
             sub.request_recovery(&mut foreign, &request(Some(0)), binding())
@@ -195,7 +195,7 @@ fn a_different_source_cannot_consume_a_deferred_demand() {
 fn draining_time_cannot_renew_a_pending_capture_recovery_deadline() {
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
-        let (control, mut source, mut sub) = fixture(&cx, 100_000).await;
+        let (control, mut source, mut sub) = Box::pin(fixture(&cx, 100_000)).await;
         let pending = sub
             .admit_recovery_request(&request(Some(0)), binding())
             .unwrap()
@@ -214,7 +214,7 @@ fn draining_time_cannot_renew_a_pending_capture_recovery_deadline() {
 fn raw_worker_access_invalidates_the_deferred_source_identity() {
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
-        let (_, mut source, mut sub) = fixture(&cx, 2_000_000).await;
+        let (_, mut source, mut sub) = Box::pin(fixture(&cx, 2_000_000)).await;
         let pending = sub
             .admit_recovery_request(&request(Some(0)), binding())
             .unwrap()

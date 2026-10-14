@@ -114,7 +114,10 @@ fn mutable_worker_access_fences_swapped_capture_provenance() {
                 .authorize_observation(host_now(&session).unwrap())
                 .unwrap();
             let control = ObservationControl::new(session, authority).unwrap();
-            verify_swapped_capture(&control, &cleanup, &displays, force_idr).await;
+            Box::pin(verify_swapped_capture(
+                &control, &cleanup, &displays, force_idr,
+            ))
+            .await;
             control.revoke();
         }
     });
