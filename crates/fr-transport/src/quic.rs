@@ -20,6 +20,7 @@ use std::{
 };
 
 mod admission;
+mod send_window;
 pub use admission::SendAdmission;
 
 mod lifetime;
@@ -956,7 +957,10 @@ impl QuicRecords {
     /// (replaceable) media must never hold a renewal challenge, control response
     /// or presented report past its deadline. Two packets would starve it at the
     /// minimum congestion window (2 x 1200 after loss) whenever anything at all
-    /// is in flight. Bulk prefixes still wait until the media queue fits too.
+    /// is in flight. Bulk prefixes reserve one packet for the prefix plus every
+    /// queued datagram, but not another empty packet. Keeping an entire extra
+    /// slot idle also reduced recovery to stop-and-wait at the two-packet floor.
+    /// Critical-first selection and its connection flow-credit reserve remain.
     fn queue_stream_prefix(&mut self, cx: &Cx, now: u64) -> Result<Option<Priority>, Error> {
         if self.pending_writes.iter().any(|p| now >= p.deliver_by) {
             return Err(Error::Expired);
@@ -968,7 +972,6 @@ impl QuicRecords {
             .congestion_window_bytes
             .saturating_sub(path.bytes_in_flight);
         let critical_needed = 1200;
-        let bulk_needed = (inner.pending_outbound_datagram_count() as u64 + 2) * 1200;
         if inner.has_pending_stream_frames() || room < critical_needed {
             return Ok(None);
         }
@@ -984,7 +987,12 @@ impl QuicRecords {
         let connection_credit = inner.streams().connection_send_remaining();
         let mut selected = None;
         for priority in [Priority::Critical, Priority::Bulk] {
-            if priority == Priority::Bulk && room < bulk_needed {
+            if priority == Priority::Bulk
+                && !send_window::bulk_prefix_fits(
+                    room,
+                    inner.pending_outbound_datagram_count() as u64,
+                )
+            {
                 break;
             }
             for (index, pending) in self.pending_writes.iter().enumerate() {
