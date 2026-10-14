@@ -111,15 +111,13 @@ mod linux {
                         .map_err(native)?,
                     display_next: None,
                     fitted: if fit {
-                        Some(
-                            FittedFrame::new(
-                                configuration.width,
-                                configuration.height,
-                                target.ok_or(Error::WrongState)?,
-                                limits,
-                            )
-                            .map_err(native)?,
+                        FittedFrame::for_viewport(
+                            configuration.width,
+                            configuration.height,
+                            target.ok_or(Error::WrongState)?,
+                            limits,
                         )
+                        .map_err(native)?
                     } else {
                         None
                     },

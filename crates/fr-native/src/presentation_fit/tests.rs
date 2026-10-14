@@ -1,5 +1,5 @@
 use super::*;
-fn pattern(w: u32, h: u32, offset: u8) -> BgraFrame {
+pub(super) fn pattern(w: u32, h: u32, offset: u8) -> BgraFrame {
     let mut pixels = Vec::new();
     for y in 0..h {
         for x in 0..w {

@@ -24,6 +24,22 @@ impl std::fmt::Debug for FittedFrame {
     }
 }
 impl FittedFrame {
+    /// Select the existing native-size presentation path when fitting is an
+    /// identity. That path retains the decoded picture for cursor updates; it
+    /// needs neither a fitted allocation nor a full-frame copy before display.
+    /// All source limits still apply, including on the allocation-free path.
+    pub fn for_viewport(
+        source_width: u32,
+        source_height: u32,
+        target: X11Target,
+        limits: ProtocolLimits,
+    ) -> Result<Option<Self>, NativeError> {
+        if (source_width, source_height) == (target.width(), target.height()) {
+            frame_len(source_width, source_height, &limits)?;
+            return Ok(None);
+        }
+        Self::new(source_width, source_height, target, limits).map(Some)
+    }
     pub fn new(
         source_width: u32,
         source_height: u32,
@@ -106,3 +122,7 @@ impl FittedFrame {
 #[cfg(test)]
 #[path = "presentation_fit/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "presentation_fit/viewport_tests.rs"]
+mod viewport_tests;
