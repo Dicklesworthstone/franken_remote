@@ -15,10 +15,10 @@ use super::*;
 use std::{process::Command, thread, time::Instant};
 
 /// One loopback netem profile for the lifetime of the value.
-struct Netem;
+pub(super) struct Netem;
 impl Netem {
     /// `rate_kbit` 0 leaves the rate unlimited.
-    fn apply(delay_ms: u32, loss_percent: f32, rate_kbit: u32) -> Self {
+    pub(super) fn apply(delay_ms: u32, loss_percent: f32, rate_kbit: u32) -> Self {
         let delay = format!("{delay_ms}ms");
         let loss = format!("{loss_percent}%");
         let rate = format!("{rate_kbit}kbit");

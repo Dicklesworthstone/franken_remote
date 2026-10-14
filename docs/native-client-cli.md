@@ -294,8 +294,12 @@ clipboard worker started; it is not proof that either native owner opened),
 `clipboard_absence`: `null` when active, otherwise a typed code such as
 `host_clipboard_unavailable` (the host did not enable it),
 `host_clipboard_refused`, `local_clipboard_unavailable`, `clipboard_not_started`
-(for example, control never granted) or `not_requested`. Clipboard text never
-appears in output, errors or logs.
+(for example, control never granted) or `not_requested`. `clipboard_ended`
+is `null` unless an ACTIVE clipboard retired while the session ran on. Then it
+names why: `clipboard_item_expired` (an item outlived its deadline, for example
+a large copy on a slow path), `clipboard_disabled`, `clipboard_authority_ended`
+or `clipboard_ended`. Control continues, and the clipboard is not re-attached
+under that grant. Clipboard text never appears in output, errors or logs.
 
 Evidence is the namespace e2e with real X11 selections on two Xvfb displays
 (`crates/frd/tests/native_host_linux_serial/real_clipboard.rs`), described

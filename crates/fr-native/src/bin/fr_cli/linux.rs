@@ -904,7 +904,7 @@ fn control_completion(progress: &Progress, control: control::Counters, json: boo
         .unwrap_or("not_requested");
     if json {
         format!(
-            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{},\"control_requested\":{},\"control_granted\":{},\"control_capabilities_granted\":{},\"wheel_unavailable\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"input_suspensions\":{},\"input_suspended_ms\":{},\"input_dropped_aged\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{}{}{audio},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false}}\n",
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{},\"control_requested\":{},\"control_granted\":{},\"control_capabilities_granted\":{},\"wheel_unavailable\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"input_suspensions\":{},\"input_suspended_ms\":{},\"input_dropped_aged\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{},\"clipboard_ended\":{}{}{audio},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false}}\n",
             output::timestamp(),
             progress.attempts,
             progress.opened,
@@ -937,6 +937,9 @@ fn control_completion(progress: &Progress, control: control::Counters, json: boo
             } else {
                 format!("\"{absence}\"")
             },
+            clipboard
+                .ended
+                .map_or_else(|| "null".to_owned(), |code| format!("\"{code}\"")),
             files.json(),
         )
     } else {
@@ -955,7 +958,13 @@ fn control_completion(progress: &Progress, control: control::Counters, json: boo
             control.results,
             control.submitted,
             if clipboard.active {
-                format!("active ({} host item(s) received)", clipboard.received)
+                let ended = clipboard
+                    .ended
+                    .map_or_else(String::new, |code| format!(", then ended: {code}"));
+                format!(
+                    "active ({} host item(s) received{ended})",
+                    clipboard.received
+                )
             } else {
                 format!("absent: {absence}")
             },
@@ -1360,13 +1369,27 @@ mod tests {
                     with(Some(control::ClipboardCounters {
                         active: true,
                         received: 2,
-                        absence: None,
+                        ..control::ClipboardCounters::default()
                     })),
                     [
                         "\"clipboard_requested\":true",
                         "\"clipboard_active\":true",
                         "\"clipboard_received\":2",
-                        "\"clipboard_absence\":null",
+                        "\"clipboard_absence\":null,\"clipboard_ended\":null",
+                    ],
+                ),
+                (
+                    with(Some(control::ClipboardCounters {
+                        active: true,
+                        received: 1,
+                        ended: Some("clipboard_item_expired"),
+                        ..control::ClipboardCounters::default()
+                    })),
+                    [
+                        "\"clipboard_requested\":true",
+                        "\"clipboard_active\":true",
+                        "\"clipboard_received\":1",
+                        "\"clipboard_absence\":null,\"clipboard_ended\":\"clipboard_item_expired\"",
                     ],
                 ),
             ];
@@ -1381,13 +1404,29 @@ mod tests {
                 &with(Some(control::ClipboardCounters {
                     active: true,
                     received: 2,
-                    absence: None,
+                    ..control::ClipboardCounters::default()
                 })),
                 false,
                 None,
             );
             assert!(
                 text.contains("clipboard active (2 host item(s) received)"),
+                "{text}"
+            );
+            let text = completion(
+                &with(Some(control::ClipboardCounters {
+                    active: true,
+                    received: 2,
+                    ended: Some("clipboard_item_expired"),
+                    ..control::ClipboardCounters::default()
+                })),
+                false,
+                None,
+            );
+            assert!(
+                text.contains(
+                    "clipboard active (2 host item(s) received, then ended: clipboard_item_expired)"
+                ),
                 "{text}"
             );
         }

@@ -13,6 +13,7 @@
 //! and the user as in `real_control`. Xvfb selections in a namespace are not a
 //! desktop clipboard manager, Wayland, or a live tailnet.
 use super::real_control::{Controlled, Harness, PRELUDE, eventually, indicator, signal};
+use super::real_impairment::Netem;
 use super::shipped_client::wait_for;
 use super::*;
 use std::{thread, time::Instant};
@@ -380,6 +381,65 @@ fn a_lost_lease_ends_the_clipboard_and_later_copies_cross_neither_way() {
         "fr after lease loss: {:?} {}",
         output.status.code(),
         String::from_utf8_lossy(&output.stdout)
+    );
+    drop((host, viewer));
+    s.daemon.finish();
+}
+
+/// A copy too large to reach the host within its item deadline on a 120 ms
+/// path (fr-clipboard-wan-item-ceiling-6mlb) ends the clipboard only: control
+/// keeps working and the completion names why. Until 145df7c the client's
+/// clipboard refused the connection's own check while that item's records were
+/// still in flight, and the whole session ended `native_session_failed`.
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; real input agent and clipboard child; tc netem on loopback"]
+fn a_copy_that_outlives_its_deadline_on_a_slow_path_ends_the_clipboard_not_control() {
+    let mut s = Controlled::start_with(true, true);
+    let mut host = Peer::start(&s.host.display);
+    let mut viewer = Peer::start(&s.viewer.display);
+    let before = unique("before the delay");
+    viewer.copy(&before);
+    if let Err(last) = pasted(&mut host, &before, Duration::from_secs(20)) {
+        panic!(
+            "lane never worked (last {last:?}); host: {}",
+            s.daemon.dump()
+        );
+    }
+    let large = format!("{} {}", unique("large"), "x".repeat(200_000));
+    {
+        let _path = Netem::apply(60, 0.0, 0);
+        viewer.copy(&large);
+        thread::sleep(Duration::from_secs(5));
+        assert!(
+            s.client.try_wait().unwrap().is_none(),
+            "a failed copy ended the session: {}",
+            s.daemon.dump()
+        );
+        assert!(
+            s.pointer_follows((150, 150), Duration::from_secs(10)),
+            "control after the failed copy: {}",
+            s.daemon.dump()
+        );
+    }
+    // The lane retired: its per-lane X11 child (which owned `before`) is gone,
+    // and the late item was never published.
+    assert!(
+        eventually(Duration::from_secs(15), || clipboard_children() == 0),
+        "the clipboard lane did not retire"
+    );
+    assert_ne!(
+        host.paste().as_deref(),
+        Some(large.as_str()),
+        "the late item was published"
+    );
+    s.close_viewer();
+    let output = wait_for(s.client, Duration::from_secs(30));
+    let report = completion(&output, &s.daemon.dump());
+    assert_eq!(report["outcome"], "stopped", "{report}");
+    assert_eq!(report["clipboard_active"], true, "{report}");
+    assert_eq!(
+        report["clipboard_ended"], "clipboard_item_expired",
+        "{report}"
     );
     drop((host, viewer));
     s.daemon.finish();

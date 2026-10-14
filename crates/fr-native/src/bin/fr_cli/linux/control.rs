@@ -88,11 +88,32 @@ pub(super) struct ClipboardCounters {
     pub(super) received: u64,
     /// Why it never became active, when known (typed code).
     pub(super) absence: Option<&'static str>,
+    /// Why an ACTIVE clipboard retired before the session ended (typed code).
+    /// Control continues; this lane is not re-attached under the same grant.
+    pub(super) ended: Option<&'static str>,
 }
 impl ClipboardCounters {
     /// The typed reason reported when the lane never became active.
     pub(super) fn absence(&self) -> Option<&'static str> {
         (!self.active).then(|| self.absence.unwrap_or("clipboard_not_started"))
+    }
+}
+/// Typed code for an active clipboard that retired mid-session.
+fn ended(reason: Option<frd::clipboard_quic::Error>) -> &'static str {
+    use fr_core::clipboard::Error as Item;
+    use fr_wire::clipboard::session::SessionError;
+    use frd::clipboard_quic::Error;
+    match reason {
+        Some(Error::HandoffExpired | Error::Session(SessionError::Clipboard(Item::Expired))) => {
+            "clipboard_item_expired"
+        }
+        Some(Error::SwitchChanged | Error::Session(SessionError::Clipboard(Item::Disabled))) => {
+            "clipboard_disabled"
+        }
+        Some(
+            Error::Controller(_) | Error::Session(SessionError::Clipboard(Item::Authority(_))),
+        ) => "clipboard_authority_ended",
+        _ => "clipboard_ended",
     }
 }
 /// Typed absence code for a clipboard that ended without becoming active.
@@ -276,6 +297,10 @@ impl Attempt {
             Phase::Retired | Phase::Closed if !counters.active => {
                 counters.absence = Some(absence(status.reason));
             }
+            // Retired, not Closed: the lane ended while the session ran on.
+            Phase::Retired => {
+                counters.ended.get_or_insert(ended(status.reason));
+            }
             _ => {}
         }
     }
@@ -437,6 +462,34 @@ mod tests {
         let policy = policy();
         assert_eq!(policy.sequence, 1);
         assert_eq!(policy.capabilities, caps);
+    }
+    #[test]
+    fn an_active_clipboard_that_retires_names_why() {
+        use fr_core::clipboard::Error as Item;
+        use fr_wire::clipboard::session::SessionError;
+        use frd::clipboard_quic::Error;
+        for (reason, code) in [
+            (Error::HandoffExpired, "clipboard_item_expired"),
+            (
+                Error::Session(SessionError::Clipboard(Item::Expired)),
+                "clipboard_item_expired",
+            ),
+            (Error::SwitchChanged, "clipboard_disabled"),
+            (
+                Error::Session(SessionError::Clipboard(Item::Authority(
+                    fr_core::input_submission::Refusal::Revoked,
+                ))),
+                "clipboard_authority_ended",
+            ),
+            (
+                Error::Session(SessionError::Clipboard(Item::LocalChanged)),
+                "clipboard_ended",
+            ),
+            (Error::Closed, "clipboard_ended"),
+        ] {
+            assert_eq!(ended(Some(reason)), code, "{reason:?}");
+        }
+        assert_eq!(ended(None), "clipboard_ended");
     }
     #[test]
     fn clipboard_absence_is_typed_and_never_reported_once_active() {
