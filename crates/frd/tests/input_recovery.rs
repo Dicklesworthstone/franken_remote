@@ -471,7 +471,11 @@ fn failed_follow_keeps_the_recovery_fence_and_can_accept_the_same_generation_lat
             .configuration
             .retire_media(&mut f.pair.client, &cx)
             .unwrap();
-        assert!(f.input.follow_recovery(&f.pair.client, &media.owner).is_err());
+        assert!(
+            f.input
+                .follow_recovery(&f.pair.client, &media.owner)
+                .is_err()
+        );
         assert_eq!(f.input.viewer_routes(&f.pair.client).unwrap(), routes);
         assert_eq!(
             f.input.viewer_scope(&f.pair.client),
@@ -639,7 +643,10 @@ fn a_foreign_media_owner_cannot_rebind_identical_numeric_routes() {
             local.input.follow_recovery(&local.pair.client, &b.owner),
             Err(Error::InvalidRoutes)
         );
-        assert_eq!(local.input.viewer_routes(&local.pair.client).unwrap(), routes);
+        assert_eq!(
+            local.input.viewer_routes(&local.pair.client).unwrap(),
+            routes
+        );
         assert_sends_fenced(&mut local, &cx, next);
         local
             .input
@@ -660,14 +667,18 @@ fn preflight_neither_resumes_input_nor_consumes_the_successor() {
         let media = f.pair.media(&cx, binding(20, next), 30, 31).await;
         f.input.begin_recovery(&f.pair.client).unwrap();
         for _ in 0..2 {
-            f.input.check_recovery(&f.pair.client, &media.owner).unwrap();
+            f.input
+                .check_recovery(&f.pair.client, &media.owner)
+                .unwrap();
             assert_eq!(
                 f.input.viewer_scope(&f.pair.client),
                 Err(Error::InvalidRoutes)
             );
             assert_sends_fenced(&mut f, &cx, next);
         }
-        f.input.follow_recovery(&f.pair.client, &media.owner).unwrap();
+        f.input
+            .follow_recovery(&f.pair.client, &media.owner)
+            .unwrap();
         assert_eq!(
             f.input.viewer_scope(&f.pair.client).unwrap(),
             (parent(), binding(20, next))

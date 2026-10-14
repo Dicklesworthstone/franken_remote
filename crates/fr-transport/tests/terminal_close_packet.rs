@@ -1,5 +1,5 @@
 //! Actual localhost TLS/UDP, production registered terminal custody and native
-//! CONNECTION_CLOSE. Admission and the local authority fence are fixtures; no
+//! `CONNECTION_CLOSE`. Admission and the local authority fence are fixtures; no
 //! Tailscale, native input release or desktop qualification is claimed.
 #![cfg(target_os = "linux")]
 #[allow(dead_code)]
@@ -141,7 +141,10 @@ async fn observe_close(pair: &mut Pair, cx: &Cx, code: u64) {
     let until = clock(cx) + 1_000_000;
     while !pair.client.connection().close_was_peer_initiated() {
         assert!(clock(cx) < until, "peer received no protected close");
-        let result = pair.client.drive_io_once(cx, Duration::from_millis(5)).await;
+        let result = pair
+            .client
+            .drive_io_once(cx, Duration::from_millis(5))
+            .await;
         assert!(result.is_ok(), "native receive: {result:?}");
         assert!(
             pair.client.connection_mut().recv_datagram().is_none(),
@@ -203,7 +206,10 @@ fn the_application_peer_ends_on_close_instead_of_waiting_for_silence_expiry() {
             QuicRecords::new(pair.client, &cx, &routes, &[video], Policy::default()).unwrap();
         let until = clock(&cx) + 1_000_000;
         loop {
-            assert!(clock(&cx) < until, "application peer waited for silence expiry");
+            assert!(
+                clock(&cx) < until,
+                "application peer waited for silence expiry"
+            );
             match client.drive(&cx, Duration::from_millis(5), || true).await {
                 Ok(()) => {}
                 Err(Error::Closed) => break,
@@ -260,10 +266,7 @@ fn cleanup_security_loss_or_cancellation_suppresses_the_fallback_packet() {
             let permitted = Arc::new(AtomicBool::new(true));
             let check = permitted.clone();
             pair.server
-                .retain_lifetime_check(
-                    &session,
-                    Arc::new(move || check.load(Ordering::Acquire)),
-                )
+                .retain_lifetime_check(&session, Arc::new(move || check.load(Ordering::Acquire)))
                 .unwrap();
             let (reporting, fenced) = arm(&mut pair, &cleanup);
             queued_video(&mut pair, &session);
@@ -341,7 +344,10 @@ fn unacknowledged_stream_backlog_still_allows_the_registered_close_packet() {
                 || true,
             )
             .unwrap();
-        pair.server.drive(&cx, Duration::ZERO, || true).await.unwrap();
+        pair.server
+            .drive(&cx, Duration::ZERO, || true)
+            .await
+            .unwrap();
         assert!(pair.server.usage().retained_send_records > 0);
         pair.server.close();
         assert!(fenced.load(Ordering::Acquire));

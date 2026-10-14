@@ -196,7 +196,7 @@ impl QuicRecords {
     /// returning its content-free reason. It must not block or re-enter this
     /// transport. Stages are always Fenced/Unknown: no native result is inferred.
     /// Normal I/O errors and explicit close transfer at most ONE socket. Native
-    /// backlog still refuses the report; only a protected CONNECTION_CLOSE may
+    /// backlog still refuses the report; only a protected `CONNECTION_CLOSE` may
     /// be flushed instead, without application payload or delivery confirmation.
     /// Dropping an in-flight I/O future still abandons that socket. The returned
     /// report never grants input.

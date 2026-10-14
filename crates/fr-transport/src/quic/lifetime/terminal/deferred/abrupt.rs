@@ -1,8 +1,8 @@
 //! Native backlog cannot carry a terminal FRD0 record safely. After the original
-//! owner fences authority, send at most one protected CONNECTION_CLOSE instead.
+//! owner fences authority, send at most one protected `CONNECTION_CLOSE` instead.
 //! The pinned native close path enters Draining before flushing, discards queued
 //! protected application packets, and emits only the close. Never call flush or
-//! drive_io_once here: neither is a general post-fence send permission.
+//! `drive_io_once` here: neither is a general post-fence send permission.
 use super::super::{Binding, Closed, DRAIN_US, Error, QuicRecords, Report, StreamRoute, now};
 use asupersync::{
     cx::Cx,
