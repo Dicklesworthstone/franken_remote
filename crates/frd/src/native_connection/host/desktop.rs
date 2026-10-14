@@ -97,6 +97,11 @@ where
             .serve_host(host, self.callbacks.approval.clone());
         async move { peer?.await }
     }
+    // A locally stopped share finishes its admitted peer on the way out, so the
+    // viewer is told the host is stopping (see `Run::poll_drain`).
+    fn finishes_peer_on_cancel(&self) -> bool {
+        true
+    }
     fn completed(
         &mut self,
         stats: serial::Statistics,
@@ -296,19 +301,25 @@ where
                         Poll::Ready(End::Desktop(result))
                     }
                 }
-                Poll::Pending => match this
-                    .listener
-                    .as_mut()
-                    .expect("active listener")
-                    .as_mut()
-                    .poll(task)
-                {
-                    Poll::Ready(result) => match this.begin_drain(End::Listener(result)) {
-                        Ok(()) => this.poll_drain(task),
-                        Err(error) => Poll::Ready(End::Desktop(Err(error))),
-                    },
-                    Poll::Pending => Poll::Pending,
-                },
+                Poll::Pending => {
+                    let polled = this
+                        .listener
+                        .as_mut()
+                        .expect("active listener")
+                        .as_mut()
+                        .poll(task);
+                    match polled {
+                        Poll::Ready(result) => {
+                            // Completed: never poll it again, even while draining.
+                            this.listener = None;
+                            match this.begin_drain(End::Listener(result)) {
+                                Ok(()) => this.poll_drain(task),
+                                Err(error) => Poll::Ready(End::Desktop(Err(error))),
+                            }
+                        }
+                        Poll::Pending => Poll::Pending,
+                    }
+                }
             }
         };
         if let Poll::Ready(value) = &result {
@@ -371,13 +382,17 @@ where
             _ => End::Desktop(result.clone()),
         })
     }
-    fn poll_drain(&mut self, task: &mut Context<'_>) -> Poll<End> {
+    fn poll_drain(&mut self, task: &mut Context<'_>) -> Poll<End>
+    where
+        N: Future<Output = Result<serial::Statistics, LinuxError>>,
+    {
         let (end, budget) = self.ending.as_mut().expect("fixed drain budget");
         match budget.expired(task) {
             Ok(true) => return Poll::Ready(End::DrainExpired),
             Err(()) => return Poll::Ready(End::Desktop(Err(dispatch::Error::Clock))),
             Ok(false) => {}
         }
+        let end = end.clone();
         if let Some(desktop) = &mut self.desktop {
             let Poll::Ready(result) = desktop.as_mut().poll(task) else {
                 return Poll::Pending;
@@ -391,8 +406,23 @@ where
             {
                 return Poll::Ready(End::Desktop(Err(error)));
             }
+            self.desktop = None;
         }
-        Poll::Ready(end.clone())
+        // Then, as when the desktop ends first (`poll_finishing`), an admitted
+        // peer finishes on its way out within the same budget: its closure
+        // report tells the viewer the host is stopping. Dropping it with the
+        // listener left the viewer to infer silence (`host_not_heard`). The
+        // listener admits no new peer: requests fail once `ending` is set and
+        // its own checks fail with the supervisor.
+        if self.completion.active.load(Ordering::Acquire)
+            && let Some(listener) = &mut self.listener
+        {
+            if listener.as_mut().poll(task).is_pending() {
+                return Poll::Pending;
+            }
+            self.listener = None;
+        }
+        Poll::Ready(end)
     }
 }
 struct Turn<'a, D, N> {

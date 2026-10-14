@@ -426,9 +426,11 @@ fn frd_run_keeps_serving_sequential_viewers_and_departing_inspections() {
     let kinds = |want: fn(&Event) -> bool| events.iter().filter(|e| want(e)).count();
     assert_eq!(kinds(listening), 9, "{events:?}");
     assert_eq!(kinds(share_ended), 9, "{events:?}");
-    // Each departed viewer is reported exactly once, before its share ends; the
-    // last share ends by local stop with its viewer still connected.
-    assert_eq!(kinds(peer_finished), 8, "{events:?}");
+    // Each viewer is reported exactly once, before its share ends. The last
+    // share ends by local stop with its viewer still connected: that viewer
+    // is finished on the way out (its closure report says the host is
+    // stopping) and reported, not abandoned.
+    assert_eq!(kinds(peer_finished), 9, "{events:?}");
     let shares: Vec<_> = events
         .split(listening)
         .skip(1)
@@ -440,10 +442,10 @@ fn frd_run_keeps_serving_sequential_viewers_and_departing_inspections() {
         })
         .collect();
     assert_eq!(shares.len(), 9, "{events:?}");
-    for share in &shares[..8] {
-        assert_eq!(share, &[(true, false), (false, true)], "{events:?}");
+    for share in &shares {
+        // The last share's slice also holds the run's final Stopped.
+        assert_eq!(&share[..2], &[(true, false), (false, true)], "{events:?}");
     }
-    assert_eq!(shares[8][0], (false, true), "{events:?}");
     assert_eq!(tools.state()["created"], 9);
     assert_eq!(tools.state()["deleted"], 9);
     assert!(UdpSocket::bind(address()).is_ok(), "listener retired");

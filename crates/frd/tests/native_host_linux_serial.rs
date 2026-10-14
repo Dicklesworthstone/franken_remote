@@ -656,5 +656,7 @@ mod real_cursor;
 mod real_files;
 #[path = "native_host_linux_serial/real_impairment.rs"]
 mod real_impairment;
+#[path = "native_host_linux_serial/real_observation_indicator.rs"]
+mod real_observation_indicator;
 #[path = "native_host_linux_serial/real_session_lifetime.rs"]
 mod real_session_lifetime;

@@ -24,6 +24,11 @@ use std::{
 /// every 10 ms (`host::ADMITTED_PULSE`); idle, every arrival is checked before
 /// it can make progress, so a slow pulse only delays noticing a revocation.
 const GUARD_PULSE_NS: u64 = 250_000_000;
+/// How long a cancelled (locally stopped) serve keeps polling its active peer
+/// so that peer can send its terminal report: the transport's own terminal
+/// drain is bounded at 250 ms. Dropping it at once left a view-only viewer to
+/// infer silence (`host_not_heard`) instead of `host_stopping`.
+const CANCEL_DRAIN_NS: u64 = 1_000_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -106,6 +111,13 @@ pub trait Application {
         statistics: Statistics,
         outcome: Result<Self::Output, HostError>,
     ) -> Result<Action, Error>;
+    /// Whether a cancelled serve keeps polling its active peer for a bounded
+    /// drain (`CANCEL_DRAIN_NS`), so that peer can send its terminal report
+    /// and complete. By default cancellation abandons the active peer without
+    /// a completion.
+    fn finishes_peer_on_cancel(&self) -> bool {
+        false
+    }
 }
 
 impl Server {
@@ -159,8 +171,10 @@ impl Server {
         });
         let inside = check.clone();
         let cx = supervisor.clone();
+        let drains = application.finishes_peer_on_cancel();
         Guard {
             cx: supervisor,
+            drains,
             check,
             inner: Some(Box::pin(async move {
                 policy.validate()?;
@@ -277,6 +291,7 @@ impl Server {
             })),
             timer: None,
             previous: None,
+            draining: None,
         }
     }
 }
@@ -364,10 +379,14 @@ impl Drop for Timer {
 // retains a failed future. Fence before dropping its active native work.
 struct Guard<F> {
     cx: Cx,
+    /// The application opted into a bounded terminal drain on cancellation.
+    drains: bool,
     check: Check,
     inner: Option<Pin<Box<F>>>,
     timer: Option<Timer>,
     previous: Option<Time>,
+    /// Set at the first cancelled turn: the end of the terminal-report drain.
+    draining: Option<Time>,
 }
 impl<F> Guard<F> {
     fn finish(&mut self) {
@@ -385,7 +404,37 @@ impl<F: Future<Output = Result<Statistics, Error>>> Future for Guard<F> {
         };
         let this = &mut *turn.owner;
         let result = (|| {
-            (this.check)()?;
+            if let Err(error) = (this.check)() {
+                if error != Error::Cancelled || !this.drains || this.inner.is_none() {
+                    return Poll::Ready(Err(error));
+                }
+                // A cancelled serve still lets its peer report why on the way
+                // out, within a fixed bound; it cannot admit new work: the
+                // loop's own checks fail, and the peer's ordinary I/O gates
+                // with them. Only the terminal path remains.
+                let driver = this.cx.timer_driver().ok_or(Error::Clock)?;
+                let now = driver.now();
+                let until = *this
+                    .draining
+                    .get_or_insert(now.saturating_add_nanos(CANCEL_DRAIN_NS));
+                if now >= until {
+                    return Poll::Ready(Err(Error::Cancelled));
+                }
+                let result = this
+                    .inner
+                    .as_mut()
+                    .ok_or(Error::Cancelled)?
+                    .as_mut()
+                    .poll(task);
+                if result.is_pending() {
+                    let timer = this.timer.get_or_insert_with(|| Timer {
+                        driver,
+                        handle: None,
+                    });
+                    timer.arm(until, task);
+                }
+                return result;
+            }
             let now = now(&this.cx)?;
             if this.previous.is_some_and(|old| now < old) {
                 return Poll::Ready(Err(Error::Clock));
