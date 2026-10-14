@@ -225,6 +225,104 @@ fn original_shared_session_automatically_recovers_and_continues_with_healthy_pee
     });
 }
 
+/// The viewer's reliable media records, as its receive pipeline judges them.
+fn received(p: &mut Member) -> Vec<Result<(), fr_media::delivery::DeliveryError>> {
+    let mut results = Vec::new();
+    let Member {
+        c,
+        viewer,
+        media,
+        receiver,
+        ..
+    } = p;
+    media
+        .receive_ready(
+            c,
+            viewer.io().unwrap().0,
+            || true,
+            |channel, bytes| {
+                assert_eq!(channel, fr_wire::Channel::MediaConfig);
+                results.push(
+                    receiver
+                        .receive(channel, bytes, now(c).unwrap())
+                        .map(|_| ()),
+                );
+                Ok(Disposition::Consumed)
+            },
+        )
+        .unwrap();
+    results
+}
+
+/// fr-xfvs: a starved congestion window keeps a picture out of the transport
+/// past its reference horizon. That used to end the viewer and, with it, a
+/// sole viewer's whole publication. Here the connection is simply not driven
+/// for longer than a 40 ms horizon.
+#[test]
+fn a_picture_the_host_could_not_send_in_time_is_recovered_instead_of_ending_the_viewer() {
+    let rt = support::runtime();
+    let cleanup_cx = rt.request_cx_with_budget(Budget::INFINITE);
+    rt.block_on(async {
+        let policy = SendPolicy {
+            reference_horizon_micros: 40_000,
+            ..SendPolicy::default()
+        };
+        let mut g = Box::pin(group_with_policy(&rt, 1, &[wire::CAPABILITY], true, policy)).await;
+        ready(&mut g).await;
+        let worker = g.publisher.worker_id();
+        let view = g.peers[0].media.binding();
+        let unsent = g.publisher.capture_next().await.unwrap();
+        assert_eq!((unsent.delivered, unsent.refused), (1, 0));
+        std::thread::sleep(Duration::from_millis(60));
+        // The source task finds the expiry first, without any transport. The
+        // viewer stays a member, fenced, and nothing is captured for it.
+        assert_eq!(g.publisher.tick(), Ok(1));
+        assert_eq!(
+            g.publisher.capture_next().await,
+            Err(crate::media::shared_publisher::Error::Media(
+                crate::media::Error::Backpressure
+            ))
+        );
+        let p = &mut g.peers[0];
+        let until = deadline(p);
+        assert!(p.control.check().is_ok());
+        // Its session says Failed once on the reliable progress lane, and the
+        // viewer's pipeline treats that as an abandoned reference chain.
+        let mut failures = Vec::new();
+        for _ in 0..20 {
+            network(p).await.unwrap();
+            failures.extend(received(p));
+        }
+        assert_eq!(
+            failures,
+            [Err(fr_media::delivery::DeliveryError::ReferenceExpired)]
+        );
+        assert_eq!(p.shared.as_ref().unwrap().statistics().recovery_requests, 0);
+        assert!(!p.frames.contains(&unsent.frame));
+        // The viewer's ordinary bound request inherits the failure's deadline.
+        admit(p).await;
+        assert_eq!(deadline(p), until);
+        let failed = g.peers.remove(0);
+        let recovered = Box::pin(replace(failed)).await;
+        g.peers.push(recovered);
+        let idr = g.publisher.capture_next().await.unwrap();
+        assert_eq!((idr.delivered, idr.refused), (1, 0));
+        ready(&mut g).await;
+        let p = &mut g.peers[0];
+        let host = p.shared.as_ref().unwrap();
+        assert_eq!(host.statistics().recovery_requests, 1);
+        assert_eq!(host.statistics().recovered_streams, 1);
+        assert_eq!(p.media.binding().recovery, view.recovery.next().unwrap());
+        assert!(p.frames.contains(&idr.frame));
+        let next = g.publisher.capture_next().await.unwrap();
+        while !p.frames.contains(&next.frame) {
+            p.turn().await.unwrap();
+        }
+        assert_eq!(g.publisher.worker_id(), worker);
+        cleanup(&mut g, &cleanup_cx).await;
+    });
+}
+
 #[test]
 fn duplicate_wire_request_during_attachment_does_not_recharge_or_extend_failure() {
     let rt = support::runtime();

@@ -168,13 +168,7 @@ pub(super) fn expired_original(error: &crate::media_quic::Error) -> bool {
 // observes it. The same failed chain then reports NeedsRecovery. Neither form
 // admits recovery after an authority, transport or bounded-recovery failure.
 fn local_reference_failure(error: &crate::media_quic::Error) -> bool {
-    expired_original(error)
-        || matches!(
-            error,
-            crate::media_quic::Error::Media(crate::media::Error::Send(
-                fr_media::delivery::SendError::NeedsRecovery
-            ))
-        )
+    error.is_reference_failure()
 }
 
 /// Local discovery fences the failed view immediately, but owns no encoder

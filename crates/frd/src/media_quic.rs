@@ -31,6 +31,21 @@ pub enum Error {
     Allocation,
     Closed,
 }
+impl Error {
+    /// A broken reference chain this sender discovered: an original that
+    /// expired before transport admission, or a later observation of that
+    /// failed chain. Egress has already fenced the view and bounded the wait.
+    /// Never an authority, transport or bounded-recovery failure; only a
+    /// session with negotiated recovery may continue through it.
+    pub(crate) const fn is_reference_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::Media(media::Error::Send(
+                SendError::OriginalExpired | SendError::NeedsRecovery
+            ))
+        )
+    }
+}
 /// Host media routes installed by the authenticated session. Input and other
 /// streams may coexist on the same connection; the session still owns dispatch.
 #[derive(Debug, Clone, Copy)]

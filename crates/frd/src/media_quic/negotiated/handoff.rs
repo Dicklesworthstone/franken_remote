@@ -82,6 +82,20 @@ impl NegotiatedMedia {
         sender: &mut QuicEgress,
     ) -> Result<u64, Error> {
         self.check_recovery_host(q, control, parent, sender, Route::Stream(control.inbound))?;
+        self.fence_sender_failure(sender)
+    }
+
+    /// [`Self::admit_sender_failure`] for an owner that discovers the broken
+    /// chain away from its viewer's network turn: the shared publisher's
+    /// source task holds no transport. Capability, role, view and the failed
+    /// cache are checked here. [`Self::notify_sender_failure`] checks the
+    /// connection before anything reaches the wire, and the viewer's request
+    /// still passes the full control-route validation.
+    pub(crate) fn fence_sender_failure(&self, sender: &mut QuicEgress) -> Result<u64, Error> {
+        self.check_recovery_capability()?;
+        if !self.is_host() || sender.view != Some(self.binding()) {
+            return Err(Error::InvalidRoutes);
+        }
         if !sender
             .egress
             .stream_subscription()

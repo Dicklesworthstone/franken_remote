@@ -21,6 +21,54 @@ Known costs, not yet fixed:
 Evidence scope: one loaded machine, namespace impairment only
 (PRESENTATION_FRESHNESS.md).
 
+## A picture the host could not send in time (fr-xfvs, 2026-10-13)
+
+Until 2026-10-13 only the viewer could start this recovery. When the host's own
+sender found a picture still unsent past its 250 ms reference horizon
+(`Send(OriginalExpired)`), the shared publisher closed that viewer. A sole
+viewer's departure then closed the whole publication, and the client saw an
+unnamed `HostStopping` close. On a lossy path this is the common case: at 1-5%
+loss the pinned stack's NewReno window sits at its two-packet floor, and the
+media admission margin then allows about one media packet per round trip, so a
+three-fragment picture at 40 ms RTT misses its horizon. The busy-screen
+view-only test failed 3 of 6 runs this way, on the current tree and on the
+2026-10-12 build alike.
+
+The publisher now treats that like the single-viewer path does
+(`streaming/recovery.rs`, `LocalFailure`). For a steady viewer that negotiated
+recovery, a sender-discovered broken chain is absorbed, not fatal:
+- The send cache has already fenced the old pictures and fixed one recovery
+  deadline. `Entry::absorb` records it with the cache's last real descriptor,
+  through `NegotiatedMedia::fence_sender_failure`, the transport-free half of
+  `admit_sender_failure`. The source task may find the expiry first; it needs
+  no connection for this.
+- The entry is fenced: no capture credit, no new pictures, no progress, no
+  cursor or audio service, and its presentation/feedback reports are consumed
+  as obsolete. It stays a member, so a sole viewer keeps its source.
+- The viewer's own session sends one reliable `Failed` progress record
+  (`notify_sender_failure`, which checks the connection first) and then waits.
+- The viewer's ordinary bound recovery request must arrive by the same deadline
+  and inherits it; nothing reaches the shared encoder before it. From there the
+  recovery is the one above. A missed deadline ends the viewer with
+  `RecoveryExpired`.
+
+The viewer's receive pipeline reports that `Failed` record as an abandoned
+reference chain (`ReferenceExpired`), not a local decode failure, so a
+connection with no fresh channels left ends, or reconnects, as
+`video_reference_lost` instead of an unnamed `NamespaceExhausted(DecodeFailed)`.
+
+Test: `a_picture_the_host_could_not_send_in_time_is_recovered_instead_of_ending_the_viewer`
+(real session, TLS and UDP; a 40 ms horizon and an undriven connection). It
+passes 8 of 8; with `Entry::tick` returning the error unchanged it fails at the
+first assertion (`Err(Closed)`). Namespace busy-screen test: 6 of 6 runs pass,
+the 1% loss row held every time, twice through an in-connection recovery
+(`recovered_streams: 1`), and the 5% row ends `video_reference_lost`.
+
+Still open: one connection fits only one complete replacement (the stream
+ceiling below), so sustained loss reaches `video_reference_lost` or a
+reconnect within seconds. The window collapse itself is upstream transport
+behaviour.
+
 A failed observation subscriber can now recover on its original QUIC connection,
 sender cache and native decoder without resetting healthy viewers or replacing
 the shared capture worker. The publisher retains the same eight member slots,

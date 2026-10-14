@@ -77,6 +77,7 @@ impl Publisher {
             media: Some(media),
             view,
             recovery: None,
+            local_failure: None,
             control,
             sender,
             failure: None,

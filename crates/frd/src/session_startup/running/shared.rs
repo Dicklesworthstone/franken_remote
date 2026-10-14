@@ -326,6 +326,15 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> Services for SharedServi
             .admitted_records
             .saturating_add(u64::try_from(report.accepted).map_err(|_| Error::Clock)?);
         self.finish_recovery(q)?;
+        // A sender-discovered failure fences this view until the viewer's
+        // request arrives: nothing certifies it or solicits reports about it.
+        if self
+            .subscriber
+            .awaits_recovery_request()
+            .map_err(Error::SharedPublication)?
+        {
+            return Ok(());
+        }
         if let Some(presentation) = &mut *self.presentation {
             presentation
                 .check_connection(q)

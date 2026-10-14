@@ -22,9 +22,80 @@ pub(super) struct Recovering {
     parent: ControlBinding,
     replacement: Option<Replacement>,
 }
+/// A broken chain found by this viewer's sender (an original that expired
+/// before the transport admitted it), not reported by the viewer. The send
+/// cache has fenced the old pictures and fixed `until`. The viewer's session
+/// reports Failed on the reliable progress lane; the viewer's ordinary bound
+/// request must arrive by `until` and inherits it. Nothing is requested from
+/// the shared encoder before then.
+pub(super) struct LocalFailure {
+    until: u64,
+    progress: fr_wire::Progress,
+    notified: bool,
+}
 impl Entry {
     pub(super) fn replacing(&self) -> bool {
         self.recovery.is_some() && self.join.is_none()
+    }
+    /// No picture enters or leaves this viewer's cache.
+    pub(super) fn fenced(&self) -> bool {
+        self.local_failure.is_some() || self.replacing()
+    }
+    /// The recovery deadline that currently bounds this viewer, if any.
+    pub(super) fn recovery_until(&self) -> Option<u64> {
+        self.local_failure
+            .as_ref()
+            .map(|local| local.until)
+            .or_else(|| self.recovery.as_ref().map(|r| r.until))
+    }
+    /// Keep a steady viewer whose sender found its own chain broken, when it
+    /// negotiated reference recovery. Every other error, viewer state and
+    /// refusal stays terminal and is returned unchanged.
+    pub(super) fn absorb(&mut self, error: Error) -> Result<(), Error> {
+        let Error::Transport(cause) = error else {
+            return Err(error);
+        };
+        if !cause.is_reference_failure()
+            || self.sender.is_closed()
+            || self.recovery.is_some()
+            || self.join.is_some()
+            || self.starting.is_some()
+        {
+            return Err(error);
+        }
+        if self.local_failure.is_some() {
+            return Ok(());
+        }
+        let (Some(media), Ok(Some(progress))) = (&self.media, self.sender.recovery_progress())
+        else {
+            return Err(error);
+        };
+        let Ok(until) = media.fence_sender_failure(&mut self.sender) else {
+            return Err(error);
+        };
+        self.local_failure = Some(LocalFailure {
+            until,
+            progress,
+            notified: false,
+        });
+        Ok(())
+    }
+    /// Report Failed once on the original connection. Backpressure retries the
+    /// identical record on a later turn, under the same deadline.
+    pub(super) fn notify_local_failure(
+        &mut self,
+        cx: &Cx,
+        q: &mut QuicRecords,
+    ) -> Result<(), Error> {
+        let (Some(local), Some(media)) = (&mut self.local_failure, &self.media) else {
+            return Ok(());
+        };
+        if !local.notified {
+            local.notified = media
+                .notify_sender_failure(cx, q, &self.sender, local.progress, local.until)
+                .map_err(Error::Transport)?;
+        }
+        Ok(())
     }
     pub(super) fn check_media(&self, q: &QuicRecords) -> Result<(), Error> {
         if let Some(media) = &self.media {
@@ -49,7 +120,15 @@ impl Entry {
 impl Subscriber {
     /// Original failure deadline, shared by attachment, IDR and decoder startup.
     pub fn recovery_deadline(&mut self, q: &QuicRecords) -> Result<Option<u64>, Error> {
-        self.with_entry(q, |entry| Ok(entry.recovery.as_ref().map(|r| r.until)))
+        self.with_entry(q, |entry| Ok(entry.recovery_until()))
+    }
+    /// This viewer's sender failed locally and its request has not arrived:
+    /// reports about the failed view are obsolete, not evidence.
+    pub(crate) fn awaits_recovery_request(&self) -> Result<bool, Error> {
+        let shared = self.members.upgrade().ok_or(Error::Closed)?;
+        let members = shared.lock().map_err(|_| Error::Poisoned)?;
+        let entry = members.entries[self.slot].as_ref().ok_or(Error::Closed)?;
+        entry.failure.map_or(Ok(entry.local_failure.is_some()), Err)
     }
     pub fn recovery_state(&mut self, q: &QuicRecords) -> Result<RecoveryState, Error> {
         self.with_entry(q, |entry| {
@@ -91,9 +170,23 @@ impl Subscriber {
                 .admit_recovery_request(q, routes, parent, &mut entry.sender, bytes)
                 .map_err(Error::Transport)?
             else {
-                return Ok(false);
+                // Only a duplicate coalesces, and a local failure has no
+                // earlier request to coalesce with.
+                return if entry.local_failure.is_some() {
+                    Err(Error::Closed)
+                } else {
+                    Ok(false)
+                };
             };
             if entry.recovery.is_some() {
+                return Err(Error::Closed);
+            }
+            // The first real request inherits the local failure's clock.
+            if entry
+                .local_failure
+                .take()
+                .is_some_and(|local| local.until != demand.deadline_micros())
+            {
                 return Err(Error::Closed);
             }
             entry.recovery = Some(Recovering {
