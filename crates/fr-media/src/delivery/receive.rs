@@ -250,6 +250,10 @@ struct Assembly {
     display_until: u64,
     reference_until: u64,
     next_repair: u64,
+    // Unique-fragment progress distinguishes an observed interior hole from a
+    // not-yet-arrived tail. These fixed fields are included in storage().
+    received_end: u32,
+    tail_probe_after: u64,
     repair_attempts: u8,
 }
 impl Assembly {
@@ -285,6 +289,8 @@ impl Assembly {
                 None => deadline(now, config.policy.reference_budget_micros)?,
             },
             next_repair: deadline(now, config.policy.repair_delay_micros)?,
+            received_end: 0,
+            tail_probe_after: deadline(now, config.policy.repair_delay_micros)?,
             repair_attempts: 0,
         })
     }
@@ -319,7 +325,12 @@ impl Assembly {
     fn has_fragment(&self, index: u32) -> bool {
         self.seen[index as usize / 64] & (1_u64 << (index % 64)) != 0
     }
-    fn fragment(&mut self, fragment: Fragment<'_>) -> Result<ReceiveUpdate, DeliveryError> {
+    fn fragment(
+        &mut self,
+        fragment: Fragment<'_>,
+        now: u64,
+        repair_delay: u64,
+    ) -> Result<ReceiveUpdate, DeliveryError> {
         if self.reliable_offset.is_some() || fragment.descriptor != self.descriptor {
             return Err(DeliveryError::ConflictingPicture);
         }
@@ -335,6 +346,12 @@ impl Assembly {
         self.seen[fragment.index as usize / 64] |= 1_u64 << (fragment.index % 64);
         self.received +=
             u32::try_from(fragment.bytes.len()).map_err(|_| DeliveryError::ResourceLimit)?;
+        // fragment_range validated the index against the bounded descriptor.
+        self.received_end = self.received_end.max(fragment.index + 1);
+        // Only a UNIQUE arrival moves this soft tail probe. Duplicates and
+        // announcements cannot keep it pending. Saturation is safe because the
+        // original hard reference deadline always caps it, including at u64::MAX.
+        self.tail_probe_after = now.saturating_add(repair_delay).min(self.reference_until);
         Ok(if self.complete() {
             ReceiveUpdate::PictureComplete
         } else {
@@ -372,8 +389,27 @@ impl Assembly {
             ReceiveUpdate::Accepted
         })
     }
-    fn missing(&self, ranges: &mut [RepairRange]) -> Result<usize, DeliveryError> {
-        let total = self.descriptor.fragment_count()?;
+    fn has_prefix_hole(&self) -> bool {
+        let prefix_bytes = (u64::from(self.received_end) * u64::from(self.descriptor.stride))
+            .min(u64::from(self.descriptor.total_bytes));
+        u64::from(self.received) < prefix_bytes
+    }
+    fn repair_due(&self) -> u64 {
+        if self.has_prefix_hole() {
+            self.next_repair
+        } else {
+            self.next_repair.max(self.tail_probe_after)
+        }
+    }
+    fn missing(&self, ranges: &mut [RepairRange], now: u64) -> Result<usize, DeliveryError> {
+        let total = if now < self.tail_probe_after {
+            // A later fragment establishes these holes even while the tail is
+            // moving. Do not spend retries guessing that an unobserved tail is
+            // already lost; once progress stops, include the entire picture.
+            self.received_end
+        } else {
+            self.descriptor.fragment_count()?
+        };
         let mut index = 0;
         let mut count = 0;
         if ranges.is_empty() {
@@ -736,10 +772,11 @@ impl ReceivePipeline {
             return Err(DeliveryError::WrongState);
         }
         let index = self.slot(fragment.descriptor, now, false)?;
-        let update = self.slots[index]
-            .as_mut()
-            .expect("inserted")
-            .fragment(fragment)?;
+        let update = self.slots[index].as_mut().expect("inserted").fragment(
+            fragment,
+            now,
+            self.config.policy.repair_delay_micros,
+        )?;
         if update == ReceiveUpdate::PictureComplete {
             self.discard_superseded();
         }
@@ -960,7 +997,7 @@ impl ReceivePipeline {
                 let a = slot.as_ref()?;
                 (!a.complete()
                     && a.reliable_offset.is_none()
-                    && now >= a.next_repair
+                    && now >= a.repair_due()
                     && a.repair_attempts < self.config.policy.max_repair_attempts)
                     .then_some((index, a.descriptor.frame))
             })
@@ -972,7 +1009,7 @@ impl ReceivePipeline {
         let mut ranges = [RepairRange { start: 0, end: 0 }; 64];
         let capacity = usize::from(self.config.limits.max_repair_ranges())
             .min((self.config.limits.record_bytes() - 36) / 8);
-        let count = a.missing(&mut ranges[..capacity])?;
+        let count = a.missing(&mut ranges[..capacity], now)?;
         let next = deadline(now, self.config.policy.repair_interval_micros)?;
         let n = encode_repair(
             a.descriptor.frame,
@@ -1064,7 +1101,7 @@ impl ReceivePipeline {
                 && a.reliable_offset.is_none()
                 && a.repair_attempts < self.config.policy.max_repair_attempts
             {
-                a.reference_until.min(a.next_repair)
+                a.reference_until.min(a.repair_due())
             } else {
                 a.reference_until
             };
