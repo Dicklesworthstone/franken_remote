@@ -49,10 +49,12 @@ Ubuntu 26.04 on the same tailnet.
 - Clipboard over delay (namespace, netem, xclip). A failed item with records
   still in flight used to close the whole session: a 40 KB copy at 120 ms RTT,
   `native_session_failed`, 3 of 3. Since 145df7c it retires only the
-  clipboard. Item ceilings (release builds): 1 MB on a LAN, ~60 KB at 30 ms
-  RTT, ~20 KB at 120 ms. The receiver caps an item at the host's authority
-  window at Begin (130-390 ms), and bulk data moves ~8 KiB per RTT beside
-  video (fr-clipboard-wan-item-ceiling-6mlb, owner decision).
+  clipboard. Item ceilings (release builds): 1 MB on a LAN; at 30 ms RTT
+  500 KB (1 MB fails); at 120 ms RTT 100 KB (200 KB fails). Before 41c3233
+  the cap was the host's input view window (130-390 ms at Begin), about 60 KB
+  and 20 KB. It is now the lease's authorization deadline (~2.7 s). Bulk data
+  still moves ~8 KiB per RTT beside video (fr-clipboard-wan-item-ceiling-6mlb,
+  owner decision).
 
 **What it took** (each with unit tests and a planted negative):
 - Asupersync pinned to git `ee72b665e` (0.6.0). Published 0.5.0 sends each
