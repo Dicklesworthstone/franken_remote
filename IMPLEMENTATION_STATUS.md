@@ -16,8 +16,19 @@ Ubuntu 26.04 on the same tailnet.
   manager).
 - `fr hosts` reports direct, DERP-relayed and idle paths correctly; a host that
   never completes the handshake ends `host_not_answering`.
-- Not exercised live yet: keys, wheel, clipboard, file sending, audio, local
-  approval, NVENC/VAAPI, macOS or Windows hosts or clients.
+- Not exercised live yet: clipboard sync, audio, local approval, VAAPI, macOS
+  or Windows hosts or clients.
+- 2026-10-14, live (ts2 `frd run --encoder nvenc --input-agent --clipboard
+  --files`, ts1 `fr connect --control --clipboard --send`, debug builds):
+  typed keys ("hello") and wheel (buttons 4 and 5) reached the host, observed
+  by an independent X client; a 100,000-byte file was published with an
+  identical sha256, and a second file with a taken name was refused. With
+  `--clipboard` the session first ended within seconds
+  (`Control(Clipboard(Transport(Unauthorized)))`); fixed in 47c0c60, and live
+  clipboard sync is still to be re-verified. Open: NVENC host
+  `cleanup_failed` in 2 of 4 runs (fr-kiao). The client on trj (load 100-250)
+  ended `Media(Worker(Deadline))`, the overload fragility in fr-tqu7, so the
+  client ran on the idle ts1.
 
 **What it took** (each with unit tests and a planted negative):
 - Asupersync pinned to git `ee72b665e` (0.6.0). Published 0.5.0 sends each
