@@ -12,6 +12,7 @@ use asupersync::{
 };
 use fr_core::limits::ProtocolLimits;
 use fr_media::worker::{self, Configuration, HEADER_BYTES, Header, Identity, Kind, Record, Role};
+mod readiness;
 mod retirement;
 pub use retirement::Retirement;
 mod selected;
@@ -325,7 +326,8 @@ fn runtime_ready(cx: &Cx) -> Result<(), Error> {
 }
 /// The short watchdog is active only while an operation is in flight. It is
 /// necessary because the pinned runtime exposes no public cancel-waker API.
-/// Socket/pipe readiness still suspends through the reactor, not a busy loop.
+/// Only I/O wakeups repoll the exchange. Network turns and this watchdog still
+/// check cancellation and deadlines, without repeatedly reading an idle pipe.
 async fn bounded<T>(
     cx: &Cx,
     deadline: Deadline,
@@ -333,6 +335,7 @@ async fn bounded<T>(
 ) -> Result<T, Error> {
     let mut previous = now(cx)?;
     let mut future = pin!(future);
+    let readiness = readiness::Readiness::new();
     let mut timer = pin!(sleep_until(previous.min(deadline.0)));
     poll_fn(|task| {
         let current = match now(cx) {
@@ -349,7 +352,7 @@ async fn bounded<T>(
         if current >= deadline.0 {
             return Poll::Ready(Err(Error::Deadline));
         }
-        if let Poll::Ready(result) = future.as_mut().poll(task) {
+        if let Poll::Ready(result) = readiness.poll(future.as_mut(), task) {
             // A foreign completion cannot extend either the clock deadline or cancellation.
             if cx.checkpoint().is_err() {
                 return Poll::Ready(Err(Error::Cancelled));
@@ -1163,6 +1166,43 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_turns_do_not_poll_io_but_still_enforce_the_original_deadline() {
+        let clock = Arc::new(VirtualClock::new());
+        let runtime = RuntimeBuilder::current_thread()
+            .with_timer_driver(TimerDriverHandle::with_virtual_clock(Arc::clone(&clock)))
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let deadline = Deadline::after(&cx, Duration::from_secs(1)).unwrap();
+            let polls = std::cell::Cell::new(0);
+            let mut pending = pin!(bounded(
+                &cx,
+                deadline,
+                poll_fn(|_| {
+                    polls.set(polls.get() + 1);
+                    Poll::<Result<(), Error>>::Pending
+                })
+            ));
+            poll_fn(|task| {
+                for _ in 0..1000 {
+                    assert!(pending.as_mut().poll(task).is_pending());
+                    clock.advance(500_000);
+                }
+                assert_eq!(polls.get(), 1);
+                clock.advance(500_000_000);
+                assert_eq!(
+                    pending.as_mut().poll(task),
+                    Poll::Ready(Err(Error::Deadline))
+                );
+                assert_eq!(polls.get(), 1);
+                Poll::Ready(())
+            })
+            .await;
+        });
+    }
+
+    #[test]
     fn elapsed_rearmed_watchdog_is_never_polled_after_completion() {
         let clock = Arc::new(VirtualClock::new());
         let runtime = RuntimeBuilder::current_thread()
@@ -1176,8 +1216,9 @@ mod tests {
             let result = bounded(
                 &cx,
                 deadline,
-                poll_fn(|_| {
+                poll_fn(|task| {
                     polls += 1;
+                    task.waker().wake_by_ref();
                     match polls {
                         1 => {
                             // I/O polling may consume the entire next watchdog interval.
