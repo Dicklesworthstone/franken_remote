@@ -22,6 +22,8 @@ use std::{cell::Cell, fmt};
 pub struct ControllerImageClipboard {
     session: ImageClipboardSession,
     clock: ProjectedClock,
+    limits: ProtocolLimits,
+    offered_sequence: u64,
     last_offered: Option<(Stamp, [u8; 32])>,
 }
 
@@ -50,6 +52,8 @@ impl ControllerImageClipboard {
         Ok(Self {
             session,
             clock,
+            limits,
+            offered_sequence: 0,
             last_offered: None,
         })
     }
@@ -68,10 +72,13 @@ impl ControllerImageClipboard {
 
     pub fn close(&mut self) {
         self.session.close();
+        self.last_offered = None;
     }
 
     /// Prepares an outbound image offer from local clipboard data.
-    /// Validates the PNG payload and ensures it fits within protocol limits.
+    /// Validates against this lane's negotiated limits before consuming a source
+    /// sequence. Each successful offer consumes its sequence even if cancelled;
+    /// a later image is a new transfer, never a replay of the previous one.
     pub fn offer(
         &mut self,
         id: u128,
@@ -87,9 +94,32 @@ impl ControllerImageClipboard {
             }
         };
 
-        // Validate untrusted PNG data
-        let metadata =
-            inspect_png(png_bytes, &ProtocolLimits::ABSOLUTE).map_err(|_| Error::InvalidLimits)?;
+        self.session
+            .maintain(at)
+            .map_err(|reason| Error::Session(reason.into()))?;
+        let metadata = inspect_png(png_bytes, &self.limits).map_err(|_| Error::InvalidLimits)?;
+        let sequence = self.offered_sequence.checked_add(1).ok_or_else(|| {
+            self.close();
+            Error::Session(fr_core::clipboard::Error::Limit.into())
+        })?;
+        let stamp = Stamp {
+            id,
+            source: Endpoint::Controller,
+            sequence,
+        };
+        let chunks = metadata.total_bytes.div_ceil(
+            u32::try_from(fr_core::clipboard::image::MAX_IMAGE_CHUNK_BYTES)
+                .expect("fixed image chunk ceiling fits u32"),
+        );
+        let begin = ImageBegin {
+            binding: self.session.binding(),
+            stamp,
+            metadata,
+            chunks,
+        };
+        begin
+            .validate(&self.limits)
+            .map_err(|reason| Error::Session(reason.into()))?;
 
         // Check echo suppression against last offered image
         if let Some((last_stamp, last_hash)) = self.last_offered
@@ -108,23 +138,7 @@ impl ControllerImageClipboard {
             return Err(Error::Stopped);
         }
 
-        let chunk_size =
-            u32::try_from(fr_core::clipboard::image::MAX_IMAGE_CHUNK_BYTES).unwrap_or(16_384);
-        let chunks = metadata.total_bytes.div_ceil(chunk_size);
-
-        let stamp = Stamp {
-            id,
-            source: Endpoint::Controller,
-            sequence: 1,
-        };
-
-        let begin = ImageBegin {
-            binding: self.session.binding(),
-            stamp,
-            metadata,
-            chunks,
-        };
-
+        self.offered_sequence = sequence;
         self.last_offered = Some((stamp, metadata.content_sha256));
         Ok((begin, metadata))
     }
