@@ -36,6 +36,13 @@ Ubuntu 26.04 on the same tailnet.
 - 2026-10-14, later, the same live check at ed45e10 (after the day's renewal,
   clipboard-projection and visibility-gap changes) passed again: keys, wheel,
   clipboard both ways, file send with a matching sha256, orderly `stopped`.
+- Clipboard over delay (namespace, netem, xclip). A failed item with records
+  still in flight used to close the whole session: a 40 KB copy at 120 ms RTT,
+  `native_session_failed`, 3 of 3. Since 145df7c it retires only the
+  clipboard. Item ceilings (release builds): 1 MB on a LAN, ~60 KB at 30 ms
+  RTT, ~20 KB at 120 ms. The receiver caps an item at the host's authority
+  window at Begin (130-390 ms), and bulk data moves ~8 KiB per RTT beside
+  video (fr-clipboard-wan-item-ceiling-6mlb, owner decision).
 
 **What it took** (each with unit tests and a planted negative):
 - Asupersync pinned to git `ee72b665e` (0.6.0). Published 0.5.0 sends each
