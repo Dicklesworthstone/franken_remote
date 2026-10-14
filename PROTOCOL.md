@@ -431,6 +431,7 @@ absolute pointer, buttons) does not offer control at all.
 | 0x0051 | ClipboardChunk | H↔K / clipboard | C; aggregate <= T | Transfer, increasing chunk index/offset, bytes; accepted Begin, exact declared total, bounded chunk count |
 | 0x0052 | ClipboardCommit | H↔K / clipboard | C | Transfer and final total; complete validated UTF-8 and current authority before OS publication; no partial publish |
 | 0x0053 | ClipboardCancel | H↔V / clipboard | C | Existing transfer and reason; may cancel in Z; never alters a newer OS clipboard value |
+| 0x0054 | ClipboardReady | H↔V / control | C | Host-boot, OS-session, remote-session and controller-lease IDs, clipboard binding ID, consent byte; only with `native-clipboard-startup` v1, once per endpoint after its attachment; a readiness barrier, never native or input authority ([PROTOCOL_CLIPBOARD_STARTUP.md](PROTOCOL_CLIPBOARD_STARTUP.md)) |
 | 0x0060 | AudioConfiguration | H→V (down) / K→H (up), respective audio channel | C | Direction, audio epoch, Opus, 48-kHz mono/stereo, packet duration/decoded-sample/jitter budgets; A; down locally host-enabled; up explicit client talk enable, OS mic grant, qualified host endpoint |
 | 0x0061 | AudioConfigured | Receiver→sender / respective audio channel | C | Direction/epoch and accepted budgets; actual configured output; no audio before this acknowledgement |
 | 0x0062 | AudioPacket | H→V (down) / K→H (up), respective audio channel | D datagram / C WSS | Direction/epoch, packet sequence, sample position/duration, Opus bytes; enabled acknowledged configuration, current authority; validate decoded samples before allocation |
@@ -486,6 +487,8 @@ logs or error strings.
 | 0x0081 | ReceiverPressure | Receiver→sender / control | C | Direction/binding, credit epoch, cumulative freed bytes/frames and queue pressure; admitted channel; §5 credit rules, no authority renewal |
 | 0x0082 | StageMetrics | Either / control | C | Bounded sanitized stage/count/byte/duration samples with clock/scope; admitted session; no raw library strings or content |
 | 0x0083 | QualityDecision | H→V / control | C | Current binding, selected operating point and bounded reason; A; inside admitted capabilities, explicit reconfiguration for codec/geometry change |
+| 0x0084 | ClockProbe | V→H / control | C | Host-boot, OS-session and remote-session IDs, nonzero sequence (80 bytes); only with `clock-correlation` v1; not an authority renewal or source observation ([PROTOCOL_CLOCK.md](PROTOCOL_CLOCK.md)) |
+| 0x0085 | ClockReply | H→V / control | C | The probe's fields plus an 8-byte host-monotonic microsecond sample (88 bytes); answers only the outstanding probe sequence |
 
 ## 7. Media completeness, recovery, and freshness
 
