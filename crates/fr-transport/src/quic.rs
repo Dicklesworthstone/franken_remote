@@ -271,6 +271,27 @@ impl Default for Policy {
         }
     }
 }
+/// Freeze all records currently queued on this stream before its first native
+/// prefix. Later sends may queue but cannot join that epoch.
+fn freeze_epoch(senders: &mut [Sender], pending: &mut VecDeque<PendingWrite>, route: StreamRoute) {
+    let sender = senders
+        .iter_mut()
+        .find(|s| s.route == route)
+        .expect("validated outbound route");
+    if sender.epoch.is_some() {
+        return;
+    }
+    let mut epoch = SendEpoch {
+        bytes: 0,
+        records: 0,
+    };
+    for record in pending.iter_mut().filter(|p| p.route == route) {
+        record.in_epoch = true;
+        epoch.bytes += record.bytes.len();
+        epoch.records += 1;
+    }
+    sender.epoch = Some(epoch);
+}
 /// Pinned 0.4.10 exposes stream structural equality but not a retained-byte
 /// getter. Preserve an EMPTY, never-used outbound stream as an exact absence
 /// witness. Refresh only public scalar counters, never clone live private maps.
@@ -1035,25 +1056,7 @@ impl QuicRecords {
             return Ok(None);
         };
         let route = self.pending_writes[index].route;
-        let sender = self
-            .senders
-            .iter_mut()
-            .find(|s| s.route == route)
-            .expect("validated outbound route");
-        if sender.epoch.is_none() {
-            // Freeze all records currently queued on this stream before the
-            // first native prefix. Later sends may queue but cannot join it.
-            let mut epoch = SendEpoch {
-                bytes: 0,
-                records: 0,
-            };
-            for pending in self.pending_writes.iter_mut().filter(|p| p.route == route) {
-                pending.in_epoch = true;
-                epoch.bytes += pending.bytes.len();
-                epoch.records += 1;
-            }
-            sender.epoch = Some(epoch);
-        }
+        freeze_epoch(&mut self.senders, &mut self.pending_writes, route);
         let pending = &mut self.pending_writes[index];
         native
             .connection_mut()
