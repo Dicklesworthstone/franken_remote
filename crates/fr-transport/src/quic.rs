@@ -39,6 +39,9 @@ pub use attachment::{AttachedChannel, ChannelRequest, ChannelScope, MediaChannel
 mod startup;
 pub use startup::ControlRoutes;
 
+mod peer_close;
+pub use peer_close::PeerClose;
+
 pub const ALPN: &[u8] = b"fr-remote/0";
 const MAX_STREAMS: usize = 16;
 /// Datagram ROUTES per connection (not queued records).
@@ -108,6 +111,9 @@ pub enum Error {
     Handler,
     Clock,
     Allocation,
+    /// The peer closed the connection with a recognized reason code
+    /// (`PeerClose`). Not a delivered report: no cleanup or effect stage is known.
+    PeerClosed(PeerClose),
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -892,8 +898,9 @@ impl QuicRecords {
         if native.connection().state() != QuicConnectionState::Established
             || native.connection().inner().streams().len() > self.streams.len()
         {
+            let peer = PeerClose::of(native.connection());
             self.close();
-            return Err(Error::Closed);
+            return Err(peer.map_or(Error::Closed, Error::PeerClosed));
         }
         // Retire only the CLOSED epoch, not every record admitted to this route.
         // Waiting records stay counted with their own original deadlines. The

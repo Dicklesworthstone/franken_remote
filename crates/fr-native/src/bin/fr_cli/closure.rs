@@ -107,8 +107,25 @@ impl Report {
 /// nothing is claimed undone, retried or replayed.
 #[cfg(target_os = "linux")]
 pub(super) fn host_closed(report: Closed) -> Option<Failure> {
+    let (code, next) = closed_code(report.reason)?;
+    let mut failure = Failure::new(code, next, 1);
+    failure.closure = Some(Report {
+        request_acknowledged: false,
+        transport_completed: false,
+        host: Some(report),
+    });
+    Some(failure)
+}
+/// The same reason carried only by the host's close code (no Closed report
+/// arrived): named alike, with no host report and nothing about its cleanup.
+#[cfg(target_os = "linux")]
+pub(super) fn host_close_code(reason: fr_wire::closure::ClosedReason) -> Option<Failure> {
+    closed_code(reason).map(|(code, next)| Failure::new(code, next, 1))
+}
+#[cfg(target_os = "linux")]
+fn closed_code(reason: fr_wire::closure::ClosedReason) -> Option<(&'static str, &'static str)> {
     use fr_wire::closure::ClosedReason;
-    let (code, next) = match report.reason {
+    Some(match reason {
         // An answer to this client's own request is a completion, not an end
         // the host chose.
         ClosedReason::ClientRequested => return None,
@@ -140,14 +157,7 @@ pub(super) fn host_closed(report: Closed) -> Option<Failure> {
             "host_session_replaced",
             "Another session replaced this one on the host. Nothing is replayed; start a new session only if this viewer should take over.",
         ),
-    };
-    let mut failure = Failure::new(code, next, 1);
-    failure.closure = Some(Report {
-        request_acknowledged: false,
-        transport_completed: false,
-        host: Some(report),
-    });
-    Some(failure)
+    })
 }
 const fn cleanup(stage: Cleanup) -> &'static str {
     match stage {

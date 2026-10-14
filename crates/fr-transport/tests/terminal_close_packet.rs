@@ -212,7 +212,8 @@ fn the_application_peer_ends_on_close_instead_of_waiting_for_silence_expiry() {
             );
             match client.drive(&cx, Duration::from_millis(5), || true).await {
                 Ok(()) => {}
-                Err(Error::Closed) => break,
+                // The authenticated reason, not a bare transport closure.
+                Err(Error::PeerClosed(PeerClose::Lease(Reason::LocalRevoke))) => break,
                 error => panic!("unexpected application close result: {error:?}"),
             }
         }
