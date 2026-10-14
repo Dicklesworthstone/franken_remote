@@ -351,31 +351,36 @@ fn an_unclaimed_host_record_ends_the_session_naming_its_kind() {
         // ClipboardReady is a session-control kind; a view-only session has no
         // clipboard lane to claim it.
         let kind = 0x0054_u16;
-        let (q, routes) = host.io().unwrap();
+        let routes = host.io().unwrap().1;
         let mut record = vec![0; 32];
         record[..6].copy_from_slice(b"FRD0\0\0");
         record[6..8].copy_from_slice(&kind.to_be_bytes());
         record[12..16].copy_from_slice(&8_u32.to_be_bytes());
         record[16..20].copy_from_slice(&routes.outbound.binding.to_be_bytes());
-        q.send(
-            &h,
-            Route::Stream(routes.outbound),
-            &record,
-            now(&h).unwrap() + 500_000,
-            || true,
-        )
-        .unwrap();
+        let send_by = now(&h).unwrap() + 4_000_000;
+        let mut sent = false;
         let mut peer = Peer::Observe {
             session: viewer,
             media: vm,
         };
         let (mut repair, mut stats, mut n) = (Repair::default(), Statistics::default(), 7000_u128);
-        let until = now(&c).unwrap() + 500_000;
+        // A hang guard only: the record may first meet send backpressure.
+        let until = now(&c).unwrap() + 5_000_000;
         let ended = loop {
             assert!(
                 now(&c).unwrap() < until,
                 "the unclaimed record never ended the session"
             );
+            if !sent {
+                let q = host.io().unwrap().0;
+                match q.send(&h, Route::Stream(routes.outbound), &record, send_by, || {
+                    true
+                }) {
+                    Ok(()) => sent = true,
+                    Err(quic::Error::Backpressure) => {}
+                    Err(error) => panic!("record send failed: {error:?}"),
+                }
+            }
             let (a, b) = Box::pin(support::both(
                 host.drive(
                     Duration::from_millis(1),
