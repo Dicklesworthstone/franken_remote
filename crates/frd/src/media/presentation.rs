@@ -16,8 +16,9 @@ use std::{
 };
 
 /// Hung-worker ceiling for one native decode/present request. It is not a frame
-/// budget: each picture's own reference deadline is (at most 250 ms after the
-/// first fragment for datagram pictures, the recovery budget for reliable IDRs).
+/// budget: media admission and completion retain the picture's original
+/// reference deadline. Negotiated recovery may drain a late native borrow up
+/// to this ceiling; strict decoders also cap IPC at the reference deadline.
 /// A fixed 200 ms here ended healthy sessions: one 1080p IDR decode, BGRA
 /// conversion and X11 draw took over 200 ms on a busy client (live, 2026-10-12).
 pub(crate) const NATIVE_REQUEST_CEILING: Duration = Duration::from_secs(2);
@@ -128,19 +129,20 @@ impl Presenter {
     ) -> impl Future<Output = Result<DecodeJob, Error>> + 'a {
         self.decode_stream_job(cx, job, false)
     }
-    /// Observation-only recovery may drain an already-submitted native request
-    /// after its reference chain is fenced. Keep the original worker, reservation
-    /// and IPC deadline; this does not make a stale picture a decoded receipt.
-    /// The canonical receiver owner must retire the returned job without calling
-    /// `complete` when its recovery reporter has accepted the failed chain.
+    /// Positively negotiated recovery may drain an already-started native request
+    /// after its reference chain expires. The worker has one fixed hung-operation
+    /// ceiling, independent of the original media deadline. The canonical loop
+    /// keeps servicing expiry, renewal and input suspension while this one charged
+    /// borrow drains, then retires it without making a stale decoded receipt.
+    /// `complete` still enforces the ORIGINAL reference deadline and generation.
     ///
     /// Native errors, context cancellation and future abandonment still poison
-    /// the worker. Input-owning/requesting callers must keep fail-fast fencing.
+    /// the worker. Callers without negotiated recovery retain fail-fast fencing.
     pub(crate) fn decode_stream_job<'a>(
         &'a mut self,
         cx: &'a Cx,
         job: DecodeJob,
-        drain_observation: bool,
+        drain_recovery: bool,
     ) -> impl Future<Output = Result<DecodeJob, Error>> + 'a {
         let valid = self
             .binding
@@ -197,8 +199,15 @@ impl Presenter {
                 .reference_deadline_us()
                 .checked_mul(1000)
                 .ok_or(Error::Worker(worker::Error::Deadline))?;
-            let deadline =
-                Deadline::after(cx, NATIVE_REQUEST_CEILING)?.capped_at(Time::from_nanos(nanos));
+            let native_ceiling = Deadline::after(cx, NATIVE_REQUEST_CEILING)?;
+            let deadline = if drain_recovery {
+                // Reference expiry invalidates useful media, not a responsive
+                // decoder. Keep the native borrow charged until its reply is
+                // retired; neither this ceiling nor a late reply renews a view.
+                native_ceiling
+            } else {
+                native_ceiling.capped_at(Time::from_nanos(nanos))
+            };
             {
                 let mut native = pin!(run_native(
                     call.operation.worker,
@@ -209,7 +218,7 @@ impl Presenter {
                     deadline,
                 ));
                 poll_fn(|task| {
-                    if !drain_observation && !picture.is_live() {
+                    if !drain_recovery && !picture.is_live() {
                         return Poll::Ready(Err(Error::Receiver(
                             fr_media::delivery::DeliveryError::DecodeMismatch,
                         )));
@@ -218,7 +227,7 @@ impl Presenter {
                 })
                 .await?;
             }
-            if !drain_observation && !picture.is_live() {
+            if !drain_recovery && !picture.is_live() {
                 return Err(Error::Receiver(
                     fr_media::delivery::DeliveryError::DecodeMismatch,
                 ));

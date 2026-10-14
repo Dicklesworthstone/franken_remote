@@ -134,8 +134,8 @@ fn drain_does_not_hide_invalid_native_reply_or_extend_native_timeout() {
                     Err(Error::Worker(worker::Error::Deadline))
                 )),
             }
-            // Drain keeps the native ceiling (here the startup picture's 2 s
-            // recovery budget binds first); it never adds time on top of it.
+            // Drain keeps one fixed native ceiling, even when the picture's
+            // original media deadline expires. Repeated polls cannot extend it.
             assert!(start.elapsed() < NATIVE_REQUEST_CEILING + Duration::from_millis(500));
             assert_eq!(presenter.worker.state(), worker::State::Poisoned);
             assert_eq!(receiver.budget_usage(), BudgetUsage::default());
@@ -193,3 +193,5 @@ fn drain_cannot_start_native_work_after_an_unpolled_scope_was_fenced() {
             .unwrap();
     });
 }
+
+mod expiry;
