@@ -107,11 +107,12 @@ fn started(cx: &Cx) -> (Egress, ObservationControl) {
 }
 fn packet(egress: &mut Egress, lane: Option<Lane>) -> (PacketOffer, Vec<u8>) {
     let mut saved = None;
-    let send = |offer: &PacketOffer,
-                bytes: &[u8],
-                guard: &mut dyn FnMut() -> Result<(), Error>| {
+    let send = |offer: &PacketOffer, bytes: &[u8], guard: &mut dyn FnMut() -> Result<(), Error>| {
         guard().unwrap();
-        assert!(saved.is_none(), "more than one transport callback in a turn");
+        assert!(
+            saved.is_none(),
+            "more than one transport callback in a turn"
+        );
         saved = Some((offer.clone(), bytes.to_vec()));
         Ok::<_, ()>(Admission::Accepted)
     };
@@ -125,9 +126,7 @@ fn packet(egress: &mut Egress, lane: Option<Lane>) -> (PacketOffer, Vec<u8>) {
     (offer, bytes)
 }
 fn announce(cx: &Cx, egress: &mut Egress, count: u32) {
-    egress
-        .enqueue(picture(cx, first_picture(), count))
-        .unwrap();
+    egress.enqueue(picture(cx, first_picture(), count)).unwrap();
     let (offer, _) = packet(egress, Some(Lane::Original));
     assert_eq!(offer.channel(), Channel::MediaConfig);
 }
@@ -289,9 +288,7 @@ fn optional_expiry_yields_without_sending_a_fresh_successor_in_the_same_call() {
             .unwrap();
         let until = egress.pending().unwrap().send_by_micros();
         clock.advance(200_000_000);
-        egress
-            .enqueue(picture(cx, first_picture() + 1, 4))
-            .unwrap();
+        egress.enqueue(picture(cx, first_picture() + 1, 4)).unwrap();
         let now = host_now(cx).unwrap().as_micros();
         clock.advance((until - now) * 1000);
         assert_eq!(
