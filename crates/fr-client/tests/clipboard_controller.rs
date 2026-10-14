@@ -190,16 +190,24 @@ fn clipboard_lease_is_not_shortened_to_input_ticket_but_expiry_is_terminal() {
     );
     assert!(lane.is_closed());
     assert_eq!(gate.calls, 0);
-    assert!(
+    // Terminal for the clipboard: a later ticket serves input but never
+    // revives this grant's clipboard. The clipboard's lapse does not end input
+    // (fr-6hbo); input keeps its own ticket, view and lease checks.
+    input
+        .accept_ticket(
+            &ticket(2, H + 3_000_000, H + 4_000_000),
+            correlation(3_000_000),
+            client(3_000_000),
+        )
+        .unwrap();
+    assert_eq!(input.stopped(), None);
+    assert!(lane.offer(3, "revived", None, client(3_000_000)).is_err());
+    assert_eq!(
         input
-            .accept_ticket(
-                &ticket(2, H + 3_000_000, H + 4_000_000),
-                correlation(3_000_000),
-                client(3_000_000)
-            )
-            .is_err()
+            .attach_clipboard(78, true, client(3_000_000))
+            .unwrap_err(),
+        Error::NotGranted
     );
-    assert!(input.stopped().is_some());
 }
 
 #[test]

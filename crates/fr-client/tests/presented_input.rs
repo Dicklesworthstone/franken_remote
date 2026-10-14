@@ -1,5 +1,6 @@
 //! Actual codecs and policy owners, with explicitly simulated media/native
 //! callbacks. Real process/HEVC/X11 composition is in the native integration.
+use fr_client::control_grant::RequestControl;
 use fr_client::input::presentation::{Error, PresentedInput};
 use fr_client::input::{self, Action, ClientInstant, InputClient, Policy, ResultEvent, StopReason};
 use fr_core::{
@@ -18,8 +19,10 @@ use fr_media::{
     freshness::{self, ClockCorrelation, ClockPolicy, ClockSample},
 };
 use fr_wire::{
+    control::{self, Granted, Request, Target},
     input::{InputDelivery, InputDirection, decode_input},
     input_result::*,
+    negotiation::ControlBinding,
     *,
 };
 fn credentials() -> InputCredentials {
@@ -44,6 +47,82 @@ fn bounds() -> InputBounds {
     InputBounds::new(DesktopPoint { x: 0, y: 0 }, 320, 240).unwrap()
 }
 fn setup() -> (ReceivePipeline, PresentedInput, MediaLimits) {
+    setup_with(
+        InputClient::new(
+            credentials(),
+            7,
+            bounds(),
+            caps(),
+            ProtocolLimits::ABSOLUTE,
+            Policy::default(),
+            ClientInstant(10_000),
+        )
+        .unwrap(),
+    )
+}
+fn clock() -> ClockCorrelation {
+    ClockCorrelation::new(
+        ClockSample {
+            host_boot: HostBootId::from_raw(1),
+            client_sent_us: 0,
+            host_sample_us: 1_000_000,
+            client_received_us: 10_000,
+        },
+        ClockPolicy {
+            drift_ppm: 0,
+            ..ClockPolicy::default()
+        },
+    )
+    .unwrap()
+}
+/// The grant `setup` builds, accepted through the real control-grant flow,
+/// which also installs the controller's clipboard projection.
+fn granted() -> InputClient {
+    let c = credentials();
+    let g = Granted {
+        request: Request {
+            parent: ControlBinding {
+                id: 6,
+                host_boot: HostBootId::from_raw(1),
+                os_session: OsSessionId::from_raw(2),
+                remote_session: c.session,
+            },
+            sequence: 9,
+            target: Target {
+                display_binding: 8,
+                view: c.view,
+                bounds: bounds(),
+                capabilities: caps(),
+            },
+        },
+        input_channel: 7,
+        lease: c.lease,
+        ticket: c.ticket,
+        issued_at_us: 1_000_000,
+        lease_until_us: 4_000_000,
+        ticket_until_us: 2_000_000,
+        first_action: 0,
+        first_pointer: 0,
+    };
+    let limits = ProtocolLimits::ABSOLUTE;
+    let mut request =
+        RequestControl::new(g.request, g.input_channel, limits, ClientInstant(5_000)).unwrap();
+    request.sent(ClientInstant(5_000)).unwrap();
+    let mut b = [0; control::GRANTED_BYTES];
+    control::encode_granted(
+        g,
+        &mut b,
+        &limits,
+        InputDirection::HostToViewer,
+        InputDelivery::Reliable,
+    )
+    .unwrap();
+    request
+        .accept(&b, clock(), Policy::default(), ClientInstant(10_000))
+        .unwrap()
+        .1
+}
+fn setup_with(input: InputClient) -> (ReceivePipeline, PresentedInput, MediaLimits) {
     let c = credentials();
     let limits = MediaLimits::new(ProtocolLimits::ABSOLUTE, 1150, 16384, 64).unwrap();
     let mut receiver = ReceivePipeline::new(
@@ -60,30 +139,7 @@ fn setup() -> (ReceivePipeline, PresentedInput, MediaLimits) {
     )
     .unwrap();
     receiver.decoder_configured(10_000).unwrap();
-    let input = InputClient::new(
-        c,
-        7,
-        bounds(),
-        caps(),
-        ProtocolLimits::ABSOLUTE,
-        Policy::default(),
-        ClientInstant(10_000),
-    )
-    .unwrap();
-    let clock = ClockCorrelation::new(
-        ClockSample {
-            host_boot: HostBootId::from_raw(1),
-            client_sent_us: 0,
-            host_sample_us: 1_000_000,
-            client_received_us: 10_000,
-        },
-        ClockPolicy {
-            drift_ppm: 0,
-            ..ClockPolicy::default()
-        },
-    )
-    .unwrap();
-    let mut input = PresentedInput::new(input, &receiver, clock, ClientInstant(10_000)).unwrap();
+    let mut input = PresentedInput::new(input, &receiver, clock(), ClientInstant(10_000)).unwrap();
     input
         .confirm_mapping(c.session, c.view, ClientInstant(10_000))
         .unwrap();
@@ -180,7 +236,16 @@ fn shown() -> (
     MediaLimits,
     FrameDescriptor,
 ) {
-    let (mut receiver, mut input, limits) = setup();
+    shown_with(setup())
+}
+fn shown_with(
+    (mut receiver, mut input, limits): (ReceivePipeline, PresentedInput, MediaLimits),
+) -> (
+    ReceivePipeline,
+    PresentedInput,
+    MediaLimits,
+    FrameDescriptor,
+) {
     let descriptor = decoded(&mut receiver, &mut input, limits, 21_000);
     input.visible(0, ClientInstant(22_000)).unwrap();
     (receiver, input, limits, descriptor)
@@ -716,6 +781,29 @@ fn a_progress_record_after_a_lost_reference_suspends_for_recovery_instead_of_end
         .unwrap();
     assert_eq!(input.input_view().recovery, next);
     assert_eq!(input.stopped(), None);
+}
+/// fr-6hbo: a real grant's clipboard projection is bound to the original
+/// receiver, which a lost reference fences. Its lapse ends the clipboard, not
+/// the grant: the controller still suspends for the negotiated recovery. This
+/// was the commonest end of lossy controlled sessions (`InvalidControl`).
+#[test]
+fn a_lost_reference_suspends_a_granted_controller_despite_its_clipboard_projection() {
+    let (mut receiver, mut input, limits, d) = shown_with(setup_with(granted()));
+    input.expect_reference_recovery();
+    abandon_dependent_picture(&mut receiver, limits);
+    assert_eq!(
+        progress(
+            &mut input,
+            limits,
+            d,
+            1_013_000,
+            SourceObservation::Captured,
+            23_300
+        ),
+        Ok(())
+    );
+    assert_eq!(input.stopped(), None);
+    assert_eq!(input.suspended_since(), Some(ClientInstant(23_300)));
 }
 #[test]
 fn without_negotiated_recovery_a_lost_reference_met_by_progress_still_ends_the_view() {

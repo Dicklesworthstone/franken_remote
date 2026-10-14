@@ -96,10 +96,14 @@ impl InputClient {
         if until <= now.0 {
             return Err(Error::TicketExpired);
         }
-        if let Some(owner) = &self.clipboard_projection
-            && owner.ticket(ticket.expires_at_us, clock, now).is_err()
+        // A projection that cannot take this ticket has lapsed: the clipboard
+        // ends for this grant, never revived; the ticket still serves input.
+        if self
+            .clipboard_projection
+            .as_ref()
+            .is_some_and(|owner| owner.ticket(ticket.expires_at_us, clock, now).is_err())
         {
-            return self.fail(StopReason::InvalidControl);
+            self.retire_clipboard();
         }
         self.credentials.ticket = c.ticket;
         if self.awaiting_recovery_ticket {

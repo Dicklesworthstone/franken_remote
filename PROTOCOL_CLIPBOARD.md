@@ -312,6 +312,12 @@ Every `poll` and `receive` callback supplies **client** monotonic time. Poll dur
 silence as well as traffic. The worker does not retain the input owner: drop,
 focus loss, suspend, disconnect, view expiry, missed input/control obligations,
 and clock failure fence it. Closing the clipboard alone does not revoke input.
+Nor does a lapsed projection (no newer ticket in time, a receiver fenced by a
+lost reference, a clock fault): it ends the clipboard for that grant, and
+input keeps its own ticket, view and lease checks. Until 2026-10-14 the lapse
+also stopped input with `InvalidControl`. That came before negotiated
+reference recovery could suspend the grant, and it was the commonest end of
+lossy controlled sessions (fr-6hbo).
 The `PresentedInput` join also retains a read-only lifetime of its exact media
 receiver; closing or dropping that receiver fences detached clipboard work
 immediately, even before the next presented-input tick. Equal numeric bindings

@@ -299,12 +299,27 @@ impl InputClient {
         {
             return self.fail(StopReason::ViewStale);
         }
-        if let Some(owner) = &self.clipboard_projection
-            && owner.check(now).is_err()
+        // The projection proves only the clipboard lane's authority. Its
+        // failure (no newer ticket proving the lease, a media receiver fenced
+        // by a lost reference, a clock fault) ends that lane for this grant,
+        // as a suspension does; input stays under its own ticket, view and
+        // lease checks. Ending input here pre-empted reference recovery, the
+        // commonest end of lossy controlled sessions (fr-6hbo).
+        if self
+            .clipboard_projection
+            .as_ref()
+            .is_some_and(|owner| owner.check(now).is_err())
         {
-            return self.fail(StopReason::InvalidControl);
+            self.retire_clipboard();
         }
         Ok(())
+    }
+    /// End the clipboard lane's authority for this grant. It is never revived:
+    /// only a new grant has a clipboard again.
+    fn retire_clipboard(&mut self) {
+        if let Some(owner) = self.clipboard_projection.take() {
+            owner.stop();
+        }
     }
     /// The viewer installed a reference recovery of the presented stream (plan
     /// 12.3): input decided on older pictures is stale. Never under a live view
@@ -408,9 +423,7 @@ impl InputClient {
             // lapse: only a ticket proves the lease, none is issued while
             // suspended, and an expired projection is never revived. The
             // clipboard ends for this grant; input itself continues.
-            if let Some(owner) = self.clipboard_projection.take() {
-                owner.stop();
-            }
+            self.retire_clipboard();
             for (released, held) in self.released_keys.iter_mut().zip(self.keys) {
                 *released |= held;
             }
