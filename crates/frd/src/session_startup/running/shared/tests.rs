@@ -280,6 +280,15 @@ async fn group_with_capabilities(
     extra: &[&str],
     changing: bool,
 ) -> Box<Group> {
+    group_with_policy(rt, count, extra, changing, SendPolicy::default()).await
+}
+async fn group_with_policy(
+    rt: &Runtime,
+    count: usize,
+    extra: &[&str],
+    changing: bool,
+    policy: SendPolicy,
+) -> Box<Group> {
     let mut peers = Vec::new();
     for i in 0..count {
         peers.push(
@@ -315,9 +324,7 @@ async fn group_with_capabilities(
             initial.clone(),
         )
         .unwrap();
-        let sender = media
-            .sender(q, p.control.clone(), SendPolicy::default())
-            .unwrap();
+        let sender = media.sender(q, p.control.clone(), policy).unwrap();
         let sub = publisher.admit_pending(host, sender, media, q).unwrap();
         p.shared = Some(session.into_shared(sub).unwrap());
     }

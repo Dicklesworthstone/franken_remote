@@ -56,7 +56,7 @@ impl Subscriber {
         if let Some(error) = entry.failure {
             return Err(error);
         }
-        if entry.recovery.is_some() {
+        if entry.recovery.is_some() || entry.local_failure.is_some() {
             return Ok(None);
         }
         entry.sender.source_progress().map_err(Error::Transport)

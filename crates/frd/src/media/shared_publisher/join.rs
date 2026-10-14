@@ -113,6 +113,7 @@ impl JoinQueue {
             media: Some(media),
             view,
             recovery: None,
+            local_failure: None,
             control,
             sender,
             failure: None,
@@ -171,6 +172,14 @@ impl Entry {
     }
     pub(super) fn tick(&mut self, now: u64) -> Result<(), Error> {
         self.control.check().map_err(Error::Media)?;
+        if self.local_failure.is_some() {
+            // The failed chain stays fenced; only its one deadline remains.
+            return if self.recovery_until().is_some_and(|until| now < until) {
+                Ok(())
+            } else {
+                Err(Error::RecoveryExpired)
+            };
+        }
         if let Some(recovery) = &self.recovery {
             if now >= recovery.until {
                 return Err(Error::RecoveryExpired);
@@ -190,11 +199,14 @@ impl Entry {
                 host.tick().map_err(Error::Startup)?;
             }
         }
-        self.sender.tick().map_err(Error::Transport)
+        match self.sender.tick() {
+            Ok(()) => Ok(()),
+            Err(error) => self.absorb(Error::Transport(error)),
+        }
     }
     pub(super) fn deadline(&self) -> Option<u64> {
-        if self.replacing() {
-            return self.recovery.as_ref().map(|r| r.until);
+        if self.fenced() {
+            return self.recovery_until();
         }
         self.sender
             .next_deadline()
@@ -208,7 +220,7 @@ impl Entry {
     pub(super) fn publish(&mut self, update: &SharedCaptureUpdate) -> Result<bool, Error> {
         // An already-issued source capture may complete after this viewer failed.
         // Healthy subscribers still consume it; a failed sender never does.
-        if self.replacing() {
+        if self.fenced() {
             return Ok(false);
         }
         if self.waiting() {
@@ -221,10 +233,10 @@ impl Entry {
                 .enqueue_shared_capture(update)
                 .map_err(Error::Transport)?;
             self.join.as_mut().expect("waiting").bootstrap = Some(update.clone());
-        } else {
-            self.sender
-                .enqueue_shared_capture(update)
-                .map_err(Error::Transport)?;
+        } else if let Err(error) = self.sender.enqueue_shared_capture(update) {
+            // A steady viewer's broken chain is recovered, not ended.
+            self.absorb(Error::Transport(error))?;
+            return Ok(false);
         }
         Ok(true)
     }
@@ -306,7 +318,7 @@ impl Members {
             if let Some(entry) = entry.as_mut().filter(|e| e.failure.is_none()) {
                 // Preserve the initial-pending cohort's original unconfigured
                 // backpressure and single next-reference retention policy.
-                if entry.replacing() || entry.starting.as_ref().is_some_and(|s| !s.seeded) {
+                if entry.fenced() || entry.starting.as_ref().is_some_and(|s| !s.seeded) {
                     continue;
                 }
                 let credit = if entry.join.is_some() {
@@ -340,7 +352,7 @@ impl Members {
         }
         for (entry, ready) in self.entries.iter_mut().zip(ready) {
             if let Some(entry) = entry.as_mut().filter(|e| e.failure.is_none())
-                && !entry.replacing()
+                && !entry.fenced()
                 && !ready
             {
                 entry.close(Error::SlowSubscriber);

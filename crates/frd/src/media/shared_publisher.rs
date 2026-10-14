@@ -53,6 +53,9 @@ struct Entry {
     media: Option<NegotiatedMedia>,
     view: Binding,
     recovery: Option<recovery::Recovering>,
+    /// This sender found its own reference chain broken and awaits the
+    /// viewer's bound recovery request.
+    local_failure: Option<recovery::LocalFailure>,
     control: ObservationControl,
     sender: QuicEgress,
     failure: Option<Error>,
@@ -74,6 +77,7 @@ impl Entry {
         }
         self.sender.close();
         self.recovery = None;
+        self.local_failure = None;
         self.media = None;
         self.join = None;
         self.failure.get_or_insert(error);
@@ -294,6 +298,7 @@ impl Publisher {
             media: Some(media),
             view,
             recovery: None,
+            local_failure: None,
             control,
             sender,
             failure: None,
@@ -587,7 +592,8 @@ impl Subscriber {
         }
         let result = (|| {
             entry.check_media(transport)?;
-            if entry.replacing() {
+            if entry.fenced() {
+                entry.notify_local_failure(cx, transport)?;
                 return Ok(SendReport {
                     accepted: 0,
                     pending: true,
@@ -606,24 +612,28 @@ impl Subscriber {
                 if entry.starting.as_ref().is_some_and(|s| !s.seeded) {
                     break;
                 }
-                let original = entry
-                    .sender
-                    .transmit_startup_authorized(
-                        cx,
-                        transport,
-                        entry.starting.as_ref().map(|s| s.first),
-                        || owner.check().is_ok(),
-                    )
-                    .map_err(Error::Transport)?;
-                let progress = if original == crate::media_egress::Progress::Idle
-                    && entry.starting.is_none()
-                {
+                let first = entry.starting.as_ref().map(|s| s.first);
+                let mut sent =
                     entry
                         .sender
-                        .transmit_authorized(cx, transport, Lane::Repair, || owner.check().is_ok())
-                        .map_err(Error::Transport)?
-                } else {
-                    original
+                        .transmit_startup_authorized(cx, transport, first, || {
+                            owner.check().is_ok()
+                        });
+                if sent == Ok(crate::media_egress::Progress::Idle) && entry.starting.is_none() {
+                    sent = entry
+                        .sender
+                        .transmit_authorized(cx, transport, Lane::Repair, || owner.check().is_ok());
+                }
+                let progress = match sent {
+                    Ok(progress) => progress,
+                    Err(error) => {
+                        // This sender's own broken chain: say so now, on the
+                        // same turn, and wait for the viewer's request.
+                        entry.absorb(Error::Transport(error))?;
+                        entry.notify_local_failure(cx, transport)?;
+                        report.pending = true;
+                        return Ok(report);
+                    }
                 };
                 match progress {
                     crate::media_egress::Progress::Accepted(_) => report.accepted += 1,

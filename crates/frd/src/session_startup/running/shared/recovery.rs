@@ -169,6 +169,13 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> SharedServices<'_, F> {
             // never an unrelated callback or a best-effort decoded request queue.
             return Ok(Some(Disposition::Blocked));
         }
+        if route == Route::Stream(self.routes.inbound)
+            && (presented::is_report(bytes) || feedback::is_feedback(bytes))
+            && self.subscriber.awaits_recovery_request().map_err(|_| ())?
+        {
+            // Sent about the view this sender has already failed.
+            return Ok(Some(Disposition::Consumed));
+        }
         Ok(None)
     }
 }
