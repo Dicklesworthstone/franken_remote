@@ -155,6 +155,9 @@ pub struct Reporter {
     last_now: u64,
     after: u64,
     sent: Option<Stamp>,
+    /// One expired, never-admitted source. Dropping its bytes must not let the
+    /// same source acquire a new send deadline or count as reported evidence.
+    discarded: Option<Stamp>,
     unavailable_sent: bool,
     pending: Option<Pending>,
 }
@@ -168,6 +171,7 @@ impl Reporter {
             last_now: now,
             after: now,
             sent: None,
+            discarded: None,
             unavailable_sent: false,
             pending: None,
         })
@@ -187,7 +191,8 @@ impl Reporter {
         if !(1..=wire::MAX_SOURCE_AGE_US).contains(&bound_us) {
             return Err(Error::Overflow);
         }
-        let sample = sample.filter(|s| s.age_upper_us < bound_us);
+        let sample =
+            sample.filter(|s| s.age_upper_us < bound_us && self.discarded != Some(s.stamp));
         // Once loss of visibility is observed, its negative report cannot be
         // replaced by a later positive sample before the host receives it.
         if self.pending.as_ref().is_some_and(|p| p.stamp.is_none()) {
@@ -268,6 +273,27 @@ impl Reporter {
         }
         self.pending(now)?;
         Ok(())
+    }
+    /// Discard only a positive report which expired BEFORE transport admitted
+    /// it. Already-queued records are not owned here and cannot be retracted.
+    /// Keep a bounded source tombstone: re-sampling the same source cannot
+    /// refresh its expired send-by. This neither reports visibility nor consumes
+    /// a sequence, and the host's previous readiness deadline is unchanged.
+    /// An expired explicit loss report remains an error, with its original
+    /// bytes/deadline retained; it cannot be erased or replaced by visibility.
+    pub fn discard_expired_positive(&mut self, now: u64) -> Result<bool, Error> {
+        tick(&mut self.last_now, now)?;
+        let Some(pending) = self.pending.as_ref().filter(|p| now >= p.until) else {
+            return Ok(false);
+        };
+        let stamp = pending.stamp.ok_or(Error::Expired)?;
+        self.discarded = Some(stamp);
+        self.pending = None;
+        Ok(true)
+    }
+    /// For accounting only: negative reports are not positive age samples.
+    pub fn pending_is_positive(&self) -> bool {
+        self.pending.as_ref().is_some_and(|p| p.stamp.is_some())
     }
     pub fn pending(&mut self, now: u64) -> Result<Option<(&[u8], u64)>, Error> {
         tick(&mut self.last_now, now)?;

@@ -340,38 +340,115 @@ impl ViewerPresentation {
             q.smoothed_rtt_us(),
             wire::VIEWER_RTT_MULTIPLE,
         );
+        self.reporter
+            .discard_expired_positive(now)
+            .map_err(Error::Proof)?;
+        let sample = sample_at(sample, now, bound)?;
         match sample {
-            ViewSample::Visible(sample, sampled_at) => {
-                // Age was measured at sampled_at, not at this later service
-                // call. Anchor the pending deadline to that original sample.
-                if now < sampled_at {
-                    return Err(Error::Proof(fr_media::presented::Error::Clock));
-                }
-                self.reporter.prepare(Some(sample), sampled_at, bound)
-            }
+            ViewSample::Visible(sample, _) => self.reporter.prepare(Some(sample), now, bound),
             ViewSample::Unavailable => self.reporter.prepare(None, now, bound),
             ViewSample::Pending => self.reporter.pause(now),
         }
         .map_err(Error::Proof)?;
+        let positive = self.reporter.pending_is_positive();
         if let Some((bytes, until)) = self.reporter.pending(now).map_err(Error::Proof)? {
-            match q.send(cx, self.outbound, bytes, until, || {
-                cx.checkpoint().is_ok()
-                    && cx
-                        .timer_driver()
-                        .is_some_and(|t| t.now().as_nanos() / 1000 < until)
-            }) {
-                Ok(()) => {
+            match send_report(q, cx, self.outbound, bytes, now, until)? {
+                ReportAdmission::Accepted => {
                     self.reporter.queued(now).map_err(Error::Proof)?;
                     self.sent = self.sent.saturating_add(1);
-                    if let ViewSample::Visible(sample, _) = sample {
+                    if positive
+                        && let ViewSample::Visible(sample, _) = sample
+                    {
                         self.ages.record(sample.age_upper_us);
                     }
                 }
-                Err(quic::Error::Backpressure) => {}
-                Err(error) => return Err(Error::Transport(error)),
+                ReportAdmission::Backpressure => {}
+                ReportAdmission::Expired => {
+                    // send_prepared proved that no bytes were admitted and
+                    // checked connection lifetime independently. Discard only
+                    // positive metadata, never an explicit loss notification.
+                    self.reporter
+                        .discard_expired_positive(report_now(cx)?)
+                        .map_err(Error::Proof)?;
+                }
             }
         }
         Ok(())
+    }
+}
+
+/// Charge time spent between sampling and service without moving the report's
+/// original send-by or moving the reporter's monotonic clock backwards.
+fn sample_at(sample: ViewSample, now: u64, bound: u64) -> Result<ViewSample, Error> {
+    let ViewSample::Visible(mut sample, sampled_at) = sample else {
+        return Ok(sample);
+    };
+    let elapsed = now
+        .checked_sub(sampled_at)
+        .ok_or(Error::Proof(fr_media::presented::Error::Clock))?;
+    sample.age_upper_us = sample
+        .age_upper_us
+        .checked_add(elapsed)
+        .ok_or(Error::Proof(fr_media::presented::Error::Overflow))?;
+    if sample.age_upper_us >= bound {
+        Ok(ViewSample::Unavailable)
+    } else {
+        Ok(ViewSample::Visible(sample, now))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReportAdmission {
+    Accepted,
+    Backpressure,
+    Expired,
+}
+fn report_now(cx: &Cx) -> Result<u64, Error> {
+    cx.checkpoint().map_err(|_| Error::Closed)?;
+    Ok(cx
+        .timer_driver()
+        .ok_or(Error::Proof(fr_media::presented::Error::Clock))?
+        .now()
+        .as_nanos()
+        / 1000)
+}
+/// A report's usefulness is a record condition, NOT connection authority.
+/// The immutable QUIC lifetime gate and all retained-record deadlines still
+/// run before and after the typed record check, including under backpressure.
+fn send_report(
+    q: &mut QuicRecords,
+    cx: &Cx,
+    route: Route,
+    bytes: &[u8],
+    prepared_at: u64,
+    until: u64,
+) -> Result<ReportAdmission, Error> {
+    let result = q.send_prepared(
+        cx,
+        route,
+        bytes,
+        until,
+        || cx.checkpoint().is_ok(),
+        || {
+            let now = report_now(cx)?;
+            if now < prepared_at {
+                return Err(Error::Proof(fr_media::presented::Error::Clock));
+            }
+            if now >= until {
+                return Err(Error::Proof(fr_media::presented::Error::Expired));
+            }
+            Ok(())
+        },
+    );
+    match result {
+        Ok(quic::SendAdmission::Accepted) => Ok(ReportAdmission::Accepted),
+        Ok(quic::SendAdmission::Refused(Error::Proof(fr_media::presented::Error::Expired))) => {
+            Ok(ReportAdmission::Expired)
+        }
+        Ok(quic::SendAdmission::Refused(error)) => Err(error),
+        Err(quic::Error::Backpressure) => Ok(ReportAdmission::Backpressure),
+        Err(quic::Error::Expired) if !q.is_closed() => Ok(ReportAdmission::Expired),
+        Err(error) => Err(Error::Transport(error)),
     }
 }
 
@@ -395,3 +472,6 @@ fn presented_age_quantiles_are_bucket_upper_bounds_and_bounded() {
     assert_eq!(ages.reports(), 6);
     assert_eq!(ages.quantile_upper_us(1000), Some(wire::MAX_SOURCE_AGE_US));
 }
+
+#[cfg(test)]
+mod expiry_tests;
