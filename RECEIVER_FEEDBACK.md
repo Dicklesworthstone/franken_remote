@@ -23,6 +23,19 @@ change capture pacing. A fixed-policy host can consume negotiated measurements
 without silently enabling adaptation. Existing local-only users of the capture
 controller retain their previous behavior.
 
+`frd run` does not enable it. Measured 2026-10-14 (namespace, controlled share,
+the client pinned to one core shared with CPU hogs, busy host content, 60 s,
+debug builds):
+- 3 hogs: both survived. With pacing: 461 pictures instead of 901, presented
+  age p95 120 ms instead of 100 ms, and 8 input suspensions (9.0 s) instead of
+  1 (1.2 s). Fewer pictures leave the presented view older, so input's view
+  freshness gate suspends control more often.
+- 8 hogs: both ended, with pacing sooner (14 s `view_stale` vs 27 s
+  `host_session_ended`).
+
+So for controlled shares, slowing capture does not protect an overloaded client;
+it trades frame rate for input suspensions.
+
 The previously published wire grammar, validation, `Requester`, `Responder` and
 `ReceiverEvidence` are reused unchanged. The runtime does not alter their
 original 50 ms host query cadence, 150 ms query/sample lifetime, 100 ms reply
