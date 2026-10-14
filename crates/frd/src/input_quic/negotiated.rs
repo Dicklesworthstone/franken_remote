@@ -173,9 +173,7 @@ impl NegotiatedInput {
         q: &QuicRecords,
         media: &NegotiatedMedia,
     ) -> Result<AttachedChannel, Error> {
-        if !self.reference_recovery
-            || !self.recovering
-            || *media.limits().protocol() != self.limits
+        if !self.reference_recovery || !self.recovering || *media.limits().protocol() != self.limits
         {
             return Err(Error::InvalidRoutes);
         }
@@ -203,7 +201,11 @@ impl NegotiatedInput {
     /// Follow the exact successor from a live completed media owner. The
     /// original input attachment, lease and sequence domain are unchanged.
     /// Failed validation leaves the recovery fence and old binding intact.
-    pub fn follow_recovery(&mut self, q: &QuicRecords, media: &NegotiatedMedia) -> Result<(), Error> {
+    pub fn follow_recovery(
+        &mut self,
+        q: &QuicRecords,
+        media: &NegotiatedMedia,
+    ) -> Result<(), Error> {
         let configuration = self.recovery_configuration(q, media)?;
         let previous = (self.configuration, self.recovery, self.recovering);
         self.configuration = configuration;
