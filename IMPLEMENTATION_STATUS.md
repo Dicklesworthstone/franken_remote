@@ -16,17 +16,21 @@ Ubuntu 26.04 on the same tailnet.
   manager).
 - `fr hosts` reports direct, DERP-relayed and idle paths correctly; a host that
   never completes the handshake ends `host_not_answering`.
-- Not exercised live yet: clipboard sync, audio, local approval, VAAPI, macOS
-  or Windows hosts or clients.
+- Not exercised live yet: audio, local approval, VAAPI, macOS or Windows hosts
+  or clients.
 - 2026-10-14, live (ts2 `frd run --encoder nvenc --input-agent --clipboard
   --files`, ts1 `fr connect --control --clipboard --send`, debug builds):
   typed keys ("hello") and wheel (buttons 4 and 5) reached the host, observed
   by an independent X client; a 100,000-byte file was published with an
   identical sha256, and a second file with a taken name was refused. With
   `--clipboard` the session first ended within seconds
-  (`Control(Clipboard(Transport(Unauthorized)))`); fixed in 47c0c60, and live
-  clipboard sync is still to be re-verified. Open: NVENC host
-  `cleanup_failed` in 2 of 4 runs (fr-kiao). The client on trj (load 100-250)
+  (`Control(Clipboard(Transport(Unauthorized)))`, fixed in 47c0c60), then no
+  text crossed (xclip owners have no selection timestamp; fixed in 41b1440).
+  Now text crosses both ways, including the host's pre-existing clipboard at
+  session start (`clipboard_received` 2). NVENC teardown takes 0.6-8.3 s on
+  that host; a slow one used to leak the ingress rule until frd refused to
+  start (`ResidualRuleLimit`), fixed in cf97a6b (fr-kiao keeps the open
+  semantics question). The client on trj (load 100-250)
   ended `Media(Worker(Deadline))`, the overload fragility in fr-tqu7, so the
   client ran on the idle ts1.
 
