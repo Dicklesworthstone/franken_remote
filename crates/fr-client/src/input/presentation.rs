@@ -500,14 +500,16 @@ impl PresentedInput {
     /// presented view is still within its original freshness bound. Renewal
     /// continues through that gap; it neither makes the candidate visible nor
     /// authorizes input from it. Once the preceding view actually expires,
-    /// InputClient::tick suspends input and renewal still continues under the
+    /// `InputClient::tick` suspends input and renewal still continues under the
     /// bounded suspension policy (plan 11.3).
     fn renewal_ready(&mut self, now: ClientInstant) -> Result<(), Error> {
-        self.input.tick(now)?;
-        if !self.input.mapped {
-            return Err(Error::Input(super::Error::MappingUnconfirmed));
-        }
-        if self.input.view_until.is_some() || self.input.suspended_since().is_some() {
+        // The view tracker still runs: a lost receiver or stale binding ends
+        // control here. Renewal needs a presented view, never merely a live
+        // connection.
+        let ready = self.tick(now)?;
+        // A successor awaiting its visibility callback leaves the preceding
+        // view's deadline in force (view_until); a stale view suspends instead.
+        if ready || self.input.view_until.is_some() || self.input.suspended_since().is_some() {
             Ok(())
         } else {
             Err(self.not_ready())

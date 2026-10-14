@@ -434,12 +434,14 @@ fn control_renewal_uses_the_preceding_visible_view_while_a_successor_awaits_visi
             index: 0,
             bytes: b"next",
         },
-        4,
+        1,
         &limits,
         &mut bytes,
     )
     .unwrap();
-    receiver.receive(Channel::Video, &bytes[..n], 23_000).unwrap();
+    receiver
+        .receive(Channel::Video, &bytes[..n], 23_000)
+        .unwrap();
     let unit = receiver.take_decodable(23_000).unwrap().unwrap();
     progress(
         &mut input,
