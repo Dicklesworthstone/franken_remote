@@ -107,6 +107,31 @@ async fn finish(state: &mut Fixture, c: &Cx, h: &Cx, n: &mut u128, t: &mut u128)
     }
 }
 #[test]
+fn negotiation_begun_in_the_presentation_gap_completes_once_the_picture_shows() {
+    run(|c, h| async move {
+        let mut s = setup(&c, &h).await;
+        // A submitted picture awaits its visibility callback: the view gate
+        // refuses, as it often does when a live session starts.
+        super::super::submit_successor(&mut s, &c);
+        begin(&mut s, true, true);
+        s.viewer.visible(1).unwrap();
+        let driver = s.driver.take().unwrap();
+        let ((), done) = Box::pin(support::both(
+            async {
+                let (mut n, mut t) = (80_000, 90_000);
+                finish(&mut s, &c, &h, &mut n, &mut t).await;
+                assert!(s.viewer.take_clipboard_worker().is_some());
+                assert!(s.host.take_clipboard_worker().is_some());
+                s.viewer.close();
+                s.host.close();
+            },
+            driver,
+        ))
+        .await;
+        assert!(done.handoff_safe());
+    });
+}
+#[test]
 fn automatic_startup_transfers_both_directions_and_keeps_input_running() {
     run(|c, h| async move {
         let mut s = setup(&c, &h).await;

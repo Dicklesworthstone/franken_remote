@@ -167,6 +167,22 @@ inside an active I/O operation retains the conservative connection fence.
 Dropping an unpolled controlled drive or closing its owner stops the clipboard
 worker's authority before it can open or publish to the native clipboard.
 
+On the viewer the lanes are authorized by the input view gate, and the
+transport treats a refused authorization as lost authority: it closes the
+connection. The gate also refuses in ordinary transient states, above all the
+moment between submitting a picture and its visibility callback. Since
+2026-10-14 the viewer pauses its clipboard (and file) lane for any turn in which
+the gate refuses, instead of servicing it; records wait in their routes and the
+lane's absolute deadlines still bound it. `expect_clipboard` likewise needs only
+live control, not a picture confirmed visible at that instant: refusing it in
+that gap retired the clipboard for the whole session. Both were found live (NVENC
+1080p at 30 fps, ts2 to ts1): the session ended
+`Control(Clipboard(Transport(Unauthorized)))` within seconds, or ran with no
+clipboard at all. Regression tests
+`an_attached_clipboard_pauses_in_the_presentation_gap_instead_of_closing_the_session`
+and `negotiation_begun_in_the_presentation_gap_completes_once_the_picture_shows`
+fail without the respective change.
+
 Use `clipboard_switches`, `take_clipboard_received`, `clipboard_reason` and
 `retire_clipboard` on the controlling owner. Results remain backpressured until
 collected; retirement does not replace an uncertain OS receipt. `WorkerTask`

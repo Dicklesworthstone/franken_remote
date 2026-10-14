@@ -22,7 +22,12 @@ impl ControlledViewer {
             return Err(Error::AlreadyAttached);
         }
         self.check().map_err(|_| Error::Closed)?;
-        if !permitted(&mut self.input, &self.control, &self.session.cx) {
+        // Registering the expectation sends nothing, so it needs live control,
+        // not a picture confirmed visible at this instant. Refusing in the
+        // transient presentation gap retired the clipboard for the whole
+        // session (seen live at 30 fps). Every transport operation is still
+        // gated in service_clipboard.
+        if self.control.is_stopped() || self.input.stopped().is_some() {
             return Err(Error::Closed);
         }
         self.clipboard_setup.expect(
@@ -122,6 +127,17 @@ impl ControlledViewer {
         Ok(())
     }
     pub(super) fn service_clipboard(&mut self) -> Result<(), ViewerError> {
+        // The lanes authorize every transport operation with the input view
+        // gate, and the transport treats a refusal as lost authority: it
+        // closes the connection. The gate also refuses in ordinary transient
+        // states (a submitted picture awaiting its visibility callback, no
+        // picture shown yet), which live 30 fps video hits constantly. Pause
+        // the lane for this turn instead; its records wait in their routes and
+        // its absolute deadlines still bound it. A stopped control ends the
+        // session through its own path.
+        if !permitted(&mut self.input, &self.control, &self.session.cx) {
+            return Ok(());
+        }
         if let Some((channel, granted)) = self
             .clipboard_setup
             .service(&mut self.session.transport, || {

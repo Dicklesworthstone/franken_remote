@@ -316,6 +316,11 @@ impl ControlledViewer {
         }
     }
     pub(super) fn service_files(&mut self) -> Result<(), super::Error> {
+        // As for the clipboard: a transiently refusing view gate pauses the
+        // file lane; it must not close the connection (see service_clipboard).
+        if !permitted(&mut self.input, &self.control, &self.session.cx) {
+            return Ok(());
+        }
         self.files
             .service(&mut self.session.transport, || {
                 permitted(&mut self.input, &self.control, &self.session.cx)

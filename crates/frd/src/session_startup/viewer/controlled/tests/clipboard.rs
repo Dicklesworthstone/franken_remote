@@ -292,6 +292,37 @@ fn unpolled_session_drives_fence_clipboard_before_native_open() {
     }
 }
 #[test]
+fn an_attached_clipboard_pauses_in_the_presentation_gap_instead_of_closing_the_session() {
+    run(|c, h| async move {
+        let mut state = setup(&c, &h).await;
+        let (hc, vc) = state.clipboard_channels.take().unwrap();
+        let _host_seed = state.host.attach_clipboard(hc, true).unwrap();
+        let _viewer_seed = state.viewer.attach_clipboard(vc, true).unwrap();
+        // A new picture is submitted and awaits its visibility callback: the
+        // view gate refuses, as it does many times a second in a live session.
+        super::submit_successor(&mut state, &c);
+        state
+            .viewer
+            .drive(Duration::ZERO, |_| {}, block)
+            .await
+            .unwrap();
+        assert!(!state.viewer.is_closed());
+        assert!(!state.viewer.clipboard_retired());
+        // Visibility resumes the lane on the same connection.
+        state.viewer.visible(1).unwrap();
+        state
+            .viewer
+            .drive(Duration::ZERO, |_| {}, block)
+            .await
+            .unwrap();
+        assert!(!state.viewer.is_closed());
+        assert!(!state.viewer.clipboard_retired());
+        state.viewer.close();
+        state.host.close();
+        assert!(state.driver.take().unwrap().await.handoff_safe());
+    });
+}
+#[test]
 fn clipboard_consent_is_independent_of_the_accepted_control_grant() {
     run(|c, h| async move {
         let mut state = setup(&c, &h).await;
