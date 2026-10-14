@@ -33,6 +33,9 @@ Ubuntu 26.04 on the same tailnet.
   semantics question). The client on trj (load 100-250)
   ended `Media(Worker(Deadline))`, the overload fragility in fr-tqu7, so the
   client ran on the idle ts1.
+- 2026-10-14, later, the same live check at ed45e10 (after the day's renewal,
+  clipboard-projection and visibility-gap changes) passed again: keys, wheel,
+  clipboard both ways, file send with a matching sha256, orderly `stopped`.
 
 **What it took** (each with unit tests and a planted negative):
 - Asupersync pinned to git `ee72b665e` (0.6.0). Published 0.5.0 sends each
@@ -96,9 +99,14 @@ still pass or fail run to run (bead fr-xfvs).
 **Tailnet path in the namespace suite.** The runner gives the namespace
 loopback MTU 1280 and drops IP fragments, as Tailscale does (6a38a0b). A
 planted 1500-byte datagram limit passes on plain loopback and fails there.
-Under it, on ts1, all 68 pass (80cdec2, 2026-10-14), including the seven
+Under it, on ts1, all 70 pass (3df6564, 2026-10-14), including the seven
 `real_audio` tests now that ts1 has PulseAudio: the host playback tone reached
 the client's monitor 104 ms after the change (54 ms at the host's monitor).
+Two are new: a local stop of `frd run` now tells a connected view-only viewer
+`host_stopping` within ~20 ms; it used to leave the viewer to time out with
+`host_not_heard` after ~3 s. And `--observation-indicator` maps the real
+"Stop sharing" window before listening; a core XTest click on it does not end
+sharing, and closing it does.
 At 2d216d1 it was 61 of 68, missing only those seven. One later run at
 9cfb65d ended a lossy row with an unnamed `Transport(Handler)` (fr-xfvs).
 Earlier, at b47a271, 58 of 67 passed: the lossy busy-screen row and the
