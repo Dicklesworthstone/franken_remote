@@ -38,11 +38,14 @@ pub(crate) async fn presenter(cx: &Cx, receiver: &mut ReceivePipeline, mode: &st
     std::fs::write(&file, include_str!("fixture.py").replace("@MODE@", mode)).unwrap();
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
     let configuration = configuration();
+    // Fixture setup, not the deadline under test: a Python worker start took
+    // over 1 s with the whole library suite running in parallel on a loaded
+    // host (trj, 2026-10-14) and failed unrelated tests here.
     let worker = Worker::start(
         cx,
         Launch::new(&file, ":0", None, Role::Present, 33).unwrap(),
         configuration,
-        Deadline::after(cx, Duration::from_secs(1)).unwrap(),
+        Deadline::after(cx, Duration::from_secs(5)).unwrap(),
     )
     .await
     .unwrap();
