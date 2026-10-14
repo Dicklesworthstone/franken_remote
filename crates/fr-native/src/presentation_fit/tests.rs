@@ -122,3 +122,6 @@ fn odd_letterbox_remainder_and_last_pixel_are_never_stale() {
         );
     }
 }
+
+#[path = "tests/reference.rs"]
+mod reference;

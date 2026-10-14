@@ -6,6 +6,9 @@ use super::{BgraFrame, NativeError, frame_len, zeroed};
 use fr_core::limits::ProtocolLimits;
 use fr_media::worker::presentation::{Fit, X11Target};
 
+#[path = "presentation_fit/rows.rs"]
+mod rows;
+
 pub struct FittedFrame {
     source: (u32, u32),
     placement: Fit,
@@ -74,25 +77,27 @@ impl FittedFrame {
             return Err(NativeError::GeometryChanged);
         }
         let fit = self.placement;
-        // Dimensions were checked before allocation. u64 products cover the
-        // complete u32 input domain, and each resulting index is in its row.
+        // Frame construction checked dimensions and byte lengths. Slice whole
+        // BGRA pixels once, then keep all address arithmetic out of the hot
+        // horizontal loop. No per-picture or per-row allocations are introduced.
+        let source_width =
+            usize::try_from(source.width).map_err(|_| NativeError::InvalidConfiguration)?;
+        let fit_width =
+            usize::try_from(fit.width).map_err(|_| NativeError::InvalidConfiguration)?;
+        let source_pixels = source.bytes.as_chunks::<4>().0;
+        let output_pixels = self.output.bytes.as_chunks_mut::<4>().0;
         for y in 0..fit.height {
             let sy = u64::from(y) * u64::from(source.height) / u64::from(fit.height);
-            let src = usize::try_from(sy * u64::from(source.width) * 4)
+            let src = usize::try_from(sy * u64::from(source.width))
                 .map_err(|_| NativeError::InvalidConfiguration)?;
             let dst = usize::try_from(
-                (u64::from(y + fit.y) * u64::from(self.output.width) + u64::from(fit.x)) * 4,
+                u64::from(y + fit.y) * u64::from(self.output.width) + u64::from(fit.x),
             )
             .map_err(|_| NativeError::InvalidConfiguration)?;
-            for x in 0..fit.width {
-                let sx = usize::try_from(
-                    u64::from(x) * u64::from(source.width) / u64::from(fit.width) * 4,
-                )
-                .map_err(|_| NativeError::InvalidConfiguration)?;
-                let dx = usize::try_from(x).map_err(|_| NativeError::InvalidConfiguration)? * 4;
-                self.output.bytes[dst + dx..dst + dx + 4]
-                    .copy_from_slice(&source.bytes[src + sx..src + sx + 4]);
-            }
+            rows::scale_row(
+                &source_pixels[src..src + source_width],
+                &mut output_pixels[dst..dst + fit_width],
+            );
         }
         Ok(&self.output)
     }
