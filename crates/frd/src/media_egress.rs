@@ -55,6 +55,8 @@ pub struct Egress {
     buffer: Vec<u8>,
     pending: Option<PacketOffer>,
     maximum: usize,
+    /// The last admitted packet, not polling frequency, determines fairness.
+    repair_next: bool,
 }
 impl fmt::Debug for Egress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -74,6 +76,7 @@ impl Egress {
             buffer: Vec::new(),
             pending: None,
             maximum,
+            repair_next: false,
         }
     }
     pub(crate) fn shared_capture_credit(
@@ -293,6 +296,27 @@ impl Egress {
         self.buffer = Vec::new();
         self.pending = None;
     }
+    /// Alternate eligible originals and repairs by actual admission, not by
+    /// poll count. An empty or paced lane falls through to the other packetizer
+    /// before preparing anything; a pending record always wins unchanged.
+    /// At most two packetizer probes and one transport callback run per call.
+    /// Expiry/error retirement yields without preparing a replacement packet.
+    /// Startup callers must keep selecting Original until their decode gate opens.
+    pub fn transmit_interleaved<E>(
+        &mut self,
+        send: impl FnOnce(
+            &PacketOffer,
+            &[u8],
+            &mut dyn FnMut() -> Result<(), Error>,
+        ) -> Result<Admission, E>,
+    ) -> Result<Progress, EgressError<E>> {
+        let lane = if self.repair_next {
+            Lane::Repair
+        } else {
+            Lane::Original
+        };
+        self.transmit_selected(lane, true, send)
+    }
     /// `send` must invoke the supplied guard immediately before native enqueue,
     /// including after any allocation/preparation that could stall. Accepted is
     /// transport admission, NOT delivery/decode/presentation. A transport error
@@ -301,6 +325,18 @@ impl Egress {
     pub fn transmit<E>(
         &mut self,
         lane: Lane,
+        send: impl FnOnce(
+            &PacketOffer,
+            &[u8],
+            &mut dyn FnMut() -> Result<(), Error>,
+        ) -> Result<Admission, E>,
+    ) -> Result<Progress, EgressError<E>> {
+        self.transmit_selected(lane, false, send)
+    }
+    fn transmit_selected<E>(
+        &mut self,
+        lane: Lane,
+        fallback: bool,
         send: impl FnOnce(
             &PacketOffer,
             &[u8],
@@ -320,14 +356,26 @@ impl Egress {
             self.buffer.resize(self.maximum, 0);
         }
         if self.pending.is_none() {
-            let result = match lane {
-                Lane::Original => subscription.next_packet(&mut self.buffer),
-                Lane::Repair => subscription.next_repair(&mut self.buffer),
+            let other = match lane {
+                Lane::Original => Lane::Repair,
+                Lane::Repair => Lane::Original,
             };
-            match result {
-                Ok(None) => return Ok(Progress::Idle),
-                Ok(Some(offer)) => self.pending = Some(offer),
-                Err(error) => return Err(EgressError::Media(self.media_failure(error))),
+            for selected in [lane, other].into_iter().take(if fallback { 2 } else { 1 }) {
+                let result = match selected {
+                    Lane::Original => subscription.next_packet(&mut self.buffer),
+                    Lane::Repair => subscription.next_repair(&mut self.buffer),
+                };
+                match result {
+                    Ok(None) => {}
+                    Ok(Some(offer)) => {
+                        self.pending = Some(offer);
+                        break;
+                    }
+                    Err(error) => return Err(EgressError::Media(self.media_failure(error))),
+                }
+            }
+            if self.pending.is_none() {
+                return Ok(Progress::Idle);
             }
         }
         let offer = self.pending.as_ref().expect("prepared above");
@@ -350,9 +398,11 @@ impl Egress {
                 self.transmit_media_failure(error)
             }
             Ok(Admission::Backpressure) => Ok(Progress::Pending(offer.clone())),
-            Ok(Admission::Accepted) => Ok(Progress::Accepted(
-                self.pending.take().expect("prepared above"),
-            )),
+            Ok(Admission::Accepted) => {
+                let offer = self.pending.take().expect("prepared above");
+                self.repair_next = offer.expiry_error() != SendError::RepairExpired;
+                Ok(Progress::Accepted(offer))
+            }
             Err(error) => {
                 self.close();
                 Err(EgressError::Transport(error))

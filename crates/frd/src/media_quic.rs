@@ -14,7 +14,7 @@ use crate::{
 use asupersync::cx::Cx;
 use fr_media::{
     access_unit::EncodedAccessUnit,
-    delivery::{BudgetUsage, MediaBindings, SendError},
+    delivery::{BudgetUsage, MediaBindings, PacketOffer, SendError},
 };
 use fr_transport::quic::{
     self, DatagramRoute, Messages, Priority, QuicRecords, Route, StreamRoute,
@@ -293,6 +293,15 @@ impl QuicEgress {
     ) -> Result<Progress, Error> {
         self.transmit_authorized(cx, transport, lane, || true)
     }
+    /// One admitted steady-state record, alternating originals and repairs
+    /// through the existing pending owner and normal QUIC admission gates.
+    pub fn transmit_interleaved(
+        &mut self,
+        cx: &Cx,
+        transport: &mut QuicRecords,
+    ) -> Result<Progress, Error> {
+        self.transmit_frame_authorized(cx, transport, None, None, || true)
+    }
     /// The OS source adds a downward-only final authority gate. This can only
     /// refuse a write; the original subscription/packet guard still runs.
     pub(crate) fn transmit_authorized(
@@ -302,10 +311,12 @@ impl QuicEgress {
         lane: Lane,
         source_live: impl FnMut() -> bool,
     ) -> Result<Progress, Error> {
-        self.transmit_frame_authorized(cx, transport, lane, None, source_live)
+        self.transmit_frame_authorized(cx, transport, Some(lane), None, source_live)
     }
     /// A pending decoder may buffer one next reference but must not receive it
     /// before `FirstDecoded`. Retain any prepared packet unchanged while waiting.
+    /// Once this gate opens, shared subscribers alternate eligible repairs and
+    /// originals instead of waiting for continuous original traffic to stop.
     pub(crate) fn transmit_startup_authorized(
         &mut self,
         cx: &Cx,
@@ -313,19 +324,22 @@ impl QuicEgress {
         first: Option<u64>,
         source_live: impl FnMut() -> bool,
     ) -> Result<Progress, Error> {
-        self.transmit_frame_authorized(cx, transport, Lane::Original, first, source_live)
+        let lane = first.map(|_| Lane::Original);
+        self.transmit_frame_authorized(cx, transport, lane, first, source_live)
     }
     fn transmit_frame_authorized(
         &mut self,
         cx: &Cx,
         transport: &mut QuicRecords,
-        lane: Lane,
+        lane: Option<Lane>,
         first: Option<u64>,
         mut source_live: impl FnMut() -> bool,
     ) -> Result<Progress, Error> {
         self.check_connection(transport)?;
         let routes = self.routes;
-        let result = self.egress.transmit(lane, |offer, bytes, guard| {
+        let send = |offer: &PacketOffer,
+                    bytes: &[u8],
+                    guard: &mut dyn FnMut() -> Result<(), media::Error>| {
             if first.is_some_and(|frame| offer.frame() != frame) {
                 return Ok(Admission::Backpressure);
             }
@@ -357,7 +371,11 @@ impl QuicEgress {
                 Err(quic::Error::Expired) if !transport.is_closed() => Ok(Admission::Expired),
                 Err(error) => Err(Error::Transport(error)),
             }
-        });
+        };
+        let result = match lane {
+            Some(lane) => self.egress.transmit(lane, send),
+            None => self.egress.transmit_interleaved(send),
+        };
         match result {
             Ok(progress) => Ok(progress),
             Err(EgressError::Media(
