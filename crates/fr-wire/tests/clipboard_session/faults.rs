@@ -74,6 +74,16 @@ fn disabled_switch_still_allows_release_only_cancel_but_no_new_item() {
     assert_eq!(pump(&mut source, &mut gate, 0), Pump::Suspended);
     assert_eq!(platform.text, [] as [String; 0]);
 }
+/// A host item's cap is authorization (lease and observation), not the host's
+/// input view window: an offer made while the view is due in 100 ms keeps the
+/// lease's deadline. Every record still checks the full authority.
+#[test]
+fn an_outgoing_items_cap_is_authorization_not_the_input_view_window() {
+    let input = bounded_view_owner(3_000_000, 100_000);
+    let mut source = session(&input, Role::Host);
+    source.offer(1, "secret", None, at(0)).unwrap();
+    assert_eq!(source.outgoing_deadline(), Some(at(3_000_000)));
+}
 #[test]
 fn renewal_does_not_extend_an_items_original_authorization_cap() {
     let mut input = owner(3_000_000);

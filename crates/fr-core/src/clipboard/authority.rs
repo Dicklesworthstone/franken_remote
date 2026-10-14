@@ -21,6 +21,13 @@ use std::sync::Arc;
 pub trait Authority: Send + Sync {
     fn binding(&self) -> Binding;
     fn deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal>;
+    /// The cap for one clipboard item admitted now, fixed at admission. It may
+    /// outlast `deadline` while control is live: the host's input view window
+    /// bounds input submission, not an item's lifetime. Every record and the
+    /// final publication still check `deadline`.
+    fn item_deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
+        self.deadline(now)
+    }
     fn revoke(&self);
 }
 
@@ -55,6 +62,9 @@ impl Monitor {
     pub fn deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
         self.0.deadline(now)
     }
+    pub fn item_deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
+        self.0.item_deadline(now)
+    }
     pub fn revoke(&self) {
         self.0.revoke();
     }
@@ -69,6 +79,9 @@ impl Authority for Host {
     }
     fn deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
         self.input.deadline(now)
+    }
+    fn item_deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
+        self.input.authorization_deadline(now)
     }
     fn revoke(&self) {
         self.input.revoke();

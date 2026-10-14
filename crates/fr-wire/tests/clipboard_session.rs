@@ -55,6 +55,45 @@ fn owner(lifetime: u64) -> InputOwner {
     )
     .unwrap()
 }
+/// Like `owner`, with the presented view evidence-bounded until `view_until`.
+fn bounded_view_owner(lifetime: u64, view_until: u64) -> InputOwner {
+    let credentials = InputCredentials {
+        session: RemoteSessionId::from_raw(1),
+        lease: InputLeaseId::from_raw(2),
+        ticket: InputTicketId::from_raw(3),
+        view: InputView {
+            geometry: DisplayGeometryGeneration::INITIAL,
+            viewport: ViewportMappingGeneration::INITIAL,
+            configuration: CodecConfigurationGeneration::INITIAL,
+            recovery: RecoveryGeneration::INITIAL,
+        },
+    };
+    let mut authority = SessionAuthority::new(
+        credentials.session,
+        AuthorityPolicy {
+            authorization_lifetime: HostDuration::from_micros(lifetime),
+            ticket_lifetime: HostDuration::from_micros(1_000_000),
+        },
+    );
+    authority.mark_capabilities_checked().unwrap();
+    authority.authorize_observation(at(0)).unwrap();
+    authority.require_view_evidence(at(0)).unwrap();
+    authority
+        .mark_view_ready_until(at(view_until), at(0))
+        .unwrap();
+    authority.grant_lease(credentials.lease, at(0)).unwrap();
+    authority
+        .issue_input_ticket(credentials.lease, credentials.ticket, at(0))
+        .unwrap();
+    InputOwner::new(
+        authority,
+        credentials,
+        InputBounds::new(DesktopPoint { x: 0, y: 0 }, 320, 240).unwrap(),
+        Capabilities::default(),
+        at(0),
+    )
+    .unwrap()
+}
 fn context(sender: Role) -> Context {
     Context {
         scope: Binding {

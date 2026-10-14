@@ -29,7 +29,8 @@ impl ChannelSession {
         if !self.maintain(now)?.enabled {
             return Err(Error::Disabled.into());
         }
-        let authority_deadline = self.monitor.deadline(now).map_err(|reason| {
+        // The read's cap: authorization, not the host's input view window.
+        let authority_deadline = self.monitor.item_deadline(now).map_err(|reason| {
             self.close();
             SessionError::Clipboard(Error::Authority(reason))
         })?;

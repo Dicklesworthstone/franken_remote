@@ -574,7 +574,12 @@ impl ImageClipboardSession {
         now: HostInstant,
         bound: HostInstant,
     ) -> Result<(), Error> {
-        let authority_deadline = self.check(now)?;
+        self.check(now)?;
+        // As for text: capped by authorization, not the input view window.
+        let authority_deadline = self.monitor.item_deadline(now).map_err(|reason| {
+            self.close();
+            Error::Authority(reason)
+        })?;
         begin.validate(&self.limits)?;
         if begin.binding != self.binding {
             return Err(Error::Binding);

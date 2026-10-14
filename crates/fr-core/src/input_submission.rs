@@ -234,6 +234,17 @@ impl InputMonitor {
             ControlStatus::Suspended { .. } => Err(Refusal::Authority(AuthorityError::ViewUnready)),
         }
     }
+    /// The authorization deadline (lease and observation) while control is
+    /// live. The view deadline bounds input SUBMISSION; lease-scoped work that
+    /// only needs the grant to stand (a clipboard item's lifetime) is capped
+    /// here and still checks `deadline` before each operation. A stale view
+    /// refuses with `ViewUnready`, exactly as `deadline` does.
+    pub fn authorization_deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
+        match self.status(now)? {
+            ControlStatus::Live { .. } => self.with(|a| a.lease_deadline()),
+            ControlStatus::Suspended { .. } => Err(Refusal::Authority(AuthorityError::ViewUnready)),
+        }
+    }
     /// Live or suspended control at a freshly sampled clock. Any error has
     /// already revoked this lease's native owner (terminal).
     pub fn status(&self, now: HostInstant) -> Result<ControlStatus, Refusal> {

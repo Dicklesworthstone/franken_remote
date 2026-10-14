@@ -89,7 +89,14 @@ and both switches immediately before each enqueue and discards it on fencing.
 
 The transfer deadline is fixed at Begin admission, no later than three seconds
 or the then-current original-owner authorization deadline. Renewal/traffic does
-not extend it. The receiver tracks its own clock monotonically; regression
+not extend it. On the host, "authorization" is the lease and observation
+deadline (`InputMonitor::authorization_deadline`), not the input view window.
+That window bounds input submission and is renewed by every presented picture,
+so it is only 130-390 ms ahead. Until 2026-10-14 it capped every item, and on a
+120 ms path a copy needing a second flight could not finish. Every chunk, the
+commit and the final publication still require a live view
+(`Authority::deadline`). The sender's read and send cap
+(`ChannelSession::observe`/`offer`) uses the same authorization deadline. The receiver tracks its own clock monotonically; regression
 fences the owner rather than manufacturing a new lifetime. A local clipboard
 revision change during transfer refuses the stale commit. Native preparation
 may block, but occurs outside the shared authority mutex. The clock, original

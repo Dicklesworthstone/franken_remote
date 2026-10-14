@@ -172,6 +172,16 @@ impl Authority for Lifetime {
         }
         Ok(deadline)
     }
+    fn item_deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
+        if !self.live.load(Ordering::Acquire) {
+            return Err(Refusal::Revoked);
+        }
+        let deadline = self.original.item_deadline(now)?;
+        if !self.live.load(Ordering::Acquire) {
+            return Err(Refusal::Revoked);
+        }
+        Ok(deadline)
+    }
     fn revoke(&self) {
         self.live.store(false, Ordering::Release);
         self.original.revoke();

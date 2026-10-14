@@ -379,7 +379,8 @@ impl ChannelSession {
             source: self.outgoing.validate()?,
             sequence,
         };
-        let authority_deadline = self.monitor.deadline(now).map_err(|reason| {
+        // The item's cap: authorization, not the host's input view window.
+        let authority_deadline = self.monitor.item_deadline(now).map_err(|reason| {
             self.close();
             SessionError::Clipboard(Error::Authority(reason))
         })?;
