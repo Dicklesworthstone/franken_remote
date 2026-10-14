@@ -253,6 +253,39 @@ fn a_lease_the_application_stopped_while_finishing_is_the_reported_cause() {
     });
 }
 #[test]
+fn a_lease_cancelled_by_the_ending_session_leaves_the_session_cause() {
+    let runtime = network::runtime();
+    let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    runtime.block_on(async {
+        // The application fails for its own reason and its teardown cancels
+        // the destination lease on the way out. Cancellation is not a cause.
+        for ended in [Err(fr_tailnet::Error::Cancelled), Ok(())] {
+            let stopped = Arc::new(AtomicBool::new(false));
+            let service = {
+                let stopped = stopped.clone();
+                std::future::poll_fn(move |_| {
+                    if stopped.load(Ordering::Acquire) {
+                        Poll::Ready(ended)
+                    } else {
+                        Poll::Pending
+                    }
+                })
+            };
+            let application = {
+                let stopped = stopped.clone();
+                async move {
+                    stopped.store(true, Ordering::Release);
+                    "view stale"
+                }
+            };
+            assert_eq!(
+                run_application(&cx, service, application).await,
+                Ok("view stale")
+            );
+        }
+    });
+}
+#[test]
 fn returning_a_value_ends_target_scope_and_abandoned_scope_fences_before_drop() {
     let runtime = network::runtime();
     let cx = runtime.request_cx_with_budget(Budget::INFINITE);

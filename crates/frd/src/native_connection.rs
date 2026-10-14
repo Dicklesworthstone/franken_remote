@@ -238,10 +238,15 @@ async fn run_application<T>(
                 // The application meets a stopped destination lease first, as
                 // a refused transport authorization (an unnamed
                 // Transport(Unauthorized)). The lease's own cause is the
-                // reason: report it. A live lease leaves the result as is.
+                // reason: report it. A live lease leaves the result as is, and
+                // so does a lease that only saw the ending session cancel it:
+                // that is not a cause, and it hid every other end as
+                // `cancelled`.
                 Poll::Ready(value) => Poll::Ready(match service.as_mut().poll(task) {
-                    Poll::Ready(result) => lost(result),
-                    Poll::Pending => Ok(value),
+                    Poll::Ready(Err(cause)) if cause != fr_tailnet::Error::Cancelled => {
+                        lost(Err(cause))
+                    }
+                    _ => Ok(value),
                 }),
                 Poll::Pending => Poll::Pending,
             },
