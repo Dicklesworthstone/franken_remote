@@ -546,6 +546,10 @@ impl SendCache {
     }
     /// Accept one bounded repair job from an already authorized control channel.
     /// Queueing never extends the original cache deadline or bypasses pacing.
+    /// An announced datagram picture may still be emitting originals when its
+    /// receiver asks for repair. Keep that request in the same single bounded
+    /// slot instead of spending another receiver retry/round trip. Emission
+    /// waits for the originals; the original horizon still bounds the job.
     pub fn queue_repair(&mut self, packet: &[u8], now: u64) -> Result<(), SendError> {
         let record = Record::decode(
             packet,
@@ -562,7 +566,7 @@ impl SendCache {
             .index(request.frame)
             .ok_or(SendError::FrameUnavailable)?;
         let p = self.pictures[index].as_mut().expect("located");
-        if p.mode == DeliveryMode::Recovery || !p.original_complete() {
+        if p.mode == DeliveryMode::Recovery || !p.announced {
             return Err(SendError::RepairNotReady);
         }
         let total = p.progress.descriptor.fragment_count()?;
@@ -591,7 +595,8 @@ impl SendCache {
         Ok(())
     }
     /// Emits one original fragment from the cache. Returns no packet once the
-    /// job completes/expires. Repair traffic has its own bounded offered-load
+    /// job completes/expires or its originals are not yet fully emitted.
+    /// Waiting consumes no repair bytes. Repair traffic has its own bounded offered-load
     /// allowance AND must pass the transport's normal congestion admission.
     pub fn next_repair_packet(
         &mut self,
@@ -604,6 +609,12 @@ impl SendCache {
         };
         let index = self.index(job.frame).ok_or(SendError::FrameUnavailable)?;
         let p = self.pictures[index].as_ref().expect("located");
+        // Do not turn an early request for a missing suffix into retransmission
+        // competing with that same suffix's first emission. Retain just the
+        // already validated job; tick above still fences an expired original.
+        if !p.original_complete() {
+            return Ok(None);
+        }
         let fragment = p.fragment(job.fragment)?;
         let charge = fragment.bytes.len()
             + if fragment.descriptor.reference.is_some() {
