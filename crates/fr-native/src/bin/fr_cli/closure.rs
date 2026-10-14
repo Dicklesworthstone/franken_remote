@@ -109,6 +109,35 @@ const fn cleanup(stage: Cleanup) -> &'static str {
     }
 }
 
+/// Project only an already-validated FRD0 Closed report from this session.
+/// An unsolicited report proves neither a close-request acknowledgement nor
+/// successful completion of a local close exchange. Its stages remain exact.
+#[cfg(target_os = "linux")]
+pub(super) fn failure(value: Closed) -> Failure {
+    use fr_wire::closure::ClosedReason;
+    let code = match value.reason {
+        ClosedReason::ClientRequested => "host_session_closed",
+        ClosedReason::HostStopping => "host_stopping",
+        ClosedReason::AuthorityExpired => "host_authority_expired",
+        ClosedReason::PermissionLost => "host_permission_lost",
+        ClosedReason::ViewInvalidated => "host_view_invalidated",
+        ClosedReason::ProtocolError => "host_protocol_error",
+        ClosedReason::HostFailure => "host_failure",
+        ClosedReason::SessionReplaced => "host_session_replaced",
+    };
+    let mut error = Failure::new(
+        code,
+        "The host ended this session. Check its reported reason, cleanup and outstanding effects before starting a new session; previously submitted actions are not rolled back.",
+        1,
+    );
+    error.closure = Some(Report {
+        request_acknowledged: false,
+        transport_completed: false,
+        host: Some(value),
+    });
+    error
+}
+
 /// Local cleanup failure/cancellation must keep any already-collected host
 /// report. The failure code and exit status still win; no success is fabricated.
 #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
@@ -118,7 +147,14 @@ pub(super) fn preserve<T>(
 ) -> Result<T, Failure> {
     result.map_err(|mut error| {
         if let Some(outcome) = outcome {
-            error.closure = Some(Report::from(outcome));
+            let mut report = Report::from(outcome);
+            // A failed later close exchange can have no report. That absence
+            // must not erase a Closed record already validated during service.
+            // Keep the exchange's actual independent acknowledgement stages.
+            if report.host.is_none() {
+                report.host = error.closure.and_then(|previous| previous.host);
+            }
+            error.closure = Some(report);
         }
         error
     })

@@ -87,6 +87,7 @@ pub(super) fn session(error: session_startup::Error) -> Option<Failure> {
         | session_startup::Error::ClientStartup(fr_client::startup::Error::Protocol(
             negotiation::Error::Refused(value),
         )) => message(value),
+        session_startup::Error::RemoteClosed(report) => Some(crate::closure::failure(report)),
         _ => None,
     }
 }
@@ -99,7 +100,10 @@ pub(super) fn connection(error: native_connection::Error) -> Option<Failure> {
 pub(super) fn observation(error: ObserverError) -> Option<Failure> {
     match error {
         ObserverError::Session(error)
-        | ObserverError::Streaming(StreamingViewerError::Session(error)) => session(error),
+        | ObserverError::Streaming(
+            StreamingViewerError::Session(error)
+            | StreamingViewerError::Control(ControlledViewerError::Session(error)),
+        ) => session(error),
         ObserverError::Streaming(StreamingViewerError::Control(
             ControlledViewerError::LeaseRevoked(report),
         )) => Some(crate::terminal::failure(report)),
@@ -275,3 +279,6 @@ mod terminal_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod closed_tests;
