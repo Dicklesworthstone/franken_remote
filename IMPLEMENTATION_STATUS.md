@@ -142,6 +142,16 @@ The host's terminal close code is now named on the client (c078b34).
   Over the eight lossy 40/120 ms rows (64 steps) the controller held 22-32
   steps before and 29-34 after, in three runs; `control_renewal_failed` is
   now the commonest end.
+- 2026-10-14 (fr-6hbo): that end was the viewer stopping itself. Every
+  control grant carries a clipboard authority projection bound to the
+  original media receiver, even with clipboard off. A lost reference fences
+  that receiver, and the projection check ended control before the grant
+  could suspend for reference recovery. A lapsed projection now ends only the
+  clipboard (7856d23). The 64 lossy-row steps went from 35/35/32 to 40/37/38
+  in three runs each, with no `control_renewal_failed`. The 40 ms 1% rows
+  held 8/8 throughout. The remaining ends are 5%-loss limits: host records
+  unacknowledged past the 2 s allowance, lease expiry, and reference or
+  decoder-restart recovery past its deadline.
 
 ## Audited state (2026-09-27)
 
