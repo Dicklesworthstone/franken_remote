@@ -140,7 +140,11 @@ impl ObservationResponder {
         if self.nonce == Some(nonce) || deadline_micros <= self.host_deadline {
             return self.fail(Error::StaleChallenge);
         }
-        let Some(until) = now.0.checked_add(1_000_000).map(ClientInstant) else {
+        // Keep the response alive for the transport's maximum bounded reliable
+        // delivery allowance. This is only a local retention/send deadline:
+        // the host still enforces the challenge's issue-time lease deadline,
+        // so congestion tolerance cannot renew or extend control authority.
+        let Some(until) = now.0.checked_add(2_000_000).map(ClientInstant) else {
             return self.fail(Error::Clock);
         };
         self.length = authority::encode(

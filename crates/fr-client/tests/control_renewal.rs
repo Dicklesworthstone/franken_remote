@@ -214,24 +214,48 @@ fn blocked_response_keeps_exact_bytes_and_fixed_exclusive_deadline() {
     );
     assert_eq!(
         v.control_response_deadline(),
-        Some(ClientInstant(1_010_100))
+        Some(ClientInstant(2_010_100))
     );
     assert_eq!(
-        v.pending_control_response(ClientInstant(1_010_099))
+        v.pending_control_response(ClientInstant(2_010_099))
             .unwrap()
             .unwrap(),
         bytes
     );
     assert_eq!(
-        v.tick(ClientInstant(1_010_100)),
+        v.tick(ClientInstant(2_010_100)),
         Err(Error::Control(fr_client::authority::Error::Expired))
     );
     assert_eq!(v.control_response_deadline(), None);
     assert!(
-        v.enable_control_renewal(11, ClientInstant(1_010_100))
+        v.enable_control_renewal(11, ClientInstant(2_010_100))
             .is_err()
     );
 }
+#[test]
+fn response_retention_survives_the_old_one_second_cutoff_without_extending_authority() {
+    let mut v = setup();
+    let start = ClientInstant(10_100);
+    v.enable_control_renewal(11, start).unwrap();
+    v.accept_control_challenge(&control(8, 4_000_000), start)
+        .unwrap();
+    let bytes = v.pending_control_response(start).unwrap().unwrap().to_vec();
+    // The former fixed 1s retention would stop control here even though the
+    // host's independently enforced challenge/lease deadline remains later.
+    let delayed = ClientInstant(1_510_100);
+    assert_eq!(
+        v.pending_control_response(delayed).unwrap().unwrap(),
+        bytes
+    );
+    assert_eq!(
+        v.control_response_deadline(),
+        Some(ClientInstant(2_010_100))
+    );
+    v.control_response_sent(delayed).unwrap();
+    assert_eq!(v.control_response_deadline(), None);
+    assert_eq!(v.stopped(), None);
+}
+
 #[test]
 fn observation_foreign_lease_malformed_and_replay_cannot_renew_control() {
     let variants = [
