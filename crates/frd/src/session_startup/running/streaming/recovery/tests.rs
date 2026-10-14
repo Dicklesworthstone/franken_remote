@@ -431,6 +431,7 @@ fn failure(mode: &'static str, budget: u64) {
         } = Box::pin(fixture(&c, &h, mode, budget, Role::Observe, true)).await;
         let mut viewer =
             StreamingViewer::from_test_parts(viewer, media, presenter, receiver, initial);
+        let control = host.stream.control.clone();
         // A loss burst plus receive silence outlives the reference deadline.
         // Start the canonical loop only after this real timer elapsed, so its
         // normal selective repair cannot make the intentionally lost frame whole.
@@ -460,6 +461,11 @@ fn failure(mode: &'static str, budget: u64) {
         assert!(server.is_err());
         assert!(client.is_err());
         assert_eq!(viewer.statistics().recovered_streams, 0);
+        // The missed recovery deadline is the named end, not a generic one.
+        assert_eq!(
+            control.end_reason(),
+            Some(crate::input_watchdog::StopReason::ViewInvalidated)
+        );
         assert!(
             frames.borrow().iter().all(|&frame| frame == 0),
             "server={server:?} client={client:?} frames={:?}",

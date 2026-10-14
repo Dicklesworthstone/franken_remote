@@ -27,9 +27,18 @@ impl CaptureFence {
 impl Drop for CaptureFence {
     fn drop(&mut self) {
         if !self.complete {
-            self.control.revoke();
+            fence_failed_recovery(&self.control);
         }
     }
+}
+/// A recovery that could not restore the picture ends the session as an
+/// invalidated view, not a local revoke (which revokes first and keeps its
+/// own meaning).
+fn fence_failed_recovery(control: &ObservationControl) {
+    if !control.revoked() {
+        control.note_end(StopReason::ViewInvalidated);
+    }
+    control.revoke();
 }
 
 impl StreamingHost {
@@ -277,11 +286,16 @@ impl<S: Services> Services for Admission<'_, S> {
                 .as_ref()
                 .map(RecoveryDemand::deadline_micros)
                 .or_else(|| self.local_failure.as_ref().map(|local| local.until))
-                .is_none_or(|until| {
-                    self.video
-                        .control
-                        .check()
-                        .is_ok_and(|n| n.as_micros() < until)
+                .is_none_or(|until| match self.video.control.check() {
+                    Ok(n) if n.as_micros() < until => true,
+                    Ok(_) => {
+                        // A recovery that missed its deadline ends the session:
+                        // name it as the view it could not restore, before the
+                        // refusal closes the connection as a generic end.
+                        self.video.control.note_end(StopReason::ViewInvalidated);
+                        false
+                    }
+                    Err(_) => false,
                 })
     }
     fn maintain<N: FnMut() -> Result<u128, ()>>(
@@ -405,6 +419,7 @@ impl<S: Services> Waiting<'_, S> {
     fn check(&mut self) -> Result<(), Error> {
         let now = self.control.check().map_err(Error::Media)?.as_micros();
         if now >= self.until {
+            self.control.note_end(StopReason::ViewInvalidated);
             return Err(Error::Expired);
         }
         if !self.other.permitted() {

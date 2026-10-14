@@ -237,7 +237,7 @@ async fn during<S: Services>(
                 && let Poll::Ready(value) = native.as_mut().poll(task)
             {
                 if value.is_err() {
-                    control.revoke();
+                    super::fence_failed_recovery(&control);
                 }
                 result = Some(value);
             }
