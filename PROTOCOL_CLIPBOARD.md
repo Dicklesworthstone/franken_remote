@@ -143,6 +143,40 @@ lifetime apply. Cancellation destroys only that read's requestor and private
 buffer, never a newer local selection. Native X server calls remain a local OS
 trust boundary and belong on the interactive worker, outside authority locks.
 
+Native text is preferred as `UTF8_STRING`. Only an explicit, correlated refusal
+of that target may select ICCCM `STRING` (Latin-1 graphics, TAB and LF); a
+malformed UTF-8 answer never triggers reinterpretation. The conversion keeps
+the same requestor, original deadline, owner and watched revision. Both native
+source bytes and the expanded UTF-8 result must fit the selected item ceiling;
+INCR lower-bound validation counts source bytes, not expansion. No locale-based
+conversion, replacement characters, additional item buffer or wire encoding is
+introduced. Unsupported native control characters refuse the read explicitly.
+
+Native publication advertises `STRING` in `TARGETS` only when the entire original
+UTF-8 selection is exactly representable. Unicode-only selections remain
+available as UTF-8, never as a substituted STRING copy. Each reader retains its
+original immutable selection, encoding and fixed three-second deadline. A
+STRING read uses one cleared 16 KiB scratch property at a time instead of a second
+selection-sized allocation. INCR sizes count the requested representation's
+bytes. Replacing the current selection cannot change a pending reader's encoding
+or contents, and expiry never emits a false successful terminator.
+
+The `clipboard_latin1` native test target uses independent Python/Xlib owners and
+requestors. It covers refusal-only target selection, exact graphic characters,
+expanded-size limits, raw INCR size checks, unchanged deadlines, reader capacity,
+immutable mixed-encoding readers and automatic copies across two real X servers.
+The automatic test uses a bounded in-memory record handoff and fixture authority
+clocks; it does not qualify a live `fr`/`frd` tailnet session. Run alongside the
+existing `clipboard_x11` target with `FR_NATIVE_CLIPBOARD_REQUIRED=1`, Xvfb and
+Python-Xlib available:
+
+```sh
+FR_NATIVE_CLIPBOARD_REQUIRED=1 xvfb-run -a \
+  -s '-screen 0 1280x1024x24 -noreset -nolisten tcp' \
+  cargo test -p fr-native --features linux-clipboard \
+  --test clipboard_x11 --test clipboard_latin1 --locked
+```
+
 `X11Clipboard::read_to_channel` connects the read to an existing admitted
 `ChannelSession`. Supply a qualified item ID and the original owner's clock,
 and call it for an actual current native change, not repeated stale notifications.

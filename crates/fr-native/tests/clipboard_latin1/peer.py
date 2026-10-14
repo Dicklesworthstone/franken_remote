@@ -72,4 +72,6 @@ while True:
                 d.flush()
     except error.BadWindow:
         # The requestor owns cancellation. Never redirect an abandoned transfer.
-        pending.pop((event.window.id, event.atom), None)
+        key = ((event.requestor.id, event.property or event.target)
+               if event.type == X.SelectionRequest else (event.window.id, event.atom))
+        pending.pop(key, None)

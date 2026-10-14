@@ -22,6 +22,7 @@ mod ffi;
 mod read;
 mod synchronize;
 pub use changes::{ClipboardChange, WatchError};
+use encoding::Encoding;
 use ffi::{Atoms, Event};
 pub use read::{ReadError, ReadText};
 pub use synchronize::{ClipboardSynchronizer, SynchronizationError};
@@ -39,6 +40,7 @@ impl Drop for Text {
 }
 struct Selection {
     text: Text,
+    latin1_len: Option<usize>,
     stamp: Stamp,
     time: u32,
 }
@@ -46,6 +48,7 @@ struct Reader {
     window: u32,
     property: u32,
     selection: Rc<Selection>,
+    encoding: Encoding,
     offset: usize,
     deadline: Instant,
 }
@@ -237,35 +240,23 @@ impl X11Clipboard {
             return;
         }
         let accepted = if event.target == self.atoms.targets {
-            self.words(
-                event.window,
-                property,
-                4,
-                &[self.atoms.targets, self.atoms.timestamp, self.atoms.utf8],
-            )
+            let targets = [
+                self.atoms.targets,
+                self.atoms.timestamp,
+                self.atoms.utf8,
+                encoding::STRING,
+            ];
+            let count = if selection.latin1_len.is_some() { 4 } else { 3 };
+            self.words(event.window, property, 4, &targets[..count])
         } else if event.target == self.atoms.timestamp {
             self.words(event.window, property, 19, &[selection.time])
-        } else if event.target != self.atoms.utf8 {
-            false
-        } else if selection.text.0.len() <= CHUNK {
-            self.property(event.window, property, self.atoms.utf8, &selection.text.0)
-        } else if let Some(slot) = self.readers.iter().position(Option::is_none) {
-            let size = u32::try_from(selection.text.0.len()).expect("admitted clipboard limit");
-            if self.watch(event.window, true)
-                && self.words(event.window, property, self.atoms.incr, &[size])
-            {
-                self.readers[slot] = Some(Reader {
-                    window: event.window,
-                    property,
-                    selection,
-                    offset: 0,
-                    deadline: now + READER_LIFETIME,
-                });
-                true
-            } else {
-                self.watch(event.window, false);
-                false
-            }
+        } else if event.target == self.atoms.utf8 {
+            let length = selection.text.0.len();
+            self.offer_text(event, property, selection, Encoding::Utf8, length, now)
+        } else if event.target == encoding::STRING {
+            selection.latin1_len.is_some_and(|length| {
+                self.offer_text(event, property, selection, Encoding::Latin1, length, now)
+            })
         } else {
             false
         };
@@ -277,6 +268,72 @@ impl X11Clipboard {
                 {
                     self.retire(slot);
                 }
+            }
+        }
+    }
+    fn offer_text(
+        &mut self,
+        event: Event,
+        property: u32,
+        selection: Rc<Selection>,
+        encoding: Encoding,
+        length: usize,
+        now: Instant,
+    ) -> bool {
+        let deadline = now + READER_LIFETIME;
+        if length <= CHUNK {
+            return self
+                .text_property(event.window, property, &selection, encoding, 0, deadline)
+                .is_some_and(|end| end == selection.text.0.len());
+        }
+        let Some(slot) = self.readers.iter().position(Option::is_none) else {
+            return false;
+        };
+        // INCR counts bytes of the requested native representation, not UTF-8
+        // bytes when STRING was requested. No allocation follows this hint.
+        let size = u32::try_from(length).expect("admitted clipboard limit");
+        if self.watch(event.window, true)
+            && self.words(event.window, property, self.atoms.incr, &[size])
+        {
+            self.readers[slot] = Some(Reader {
+                window: event.window,
+                property,
+                selection,
+                encoding,
+                offset: 0,
+                deadline,
+            });
+            true
+        } else {
+            self.watch(event.window, false);
+            false
+        }
+    }
+    /// Write one bounded native property from the original immutable selection.
+    /// Translation finishes before the deadline recheck, and the scratch bytes
+    /// are cleared after the native call. None retires rather than retries.
+    fn text_property(
+        &self,
+        window: u32,
+        property: u32,
+        selection: &Selection,
+        encoding: Encoding,
+        offset: usize,
+        deadline: Instant,
+    ) -> Option<usize> {
+        match encoding {
+            Encoding::Utf8 => {
+                let end = offset.checked_add(CHUNK)?.min(selection.text.0.len());
+                let bytes = selection.text.0.get(offset..end)?;
+                (Instant::now() < deadline
+                    && self.property(window, property, self.atoms.utf8, bytes))
+                .then_some(end)
+            }
+            Encoding::Latin1 => {
+                let chunk = encoding::Latin1Chunk::at(&selection.text.0, offset)?;
+                (Instant::now() < deadline
+                    && self.property(window, property, encoding::STRING, chunk.bytes()))
+                .then_some(chunk.next)
             }
         }
     }
@@ -304,19 +361,21 @@ impl X11Clipboard {
                         .is_some_and(|r| r.window == event.window && r.property == event.property)
                 }) {
                     let r = self.readers[slot].as_ref().expect("matched slot");
-                    let end = (r.offset + CHUNK).min(r.selection.text.0.len());
-                    let complete = r.offset == end;
-                    let sent = now < r.deadline
-                        && self.property(
-                            r.window,
-                            r.property,
-                            self.atoms.utf8,
-                            &r.selection.text.0[r.offset..end],
-                        );
-                    if !sent || complete {
-                        self.retire(slot);
+                    let next = self.text_property(
+                        r.window,
+                        r.property,
+                        &r.selection,
+                        r.encoding,
+                        r.offset,
+                        r.deadline,
+                    );
+                    // An empty property is the successful terminator only
+                    // after every original UTF-8 byte was consumed. Expiry or
+                    // conversion failure never manufactures one.
+                    if let Some(next) = next.filter(|&end| end != r.offset) {
+                        self.readers[slot].as_mut().expect("live reader").offset = next;
                     } else {
-                        self.readers[slot].as_mut().expect("live reader").offset = end;
+                        self.retire(slot);
                     }
                 }
             }
@@ -378,6 +437,7 @@ impl ClipboardSink for X11Clipboard {
         if text.len() > self.limit || !stamp.valid() {
             return Err(PlatformError::Unsupported);
         }
+        let latin1_len = encoding::latin1_len(text);
         let mut bytes = Vec::new();
         bytes
             .try_reserve_exact(text.len())
@@ -398,6 +458,7 @@ impl ClipboardSink for X11Clipboard {
                 Some(event) if event.kind == 4 && event.time != 0 && event.sequence == sequence => {
                     self.prepared = Some(Rc::new(Selection {
                         text,
+                        latin1_len,
                         stamp,
                         time: event.time,
                     }));

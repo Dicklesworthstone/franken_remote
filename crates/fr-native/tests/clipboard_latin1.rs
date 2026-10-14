@@ -6,7 +6,7 @@ use fr_core::limits::{LimitOverrides, ProtocolLimits};
 use fr_native::clipboard::{ReadError, ReadText, X11Clipboard};
 use serde_json::{Value, json};
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, BufWriter, Write},
     process::{Child, Command, Stdio},
     sync::{Mutex, mpsc},
     thread,
@@ -31,8 +31,12 @@ impl Peer {
             .spawn()
             .unwrap();
         let mut stdin = child.stdin.take().unwrap();
-        serde_json::to_writer(&mut stdin, &settings).unwrap();
-        stdin.write_all(b"\n").unwrap();
+        {
+            let mut buffered = BufWriter::new(&mut stdin);
+            serde_json::to_writer(&mut buffered, &settings).unwrap();
+            buffered.write_all(b"\n").unwrap();
+            buffered.flush().unwrap();
+        }
         drop(stdin);
         let stdout = child.stdout.take().unwrap();
         let (send, lines) = mpsc::sync_channel(16);
@@ -286,3 +290,8 @@ fn changing_encoding_keeps_the_original_absolute_deadline() {
     assert!(matches!(reader.poll_read(), Err(ReadError::Expired)));
     assert!(matches!(reader.poll_read(), Err(ReadError::NotReading)));
 }
+
+#[path = "clipboard_latin1/automatic.rs"]
+mod automatic;
+#[path = "clipboard_latin1/publication.rs"]
+mod publication;
