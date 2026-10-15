@@ -352,6 +352,10 @@ fn a_frozen_controller_leaves_no_partial_file_under_its_final_name() {
     let until = Instant::now() + Duration::from_secs(90);
     let staged = loop {
         assert!(
+            !drop_dir.0.join(name).exists(),
+            "published before the freeze"
+        );
+        assert!(
             drop_dir.entries().is_empty(),
             "a partial name is visible: {:?}",
             drop_dir.entries()

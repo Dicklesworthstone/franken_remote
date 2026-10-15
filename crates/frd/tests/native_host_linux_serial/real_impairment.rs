@@ -223,12 +223,6 @@ fn controlled_session_under_namespace_delay_and_loss() {
     }
 }
 
-/// One view-only profile: a fresh `frd run` (no input agent) + shipped
-/// `fr connect --view-only` on a clean link, then impaired while the host
-/// desktop changes colour; each change must appear in the viewer window.
-/// Shown changes, their times, how the row ended, and the held session's
-/// media counters. `busy` rapid intermediate host changes (never near a
-/// measured colour) precede each measured change, so loss actually hits video.
 /// Paints random noise into a 300x200 window over the host root's top-left at
 /// about 30 Hz until killed: content an encoder cannot compress. The measured
 /// root pixel (the viewer window's centre) stays outside it.
@@ -261,6 +255,14 @@ while True:
     time.sleep(1 / 30)
 "#;
 
+/// One view-only profile: a fresh `frd run` (no input agent) + shipped
+/// `fr connect --view-only` on a clean link, then impaired while the host
+/// desktop changes colour; each change must appear in the viewer window.
+/// Shown changes, their times, how the row ended, and the held session's
+/// media counters. `busy` rapid intermediate host changes (never near a
+/// measured colour) precede each measured change, so loss actually hits video.
+/// `noise` runs [`NOISE`] on the host from 2 s before the link is impaired
+/// until the measured changes are done.
 fn view_row(
     delay_ms: u32,
     loss_percent: f32,

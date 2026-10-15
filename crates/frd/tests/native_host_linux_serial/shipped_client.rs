@@ -176,7 +176,8 @@ pub(super) fn wait_for_event(
 #[test]
 fn a_client_that_overstays_is_named_with_its_blocked_process_tree() {
     let hung = Command::new("sh")
-        .args(["-c", "sleep 30; true"])
+        // `; true` keeps sh as the parent; the orphaned sleep ends on its own.
+        .args(["-c", "sleep 3; true"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

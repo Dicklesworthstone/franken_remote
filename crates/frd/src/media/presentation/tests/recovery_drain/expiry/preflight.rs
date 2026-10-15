@@ -25,7 +25,10 @@ fn unstarted_expired_picture_keeps_worker_for_the_original_recovery() {
         sleep(cx.now(), Duration::from_millis(65)).await;
         assert!(host_now(&cx).unwrap().as_micros() >= until);
         let retired = pending.await.unwrap();
-        assert!(retired.stage.is_none(), "no native completion may be invented");
+        assert!(
+            retired.stage.is_none(),
+            "no native completion may be invented"
+        );
         assert_eq!(retired.picture().reference_deadline_us(), until);
         assert_eq!(receiver.budget_usage(), charged);
         assert_eq!(presenter.worker_id(), worker);
@@ -145,7 +148,10 @@ fn cancelled_request_cannot_turn_expiry_into_optional_retirement() {
     rt.block_on(async {
         let cleanup = Cx::current().unwrap();
         let (mut presenter, mut receiver, _) = short_reference(&request).await;
-        let job = presenter.take_next(&request, &mut receiver).unwrap().unwrap();
+        let job = presenter
+            .take_next(&request, &mut receiver)
+            .unwrap()
+            .unwrap();
         let pending = presenter.decode_stream_job(&request, job, true);
         sleep(cleanup.now(), Duration::from_millis(65)).await;
         request.cancel_fast(asupersync::types::CancelKind::User);
@@ -155,7 +161,11 @@ fn cancelled_request_cannot_turn_expiry_into_optional_retirement() {
         ));
         assert_eq!(presenter.worker.state(), worker::State::Poisoned);
         assert_eq!(receiver.budget_usage(), BudgetUsage::default());
-        assert!(receiver.tick(host_now(&cleanup).unwrap().as_micros()).is_err());
+        assert!(
+            receiver
+                .tick(host_now(&cleanup).unwrap().as_micros())
+                .is_err()
+        );
         assert_eq!(receiver.state(), ReceiveState::Closed);
         reap(&mut presenter, &cleanup).await;
     });
