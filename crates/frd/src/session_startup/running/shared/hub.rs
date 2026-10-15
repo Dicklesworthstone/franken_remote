@@ -553,7 +553,10 @@ impl Turn {
             {
                 let retired = slots.entries[self.slot].take();
                 slots.statistics.finished = slots.statistics.finished.saturating_add(1);
-                if result.is_err() {
+                // A viewer that closed its own session departed; it did not fail.
+                if result.is_err_and(|error| {
+                    !matches!(error, Error::Session(session) if session.is_peer_departure())
+                }) {
                     slots.statistics.failed = slots.statistics.failed.saturating_add(1);
                 }
                 retired

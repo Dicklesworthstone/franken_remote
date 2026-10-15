@@ -229,6 +229,31 @@ pub(super) fn await_colour(
     None
 }
 
+/// The viewer closed its own window: the host counts a departure, not a
+/// failure (it used to log `refused: 1` / `failed: 1` for every clean close),
+/// and the listener counts the peer as admitted.
+pub(super) fn departure_counted(events: &[Event]) {
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::PeerFinished {
+                admitted: 1,
+                refused: 0,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            Event::ShareEnded { outcome }
+                if outcome.contains("finished: 1, failed: 0")
+        )),
+        "{events:?}"
+    );
+}
+
 /// The shipped client, view-only, on the viewer's own display.
 pub(super) fn connect(fr: &Path, api: &Path, roots: &Path, display: &str, worker: &Path) -> Child {
     let port = address().port().to_string();
@@ -347,5 +372,6 @@ fn fr_connect_presents_real_host_pixels_through_frd_run() {
         "{events:?}"
     );
     assert!(matches!(events.last(), Some(Event::Stopped)), "{events:?}");
+    departure_counted(&events);
     assert!(UdpSocket::bind(address()).is_ok(), "listener retired");
 }

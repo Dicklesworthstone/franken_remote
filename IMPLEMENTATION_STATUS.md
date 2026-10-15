@@ -26,7 +26,10 @@ Ubuntu 26.04 on the same tailnet.
   NTP-synced clocks). Every 20 ms block carried the tone, for 30 s before
   the switch and 2 s after it. Both runs completed `stopped` with
   `audio_active: true`. The host log counted each clean session as
-  `refused: 1` / `failed: 1` (bead fr-u0xk).
+  `refused: 1` / `failed: 1`. It now counts `admitted: 1`, `refused: 0`
+  and `failed: 0` (fr-u0xk). Also new: a controller's window close runs its
+  closing exchange, and the controller's completion reports the host's lease
+  report (fr-rsru).
 - 2026-10-14, live (ts2 `frd run --encoder nvenc --input-agent --clipboard
   --files`, ts1 `fr connect --control --clipboard --send`, debug builds):
   typed keys ("hello") and wheel (buttons 4 and 5) reached the host, observed

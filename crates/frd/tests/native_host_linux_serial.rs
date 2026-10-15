@@ -539,12 +539,14 @@ fn policy_handover(stop: bool) {
             assert_eq!(requests.load(Ordering::Acquire), 1);
             assert_eq!(app.approvals.load(Ordering::Acquire), 0);
         } else {
+            // The first peer was served before the policy change ended it: that
+            // is its outcome below, not a refused admission.
             assert_eq!(
                 result,
                 Ok(serial::Statistics {
                     attempts: 2,
-                    admitted: 1,
-                    refused: 1
+                    admitted: 2,
+                    refused: 0
                 })
             );
             assert_eq!(

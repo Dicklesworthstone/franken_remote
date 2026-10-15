@@ -575,6 +575,17 @@ impl Driver {
 fn controlled_outcome(result: Result<Report, super::super::Error>) -> Result<Report, Error> {
     match result.map_err(Error::from) {
         Ok(report) => Ok(report),
+        // The controller closed its own session: finished, not failed.
+        Err(Error::Desktop(error))
+            if matches!(
+                &*error,
+                super::super::Error::Publication(crate::session_startup::PublisherError::Session(
+                    session
+                )) if session.is_peer_departure()
+            ) =>
+        {
+            Ok(super::controlled::served(false))
+        }
         Err(error) if error.is_peer_outcome() => Ok(super::controlled::served(true)),
         Err(error) => Err(error),
     }
@@ -696,6 +707,28 @@ mod tests {
         ] {
             assert!(error.is_peer_outcome(), "{error:?}");
         }
+    }
+
+    #[test]
+    fn a_controller_that_closed_its_own_session_finished_rather_than_failed() {
+        let left = super::controlled_outcome(Err(Desktop::Publication(Publication::Session(
+            Session::Renewal(crate::media::renewal::Error::PeerClosed),
+        ))))
+        .unwrap();
+        assert_eq!(
+            (
+                left.viewers.admitted,
+                left.viewers.finished,
+                left.viewers.failed
+            ),
+            (1, 1, 0)
+        );
+        // Any other renewal end of that viewer is still its failure.
+        let lost = super::controlled_outcome(Err(Desktop::Publication(Publication::Session(
+            Session::Renewal(crate::media::renewal::Error::Expired),
+        ))))
+        .unwrap();
+        assert_eq!((lost.viewers.finished, lost.viewers.failed), (0, 1));
     }
 
     #[test]

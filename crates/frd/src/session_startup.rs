@@ -110,6 +110,18 @@ pub enum Error {
     RemoteClosed(fr_wire::closure::Closed),
     Closed,
 }
+impl Error {
+    /// The viewer closed its own session (its close request, or the end of its
+    /// control stream): a departure, not a failure of either side. Host
+    /// counters report it as finished, not failed.
+    #[must_use]
+    pub const fn is_peer_departure(&self) -> bool {
+        matches!(
+            self,
+            Self::Renewal(crate::media::renewal::Error::PeerClosed)
+        )
+    }
+}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self:?}")

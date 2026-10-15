@@ -76,6 +76,10 @@ impl Policy {
         Ok(())
     }
 }
+/// Per-listener counts. `admitted`: the peer passed native TLS, `LocalAPI`
+/// admission and Host creation, so the application served it, however that
+/// session later ended (its exact outcome goes to `completed`). `refused`:
+/// the attempt ended before that point (including an idle accept window).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Statistics {
     pub attempts: u64,
@@ -226,6 +230,7 @@ impl Server {
                             .map_err(|e| Error::Host(HostError::Accept(e)))?,
                     };
                     inside()?;
+                    let mut served = false;
                     let outcome = {
                         let running = self.run_on_protected_listener_gated(
                             &peer,
@@ -238,7 +243,10 @@ impl Server {
                             Arc::new(move |bound| {
                                 terminal_original() && bound == address && terminal_gate().is_ok()
                             }),
-                            |host| application.serve(host),
+                            |host| {
+                                served = true;
+                                application.serve(host)
+                            },
                         );
                         let mut running = std::pin::pin!(running);
                         poll_fn(|task| {
@@ -254,10 +262,13 @@ impl Server {
                     // callback may collect effects or release a retained original
                     // transport; stalled cleanup must not erase its receipt.
                     let failure = outcome.as_ref().err().copied();
-                    if failure.is_some() {
-                        stats.refused += 1;
-                    } else {
+                    // Admission is reaching the application, not how the
+                    // admitted session ended: a desktop peer's serve usually
+                    // ends cancelled by its share's own teardown.
+                    if served {
                         stats.admitted += 1;
+                    } else {
+                        stats.refused += 1;
                     }
                     let action = application.completed(stats, outcome)?;
                     inside()?;

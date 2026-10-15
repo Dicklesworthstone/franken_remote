@@ -205,12 +205,14 @@ fn changed_active(keep: bool) {
                 assert!(UdpSocket::bind(address).is_err());
                 drop(held.lock().unwrap().take());
             } else {
+                // Both peers reached the application; the first one's end (policy
+                // Changed) is its outcome, not a refused admission.
                 assert_eq!(
                     result,
                     Ok(Statistics {
                         attempts: 2,
-                        admitted: 1,
-                        refused: 1
+                        admitted: 2,
+                        refused: 0
                     })
                 );
                 assert_eq!(app.approvals.load(Ordering::Acquire), 1);
