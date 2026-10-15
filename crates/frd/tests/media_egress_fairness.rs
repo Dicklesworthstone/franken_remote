@@ -177,16 +177,26 @@ fn waiting_for_unissued_requested_fragments_still_advances_originals() {
     run(|cx, _| {
         let (mut egress, _) = started(cx);
         announce(cx, &mut egress, 8);
-        packet(&mut egress, Some(Lane::Original));
+        let mut originals = vec![packet(&mut egress, Some(Lane::Original)).1];
+        // A tail request names fragments 6 and 7 before either original exists.
         request(&mut egress, 6, 8, 8);
-        for _ in 1..8 {
-            let (offer, _) = packet(&mut egress, None);
-            assert!(!is_repair(&offer));
-            assert_eq!(offer.channel(), Channel::Video);
+        // Every turn still sends something: the waiting tail never stalls the
+        // originals. Each requested fragment is gated by its OWN original
+        // (6506e20), so repair 6 may precede original 7, but no repair can
+        // precede, or stand in for, its original.
+        let mut repaired = Vec::new();
+        for _ in 0..9 {
+            let (offer, bytes) = packet(&mut egress, None);
+            if is_repair(&offer) {
+                let index = originals.iter().position(|o| *o == bytes);
+                repaired.push(index.expect("a repair of an unissued original"));
+            } else {
+                assert_eq!(offer.channel(), Channel::Video);
+                originals.push(bytes);
+            }
         }
-        for _ in 0..2 {
-            assert!(is_repair(&packet(&mut egress, None).0));
-        }
+        assert_eq!(originals.len(), 8);
+        assert_eq!(repaired, [6, 7]);
         assert_eq!(
             egress
                 .transmit_interleaved::<()>(|_, _, _| panic!("empty lanes submitted"))
