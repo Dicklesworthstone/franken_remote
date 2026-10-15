@@ -13,10 +13,11 @@ prepare) # STOP
   bash "$H/pulse.sh" "$D/pa" fr_view > /dev/null
   (env HOME="$D/pa" XDG_RUNTIME_DIR="$D/pa" PULSE_RUNTIME_PATH="$D/pa" setsid nohup \
     python3 -u "$H/tone_recorder.py" "unix:$D/pa/native" fr_view "$1" "$D/rec.bin" > "$D/rec.log" 2>&1 < /dev/null &) ;;
-connect) # BIN NODE
+connect) # BIN NODE (one attempt: the host runs --once, so a reconnect
+  # could only hide the first attempt's real end behind host_not_answering)
   (env HOME="$D/pa" XDG_CONFIG_HOME="$D/pa" XDG_RUNTIME_DIR="$D/pa" PULSE_RUNTIME_PATH="$D/pa" \
     PULSE_SERVER="unix:$D/pa/native" setsid nohup timeout 180 "$1/fr" connect "$2" --control \
-    --clipboard --send "$D/send.bin" --audio --experimental-native --display only \
+    --clipboard --send "$D/send.bin" --audio --experimental-native --display only --attempts 1 \
     --x-display "$DISPLAY" --worker "$1/fr-media-worker" --json > "$D/client.log" 2> "$D/client.err" < /dev/null &) ;;
 drive) # TEXT
   W=$(viewer); echo "viewer=${W:-none}"; [ -z "$W" ] && exit 0

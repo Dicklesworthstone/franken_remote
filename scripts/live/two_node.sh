@@ -80,5 +80,10 @@ print('PASS' if h >= 0.2 and abs(h - v) <= 0.1 else 'FAIL')" "$HOST_VIEW" "$VIEW
   row clipboard_host_to_client "$([ "$CLIENT_CLIP" = "fr-live-host-after-$R" ] && echo PASS || echo FAIL)" ""
   row file_send "$([ -n "$SENT" ] && [ "$(echo "$EVIDENCE" | value file_sha256)" = "$SENT" ] && echo PASS || echo FAIL)" "100000 bytes, sha256 match"
   row audio_tone "$([ "$(echo "$FINISH" | value verdict)" = pass ] && echo PASS || echo FAIL)" "switch->client $(echo "$FINISH" | value switch_to_client_detect_ms) ms; $(echo "$FINISH" | grep -o 'sustained_hz2_blocks=[0-9/]*')"
+  row controller_close_exchange "$(echo "$COMPLETION" | python3 -c "import json,sys
+try: d=json.load(sys.stdin); print('PASS' if d['close_exchange']['request_acknowledged'] else 'FAIL')
+except Exception: print('FAIL')")" "lease_report $(echo "$COMPLETION" | python3 -c "import json,sys
+try: print(json.dumps(json.load(sys.stdin).get('lease_report')))
+except Exception: print(None)")"
   row orderly_end "$([ "$(field outcome)" = stopped ] && echo "$EVIDENCE" | grep -q 'host_events=.*stopped' && echo PASS || echo FAIL)" "client $(field outcome)"
 } | tee "$OUT/summary.txt"
