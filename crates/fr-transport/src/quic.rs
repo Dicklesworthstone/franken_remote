@@ -885,16 +885,17 @@ impl QuicRecords {
             let until = self.senders.iter().filter_map(|s| s.until).min();
             // Native ownership stays outside self across every await: dropping
             // or unwinding an in-flight operation cannot resume its queued data.
-            let mut native = self.native.take().ok_or(Error::Closed)?;
+            let mut held = self.hold()?;
             let result = lifetime::poll_io(
                 cx,
                 gate.as_deref(),
                 authorize,
                 current,
                 until,
-                native.flush(cx),
+                held.native().flush(cx),
             )
             .await;
+            let native = held.release();
             self.finish_native_io(native, result)?;
             if queued != Some(Priority::Bulk) {
                 // A critical prefix gets the first native slot, then yields to
@@ -904,16 +905,17 @@ impl QuicRecords {
         }
         let current = self.check(cx, authorize)?;
         let until = self.senders.iter().filter_map(|s| s.until).min();
-        let mut native = self.native.take().ok_or(Error::Closed)?;
+        let mut held = self.hold()?;
         let result = lifetime::poll_io(
             cx,
             gate.as_deref(),
             authorize,
             current,
             until,
-            native.drive_io_once(cx, wait),
+            held.native().drive_io_once(cx, wait),
         )
         .await;
+        let native = held.release();
         self.finish_native_io(native, result)?;
         self.check(cx, authorize)?;
         let native = self.native.as_mut().ok_or(Error::Closed)?;
@@ -956,8 +958,16 @@ impl QuicRecords {
     // A *returned* cancelled/failed I/O turn may transfer custody only into
     // close. Never resume ordinary I/O after that error. The terminal drain must
     // independently prove absence of native payload/retransmissions; uncertain
-    // or partially staged work is refused. Dropping an unreturned I/O future
-    // still drops its local socket, so no abandoned operation can be resumed.
+    // or partially staged work is refused. A DROPPED I/O turn (an outer timeout
+    // or an abandoned session) goes the same way through `Held`, so no
+    // abandoned operation can be resumed and an armed report is not lost.
+    fn hold(&mut self) -> Result<Held<'_>, Error> {
+        let native = self.native.take().ok_or(Error::Closed)?;
+        Ok(Held {
+            records: self,
+            native: Some(native),
+        })
+    }
     fn finish_native_io<T>(
         &mut self,
         native: NativeQuicUdpConnection,
@@ -1269,6 +1279,34 @@ impl QuicRecords {
             s.fin = true;
         }
         Ok(count)
+    }
+}
+/// The native connection taken out of `QuicRecords` for one awaited
+/// operation. Released when the operation returns; if the turn is dropped
+/// first, the connection is put back only to `close` it (capturing an armed
+/// terminal report), never to continue the interrupted operation. The
+/// terminal gate still refuses that report after any revocation. During a
+/// panic unwind the socket is just dropped: no native state is inspected.
+struct Held<'a> {
+    records: &'a mut QuicRecords,
+    native: Option<NativeQuicUdpConnection>,
+}
+impl Held<'_> {
+    fn native(&mut self) -> &mut NativeQuicUdpConnection {
+        self.native.as_mut().expect("held until released")
+    }
+    fn release(mut self) -> NativeQuicUdpConnection {
+        self.native.take().expect("held until released")
+    }
+}
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        if let Some(native) = self.native.take()
+            && !std::thread::panicking()
+        {
+            self.records.native = Some(native);
+            self.records.close();
+        }
     }
 }
 fn now(cx: &Cx) -> Result<u64, Error> {

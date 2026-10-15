@@ -176,8 +176,13 @@ fn slow_cleanup_or_delayed_report_poll_cannot_restart_the_closure_deadline() {
     }
 }
 
+/// An abandoned I/O turn (dropped, e.g. by an outer timeout or a cancelled
+/// session guard) transfers custody into close exactly like a returned
+/// cancellation: the armed report is still owed and delivered, and the
+/// connection can never be driven again. Before, the dropped turn took the
+/// socket with it and a viewer heard only silence (fr-izv6).
 #[test]
-fn abandoned_io_or_either_report_owner_cannot_emit_or_reopen_a_connection() {
+fn abandoned_io_still_reports_once_and_neither_report_owner_can_reopen_a_connection() {
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         assert_eq!(ClosedReport::default().finish(outcome()).await, None);
@@ -194,9 +199,15 @@ fn abandoned_io_or_either_report_owner_cannot_emit_or_reopen_a_connection() {
             }
         }
         assert!(pending);
-        p.server.close();
+        // Dropping the turn already closed it and fenced the owner.
+        assert!(p.server.is_closed());
         assert!(fenced.load(Ordering::Acquire));
-        assert_eq!(reporting.finish(outcome()).await, Some(Err(Error::Closed)));
+        assert_eq!(
+            p.server.drive(&cx, Duration::from_millis(1), || true).await,
+            Err(Error::Closed)
+        );
+        delivered(&mut p, &cx, reporting).await;
+        assert!(p.server.is_closed());
         let mut p = pair(&cx).await;
         let (reporting, fenced) = arm(&mut p, &cx);
         drop(reporting);

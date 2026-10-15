@@ -70,10 +70,15 @@ It cannot infer another task's native-release result or action receipt counts.
 Absent an exact close-request cause, the listener reports its own stop, permission
 failure, or host failure; it does not guess a lease-expiry cause. A competing
 explicit terminal report cannot replace the first registered consumer. Reporting
-is best effort: native backlog, lost credentials, abandoned I/O, dropped owners,
-and expired cleanup budgets still prevent delivery. A parent which discards an
-independently hosted application before it returns may have no captured socket;
-this is not a promise that every desktop shutdown produces a Closed record.
+is best effort: lost credentials, dropped owners and expired cleanup budgets still
+prevent delivery, and native backlog sends only a coded `CONNECTION_CLOSE` instead
+of the record. An I/O turn that is dropped rather than returned (the turn's own
+250 ms bound, or a cancelled session guard dropping the application mid-turn)
+moves its socket into the same terminal custody as a returned cancellation, so
+the armed report is still sent; the interrupted operation is never resumed. A
+parent which drops an independently hosted application's transport outside an
+I/O turn may have no captured socket; this is not a promise that every desktop
+shutdown produces a Closed record.
 
 Five additional tests exercise actual protected-listener ownership, TLS/UDP,
 LocalAPI credential checks and the ordinary Host/Viewer startup and renewal paths

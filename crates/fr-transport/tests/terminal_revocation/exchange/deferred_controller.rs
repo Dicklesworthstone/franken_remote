@@ -151,29 +151,44 @@ fn emergency_close_and_abandoned_consumers_never_invent_a_local_request() {
     });
 }
 
+/// A DROPPED I/O turn (an outer timeout or a cancelled session guard, rather
+/// than a returned cancellation) transfers the same terminal custody: the
+/// requested exchange still runs once, and the connection is never driven
+/// again. Before, the dropped turn took the socket with it (fr-izv6).
 #[test]
-fn abandoned_native_io_is_not_recovered_by_a_late_request_or_finish() {
+fn abandoned_native_io_transfers_only_terminal_custody_like_a_returned_cancellation() {
     let rt = runtime();
     let app = rt.request_cx_with_budget(asupersync::types::Budget::INFINITE);
     let cleanup = rt.request_cx_with_budget(asupersync::types::Budget::INFINITE);
     rt.block_on(async {
         let mut p = pair(&cleanup).await;
-        let (reporter, signal, _) = arm(&mut p, &app, &cleanup, u64::MAX);
+        let (reporter, signal, fenced) = arm(&mut p, &app, &cleanup, clock(&cleanup) + 1_000_000);
         let mut exercised = false;
         for _ in 0..16 {
             let mut io = pin!(p.client.drive(&app, Duration::from_millis(100), || true));
             if poll_fn(|task| Poll::Ready(io.as_mut().poll(task).is_pending())).await {
-                signal.request(closure::Reason::Requested).unwrap();
+                assert_eq!(signal.request(closure::Reason::Requested), Ok(true));
+                assert!(fenced.load(Ordering::Acquire));
                 exercised = true;
                 break; // Drop the live operation, rather than collect cancellation.
             }
         }
         assert!(exercised);
-        p.client.close();
-        assert_eq!(
-            reporter.finish().await.unwrap().exchange.transport,
-            Err(Error::Closed)
-        );
+        assert!(p.client.is_closed());
+        assert_eq!(p.client.tick(&cleanup, || true), Err(Error::Closed));
+        // Bounded: a socket lost with the dropped turn would send no request.
+        let (outcome, sent) = asupersync::time::timeout(
+            cleanup.now(),
+            Duration::from_secs(5),
+            Box::pin(both(
+                reporter.finish(),
+                request_then_report(&cleanup, &mut p, final_report()),
+            )),
+        )
+        .await
+        .expect("the captured request was exchanged");
+        assert_eq!(outcome.unwrap().exchange.report, Some(final_report()));
+        assert_eq!(sent, Ok(()));
         assert!(p.client.is_closed());
     });
 }

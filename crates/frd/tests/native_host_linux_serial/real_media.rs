@@ -375,3 +375,84 @@ fn fr_connect_presents_real_host_pixels_through_frd_run() {
     departure_counted(&events);
     assert!(UdpSocket::bind(address()).is_ok(), "listener retired");
 }
+
+/// The host's capture worker refuses its configuration after the viewer was
+/// admitted. The viewer must get a named terminal reason from the host's
+/// closing report (`host_failure`), not a renewal timeout (`host_not_heard`).
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; fixture capture worker; one Xvfb display"]
+fn fr_connect_names_a_host_capture_refusal_as_host_failure() {
+    let (fr, worker) = (sibling("fr"), sibling("fr-media-worker"));
+    let viewer = Xvfb::start("800x600x24");
+    let (refusing, _trace) = super::persistent_desktop::source_script("refuse-configure");
+    let api = fixture::Api::new();
+    let tools = Tools::new();
+    let roots = fixture::pki().join("ca.pem");
+    let options = Options {
+        socket: Some(api.path.clone()),
+        port: address().port(),
+        interface: "fr-fixture".into(),
+        worker: refusing,
+        display: ":0".into(),
+        xauthority: None,
+        trust_roots: roots.clone(),
+        sharing: fr_tailnet::Scope::OwnUser,
+        fps: 15,
+        bitrate: 2_000_000,
+        ingress_tools: Some((tools.0.join("nft"), tools.0.join("ip"))),
+        once: false,
+        handle_signals: false,
+        input_agent: None,
+        clipboard: false,
+        audio: None,
+        files: None,
+        session_monitor: None,
+    };
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let report: Reporter = Arc::new(move |event| sink.lock().unwrap().push(event));
+    let stop = Arc::new(StopHandle::default());
+    let host_stop = stop.clone();
+    let daemon = thread::spawn(move || host_run::run(&options, &report, &host_stop));
+    let dump = || format!("{:?}", events.lock().unwrap());
+    assert!(
+        wait_for_event(&events, Duration::from_secs(20), |e| matches!(
+            e,
+            Event::Listening { .. }
+        )),
+        "frd never listened: {}",
+        dump()
+    );
+    let client_api = ClientApi::new();
+    let client = connect(&fr, &client_api.path, &roots, &viewer.display, &worker);
+    let output = super::shipped_client::wait_for(client, Duration::from_secs(40));
+    stop.request();
+    let _ = daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "{error}; fr: {stdout} {}; host: {}",
+            String::from_utf8_lossy(&output.stderr),
+            dump()
+        )
+    });
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "fr: {stdout}; host: {}",
+        dump()
+    );
+    assert_eq!(
+        value["outcome"],
+        "refused",
+        "fr: {stdout}; host: {}",
+        dump()
+    );
+    assert_eq!(
+        value["error"]["code"],
+        "host_failure",
+        "fr: {stdout} {}; host: {}",
+        String::from_utf8_lossy(&output.stderr),
+        dump()
+    );
+}

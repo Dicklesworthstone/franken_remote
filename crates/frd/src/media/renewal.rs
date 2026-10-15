@@ -127,7 +127,7 @@ impl ObservationRenewal {
     ) {
         self.closure_reason = reason;
     }
-    fn mark_closure_reason(&self, reason: fr_wire::closure::ClosedReason) {
+    pub(crate) fn mark_closure_reason(&self, reason: fr_wire::closure::ClosedReason) {
         if let Some(signal) = &self.closure_reason {
             let _ = signal.compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire);
         }

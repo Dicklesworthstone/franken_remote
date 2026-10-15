@@ -240,6 +240,13 @@ impl HostSession {
         self.check()?;
         self.opened.io()
     }
+    /// The host could not start or continue this viewer's source. Its armed
+    /// closing report then says `host_failure` instead of leaving the viewer to
+    /// time out. First reason wins: a client's own close request is kept.
+    pub(crate) fn mark_host_failure(&self) {
+        self.renewal
+            .mark_closure_reason(fr_wire::closure::ClosedReason::HostFailure);
+    }
     pub fn close(&mut self) {
         self.opened.close();
         if let Some(surface) = &self.sharing_surface {

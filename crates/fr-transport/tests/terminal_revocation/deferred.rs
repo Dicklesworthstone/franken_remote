@@ -139,8 +139,11 @@ fn returned_pending_io_cancellation_transfers_only_terminal_custody() {
     });
 }
 
+/// A dropped I/O turn transfers the same terminal custody as a returned
+/// cancellation: the lease is fenced at the drop, the revocation is still
+/// reported once, and the connection is never driven again (fr-izv6).
 #[test]
-fn abandoned_pending_io_is_not_recovered_as_a_reportable_socket() {
+fn abandoned_pending_io_still_reports_the_revocation_once() {
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let mut p = pair(&cx).await;
@@ -156,9 +159,9 @@ fn abandoned_pending_io_is_not_recovered_as_a_reportable_socket() {
             }
         }
         assert!(exercised);
-        p.server.close();
         assert!(fenced.load(Ordering::Acquire));
-        assert_eq!(reporting.finish().await, Some(Err(Error::Closed)));
+        assert_eq!(p.server.tick(&cx, || true), Err(Error::Closed));
+        delivered(&mut p, &cx, reporting).await;
     });
 }
 

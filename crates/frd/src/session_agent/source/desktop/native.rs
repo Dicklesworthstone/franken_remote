@@ -334,7 +334,7 @@ where
     L: FnMut(&mut SessionAgent, &mut Context<'_>) -> Result<LocalAction, ()> + Send,
 {
     session.require_shared_profile().map_err(Error::Startup)?;
-    let mut prepared = prepare_during_session(
+    let mut prepared = match prepare_during_session(
         agent,
         &mut session,
         deadline,
@@ -344,7 +344,18 @@ where
         select,
         local,
     )
-    .await?;
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            // A refused capture/encoder worker is a host fault the viewer is
+            // owed a reason for (never which native step failed).
+            if matches!(error, Error::Preparation(_) | Error::SourceSetup) {
+                session.mark_host_failure();
+            }
+            return Err(error);
+        }
+    };
     deadline.check()?;
     let registration = agent
         .register_original_source(&prepared.publisher)

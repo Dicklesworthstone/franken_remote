@@ -46,13 +46,7 @@ impl Reporting {
         self,
         fallback: ClosedReason,
     ) -> impl Future<Output = Option<ObservationClosure>> + use<> {
-        // These two values are recorded only by the original close-request
-        // parser. A FIN, cancelled task or generic PeerClosed is not a request.
-        let reason = match self.reason.load(Ordering::Acquire) {
-            1 => ClosedReason::ClientRequested,
-            6 => ClosedReason::ProtocolError,
-            _ => fallback,
-        };
+        let reason = recorded(self.reason.load(Ordering::Acquire), fallback);
         let report = Closed {
             reason,
             cleanup: Cleanup::Unconfirmed,
@@ -64,6 +58,17 @@ impl Reporting {
                 .await
                 .map(|delivery| ObservationClosure { report, delivery })
         }
+    }
+}
+/// 1 and 6 are recorded only by the original close-request parser (a FIN,
+/// cancelled task or generic `PeerClosed` is not a request); 7 only by the host
+/// when this viewer's source could not be prepared. Anything else is fallback.
+fn recorded(value: u8, fallback: ClosedReason) -> ClosedReason {
+    match value {
+        1 => ClosedReason::ClientRequested,
+        6 => ClosedReason::ProtocolError,
+        7 => ClosedReason::HostFailure,
+        _ => fallback,
     }
 }
 impl Host {
@@ -102,5 +107,21 @@ impl Configuration {
             .map_err(Error::Transport)?;
         session.closure_reason = Some(self.reason);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_recorded_reasons_override_the_listener_fallback() {
+        let fallback = ClosedReason::HostStopping;
+        assert_eq!(recorded(1, fallback), ClosedReason::ClientRequested);
+        assert_eq!(recorded(6, fallback), ClosedReason::ProtocolError);
+        assert_eq!(recorded(7, fallback), ClosedReason::HostFailure);
+        for unrecorded in [0, 2, 3, 4, 5, 8, 255] {
+            assert_eq!(recorded(unrecorded, fallback), fallback);
+        }
     }
 }
