@@ -161,13 +161,7 @@ impl QuicRecords {
         // native datagram queue: it can also contain another view's media or
         // critical pointer state. Late arrivals fail the normal route lookup.
         self.datagrams.retain(|route| route.binding != binding);
-        if self
-            .pending_datagram
-            .as_ref()
-            .is_some_and(|(route, _, _)| route.binding == binding)
-        {
-            self.pending_datagram = None;
-        }
+        self.pending_datagrams.retire(binding);
         for sender in &mut self.senders {
             if sender.route.stream == outbound {
                 sender.bytes = 0;

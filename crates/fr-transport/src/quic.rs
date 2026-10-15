@@ -20,6 +20,7 @@ use std::{
 };
 
 mod admission;
+mod datagrams;
 mod send_window;
 pub use admission::SendAdmission;
 
@@ -396,7 +397,7 @@ pub struct QuicRecords {
     streams: Vec<StreamRoute>,
     datagrams: Vec<DatagramRoute>,
     inbound: Vec<Inbound>,
-    pending_datagram: Option<(DatagramRoute, Bytes, u64)>,
+    pending_datagrams: datagrams::PendingDatagrams,
     policy: Policy,
     last_now: Option<u64>,
     read_bytes: u64,
@@ -512,7 +513,7 @@ impl QuicRecords {
             streams: streams.to_vec(),
             datagrams: datagrams.to_vec(),
             inbound,
-            pending_datagram: None,
+            pending_datagrams: datagrams::PendingDatagrams::new(),
             policy,
             last_now: None,
             read_bytes: 0,
@@ -589,7 +590,7 @@ impl QuicRecords {
     pub fn close(&mut self) {
         self.capture_revocation();
         self.native = None;
-        self.pending_datagram = None;
+        self.pending_datagrams.clear();
         self.pending_writes.clear();
         for s in &mut self.inbound {
             s.framing.close();
@@ -614,10 +615,7 @@ impl QuicRecords {
                 .iter()
                 .map(|s| s.remainder.len())
                 .sum::<usize>()
-                + self
-                    .pending_datagram
-                    .as_ref()
-                    .map_or(0, |(_, b, _)| b.len()),
+                + self.pending_datagrams.bytes(),
             retained_send_upper_bound: self.senders.iter().map(|s| s.bytes).sum(),
             retained_send_records: self.senders.iter().map(|s| s.records).sum(),
             critical_send_bytes: self.send_usage(Priority::Critical).0,
@@ -658,6 +656,7 @@ impl QuicRecords {
             }
             self.last_now = Some(now);
             self.service_optional_retirements(cx)?;
+            self.pending_datagrams.expire(now);
             if self.attachments.iter().any(|r| r.expired(now)) {
                 return Err(Error::Expired);
             }
@@ -1115,9 +1114,16 @@ impl QuicRecords {
     fn receive_datagram(
         &mut self,
         current: u64,
+        remaining: &mut usize,
         handler: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
     ) -> Result<usize, Error> {
-        if self.pending_datagram.is_none() {
+        if self.pending_datagrams.receive_one(current, handler)? != 0 {
+            return Ok(1);
+        }
+        // Budget native records EXAMINED, separately from records consumed by
+        // handlers. Retired bindings and a flooded blocked route cannot make
+        // this loop unbounded, nor force one idle turn per discarded packet.
+        while *remaining != 0 {
             let Some(bytes) = self
                 .native
                 .as_mut()
@@ -1125,8 +1131,9 @@ impl QuicRecords {
                 .connection_mut()
                 .recv_datagram()
             else {
-                return Ok(0);
+                break;
             };
+            *remaining -= 1;
             if bytes.len() < HEADER_BYTES || bytes.len() > self.policy.datagram_record_bytes {
                 return Err(Error::TooLarge);
             }
@@ -1141,7 +1148,7 @@ impl QuicRecords {
             else {
                 // Late datagrams for retired bindings are disposable. No
                 // response allocation and no reinterpretation as current.
-                return Ok(0);
+                continue;
             };
             if !datagram_admits(route.kind, kind) {
                 return Err(Error::WrongRoute);
@@ -1152,21 +1159,15 @@ impl QuicRecords {
                 binding,
                 Messages::Exact(kind),
             )?;
-            let until = current
-                .checked_add(self.policy.record_lifetime_micros)
-                .ok_or(Error::Clock)?;
-            self.pending_datagram = Some((route, bytes, until));
-        }
-        let (route, bytes, until) = self.pending_datagram.as_ref().expect("installed");
-        if current >= *until {
-            self.pending_datagram = None;
-            return Ok(0);
-        }
-        if handler(Route::Datagram(*route), bytes).map_err(|()| Error::Handler)?
-            == Disposition::Consumed
-        {
-            self.pending_datagram = None;
-            return Ok(1);
+            if self.pending_datagrams.hold(
+                route,
+                bytes,
+                current,
+                self.policy.record_lifetime_micros,
+            )? && self.pending_datagrams.receive_one(current, handler)? != 0
+            {
+                return Ok(1);
+            }
         }
         Ok(0)
     }
@@ -1178,6 +1179,7 @@ impl QuicRecords {
         handler: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
     ) -> Result<usize, Error> {
         let mut count = 0;
+        let mut datagram_budget = TURN_RECORDS;
         let lanes = self.inbound.len() + 1;
         // The budget is RECORDS, not lane visits: each lane still yields at
         // most one record per round, and a full round in which no lane yields
@@ -1190,13 +1192,14 @@ impl QuicRecords {
             self.cursor = (self.cursor + 1) % lanes;
             let before = count;
             if which == self.inbound.len() {
-                count += self.receive_datagram(current, &mut |route, bytes| {
-                    if ready(route) {
-                        handler(route, bytes)
-                    } else {
-                        Ok(Disposition::Blocked)
-                    }
-                })?;
+                count +=
+                    self.receive_datagram(current, &mut datagram_budget, &mut |route, bytes| {
+                        if ready(route) {
+                            handler(route, bytes)
+                        } else {
+                            Ok(Disposition::Blocked)
+                        }
+                    })?;
             } else {
                 count += self.receive_stream(which, current, cx, ready, handler)?;
             }
