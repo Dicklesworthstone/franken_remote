@@ -235,6 +235,17 @@ fn fr_connect_sends_files_and_shares_the_clipboard_in_one_controlled_session() {
         "{report}"
     );
     assert_eq!(report["files_absence"], serde_json::Value::Null, "{report}");
+    // The window close is an orderly closing exchange even with the file lane
+    // open (the input fence used to close the connection through the file
+    // lane's retirement, live 2026-10-15). The lanes have been quiet for 2 s.
+    assert_eq!(
+        report["close_exchange"]["request_acknowledged"], true,
+        "{report}"
+    );
+    assert_eq!(
+        report["lease_report"]["reason"], "session_ended",
+        "{report}"
+    );
     let text = report.to_string();
     for secret in [&first, &second] {
         let nonce = secret.split(' ').nth(1).unwrap();
