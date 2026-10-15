@@ -9,7 +9,17 @@ use std::{
     ffi::{CString, c_char, c_int, c_ulong, c_void},
     io::{BufRead, BufReader},
     process::{Child, Command, Stdio},
+    sync::{Mutex, MutexGuard, PoisonError},
 };
+
+/// libXext keeps one unlocked last-display cache per extension library per
+/// process (`XextFindDisplay`), and `XInitThreads` does not cover it. These
+/// tests open displays on parallel test threads (this helper's `RandR` monitor
+/// changes, inventories, Damage, `XFixes`), so a display closed on one thread
+/// could be found through that cache on another; glibc aborted one run on heap
+/// corruption (fr-uap4). Production opens one inventory per media worker
+/// process. Here each Screen holds this for its whole lifetime.
+static XEXT: Mutex<()> = Mutex::new(());
 
 #[repr(C)]
 struct Monitor {
@@ -60,9 +70,12 @@ pub(super) struct Screen {
     pub(super) name: String,
     display: *mut c_void,
     root: c_ulong,
+    _xext: MutexGuard<'static, ()>,
 }
 impl Screen {
     pub(super) fn start() -> Self {
+        // A failed test must not poison every later one in this binary.
+        let xext = XEXT.lock().unwrap_or_else(PoisonError::into_inner);
         fr_native::xlib::initialize_threads().unwrap();
         let mut child = Command::new("Xvfb")
             .args([
@@ -92,6 +105,7 @@ impl Screen {
             name,
             display,
             root,
+            _xext: xext,
         }
     }
     pub(super) fn atom(&self, name: &str) -> c_ulong {
