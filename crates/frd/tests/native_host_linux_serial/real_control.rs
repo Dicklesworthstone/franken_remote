@@ -375,7 +375,7 @@ fn linked(image: &Path) -> String {
 }
 
 /// The shipped client with an explicit role on the given local display.
-fn connect(
+pub(super) fn connect(
     fr: &Path,
     api: &Path,
     roots: &Path,

@@ -109,8 +109,11 @@ view-only `fr connect`. A core XTest ALLOW neither admits the peer nor dismisses
 the prompt. An ALLOW attributed to Xvfb's mouse (the fixture above) admits it,
 and real host pixels reach the viewer. Closing the prompt denies the peer with
 `host_local_approval_denied`; an unanswered prompt ends with
-`host_approval_unanswered` (or `host_approval_expired`). The session lifecycle
-and tailnet are fixtures; this is not live or physical-input evidence.
+`host_approval_unanswered` (or `host_approval_expired`). With
+`--input-agent`, a controller's single prompt is for control: an XTest ALLOW
+leaves it waiting with no host pixels, and an attributed ALLOW admits it with
+control granted. The session lifecycle and tailnet are fixtures; this is not
+live or physical-input evidence.
 
 The broader `fr-rc-sec-approval-synthetic-input-t2r` bead remains open: independently
 fencing remote input against pending approval-window geometry is separate work.

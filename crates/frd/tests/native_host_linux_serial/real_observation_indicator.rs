@@ -294,9 +294,16 @@ type ApprovalHost = (
     Arc<Mutex<Vec<Event>>>,
     Arc<StopHandle>,
 );
-/// A monitored `frd run --approval local` host (view-only, synthetic session
-/// lifecycle that stays active): its thread, events and stop handle.
-fn approval_host(display: &str, api: &fixture::Api, tools: &Tools, roots: &Path) -> ApprovalHost {
+/// A monitored `frd run --approval local` host (view-only, or with
+/// `--input-agent` when `control`; synthetic session lifecycle that stays
+/// active): its thread, events and stop handle.
+fn approval_host(
+    display: &str,
+    api: &fixture::Api,
+    tools: &Tools,
+    roots: &Path,
+    control: bool,
+) -> ApprovalHost {
     let worker = sibling("fr-media-worker");
     let policy = tools.0.join("host-policy.json");
     Store::new(&policy)
@@ -318,7 +325,7 @@ fn approval_host(display: &str, api: &fixture::Api, tools: &Tools, roots: &Path)
         ingress_tools: Some((tools.0.join("nft"), tools.0.join("ip"))),
         once: false,
         handle_signals: false,
-        input_agent: None,
+        input_agent: control.then(|| sibling("fr-input-agent")),
         clipboard: false,
         audio: None,
         files: None,
@@ -375,7 +382,7 @@ fn local_approval_prompts_ignores_synthetic_allow_and_denies_on_close() {
     let api = fixture::Api::new();
     let tools = Tools::new();
     let roots = fixture::pki().join("ca.pem");
-    let (daemon, events, stop) = approval_host(&host.display, &api, &tools, &roots);
+    let (daemon, events, stop) = approval_host(&host.display, &api, &tools, &roots, false);
     let dump = || format!("{:?}", events.lock().unwrap());
     assert!(
         wait_for_event(&events, Duration::from_secs(20), |e| matches!(
@@ -464,7 +471,7 @@ fn a_device_attributed_local_allow_admits_the_viewer() {
     let api = fixture::Api::new();
     let tools = Tools::new();
     let roots = fixture::pki().join("ca.pem");
-    let (daemon, events, stop) = approval_host(&host.display, &api, &tools, &roots);
+    let (daemon, events, stop) = approval_host(&host.display, &api, &tools, &roots, false);
     let dump = || format!("{:?}", events.lock().unwrap());
     assert!(
         wait_for_event(&events, Duration::from_secs(20), |e| matches!(
@@ -535,6 +542,93 @@ fn a_device_attributed_local_allow_admits_the_viewer() {
     assert!(result.is_ok(), "frd run: {result:?}; host: {}", dump());
 }
 
+/// `frd run --approval local --input-agent`: a controller's single prompt is
+/// for control. A core `XTest` ALLOW neither admits it nor dismisses the
+/// prompt, and no host pixels reach it while it waits. An ALLOW attributed to
+/// Xvfb's own pointer (an explicit fixture) admits it and its control is
+/// granted.
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; synthetic session lifecycle; Xvfb device attribution fixture"]
+fn a_controller_is_admitted_and_granted_control_only_by_attributed_consent() {
+    const PROMPT: &str = "FrankenRemote - Local approval";
+    let (fr, worker) = (sibling("fr"), sibling("fr-media-worker"));
+    let host = Xvfb::start("640x480x24");
+    let viewer = Xvfb::start("800x600x24");
+    set_root(&host.display, COLOUR);
+    let api = fixture::Api::new();
+    let tools = Tools::new();
+    let roots = fixture::pki().join("ca.pem");
+    let (daemon, events, stop) = approval_host(&host.display, &api, &tools, &roots, true);
+    let dump = || format!("{:?}", events.lock().unwrap());
+    assert!(
+        wait_for_event(&events, Duration::from_secs(20), |e| matches!(
+            e,
+            Event::Listening { .. }
+        )),
+        "frd never listened: {}",
+        dump()
+    );
+    let client_api = ClientApi::new();
+    let mut client = super::real_control::connect(
+        &fr,
+        &client_api.path,
+        &roots,
+        &viewer.display,
+        &worker,
+        false,
+        &[],
+    );
+    let until = Instant::now() + Duration::from_secs(20);
+    let prompt = loop {
+        if let Some(prompt) = titled(&host.display, PROMPT) {
+            break prompt;
+        }
+        assert!(
+            Instant::now() < until,
+            "no local approval prompt: {}",
+            dump()
+        );
+        thread::sleep(Duration::from_millis(100));
+    };
+    peer(&host.display, prompt.0, "allow");
+    thread::sleep(Duration::from_secs(2));
+    let waiting = window_pixels(&viewer.display)
+        .into_iter()
+        .any(|(_, pixel)| near(pixel, COLOUR));
+    assert!(
+        !waiting,
+        "host pixels reached the controller before consent"
+    );
+    assert_eq!(titled(&host.display, PROMPT).map(|p| p.0), Some(prompt.0));
+    peer(&host.display, prompt.0, "device-allow");
+    let shown = await_colour(&viewer.display, COLOUR, &mut client);
+    // Control is requested once a fresh frame shows; let it be granted.
+    thread::sleep(Duration::from_secs(3));
+    if let Some(window) = shown {
+        close_window(&viewer.display, window);
+    }
+    let output = wait_for(client, Duration::from_secs(30));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    println!("attributed control consent -> fr: {}", stdout.trim());
+    let report: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or(serde_json::Value::Null);
+    assert!(
+        shown.is_some(),
+        "no host picture after consent: {stdout}; host: {}",
+        dump()
+    );
+    assert_eq!(
+        report["control_granted"],
+        true,
+        "{stdout}; host: {}",
+        dump()
+    );
+    assert_eq!(report["outcome"], "stopped", "{stdout}");
+    stop.request();
+    let result = daemon.join().unwrap();
+    assert!(result.is_ok(), "frd run: {result:?}; host: {}", dump());
+}
+
 /// The same prompt left unanswered: the wait ends with a typed reason at the
 /// client, never the generic `native_session_failed` it reported before.
 #[test]
@@ -548,7 +642,7 @@ fn an_unanswered_local_approval_expires_with_a_typed_reason() {
     let api = fixture::Api::new();
     let tools = Tools::new();
     let roots = fixture::pki().join("ca.pem");
-    let (daemon, events, stop) = approval_host(&host.display, &api, &tools, &roots);
+    let (daemon, events, stop) = approval_host(&host.display, &api, &tools, &roots, false);
     let dump = || format!("{:?}", events.lock().unwrap());
     assert!(
         wait_for_event(&events, Duration::from_secs(20), |e| matches!(
