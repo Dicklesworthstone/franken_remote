@@ -64,6 +64,8 @@ cargo build --release --locked -p fr-native \
 sudo env DISPLAY=:0 XAUTHORITY="$XAUTHORITY" ./target/release/frd run --software-explicit --display :0 --json
 ```
 
+`sudo` is for the tailnet-only nftables ingress rule (`CAP_NET_ADMIN`). To keep `frd` itself unprivileged, run the root `frd ingress-helper` instead (`frd install --user` prints its system unit and config) and make your user the node's Tailscale operator (`sudo tailscale set --operator=$USER`); see [LINUX_NATIVE_INGRESS.md](LINUX_NATIVE_INGRESS.md). That path is namespace-tested, not yet run on a live tailnet host.
+
 Host options:
 - Add `--input-agent "$PWD/target/release/fr-input-agent"` to allow control, plus `--clipboard` for the text clipboard.
 - Add `--files DIR` to receive files. DIR must be owned by the user running `frd` and not writable by others.
