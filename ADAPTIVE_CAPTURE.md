@@ -121,7 +121,10 @@ about half its former size. The namespace row
 `real_impairment::view_only_incompressible_content_over_a_narrow_link` (a noise
 window, the test host's 2 Mbit/s target) holds every change on a 3 Mbit/s link,
 where the session used to end within seconds (0/6 shown; also 1/6 at 4 Mbit/s).
-NVENC and VA-API still use their libavcodec defaults (not yet measured).
+NVENC gets the same bound. On a GTX 1070 (640x480, 15 fps, 2 Mbit/s, partial
+noise) its defaults emitted P pictures of up to 70 KB; with the bound the largest
+was 24 KB and the IDR fell from 85 to 69 KB. VA-API keeps its libavcodec defaults
+(not measured).
 
 Remaining work includes qualified runtime bitrate/quantizer/resolution changes,
 remote decoder and presentation feedback, aggregate host/path budgets, qualified

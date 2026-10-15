@@ -10,7 +10,8 @@
 # fr-media-worker and fr-input-agent; CLIENT_BIN holds fr, fr-media-worker and
 # fr-opus-worker. Env: WORK (directory under each node's home, default
 # fr_live), HOST_DISPLAY (77), CLIENT_DISPLAY (78), AUDIO (1; 0 skips audio
-# on nodes without PulseAudio, and the audio row then reads SKIP).
+# on nodes without PulseAudio, and the audio row then reads SKIP), ENCODER
+# (software; nvenc or vaapi selects the host's hardware encoder).
 # Host needs sudo, Xvfb, xauth, mcookie, xsetroot, xclock, xev, xclip, python3,
 # pulseaudio; the client needs Xvfb, xauth, mcookie, xdotool, xclip, python3,
 # pulseaudio. Displays are private Xvfb servers and audio uses private
@@ -26,7 +27,7 @@ HW=$(ssh "$HS" 'echo $HOME')/${WORK:-fr_live}; CW=$(ssh "$CS" 'echo $HOME')/${WO
 R=$(date +%s); SELF=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$OUT"; exec > >(tee "$OUT/transcript.txt") 2>&1
 A=${AUDIO:-1}
-host() { ssh "$HS" "FR_LIVE_AUDIO=$A bash $HW/live/host.sh $1 $HW $HN $R ${*:2}"; }
+host() { ssh "$HS" "FR_LIVE_AUDIO=$A FR_LIVE_ENCODER=${ENCODER:-software} bash $HW/live/host.sh $1 $HW $HN $R ${*:2}"; }
 client() { ssh "$CS" "FR_LIVE_AUDIO=$A bash $CW/live/client.sh $1 $CW $CN $R ${*:2}"; }
 value() { grep -m1 "^$1=" | cut -d= -f2-; }
 
