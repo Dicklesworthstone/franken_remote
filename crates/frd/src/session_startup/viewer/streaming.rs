@@ -7,6 +7,7 @@ mod cursor;
 mod disconnect;
 pub(in crate::session_startup) mod files;
 mod interactive;
+mod native_turn;
 mod recovery;
 use super::{
     ViewerSession,
@@ -740,7 +741,12 @@ impl StreamingViewer {
             }
             if !recovering {
                 // Between decode jobs only: the presenter is not borrowed.
-                self.apply_cursor(cx).await?;
+                self.apply_cursor(cx, result, other).await?;
+                // Network service during a redraw may have fenced this chain.
+                // Re-enter recovery before preparing another decode or view.
+                if self.receiver.state() == fr_media::delivery::ReceiveState::NeedsRecovery {
+                    continue;
+                }
             }
             let ready = !recovering && self.peer.prepare_decode(&self.receiver)?;
             let job = if ready {
@@ -803,27 +809,10 @@ impl StreamingViewer {
                             result,
                             other,
                         );
-                        let mut turn = pin!(turn);
-                        let mut decoded = None;
-                        // Do not cancel a healthy canonical network drive just
-                        // because native completion won the race. Finish its turn.
-                        poll_fn(|task| {
-                            if decoded.is_none()
-                                && let Poll::Ready(r) = decoding.as_mut().poll(task)
-                            {
-                                decoded = Some(r);
-                            }
-                            if let Some(Err(e)) = &decoded {
-                                self.control.stop();
-                                return Poll::Ready(Err(Error::Media(*e)));
-                            }
-                            turn.as_mut().poll(task)
-                        })
-                        .await?;
-                        decoded
+                        native_turn::drive(decoding.as_mut(), turn, &self.control).await?
                     };
-                    if let Some(stage) = decoded {
-                        break stage.map_err(Error::Media)?;
+                    if let Some(job) = decoded {
+                        break job;
                     }
                     acquisition::notify(
                         &mut self.peer,
@@ -1080,6 +1069,9 @@ async fn network(
     }
     driven?;
     let recovering = recovery::service(peer, recovery, receiver, repair, cx)?;
+    if recovering && let Peer::Control(viewer) = peer {
+        viewer.enter_recovery().map_err(Error::Control)?;
+    }
     // Source evidence is serviced independently of codec progress and before
     // advisory telemetry. No report can be derived from decode completion alone.
     if let Some(presentation) = presentation {

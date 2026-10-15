@@ -8,7 +8,7 @@
 use super::{CaptureSource, Error, MediaOperation, ObservationControl, Presenter};
 use crate::worker;
 use fr_media::worker::{Kind, Record, cursor, overlay};
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 /// A capture worker's typed `ReadCursor` reply. `None` records that the
 /// pointer moved between the native image and position queries.
@@ -83,27 +83,40 @@ impl Presenter {
     /// Install the client-rendered cursor on the presenter BETWEEN decode jobs.
     /// The worker re-presents its retained picture with the new overlay; this
     /// is not a decode completion, presentation receipt or visibility proof.
-    pub(crate) async fn apply_cursor(
-        &mut self,
-        cx: &asupersync::cx::Cx,
+    /// Stage the bounded update synchronously so the future borrows only this
+    /// presenter, not the cursor cache. Incoming positions can then coalesce
+    /// while the original IPC request drains alongside session service.
+    pub(crate) fn apply_cursor<'a>(
+        &'a mut self,
+        cx: &'a asupersync::cx::Cx,
         update: &overlay::Update<'_>,
-    ) -> Result<(), Error> {
-        if self.worker.state() != worker::State::Running {
-            return Err(worker::Error::Unavailable.into());
+    ) -> impl Future<Output = Result<(), Error>> + 'a + use<'a> {
+        let prepared = (|| {
+            if self.worker.state() != worker::State::Running {
+                return Err(Error::Worker(worker::Error::Unavailable));
+            }
+            let body = overlay::encode(update, &self.configuration.limits()?)?;
+            // Queueing this prepared request consumes the same native ceiling;
+            // neither later polling nor a new cursor position renews its time.
+            let deadline =
+                worker::Deadline::after(cx, super::presentation::NATIVE_REQUEST_CEILING)?;
+            Ok((body, deadline))
+        })();
+        async move {
+            let (body, deadline) = prepared?;
+            let mut operation = MediaOperation::new(&mut self.worker);
+            let reply = operation
+                .worker
+                .request(cx, Kind::CursorOverlay, body, deadline)
+                .await?;
+            if reply.header.kind != Kind::CursorOverlayApplied {
+                return Err(Error::InvalidFrame);
+            }
+            operation.completed = true;
+            Ok(())
         }
-        let body = overlay::encode(update, &self.configuration.limits()?)?;
-        // Re-presenting the retained picture is the same native work as a
-        // present, so it has the same hung-worker ceiling.
-        let deadline = worker::Deadline::after(cx, super::presentation::NATIVE_REQUEST_CEILING)?;
-        let mut operation = MediaOperation::new(&mut self.worker);
-        let reply = operation
-            .worker
-            .request(cx, Kind::CursorOverlay, body, deadline)
-            .await?;
-        operation.completed = true;
-        if reply.header.kind != Kind::CursorOverlayApplied {
-            return Err(Error::InvalidFrame);
-        }
-        Ok(())
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests;

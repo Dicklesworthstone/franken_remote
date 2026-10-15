@@ -20,6 +20,12 @@ try:
     while True:
         h=read(36); b=read(int.from_bytes(h[32:36],'big')); k=int.from_bytes(h[6:8],'big')
         if k==5: reply(h,262); break
+        if k==17:
+            if MODE=='cursor-snapshot': assert b[-4:]==bytes([1,2,3,255])
+            if MODE=='cursor-stall': time.sleep(60)
+            if MODE=='cursor-bad': reply(h,261,(999).to_bytes(8,'big'))
+            else: reply(h,275)
+            continue
         assert k in (4,6)
         if MODE=='stall': time.sleep(60)
         if MODE=='slow': time.sleep(.04)

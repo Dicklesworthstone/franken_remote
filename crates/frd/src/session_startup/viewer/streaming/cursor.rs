@@ -24,11 +24,12 @@ use fr_media::{
     pipeline::{CursorPipelineTracker, CursorRenderingOwner, PipelineError, StoredCursorShape},
     worker::overlay::Update,
 };
-use fr_transport::quic::{QuicRecords, Route};
+use fr_transport::quic::{Disposition, QuicRecords, Route};
+use std::pin::pin;
 use fr_wire::{Kind, WireError, cursor as wire};
 
-/// Bounded work per call: every step is at most one presenter exchange or
-/// one nonblocking platform request.
+/// Bound local nonblocking ownership transitions before choosing one redraw.
+/// A redraw always returns the presenter to pixel decode before another one.
 const MAX_STEPS: usize = 4;
 
 /// Typed cursor refusal from the authenticated host's records.
@@ -270,42 +271,95 @@ fn fault(error: &PipelineError) -> Fault {
 }
 
 impl StreamingViewer {
-    /// Advance the single remote-cursor owner while NO decode job borrows the
-    /// presenter. An overlay change re-composites the retained picture; this
-    /// is not a decode, presentation or visibility receipt and never touches
-    /// the receiver. Local pointer requests never wait on the platform.
-    pub(super) async fn apply_cursor(&mut self, cx: &Cx) -> Result<(), Error> {
-        let Some(cursor) = &mut self.cursor else {
-            return Ok(());
-        };
-        let cursor = &mut cursor.remote;
-        let now = super::now(cx).map_err(Error::Session)?;
-        // Only an active grant makes the local pointer a remote-cursor owner.
-        let (controlling, mut local, history) = match self.peer.controlled() {
-            Some(viewer) => {
-                let (local, history) = viewer.local_cursor();
-                (true, local, Some(history))
-            }
-            None => (false, None, None),
-        };
-        for _ in 0..MAX_STEPS {
-            let Step::Overlay(overlay) =
-                cursor.advance(controlling, local.as_deref_mut(), history, now)
+    /// Advance one overlay operation between decode jobs while the ORIGINAL
+    /// network/input/recovery services continue. New cursor records coalesce in
+    /// the existing bounded tracker; neither a redraw nor its acknowledgement
+    /// is a decode, visibility receipt or fresh-view witness.
+    pub(super) async fn apply_cursor(
+        &mut self,
+        cx: &Cx,
+        result: &mut impl FnMut(fr_client::input::ResultEvent),
+        other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+    ) -> Result<(), Error> {
+        let (view, overlay, native) = {
+            let Some(cursor) = &mut self.cursor else {
+                return Ok(());
+            };
+            let now = super::now(cx).map_err(Error::Session)?;
+            // Do not promote/change rendering owners during this request. The
+            // installed input owner still services its capture and stop handles.
+            let (controlling, local, history) = match self.peer.controlled() {
+                Some(viewer) => {
+                    let (local, history) = viewer.local_cursor();
+                    (true, local, Some(history))
+                }
+                None => (false, None, None),
+            };
+            let Step::Overlay(overlay) = cursor.remote.advance(controlling, local, history, now)
             else {
                 return Ok(());
             };
-            let Some(update) = cursor.overlay_update(overlay) else {
+            let Some(update) = cursor.remote.overlay_update(overlay) else {
                 return Ok(());
             };
-            self.presenter
-                .apply_cursor(cx, &update)
-                .await
-                .map_err(Error::Media)?;
-            cursor.overlay_applied(overlay);
+            // This constructor owns the existing IPC staging buffer, never a
+            // cache borrow across network reception or another pixel allocation.
+            (
+                cursor.lanes.view,
+                overlay,
+                self.presenter.apply_cursor(cx, &update),
+            )
+        };
+        {
+            let mut native = pin!(native);
+            loop {
+                let turn = super::network(
+                    &mut self.peer,
+                    self.clipboard.as_mut(),
+                    self.files.as_mut(),
+                    &mut self.receiver,
+                    &mut self.repair,
+                    self.recovery.as_deref_mut(),
+                    &mut self.statistics,
+                    self.feedback.as_mut(),
+                    self.presentation.as_mut(),
+                    self.cursor.as_mut(),
+                    self.audio.as_mut(),
+                    cx,
+                    result,
+                    other,
+                );
+                if super::native_turn::drive(native.as_mut(), turn, &self.control)
+                    .await?
+                    .is_some()
+                {
+                    break;
+                }
+            }
+        }
+        if let Some(cursor) = &mut self.cursor {
+            cursor.complete_overlay(view, overlay);
         }
         Ok(())
     }
 }
+impl ViewerCursor {
+    fn complete_overlay(&mut self, view: fr_wire::decoder::Binding, overlay: Option<At>) {
+        if self.lanes.view == view {
+            // Acknowledge the submitted snapshot, NOT a newer position received
+            // while it was pending. The newest state gets the next admission.
+            self.remote.overlay_applied(overlay);
+        } else {
+            // A retired generation's physical draw must be hidden/re-addressed,
+            // never adopted as the new generation's installed cursor image.
+            self.remote.rendered.overlay_unknown();
+            self.remote.installed = None;
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod cooperative_tests;
 
 #[cfg(test)]
 mod tests;

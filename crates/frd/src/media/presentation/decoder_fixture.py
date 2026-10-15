@@ -17,6 +17,10 @@ try:
         elif kind in (4, 6):
             time.sleep(@DECODE_SECONDS@)
             k, out = (261 if kind == 4 else 264), b[:8]
+        elif kind == 17:
+            # A redraw shares the configured native delay but emits no frame receipt.
+            time.sleep(@DECODE_SECONDS@)
+            k, out = 275, b''
         elif kind == 5: k, out = 262, b''
         else: raise ValueError(kind)
         sys.stdout.buffer.write(h[:6] + k.to_bytes(2, 'big') + h[8:32] + len(out).to_bytes(4, 'big') + out)
