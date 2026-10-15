@@ -1,6 +1,7 @@
 #![cfg(all(target_os = "linux", feature = "linux-media"))]
 //! Native drawable evidence only: independent X11 clear and pixel readback.
 //! No synthetic visibility report, decoder completion, or hardware claim.
+#[allow(dead_code)] // The shared server helper also serves the region tests.
 #[path = "presentation_support/mod.rs"]
 mod support;
 use fr_core::limits::ProtocolLimits;

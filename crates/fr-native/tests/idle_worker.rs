@@ -1,6 +1,7 @@
 #![cfg(all(target_os = "linux", feature = "linux-media"))]
 //! Real child process, admitted HEVC, independent X11 damage/readback. Repaint
 //! must not mint worker responses or replace the last submitted reference.
+#[allow(dead_code)] // The shared server helper also serves the region tests.
 #[path = "presentation_support/mod.rs"]
 mod support;
 use fr_core::{ids::CodecConfigurationGeneration, limits::ProtocolLimits};
