@@ -13,6 +13,9 @@ pub enum Error {
     Order,
     Clock,
     Expired,
+    /// This client's startup deadline ended while the host was still asking
+    /// its local user to approve the connection (`ApprovalRequired`).
+    ApprovalUnanswered,
     Closed,
 }
 impl fmt::Display for Error {
@@ -120,7 +123,11 @@ impl Startup {
         } else if now_us < self.last_us {
             Some(Error::Clock)
         } else if now_us >= self.until_us {
-            Some(Error::Expired)
+            Some(if self.approval.is_some() {
+                Error::ApprovalUnanswered
+            } else {
+                Error::Expired
+            })
         } else {
             None
         };

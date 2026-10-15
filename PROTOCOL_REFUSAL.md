@@ -93,6 +93,15 @@ and locally authored next-action text. For example, required-capability mismatch
 is `host_required_capability_missing`, while denied local approval is
 `host_local_approval_denied`; neither is reduced to a generic connection failure.
 
+Two local-approval outcomes needed fixes (2026-10-14, namespace e2e with the
+real consent prompt):
+- A denial made while the host was inside a transport wait used to close the
+  connection before the refusal was sent. It is now reported.
+- A prompt left unanswered ends when the first of two equal 30 s bounds
+  passes: the host's prompt budget (`host_approval_expired`) or this client's
+  startup deadline after the host's `ApprovalRequired` notice
+  (`host_approval_unanswered`). Before, it read `native_session_failed`.
+
 Only connection-level refusals without an operation/effect receipt use this
 projection. Local cancellation and unconfirmed native cleanup retain their own
 outcomes and take precedence. Host refusals do not become reconnectable, change

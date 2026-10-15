@@ -88,6 +88,12 @@ pub(super) fn session(error: session_startup::Error) -> Option<Failure> {
             negotiation::Error::Refused(value),
         )) => message(value),
         session_startup::Error::RemoteClosed(report) => Some(crate::closure::failure(report)),
+        session_startup::Error::ClientStartup(fr_client::startup::Error::ApprovalUnanswered) => {
+            Some(failure(
+                "host_approval_unanswered",
+                "The host asked its local user to approve this connection, and no answer arrived before this client's startup deadline. Ask the person at the host to approve when prompted, then start a new session; nothing was opened.",
+            ))
+        }
         _ => None,
     }
 }
@@ -198,6 +204,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_startup_deadline_during_local_approval_is_named() {
+        let failure = session(session_startup::Error::ClientStartup(
+            fr_client::startup::Error::ApprovalUnanswered,
+        ))
+        .unwrap();
+        assert_eq!(failure.code, "host_approval_unanswered");
+        assert_eq!(failure.exit, 1);
+        // A plain client startup expiry stays unnamed here.
+        assert_eq!(
+            session(session_startup::Error::ClientStartup(
+                fr_client::startup::Error::Expired
+            )),
+            None
+        );
     }
 
     #[test]

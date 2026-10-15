@@ -33,6 +33,8 @@ const SILENCE_US: u64 = 3_000_000;
 /// Drives the existing shared Startup over the SAME native control pair. One
 /// exact record survives backpressure. Drop, cancellation and uncertainty close
 /// this session rather than restarting a partly sent negotiation.
+/// The startup transport gate's grace past the deadline (see `drive`).
+const DEADLINE_GRACE_US: u64 = 10_000;
 pub struct Viewer {
     cx: Cx,
     startup: Option<Startup>,
@@ -206,13 +208,20 @@ impl Viewer {
                     .checked_sub(now(&guard.viewer.cx)?)
                     .ok_or(Error::Expired)?;
                 let cx = &guard.viewer.cx;
+                // `tick`, before and after every drive, reports the deadline
+                // typed (`ApprovalUnanswered` while local approval is pending).
+                // The transport's gate closes the connection on a refusal, so
+                // it allows a short grace past the deadline: gating at exactly
+                // the deadline turned this client's own startup timeout into a
+                // bare Unauthorized whenever the gate sampled the clock first.
+                let gate = until.saturating_add(DEADLINE_GRACE_US);
                 guard
                     .viewer
                     .transport
                     .as_mut()
                     .ok_or(Error::Closed)?
                     .drive(cx, wait.min(Duration::from_micros(remaining)), || {
-                        now(cx).is_ok_and(|n| n < until)
+                        now(cx).is_ok_and(|n| n < gate)
                     })
                     .await?;
                 guard.viewer.tick()?;

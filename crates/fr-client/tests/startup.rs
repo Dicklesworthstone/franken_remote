@@ -94,6 +94,26 @@ fn host_clock_is_not_compared_to_client_clock_and_approval_cannot_renew_timeout(
     c.sent(10_000_004).unwrap();
     assert_eq!(c.finish(10_000_005).unwrap().observation_until_us, 17);
 }
+/// The client's own deadline ending during the host's approval wait names it;
+/// a notice never extends that deadline, and without one it stays Expired.
+#[test]
+fn a_deadline_reached_while_approval_is_pending_is_named() {
+    let mut c = selected(10_000_000);
+    c.receive(
+        &bytes(&Message::ApprovalRequired {
+            request: binding().remote_session,
+            deadline_us: 1,
+            role: Role::RequestControl,
+        }),
+        10_000_001,
+    )
+    .unwrap();
+    assert_eq!(c.tick(10_009_999), Ok(()));
+    assert_eq!(c.tick(10_010_000), Err(Error::ApprovalUnanswered));
+    assert_eq!(c.tick(10_010_001), Err(Error::Closed));
+    let mut c = selected(10_000_000);
+    assert_eq!(c.tick(10_010_000), Err(Error::Expired));
+}
 #[test]
 fn unexpected_early_or_replayed_messages_are_terminal() {
     let mut c = Startup::new(offer(), 0, 10_000).unwrap();

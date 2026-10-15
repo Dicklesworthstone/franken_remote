@@ -416,3 +416,63 @@ fn local_approval_prompts_ignores_synthetic_allow_and_denies_on_close() {
     let result = daemon.join().unwrap();
     assert!(result.is_ok(), "frd run: {result:?}; host: {}", dump());
 }
+
+/// The same prompt left unanswered: the wait ends with a typed reason at the
+/// client, never the generic `native_session_failed` it reported before.
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; synthetic session lifecycle"]
+fn an_unanswered_local_approval_expires_with_a_typed_reason() {
+    const PROMPT: &str = "FrankenRemote - Local approval";
+    let (fr, worker) = (sibling("fr"), sibling("fr-media-worker"));
+    let host = Xvfb::start("640x480x24");
+    let viewer = Xvfb::start("800x600x24");
+    set_root(&host.display, COLOUR);
+    let api = fixture::Api::new();
+    let tools = Tools::new();
+    let roots = fixture::pki().join("ca.pem");
+    let (daemon, events, stop) = approval_host(&host.display, &api, &tools, &roots);
+    let dump = || format!("{:?}", events.lock().unwrap());
+    assert!(
+        wait_for_event(&events, Duration::from_secs(20), |e| matches!(
+            e,
+            Event::Listening { .. }
+        )),
+        "frd never listened: {}",
+        dump()
+    );
+    let client_api = ClientApi::new();
+    let client = connect(&fr, &client_api.path, &roots, &viewer.display, &worker);
+    let until = Instant::now() + Duration::from_secs(20);
+    while titled(&host.display, PROMPT).is_none() {
+        assert!(
+            Instant::now() < until,
+            "no local approval prompt: {}",
+            dump()
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+    let asked = Instant::now();
+    let output = wait_for(client, Duration::from_secs(90));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    println!(
+        "unanswered approval -> fr after {:?}: {}",
+        asked.elapsed(),
+        stdout.trim()
+    );
+    // Typed either way: the host's expiry, or this client's own startup
+    // deadline reached during the approval wait (both are 30 s today).
+    assert!(
+        stdout.contains("\"host_approval_expired\"")
+            || stdout.contains("\"host_approval_unanswered\""),
+        "{stdout}; host: {}",
+        dump()
+    );
+    let gone = Instant::now() + Duration::from_secs(10);
+    while titled(&host.display, PROMPT).is_some() {
+        assert!(Instant::now() < gone, "the prompt outlived its request");
+        thread::sleep(Duration::from_millis(100));
+    }
+    stop.request();
+    let result = daemon.join().unwrap();
+    assert!(result.is_ok(), "frd run: {result:?}; host: {}", dump());
+}

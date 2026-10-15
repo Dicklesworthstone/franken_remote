@@ -126,6 +126,44 @@ fn native_viewer_receives_a_denial_made_during_a_host_wait() {
     );
 }
 
+/// The viewer's own startup deadline ending during the host's approval wait is
+/// typed. Its last wait used to end exactly at that deadline, where the
+/// transport re-checked the gate and closed the connection as Unauthorized
+/// (live, a prompt left unanswered read `native_session_failed`).
+#[test]
+fn a_viewer_deadline_during_local_approval_is_reported_typed() {
+    let runtime = network::runtime();
+    let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    let hcx = runtime.request_cx_with_budget(Budget::INFINITE);
+    runtime.block_on(async {
+        let (client, server) = network::native_pair(&cx, "localhost", quic::ALPN).await;
+        let policy = quic::Policy::default();
+        let host = connection_test_host(hcx.clone(), server.unwrap(), offer(), policy);
+        let mut viewer = Viewer::new(
+            cx.clone(),
+            client.unwrap(),
+            offer(),
+            policy,
+            Duration::from_millis(300),
+        )
+        .unwrap();
+        // The local user never answers; the host's own 2 s bound is later.
+        let host_run = host.open(Duration::from_millis(5), |_, _| Ok(()));
+        let viewer_run = async {
+            loop {
+                if let Err(error) = viewer.drive(Duration::from_millis(50)).await {
+                    return error;
+                }
+            }
+        };
+        let (_, client_result) = Box::pin(network::both(host_run, viewer_run)).await;
+        assert_eq!(
+            client_result,
+            Error::ClientStartup(fr_client::startup::Error::ApprovalUnanswered)
+        );
+    });
+}
+
 #[test]
 fn native_viewer_receives_version_refusal_not_an_unexplained_disconnect() {
     let mut client = offer();
