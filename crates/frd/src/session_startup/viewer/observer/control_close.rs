@@ -30,7 +30,10 @@ impl NativeObserver {
         result: impl FnMut(ResultEvent) + 'a,
     ) -> impl Future<Output = Result<ControlCloseOutcome, Error>> + 'a {
         let cx = self.cx.clone();
-        let request = self.control_request(sequence, capabilities);
+        // The same negotiated request as `serve_interactive_control`: wanted
+        // operations met with what negotiation allows (no wheel on a host
+        // whose executor cannot scroll by lines).
+        let request = self.negotiated_request(sequence, capabilities);
         let future = request.and_then(|request| {
             self.input
                 .take()
