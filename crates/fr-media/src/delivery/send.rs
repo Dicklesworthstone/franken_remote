@@ -650,33 +650,30 @@ impl SendCache {
         // Gate the next requested FRAGMENT, not the end of the entire job.
         // A tail probe may include originals that have not been issued yet;
         // those cannot hold a known lost prefix behind the whole paced flight.
-        // When this head is unissued, other eligible pictures still progress.
-        let selected = self
-            .pictures
-            .iter()
-            .enumerate()
-            .filter_map(|(index, picture)| {
-                let p = picture.as_ref()?;
-                let job = p.repair.as_ref()?;
-                (job.fragment < p.next_original).then_some((
-                    index,
-                    p.send_by,
-                    p.progress.descriptor.frame,
-                ))
-            })
-            .min_by_key(|&(_, until, frame)| (until, frame));
-        let Some((index, _, frame)) = selected else {
+        // Unissued or byte-blocked heads cannot hold another picture's fitting
+        // repair. Preserve the original fragment order within each job.
+        // At refill the earliest deadline wins again, so small repairs cannot
+        // displace an older job from the newly available full allowance.
+        let remaining = self.policy.repair_bytes_per_window - self.repair_spent;
+        let mut selected = None;
+        for (index, picture) in self.pictures.iter().enumerate() {
+            let Some(p) = picture else { continue };
+            let Some(job) = &p.repair else { continue };
+            if job.fragment >= p.next_original || p.repair_packet_bytes(job.fragment)? > remaining {
+                continue;
+            }
+            let candidate = (p.send_by, p.progress.descriptor.frame, index);
+            if selected.is_none_or(|old| candidate < old) {
+                selected = Some(candidate);
+            }
+        }
+        let Some((_, frame, index)) = selected else {
+            // Local byte pacing preserves every job and its original deadline.
+            // repair_window_deadline() schedules any useful blocked head's refill.
             return Ok(None);
         };
         let p = self.pictures[index].as_mut().expect("selected");
         let job = p.repair.as_ref().expect("selected job");
-        if p.repair_packet_bytes(job.fragment)?
-            > self.policy.repair_bytes_per_window - self.repair_spent
-        {
-            // This is local pacing, not malformed media or a failed native
-            // write. Preserve the fixed job and all its accounting through it.
-            return Ok(None);
-        }
         let fragment = p.fragment(job.fragment)?;
         let n = encode_fragment(
             fragment,
