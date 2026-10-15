@@ -5,8 +5,10 @@
 //! users must not be able to mutate the drop directory. Peer metadata never
 //! supplies an absolute path, an executable mode, or a symlink to materialize.
 mod conflict;
+mod staging;
 pub use conflict::{ConflictPolicy, PublishedFile};
 use conflict::{MAX_CONFLICT_ATTEMPTS, conflict_name};
+use staging::StagingFile;
 
 use asupersync::atp::{
     object::{ContentId, ObjectId},
@@ -16,13 +18,12 @@ use asupersync::net::atp::transport_common::{
     StagedEntryReceive, flat_merkle_root_from_digests, hex_encode,
 };
 use rustix::{
-    fd::OwnedFd,
-    fs::{self, AtFlags, Mode, OFlags, RenameFlags},
+    fd::{AsFd, OwnedFd},
+    fs::{self, Mode, OFlags},
     process::geteuid,
 };
 use std::{
     fmt,
-    fs::File,
     io::{self, Write},
     path::{Component, Path},
     sync::{Arc, Mutex},
@@ -204,21 +205,15 @@ impl DropDirectory {
         let mut random = [0_u8; 16];
         getrandom::fill(&mut random).map_err(|_| Error::Io(io::ErrorKind::Other))?;
         let suffix = u128::from_be_bytes(random);
-        let staging = format!("{STAGING_PREFIX}{suffix:032x}");
-        let fd = fs::openat(
-            &self.0.fd,
-            staging.as_str(),
-            OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::from_raw_mode(0o600),
-        )?;
+        let label = format!("{STAGING_PREFIX}{suffix:032x}");
+        let staging = StagingFile::create(self.0.fd.as_fd(), &label)?;
         // ATP's streaming verifier performs no filesystem access. Its private,
-        // relative staging label is bookkeeping; our pinned fd owns all I/O.
-        let mut hasher = StagedEntryReceive::new(staging.clone().into());
+        // relative staging label is bookkeeping even for an unnamed inode.
+        let mut hasher = StagedEntryReceive::new(label.into());
         hasher.mark_created();
         Ok(PendingFile {
-            reservation,
-            file: fd.into(),
             staging,
+            reservation,
             destination: name.to_owned(),
             conflict_policy: self.1,
             nonce: suffix,
@@ -291,15 +286,18 @@ enum State {
     Cancelled,
 }
 
-/// One unpublished regular file. Dropping it removes ONLY its own staging name.
+/// One unpublished regular file. Linux `O_TMPFILE` plus procfs, when available,
+/// keeps its inode unnamed until publication; process death then reclaims it.
+/// Filesystems without that support retain the private named-staging fallback
+/// and may still require local cleanup after process death. No old files are
+/// scanned or deleted. Directory transfers keep their separate staging policy.
+///
 /// Failure is terminal; a partially failed write cannot be retried as if it had
 /// no effects. No payload is accumulated in memory and offsets are sequential.
-/// Process death may leave private staging files for local cleanup, never a
-/// partially written destination or an automatically resumed authority grant.
 pub struct PendingFile {
+    // Inode custody ends before its reservation is released, including Drop.
+    staging: StagingFile,
     reservation: Reservation,
-    file: File,
-    staging: String,
     destination: String,
     conflict_policy: ConflictPolicy,
     nonce: u128,
@@ -345,7 +343,7 @@ impl PendingFile {
         {
             return Err(Error::InvalidChunk);
         }
-        self.file.write_all(bytes)?;
+        self.staging.file().write_all(bytes)?;
         self.hasher
             .as_mut()
             .ok_or(Error::Retired)?
@@ -386,7 +384,7 @@ impl PendingFile {
         if !valid || digest.size != self.size {
             return Err(Error::Integrity);
         }
-        self.file.sync_all()?;
+        self.staging.file().sync_all()?;
         self.state = State::Verified;
         Ok(())
     }
@@ -410,13 +408,10 @@ impl PendingFile {
         let original = self.destination.clone();
         let mut attempt = 0;
         loop {
-            match fs::renameat_with(
-                &self.reservation.root.fd,
-                self.staging.as_str(),
-                &self.reservation.root.fd,
-                self.destination.as_str(),
-                RenameFlags::NOREPLACE,
-            ) {
+            match self
+                .staging
+                .publish(self.reservation.root.fd.as_fd(), self.destination.as_str())
+            {
                 Ok(()) => break,
                 Err(rustix::io::Errno::EXIST)
                     if self.conflict_policy == ConflictPolicy::KeepBoth
@@ -429,7 +424,7 @@ impl PendingFile {
                 Err(error) => return Err(error.into()),
             }
         }
-        // After rename succeeds, cleanup MUST NOT unlink this destination even
+        // After publication succeeds, cleanup MUST NOT unlink this destination even
         // if the directory sync fails. Publication uncertainty is not rollback.
         self.state = State::Published;
         let publication = if fs::fsync(&self.reservation.root.fd).is_ok() {
@@ -454,12 +449,8 @@ impl PendingFile {
         if matches!(self.state, State::Published | State::Cancelled) {
             return Ok(());
         }
-        match fs::unlinkat(
-            &self.reservation.root.fd,
-            self.staging.as_str(),
-            AtFlags::empty(),
-        ) {
-            Ok(()) | Err(rustix::io::Errno::NOENT) => {
+        match self.staging.cleanup(self.reservation.root.fd.as_fd()) {
+            Ok(()) => {
                 self.state = State::Cancelled;
                 self.reservation.release = true;
                 Ok(())
@@ -540,3 +531,7 @@ impl PendingObject {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "receive/publication_tests.rs"]
+mod publication_tests;

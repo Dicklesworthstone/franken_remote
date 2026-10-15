@@ -210,39 +210,3 @@ fn concurrent_same_name_publications_keep_every_verified_file() {
     assert!(names.contains("shared.bin"));
     assert_eq!(scratch.entries(), 8);
 }
-#[test]
-fn exhausted_conflict_candidates_fail_bounded_without_changing_existing_entries() {
-    let scratch = Scratch::new();
-    let root = scratch
-        .open()
-        .with_conflict_policy(ConflictPolicy::KeepBoth);
-    let pending = verified(&root, "report.txt", b"incoming");
-    let staging = fs::read_dir(&scratch.0)
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .file_name();
-    let staging = staging.to_str().unwrap();
-    let nonce = staging.strip_prefix(".fr-part-").unwrap();
-    fs::write(scratch.0.join("report.txt"), b"keep").unwrap();
-    for attempt in 0..8 {
-        fs::write(
-            scratch
-                .0
-                .join(format!("report.fr-conflict-{nonce}-{attempt}.txt")),
-            b"keep",
-        )
-        .unwrap();
-    }
-    assert!(matches!(pending.publish_named(), Err(Error::Conflict)));
-    assert_eq!(scratch.entries(), 9);
-    for entry in fs::read_dir(&scratch.0).unwrap() {
-        assert_eq!(fs::read(entry.unwrap().path()).unwrap(), b"keep");
-    }
-    // Failed publication cleanup releases only this staging owner's charge.
-    assert_eq!(
-        verified(&root, "other", b"new").publish(),
-        Ok(Publication::Durable)
-    );
-}
