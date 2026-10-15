@@ -33,7 +33,11 @@ enum Scenario {
     NoOffer,
     BadConfiguration,
     Cancel,
+    /// A record no lane claims arrives while the viewer waits for the offer.
+    Unclaimed,
 }
+/// `ClipboardReady`: a session-control kind this view-only session has no lane for.
+const UNCLAIMED: u16 = 0x0054;
 
 fn configuration(media: &NegotiatedMedia) -> Vec<u8> {
     // Exactly the canonical parameter sets used by Presenter::stream_fixture.
@@ -270,7 +274,13 @@ fn exercise(scenario: Scenario) {
                         Ok(())
                     },
                     |_| {},
-                    |_, _| Ok(Disposition::Blocked),
+                    |_, _| {
+                        if scenario == Scenario::Unclaimed {
+                            Err(())
+                        } else {
+                            Ok(Disposition::Blocked)
+                        }
+                    },
                 )
                 .await;
             client_done.set(true);
@@ -366,7 +376,29 @@ fn exercise(scenario: Scenario) {
             ));
             reported.set(true);
             let failed_at = Instant::now();
-            if matches!(scenario, Scenario::NoOffer | Scenario::Cancel) {
+            if scenario == Scenario::Unclaimed {
+                let outbound = host.io().unwrap().1.outbound;
+                let mut record = vec![0; 32];
+                record[..6].copy_from_slice(b"FRD0\0\0");
+                record[6..8].copy_from_slice(&UNCLAIMED.to_be_bytes());
+                record[12..16].copy_from_slice(&8_u32.to_be_bytes());
+                record[16..20].copy_from_slice(&outbound.binding.to_be_bytes());
+                host.io()
+                    .unwrap()
+                    .0
+                    .send(
+                        &h,
+                        Route::Stream(outbound),
+                        &record,
+                        stamp() + 4_000_000,
+                        || true,
+                    )
+                    .unwrap();
+            }
+            if matches!(
+                scenario,
+                Scenario::NoOffer | Scenario::Cancel | Scenario::Unclaimed
+            ) {
                 while !done.get() {
                     if host
                         .drive(
@@ -560,6 +592,10 @@ fn exercise(scenario: Scenario) {
                     ))
                 );
             }
+            if scenario == Scenario::Unclaimed {
+                // Named, not Session(Transport(Handler)) -> native_session_failed.
+                assert_eq!(result, Err(super::Error::UnclaimedRecord(UNCLAIMED)));
+            }
         }
         // Session close does not replace or recycle the original connection proof.
 
@@ -591,6 +627,10 @@ fn absent_host_offer_expires_the_original_request_without_restarting_startup() {
 #[test]
 fn changed_native_configuration_is_terminal_before_decoder_acknowledgement() {
     exercise(Scenario::BadConfiguration);
+}
+#[test]
+fn an_unclaimed_record_during_recovery_ends_the_session_naming_its_kind() {
+    exercise(Scenario::Unclaimed);
 }
 #[test]
 fn local_stop_during_recovery_fences_the_original_session() {

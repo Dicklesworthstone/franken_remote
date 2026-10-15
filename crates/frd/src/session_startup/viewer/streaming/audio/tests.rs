@@ -5,7 +5,7 @@
 use super::*;
 use asupersync::net::quic_native::StreamId;
 use fr_core::audio::{AudioChannels, AudioStopReason};
-use fr_transport::quic::{DatagramRoute, Messages, Priority, StreamRoute};
+use fr_transport::quic::{DatagramRoute, Disposition, Messages, Priority, StreamRoute};
 use std::{cell::RefCell, rc::Rc};
 
 const BINDING: u32 = 9;
@@ -313,3 +313,39 @@ fn local_session_close_drops_output_once_without_inventing_host_end_or_failure()
 
 #[path = "reply_tests.rs"]
 mod reply_tests;
+
+/// A reference recovery replaces only the video media. Its dispatch does not
+/// know the audio lanes, so without this wrapper the first packet reached the
+/// embedding's catch-all refusal and ended the session.
+#[test]
+fn audio_keeps_playing_through_a_reference_recovery() {
+    let (mut audio, calls) = owner();
+    audio.receive(control(), &configuration(1), &mut live());
+    audio.state = State::Active(offer(1));
+    let refused = std::cell::Cell::new(None);
+    let mut other = |_: Route, _: &[u8]| Err(());
+    let mut lanes =
+        super::super::continuation::lanes(Some(&mut audio), live(), &refused, &mut other);
+    assert_eq!(
+        lanes(datagram(), &packet(1, 0, 40)),
+        Ok(Disposition::Consumed)
+    );
+    assert_eq!(refused.get(), None);
+    // ClipboardReady on a stream no lane of this session owns.
+    let mut unclaimed = vec![0; 32];
+    unclaimed[..6].copy_from_slice(b"FRD0\0\0");
+    unclaimed[6..8].copy_from_slice(&0x0054_u16.to_be_bytes());
+    assert_eq!(
+        lanes(
+            Route::Stream(stream(11, false, Messages::Exact(0x0054))),
+            &unclaimed
+        ),
+        Err(())
+    );
+    drop(lanes);
+    assert_eq!(calls.borrow().received.len(), 1);
+    assert_eq!(
+        refused.get(),
+        Some(super::super::Error::UnclaimedRecord(0x0054))
+    );
+}

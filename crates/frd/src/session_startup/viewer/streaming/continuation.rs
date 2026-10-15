@@ -100,6 +100,7 @@ pub(super) fn resume<'a>(
     receiver: &'a mut ReceivePipeline,
     ui: &'a mut impl FnMut(acquisition::Dispatch<'_>, Option<Presentation>) -> Result<(), ()>,
     other: &'a mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+    refused: &'a Cell<Option<Error>>,
 ) -> impl Future<Output = Result<(NegotiatedMedia, PresentationReceipt), Error>> + 'a {
     let attempt = Attempt {
         link,
@@ -117,6 +118,7 @@ pub(super) fn resume<'a>(
             attempt.receiver,
             ui,
             other,
+            refused,
         ))
         .await?;
         attempt.completed = true;
@@ -149,16 +151,21 @@ impl Budget {
 /// Old advisory queries are validated and retired, not answered using a new
 /// receiver's counters. Their requester expires them to unknown. New-generation
 /// queries stay queued for the new feedback owner after the handshake finishes.
-struct Dispatch {
+struct Dispatch<'a> {
     inbound: Route,
     old: Binding,
     next: Binding,
     metrics: bool,
     limits: fr_core::limits::ProtocolLimits,
     obsolete: [Route; 4],
-    active: Option<[Route; 3]>,
+    /// The new generation's media lanes and its configuration stream, which
+    /// after the decoder configuration carries only cursor shapes: held for
+    /// their owners once the recovery completes.
+    active: Option<[Route; 4]>,
+    /// Why a callback refused, so the drive's bare handler refusal is named.
+    refused: &'a Cell<Option<Error>>,
 }
-impl Dispatch {
+impl Dispatch<'_> {
     fn receive(
         &self,
         route: Route,
@@ -170,7 +177,7 @@ impl Dispatch {
         }
         if feedback::is_feedback(bytes) {
             if !self.metrics || route != self.inbound {
-                return Err(());
+                return self.refuse(Error::Feedback(feedback::Error::Binding));
             }
             let decode = |binding| {
                 receiver_metrics::decode(
@@ -193,7 +200,7 @@ impl Dispatch {
             ) {
                 return Ok(Disposition::Blocked);
             }
-            return Err(());
+            return self.refuse(Error::Feedback(feedback::Error::Binding));
         }
         if self.active.is_some_and(|routes| routes.contains(&route)) {
             return Ok(Disposition::Blocked);
@@ -210,6 +217,13 @@ impl Dispatch {
         }
         other(route, bytes)
     }
+    /// The first refusal of a drive ends it; keep that one.
+    fn refuse(&self, error: Error) -> Result<Disposition, ()> {
+        if self.refused.get().is_none() {
+            self.refused.set(Some(error));
+        }
+        Err(())
+    }
 }
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run(
@@ -220,6 +234,7 @@ async fn run(
     receiver: &mut ReceivePipeline,
     ui: &mut impl FnMut(acquisition::Dispatch<'_>, Option<Presentation>) -> Result<(), ()>,
     other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+    refused: &Cell<Option<Error>>,
 ) -> Result<(NegotiatedMedia, PresentationReceipt), Error> {
     let session = link.session();
     session.check().map_err(Error::Session)?;
@@ -246,6 +261,7 @@ async fn run(
         obsolete: previous
             .retiring_viewer_routes(&session.transport)
             .map_err(Error::Routes)?,
+        refused,
     };
     // A locally queued request is not host receipt. Wait for the authenticated
     // NEXT configuration offer before sending resets for our old media streams.
@@ -303,15 +319,13 @@ async fn run(
     let media = replacement
         .finish(&budget.cx, &mut session.transport)
         .map_err(Error::Replacement)?;
-    dispatch.active = Some(
-        media
-            .viewer_routes(&session.transport)
-            .map_err(Error::Routes)?
-            .map(|(r, _)| r),
-    );
     let configuration = media
         .viewer_configuration_route(&session.transport)
         .map_err(Error::Routes)?;
+    let [(recovery, _), (video, _), (datagram, _)] = media
+        .viewer_routes(&session.transport)
+        .map_err(Error::Routes)?;
+    dispatch.active = Some([recovery, video, datagram, Route::Stream(configuration)]);
     let config = configuration_record(link, &budget, configuration, &dispatch, ui, other).await?;
     let mut handshake = decoder_startup::ViewerRecovery::prepare(
         budget.cx.clone(),
@@ -374,7 +388,7 @@ async fn run(
 fn replacement_offered(
     session: &mut ViewerSession,
     budget: &Budget,
-    dispatch: &Dispatch,
+    dispatch: &Dispatch<'_>,
 ) -> Result<bool, Error> {
     let offered = Cell::new(false);
     let mut failure = None;
@@ -423,7 +437,7 @@ async fn configuration_record(
     link: &mut Link<'_>,
     budget: &Budget,
     route: StreamRoute,
-    dispatch: &Dispatch,
+    dispatch: &Dispatch<'_>,
     ui: &mut impl FnMut(acquisition::Dispatch<'_>, Option<Presentation>) -> Result<(), ()>,
     other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
 ) -> Result<Vec<u8>, Error> {
@@ -474,7 +488,7 @@ async fn send_ack(
     link: &mut Link<'_>,
     budget: &Budget,
     handshake: &mut decoder_startup::ViewerRecovery<'_>,
-    dispatch: &Dispatch,
+    dispatch: &Dispatch<'_>,
     ui: &mut impl FnMut(acquisition::Dispatch<'_>, Option<Presentation>) -> Result<(), ()>,
     other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
 ) -> Result<(), Error> {
@@ -503,7 +517,7 @@ async fn during<T>(
     link: &mut Link<'_>,
     budget: &Budget,
     native: impl Future<Output = Result<T, decoder_startup::Error>>,
-    dispatch: &Dispatch,
+    dispatch: &Dispatch<'_>,
     ui: &mut impl FnMut(acquisition::Dispatch<'_>, Option<Presentation>) -> Result<(), ()>,
     other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
 ) -> Result<T, Error> {
@@ -533,6 +547,27 @@ async fn during<T>(
     }
 }
 
+/// Audio is not video: its lanes outlive the replaced media, so it keeps
+/// playing through a recovery. A record no lane claims is named.
+pub(super) fn lanes<'a>(
+    mut audio: Option<&'a mut super::audio::ViewerAudio>,
+    mut live: impl FnMut() -> bool + 'a,
+    refused: &'a Cell<Option<Error>>,
+    other: &'a mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+) -> impl FnMut(Route, &[u8]) -> Result<Disposition, ()> + 'a {
+    move |route, bytes| {
+        if let Some(audio) = audio.as_deref_mut().filter(|a| a.owns(route, bytes)) {
+            audio.receive(route, bytes, &mut live);
+            return Ok(Disposition::Consumed);
+        }
+        other(route, bytes).map_err(|()| {
+            if refused.get().is_none() {
+                refused.set(Some(super::unclaimed(bytes)));
+            }
+        })
+    }
+}
+
 impl super::StreamingViewer {
     /// Resume this stream on its recovered generation, on the same session:
     /// an observer's, or a control grant's (suspended until resumed by the
@@ -549,6 +584,17 @@ impl super::StreamingViewer {
         // evidence do not. Late old metrics are explicitly retired by Dispatch.
         let feedback_sent = self.feedback.take().map_or(0, |f| f.sent);
         let presentation_sent = self.presentation.take().map_or(0, |p| p.sent);
+        let refused = Cell::new(None);
+        let cx = self.control.cx.clone();
+        let mut lanes = lanes(
+            self.audio.as_mut(),
+            || cx.checkpoint().is_ok(),
+            &refused,
+            other,
+        );
+        // A drive ends on its callback's first refusal: report that, not the
+        // transport's bare Handler error.
+        let named = |error| refused.take().unwrap_or(error);
         match std::mem::replace(&mut self.peer, super::Peer::Closed) {
             super::Peer::Observe { mut session, media } => {
                 let (media, receipt) = resume(
@@ -558,9 +604,12 @@ impl super::StreamingViewer {
                     &mut self.presenter,
                     &mut self.receiver,
                     ui,
-                    other,
+                    &mut lanes,
+                    &refused,
                 )
-                .await?;
+                .await
+                .map_err(named)?;
+                drop(lanes);
                 let presentation = self.reinstall(
                     &mut session,
                     &media,
@@ -586,9 +635,12 @@ impl super::StreamingViewer {
                     &mut self.presenter,
                     &mut self.receiver,
                     ui,
-                    other,
+                    &mut lanes,
+                    &refused,
                 )
-                .await?;
+                .await
+                .map_err(named)?;
+                drop(lanes);
                 let presentation = self.reinstall(
                     viewer.session_mut(),
                     &media,

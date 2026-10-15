@@ -961,6 +961,14 @@ impl Repair {
         Ok(())
     }
 }
+/// A host record no lane of this session claimed, named by its FRD0 kind.
+fn unclaimed(bytes: &[u8]) -> Error {
+    Error::UnclaimedRecord(
+        bytes
+            .get(6..8)
+            .map_or(0, |k| u16::from_be_bytes([k[0], k[1]])),
+    )
+}
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn network(
     peer: &mut Peer,
@@ -1062,10 +1070,7 @@ async fn network(
                 Ok(Disposition::Consumed)
             } else {
                 other(route, bytes).map_err(|()| {
-                    let kind = bytes
-                        .get(6..8)
-                        .map_or(0, |k| u16::from_be_bytes([k[0], k[1]]));
-                    failure = Some(Error::UnclaimedRecord(kind));
+                    failure = Some(unclaimed(bytes));
                 })
             }
         })
