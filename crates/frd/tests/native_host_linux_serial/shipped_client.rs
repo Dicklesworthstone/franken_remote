@@ -122,12 +122,40 @@ pub(super) fn wait_for(child: std::process::Child, limit: Duration) -> std::proc
     let until = Instant::now() + limit;
     while child.try_wait().unwrap().is_none() {
         if Instant::now() >= until {
+            // Name what fr was blocked in BEFORE killing it. Its pipes are not
+            // read here: a surviving worker could hold them open forever.
+            let blocked = blocked_in(child.id());
             let _ = child.kill();
-            panic!("fr did not finish within {limit:?}");
+            panic!("fr did not finish within {limit:?}; blocked in: {blocked}");
         }
         thread::sleep(Duration::from_millis(10));
     }
     child.wait_with_output().unwrap()
+}
+
+/// Each thread's name and kernel wait channel, for the process and its
+/// children (e.g. `pipe_write`, `ep_poll`, `futex_wait_queue`).
+fn blocked_in(pid: u32) -> String {
+    use std::fmt::Write as _;
+    let read = |path: String| fs::read_to_string(path).unwrap_or_default();
+    let mut out = String::new();
+    let mut pids = vec![pid.to_string()];
+    let mut index = 0;
+    while let Some(pid) = pids.get(index).cloned() {
+        index += 1;
+        let _ = write!(out, "[{pid}");
+        for task in fs::read_dir(format!("/proc/{pid}/task"))
+            .into_iter()
+            .flatten()
+        {
+            let task = task.map(|t| t.path()).unwrap_or_default();
+            let at = |file: &str| read(task.join(file).display().to_string());
+            let _ = write!(out, " {}:{}", at("comm").trim(), at("wchan"));
+            pids.extend(at("children").split_whitespace().map(str::to_owned));
+        }
+        out.push(']');
+    }
+    out
 }
 
 pub(super) fn wait_for_event(
@@ -143,6 +171,25 @@ pub(super) fn wait_for_event(
         thread::sleep(Duration::from_millis(10));
     }
     true
+}
+
+#[test]
+fn a_client_that_overstays_is_named_with_its_blocked_process_tree() {
+    let hung = Command::new("sh")
+        .args(["-c", "sleep 30; true"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let panic = std::panic::catch_unwind(|| wait_for(hung, Duration::from_millis(300)))
+        .expect_err("a hung child must not be reported as finished");
+    let message = panic.downcast_ref::<String>().unwrap();
+    assert!(message.contains("did not finish within 300ms"), "{message}");
+    // The shell and its sleeping child, each with its thread names.
+    assert!(
+        message.contains(" sh:") && message.contains(" sleep:"),
+        "{message}"
+    );
 }
 
 fn run_displays(fr: &Path, api: &Path, roots: &Path) -> std::process::Output {
