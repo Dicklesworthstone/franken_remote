@@ -9,7 +9,10 @@
 //! video fragments on a clean link whenever a partial receive pulled a turn of
 //! datagrams. The cost: a consumer that STAYS blocked while its route keeps
 //! arriving holds other routes back until its record drains or expires. In-tree
-//! consumers block for one partial pass, or while the input agent is busy.
+//! consumers block for one partial pass, while the input agent is busy, or (a
+//! reference recovery) hold the new video generation until the decoder
+//! handshake completes, about one or two round trips: audio arriving behind it
+//! is delayed by that much, not lost.
 //! This does not make unreliable media reliable or replace the session's
 //! reference/freshness validation.
 use super::{Bytes, DatagramRoute, Disposition, Error, MAX_DATAGRAMS, Route};
