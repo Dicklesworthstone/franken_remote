@@ -254,6 +254,10 @@ struct Assembly {
     // not-yet-arrived tail. These fixed fields are included in storage().
     received_end: u32,
     tail_probe_after: u64,
+    // Reordering grace for a newly exposed prefix-gap episode. Keep it fixed
+    // while any prefix hole remains; ongoing traffic cannot defer a real loss.
+    // The next episode starts only after all observed prefix holes are filled.
+    prefix_probe_after: Option<u64>,
     repair_attempts: u8,
 }
 impl Assembly {
@@ -291,6 +295,7 @@ impl Assembly {
             next_repair: deadline(now, config.policy.repair_delay_micros)?,
             received_end: 0,
             tail_probe_after: deadline(now, config.policy.repair_delay_micros)?,
+            prefix_probe_after: None,
             repair_attempts: 0,
         })
     }
@@ -352,6 +357,21 @@ impl Assembly {
         // announcements cannot keep it pending. Saturation is safe because the
         // original hard reference deadline always caps it, including at u64::MAX.
         self.tail_probe_after = now.saturating_add(repair_delay).min(self.reference_until);
+        if self.has_prefix_hole() {
+            // Keep the initial picture-level reorder allowance for holes
+            // exposed during startup. Once that allowance has elapsed, a NEW
+            // gap episode gets its own grace instead of an already-past timer.
+            // Existing holes never restart their grace; request cadence is an
+            // independent lower bound in repair_due().
+            let probe = if self.repair_attempts == 0 && now < self.next_repair {
+                self.next_repair
+            } else {
+                self.tail_probe_after
+            };
+            self.prefix_probe_after.get_or_insert(probe);
+        } else {
+            self.prefix_probe_after = None;
+        }
         Ok(if self.complete() {
             ReceiveUpdate::PictureComplete
         } else {
@@ -395,11 +415,8 @@ impl Assembly {
         u64::from(self.received) < prefix_bytes
     }
     fn repair_due(&self) -> u64 {
-        if self.has_prefix_hole() {
-            self.next_repair
-        } else {
-            self.next_repair.max(self.tail_probe_after)
-        }
+        self.next_repair
+            .max(self.prefix_probe_after.unwrap_or(self.tail_probe_after))
     }
     fn missing(&self, ranges: &mut [RepairRange], now: u64) -> Result<usize, DeliveryError> {
         let total = if now < self.tail_probe_after {

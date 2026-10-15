@@ -260,3 +260,6 @@ fn a_late_tail_loss_can_be_repaired_on_the_same_chain_after_a_paced_flight() {
 
 #[path = "progressive_repair/prefix.rs"]
 mod prefix;
+
+#[path = "progressive_repair/reordering.rs"]
+mod reordering;
