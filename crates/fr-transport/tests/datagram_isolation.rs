@@ -158,3 +158,69 @@ fn readiness_backpressure_is_isolated_between_native_datagram_routes() {
 fn handler_backpressure_is_isolated_between_native_datagram_routes() {
     runtime().block_on(isolate_blocked_route(false));
 }
+
+/// A receive that blocks a route it does not own (the controlled viewer's
+/// clock-only pass, a startup handshake) must not cost that route its later
+/// datagrams. With per-route custody that dropped a full route's arrivals,
+/// one such pass held the first video fragment and discarded the rest of the
+/// turn: on a clean link every controlled namespace session then ended
+/// `video_reference_lost` (12 of 79 suite tests).
+#[test]
+fn a_pass_that_blocks_a_route_loses_none_of_its_later_datagrams() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let (client, server) = native_pair(&cx, "localhost", ALPN).await;
+        let outgoing = [DatagramRoute {
+            binding: 2,
+            kind: 0x0034,
+            outbound: true,
+        }];
+        let incoming = outgoing.map(|r| DatagramRoute {
+            outbound: false,
+            ..r
+        });
+        let mut server =
+            QuicRecords::new(server.unwrap(), &cx, &[], &outgoing, Policy::default()).unwrap();
+        let mut client =
+            QuicRecords::new(client.unwrap(), &cx, &[], &incoming, Policy::default()).unwrap();
+        let sent: Vec<_> = (0..6).map(|n| record(outgoing[0], 40 + n)).collect();
+        for bytes in &sent {
+            server
+                .send(
+                    &cx,
+                    Route::Datagram(outgoing[0]),
+                    bytes,
+                    clock(&cx) + 2_000_000,
+                    || true,
+                )
+                .unwrap();
+        }
+        let mut received = Vec::new();
+        for _ in 0..64 {
+            server.drive(&cx, Duration::ZERO, || true).await.unwrap();
+            client
+                .drive(&cx, Duration::from_millis(1), || true)
+                .await
+                .unwrap();
+            // First a pass that owns nothing here, then the real consumer.
+            client
+                .receive(&cx, || true, |_, _| Ok(Disposition::Blocked))
+                .unwrap();
+            client
+                .receive(
+                    &cx,
+                    || true,
+                    |r, bytes| {
+                        assert_eq!(r, Route::Datagram(incoming[0]));
+                        received.push(bytes.to_vec());
+                        Ok(Disposition::Consumed)
+                    },
+                )
+                .unwrap();
+            if received.len() == sent.len() {
+                break;
+            }
+        }
+        assert_eq!(received, sent, "a blocking pass lost datagrams");
+    });
+}

@@ -397,7 +397,8 @@ pub struct QuicRecords {
     streams: Vec<StreamRoute>,
     datagrams: Vec<DatagramRoute>,
     inbound: Vec<Inbound>,
-    pending_datagrams: datagrams::PendingDatagrams,
+    // Boxed: callers hold this transport in futures near Clippy's 16 KiB limit.
+    pending_datagrams: Box<datagrams::PendingDatagrams>,
     policy: Policy,
     last_now: Option<u64>,
     read_bytes: u64,
@@ -516,7 +517,7 @@ impl QuicRecords {
             streams: streams.to_vec(),
             datagrams: datagrams.to_vec(),
             inbound,
-            pending_datagrams: datagrams::PendingDatagrams::new(),
+            pending_datagrams: Box::new(datagrams::PendingDatagrams::new()),
             policy,
             last_now: None,
             read_bytes: 0,
@@ -1136,6 +1137,10 @@ impl QuicRecords {
         if self.pending_datagrams.receive_one(current, handler)? != 0 {
             return Ok(1);
         }
+        // A parked arrival waits for its route: read no further native record.
+        if self.pending_datagrams.waiting(current) {
+            return Ok(0);
+        }
         // Budget native records EXAMINED, separately from records consumed by
         // handlers. Retired bindings and a flooded blocked route cannot make
         // this loop unbounded, nor force one idle turn per discarded packet.
@@ -1175,13 +1180,16 @@ impl QuicRecords {
                 binding,
                 Messages::Exact(kind),
             )?;
-            if self.pending_datagrams.hold(
+            if !self.pending_datagrams.hold(
                 route,
                 bytes,
                 current,
                 self.policy.record_lifetime_micros,
-            )? && self.pending_datagrams.receive_one(current, handler)? != 0
-            {
+            )? {
+                // Parked behind its full route: the rest stays native-queued.
+                break;
+            }
+            if self.pending_datagrams.receive_one(current, handler)? != 0 {
                 return Ok(1);
             }
         }
