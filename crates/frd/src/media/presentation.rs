@@ -43,6 +43,28 @@ impl DecodeJob {
     fn picture(&self) -> &ReceivedPicture {
         self.picture.as_ref().expect("owned decode picture")
     }
+    /// Check before staging and again before the first IPC write. Recovery
+    /// tolerance only drains STARTED work; it never admits an expired picture.
+    /// False returns this still-owned job to the canonical receiver tick, which
+    /// establishes the actual failure and its original recovery owner.
+    fn may_submit(&self, cx: &Cx, current: u64, drain_recovery: bool) -> Result<bool, Error> {
+        if cx.is_cancel_requested() {
+            return Err(Error::Worker(worker::Error::Cancelled));
+        }
+        if !self.picture().is_live() {
+            return Err(Error::Receiver(
+                fr_media::delivery::DeliveryError::DecodeMismatch,
+            ));
+        }
+        if current < self.picture().reference_deadline_us() {
+            return Ok(true);
+        }
+        if drain_recovery {
+            Ok(false)
+        } else {
+            Err(Error::Worker(worker::Error::Deadline))
+        }
+    }
     pub(crate) fn complete(
         mut self,
         cx: &Cx,
@@ -76,6 +98,15 @@ impl Drop for DecodeJob {
 struct DecodeCall<'a> {
     job: Option<DecodeJob>,
     operation: MediaOperation<'a>,
+}
+impl DecodeCall<'_> {
+    /// No request was submitted, so there is no uncertain native operation to
+    /// poison. Keep the reservation and leave stage absent: this is NOT decode
+    /// success. The canonical loop must tick/recover before dropping the job.
+    fn retire_unsubmitted(mut self) -> DecodeJob {
+        self.operation.completed = true;
+        self.job.take().expect("owned unsubmitted decode job")
+    }
 }
 impl Presenter {
     /// A successful network startup stamps the presenter before handing it to
@@ -135,6 +166,9 @@ impl Presenter {
     /// keeps servicing expiry, renewal and input suspension while this one charged
     /// borrow drains, then retires it without making a stale decoded receipt.
     /// `complete` still enforces the ORIGINAL reference deadline and generation.
+    /// An expired job which has not started IPC is returned without a native
+    /// stage, still charged, for the SAME canonical recovery admission. It must
+    /// never be mistaken for a decoded/presented receipt or sent after staging.
     ///
     /// Native errors, context cancellation and future abandonment still poison
     /// the worker. Callers without negotiated recovery retain fail-fast fencing.
@@ -169,8 +203,8 @@ impl Presenter {
                 return Err(Error::InvalidFrame);
             }
             let current = host_now(cx)?.as_micros();
-            if current >= picture.reference_deadline_us() {
-                return Err(Error::Worker(worker::Error::Deadline));
+            if !job.may_submit(cx, current, drain_recovery)? {
+                return Ok(call.retire_unsubmitted());
             }
             // A late picture is skipped only when something newer supersedes it.
             // The newest one is what the source shows; on a static desktop no
@@ -195,6 +229,11 @@ impl Presenter {
                 kind,
                 picture.bytes(),
             )?;
+            // Staging may allocate/copy a large admitted AU on a loaded client.
+            // Recheck time and authority before native IPC takes any ownership.
+            if !job.may_submit(cx, host_now(cx)?.as_micros(), drain_recovery)? {
+                return Ok(call.retire_unsubmitted());
+            }
             let nanos = picture
                 .reference_deadline_us()
                 .checked_mul(1000)
