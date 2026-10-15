@@ -11,16 +11,16 @@ prepare)
   (setsid nohup xev -geometry 600x400+600+400 -name "fr-live-xev-$R" > "$D/xev.log" 2>&1 < /dev/null &)
   (printf 'fr-live-host-before-%s' "$R" | setsid nohup bash -c 'exec -a "fr-live-clip-$0" xclip -selection clipboard -loops 0' "$R" > /dev/null 2>&1 &)
   sudo mkdir -m 700 "$D/drop"
-  bash "$H/pulse.sh" "$D/pa" fr_host ;;
+  [ "${FR_LIVE_AUDIO:-1}" = 0 ] || bash "$H/pulse.sh" "$D/pa" fr_host ;;
 player) # SWITCH STOP
   (env HOME="$D/pa" XDG_RUNTIME_DIR="$D/pa" PULSE_RUNTIME_PATH="$D/pa" setsid nohup \
     python3 -u "$H/tone_player.py" "unix:$D/pa/native" fr_host 450 1050 "$1" "$2" > "$D/player.log" 2>&1 < /dev/null &)
   sleep 1; head -1 "$D/player.log" ;;
 serve) # BIN: root frd in a private MOUNT namespace (tmpfs /root keeps libpulse's
   # root cookie off the real /root); the network namespace is the host's.
-  B=$1
-  printf '#!/bin/bash\nmount -t tmpfs -o mode=0700 tmpfs /root\nexec env DISPLAY=%s XAUTHORITY=%s %s/frd run --encoder software --display %s --worker %s/fr-media-worker --input-agent %s/fr-input-agent --clipboard --files %s/drop --audio --audio-server %s/pa/native --once --json\n' \
-    "$DISPLAY" "$XAUTHORITY" "$B" "$DISPLAY" "$B" "$B" "$D" "$D" > "$D/serve.sh"
+  B=$1; AUDIO="--audio --audio-server $D/pa/native"; [ "${FR_LIVE_AUDIO:-1}" = 0 ] && AUDIO=""
+  printf '#!/bin/bash\nmount -t tmpfs -o mode=0700 tmpfs /root\nexec env DISPLAY=%s XAUTHORITY=%s %s/frd run --encoder software --display %s --worker %s/fr-media-worker --input-agent %s/fr-input-agent --clipboard --files %s/drop %s --once --json\n' \
+    "$DISPLAY" "$XAUTHORITY" "$B" "$DISPLAY" "$B" "$B" "$D" "$AUDIO" > "$D/serve.sh"
   chmod +x "$D/serve.sh"
   (sudo setsid nohup unshare --mount --propagation private "$D/serve.sh" > "$D/host.log" 2>&1 < /dev/null &)
   for _ in $(seq 1 120); do grep -q '"listening"' "$D/host.log" && break; sleep 0.5; done

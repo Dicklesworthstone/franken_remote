@@ -9,7 +9,8 @@
 # HOST_NODE is what `fr connect` dials (node ID or name). HOST_BIN holds frd,
 # fr-media-worker and fr-input-agent; CLIENT_BIN holds fr, fr-media-worker and
 # fr-opus-worker. Env: WORK (directory under each node's home, default
-# fr_live), HOST_DISPLAY (77), CLIENT_DISPLAY (78).
+# fr_live), HOST_DISPLAY (77), CLIENT_DISPLAY (78), AUDIO (1; 0 skips audio
+# on nodes without PulseAudio, and the audio row then reads SKIP).
 # Host needs sudo, Xvfb, xauth, mcookie, xsetroot, xclock, xev, xclip, python3,
 # pulseaudio; the client needs Xvfb, xauth, mcookie, xdotool, xclip, python3,
 # pulseaudio. Displays are private Xvfb servers and audio uses private
@@ -24,8 +25,9 @@ HN=${HOST_DISPLAY:-77}; CN=${CLIENT_DISPLAY:-78}
 HW=$(ssh "$HS" 'echo $HOME')/${WORK:-fr_live}; CW=$(ssh "$CS" 'echo $HOME')/${WORK:-fr_live}
 R=$(date +%s); SELF=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$OUT"; exec > >(tee "$OUT/transcript.txt") 2>&1
-host() { ssh "$HS" "bash $HW/live/host.sh $1 $HW $HN $R ${*:2}"; }
-client() { ssh "$CS" "bash $CW/live/client.sh $1 $CW $CN $R ${*:2}"; }
+A=${AUDIO:-1}
+host() { ssh "$HS" "FR_LIVE_AUDIO=$A bash $HW/live/host.sh $1 $HW $HN $R ${*:2}"; }
+client() { ssh "$CS" "FR_LIVE_AUDIO=$A bash $CW/live/client.sh $1 $CW $CN $R ${*:2}"; }
 value() { grep -m1 "^$1=" | cut -d= -f2-; }
 
 echo "== run $R; source $(git -C "$SELF" rev-parse --short HEAD 2>/dev/null)$(git -C "$SELF" diff --quiet 2>/dev/null || echo +dirty)"
@@ -35,7 +37,7 @@ echo "host binaries: $(ssh "$HS" "sha256sum $HB/frd $HB/fr-media-worker $HB/fr-i
 echo "client binaries: $(ssh "$CS" "sha256sum $CB/fr $CB/fr-media-worker $CB/fr-opus-worker | cut -c1-16 | tr '\n' ' '")"
 echo "== host: display, xev, pre-session copy, drop dir, PulseAudio"; host prepare
 NOW=$(ssh "$HS" date +%s); SWITCH=$((NOW + 40)); STOP=$((NOW + 70))
-host player "$SWITCH" "$STOP"
+[ "$A" = 0 ] || host player "$SWITCH" "$STOP"
 echo "== host: frd run"; host serve "$HB"
 echo "== client: file, PulseAudio + recorder, fr connect"
 SENT=$(client prepare "$STOP" | tee /dev/stderr | value file_sha256)
@@ -53,7 +55,7 @@ echo "host colour change -> viewer pixel (ms): $VIEW_MS"
 sleep 8; HOST_CLIP=$(host clip-read); echo "host clipboard: $HOST_CLIP"
 host clip-copy "fr-live-host-after-$R"; sleep 8
 CLIENT_CLIP=$(client clip-read); echo "client clipboard: $CLIENT_CLIP"
-WAIT=$((STOP - $(date +%s) + 2)); [ "$WAIT" -gt 0 ] && { echo "== audio: waiting ${WAIT}s"; sleep "$WAIT"; }
+WAIT=$((STOP - $(date +%s) + 2)); [ "$A" != 0 ] && [ "$WAIT" -gt 0 ] && { echo "== audio: waiting ${WAIT}s"; sleep "$WAIT"; }
 echo "== client: close viewer, completion, audio analysis, path"
 FINISH=$(client finish "$SWITCH" "$CB" "$NODE" | tee /dev/stderr)
 echo "== host evidence"; EVIDENCE=$(host evidence send.bin | tee /dev/stderr)
@@ -79,7 +81,8 @@ print('PASS' if h >= 0.2 and abs(h - v) <= 0.1 else 'FAIL')" "$HOST_VIEW" "$VIEW
   row clipboard_client_to_host "$([ "$HOST_CLIP" = "fr-live-client-$R" ] && echo PASS || echo FAIL)" ""
   row clipboard_host_to_client "$([ "$CLIENT_CLIP" = "fr-live-host-after-$R" ] && echo PASS || echo FAIL)" ""
   row file_send "$([ -n "$SENT" ] && [ "$(echo "$EVIDENCE" | value file_sha256)" = "$SENT" ] && echo PASS || echo FAIL)" "100000 bytes, sha256 match"
-  row audio_tone "$([ "$(echo "$FINISH" | value verdict)" = pass ] && echo PASS || echo FAIL)" "switch->client $(echo "$FINISH" | value switch_to_client_detect_ms) ms; $(echo "$FINISH" | grep -o 'sustained_hz2_blocks=[0-9/]*')"
+  if [ "$A" = 0 ]; then row audio_tone SKIP "AUDIO=0: no sound server on a node"; else
+  row audio_tone "$([ "$(echo "$FINISH" | value verdict)" = pass ] && echo PASS || echo FAIL)" "switch->client $(echo "$FINISH" | value switch_to_client_detect_ms) ms; $(echo "$FINISH" | grep -o 'sustained_hz2_blocks=[0-9/]*')"; fi
   row controller_close_exchange "$(echo "$COMPLETION" | python3 -c "import json,sys
 try: d=json.load(sys.stdin); print('PASS' if d['close_exchange']['request_acknowledged'] else 'FAIL')
 except Exception: print('FAIL')")" "lease_report $(echo "$COMPLETION" | python3 -c "import json,sys

@@ -10,14 +10,16 @@ case $CMD in
 prepare) # STOP
   mkdir -p "$D"; head -c 100000 /dev/urandom > "$D/send.bin"
   echo "file_sha256=$(sha256sum "$D/send.bin" | cut -d' ' -f1)"
+  mkdir -p "$D/pa"; [ "${FR_LIVE_AUDIO:-1}" = 0 ] && exit 0
   bash "$H/pulse.sh" "$D/pa" fr_view > /dev/null
   (env HOME="$D/pa" XDG_RUNTIME_DIR="$D/pa" PULSE_RUNTIME_PATH="$D/pa" setsid nohup \
     python3 -u "$H/tone_recorder.py" "unix:$D/pa/native" fr_view "$1" "$D/rec.bin" > "$D/rec.log" 2>&1 < /dev/null &) ;;
 connect) # BIN NODE (one attempt: the host runs --once, so a reconnect
   # could only hide the first attempt's real end behind host_not_answering)
+  AUDIO=--audio; [ "${FR_LIVE_AUDIO:-1}" = 0 ] && AUDIO=""
   (env HOME="$D/pa" XDG_CONFIG_HOME="$D/pa" XDG_RUNTIME_DIR="$D/pa" PULSE_RUNTIME_PATH="$D/pa" \
     PULSE_SERVER="unix:$D/pa/native" setsid nohup timeout 180 "$1/fr" connect "$2" --control \
-    --clipboard --send "$D/send.bin" --audio --experimental-native --display only --attempts 1 \
+    --clipboard --send "$D/send.bin" $AUDIO --experimental-native --display only --attempts 1 \
     --x-display "$DISPLAY" --worker "$1/fr-media-worker" --json > "$D/client.log" 2> "$D/client.err" < /dev/null &) ;;
 drive) # TEXT
   W=$(viewer); echo "viewer=${W:-none}"; [ -z "$W" ] && exit 0
@@ -37,7 +39,7 @@ finish) # SWITCH BIN NODE
   W=$(viewer); [ -n "$W" ] && python3 "$H/close_window.py" "$DISPLAY" "$W"
   for _ in $(seq 1 40); do [ -s "$D/client.log" ] && break; sleep 0.5; done
   echo "completion=$(cat "$D/client.log")"
-  python3 "$H/tone_analyze.py" "$D/rec.bin" 450 1050 "$1"
+  [ "${FR_LIVE_AUDIO:-1}" = 0 ] && echo verdict=skipped || python3 "$H/tone_analyze.py" "$D/rec.bin" 450 1050 "$1"
   "$2/fr" hosts --json 2>/dev/null | python3 -c "
 import json, sys
 peers = json.load(sys.stdin).get('peers', [])

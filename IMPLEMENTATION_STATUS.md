@@ -67,6 +67,19 @@ Ubuntu 26.04 on the same tailnet.
   and 20 KB. It is now the lease's authorization deadline (~2.7 s). Bulk data
   still moves ~8 KiB per RTT beside video (fr-clipboard-wan-item-ceiling-6mlb,
   owner decision).
+- 2026-10-15, release builds, `scripts/live/two_node.sh` with `AUDIO=0`: ts2
+  (`frd run --encoder software`) hosted and the idle ts1 controlled, over a
+  direct tailnet path. Every row passed twice: session open, view pixels,
+  keys, wheel, clipboard both ways (with the host's pre-session copy), a
+  100 KB file with a matching sha256, the controller's closing exchange (host
+  lease report `session_ended`, cleanup `fenced`) and `stopped`. A host
+  colour change reached the client's pixel in 102-167 ms. Audio was not
+  tested: ts2 has no sound server. Before 68663b7 the closing exchange failed
+  3 of 3 with a file lane open: the input fence cancelled the session's
+  context, the file lane's stream reset then refused it, and the failed
+  retirement closed the connection (`transport: Closed`). Earlier release
+  runs with the busy trj as client ended `video_worker_late` or
+  `video_reference_lost` (fr-tqu7).
 
 **What it took** (each with unit tests and a planted negative):
 - Asupersync pinned to git `ee72b665e` (0.6.0). Published 0.5.0 sends each
