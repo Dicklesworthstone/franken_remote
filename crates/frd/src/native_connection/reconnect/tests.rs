@@ -262,6 +262,20 @@ fn established_streaming_transport_failures_have_the_same_policy_in_every_owner(
     }
 }
 
+/// Only this client's own worker missing a request deadline is named; its
+/// other failures keep the generic path.
+#[test]
+fn only_the_clients_own_worker_deadline_is_a_named_lapse() {
+    use crate::worker::Error as W;
+    for error in [W::Deadline, W::PeerClosed, W::PipeFailed, W::Cancelled] {
+        let failure = Failure::Observation(ObserverError::Streaming(StreamingViewerError::Media(
+            crate::media::Error::Worker(error),
+        )));
+        let expected = (error == W::Deadline).then_some(Lapse::VideoWorkerLate);
+        assert_eq!(lapse(failure), expected, "{error:?}");
+    }
+}
+
 #[test]
 fn only_transport_deadlines_and_stale_views_are_named_lapses() {
     use crate::session_startup::{ControlledViewerError as C, Error as S};

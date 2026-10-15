@@ -68,15 +68,17 @@ Connect uses fresh installed-tailnet identity and strict TLS on every attempt.
 Connect needs exactly one role. --view-only never requests control.
 --control requests input control ONCE, after the window shows a fresh frame; the
 host must run frd run --input-agent. Keys, buttons, absolute pointer and discrete
-line-wheel scrolling are available (no text, pixel-scroll or audio).
+line-wheel scrolling are available (no text or pixel-scroll input).
 Lost or refused control is never
 retried or reacquired: after a request, fr does not reconnect.
 A session that ends without a host report names its local cause: view_stale
 (the picture could not be proven fresh in time), transport_deadline_expired (a
 record missed its delivery deadline), host_not_heard (host renewals stopped
 arriving), video_reference_lost (lost video could not be repaired in time),
-video_startup_expired (a decoder start or restart ran out of time) or
-control_renewal_failed (the control lease could not be renewed in time);
+video_startup_expired (a decoder start or restart ran out of time),
+video_worker_late (this machine's decoder/presenter missed a deadline, usually
+overload) or control_renewal_failed (the control lease could not be renewed in
+time);
 any other end is native_session_failed, its typed chain on stderr.
 --clipboard (with --control; build with linux-clipboard) lets the UTF-8 text
 CLIPBOARD follow the control lease both ways, when the host runs frd run
@@ -87,7 +89,7 @@ runs frd run --files DIR; symlinks, directories and special files are refused
 before connecting. The host never overwrites: a taken name is refused. The
 completion reports each file by index and size only (host-reported outcome), or
 the typed reason nothing was sent. --clipboard and --send may be combined.
---audio (with --view-only only) asks for host playback audio; without it no audio
+--audio (with --view-only or --control) asks for host playback audio; without it no audio
 capability is offered. The host must run frd run --audio. Output goes to the local
 PulseAudio server (--audio-server, else PULSE_SERVER, else
 $XDG_RUNTIME_DIR/pulse/native) and its default sink unless --audio-sink names one.

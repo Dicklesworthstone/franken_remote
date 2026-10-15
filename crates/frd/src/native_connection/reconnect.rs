@@ -498,6 +498,10 @@ pub enum Lapse {
     /// The host sent an authenticated record that no lane of this session
     /// claims. The session ends on the protocol fault instead of guessing.
     UnexpectedRecord,
+    /// This client's own decode/present worker did not answer a request
+    /// within its deadline (live: a client starved for CPU), so the session
+    /// ended instead of showing pictures late.
+    VideoWorkerLate,
 }
 pub fn lapse(failure: Failure) -> Option<Lapse> {
     use crate::session_startup::{ControlledViewerError as C, Error as S};
@@ -590,6 +594,9 @@ pub fn lapse(failure: Failure) -> Option<Lapse> {
         Failure::Observation(ObserverError::Streaming(StreamingViewerError::UnclaimedRecord(_))) => {
             Some(Lapse::UnexpectedRecord)
         }
+        Failure::Observation(ObserverError::Streaming(StreamingViewerError::Media(
+            crate::media::Error::Worker(crate::worker::Error::Deadline),
+        ))) => Some(Lapse::VideoWorkerLate),
         Failure::Observation(ObserverError::Streaming(error))
             if streaming_transport(error) == Some(T::Expired) =>
         {

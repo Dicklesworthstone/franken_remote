@@ -30,6 +30,10 @@ pub(super) fn reconnect(error: reconnect::Failure) -> Option<Failure> {
             "host_record_unexpected",
             "The host sent a session record this client does not handle, so the session ended on the protocol fault; nothing is replayed. Check that host and client run the same FrankenRemote build, and report it if they do.",
         ),
+        Lapse::VideoWorkerLate => failure(
+            "video_worker_late",
+            "This machine's video decoder/presenter did not finish a picture within its deadline, which usually means this machine is overloaded, so the session ended instead of showing pictures late; nothing is replayed. Check this machine's load (for example with top) before starting a new session.",
+        ),
         Lapse::ControlRenewalFailed => failure(
             "control_renewal_failed",
             "The control lease could not be renewed, or proven live by a newer host ticket, before its deadline, so control ended; nothing is replayed and control is not reacquired automatically. Check the path's round-trip time and loss (tailscale ping) before starting a new session.",
@@ -101,6 +105,12 @@ mod tests {
         )))
         .unwrap();
         assert_eq!(startup.code, "video_startup_expired");
+        let late = reconnect(observed(Streaming::Media(frd::media::Error::Worker(
+            frd::worker::Error::Deadline,
+        ))))
+        .unwrap();
+        assert_eq!(late.code, "video_worker_late");
+        assert_eq!(late.exit, 1);
         assert_eq!(startup.exit, 1);
         assert!(startup.next.contains("tailscale ping"));
         assert_eq!(deadline.code, "transport_deadline_expired");
