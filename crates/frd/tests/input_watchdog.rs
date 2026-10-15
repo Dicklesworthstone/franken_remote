@@ -235,6 +235,7 @@ fn another_runtime_ambient_clock_cannot_take_over_the_timer() {
     let cx = a.request_cx_with_budget(Budget::INFINITE);
     let owner = session(&cx, 3_000_000);
     let mut watchdog = Watchdog::new(cx, owner.monitor()).unwrap();
+    let before = driver.pending_count();
     let other = runtime();
     other.block_on(async {
         std::future::poll_fn(|task| {
@@ -243,8 +244,14 @@ fn another_runtime_ambient_clock_cannot_take_over_the_timer() {
         })
         .await;
     });
+    // The timer is registered on the watchdog's own driver, not the polling
+    // runtime's ambient one. Count the registration: this runtime's idle
+    // worker also processes due timers, so once the clock advances it can
+    // fire the timer before this thread does (a fired count of 0, seen once
+    // on a macOS CI runner).
+    assert_eq!(driver.pending_count(), before + 1);
     clock.advance_to(Time::from_secs(3));
-    assert_eq!(driver.process_timers(), 1);
+    let _ = driver.process_timers();
     let (_, waker) = count_waker();
     let mut task = Context::from_waker(&waker);
     assert_eq!(
