@@ -41,6 +41,7 @@ impl Earlier {
         ends: [(0, ""); 2],
         len: 0,
     };
+    #[cfg(any(test, all(target_os = "linux", feature = "linux-desktop")))]
     pub fn push(&mut self, attempt: u8, code: &'static str) {
         if let Some(slot) = self.ends.get_mut(usize::from(self.len)) {
             *slot = (attempt, code);
@@ -48,6 +49,7 @@ impl Earlier {
         }
     }
     /// The ends of attempts before `last` only.
+    #[cfg(any(test, all(target_os = "linux", feature = "linux-desktop")))]
     #[must_use]
     pub fn before(self, last: u8) -> Self {
         let mut kept = Self::NONE;

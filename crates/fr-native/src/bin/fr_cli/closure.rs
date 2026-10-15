@@ -135,7 +135,7 @@ pub(super) fn failure(value: Closed) -> Failure {
 }
 /// The same reason carried only by the host's terminal close code: no Closed
 /// report arrived, so none is shown and its cleanup and effects are unknown.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", any(test, feature = "linux-desktop")))]
 pub(super) fn close_code_failure(reason: fr_wire::closure::ClosedReason) -> Failure {
     Failure::new(
         closed_code(reason),

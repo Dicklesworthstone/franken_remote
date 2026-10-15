@@ -61,6 +61,8 @@ impl Raw {
 }
 unsafe extern "C" {
     pub(crate) fn fr_x11_transfer_stats(surface: *mut c_void, out: *mut Raw);
+    #[cfg(feature = "linux-displays")]
     pub(crate) fn fr_ximage_stats(capture: *mut c_void, out: *mut Raw);
+    #[cfg(feature = "linux-displays")]
     pub(crate) fn fr_ximage_free(capture: *mut c_void);
 }
