@@ -189,16 +189,35 @@ int fr_decoder_send(FrDecoder *d,const uint8_t *bytes,size_t len,int64_t pts) {
     }
     av_packet_free(&p); return result(r);
 }
-int fr_decoder_receive(FrDecoder *d,uint8_t *out,size_t len,int64_t *pts) {
-    if (!d || !out || !pts || !bgra_buffer(d->w,d->h,len)) return FR_INVALID;
+/* Both output modes complete the same real decode and validate the same
+   frame. Reference-only work must never bypass native geometry/error checks. */
+static int fr_decoder_output(FrDecoder *d) {
     if (!d->have_frame) { int r=avcodec_receive_frame(d->ctx,d->frame); if (r<0) return result(r); d->have_frame=1; }
     AVFrame *f=d->frame;
     if (f->width!=d->w || f->height!=d->h || f->format!=AV_PIX_FMT_YUV420P || f->pts<0 || f->decode_error_flags) return FR_GEOMETRY;
+    return FR_OK;
+}
+static int fr_decoder_retire_output(FrDecoder *d,int64_t *pts) {
+    *pts=d->frame->pts;
+    /* Release ONLY the caller's output reference. avcodec retains its own DPB
+       references for following predicted pictures. Never flush or skip decode. */
+    av_frame_unref(d->frame); d->have_frame=0; return FR_OK;
+}
+int fr_decoder_receive_reference(FrDecoder *d,int64_t *pts) {
+    if (!d || !pts) return FR_INVALID;
+    int code=fr_decoder_output(d); if (code!=FR_OK) return code;
+    /* No BGRA destination, swscale context, conversion, or presentation. */
+    return fr_decoder_retire_output(d,pts);
+}
+int fr_decoder_receive(FrDecoder *d,uint8_t *out,size_t len,int64_t *pts) {
+    if (!d || !out || !pts || !bgra_buffer(d->w,d->h,len)) return FR_INVALID;
+    int code=fr_decoder_output(d); if (code!=FR_OK) return code;
+    AVFrame *f=d->frame;
     d->scale=sws_getCachedContext(d->scale,d->w,d->h,(enum AVPixelFormat)f->format,d->w,d->h,AV_PIX_FMT_BGRA,SWS_FAST_BILINEAR,NULL,NULL,NULL);
     if (!d->scale || sws_setColorspaceDetails(d->scale,sws_getCoefficients(SWS_CS_ITU709),0,sws_getCoefficients(SWS_CS_ITU709),1,0,1<<16,1<<16)<0) return FR_CODEC;
     uint8_t *dst[4]={out,NULL,NULL,NULL}; int stride[4]={d->w*4,0,0,0};
     if (sws_scale(d->scale,(const uint8_t *const *)f->data,f->linesize,0,d->h,dst,stride)!=d->h) return FR_CODEC;
-    *pts=f->pts; av_frame_unref(f); d->have_frame=0; return FR_OK;
+    return fr_decoder_retire_output(d,pts);
 }
 
 #include "x11_image.c"

@@ -74,6 +74,7 @@ unsafe extern "C" {
     fn fr_decoder_free(p: *mut c_void);
     fn fr_decoder_send(p: *mut c_void, bytes: *const u8, len: usize, pts: i64) -> c_int;
     fn fr_decoder_receive(p: *mut c_void, bytes: *mut u8, len: usize, pts: *mut i64) -> c_int;
+    fn fr_decoder_receive_reference(p: *mut c_void, pts: *mut i64) -> c_int;
     fn fr_x11_new(
         display: *const c_char,
         presenter: c_int,
@@ -540,6 +541,44 @@ impl HevcDecoder {
         self.last = Some(unit.frame());
         Ok(())
     }
+    /// Complete one real decode whose pixels are not needed for presentation.
+    /// No CPU BGRA buffer is acquired or converted. Only the native output
+    /// reference is released; the codec keeps its reference-picture pool for
+    /// later dependent frames. This is decode completion, never visible state.
+    /// `NeedInput` consumes neither an identity nor the existing spare buffer.
+    pub fn poll_reference(&mut self) -> Result<FrameId, NativeError> {
+        if self.closed {
+            return Err(NativeError::Closed);
+        }
+        let mut pts = 0;
+        // SAFETY: exclusively owned live decoder and writable scalar output.
+        // The bridge decodes and validates the same frame as receive(), then
+        // drops only its AVFrame reference, without touching Rust pixel memory.
+        self.receive_status(unsafe {
+            fr_decoder_receive_reference(self.raw.as_ptr(), &raw mut pts)
+        })?;
+        self.complete_output(pts)
+    }
+    /// Both output modes consume exactly the oldest accepted input identity.
+    /// An unexpected native output is terminal, not a reason to skip an entry.
+    fn complete_output(&mut self, pts: i64) -> Result<FrameId, NativeError> {
+        let Some(id) = self.pending.pop_front() else {
+            self.closed = true;
+            return Err(NativeError::Codec);
+        };
+        if i64::try_from(id.as_raw()) != Ok(pts) {
+            self.closed = true;
+            return Err(NativeError::UnsupportedBitstream);
+        }
+        Ok(id)
+    }
+    fn receive_status(&mut self, code: c_int) -> Result<(), NativeError> {
+        let result = status(code);
+        if result.as_ref().is_err_and(|e| *e != NativeError::NeedInput) {
+            self.closed = true;
+        }
+        result
+    }
     pub fn poll_output(&mut self) -> Result<(FrameId, BgraFrame), NativeError> {
         if self.closed {
             return Err(NativeError::Closed);
@@ -552,7 +591,7 @@ impl HevcDecoder {
         };
         let mut pts = 0;
         // SAFETY: packed BGRA destination is exactly the admitted size; bridge rejects changed geometry.
-        let received = status(unsafe {
+        let received = self.receive_status(unsafe {
             fr_decoder_receive(
                 self.raw.as_ptr(),
                 bytes.as_mut_ptr(),
@@ -567,11 +606,7 @@ impl HevcDecoder {
             }
             return Err(error);
         }
-        let id = self.pending.pop_front().ok_or(NativeError::Codec)?;
-        if id.as_raw() != pts.cast_unsigned() {
-            self.closed = true;
-            return Err(NativeError::UnsupportedBitstream);
-        }
+        let id = self.complete_output(pts)?;
         Ok((
             id,
             BgraFrame {
