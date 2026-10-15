@@ -150,33 +150,37 @@ fn failed_share(fail_cleanup: bool) {
     let runtime = network::runtime();
     let client = runtime.request_cx_with_budget(Budget::INFINITE);
     runtime.block_on(async {
-        timeout(client.now(), Duration::from_secs(12), async {
-            until(&client, || {
-                events
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|e| matches!(e, Event::Listening { .. }))
-            })
-            .await;
-            let native = fixture::client(&client, address()).await;
-            let mut viewer = Viewer::new(
-                client.clone(),
-                native,
-                super::persistent_desktop::offer(),
-                fr_transport::quic::Policy::default(),
-                Duration::from_secs(3),
-            )
-            .unwrap();
-            while !viewer.is_complete() && !host.is_finished() {
-                if viewer.drive(Duration::from_millis(5)).await.is_err() {
-                    break;
+        timeout(
+            client.now(),
+            Duration::from_secs(12),
+            Box::pin(async {
+                until(&client, || {
+                    events
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|e| matches!(e, Event::Listening { .. }))
+                })
+                .await;
+                let native = fixture::client(&client, address()).await;
+                let mut viewer = Viewer::new(
+                    client.clone(),
+                    native,
+                    super::persistent_desktop::offer(),
+                    fr_transport::quic::Policy::default(),
+                    Duration::from_secs(3),
+                )
+                .unwrap();
+                while !viewer.is_complete() && !host.is_finished() {
+                    if viewer.drive(Duration::from_millis(5)).await.is_err() {
+                        break;
+                    }
                 }
-            }
-            // Keep the original connection alive until the host has handled its
-            // real source failure. No fabricated decoder reply or reconnect.
-            until(&client, || host.is_finished()).await;
-        })
+                // Keep the original connection alive until the host has handled its
+                // real source failure. No fabricated decoder reply or reconnect.
+                until(&client, || host.is_finished()).await;
+            }),
+        )
         .await
         .unwrap();
     });

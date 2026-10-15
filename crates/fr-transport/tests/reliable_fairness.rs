@@ -12,6 +12,11 @@ use fr_wire::HEADER_BYTES;
 use std::time::Duration;
 use support::{clock, native_pair, runtime};
 
+/// A sender turn that also services the peer's ACKs. `drive(Duration::ZERO)`
+/// stages prefixes but does not process received packets, so no
+/// acknowledgement epoch can close in a loop of zero-wait turns.
+const ACK_TURN: Duration = Duration::from_millis(1);
+
 struct Peers {
     server: QuicRecords,
     client: QuicRecords,
@@ -128,11 +133,7 @@ fn a_large_bulk_record_cannot_hide_another_lanes_small_record() {
         );
 
         for _ in 0..128 {
-            peers
-                .server
-                .drive(&cx, Duration::ZERO, || true)
-                .await
-                .unwrap();
+            peers.server.drive(&cx, ACK_TURN, || true).await.unwrap();
             peers
                 .client
                 .drive(&cx, Duration::from_millis(1), || true)
@@ -150,11 +151,7 @@ fn a_large_bulk_record_cannot_hide_another_lanes_small_record() {
             if peers.server.usage().retained_send_records == 0 {
                 break;
             }
-            peers
-                .server
-                .drive(&cx, Duration::ZERO, || true)
-                .await
-                .unwrap();
+            peers.server.drive(&cx, ACK_TURN, || true).await.unwrap();
             peers
                 .client
                 .drive(&cx, Duration::from_millis(1), || true)
@@ -231,11 +228,7 @@ fn a_waiting_epoch_does_not_bypass_ack_accounting_or_hold_another_lane() {
 
         // Only after the sender services ACKs can the waiting epoch stage.
         for _ in 0..128 {
-            peers
-                .server
-                .drive(&cx, Duration::ZERO, || true)
-                .await
-                .unwrap();
+            peers.server.drive(&cx, ACK_TURN, || true).await.unwrap();
             peers
                 .client
                 .drive(&cx, Duration::from_millis(1), || true)
