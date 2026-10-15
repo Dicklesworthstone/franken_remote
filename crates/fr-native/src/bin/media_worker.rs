@@ -2,6 +2,10 @@
 //! Private media process, launched through parent-owned anonymous pipes.
 //! There is deliberately no socket, tailnet API, certificate or input handling.
 #[cfg(target_os = "linux")]
+#[path = "media_worker/cursor.rs"]
+mod cursor;
+
+#[cfg(target_os = "linux")]
 mod linux {
     use fr_core::limits::ProtocolLimits;
     use fr_media::worker::cursor::Observation;
@@ -280,8 +284,7 @@ mod linux {
                     None => last.as_mut(),
                 };
                 if let Some(frame) = retained {
-                    overlay.recomposite(frame, place).map_err(native)?;
-                    surface.present(frame).map_err(native)?;
+                    super::cursor::repaint(surface, overlay, frame, place).map_err(native)?;
                     if verify && surface.snapshot().map_err(native)?.pixels() != frame.pixels() {
                         return Err(Error::NativeFailure);
                     }
