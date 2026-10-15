@@ -35,6 +35,37 @@ API readiness. See [the startup evidence](PRESENTATION_FRESHNESS.md#exact-native
 This is a deliberately narrow baseline, not CABAC validation, a security sandbox,
 hardware qualification or an authenticated network session.
 
+## Reference-only decode completion
+
+The private worker's existing `Decode` request completes HEVC reference work
+without acquiring a Rust BGRA output or running YUV-to-BGRA conversion. It uses
+`HevcDecoder::poll_reference`; `Present` continues to use the pixel-producing
+path. Both modes call the real `avcodec_receive_frame`, check the admitted output
+geometry, pixel format, decode-error flags and oldest accepted frame identity,
+and release only the returned `AVFrame` reference. Codec-owned reference pictures
+remain available for later predicted frames. This is not frame skipping, a DPB
+flush, a replacement codec, or a claim of zero native allocations.
+
+A pending decode-only request keeps its mode through `NeedInput`. Successful
+completion returns only `Decoded` and the checked frame ID, never `Presented`.
+The last displayed image, fitted output and cursor save-under stay untouched;
+cursor movement after decode-only work recomposites the last presented picture.
+Malformed media and native failures still refuse. The original worker watchdog,
+reference usefulness, display freshness, source-evidence and input-authority
+checks are unchanged; finishing reference work creates no visible-readiness claim.
+
+`reference_decode` tests use actual software HEVC encoding/decoding and real
+private worker pipes/X11 windows. They compare later presented bytes with a
+full-output decoder across long predicted chains, check allocation-free Rust
+reference polls, immutable retained pixels, native-size/fitted presentation,
+cursor restoration and malformed-input refusal. They do not qualify the frd
+supervisor, a live tailnet, hardware decode or a loaded-client latency envelope.
+
+```sh
+cargo test -p fr-native --no-default-features --features linux-media \
+  --test reference_decode --locked
+```
+
 ## Build and reproduce
 
 Install a C compiler, pkg-config, FFmpeg development packages (`libavcodec-dev`,

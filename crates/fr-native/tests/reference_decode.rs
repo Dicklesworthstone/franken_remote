@@ -1,6 +1,7 @@
 #![cfg(all(target_os = "linux", feature = "linux-media"))]
 //! Actual software HEVC encode/decode, with selected outputs used only as
-//! references. No X11, transport, optical visibility or hardware qualification.
+//! references. Worker tests also exercise real X11/private pipes, not transport,
+//! optical visibility, hardware or the frd authority supervisor.
 use fr_core::{ids::CodecConfigurationGeneration, limits::ProtocolLimits};
 use fr_media::{
     access_unit::{EncodedAccessUnit, FrameId},
@@ -172,3 +173,6 @@ fn reference_mode_does_not_bypass_bitstream_admission_or_consume_a_refused_input
     assert_eq!(decoder.submit(&next), Err(NativeError::StaleGeneration));
     assert_eq!(decoder.poll_reference(), Err(NativeError::NeedInput));
 }
+
+#[path = "reference_decode/worker.rs"]
+mod worker;

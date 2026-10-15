@@ -155,50 +155,66 @@ mod linux {
                     overlay,
                     last,
                     presented,
-                } => match codec.poll_output() {
-                    Ok((frame, pixels)) => {
-                        let display = display_next.take().ok_or(Error::WrongState)?;
-                        if !display {
-                            codec.recycle(pixels);
-                            return Ok((Kind::Decoded, frame.as_raw().to_be_bytes().to_vec()));
-                        }
-                        let place = placement(fitted.as_ref());
-                        let mut pixels = pixels;
-                        // The single client-rendered cursor is composited over a
-                        // fresh copy of the decoded picture, then presented.
-                        let shown = if let Some(fitted) = fitted {
-                            let output = fitted.render_mut(&pixels).map_err(native)?;
-                            overlay.composite_fresh(output, place).map_err(native)?;
-                            &*output
-                        } else {
-                            overlay
-                                .composite_fresh(&mut pixels, place)
-                                .map_err(native)?;
-                            &pixels
-                        };
-                        surface.present(shown).map_err(native)?;
-                        // Explicit local verification mode only, never a remote peer option.
-                        // Production does not read every presented frame back from the GPU/X server.
-                        if verify && surface.snapshot().map_err(native)?.pixels() != shown.pixels()
-                        {
-                            return Err(Error::NativeFailure);
-                        }
-                        // The previous retained picture (or a fitted frame's
-                        // source) is no longer referenced: reuse its buffer.
-                        if fitted.is_none() {
-                            if let Some(previous) = last.replace(pixels) {
-                                codec.recycle(previous);
+                } => {
+                    // A reference-only Decode still completes the real HEVC
+                    // picture, but never needs BGRA conversion or a display
+                    // buffer. Keep this choice through NeedInput/Poll turns.
+                    // The last presented pixels and cursor save-under remain
+                    // untouched, and Decoded never becomes a visibility claim.
+                    if *display_next == Some(false) {
+                        return match codec.poll_reference() {
+                            Ok(frame) => {
+                                *display_next = None;
+                                Ok((Kind::Decoded, frame.as_raw().to_be_bytes().to_vec()))
                             }
-                        } else {
-                            codec.recycle(pixels);
-                        }
-                        *presented = true;
-                        // This acknowledges X11 submission/synchronization, not optical visibility.
-                        Ok((Kind::Presented, frame.as_raw().to_be_bytes().to_vec()))
+                            Err(NativeError::NeedInput) => Ok((Kind::NeedInput, Vec::new())),
+                            Err(error) => Err(native(error)),
+                        };
                     }
-                    Err(NativeError::NeedInput) => Ok((Kind::NeedInput, Vec::new())),
-                    Err(e) => Err(native(e)),
-                },
+                    match codec.poll_output() {
+                        Ok((frame, pixels)) => {
+                            if display_next.take() != Some(true) {
+                                return Err(Error::WrongState);
+                            }
+                            let place = placement(fitted.as_ref());
+                            let mut pixels = pixels;
+                            // The single client-rendered cursor is composited over a
+                            // fresh copy of the decoded picture, then presented.
+                            let shown = if let Some(fitted) = fitted {
+                                let output = fitted.render_mut(&pixels).map_err(native)?;
+                                overlay.composite_fresh(output, place).map_err(native)?;
+                                &*output
+                            } else {
+                                overlay
+                                    .composite_fresh(&mut pixels, place)
+                                    .map_err(native)?;
+                                &pixels
+                            };
+                            surface.present(shown).map_err(native)?;
+                            // Explicit local verification mode only, never a remote peer option.
+                            // Production does not read every presented frame back from the GPU/X server.
+                            if verify
+                                && surface.snapshot().map_err(native)?.pixels() != shown.pixels()
+                            {
+                                return Err(Error::NativeFailure);
+                            }
+                            // The previous retained picture (or a fitted frame's
+                            // source) is no longer referenced: reuse its buffer.
+                            if fitted.is_none() {
+                                if let Some(previous) = last.replace(pixels) {
+                                    codec.recycle(previous);
+                                }
+                            } else {
+                                codec.recycle(pixels);
+                            }
+                            *presented = true;
+                            // This acknowledges X11 submission/synchronization, not optical visibility.
+                            Ok((Kind::Presented, frame.as_raw().to_be_bytes().to_vec()))
+                        }
+                        Err(NativeError::NeedInput) => Ok((Kind::NeedInput, Vec::new())),
+                        Err(e) => Err(native(e)),
+                    }
+                }
             }
         }
         /// Missing XFIXES or an unrepresentable image is a typed, NON-fatal
