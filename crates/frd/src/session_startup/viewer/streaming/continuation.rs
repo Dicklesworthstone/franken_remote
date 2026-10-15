@@ -26,34 +26,78 @@ use std::{cell::Cell, future::Future, pin::pin, task::Poll, time::Duration};
 /// The parent a recovery keeps serving while old media is fenced: an
 /// observation session, or a control grant whose suspended input keeps its
 /// renewals, tickets and results serviced through its own drive.
-pub(super) enum Link<'a> {
+enum Parent<'a> {
     Observe(&'a mut ViewerSession),
     Control(&'a mut ControlledViewer, &'a mut dyn FnMut(ResultEvent)),
 }
+/// The original parent and audio output stay together for EVERY recovery
+/// network turn. Receiving packets alone cannot make native playback progress.
+/// No audio generation, queue, deadline or decoder is created by video recovery.
+pub(super) struct Link<'a> {
+    parent: Parent<'a>,
+    audio: Option<&'a mut super::audio::ViewerAudio>,
+    refused: &'a Cell<Option<Error>>,
+}
 impl Link<'_> {
     fn session(&mut self) -> &mut ViewerSession {
-        match self {
-            Self::Observe(session) => session,
-            Self::Control(viewer, _) => viewer.session_mut(),
+        match &mut self.parent {
+            Parent::Observe(session) => session,
+            Parent::Control(viewer, _) => viewer.session_mut(),
         }
     }
     async fn drive(
         &mut self,
         wait: Duration,
-        dispatch: impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+        mut dispatch: impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
     ) -> Result<(), Error> {
-        match self {
-            Self::Observe(session) => session.drive(wait, dispatch).await.map_err(Error::Session),
-            Self::Control(viewer, result) => viewer
-                .drive(wait, &mut **result, dispatch)
+        let Self {
+            parent,
+            audio,
+            refused,
+        } = self;
+        let session = match parent {
+            Parent::Observe(session) => &mut **session,
+            Parent::Control(viewer, _) => viewer.session_mut(),
+        };
+        // Playback depends on the original observation, not the fenced video
+        // receiver or a suspended input grant. Check before native service and
+        // again at its bounded callbacks; a quiet network still gets a turn.
+        session.check().map_err(Error::Session)?;
+        let cx = session.cx.clone();
+        let heard_until = session.heard_until;
+        let mut live = || {
+            cx.checkpoint().is_ok() && now(&cx).is_ok_and(|current| current < heard_until)
+        };
+        if let Some(audio) = audio.as_deref_mut() {
+            audio.service(
+                &mut session.transport,
+                &cx,
+                now(&cx).map_err(Error::Session)?,
+                &mut live,
+            )?;
+        }
+        // Preserve exactly one audio owner across local progress and dispatch.
+        // Its pending configuration/stop reply retains its original deadline.
+        // Parent drive validates its renewed observation before dispatch. Do
+        // not hold the pre-drive heard deadline over a newly accepted renewal.
+        let routed = lanes(
+            audio.as_deref_mut(),
+            || cx.checkpoint().is_ok(),
+            refused,
+            &mut dispatch,
+        );
+        match parent {
+            Parent::Observe(session) => session.drive(wait, routed).await.map_err(Error::Session),
+            Parent::Control(viewer, result) => viewer
+                .drive(wait, &mut **result, routed)
                 .await
                 .map_err(Error::Control),
         }
     }
     fn close(&mut self) {
-        match self {
-            Self::Observe(session) => session.close(),
-            Self::Control(viewer, _) => viewer.close(),
+        match &mut self.parent {
+            Parent::Observe(session) => session.close(),
+            Parent::Control(viewer, _) => viewer.close(),
         }
     }
     /// An interactive embedding sees its grant, not an observer.
@@ -63,9 +107,9 @@ impl Link<'_> {
         ui: &mut impl FnMut(acquisition::Dispatch<'_>, Option<Presentation>) -> Result<(), ()>,
     ) -> Result<(), Error> {
         budget.remaining()?;
-        let state = match self {
-            Self::Observe(_) => acquisition::State::Observing,
-            Self::Control(viewer, _) => acquisition::State::Controlled(viewer),
+        let state = match &mut self.parent {
+            Parent::Observe(_) => acquisition::State::Observing,
+            Parent::Control(viewer, _) => acquisition::State::Controlled(viewer),
         };
         ui(acquisition::Dispatch::Existing(state), None).map_err(|()| Error::Application)?;
         budget.remaining()?;
@@ -585,31 +629,27 @@ impl super::StreamingViewer {
         let feedback_sent = self.feedback.take().map_or(0, |f| f.sent);
         let presentation_sent = self.presentation.take().map_or(0, |p| p.sent);
         let refused = Cell::new(None);
-        let cx = self.control.cx.clone();
-        let mut lanes = lanes(
-            self.audio.as_mut(),
-            || cx.checkpoint().is_ok(),
-            &refused,
-            other,
-        );
         // A drive ends on its callback's first refusal: report that, not the
         // transport's bare Handler error.
         let named = |error| refused.take().unwrap_or(error);
         match std::mem::replace(&mut self.peer, super::Peer::Closed) {
             super::Peer::Observe { mut session, media } => {
                 let (media, receipt) = resume(
-                    Link::Observe(&mut session),
+                    Link {
+                        parent: Parent::Observe(&mut session),
+                        audio: self.audio.as_mut(),
+                        refused: &refused,
+                    },
                     media,
                     self.recovery.as_mut().ok_or(Error::Closed)?,
                     &mut self.presenter,
                     &mut self.receiver,
                     ui,
-                    &mut lanes,
+                    other,
                     &refused,
                 )
                 .await
                 .map_err(named)?;
-                drop(lanes);
                 let presentation = self.reinstall(
                     &mut session,
                     &media,
@@ -629,18 +669,21 @@ impl super::StreamingViewer {
                     }
                 };
                 let (media, receipt) = resume(
-                    Link::Control(&mut viewer, result),
+                    Link {
+                        parent: Parent::Control(&mut viewer, result),
+                        audio: self.audio.as_mut(),
+                        refused: &refused,
+                    },
                     previous,
                     self.recovery.as_mut().ok_or(Error::Closed)?,
                     &mut self.presenter,
                     &mut self.receiver,
                     ui,
-                    &mut lanes,
+                    other,
                     &refused,
                 )
                 .await
                 .map_err(named)?;
-                drop(lanes);
                 let presentation = self.reinstall(
                     viewer.session_mut(),
                     &media,
@@ -737,3 +780,6 @@ impl super::StreamingViewer {
         })
     }
 }
+
+#[cfg(test)]
+mod audio_tests;
