@@ -126,7 +126,7 @@ impl Worker {
             worker::overlay::encode(update, &ProtocolLimits::ABSOLUTE).unwrap(),
         );
         assert_eq!(response.header.kind, Kind::CursorOverlayApplied);
-        assert_eq!(response.body(), &[]);
+        assert_eq!(response.body(), <&[u8]>::default());
     }
 }
 impl Drop for Worker {
