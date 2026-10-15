@@ -22,6 +22,8 @@ struct Failure {
     exit: u8,
     revocation: Option<terminal::Report>,
     closure: Option<closure::Report>,
+    /// Earlier attempts' typed ends, when a reconnect's own end would hide them.
+    earlier: output::Earlier,
 }
 impl Failure {
     const fn new(code: &'static str, next: &'static str, exit: u8) -> Self {
@@ -31,6 +33,7 @@ impl Failure {
             exit,
             revocation: None,
             closure: None,
+            earlier: output::Earlier::NONE,
         }
     }
 }
@@ -79,7 +82,10 @@ video_startup_expired (a decoder start or restart ran out of time),
 video_worker_late (this machine's decoder/presenter missed a deadline, usually
 overload) or control_renewal_failed (the control lease could not be renewed in
 time);
-any other end is native_session_failed, its typed chain on stderr.
+any other end is native_session_failed, its typed chain on stderr. When an
+automatic reconnect then fails too, attempts_ended names the earlier
+attempts' ends (the reconnect's own end, e.g. host_not_answering after a
+--once host stopped, would otherwise hide them).
 --clipboard (with --control; build with linux-clipboard) lets the UTF-8 text
 CLIPBOARD follow the control lease both ways, when the host runs frd run
 --clipboard too; otherwise the completion reports clipboard absence by type.

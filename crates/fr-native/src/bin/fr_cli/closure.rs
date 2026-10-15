@@ -29,7 +29,7 @@ impl Report {
         if json {
             use crate::output::{quoted, timestamp};
             format!(
-                "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":{},\"error\":{{\"code\":{},\"next_action\":{}}},\"close_exchange\":{}}}\n",
+                "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":{},\"error\":{{\"code\":{},\"next_action\":{}}},\"close_exchange\":{}{}}}\n",
                 timestamp(),
                 quoted(if error.exit == 130 {
                     "cancelled"
@@ -39,9 +39,16 @@ impl Report {
                 quoted(error.code),
                 quoted(error.next),
                 self.json(),
+                error.earlier.json(),
             )
         } else {
-            format!("{}: {} {}\n", error.code, error.next, self.text())
+            format!(
+                "{}: {} {}{}\n",
+                error.code,
+                error.next,
+                self.text(),
+                error.earlier.text()
+            )
         }
     }
     pub(super) fn json(self) -> String {

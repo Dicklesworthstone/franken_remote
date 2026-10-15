@@ -22,6 +22,62 @@ pub fn quoted(value: &str) -> String {
     out.push('"');
     out
 }
+/// Up to two earlier attempts' content-free end codes, oldest first. A
+/// reconnect that then fails differently (often `host_not_answering`, when
+/// a `--once` host already stopped) would otherwise hide why the session
+/// it replaced ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Earlier {
+    ends: [(u8, &'static str); 2],
+    len: u8,
+}
+impl Default for Earlier {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+impl Earlier {
+    pub const NONE: Self = Self {
+        ends: [(0, ""); 2],
+        len: 0,
+    };
+    pub fn push(&mut self, attempt: u8, code: &'static str) {
+        if let Some(slot) = self.ends.get_mut(usize::from(self.len)) {
+            *slot = (attempt, code);
+            self.len += 1;
+        }
+    }
+    /// The ends of attempts before `last` only.
+    #[must_use]
+    pub fn before(self, last: u8) -> Self {
+        let mut kept = Self::NONE;
+        for &(attempt, code) in &self.ends[..usize::from(self.len)] {
+            if attempt < last {
+                kept.push(attempt, code);
+            }
+        }
+        kept
+    }
+    /// `,"attempts_ended":[...]` for a JSON object, or nothing.
+    pub fn json(self) -> String {
+        if self.len == 0 {
+            return String::new();
+        }
+        let ends = self.ends[..usize::from(self.len)]
+            .iter()
+            .map(|&(attempt, code)| format!("{{\"attempt\":{attempt},\"code\":{}}}", quoted(code)))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(",\"attempts_ended\":[{ends}]")
+    }
+    pub fn text(self) -> String {
+        let mut text = String::new();
+        for &(attempt, code) in &self.ends[..usize::from(self.len)] {
+            let _ = write!(text, " Attempt {attempt} had ended: {code}.");
+        }
+        text
+    }
+}
 pub fn timestamp() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -32,7 +88,7 @@ pub fn timestamp() -> String {
 pub fn failure(error: Failure, json: bool) -> String {
     if json {
         format!(
-            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":{},\"error\":{{\"code\":{},\"next_action\":{}}}}}\n",
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":{},\"error\":{{\"code\":{},\"next_action\":{}}}{}}}\n",
             timestamp(),
             quoted(if error.exit == 130 {
                 "cancelled"
@@ -40,10 +96,11 @@ pub fn failure(error: Failure, json: bool) -> String {
                 "refused"
             }),
             quoted(error.code),
-            quoted(error.next)
+            quoted(error.next),
+            error.earlier.json()
         )
     } else {
-        format!("{}: {}\n", error.code, error.next)
+        format!("{}: {}{}\n", error.code, error.next, error.earlier.text())
     }
 }
 pub fn write(text: &str) -> io::Result<()> {
@@ -762,5 +819,34 @@ mod tests {
         let text = hosts(&discovery, false);
         assert!(text.contains("[direct: 192.168.1.100:41641]"));
         assert!(text.contains("[DERP RELAY: sfo - LATENCY ELEVATED]"));
+    }
+
+    /// A reconnect's own end does not hide the earlier attempts' ends; the
+    /// final attempt is never listed twice and a single attempt adds nothing.
+    #[test]
+    fn earlier_attempt_ends_are_named_once_and_only_before_the_last() {
+        let mut ended = Earlier::NONE;
+        ended.push(1, "video_reference_lost");
+        ended.push(2, "host_not_answering");
+        let mut failure = Failure::new("host_not_answering", "next", 1);
+        failure.earlier = ended.before(2);
+        let json: serde_json::Value = serde_json::from_str(&super::failure(failure, true)).unwrap();
+        assert_eq!(
+            json["attempts_ended"],
+            serde_json::json!([{"attempt": 1, "code": "video_reference_lost"}])
+        );
+        assert_eq!(json["error"]["code"], "host_not_answering");
+        assert!(
+            super::failure(failure, false).contains("Attempt 1 had ended: video_reference_lost.")
+        );
+        let single = Failure::new("video_reference_lost", "next", 1);
+        let json: serde_json::Value = serde_json::from_str(&super::failure(single, true)).unwrap();
+        assert!(json.get("attempts_ended").is_none());
+        // Bounded: the two oldest earlier ends are kept.
+        let mut many = Earlier::NONE;
+        for attempt in 1..=9 {
+            many.push(attempt, "host_not_heard");
+        }
+        assert_eq!(many.before(10).json().matches("\"attempt\"").count(), 2);
     }
 }

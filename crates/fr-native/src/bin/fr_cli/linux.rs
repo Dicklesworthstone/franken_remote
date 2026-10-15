@@ -477,7 +477,19 @@ fn completed(
     let result = completed_result(application, result, stopped, progress, json);
     // Preserve the original host report even when local native cleanup or the
     // supervisor failed. A failure status must not erase known external effects.
-    crate::closure::preserve(result, close_outcome(application))
+    // Name earlier attempts' ends too: a reconnect's own end can hide them.
+    crate::closure::preserve(result, close_outcome(application)).map_err(|mut failure| {
+        failure.earlier = progress.ended.before(progress.attempts);
+        failure
+    })
+}
+/// One attempt's typed end, for `attempts_ended`: the same host-report and
+/// lapse names the final end gets, else the generic code.
+#[cfg(feature = "linux-desktop")]
+fn end_code(failure: reconnect::Failure) -> &'static str {
+    refusal::reconnect(failure)
+        .or_else(|| lapse::reconnect(failure))
+        .map_or("native_session_failed", |named| named.code)
 }
 /// The original closing exchange: a viewer's, or a granted controller's
 /// session exchange (its separate lease report is not translated into it).
@@ -641,6 +653,8 @@ struct Progress {
     files: Option<files::Local>,
     /// The last attempt's content-free viewer counters (set after the run).
     media: Option<frd::session_startup::ViewerStatistics>,
+    /// Each failed attempt's typed end, recorded as it is cleaned up.
+    ended: crate::output::Earlier,
 }
 #[cfg(feature = "linux-desktop")]
 impl Progress {
@@ -747,7 +761,10 @@ impl Ui for Interface {
                 progress.begin(attempt);
                 self.attempt = None;
             }
-            Status::Cleaning { failure, .. } => {
+            Status::Cleaning { attempt, failure } => {
+                if let Some(failure) = failure {
+                    progress.ended.push(attempt, end_code(failure));
+                }
                 // Last content-free clipboard sample before the attempt's handle goes.
                 if let (Some(attempt), Some(counters)) = (
                     self.attempt.take(),
@@ -797,6 +814,7 @@ fn completion(progress: &Progress, json: bool, closure: Option<crate::closure::R
 }
 /// `lease` is a granted controller's own lease report from its closing
 /// exchange (control completions only).
+#[cfg(feature = "linux-desktop")]
 fn completion_with_lease(
     progress: &Progress,
     json: bool,

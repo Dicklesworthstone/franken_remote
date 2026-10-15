@@ -56,6 +56,7 @@ pub(super) fn closed_by_code(reason: Reason) -> Failure {
         exit: 1,
         revocation: None,
         closure: None,
+        earlier: crate::output::Earlier::NONE,
     }
 }
 
@@ -94,6 +95,7 @@ pub(super) fn failure(value: Revoked) -> Failure {
         exit: 1,
         revocation: Some(report),
         closure: None,
+        earlier: crate::output::Earlier::NONE,
     }
 }
 
@@ -109,13 +111,14 @@ pub(super) fn output(error: Failure, json: bool) -> String {
     if json {
         use crate::output::{quoted, timestamp};
         format!(
-            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"revoked\",\"error\":{{\"code\":{},\"next_action\":{},\"revocation\":{{\"reason\":{},\"cleanup_stage\":{},\"effect_stage\":{}}}}}}}\n",
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"revoked\",\"error\":{{\"code\":{},\"next_action\":{},\"revocation\":{{\"reason\":{},\"cleanup_stage\":{},\"effect_stage\":{}}}}}{}}}\n",
             timestamp(),
             quoted(error.code),
             quoted(error.next),
             quoted(report.reason()),
             quoted(report.cleanup()),
-            quoted(report.effects())
+            quoted(report.effects()),
+            error.earlier.json()
         )
     } else {
         format!(
