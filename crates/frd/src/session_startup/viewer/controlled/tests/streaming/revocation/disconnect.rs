@@ -210,6 +210,71 @@ fn close_request_fences_granted_input_and_retains_the_actual_hosts_lease_report(
     });
 }
 
+/// An orderly close after a file send still exchanges its `CloseRequest`. The
+/// input fence cancels the session's context first; the file lane retired on
+/// that context had its stream reset refused, which closed the whole
+/// connection, and the exchange reported Closed (live, `fr connect --control
+/// --send`, 2026-10-15).
+#[test]
+fn an_orderly_close_after_a_file_send_still_exchanges_its_close_request() {
+    use super::super::super::files::{Disk, join, setup};
+    run(|c, h| async move {
+        let cleanup_cx = Cx::current().unwrap();
+        let mut f = setup(&c, &h).await;
+        let (source, dest) = (Disk::new(), Disk::new());
+        join(&mut f, &dest, fr_files::session::Permission::new(true));
+        let driver = f.driver.take().unwrap();
+        let (outcome, summary) = Box::pin(support::both(
+            async {
+                f.viewer
+                    .send_file(source.source(b"sent before closing"), "sent")
+                    .unwrap();
+                let until = now(&c).unwrap() + 2_000_000;
+                while !(f.viewer.file_result().is_some() && f.viewer.file_cleanup_finished()) {
+                    assert!(now(&c).unwrap() < until, "bounded file completion");
+                    turn(&mut f).await;
+                }
+                settle(&mut f).await;
+                let reporting = arm_report(&mut f, &cleanup_cx);
+                let ending = f
+                    .viewer
+                    .disconnect_with_cleanup(&cleanup_cx, closure::Reason::Requested);
+                let (outcome, sent) = Box::pin(support::both(ending, async {
+                    let (mut nonces, mut tickets) = (61_000, 71_000);
+                    while f
+                        .host
+                        .drive(
+                            Duration::from_millis(1),
+                            || nonce(&mut nonces),
+                            || {
+                                tickets += 1;
+                                Some(InputTicketId::from_raw(tickets))
+                            },
+                            block,
+                        )
+                        .await
+                        .is_ok()
+                    {}
+                    reporting.finish().await
+                }))
+                .await;
+                assert_eq!(sent, Some(Ok(())));
+                outcome.unwrap()
+            },
+            driver,
+        ))
+        .await;
+        assert!(summary.handoff_safe());
+        assert!(outcome.exchange.request_acknowledged);
+        assert_eq!(outcome.exchange.transport, Ok(()));
+        assert_eq!(
+            outcome.revocation.map(|revoked| revoked.reason),
+            Some(Reason::SessionEnded)
+        );
+        f.observation.revoke();
+    });
+}
+
 #[test]
 fn unpolled_controller_close_fences_capture_but_cannot_claim_a_completed_exchange() {
     run(|c, h| async move {

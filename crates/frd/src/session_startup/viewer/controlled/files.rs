@@ -49,13 +49,33 @@ impl Slot {
             && (self.stopped || self.permission.as_ref().is_none_or(Permission::is_approved))
     }
     pub(super) fn stop(&mut self, q: &mut QuicRecords) -> Result<(), Error> {
+        self.stop_on(q, None)
+    }
+    /// `cleanup`: an orderly close's input fence, which already cancelled the
+    /// session's own context. A quiescent lane stays attached and idle: its
+    /// stream reset would fail the closing exchange's empty-sender proof.
+    /// In-flight file work is still cancelled, on that independent context
+    /// (see `Sender::cancel_on`).
+    pub(super) fn stop_on(
+        &mut self,
+        q: &mut QuicRecords,
+        cleanup: Option<&Cx>,
+    ) -> Result<(), Error> {
         if self.pending.take().is_some() {
             self.failure.get_or_insert(Error::Cancelled);
         }
         if !self.stopped {
             self.stopped = true;
             if let Some(sender) = &mut self.sender {
-                sender.cancel(q)?;
+                match cleanup {
+                    Some(_)
+                        if matches!(
+                            sender.stage(),
+                            Stage::Idle | Stage::Finished | Stage::Closed
+                        ) => {}
+                    Some(cleanup) => sender.cancel_on(q, cleanup)?,
+                    None => sender.cancel(q)?,
+                }
             }
         }
         Ok(())

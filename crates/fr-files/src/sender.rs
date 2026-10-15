@@ -427,10 +427,19 @@ impl<'a> Sender<'a> {
     /// Local file-only cancellation is out of band from bulk queue capacity.
     /// The caller can keep servicing the original desktop connection normally.
     pub fn cancel(&mut self, q: &mut QuicRecords) -> Result<(), Error> {
+        let cx = self.cx.clone();
+        self.cancel_on(q, &cx)
+    }
+    /// [`Self::cancel`] after an input fence cancelled this sender's own
+    /// context: retire the lane on the caller's independent cleanup context.
+    /// The native stream reset refuses a cancelled context, and a failed lane
+    /// retirement closes the whole connection, so on the session's context a
+    /// file-lane stop would take the closing exchange's socket with it.
+    pub fn cancel_on(&mut self, q: &mut QuicRecords, cleanup: &Cx) -> Result<(), Error> {
         self.identity(q)?;
         self.fail(Error::Cancelled);
         self.settle_batch();
-        self.retire(q)
+        self.retire_on(q, cleanup)
     }
     pub fn service(
         &mut self,
@@ -581,11 +590,15 @@ impl<'a> Sender<'a> {
         }
     }
     fn retire(&mut self, q: &mut QuicRecords) -> Result<(), Error> {
+        let cx = self.cx.clone();
+        self.retire_on(q, &cx)
+    }
+    fn retire_on(&mut self, q: &mut QuicRecords, cx: &Cx) -> Result<(), Error> {
         self.closed = true;
         if q.is_closed() {
             return Ok(());
         }
-        self.lane.retire(q, &self.cx).map_err(Error::Transport)
+        self.lane.retire(q, cx).map_err(Error::Transport)
     }
     fn identity(&self, q: &QuicRecords) -> Result<(), Error> {
         if q.is_bound_to(&self.connection) {

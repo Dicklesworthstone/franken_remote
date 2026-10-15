@@ -99,7 +99,10 @@ impl ControlledViewer {
         if let Some(clock) = &mut viewer.session.clock {
             clock.stop();
         }
-        viewer.fence_input();
+        // The fence cancels the session's context; the file lane then retires
+        // on the cleanup context, or its refused reset closes the connection
+        // and this exchange has no socket (seen live with --send).
+        viewer.fence_input_on(Some(cleanup));
         let prepared = ready.map(|until| {
             Box::pin(viewer.session.transport.close_control_with_request(
                 cleanup,
@@ -142,12 +145,15 @@ impl ControlledViewer {
     /// Input admission and receipt retention are independent. Establish the fence
     /// before invoking any native capture, clipboard or file cleanup boundary.
     pub(super) fn fence_input(&mut self) {
+        self.fence_input_on(None);
+    }
+    fn fence_input_on(&mut self, cleanup: Option<&Cx>) {
         self.control.stop();
         self.input.stop(StopReason::Disconnected);
         self.pending = None;
         self.events = None;
         self.clock.stop();
-        let _ = self.files.stop(&mut self.session.transport);
+        let _ = self.files.stop_on(&mut self.session.transport, cleanup);
         if let Some(capture) = &self.native_capture {
             capture.stop();
         }
