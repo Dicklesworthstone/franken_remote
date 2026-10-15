@@ -39,6 +39,24 @@ impl Scratch {
         names.sort();
         names
     }
+    /// Sizes of the unnamed (`O_TMPFILE`) staging inodes this process holds
+    /// in this directory: procfs shows each as `DIR/#INODE (deleted)`.
+    fn unnamed_staging(&self) -> Vec<u64> {
+        let prefix = format!("{}/#", fs::canonicalize(&self.0).unwrap().display());
+        fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|fd| {
+                let fd = fd.ok()?.path();
+                let target = fs::read_link(&fd).ok()?;
+                let target = target.to_str()?;
+                if target.starts_with(&prefix) && target.ends_with(" (deleted)") {
+                    fs::metadata(&fd).ok().map(|m| m.len())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 }
 impl std::ops::Drop for Scratch {
     fn drop(&mut self) {
@@ -213,18 +231,21 @@ fn no_byte_lands_without_the_controllers_live_lease() {
     session
         .write(session.binding(), 1, 0, b"pay", || at(200))
         .unwrap();
-    assert_eq!(scratch.entries().len(), 1, "one private staging file");
-    assert!(scratch.entries()[0].starts_with(".fr-part-"));
+    // Staged in an unnamed inode: the bytes are held, but no partial name is
+    // ever visible in the drop directory.
+    assert!(scratch.entries().is_empty(), "{:?}", scratch.entries());
+    assert_eq!(scratch.unnamed_staging(), [3], "one unnamed staging inode");
     let expired = at(3_500_000);
     assert!(input.monitor().deadline(expired).is_err(), "lease expired");
     assert!(matches!(
         session.write(session.binding(), 1, 3, b"load", || expired),
         Err(SessionError::Authority(_))
     ));
-    // The disk worker's timer turn (it runs without traffic too) removes the
-    // fenced transfer's private staging file; nothing was published.
+    // The disk worker's timer turn (it runs without traffic too) releases the
+    // fenced transfer's staging inode; nothing was published.
     assert!(session.service(expired).is_err());
     assert!(scratch.entries().is_empty(), "{:?}", scratch.entries());
+    assert_eq!(scratch.unnamed_staging(), Vec::<u64>::new());
     assert!(matches!(
         session.complete(session.binding(), 1, || expired),
         Err(SessionError::Closed | SessionError::NoTransfer)

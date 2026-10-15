@@ -2,7 +2,7 @@
 //! `frd run --input-agent --files DIR`: explicitly selected regular files go
 //! from the viewer to the host over the controller's one-use file lane on the
 //! real UDP/TLS/QUIC session (ATP full-object profile, the host's bounded disk
-//! worker, a private staging file and a no-replace atomic rename), attached
+//! worker, an unnamed staging inode and a no-replace link into place), attached
 //! only under the controller's input lease. Effects are observed directly on
 //! the host's drop directory; nothing here reads `FrankenRemote` state for them.
 //!
@@ -38,6 +38,24 @@ impl Dir {
             .collect();
         names.sort();
         names
+    }
+    /// Sizes of the unnamed (`O_TMPFILE`) staging inodes held in this
+    /// directory by the in-process `frd run`: procfs shows `DIR/#INODE (deleted)`.
+    fn unnamed_staging(&self) -> Vec<u64> {
+        let prefix = format!("{}/#", fs::canonicalize(&self.0).unwrap().display());
+        fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|fd| {
+                let fd = fd.ok()?.path();
+                let target = fs::read_link(&fd).ok()?;
+                let target = target.to_str()?;
+                if target.starts_with(&prefix) && target.ends_with(" (deleted)") {
+                    fs::metadata(&fd).ok().map(|m| m.len())
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
     /// The operator's validated, descriptor-pinned drop directory.
     fn directory(&self) -> Directory {
@@ -329,21 +347,19 @@ fn a_frozen_controller_leaves_no_partial_file_under_its_final_name() {
         Some(drop_dir.directory()),
         &[source.0.join(name)],
     );
-    // Mid-transfer: a private staging file holds some, not all, bytes.
+    // Mid-transfer: an unnamed staging inode holds some, not all, bytes, and
+    // no partial name is visible in the drop directory.
     let until = Instant::now() + Duration::from_secs(90);
     let staged = loop {
         assert!(
-            !drop_dir.0.join(name).exists(),
-            "published before the freeze"
+            drop_dir.entries().is_empty(),
+            "a partial name is visible: {:?}",
+            drop_dir.entries()
         );
-        let partial = fs::read_dir(&drop_dir.0).unwrap().find_map(|entry| {
-            let entry = entry.unwrap();
-            let len = entry.metadata().unwrap().len();
-            (entry.file_name().to_string_lossy().starts_with(".fr-part-")
-                && len > 0
-                && len < total as u64)
-                .then_some(len)
-        });
+        let partial = drop_dir
+            .unnamed_staging()
+            .into_iter()
+            .find(|&len| len > 0 && len < total as u64);
         if let Some(len) = partial {
             break len;
         }
@@ -364,7 +380,9 @@ fn a_frozen_controller_leaves_no_partial_file_under_its_final_name() {
             !drop_dir.0.join(name).exists(),
             "a fenced transfer was published"
         );
-        indicator(&mut s.observer).is_none() && drop_dir.entries().is_empty()
+        indicator(&mut s.observer).is_none()
+            && drop_dir.entries().is_empty()
+            && drop_dir.unnamed_staging().is_empty()
     });
     assert!(
         fenced,
