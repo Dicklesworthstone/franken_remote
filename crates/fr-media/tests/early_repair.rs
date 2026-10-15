@@ -106,7 +106,7 @@ fn finish_originals(sender: &mut SendCache, now: u64) {
 }
 
 #[test]
-fn an_early_request_repairs_a_lost_prefix_after_original_tail_without_retry() {
+fn an_early_request_repairs_a_lost_prefix_before_its_requested_tail_without_retry() {
     let (mut sender, mut receiver) = bootstrap(SendPolicy::default());
     let (announcement, bytes) = announced(&mut sender);
     receiver.receive(announcement.channel(), &bytes, 1).unwrap();
@@ -120,8 +120,19 @@ fn an_early_request_repairs_a_lost_prefix_after_original_tail_without_retry() {
     sender
         .queue_repair(&packet[..repair.bytes], 40_001)
         .unwrap();
-    // No repair can compete with originals, even across many pending turns.
-    for now in [40_001, 80_001, 140_001] {
+    // The same request also names the unissued tail. Repair the issued lost
+    // prefix now, while retaining that tail without another request or round.
+    let prefix = sender
+        .next_repair_packet(40_001, &mut packet)
+        .unwrap()
+        .expect("a requested tail must not hold an issued lost prefix");
+    assert_eq!(prefix.send_by_micros(), original_deadline);
+    sender.authorize_write(&prefix, 40_001).unwrap();
+    receiver
+        .receive(prefix.channel(), &packet[..prefix.byte_len()], 60_001)
+        .unwrap();
+    assert!(sender.originals_pending());
+    for now in [80_001, 140_001] {
         assert!(
             sender
                 .next_repair_packet(now, &mut packet)
@@ -140,8 +151,16 @@ fn an_early_request_repairs_a_lost_prefix_after_original_tail_without_retry() {
     while let Some((offer, bytes)) = next(&mut sender, 200_001) {
         receiver.receive(offer.channel(), &bytes, 200_001).unwrap();
     }
-    assert!(receiver.take_decodable(200_001).unwrap().is_none());
-    let mut repairs = 0;
+    // Completing the original tail now immediately unlocks the valid picture;
+    // it no longer needs the later tail-repair flight to deliver its prefix.
+    let decoded = receiver.take_decodable(200_001).unwrap().unwrap();
+    assert_eq!(decoded.descriptor().frame, 1);
+    assert_eq!(decoded.bytes(), picture(1, config()).1);
+    receiver
+        .acknowledge_decode(&decoded, true, 200_001)
+        .unwrap();
+    drop(decoded);
+    let mut repairs = 1;
     while let Some(offer) = sender.next_repair_packet(200_001, &mut packet).unwrap() {
         assert_eq!(offer.send_by_micros(), original_deadline);
         sender.authorize_write(&offer, 200_001).unwrap();
@@ -151,13 +170,7 @@ fn an_early_request_repairs_a_lost_prefix_after_original_tail_without_retry() {
         repairs += 1;
     }
     assert_eq!(repairs, 4);
-    let decoded = receiver.take_decodable(220_001).unwrap().unwrap();
-    assert_eq!(decoded.descriptor().frame, 1);
-    assert_eq!(decoded.bytes(), picture(1, config()).1);
-    receiver
-        .acknowledge_decode(&decoded, true, 220_001)
-        .unwrap();
-    drop(decoded);
+    assert!(receiver.take_decodable(220_001).unwrap().is_none());
     assert!(!sender.needs_recovery());
     assert_eq!(receiver.budget_usage().pictures, 0);
 }

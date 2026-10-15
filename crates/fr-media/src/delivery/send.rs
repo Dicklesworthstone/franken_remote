@@ -564,8 +564,9 @@ impl SendCache {
     /// An announced datagram picture may still be emitting originals when its
     /// receiver asks for repair. Keep that request in its original picture
     /// slot instead of spending another receiver retry/round trip. Emission
-    /// waits only for the requested original prefix, not unrelated tail data;
-    /// the original horizon still bounds the job. A newer request can add
+    /// advances one fragment at a time behind its own original: an unissued
+    /// requested tail cannot delay an issued prefix. The original horizon
+    /// still bounds the job. A newer request can add
     /// fragments to the unsent suffix within the same range, round and cadence
     /// bounds, but cannot delay that job by requesting an unissued later tail.
     pub fn queue_repair(&mut self, packet: &[u8], now: u64) -> Result<(), SendError> {
@@ -603,9 +604,9 @@ impl SendCache {
             }
         }
         let job = if let Some(pending) = &p.repair {
-            // Coalescing must never postpone already accepted work by raising
-            // its original-emission gate. A new unissued suffix can retry once
-            // its originals have progressed; the existing job stays untouched.
+            // Preserve the existing admission ceiling for unissued extensions.
+            // A peer cannot grow the pending job farther into the future until
+            // those originals progress; the existing accepted job stays intact.
             if ranges[count - 1].end > p.next_original.max(pending.ranges[pending.count - 1].end) {
                 return Err(SendError::RepairBusy);
             }
@@ -646,7 +647,10 @@ impl SendCache {
     ) -> Result<Option<PacketOffer>, SendError> {
         self.tick(now)?;
         // Earliest deadline/reference first, irrespective of request arrival.
-        // A job naming unissued originals must not block other eligible jobs.
+        // Gate the next requested FRAGMENT, not the end of the entire job.
+        // A tail probe may include originals that have not been issued yet;
+        // those cannot hold a known lost prefix behind the whole paced flight.
+        // When this head is unissued, other eligible pictures still progress.
         let selected = self
             .pictures
             .iter()
@@ -654,7 +658,7 @@ impl SendCache {
             .filter_map(|(index, picture)| {
                 let p = picture.as_ref()?;
                 let job = p.repair.as_ref()?;
-                (job.ranges[job.count - 1].end <= p.next_original).then_some((
+                (job.fragment < p.next_original).then_some((
                     index,
                     p.send_by,
                     p.progress.descriptor.frame,
@@ -785,7 +789,7 @@ impl SendCache {
             .flatten()
             .any(|p| {
                 p.repair.as_ref().is_some_and(|job| {
-                    job.ranges[job.count - 1].end <= p.next_original
+                    job.fragment < p.next_original
                         && refill < p.send_by
                         && p.repair_packet_bytes(job.fragment)
                             .is_ok_and(|charge| charge > remaining)

@@ -113,7 +113,7 @@ fn sparse_prefix_ranges_finish_before_the_unrequested_tail() {
 }
 
 #[test]
-fn a_mixed_request_waits_for_exactly_its_fixed_requested_prefix() {
+fn a_mixed_request_advances_each_fragment_only_after_its_original() {
     let (mut sender, _) = fixture(SendPolicy {
         max_repair_rounds: 1,
         repair_bytes_per_window: 3 * 1_150,
@@ -122,28 +122,31 @@ fn a_mixed_request_waits_for_exactly_its_fixed_requested_prefix() {
     issue(&mut sender, 1, 10_000, 1);
     let query = request(1, &[RepairRange { start: 0, end: 3 }]);
     sender.queue_repair(&query, 30_000).unwrap();
-    let mut out = [0xa5; 1_150];
-    for now in 30_000..30_100 {
-        assert!(sender.next_repair_packet(now, &mut out).unwrap().is_none());
-        assert_eq!(out, [0xa5; 1_150]);
-        assert_eq!(sender.queue_repair(&query, now), Err(SendError::RepairBusy));
-    }
-    assert_eq!(index(&original(&mut sender, 31_000)), 1);
-    assert!(
-        sender
-            .next_repair_packet(31_000, &mut out)
-            .unwrap()
-            .is_none()
-    );
-    assert_eq!(index(&original(&mut sender, 32_000)), 2);
+    let charge = (sender.cached_pictures(), sender.cached_bytes());
     for expected in 0..3 {
-        let packet = repair(&mut sender, 32_000).unwrap();
+        let now = 30_000 + u64::from(expected) * 1_000;
+        if expected != 0 {
+            assert_eq!(index(&original(&mut sender, now)), expected);
+        }
+        let packet = repair(&mut sender, now).expect("issued fragment is independently ready");
         assert_eq!(index(&packet), expected);
         assert_eq!(packet.0.byte_len(), 1_150);
-        sender.authorize_write(&packet.0, 32_000).unwrap();
+        assert_eq!(packet.0.send_by_micros(), 260_000);
+        sender.authorize_write(&packet.0, now).unwrap();
+        let mut out = [0xa5; 1_150];
+        for at in now..now + 100 {
+            assert!(sender.next_repair_packet(at, &mut out).unwrap().is_none());
+            assert_eq!(out, [0xa5; 1_150]);
+            assert_eq!((sender.cached_pictures(), sender.cached_bytes()), charge);
+        }
+        if expected != 2 {
+            assert_eq!(
+                sender.queue_repair(&query, now + 99),
+                Err(SendError::RepairBusy)
+            );
+        }
     }
-    assert!(repair(&mut sender, 32_000).is_none());
-    assert_eq!(index(&original(&mut sender, 32_000)), 3);
+    assert_eq!(index(&original(&mut sender, 33_000)), 3);
     assert_eq!(
         sender.queue_repair(&query, 100_000),
         Err(SendError::RepairRateLimited)
@@ -256,7 +259,7 @@ fn forty_paced_pictures_with_lost_prefix_repairs_keep_the_same_dependency_chain(
 }
 
 #[test]
-fn later_ranges_cannot_bypass_original_emission_because_the_first_is_ready() {
+fn a_ready_first_range_does_not_wait_for_or_release_an_unissued_later_range() {
     let (mut sender, _) = fixture(SendPolicy::default());
     issue(&mut sender, 1, 10_000, 2);
     sender
@@ -271,6 +274,9 @@ fn later_ranges_cannot_bypass_original_emission_because_the_first_is_ready() {
             30_000,
         )
         .unwrap();
+    let first = repair(&mut sender, 30_000).expect("ready range must not wait for a later range");
+    assert_eq!(index(&first), 0);
+    sender.authorize_write(&first.0, 30_000).unwrap();
     let mut out = [0xa5; 1_150];
     for expected in 2..6 {
         assert!(
@@ -282,11 +288,46 @@ fn later_ranges_cannot_bypass_original_emission_because_the_first_is_ready() {
         assert_eq!(out, [0xa5; 1_150]);
         assert_eq!(index(&original(&mut sender, 30_000)), expected);
     }
-    for expected in [0, 5] {
-        let packet = repair(&mut sender, 30_000).unwrap();
-        assert_eq!(index(&packet), expected);
-        sender.authorize_write(&packet.0, 30_000).unwrap();
-    }
+    let last = repair(&mut sender, 30_000).unwrap();
+    assert_eq!(index(&last), 5);
+    sender.authorize_write(&last.0, 30_000).unwrap();
     assert!(repair(&mut sender, 30_000).is_none());
     assert!(sender.originals_pending());
+}
+
+#[test]
+fn a_partly_issued_request_wakes_for_credit_only_when_its_head_is_ready() {
+    let (mut sender, _) = fixture(SendPolicy {
+        max_repair_rounds: 1,
+        repair_bytes_per_window: 1_150,
+        repair_window_micros: 50_000,
+        ..SendPolicy::default()
+    });
+    issue(&mut sender, 1, 10_000, 1);
+    sender
+        .queue_repair(&request(1, &[RepairRange { start: 0, end: 3 }]), 30_000)
+        .unwrap();
+    let first = repair(&mut sender, 30_000).unwrap();
+    assert_eq!(index(&first), 0);
+    // A spent repair budget alone cannot create repeated idle wakeups while
+    // the next requested fragment has not been issued as an original.
+    assert_eq!(sender.next_deadline(), Some(260_000));
+    assert_eq!(index(&original(&mut sender, 40_000)), 1);
+    assert!(repair(&mut sender, 40_000).is_none());
+    assert_eq!(sender.next_deadline(), Some(50_000));
+    assert!(repair(&mut sender, 49_999).is_none());
+    let second = repair(&mut sender, 50_000).unwrap();
+    assert_eq!(index(&second), 1);
+    assert_eq!(sender.next_deadline(), Some(260_000));
+    assert_eq!(index(&original(&mut sender, 60_000)), 2);
+    assert!(repair(&mut sender, 60_000).is_none());
+    assert_eq!(sender.next_deadline(), Some(100_000));
+    let third = repair(&mut sender, 100_000).unwrap();
+    assert_eq!(index(&third), 2);
+    for packet in [first, second, third] {
+        assert_eq!(packet.0.send_by_micros(), 260_000);
+    }
+    assert!(sender.originals_pending());
+    assert_eq!(sender.next_deadline(), Some(260_000));
+    assert!(repair(&mut sender, 100_000).is_none());
 }
