@@ -142,14 +142,21 @@ impl Client {
         F: Future<Output = T> + 'a,
         A: FnOnce(Viewer) -> F + 'a,
     {
-        self.run_checked(cx, selector, cfg, offer, None, application)
+        self.run_checked(cx.clone(), cx, selector, cfg, offer, None, application)
     }
     // A reconnect pin is comparison-only metadata. Every attempt still performs
     // fresh LocalAPI, TLS and post-handshake checks before exposing a Viewer.
     #[allow(clippy::too_many_arguments)]
+    //
+    // `cx` owns the connection: destination lease, renewal and this scope.
+    // `application` is the Viewer's own context. Fencing a granted controller
+    // cancels the application context; the connection stays up so its
+    // closing exchange (on an independent cleanup context) can still run.
+    // Both are cancelled when the scope ends. `run` passes one context.
     fn run_checked<'a, T: 'a, F, A>(
         &'a mut self,
         cx: Cx,
+        application_cx: Cx,
         selector: PeerSelector<'a>,
         cfg: Configuration,
         offer: Offer,
@@ -162,6 +169,7 @@ impl Client {
     {
         Scoped {
             cx: cx.clone(),
+            application: application_cx.clone(),
             inner: Box::pin(async move {
                 cfg.validate()?;
                 offer.validate().map_err(|_| Error::InvalidConfiguration)?;
@@ -185,7 +193,7 @@ impl Client {
                     .map_err(Error::Tailnet)?;
                 let lease = owner.lease();
                 let viewer = join_viewer(
-                    &cx,
+                    &application_cx,
                     native,
                     Arc::new(move || lease.check().is_ok()),
                     offer,
@@ -260,6 +268,7 @@ async fn run_application<T>(
 }
 struct Scoped<F> {
     cx: Cx,
+    application: Cx,
     inner: Pin<Box<F>>,
 }
 impl<T, F: Future<Output = Result<T, Error>>> Future for Scoped<F> {
@@ -272,6 +281,7 @@ impl<T, F: Future<Output = Result<T, Error>>> Future for Scoped<F> {
         let result = this.inner.as_mut().poll(task);
         if result.is_ready() {
             this.cx.cancel_fast(CancelKind::User);
+            this.application.cancel_fast(CancelKind::User);
         }
         result
     }
@@ -279,6 +289,7 @@ impl<T, F: Future<Output = Result<T, Error>>> Future for Scoped<F> {
 impl<F> Drop for Scoped<F> {
     fn drop(&mut self) {
         self.cx.cancel_fast(CancelKind::User);
+        self.application.cancel_fast(CancelKind::User);
     }
 }
 #[cfg(test)]

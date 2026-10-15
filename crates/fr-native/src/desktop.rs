@@ -561,6 +561,110 @@ impl Desktop {
             }),
         })
     }
+    /// `serve_interactive` with an orderly window close: a window-manager close
+    /// becomes `Break(Requested)` at the next UI turn. After a grant, the
+    /// original input owner fences inside that turn and the controller's
+    /// terminal exchange runs on `cleanup` (independently provisioned on the
+    /// same runtime clock). Before a grant, the close stops locally without a
+    /// report. Emergency window events, callback errors, lost authority and
+    /// protocol failures keep their immediate behaviour.
+    pub fn serve_interactive_until<'a>(
+        &'a mut self,
+        cleanup: &'a Cx,
+        sequence: u64,
+        capabilities: fr_core::input_submission::Capabilities,
+        policy: fr_client::input::Policy,
+        mut ui: impl FnMut(
+            frd::session_startup::InteractiveViewerState<'_>,
+            Option<Presentation>,
+        ) -> Result<Option<frd::session_startup::viewer_events::Layout>, ()>
+        + 'a,
+        result: impl FnMut(fr_client::input::ResultEvent) + 'a,
+    ) -> Result<
+        impl Future<Output = Result<frd::session_startup::ControlCloseOutcome, Error>> + 'a,
+        Error,
+    > {
+        if self.state() != State::Viewing {
+            return Err(Error::NotViewing);
+        }
+        let fitted = self.configuration.fit_window.is_some();
+        let window = self.window().ok_or(Error::NotViewing)?;
+        window.enable_orderly_close().map_err(Error::Window)?;
+        let display = self.observer.as_ref().ok_or(Error::NotViewing)?.display();
+        let local = &self.configuration.display;
+        let input = &mut self.input;
+        let observer = self.observer.as_mut().ok_or(Error::NotViewing)?;
+        let stop = observer.control();
+        let failure = Rc::new(Cell::new(None));
+        let report = failure.clone();
+        let inner = observer.serve_interactive_control_until(
+            cleanup,
+            sequence,
+            capabilities,
+            policy,
+            move |state, presentation| {
+                use frd::session_startup::InteractiveViewerState;
+                if window.status() == viewer_window::Status::CloseRequested {
+                    return Ok(std::ops::ControlFlow::Break(
+                        fr_wire::closure::Reason::Requested,
+                    ));
+                }
+                let attached = match state {
+                    InteractiveViewerState::Controlled(viewer) => {
+                        match ui(InteractiveViewerState::Controlled(viewer), presentation)? {
+                            None => Ok(()),
+                            Some(layout) => (|| {
+                                if input.is_some() {
+                                    return Err(Error::CaptureAlreadyStarted);
+                                }
+                                let target = window.input_window().map_err(Error::Window)?;
+                                if fitted {
+                                    check_fitted_layout(display, target, &layout)?;
+                                } else {
+                                    check_layout(display, target, &layout)?;
+                                }
+                                *input = Some(
+                                    crate::viewer_input::X11InputCapture::attach(
+                                        viewer, local, target, layout,
+                                    )
+                                    .map_err(Error::InputCapture)?,
+                                );
+                                Ok(())
+                            })(),
+                        }
+                    }
+                    other => {
+                        if ui(other, presentation)?.is_some() {
+                            Err(Error::NotViewing)
+                        } else {
+                            Ok(())
+                        }
+                    }
+                };
+                attached
+                    .map(|()| std::ops::ControlFlow::Continue(()))
+                    .map_err(|error| report.set(Some(error)))
+            },
+            result,
+        );
+        Ok(Operation {
+            state: &mut self.state,
+            stop,
+            success: State::Stopped,
+            complete: false,
+            inner: Box::pin(async move {
+                inner
+                    .await
+                    .map_err(|error| failure.get().unwrap_or(Error::Observer(error)))
+            }),
+        })
+    }
+    /// The granted controller's exact terminal exchange, independent of reap.
+    pub fn control_disconnect_outcome(&self) -> Option<frd::session_startup::ControlCloseOutcome> {
+        self.observer
+            .as_ref()
+            .and_then(NativeObserver::control_disconnect_outcome)
+    }
     /// Fence the original session before stopping either native resource. Keep
     /// owners for reaping; this method never blocks or claims cleanup completed.
     pub fn close(&mut self) {

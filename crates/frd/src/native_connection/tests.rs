@@ -305,6 +305,7 @@ fn returning_a_value_ends_target_scope_and_abandoned_scope_fences_before_drop() 
     let mut task = Context::from_waker(Waker::noop());
     let mut scope = Box::pin(Scoped {
         cx: cx.clone(),
+        application: cx.clone(),
         inner: Box::pin(async move {
             work.await;
             Ok::<_, Error>(())

@@ -243,6 +243,11 @@ impl Client {
                     let session = runtime
                         .try_request_cx_with_budget(cx.budget())
                         .map_err(|_| Failure::MissingRuntime)?;
+                    // The Viewer's own context: a granted controller's fence
+                    // cancels it, not the connection that carries its close.
+                    let viewing = runtime
+                        .try_request_cx_with_budget(cx.budget())
+                        .map_err(|_| Failure::MissingRuntime)?;
                     let outcome = guarded(
                         &cx,
                         &mut clock,
@@ -258,6 +263,7 @@ impl Client {
                                 }
                                 self.run_checked(
                                     session.clone(),
+                                    viewing.clone(),
                                     selector,
                                     cfg,
                                     offer.clone(),
@@ -280,6 +286,7 @@ impl Client {
                     .await;
                     // Owned cancels before dropping the application future. All
                     // external native storage now belongs only to cleanup.
+                    viewing.cancel_fast(CancelKind::User);
                     let failure = outcome.as_ref().err().copied();
                     let notice = notify(application, Status::Cleaning { attempt, failure });
                     let clean = runtime

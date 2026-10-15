@@ -51,6 +51,9 @@ pub use crate::media::presented::AgeHistogram as PresentedAgeHistogram;
 pub use fr_files::sender::{
     Error as FileSendError, Outcome as FileSendOutcome, Receipt as FileSendReceipt,
 };
+/// A granted controller's terminal exchange: the session outcome and any
+/// lease report, kept separate.
+pub use fr_transport::ControlCloseOutcome;
 /// Exact terminal exchange outcome; distinct from local native cleanup.
 pub use fr_transport::quic::CloseOutcome as ViewerCloseOutcome;
 pub use viewer::controlled::events as viewer_events;

@@ -362,7 +362,9 @@ fn connect(
             clipboard,
             audio: audio_output,
         },
-    );
+    )
+    // A controller's window close runs the closing exchange, as a viewer's does.
+    .with_cleanup_runtime(runtime.handle());
     let selector = if connection.target.by_name {
         PeerSelector::Name(&connection.target.node)
     } else {
@@ -475,7 +477,19 @@ fn completed(
     let result = completed_result(application, result, stopped, progress, json);
     // Preserve the original host report even when local native cleanup or the
     // supervisor failed. A failure status must not erase known external effects.
-    crate::closure::preserve(result, application.disconnect_outcome())
+    crate::closure::preserve(result, close_outcome(application))
+}
+/// The original closing exchange: a viewer's, or a granted controller's
+/// session exchange (its separate lease report is not translated into it).
+#[cfg(feature = "linux-desktop")]
+fn close_outcome(
+    application: &Session<Interface>,
+) -> Option<frd::session_startup::ViewerCloseOutcome> {
+    application.disconnect_outcome().or_else(|| {
+        application
+            .control_disconnect_outcome()
+            .map(|outcome| outcome.exchange)
+    })
 }
 #[cfg(feature = "linux-desktop")]
 fn completed_result(
@@ -562,12 +576,13 @@ fn completed_result(
             "Verify host approval, selected display, worker/HEVC support and transport qualification; do not bypass admission checks.",
         ));
     }
-    Ok(completion(
+    Ok(completion_with_lease(
         progress,
         json,
+        close_outcome(application).map(crate::closure::Report::from),
         application
-            .disconnect_outcome()
-            .map(crate::closure::Report::from),
+            .control_disconnect_outcome()
+            .and_then(|outcome| outcome.revocation),
     ))
 }
 
@@ -776,9 +791,20 @@ fn install_audio(
     }
 }
 #[cfg(feature = "linux-desktop")]
+#[cfg(test)]
 fn completion(progress: &Progress, json: bool, closure: Option<crate::closure::Report>) -> String {
+    completion_with_lease(progress, json, closure, None)
+}
+/// `lease` is a granted controller's own lease report from its closing
+/// exchange (control completions only).
+fn completion_with_lease(
+    progress: &Progress,
+    json: bool,
+    closure: Option<crate::closure::Report>,
+    lease: Option<fr_wire::lease_revoked::Revoked>,
+) -> String {
     if let Some(control) = progress.control {
-        return control_completion(progress, control, json);
+        return control_completion(progress, control, json, closure, lease);
     }
     let audio = progress.audio.as_ref().map(|report| report.borrow());
     let (requested, active, played, resets, absence) =
@@ -891,7 +917,13 @@ fn control_audio_completion(progress: &Progress, json: bool) -> String {
 /// Clipboard fields are content-free: requested, became active, host items
 /// committed to the local CLIPBOARD, or the typed reason it never became active.
 #[cfg(feature = "linux-desktop")]
-fn control_completion(progress: &Progress, control: control::Counters, json: bool) -> String {
+fn control_completion(
+    progress: &Progress,
+    control: control::Counters,
+    json: bool,
+    closure: Option<crate::closure::Report>,
+    lease: Option<fr_wire::lease_revoked::Revoked>,
+) -> String {
     let files = progress
         .files
         .as_ref()
@@ -904,7 +936,7 @@ fn control_completion(progress: &Progress, control: control::Counters, json: boo
         .unwrap_or("not_requested");
     if json {
         format!(
-            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{},\"control_requested\":{},\"control_granted\":{},\"control_capabilities_granted\":{},\"wheel_unavailable\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"input_suspensions\":{},\"input_suspended_ms\":{},\"input_dropped_aged\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{},\"clipboard_ended\":{}{}{audio},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false}}\n",
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{},\"control_requested\":{},\"control_granted\":{},\"control_capabilities_granted\":{},\"wheel_unavailable\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"input_suspensions\":{},\"input_suspended_ms\":{},\"input_dropped_aged\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{},\"clipboard_ended\":{}{}{audio},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false,\"close_exchange\":{},\"lease_report\":{}}}\n",
             output::timestamp(),
             progress.attempts,
             progress.opened,
@@ -941,6 +973,8 @@ fn control_completion(progress: &Progress, control: control::Counters, json: boo
                 .ended
                 .map_or_else(|| "null".to_owned(), |code| format!("\"{code}\"")),
             files.json(),
+            closure.map_or_else(|| "null".to_owned(), crate::closure::Report::json),
+            crate::terminal::lease_json(lease),
         )
     } else {
         format!(
@@ -1462,8 +1496,10 @@ mod tests {
             assert!(absent.get("close_exchange").unwrap().is_null());
             assert!(completion(&progress, false, None).contains("No completed close exchange"));
         }
+        /// A controller's completion carries its OWN closing exchange and
+        /// lease report; without them both are null, never omitted or guessed.
         #[test]
-        fn observation_closure_projection_does_not_change_control_completion() {
+        fn a_control_completion_reports_its_own_close_exchange_and_lease_report() {
             let progress = Progress {
                 control: Some(control::Counters::default()),
                 ..Progress::default()
@@ -1471,7 +1507,27 @@ mod tests {
             let json: serde_json::Value =
                 serde_json::from_str(&completion(&progress, true, None)).unwrap();
             assert_eq!(json["role"], "control");
-            assert!(json.get("close_exchange").is_none());
+            assert!(json.get("close_exchange").unwrap().is_null());
+            assert!(json.get("lease_report").unwrap().is_null());
+            let lease = fr_wire::lease_revoked::Revoked {
+                lease: fr_core::ids::InputLeaseId::from_raw(7),
+                reason: fr_wire::lease_revoked::Reason::SessionEnded,
+                cleanup: fr_wire::lease_revoked::CleanupStage::Released,
+                effects: fr_wire::lease_revoked::EffectStage::ReceiptsComplete,
+            };
+            let json: serde_json::Value =
+                serde_json::from_str(&completion_with_lease(&progress, true, None, Some(lease)))
+                    .unwrap();
+            assert_eq!(
+                json["lease_report"],
+                serde_json::json!({
+                    "reason": "session_ended",
+                    "cleanup_stage": "released",
+                    "effect_stage": "receipts_complete"
+                })
+            );
+            // Stages only: no lease ID or other identifier reaches the output.
+            assert_eq!(json["lease_report"].as_object().unwrap().len(), 3);
         }
         #[test]
         fn supervisor_cleanup_failure_cannot_be_masked_by_a_user_close_or_signal() {

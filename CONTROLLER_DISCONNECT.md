@@ -225,4 +225,30 @@ HEVC/GPU, X11 input release, installed-Tailscale or a full current-workspace/col
 dependency qualification. Concurrent native test-only fixes are preserved, not
 counted as rerun. Selecting this API from the default native controller window
 and CLI, independently confirmed host-native cleanup and final effect accounting
-remain open. The default controller window close remains an immediate input fence.
+remain open. (Superseded below: the default controller window close now runs the exchange.)
+
+## `fr connect --control` closes through it
+
+`fr connect --control` now serves through `serve_interactive_control_until`.
+A window-manager close of the controller window becomes `Break(Requested)`
+at the next UI turn, and the granted controller's closing exchange runs on a
+fresh cleanup context from the client's runtime. Two things were needed on
+the client:
+
+- The client's `Viewer` gets its own application context, separate from the
+  connection context. The connection context owns the destination lease,
+  its renewal and the connection scope. The input fence cancels only the
+  application context. Before this change the fence cancelled the session
+  context, which failed the destination lease. That lease is also the
+  client's terminal gate, so every controller close exchange ended
+  `Unauthorized` before sending anything. Both contexts are still
+  cancelled when the attempt ends.
+- The control completion reports `close_exchange` (as a viewer's does) and a
+  content-free `lease_report` (reason, cleanup stage, effect stage), or null.
+
+Namespace e2e (the attributed-consent control test) shows the host
+acknowledging the request (`request_acknowledged: true`,
+`transport_completed: true`) and reporting the lease ended with
+`session_ended`, cleanup `fenced`. Before, both fields were absent and the
+host saw a transport expiry. Emergency window events, callback errors, lost
+authority and protocol failures still stop immediately.

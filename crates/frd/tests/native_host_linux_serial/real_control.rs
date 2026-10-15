@@ -771,6 +771,23 @@ impl Controlled {
 /// A wheel notch on the VIEWER (logical button 4, one line up) reaches the
 /// host window at `at` as one discrete wheel press/release: the host offered
 /// line scrolling because its executor probed it, so the client asked for it.
+/// The window close ran the controller's closing exchange (before, there was
+/// none). It is best effort within its 250 ms budget: native send backlog can
+/// refuse the request, or the report can miss the budget after the request was
+/// acknowledged. A lease report, when one arrived, is reported by stage only.
+fn controller_closed(report: &serde_json::Value) {
+    let exchange = &report["close_exchange"];
+    assert!(exchange.is_object(), "{report}");
+    let lease = &report["lease_report"];
+    assert!(
+        lease.is_null() || (lease["reason"].is_string() && lease["cleanup_stage"].is_string()),
+        "{report}"
+    );
+    println!(
+        "controller close: request_acknowledged {} lease_report {}",
+        exchange["request_acknowledged"], report["lease_report"]
+    );
+}
 fn wheel_reaches_host(s: &mut Controlled, at: Point) {
     let before = host_events(&mut s.observer).len();
     s.viewer("button 4 1");
@@ -894,6 +911,7 @@ fn fr_connect_control_drives_the_host_desktop_through_frd_run() {
         "{report}"
     );
     assert_eq!(report["physical_visibility_proven"], false, "{report}");
+    controller_closed(&report);
     assert!(
         eventually(Duration::from_secs(15), || indicator(&mut s.observer)
             .is_none()),

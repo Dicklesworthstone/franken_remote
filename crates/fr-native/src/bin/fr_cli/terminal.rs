@@ -59,6 +59,27 @@ pub(super) fn closed_by_code(reason: Reason) -> Failure {
     }
 }
 
+/// A granted controller's own closing exchange: the host's lease report as
+/// content-free stages, or null when none arrived.
+pub(super) fn lease_json(value: Option<Revoked>) -> String {
+    value.map_or_else(
+        || "null".to_owned(),
+        |value| {
+            let report = Report {
+                reason: value.reason,
+                cleanup: value.cleanup,
+                effects: value.effects,
+            };
+            format!(
+                "{{\"reason\":\"{}\",\"cleanup_stage\":\"{}\",\"effect_stage\":\"{}\"}}",
+                report.reason(),
+                report.cleanup(),
+                report.effects()
+            )
+        },
+    )
+}
+
 /// Call only after the original controlled viewer validated the exact session,
 /// control route and lease. Ordinary disconnects do not imply this report.
 pub(super) fn failure(value: Revoked) -> Failure {

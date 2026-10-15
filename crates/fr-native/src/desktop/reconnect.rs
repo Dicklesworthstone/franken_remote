@@ -3,7 +3,12 @@
 //! positively completed native cleanup permits another attempt; no replay.
 #![forbid(unsafe_code)]
 use super::{CaptureCleanup, Cleanup, Configuration, Desktop, Error, PickerCleanup, WindowCleanup};
-use asupersync::{cx::Cx, time::sleep_until, types::Time};
+use asupersync::{
+    cx::Cx,
+    runtime::RuntimeHandle,
+    time::sleep_until,
+    types::{Budget, Time},
+};
 use fr_client::{input, startup::ApprovalNotice};
 use fr_core::input_submission::Capabilities;
 use fr_media::freshness::ClockPolicy;
@@ -93,6 +98,11 @@ pub struct Session<U> {
     cleanup: Option<Cleanup>,
     cleanup_failure: Option<CleanupFailure>,
     disconnect: Option<ViewerCloseOutcome>,
+    /// Where a granted controller's closing exchange gets its independent
+    /// cleanup context. Without it a controller's window close stops
+    /// immediately, with no closing exchange (the original behaviour).
+    cleanup_runtime: Option<RuntimeHandle>,
+    control_disconnect: Option<frd::session_startup::ControlCloseOutcome>,
     statistics: Option<ViewerStatistics>,
     /// Why the last attempt's local input capture stopped, sampled before
     /// cleanup closes it. Content-free; a capture stop otherwise reaches the
@@ -118,9 +128,19 @@ impl<U> Session<U> {
             cleanup: None,
             cleanup_failure: None,
             disconnect: None,
+            cleanup_runtime: None,
+            control_disconnect: None,
             statistics: None,
             input_stop: None,
         }
+    }
+    /// Give a control-capable session an orderly window close: a controller's
+    /// window-manager close runs the terminal exchange on a fresh context
+    /// from `runtime` instead of dropping the connection.
+    #[must_use]
+    pub fn with_cleanup_runtime(mut self, runtime: RuntimeHandle) -> Self {
+        self.cleanup_runtime = Some(runtime);
+        self
     }
     pub fn desktop(&self) -> Option<&Desktop> {
         self.desktop.as_ref()
@@ -143,6 +163,13 @@ impl<U> Session<U> {
     /// are reaped. None is no completed exchange, never confirmed remote cleanup.
     pub const fn disconnect_outcome(&self) -> Option<ViewerCloseOutcome> {
         self.disconnect
+    }
+    /// A granted controller's closing exchange (session report and any lease
+    /// report). None is no completed exchange, never confirmed cleanup.
+    pub const fn control_disconnect_outcome(
+        &self,
+    ) -> Option<frd::session_startup::ControlCloseOutcome> {
+        self.control_disconnect
     }
     /// The last attempt's content-free viewer counters, sampled before its
     /// native owners are reaped. None: that attempt never opened a viewer.
@@ -174,6 +201,43 @@ impl<U> Session<U> {
         .map_err(|_| ObserverError::Application)
     }
 }
+/// A control-capable attempt's service: an orderly window close when a
+/// cleanup context exists, otherwise the original immediate close.
+async fn serve_control(
+    desktop: &mut Desktop,
+    cleanup: Option<&Cx>,
+    policy: ControlPolicy,
+    interactive: impl FnMut(
+        InteractiveViewerState<'_>,
+        Option<Presentation>,
+    ) -> Result<Option<Layout>, ()>,
+    result: impl FnMut(input::ResultEvent),
+) -> Result<(), Error> {
+    match cleanup {
+        Some(cleanup) => desktop
+            .serve_interactive_until(
+                cleanup,
+                policy.sequence,
+                policy.capabilities,
+                policy.input,
+                interactive,
+                result,
+            )?
+            .await
+            .map(|_| ()),
+        None => {
+            desktop
+                .serve_interactive(
+                    policy.sequence,
+                    policy.capabilities,
+                    policy.input,
+                    interactive,
+                    result,
+                )?
+                .await
+        }
+    }
+}
 impl<U: Ui> Application for Session<U> {
     type Output = ();
     async fn run(&mut self, attempt: u8, viewer: Viewer) -> Result<(), ObserverError> {
@@ -185,6 +249,7 @@ impl<U: Ui> Application for Session<U> {
         self.cleanup = None;
         self.cleanup_failure = None;
         self.disconnect = None;
+        self.control_disconnect = None;
         self.statistics = None;
         self.input_stop = None;
         // Store before ANY await or callback so interrupted work stays owned.
@@ -194,6 +259,14 @@ impl<U: Ui> Application for Session<U> {
         let clock = match self.mode {
             Mode::Observe => None,
             Mode::ControlCapable(policy) => Some(policy.clock),
+        };
+        let cleanup = match (&self.mode, &self.cleanup_runtime) {
+            (Mode::ControlCapable(_), Some(runtime)) => Some(
+                runtime
+                    .try_request_cx_with_budget(Budget::INFINITE)
+                    .map_err(|_| ObserverError::Application)?,
+            ),
+            _ => None,
         };
         let outcome = async {
             desktop
@@ -224,30 +297,28 @@ impl<U: Ui> Application for Session<U> {
                     .map(|_| ())
                     .map_err(|e| Error::Observer(ObserverError::Streaming(e))),
                 Mode::ControlCapable(policy) => {
-                    desktop
-                        .serve_interactive(
-                            policy.sequence,
-                            policy.capabilities,
-                            policy.input,
-                            |state, frame| {
-                                callback(&stop, || {
-                                    ui.borrow_mut().interactive(attempt, state, frame)
-                                })
+                    serve_control(
+                        desktop,
+                        cleanup.as_ref(),
+                        policy,
+                        |state, frame| {
+                            callback(&stop, || ui.borrow_mut().interactive(attempt, state, frame))
                                 .map_err(|_| ())
-                            },
-                            |result| {
-                                let _ = callback(&stop, || {
-                                    ui.borrow_mut().input_result(attempt, result);
-                                    Ok(())
-                                });
-                            },
-                        )?
-                        .await
+                        },
+                        |result| {
+                            let _ = callback(&stop, || {
+                                ui.borrow_mut().input_result(attempt, result);
+                                Ok(())
+                            });
+                        },
+                    )
+                    .await
                 }
             }
         }
         .await;
         self.disconnect = desktop.disconnect_outcome();
+        self.control_disconnect = desktop.control_disconnect_outcome();
         self.statistics = desktop.statistics();
         // Record genuine native cancellation BEFORE cleanup can stop a pending
         // picker itself. It cannot relabel a deadline/link failure as user intent.
