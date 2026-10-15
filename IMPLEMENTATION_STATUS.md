@@ -80,6 +80,12 @@ Ubuntu 26.04 on the same tailnet.
   retirement closed the connection (`transport: Closed`). Earlier release
   runs with the busy trj as client ended `video_worker_late` or
   `video_reference_lost` (fr-tqu7).
+- 2026-10-15 later, same pair and script. libx265 now encodes each picture on
+  four wavefront threads (ecce132; one picture, so no added picture delay). A
+  host colour change reached the client's pixel in 49-75 ms over two runs.
+  Alternating runs of the previous build took 108-174 ms. With
+  `ENCODER=nvenc` (NVENC now has the same 200 ms VBV, fe8fb70) every row
+  passed and the change took 32-59 ms.
 
 **What it took** (each with unit tests and a planted negative):
 - Asupersync pinned to git `ee72b665e` (0.6.0). Published 0.5.0 sends each
