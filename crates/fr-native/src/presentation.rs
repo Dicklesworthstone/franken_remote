@@ -7,6 +7,13 @@ use core::ptr::NonNull;
 use std::os::fd::{AsRawFd, BorrowedFd};
 
 unsafe extern "C" {
+    fn fr_x11_present_regions(
+        surface: *mut c_void,
+        bytes: *const u8,
+        length: usize,
+        regions: *const [u32; 4],
+        count: usize,
+    ) -> c_int;
     fn fr_x11_damage_source(
         surface: *mut c_void,
         display: *mut *mut c_void,
@@ -39,6 +46,50 @@ pub struct PresentationMaintenance {
 }
 
 impl X11Surface {
+    /// Update at most two `(x, y, width, height)` rectangles of the last
+    /// submitted image. The caller must preserve every pixel outside them;
+    /// this is local retained-image maintenance, not a fresh decoded frame.
+    /// A first full `present` is required, even for an empty region list.
+    ///
+    /// Bounds are checked before any copy. The original native buffer is reused
+    /// on both shared-memory and socket paths, and native completion precedes
+    /// reuse. An exposure redraws the complete retained image without recopying
+    /// it. Empty damage still checks lifecycle/repairs exposure, but otherwise
+    /// sends no image. This never raises the window or grants input authority.
+    pub fn present_regions(
+        &mut self,
+        frame: &super::BgraFrame,
+        regions: &[[u32; 4]],
+    ) -> Result<(), NativeError> {
+        if (frame.width(), frame.height()) != (self.width(), self.height()) {
+            return Err(NativeError::GeometryChanged);
+        }
+        if regions.len() > 2
+            || regions.iter().any(|&[x, y, width, height]| {
+                width == 0
+                    || height == 0
+                    || x >= self.width()
+                    || y >= self.height()
+                    || width > self.width() - x
+                    || height > self.height() - y
+            })
+        {
+            return Err(NativeError::InvalidConfiguration);
+        }
+        // SAFETY: immutable packed pixels and at most two ABI-matching arrays
+        // live for this synchronous call. C independently validates all bounds
+        // before modifying its sole retained image, and retains no Rust pointer.
+        status(unsafe {
+            fr_x11_present_regions(
+                self.raw.as_ptr(),
+                frame.pixels().as_ptr(),
+                frame.pixels().len(),
+                regions.as_ptr(),
+                regions.len(),
+            )
+        })
+    }
+
     /// Snapshot counters from this original native owner, without capturing.
     pub fn transfer_statistics(&self) -> Result<crate::image_transfer::Statistics, NativeError> {
         let mut raw = crate::image_transfer::Raw::default();

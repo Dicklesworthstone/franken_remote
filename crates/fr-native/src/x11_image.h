@@ -18,6 +18,11 @@ int fr_ximage_new(Display *, Visual *, int depth, int width, int height,
 void fr_ximage_free(FrXImageTransfer *);
 int fr_ximage_capture(FrXImageTransfer *, Drawable, int x, int y, uint8_t *, size_t);
 int fr_ximage_store(FrXImageTransfer *, const uint8_t *, size_t);
+/* At most two local (x,y,width,height) regions. The complete list is checked
+   before any copy/submission; the retained image must already be initialized. */
+int fr_ximage_store_regions(FrXImageTransfer *, const uint8_t *, size_t,
+                            const uint32_t (*)[4], size_t);
+int fr_ximage_draw_regions(FrXImageTransfer *, Drawable, GC, const uint32_t (*)[4], size_t);
 int fr_ximage_ready(const FrXImageTransfer *);
 int fr_ximage_draw(FrXImageTransfer *, Drawable, GC);
 void fr_ximage_stats(const FrXImageTransfer *, FrXImageStats *);

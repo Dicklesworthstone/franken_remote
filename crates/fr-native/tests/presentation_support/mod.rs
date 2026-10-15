@@ -69,6 +69,12 @@ pub struct Server {
 }
 impl Server {
     pub fn start() -> Self {
+        Self::with_options(&[])
+    }
+    pub fn without_shared_memory() -> Self {
+        Self::with_options(&["-extension", "MIT-SHM"])
+    }
+    fn with_options(options: &[&str]) -> Self {
         fr_native::xlib::initialize_threads().unwrap();
         let mut child = Command::new("Xvfb")
             .args([
@@ -81,6 +87,7 @@ impl Server {
                 "tcp",
                 "-noreset",
             ])
+            .args(options)
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()

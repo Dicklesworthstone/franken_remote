@@ -215,33 +215,86 @@ int fr_ximage_store(FrXImageTransfer *t, const uint8_t *pixels, size_t length) {
 int fr_ximage_ready(const FrXImageTransfer *t) {
     return t && !t->capture && !t->failed && t->ready;
 }
-int fr_ximage_draw(FrXImageTransfer *t, Drawable drawable, GC gc) {
-    if (!fr_ximage_ready(t) || !gc) return IMAGE_INVALID;
-    XImage *image = t->image;
-    XFlushGC(t->display, gc);
+/* Coordinates name subregions of the existing packed image, not an allocation
+   or a new drawable. Subtract before comparing so malicious extents cannot wrap. */
+static int fr_ximage_regions(const FrXImageTransfer *t,
+                             const uint32_t (*regions)[4], size_t count) {
+    if (!fr_ximage_ready(t) || count>2 || (count && !regions)) return 0;
+    uint32_t w=(uint32_t)t->image->width, h=(uint32_t)t->image->height;
+    for (size_t i=0;i<count;++i) {
+        const uint32_t *r=regions[i];
+        if (!r[2] || !r[3] || r[0]>=w || r[1]>=h || r[2]>w-r[0] || r[3]>h-r[1])
+            return 0;
+    }
+    return 1;
+}
+int fr_ximage_store_regions(FrXImageTransfer *t, const uint8_t *pixels, size_t length,
+                            const uint32_t (*regions)[4], size_t count) {
+    if (!fr_ximage_regions(t,regions,count) || !pixels || length!=t->length)
+        return IMAGE_INVALID;
+    /* Validate the WHOLE list before the first write. Overlapping regions copy
+       the same final pixels; neither operation reads from a modified source. */
+    size_t stride=(size_t)t->image->bytes_per_line;
+    for (size_t i=0;i<count;++i) {
+        const uint32_t *r=regions[i];
+        size_t row=(size_t)r[2]*4;
+        for (uint32_t y=0;y<r[3];++y) {
+            size_t offset=((size_t)r[1]+y)*stride+(size_t)r[0]*4;
+            memcpy(t->image->data+offset,pixels+offset,row);
+        }
+        fr_image_count(&t->stats.copied_bytes,(uint64_t)row*r[3]);
+    }
+    return IMAGE_OK;
+}
+int fr_ximage_draw_regions(FrXImageTransfer *t, Drawable drawable, GC gc,
+                           const uint32_t (*regions)[4], size_t count) {
+    if (!fr_ximage_regions(t,regions,count) || !gc) return IMAGE_INVALID;
+    if (!count) return IMAGE_OK;
+    XImage *image=t->image;
+    XFlushGC(t->display,gc);
     XFlush(t->display);
     if (t->segment) {
-        xShmPutImageReq request = {0};
-        request.drawable = (uint32_t)drawable;
-        request.gc = (uint32_t)XGContextFromGC(gc);
-        request.totalWidth = request.srcWidth = (uint16_t)image->width;
-        request.totalHeight = request.srcHeight = (uint16_t)image->height;
-        request.depth = 24; request.format = ZPixmap;
-        request.shmseg = t->segment;
-        if (!fr_shm_checked(t->connection, fr_shm_request(t->connection,
-                X_ShmPutImage, 1, &request, sizeof(request), -1))) {
-            t->failed = 1; return IMAGE_DISPLAY;
+        unsigned int sequences[2]={0};
+        /* Submit both rectangles before waiting. They borrow the same immutable
+           image, and ALL checked completions precede any reuse or unmapping. */
+        for (size_t i=0;i<count;++i) {
+            const uint32_t *r=regions[i];
+            xShmPutImageReq request={0};
+            request.drawable=(uint32_t)drawable;
+            request.gc=(uint32_t)XGContextFromGC(gc);
+            request.totalWidth=(uint16_t)image->width;
+            request.totalHeight=(uint16_t)image->height;
+            request.srcX=(uint16_t)r[0]; request.srcY=(uint16_t)r[1];
+            request.srcWidth=(uint16_t)r[2]; request.srcHeight=(uint16_t)r[3];
+            request.dstX=(int16_t)r[0]; request.dstY=(int16_t)r[1];
+            request.depth=24; request.format=ZPixmap; request.shmseg=t->segment;
+            sequences[i]=fr_shm_request(t->connection,X_ShmPutImage,1,
+                                        &request,sizeof(request),-1);
         }
+        int ok=1;
+        for (size_t i=0;i<count;++i) {
+            if (fr_shm_checked(t->connection,sequences[i]))
+                fr_image_count(&t->stats.images,1);
+            else ok=0;
+        }
+        if (!ok) { t->failed=1; return IMAGE_DISPLAY; }
     } else {
-        XPutImage(t->display, drawable, gc, image, 0, 0, 0, 0, image->width, image->height);
-        XSync(t->display, False);
-        fr_image_count(&t->stats.socket_pixel_bytes, t->length);
+        for (size_t i=0;i<count;++i) {
+            const uint32_t *r=regions[i];
+            XPutImage(t->display,drawable,gc,image,(int)r[0],(int)r[1],
+                      (int)r[0],(int)r[1],r[2],r[3]);
+            fr_image_count(&t->stats.socket_pixel_bytes,(uint64_t)r[2]*r[3]*4);
+        }
+        XSync(t->display,False);
+        fr_image_count(&t->stats.images,count);
     }
-    /* Checked request completion (or the socket path's XSync) precedes every
-       reuse, idle repaint, detach and unmap. Never overwrite an in-flight image.
-       This is server submission completion, not compositor/scanout visibility. */
-    fr_image_count(&t->stats.images, 1);
+    /* Server submission completion, never compositor/scanout visibility. */
     return IMAGE_OK;
+}
+int fr_ximage_draw(FrXImageTransfer *t, Drawable drawable, GC gc) {
+    if (!fr_ximage_ready(t)) return IMAGE_INVALID;
+    const uint32_t region[1][4]={{0,0,(uint32_t)t->image->width,(uint32_t)t->image->height}};
+    return fr_ximage_draw_regions(t,drawable,gc,region,1);
 }
 void fr_ximage_stats(const FrXImageTransfer *t, FrXImageStats *out) {
     if (!out) return;

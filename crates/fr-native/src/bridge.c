@@ -496,6 +496,19 @@ int fr_x11_present(FrX11 *x,const uint8_t *bgra,size_t len) {
     if (x->presenter==1) XRaiseWindow(x->display,x->window);
     return fr_x11_draw_front(x);
 }
+/* Cursor-only/local damage never raises the UI window or invents a new frame.
+   Exposure needs the whole retained image, even if this turn changed no pixels. */
+int fr_x11_present_regions(FrX11 *x,const uint8_t *bgra,size_t len,
+                           const uint32_t (*regions)[4],size_t count) {
+    if (!x || !x->presenter || !bgra || !bgra_buffer(x->w,x->h,len)) return FR_INVALID;
+    int code=fr_x11_geometry(x); if (code!=FR_OK) return code;
+    code=fr_ximage_store_regions(x->front,bgra,len,regions,count);
+    if (code!=FR_OK) return code;
+    if (x->exposed) return fr_x11_draw_front(x);
+    code=fr_ximage_draw_regions(x->front,x->canvas?x->canvas:x->window,x->gc,regions,count);
+    if (code!=FR_OK) { fr_x11_retire(x); return code; }
+    return fr_x11_geometry(x);
+}
 int fr_x11_maintain_presentation(FrX11 *x,int *repainted,size_t *retained_bytes) {
     if (!x || !x->presenter || !repainted || !retained_bytes) return FR_INVALID;
     *repainted=0; *retained_bytes=0;
