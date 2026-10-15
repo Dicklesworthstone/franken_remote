@@ -16,8 +16,17 @@ Ubuntu 26.04 on the same tailnet.
   manager).
 - `fr hosts` reports direct, DERP-relayed and idle paths correctly; a host that
   never completes the handshake ends `host_not_answering`.
-- Not exercised live yet: audio, local approval, VAAPI, macOS or Windows hosts
-  or clients.
+- Not exercised live yet: local approval, VAAPI, macOS or Windows hosts or
+  clients.
+- 2026-10-14, live audio (ts1 `frd run --audio`, trj `fr connect --audio`,
+  debug builds at c70a82b, a private PulseAudio null sink at each end). This
+  was done in a view-only session and in a controlled one. The host sink
+  played 450 Hz, then 1050 Hz at a scheduled instant. The client sink's
+  monitor showed the change about 0.1 s later (121 and 92 ms, across
+  NTP-synced clocks). Every 20 ms block carried the tone, for 30 s before
+  the switch and 2 s after it. Both runs completed `stopped` with
+  `audio_active: true`. The host log counted each clean session as
+  `refused: 1` / `failed: 1` (bead fr-u0xk).
 - 2026-10-14, live (ts2 `frd run --encoder nvenc --input-agent --clipboard
   --files`, ts1 `fr connect --control --clipboard --send`, debug builds):
   typed keys ("hello") and wheel (buttons 4 and 5) reached the host, observed
