@@ -43,6 +43,13 @@ client connect "$CB" "$NODE"
 echo "== client: focus, view, keys, wheel, copy"
 HOST_VIEW=$(host view); echo "host root samples: $HOST_VIEW"
 DRIVE=$(client drive "fr-live-client-$R" | tee /dev/stderr)
+# Glass-to-glass: the host root changes colour at scheduled instants; the
+# client polls one viewer pixel every ~2 ms (NTP-synced clocks).
+FLIPS=6; FSTART=$(($(ssh "$HS" date +%s) + 3))
+client watch "$FLIPS" 30 > "$OUT/watch.txt" &
+WATCHER=$!; host flip "$FSTART" "$FLIPS" 2 > "$OUT/flip.txt"; wait "$WATCHER"
+VIEW_MS=$(paste -d' ' "$OUT/flip.txt" "$OUT/watch.txt" | awk '{ if ($6 == "" || $6 == "None") printf "lost "; else printf "%d ", ($6 - $3) * 1000 }')
+echo "host colour change -> viewer pixel (ms): $VIEW_MS"
 sleep 8; HOST_CLIP=$(host clip-read); echo "host clipboard: $HOST_CLIP"
 host clip-copy "fr-live-host-after-$R"; sleep 8
 CLIENT_CLIP=$(client clip-read); echo "client clipboard: $CLIENT_CLIP"
@@ -65,6 +72,7 @@ row() { printf '%-28s %-4s %s\n' "$1" "$2" "$3"; }
   row view_pixels "$(python3 -c "import sys
 h, v = (int(a.split()[0].split('/')[0]) / int(a.split()[0].split('/')[1]) for a in sys.argv[1:3])
 print('PASS' if h >= 0.2 and abs(h - v) <= 0.1 else 'FAIL')" "$HOST_VIEW" "$VIEW" 2>/dev/null || echo FAIL)" "#336699 samples: host $HOST_VIEW, viewer $VIEW"
+  row view_change_latency "$(echo "$VIEW_MS" | grep -q lost || [ -z "$VIEW_MS" ] && echo FAIL || echo PASS)" "ms per change: $VIEW_MS"
   row control_keys "$([ "$(echo "$EVIDENCE" | value keys)" = hello ] && echo PASS || echo FAIL)" "host saw '$(echo "$EVIDENCE" | value keys)'"
   row control_wheel "$([ "$(echo "$EVIDENCE" | value wheel)" = 45 ] && echo PASS || echo FAIL)" "host buttons '$(echo "$EVIDENCE" | value wheel)'"
   row clipboard_host_presession "$([ "$(echo "$DRIVE" | value clip_before)" = "fr-live-host-before-$R" ] && echo PASS || echo FAIL)" ""

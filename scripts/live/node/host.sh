@@ -1,6 +1,6 @@
 #!/bin/bash
 # Host side of scripts/live/two_node.sh. Every artifact lives in WORK/R.
-# Subcommands: prepare | player | serve | view | clip-read | clip-copy | evidence | cleanup
+# Subcommands: prepare | player | serve | view | flip | clip-read | clip-copy | evidence | cleanup
 set -u
 CMD=$1; WORK=$2; N=$3; R=$4; shift 4
 H=$(dirname "$0"); D=$WORK/$R
@@ -26,6 +26,13 @@ serve) # BIN: root frd in a private MOUNT namespace (tmpfs /root keeps libpulse'
   for _ in $(seq 1 120); do grep -q '"listening"' "$D/host.log" && break; sleep 0.5; done
   grep -q '"listening"' "$D/host.log" && echo listening || { echo not-listening; tail -3 "$D/host.log"; } ;;
 view) python3 "$H/window_colour.py" "$DISPLAY" root 336699 ;;
+flip) # START COUNT GAP: alternate the root between #993366 and #336699 at
+  # START + i*GAP (wall clock), printing when each change was requested.
+  for i in $(seq 0 $(($2 - 1))); do
+    python3 -c "import sys, time; time.sleep(max(0, float(sys.argv[1]) - time.time()))" "$(($1 + i * $3))"
+    [ $((i % 2)) = 0 ] && C=993366 || C=336699
+    xsetroot -solid "#$C"; echo "set $C $(date +%s.%N)"
+  done ;;
 clip-read) timeout 3 xclip -o -selection clipboard 2>/dev/null; echo ;;
 clip-copy) (printf '%s' "$1" | setsid nohup bash -c 'exec -a "fr-live-clip-$0" xclip -selection clipboard -loops 0' "$R" > /dev/null 2>&1 &) ;;
 evidence) # FILE_NAME

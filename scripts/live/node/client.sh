@@ -1,6 +1,6 @@
 #!/bin/bash
 # Client side of scripts/live/two_node.sh. Every artifact lives in WORK/R.
-# Subcommands: prepare | connect | drive | clip-read | finish | cleanup
+# Subcommands: prepare | connect | drive | watch | clip-read | finish | cleanup
 set -u
 CMD=$1; WORK=$2; N=$3; R=$4; shift 4
 H=$(dirname "$0"); D=$WORK/$R
@@ -28,6 +28,9 @@ drive) # TEXT
   xdotool click 4; sleep 0.5; xdotool click 5; sleep 3
   echo "clip_before=$(timeout 3 xclip -o -selection clipboard 2>/dev/null)"
   (printf '%s' "$1" | setsid nohup bash -c 'exec -a "fr-live-clip-$0" xclip -selection clipboard -loops 0' "$R" > /dev/null 2>&1 &) ;;
+watch) # COUNT TIMEOUT: pixel (100,1000) of the viewer, the host colours in order
+  W=$(viewer); SEQ=""; for i in $(seq 0 $(($1 - 1))); do [ $((i % 2)) = 0 ] && SEQ="$SEQ 993366" || SEQ="$SEQ 336699"; done
+  python3 "$H/watch_pixel.py" "$DISPLAY" "$W" 100 1000 "$2" $SEQ ;;
 clip-read) timeout 3 xclip -o -selection clipboard 2>/dev/null; echo ;;
 finish) # SWITCH BIN NODE
   W=$(viewer); [ -n "$W" ] && python3 "$H/close_window.py" "$DISPLAY" "$W"
