@@ -66,3 +66,29 @@ unsafe extern "C" {
     #[cfg(feature = "linux-displays")]
     pub(crate) fn fr_ximage_free(capture: *mut c_void);
 }
+
+/// Fixed-size local damage for a cursor-only update, not a video receipt.
+/// Coordinates are destination pixels; no desktop or cursor pixels are stored.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CursorDamage {
+    rectangles: [[u32; 4]; 2],
+    count: usize,
+}
+impl CursorDamage {
+    pub fn regions(&self) -> &[[u32; 4]] {
+        &self.rectangles[..self.count]
+    }
+    pub(crate) fn between(old: Option<[u32; 4]>, new: Option<[u32; 4]>) -> Self {
+        let mut damage = Self::default();
+        for area in [old, new].into_iter().flatten() {
+            // Identical bounds with a changed shape are repainted ONCE. Merely
+            // overlapping/distant bounds stay separate instead of paying for
+            // untouched desktop pixels between them.
+            if !damage.regions().contains(&area) {
+                damage.rectangles[damage.count] = area;
+                damage.count += 1;
+            }
+        }
+        damage
+    }
+}

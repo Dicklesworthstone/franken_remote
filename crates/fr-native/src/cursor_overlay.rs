@@ -8,6 +8,7 @@
 //! second full frame. Straight-alpha blend, clipped to the picture area.
 #![forbid(unsafe_code)]
 use super::{BgraFrame, NativeError};
+use crate::image_transfer::CursorDamage;
 use fr_media::worker::{overlay::Update, presentation::Fit};
 
 /// Mapping from decoded picture pixels into the presented image.
@@ -48,6 +49,10 @@ pub struct CursorOverlay {
     position: Option<(i32, i32)>,
     saved: Option<Rect>,
     under: Vec<u8>,
+    // Save-under pixels belong to one retained layout. A fresh picture is the
+    // only way to rebase it; never index the old rectangle in a resized image.
+    layout: Option<(u32, u32, Placement)>,
+    shape_changed: bool,
 }
 impl std::fmt::Debug for CursorOverlay {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -105,18 +110,24 @@ impl CursorOverlay {
                     rgba: owned,
                 });
                 self.position = Some((x, y));
+                self.shape_changed = true;
             }
         }
         Ok(())
     }
-    /// A freshly rendered picture: saved pixels belong to the old one.
+    /// A freshly rendered picture: saved pixels belong to the old one. The
+    /// caller still presents the WHOLE new picture, including any new cursor.
     pub fn composite_fresh(
         &mut self,
         frame: &mut BgraFrame,
         placement: Placement,
     ) -> Result<(), NativeError> {
-        self.saved = None;
-        self.composite(frame, placement)
+        let (rect, stride) = self.prepare(frame, placement)?;
+        self.reserve_under(rect)?;
+        self.paint(frame, rect, stride);
+        self.layout = Some((frame.width, frame.height, placement));
+        self.shape_changed = false;
+        Ok(())
     }
     /// The same retained picture: restore what the previous cursor covered,
     /// then composite the current state (or nothing, when hidden).
@@ -125,8 +136,35 @@ impl CursorOverlay {
         frame: &mut BgraFrame,
         placement: Placement,
     ) -> Result<(), NativeError> {
-        if let Some(rect) = self.saved.take() {
-            let stride = frame_stride(frame)?;
+        self.recomposite_regions(frame, placement).map(|_| ())
+    }
+    /// Recompose only the cursor in the SAME retained picture and return its
+    /// old/new destination rectangles for `X11Surface::present_regions`.
+    ///
+    /// At most two clipped cursor rectangles, never a full-frame union. A
+    /// repeated effective position with an unchanged shape does no pixel work.
+    /// Even empty damage must service the presenter's original drawable
+    /// lifetime and exposure events. This is not a new video presentation or
+    /// freshness witness. A new picture/layout requires `composite_fresh`.
+    pub fn recomposite_regions(
+        &mut self,
+        frame: &mut BgraFrame,
+        placement: Placement,
+    ) -> Result<CursorDamage, NativeError> {
+        let layout = (frame.width, frame.height, placement);
+        if self.layout.is_some_and(|old| old != layout) {
+            return Err(NativeError::GeometryChanged);
+        }
+        let (next, stride) = self.prepare(frame, placement)?;
+        if !self.shape_changed && self.saved == next {
+            return Ok(CursorDamage::default());
+        }
+        // Complete every fallible check/allocation BEFORE touching the retained
+        // image or its saved pixels. An allocation failure cannot erase an old
+        // cursor and leave an unreportable partial update on the destination.
+        self.reserve_under(next)?;
+        let damage = CursorDamage::between(self.saved.map(destination), next.map(destination));
+        if let Some(rect) = self.saved {
             let row = rect.width as usize * 4;
             for line in 0..rect.height as usize {
                 let dst = (rect.y as usize + line) * stride + rect.x as usize * 4;
@@ -134,25 +172,57 @@ impl CursorOverlay {
                     .copy_from_slice(&self.under[line * row..(line + 1) * row]);
             }
         }
-        self.composite(frame, placement)
+        self.paint(frame, next, stride);
+        self.layout = Some(layout);
+        self.shape_changed = false;
+        Ok(damage)
     }
-    fn composite(
-        &mut self,
-        frame: &mut BgraFrame,
+    fn prepare(
+        &self,
+        frame: &BgraFrame,
         placement: Placement,
-    ) -> Result<(), NativeError> {
-        let (Some(shape), Some((x, y))) = (&self.shape, self.position) else {
-            return Ok(());
+    ) -> Result<(Option<Rect>, usize), NativeError> {
+        // Validate placement even when hidden/offscreen, before save-under can
+        // be restored. The frame itself already owns a validated packed buffer.
+        if let Placement::Fitted {
+            fit,
+            source_width,
+            source_height,
+        } = placement
+        {
+            if source_width == 0 || source_height == 0 || fit.width == 0 || fit.height == 0 {
+                return Err(NativeError::InvalidConfiguration);
+            }
+            if fit.x >= frame.width
+                || fit.y >= frame.height
+                || fit.width > frame.width - fit.x
+                || fit.height > frame.height - fit.y
+            {
+                return Err(NativeError::GeometryChanged);
+            }
+        }
+        let rect = match (&self.shape, self.position) {
+            (Some(shape), Some((x, y))) => clip(shape, x, y, frame, placement)?,
+            _ => None,
         };
-        let Some(rect) = clip(shape, x, y, frame, placement)? else {
-            return Ok(());
-        };
-        let stride = frame_stride(frame)?;
-        let row = rect.width as usize * 4;
-        self.under.clear();
+        Ok((rect, frame_stride(frame)?))
+    }
+    fn reserve_under(&mut self, rect: Option<Rect>) -> Result<(), NativeError> {
+        let bytes = rect.map_or(0, |r| r.width as usize * r.height as usize * 4);
+        // The old saved contents are still needed until restore completes.
         self.under
-            .try_reserve_exact(row * rect.height as usize)
-            .map_err(|_| NativeError::Allocation)?;
+            .try_reserve_exact(bytes.saturating_sub(self.under.len()))
+            .map_err(|_| NativeError::Allocation)
+    }
+    // The rectangle and storage were checked before the first pixel mutation.
+    fn paint(&mut self, frame: &mut BgraFrame, rect: Option<Rect>, stride: usize) {
+        self.saved = rect;
+        self.under.clear();
+        let Some(rect) = rect else {
+            return;
+        };
+        let shape = self.shape.as_ref().expect("prepared visible cursor");
+        let row = rect.width as usize * 4;
         for line in 0..rect.height as usize {
             let dst = (rect.y as usize + line) * stride + rect.x as usize * 4;
             self.under.extend_from_slice(&frame.bytes[dst..dst + row]);
@@ -171,10 +241,13 @@ impl CursorOverlay {
                 }
             }
         }
-        self.saved = Some(rect);
-        Ok(())
     }
 }
+
+fn destination(rect: Rect) -> [u32; 4] {
+    [rect.x, rect.y, rect.width, rect.height]
+}
+
 fn blend(source: u8, destination: u8, alpha: u32) -> u8 {
     let mixed = (u32::from(source) * alpha + u32::from(destination) * (255 - alpha) + 127) / 255;
     u8::try_from(mixed).expect("convex combination of bytes")

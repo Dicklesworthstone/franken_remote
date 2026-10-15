@@ -135,3 +135,6 @@ fn hostile_updates_are_refused_before_allocation() {
     );
     assert_eq!(overlay.retained_bytes(), 0);
 }
+
+#[path = "damage_tests.rs"]
+mod damage_tests;
