@@ -652,6 +652,18 @@ impl super::StreamingViewer {
                     viewer.close();
                     return Err(Error::Control(error));
                 }
+                // follow_recovery installed an EMPTY presentation tracker. The
+                // handshake consumed the first recovered IDR outside serve's
+                // normal decode loop, so move its actual completion into that
+                // tracker BEFORE exposing the frame to a visibility callback.
+                // This does not call visible(), renew a ticket, or reset either
+                // the original display deadline or the source observation.
+                let submitted =
+                    receipt.stage == crate::media::PresentationStage::SubmittedToCompositor;
+                if let Err(error) = viewer.decoded(receipt.decoded, submitted) {
+                    viewer.close();
+                    return Err(Error::Control(error));
+                }
                 self.peer = super::Peer::Control(viewer);
                 Ok(presentation)
             }
