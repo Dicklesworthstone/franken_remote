@@ -100,8 +100,12 @@ int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int gop,FrEncoder
         av_dict_set(&opts,"zerolatency","1",0); av_dict_set(&opts,"rc-lookahead","0",0);
         av_dict_set(&opts,"forced-idr","1",0); av_dict_set(&opts,"delay","0",0);
     } else if (backend==2) {
+        /* Four wavefront threads within ONE picture (frame-threads=1 adds no
+         * picture delay). Single-threaded, a 1080p P picture took 28 ms
+         * (desktop) and 59 ms (busy) on ts2, past a 30 fps interval; with 4
+         * threads 12 and 21 ms; busy pictures were about 3% larger. */
         char params[256];
-        snprintf(params,sizeof(params),"bframes=0:rc-lookahead=0:ref=1:keyint=%d:min-keyint=%d:scenecut=0:open-gop=0:repeat-headers=1:aud=1:pools=none:frame-threads=1:log-level=error",gop,gop);
+        snprintf(params,sizeof(params),"bframes=0:rc-lookahead=0:ref=1:keyint=%d:min-keyint=%d:scenecut=0:open-gop=0:repeat-headers=1:aud=1:pools=4:frame-threads=1:log-level=error",gop,gop);
         av_dict_set(&opts,"preset","ultrafast",0); av_dict_set(&opts,"tune","zerolatency",0);
         av_dict_set(&opts,"x265-params",params,0); av_dict_set(&opts,"forced-idr","1",0);
     }
