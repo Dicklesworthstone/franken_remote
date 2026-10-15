@@ -39,7 +39,7 @@ uint32_t fr_native_compiled_avcodec_version(void) { return LIBAVCODEC_VERSION_IN
 
 typedef struct {
     AVCodecContext *ctx;
-    AVFrame *input;
+    AVFrame *input, *source;
     AVPacket *packet;
     struct SwsContext *scale;
     AVBufferRef *device, *frames;
@@ -47,10 +47,27 @@ typedef struct {
 } FrEncoder;
 void fr_encoder_free(FrEncoder *e) {
     if (!e) return;
-    av_packet_free(&e->packet); av_frame_free(&e->input);
+    av_packet_free(&e->packet); av_frame_free(&e->input); av_frame_free(&e->source);
     avcodec_free_context(&e->ctx); sws_freeContext(e->scale);
     av_buffer_unref(&e->frames); av_buffer_unref(&e->device); free(e);
 }
+/* Four slice threads (they apply to sws_scale_frame only): a 1080p
+ * BGRA->YUV420P conversion took 9.6 ms on ts2 single-threaded, 3.4 with four. */
+static struct SwsContext *bgra_scaler(int w,int h,enum AVPixelFormat dst) {
+    struct SwsContext *s=sws_alloc_context();
+    if (!s) return NULL;
+    if (av_opt_set_int(s,"srcw",w,0)<0 || av_opt_set_int(s,"srch",h,0)<0 ||
+        av_opt_set_int(s,"src_format",AV_PIX_FMT_BGRA,0)<0 ||
+        av_opt_set_int(s,"dstw",w,0)<0 || av_opt_set_int(s,"dsth",h,0)<0 ||
+        av_opt_set_int(s,"dst_format",dst,0)<0 ||
+        av_opt_set_int(s,"sws_flags",SWS_FAST_BILINEAR,0)<0 ||
+        av_opt_set_int(s,"threads",4,0)<0 || sws_init_context(s,NULL,NULL)<0) {
+        sws_freeContext(s); return NULL;
+    }
+    return s;
+}
+/* The caller owns the pixels for the duration of one send. */
+static void borrowed(void *opaque,uint8_t *data) { (void)opaque; (void)data; }
 int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int gop,FrEncoder **out) {
     if (!out) return FR_INVALID; *out=NULL;
     if (!geometry(w,h) || fps<1 || fps>240 || bitrate<10000 || bitrate>200000000 || gop<1 || gop>480) return FR_INVALID;
@@ -60,7 +77,8 @@ int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int gop,FrEncoder
     if (!codec || codec->id!=AV_CODEC_ID_HEVC) return FR_UNAVAILABLE;
     FrEncoder *e=calloc(1,sizeof(*e)); if (!e) return FR_MEMORY;
     e->ctx=avcodec_alloc_context3(codec); e->input=av_frame_alloc(); e->packet=av_packet_alloc();
-    if (!e->ctx || !e->input || !e->packet) { fr_encoder_free(e); return FR_MEMORY; }
+    e->source=av_frame_alloc();
+    if (!e->ctx || !e->input || !e->packet || !e->source) { fr_encoder_free(e); return FR_MEMORY; }
     AVCodecContext *c=e->ctx; c->width=w; c->height=h;
     c->time_base=(AVRational){1,fps}; c->framerate=(AVRational){fps,1};
     c->bit_rate=bitrate; c->gop_size=gop; c->max_b_frames=0;
@@ -115,15 +133,23 @@ int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int gop,FrEncoder
     e->input->color_primaries=c->color_primaries; e->input->color_trc=c->color_trc;
     e->input->colorspace=c->colorspace; e->input->color_range=c->color_range;
     if (av_frame_get_buffer(e->input,32)<0) { fr_encoder_free(e); return FR_MEMORY; }
-    e->scale=sws_getContext(w,h,AV_PIX_FMT_BGRA,w,h,sw,SWS_FAST_BILINEAR,NULL,NULL,NULL);
+    e->scale=bgra_scaler(w,h,sw);
     if (!e->scale || sws_setColorspaceDetails(e->scale,sws_getCoefficients(SWS_CS_ITU709),1,sws_getCoefficients(SWS_CS_ITU709),0,0,1<<16,1<<16)<0) { fr_encoder_free(e); return FR_CODEC; }
     *out=e; return FR_OK;
 }
 int fr_encoder_send(FrEncoder *e,const uint8_t *bgra,size_t len,int64_t pts,int idr) {
     if (!e || !bgra || pts<0 || e->draining || !bgra_buffer(e->ctx->width,e->ctx->height,len)) return FR_INVALID;
     if (av_frame_make_writable(e->input)<0) return FR_MEMORY;
-    const uint8_t *src[4]={bgra,NULL,NULL,NULL}; int strides[4]={e->ctx->width*4,0,0,0};
-    if (sws_scale(e->scale,src,strides,0,e->ctx->height,e->input->data,e->input->linesize)!=e->ctx->height) return FR_CODEC;
+    /* A no-op-free reference: sws_scale_frame refs its source, and a frame
+     * without one would make it copy all 8 MB first. Released before return. */
+    AVFrame *src=e->source;
+    src->format=AV_PIX_FMT_BGRA; src->width=e->ctx->width; src->height=e->ctx->height;
+    src->buf[0]=av_buffer_create((uint8_t *)bgra,len,borrowed,NULL,AV_BUFFER_FLAG_READONLY);
+    if (!src->buf[0]) return FR_MEMORY;
+    src->data[0]=(uint8_t *)bgra; src->linesize[0]=e->ctx->width*4;
+    int scaled=sws_scale_frame(e->scale,e->input,src);
+    av_frame_unref(src);
+    if (scaled<0) return FR_CODEC;
     e->input->pts=pts; e->input->pict_type=idr?AV_PICTURE_TYPE_I:AV_PICTURE_TYPE_NONE;
     if (e->frames) {
         AVFrame *gpu=av_frame_alloc(); if (!gpu) return FR_MEMORY;
