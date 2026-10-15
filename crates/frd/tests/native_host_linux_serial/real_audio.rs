@@ -717,3 +717,5 @@ fn a_missing_host_monitor_is_a_typed_stop_while_video_continues() {
 
 #[path = "real_audio/controlled.rs"]
 mod controlled;
+#[path = "real_audio/indicated.rs"]
+mod indicated;

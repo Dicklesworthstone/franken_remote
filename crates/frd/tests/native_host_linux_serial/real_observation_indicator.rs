@@ -18,7 +18,7 @@ const TITLE: &str = "FrankenRemote - Stop sharing";
 
 /// (window, x, y) of the mapped top-level window titled `TITLE`, read by an
 /// independent Xlib client on the host display.
-fn indicator(display: &str) -> Option<(u64, i32, i32)> {
+pub(super) fn indicator(display: &str) -> Option<(u64, i32, i32)> {
     titled(display, TITLE)
 }
 fn titled(display: &str, title: &str) -> Option<(u64, i32, i32)> {
@@ -435,7 +435,7 @@ fn local_approval_prompts_ignores_synthetic_allow_and_denies_on_close() {
 /// `fr-native`'s independent X peer. Its `device-*` operations attribute
 /// events to Xvfb's own non-XTEST pointer: an explicit source-attribution
 /// fixture, not evidence of a physical device or a human.
-fn peer(display: &str, window: u64, operation: &str) {
+pub(super) fn peer(display: &str, window: u64, operation: &str) {
     let script = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../fr-native/tests/sharing_indicator/peer.py"
