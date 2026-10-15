@@ -122,9 +122,14 @@ mod linux {
             return CHANNEL;
         };
         let opened = std::env::var("DISPLAY").ok().and_then(|display| {
-            sharing_indicator::start_observation_with(&display, move || {
+            sharing_indicator::start_observation_with(&display, move |reason| {
                 if !flag.swap(true, Ordering::AcqRel) {
-                    let _ = notify.send(&process::encode_signal(Signal::LocalRevoke));
+                    let signal = if reason.is_local_user() {
+                        Signal::LocalRevoke
+                    } else {
+                        Signal::IndicatorFailed
+                    };
+                    let _ = notify.send(&process::encode_signal(signal));
                 }
             })
             .ok()

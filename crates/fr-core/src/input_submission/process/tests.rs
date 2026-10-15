@@ -315,16 +315,18 @@ fn release_frames_carry_only_release_transitions() {
 
 #[test]
 fn signals_are_fixed_datagrams_with_direction_named_kinds() {
-    for signal in [Signal::Fence, Signal::LocalRevoke] {
+    for signal in [Signal::Fence, Signal::LocalRevoke, Signal::IndicatorFailed] {
         let bytes = encode_signal(signal);
         assert_eq!(decode_signal(&bytes), Ok(signal));
         assert_eq!(decode_signal(&bytes[..15]), Err(CodecError::Length));
         let mut padded = bytes;
         padded[15] = 1;
         assert_eq!(decode_signal(&padded), Err(CodecError::Padding));
-        let mut kind = bytes;
-        kind[5] = 3;
-        assert_eq!(decode_signal(&kind), Err(CodecError::Kind));
+        for unknown in [0, 4] {
+            let mut kind = bytes;
+            kind[5] = unknown;
+            assert_eq!(decode_signal(&kind), Err(CodecError::Kind));
+        }
         let mut magic = bytes;
         magic[0] = b'X';
         assert_eq!(decode_signal(&magic), Err(CodecError::Magic));

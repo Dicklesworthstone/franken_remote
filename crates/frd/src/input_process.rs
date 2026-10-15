@@ -180,6 +180,8 @@ enum Gate {
     Fenced,
     /// The child's local sharing indicator was used (implies fenced).
     LocallyRevoked,
+    /// The child's indicator ended without the local user (implies fenced).
+    IndicatorFailed,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Prepared {
@@ -325,14 +327,14 @@ impl RemoteSink {
         for _ in 0..SIGNALS_PER_POLL {
             match self.signals.recv(&mut buffer) {
                 // A host-direction or malformed datagram breaks the protocol.
-                Ok(n) => {
-                    if process::decode_signal(&buffer[..n]) == Ok(Signal::LocalRevoke) {
-                        self.gate = Gate::LocallyRevoked;
-                    } else {
+                Ok(n) => match process::decode_signal(&buffer[..n]) {
+                    Ok(Signal::LocalRevoke) => self.gate = Gate::LocallyRevoked,
+                    Ok(Signal::IndicatorFailed) => self.gate = Gate::IndicatorFailed,
+                    _ => {
                         self.poison();
                         return;
                     }
-                }
+                },
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Err(_) => {
@@ -460,7 +462,7 @@ impl InputSink for RemoteSink {
         if !self.poisoned && !channel_idle(&mut self.command) {
             self.poison();
         }
-        self.poisoned
+        self.poisoned || self.gate == Gate::IndicatorFailed
     }
 }
 impl Drop for RemoteSink {

@@ -97,6 +97,14 @@ impl Process<'_> {
             {
                 Err(Error::LocalRevoke)
             }
+            // The indicator ended without the local user: unavailable, not a
+            // local revoke.
+            Ok(n)
+                if n == process::SIGNAL_BYTES
+                    && bytes[..n] == process::encode_signal(Signal::IndicatorFailed) =>
+            {
+                Err(Error::Unavailable)
+            }
             Ok(_) => Err(Error::Protocol),
             Err(error) if retry(&error) => Ok(()),
             Err(_) => Err(Error::Unavailable),

@@ -125,8 +125,9 @@ mod linux {
         }
     }
 
-    /// The indicator must be mapped before Ready; any stop is a local revoke
-    /// that sends exactly one `LocalRevoke` datagram to frd.
+    /// The indicator must be mapped before Ready. Its first stop sends exactly
+    /// one datagram: `LocalRevoke` when the local user caused it, otherwise
+    /// `IndicatorFailed` (frd names that a native failure, not a revoke).
     fn show_indicator(
         display: &str,
         signals: &UnixDatagram,
@@ -136,9 +137,14 @@ mod linux {
             .try_clone()
             .map_err(|_| PlatformError::Unavailable)?;
         let flag = revoked.clone();
-        let indicator = sharing_indicator::start_with(display, move || {
+        let indicator = sharing_indicator::start_with(display, move |reason| {
             if !flag.swap(true, Ordering::AcqRel) {
-                let _ = notify.send(&process::encode_signal(Signal::LocalRevoke));
+                let signal = if reason.is_local_user() {
+                    Signal::LocalRevoke
+                } else {
+                    Signal::IndicatorFailed
+                };
+                let _ = notify.send(&process::encode_signal(signal));
             }
         })
         .map_err(|error| match error {

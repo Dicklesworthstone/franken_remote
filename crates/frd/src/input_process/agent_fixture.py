@@ -8,6 +8,7 @@ MODE = "@MODE@"
 LOG = "@LOG@"
 FENCE = b"FRIF\x01\x01" + bytes(10)
 LOCAL_REVOKE = b"FRIF\x01\x02" + bytes(10)
+INDICATOR_FAILED = b"FRIF\x01\x03" + bytes(10)
 
 def log(line):
     with open(LOG, "a") as f:
@@ -112,6 +113,10 @@ try:
                 fenced = True
                 log("LOCAL-REVOKE")
                 sig.send(LOCAL_REVOKE)
+            if MODE == "indicator-failed" and not release:
+                fenced = True
+                log("INDICATOR-FAILED")
+                sig.send(INDICATOR_FAILED)
             if MODE == "die-after-effect":
                 log("DIE")
                 os._exit(9)

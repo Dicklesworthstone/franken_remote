@@ -45,6 +45,12 @@ still remove authority but cannot establish map evidence, approve a session,
 re-enable clipboard, or grant control. Keyboard-map changes refresh only
 the stop accelerators. No keyboard/pointer grab or global hotkey is installed.
 
+The out-of-process executors (`fr-input-agent`, `fr-observation-indicator`)
+report the first stop to frd as one datagram. The local user's own stop (button,
+accelerator, window close or hide) sends `LocalRevoke`. Any other end (mapping
+expiry, native failure, authority end, owner drop) sends `IndicatorFailed`,
+which frd names a native failure, never `local_revoke`.
+
 Each native turn handles at most 32 events, checks authority between events,
 coalesces drawing, and sleeps 10 ms. Mapping has one two-second budget captured
 at `start`, not renewed on first thread execution. The independent stop handle

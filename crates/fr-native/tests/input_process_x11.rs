@@ -1141,7 +1141,7 @@ fn local_indicator_failures_always_revoke_their_owner() {
     let calls = Arc::new(AtomicUsize::new(0));
     let counted = || {
         let calls = calls.clone();
-        move || {
+        move |_| {
             calls.fetch_add(1, Ordering::SeqCst);
         }
     };

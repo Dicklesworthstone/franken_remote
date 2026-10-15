@@ -149,6 +149,9 @@ impl fmt::Debug for Reply {
 pub enum Signal {
     Fence,
     LocalRevoke,
+    /// The local indicator ended without the local user (native failure,
+    /// mapping expiry): the executor is fenced, but not by a user's revoke.
+    IndicatorFailed,
 }
 
 /// Translate the owner's exclusive deadline into the executor's raw monotonic
@@ -387,6 +390,7 @@ pub fn encode_signal(signal: Signal) -> [u8; SIGNAL_BYTES] {
     bytes[5] = match signal {
         Signal::Fence => 1,
         Signal::LocalRevoke => 2,
+        Signal::IndicatorFailed => 3,
     };
     bytes
 }
@@ -406,6 +410,7 @@ pub fn decode_signal(bytes: &[u8]) -> Result<Signal, CodecError> {
     match bytes[5] {
         1 => Ok(Signal::Fence),
         2 => Ok(Signal::LocalRevoke),
+        3 => Ok(Signal::IndicatorFailed),
         _ => Err(CodecError::Kind),
     }
 }

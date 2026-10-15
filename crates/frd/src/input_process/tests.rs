@@ -407,6 +407,23 @@ fn control_stop_fences_an_in_flight_submit_and_hands_off_after_cleanup() {
     assert!(lines.iter().any(|l| l == "CLEANUP"));
 }
 
+/// An indicator that ends without the local user (native failure, mapping
+/// expiry) is a native failure of the executor, never reported as the user's
+/// local revoke (fr-load-ends-cuqi).
+#[test]
+fn child_indicator_failure_stops_control_as_a_native_failure_not_a_revoke() {
+    let seat = Seat::default();
+    let (mut agent, running, log) = start("indicator-failed", &seat);
+    agent
+        .submit(&bytes(0, press()), InputDelivery::Reliable)
+        .unwrap();
+    assert_eq!(receipt(&mut agent).outcome, InputOutcome::SubmittedToOs);
+    let shutdown = running.finish();
+    assert_eq!(shutdown.reason, StopReason::NativeFailure);
+    assert!(!seat.is_occupied());
+    assert!(transcript(&log).iter().any(|l| l == "INDICATOR-FAILED"));
+}
+
 #[test]
 fn child_indicator_revoke_stops_control_and_releases_through_the_child() {
     let seat = Seat::default();

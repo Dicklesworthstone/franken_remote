@@ -47,6 +47,13 @@ pub enum StopReason {
     MappingExpired,
 }
 impl StopReason {
+    /// A stop the local user caused: their click or key on it, or closing or
+    /// hiding it. Everything else is the indicator's own failure or end, and
+    /// must not be reported as the user revoking.
+    #[must_use]
+    pub const fn is_local_user(self) -> bool {
+        matches!(self, Self::User | Self::Hidden | Self::WindowLost)
+    }
     fn from_state(value: u8) -> Option<Self> {
         match value {
             2 => Some(Self::User),
@@ -81,16 +88,16 @@ enum Owner {
     #[cfg(feature = "linux-session-ui")]
     // Boxed: the observation owner is far larger than the local revoke.
     Observation(Box<ObservationControl>),
-    /// A local executor's revoke. It must be idempotent, nonblocking and must
-    /// not call back into the indicator.
-    Local(Box<dyn Fn() + Send + Sync>),
+    /// A local executor's revoke, told why. It must be idempotent,
+    /// nonblocking and must not call back into the indicator.
+    Local(Box<dyn Fn(StopReason) + Send + Sync>),
 }
 impl Owner {
-    fn revoke(&self) {
+    fn revoke(&self, reason: StopReason) {
         match self {
             #[cfg(feature = "linux-session-ui")]
             Self::Observation(observation) => observation.revoke(),
-            Self::Local(revoke) => revoke(),
+            Self::Local(revoke) => revoke(reason),
         }
     }
     fn live(&self) -> bool {
@@ -122,7 +129,7 @@ impl Shared {
     fn stop(&self, reason: StopReason) {
         // Fence the actual session/input owner FIRST, without a native/UI lock.
         // Status becoming terminal is never proof that native cleanup finished.
-        self.owner.revoke();
+        self.owner.revoke(reason);
         let _ = self
             .state
             .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
@@ -197,11 +204,11 @@ fn launch(
     mode: Mode,
 ) -> Result<(IndicatorControl, JoinHandle<()>), Error> {
     if !local_display(display) {
-        owner.revoke();
+        owner.revoke(StopReason::NativeFailure);
         return Err(Error::InvalidDisplay);
     }
     let Ok(display) = CString::new(display) else {
-        owner.revoke();
+        owner.revoke(StopReason::NativeFailure);
         return Err(Error::InvalidDisplay);
     };
     let control = IndicatorControl(Arc::new(Shared {
@@ -313,7 +320,7 @@ impl Drop for SharingIndicator {
 /// open (`NativeFailure`), which the executor reports as a refused launch.
 pub fn start_with(
     display: &str,
-    on_revoke: impl Fn() + Send + Sync + 'static,
+    on_revoke: impl Fn(StopReason) + Send + Sync + 'static,
 ) -> Result<LocalIndicator, Error> {
     let (control, task) = launch(display, Owner::Local(Box::new(on_revoke)), Mode::Control)?;
     Ok(LocalIndicator {
@@ -327,7 +334,7 @@ pub fn start_with(
 /// existing indicator; synthetic input is not an alternate stop path.
 pub fn start_observation_with(
     display: &str,
-    on_revoke: impl Fn() + Send + Sync + 'static,
+    on_revoke: impl Fn(StopReason) + Send + Sync + 'static,
 ) -> Result<LocalIndicator, Error> {
     let (control, task) = launch(display, Owner::Local(Box::new(on_revoke)), Mode::Sharing)?;
     Ok(LocalIndicator {
@@ -512,3 +519,24 @@ mod mapping;
 
 #[cfg(test)]
 mod responsiveness;
+
+#[cfg(test)]
+mod stop_reasons {
+    use super::StopReason;
+
+    /// Only the local user's own stops are reported as a local revoke.
+    #[test]
+    fn only_the_local_users_stops_are_local_revokes() {
+        for reason in [StopReason::User, StopReason::Hidden, StopReason::WindowLost] {
+            assert!(reason.is_local_user(), "{reason:?}");
+        }
+        for reason in [
+            StopReason::AuthorityEnded,
+            StopReason::NativeFailure,
+            StopReason::OwnerDropped,
+            StopReason::MappingExpired,
+        ] {
+            assert!(!reason.is_local_user(), "{reason:?}");
+        }
+    }
+}

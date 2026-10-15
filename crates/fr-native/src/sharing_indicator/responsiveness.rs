@@ -5,7 +5,7 @@ fn fixture(mapped: bool, last: Instant) -> (IndicatorControl, Arc<AtomicBool>) {
     let revoked = Arc::new(AtomicBool::new(false));
     let flag = revoked.clone();
     let control = IndicatorControl(Arc::new(Shared {
-        owner: Owner::Local(Box::new(move || {
+        owner: Owner::Local(Box::new(move |_| {
             flag.store(true, Ordering::Release);
         })),
         state: AtomicU8::new(u8::from(mapped)),
