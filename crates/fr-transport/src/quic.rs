@@ -404,6 +404,9 @@ pub struct QuicRecords {
     advertised_limit: u64,
     pending_writes: VecDeque<PendingWrite>,
     senders: Vec<Sender>,
+    // Independent round-robin positions for Critical and Bulk. Servicing a
+    // critical prefix must not reset fairness among otherwise-ready bulk lanes.
+    send_cursor: [usize; 2],
     cursor: usize,
 }
 impl fmt::Debug for QuicRecords {
@@ -520,6 +523,7 @@ impl QuicRecords {
             advertised_limit: policy.connection_window,
             pending_writes: VecDeque::new(),
             senders,
+            send_cursor: [0; 2],
             cursor: 0,
         })
     }
@@ -1016,7 +1020,7 @@ impl QuicRecords {
         };
         let connection_credit = inner.streams().connection_send_remaining();
         let mut selected = None;
-        for priority in [Priority::Critical, Priority::Bulk] {
+        for (class, priority) in [Priority::Critical, Priority::Bulk].into_iter().enumerate() {
             if priority == Priority::Bulk
                 && !send_window::bulk_prefix_fits(
                     room,
@@ -1025,21 +1029,27 @@ impl QuicRecords {
             {
                 break;
             }
-            for (index, pending) in self.pending_writes.iter().enumerate() {
-                // Preserve bytes and whole-record order WITHIN each stream,
-                // while a flow-blocked stream cannot block another stream.
-                if pending.route.priority != priority
-                    || (!pending.in_epoch
-                        && self
-                            .senders
-                            .iter()
-                            .any(|s| s.route == pending.route && s.epoch.is_some()))
-                    || self
-                        .pending_writes
-                        .iter()
-                        .take(index)
-                        .any(|p| p.route.stream == pending.route.stream)
-                {
+            // Rotate STREAMS, not records. Otherwise a large bulk record keeps
+            // winning every prefix while smaller clipboard/file/recovery work
+            // on another ready stream spends its original deadline waiting.
+            for step in 0..self.senders.len() {
+                let sender_index = (self.send_cursor[class] + step) % self.senders.len();
+                let sender = &self.senders[sender_index];
+                if sender.route.priority != priority {
+                    continue;
+                }
+                // The FIRST pending record preserves whole-record and byte
+                // order on this stream. A later record cannot bypass its head,
+                // and a waiting epoch cannot join an unacknowledged one.
+                let Some(index) = self
+                    .pending_writes
+                    .iter()
+                    .position(|pending| pending.route == sender.route)
+                else {
+                    continue;
+                };
+                let pending = &self.pending_writes[index];
+                if !pending.in_epoch && sender.epoch.is_some() {
                     continue;
                 }
                 let credit = inner
@@ -1053,7 +1063,7 @@ impl QuicRecords {
                     .min(900)
                     .min(usize::try_from(credit).unwrap_or(usize::MAX));
                 if length != 0 {
-                    selected = Some((index, length, priority));
+                    selected = Some((index, length, priority, class, sender_index));
                     break;
                 }
             }
@@ -1061,7 +1071,7 @@ impl QuicRecords {
                 break;
             }
         }
-        let Some((index, length, priority)) = selected else {
+        let Some((index, length, priority, class, sender_index)) = selected else {
             return Ok(None);
         };
         let route = self.pending_writes[index].route;
@@ -1080,11 +1090,17 @@ impl QuicRecords {
         if pending.offset == pending.bytes.len() {
             self.pending_writes.remove(index);
         }
+        // Advance only after native acceptance. Backpressure and failed writes
+        // neither spend another lane's turn nor relax any retained deadline.
+        self.send_cursor[class] = (sender_index + 1) % self.senders.len();
         Ok(Some(priority))
     }
     /// Drain at most 16 borrowed records per turn, alternating streams with
     /// datagrams, one record per lane per round; idle or blocked lanes do not
     /// spend that budget. A blocked handler keeps its complete record (one per route).
+    /// Separately examine at most 16 native datagrams, including disposable
+    /// arrivals for full/retired routes. A blocked datagram route cannot hold
+    /// other routes behind its retained record.
     /// Native receive windows plus these explicitly reported buffers must be
     /// included in the parent process's admission budget.
     pub fn receive(
