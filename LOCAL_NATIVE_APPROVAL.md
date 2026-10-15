@@ -101,6 +101,17 @@ source from verified 284b3d6 and unchanged matching external CI libraries. Chang
 preimages were checked against main; this is not a complete latest-workspace,
 installed-Tailscale, real desktop-locker or physical-input qualification.
 
+## `frd run --approval local` end to end
+
+The namespace e2e `real_observation_indicator` runs a real `frd run --approval
+local` host (monitored session, the real consent child) against a shipped
+view-only `fr connect`. A core XTest ALLOW neither admits the peer nor dismisses
+the prompt. An ALLOW attributed to Xvfb's mouse (the fixture above) admits it,
+and real host pixels reach the viewer. Closing the prompt denies the peer with
+`host_local_approval_denied`; an unanswered prompt ends with
+`host_approval_unanswered` (or `host_approval_expired`). The session lifecycle
+and tailnet are fixtures; this is not live or physical-input evidence.
+
 The broader `fr-rc-sec-approval-synthetic-input-t2r` bead remains open: independently
 fencing remote input against pending approval-window geometry is separate work.
 This change rejects the injected decision at the real native consent boundary;

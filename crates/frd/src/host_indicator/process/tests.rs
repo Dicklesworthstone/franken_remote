@@ -151,6 +151,9 @@ while True:
         if mode == 'revoke' and checks > 1:
             socket.socket(fileno=1).send(bytes([@SIGNAL@]))
             time.sleep(30)
+        if mode == 'failed' and checks > 1:
+            socket.socket(fileno=1).send(bytes([@FAILED@]))
+            time.sleep(30)
     data[5] = 129
     if mode == 'wrong-sequence':
         data[15] ^= 1
@@ -162,11 +165,14 @@ while True:
     else:
         s.sendall(data)
 ";
-    let signal = encode_signal(Signal::LocalRevoke)
-        .iter()
-        .map(u8::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
+    let bytes = |signal| {
+        encode_signal(signal)
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let (signal, failed) = (bytes(Signal::LocalRevoke), bytes(Signal::IndicatorFailed));
     for mode in [
         "ready",
         "wrong-sequence",
@@ -176,6 +182,7 @@ while True:
         "fragmented",
         "later-stall",
         "revoke",
+        "failed",
         "early-revoke",
     ] {
         let stop = Arc::new(StopHandle::default());
@@ -186,7 +193,10 @@ while True:
         ));
         std::fs::write(
             &path,
-            FIXTURE.replace("@MODE@", mode).replace("@SIGNAL@", &signal),
+            FIXTURE
+                .replace("@MODE@", mode)
+                .replace("@SIGNAL@", &signal)
+                .replace("@FAILED@", &failed),
         )
         .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -197,7 +207,7 @@ while True:
         let until = Instant::now() + Duration::from_secs(5);
         let result = super::super::drive(&owner, &stop, || {
             called.store(true, Ordering::Release);
-            if matches!(mode, "later-stall" | "revoke") {
+            if matches!(mode, "later-stall" | "revoke" | "failed") {
                 while !stop.is_requested() {
                     assert!(
                         Instant::now() < until,
@@ -212,7 +222,10 @@ while True:
             drained.store(true, Ordering::Release);
             Ok(())
         });
-        let admitted = matches!(mode, "ready" | "fragmented" | "later-stall" | "revoke");
+        let admitted = matches!(
+            mode,
+            "ready" | "fragmented" | "later-stall" | "revoke" | "failed"
+        );
         assert_eq!(
             called.load(Ordering::Acquire),
             admitted,
@@ -228,6 +241,15 @@ while True:
             matches!(mode, "ready" | "fragmented" | "revoke"),
             "outcome: {mode}: {result:?}"
         );
+        // The indicator's own failure stops the host too, but is reported as
+        // the indicator being unavailable, never as a local user's revoke.
+        if mode == "failed" {
+            assert_eq!(
+                result,
+                Err(super::super::Error::Indicator(Error::Unavailable)),
+                "{mode}"
+            );
+        }
         owner.stop();
         assert!(stop.is_requested(), "stop must precede cleanup: {mode}");
         loop {

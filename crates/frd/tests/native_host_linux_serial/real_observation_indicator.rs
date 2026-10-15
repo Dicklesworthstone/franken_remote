@@ -92,6 +92,24 @@ x.XSync(d, 0)
 #[test]
 #[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays"]
 fn the_observation_indicator_shows_for_a_view_only_share_and_its_close_stops_sharing() {
+    indicator_stops_a_share("indicator close", close_window);
+}
+
+/// The Stop sharing button clicked by a pointer attributed to a non-XTEST
+/// device (Xvfb's own; an explicit fixture, not a physical device) ends the
+/// share the same way, after the same window ignored a core `XTest` click.
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; Xvfb device attribution fixture"]
+fn a_device_attributed_stop_click_ends_a_view_only_share() {
+    indicator_stops_a_share("device stop click", |display, window| {
+        peer(display, window, "device-click");
+    });
+}
+
+/// A view-only share with the real observation indicator: it maps before the
+/// listener, ignores a core `XTest` click, and `local_stop` (a local user's
+/// action on the window) ends sharing with `host_stopping` at the viewer.
+fn indicator_stops_a_share(label: &str, local_stop: impl FnOnce(&str, u64)) {
     let (fr, worker) = (sibling("fr"), sibling("fr-media-worker"));
     let image = sibling("fr-observation-indicator");
     let host = Xvfb::start("640x480x24");
@@ -179,18 +197,15 @@ fn the_observation_indicator_shows_for_a_view_only_share_and_its_close_stops_sha
     );
     assert!(indicator(&host.display).is_some());
 
-    // The local user closes the indicator: the original host stops sharing
-    // with local priority, the viewer is told, and the indicator goes away.
+    // The local user stops sharing from the indicator: the original host
+    // stops with local priority, the viewer is told, the indicator goes away.
     let closed = Instant::now();
-    close_window(&host.display, window);
+    local_stop(&host.display, window);
     let output = wait_for(client, Duration::from_secs(30));
     let stopped = closed.elapsed();
     let result = daemon.join().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
-    println!(
-        "indicator close -> client end {stopped:?}; fr: {}",
-        stdout.trim()
-    );
+    println!("{label} -> client end {stopped:?}; fr: {}", stdout.trim());
     assert!(result.is_ok(), "frd run: {result:?}; host: {}", dump());
     assert!(
         stdout.contains("\"host_stopping\""),
@@ -345,9 +360,9 @@ fn approval_host(display: &str, api: &fixture::Api, tools: &Tools, roots: &Path)
 /// window maps for a view-only peer, which sees no host pixels while it waits.
 /// A core `XTest` click on ALLOW (what a remote controller could inject) does
 /// not admit it, and the local user's close of the window denies it with a
-/// typed reason at the client. Device-attributed positive consent needs a
-/// physical device, which Xvfb has none of. The session lifecycle is the
-/// synthetic fixture (always active here). Before the consent permit fix the
+/// typed reason at the client. The positive row is
+/// `a_device_attributed_local_allow_admits_the_viewer`. The session lifecycle
+/// is the synthetic fixture (always active here). Before the consent permit fix the
 /// close reached the viewer as a bare `native_session_failed`.
 #[test]
 #[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; synthetic session lifecycle"]
@@ -412,6 +427,109 @@ fn local_approval_prompts_ignores_synthetic_allow_and_denies_on_close() {
         dump()
     );
     assert_eq!(titled(&host.display, PROMPT), None);
+    stop.request();
+    let result = daemon.join().unwrap();
+    assert!(result.is_ok(), "frd run: {result:?}; host: {}", dump());
+}
+
+/// `fr-native`'s independent X peer. Its `device-*` operations attribute
+/// events to Xvfb's own non-XTEST pointer: an explicit source-attribution
+/// fixture, not evidence of a physical device or a human.
+fn peer(display: &str, window: u64, operation: &str) {
+    let script = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../fr-native/tests/sharing_indicator/peer.py"
+    );
+    assert!(
+        Command::new("python3")
+            .args([script, display, &window.to_string(), operation])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+/// The positive row: an ALLOW click attributed to a non-XTEST pointer device
+/// admits the waiting view-only peer, which then shows real host pixels and
+/// stops cleanly. The same window ignored a core `XTest` ALLOW first, so the
+/// admission is the attributed click, not any click.
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; synthetic session lifecycle; Xvfb device attribution fixture"]
+fn a_device_attributed_local_allow_admits_the_viewer() {
+    const PROMPT: &str = "FrankenRemote - Local approval";
+    let (fr, worker) = (sibling("fr"), sibling("fr-media-worker"));
+    let host = Xvfb::start("640x480x24");
+    let viewer = Xvfb::start("800x600x24");
+    set_root(&host.display, COLOUR);
+    let api = fixture::Api::new();
+    let tools = Tools::new();
+    let roots = fixture::pki().join("ca.pem");
+    let (daemon, events, stop) = approval_host(&host.display, &api, &tools, &roots);
+    let dump = || format!("{:?}", events.lock().unwrap());
+    assert!(
+        wait_for_event(&events, Duration::from_secs(20), |e| matches!(
+            e,
+            Event::Listening { .. }
+        )),
+        "frd never listened: {}",
+        dump()
+    );
+    let client_api = ClientApi::new();
+    let mut client = connect(&fr, &client_api.path, &roots, &viewer.display, &worker);
+    let until = Instant::now() + Duration::from_secs(20);
+    let prompt = loop {
+        if let Some(prompt) = titled(&host.display, PROMPT) {
+            break prompt;
+        }
+        assert!(
+            Instant::now() < until,
+            "no local approval prompt: {}",
+            dump()
+        );
+        thread::sleep(Duration::from_millis(100));
+    };
+    let shows_host = |display: &str| {
+        window_pixels(display)
+            .into_iter()
+            .any(|(_, pixel)| near(pixel, COLOUR))
+    };
+    peer(&host.display, prompt.0, "allow");
+    thread::sleep(Duration::from_secs(1));
+    assert!(
+        !shows_host(&viewer.display),
+        "an XTest ALLOW admitted the peer"
+    );
+    assert_eq!(titled(&host.display, PROMPT).map(|p| p.0), Some(prompt.0));
+    let allowed = Instant::now();
+    peer(&host.display, prompt.0, "device-allow");
+    let shown = await_colour(&viewer.display, COLOUR, &mut client);
+    let admitted = allowed.elapsed();
+    // The viewer user closes the window: a clean stop of an admitted share.
+    if let Some(window) = shown {
+        close_window(&viewer.display, window);
+    } else {
+        let _ = Command::new("kill")
+            .args(["-INT", &client.id().to_string()])
+            .status();
+    }
+    let output = wait_for(client, Duration::from_secs(30));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    println!(
+        "device-attributed allow -> host pixels after {admitted:?}; fr: {}",
+        stdout.trim()
+    );
+    assert!(
+        shown.is_some(),
+        "an attributed ALLOW did not admit the peer: {stdout}; host: {}",
+        dump()
+    );
+    assert_eq!(
+        titled(&host.display, PROMPT),
+        None,
+        "prompt outlived consent"
+    );
+    let report: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(report["outcome"], "stopped", "{report}");
     stop.request();
     let result = daemon.join().unwrap();
     assert!(result.is_ok(), "frd run: {result:?}; host: {}", dump());
