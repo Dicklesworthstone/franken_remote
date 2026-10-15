@@ -229,11 +229,44 @@ fn controlled_session_under_namespace_delay_and_loss() {
 /// Shown changes, their times, how the row ended, and the held session's
 /// media counters. `busy` rapid intermediate host changes (never near a
 /// measured colour) precede each measured change, so loss actually hits video.
+/// Paints random noise into a 300x200 window over the host root's top-left at
+/// about 30 Hz until killed: content an encoder cannot compress. The measured
+/// root pixel (the viewer window's centre) stays outside it.
+const NOISE: &str = r#"
+import ctypes as c, os, sys, time
+x = c.CDLL("libX11.so.6")
+P, U = c.c_void_p, c.c_ulong
+x.XOpenDisplay.restype = P
+x.XDefaultRootWindow.restype = U; x.XDefaultRootWindow.argtypes = [P]
+x.XCreateSimpleWindow.restype = U
+x.XCreateSimpleWindow.argtypes = [P, U, c.c_int, c.c_int, c.c_uint, c.c_uint, c.c_uint, U, U]
+x.XMapWindow.argtypes = [P, U]
+x.XDefaultVisual.restype = P; x.XDefaultVisual.argtypes = [P, c.c_int]
+x.XDefaultGC.restype = P; x.XDefaultGC.argtypes = [P, c.c_int]
+x.XCreateImage.restype = P
+x.XCreateImage.argtypes = [P, P, c.c_uint, c.c_int, c.c_int, P, c.c_uint, c.c_uint, c.c_int, c.c_int]
+x.XPutImage.argtypes = [P, U, P, P, c.c_int, c.c_int, c.c_int, c.c_int, c.c_uint, c.c_uint]
+x.XFlush.argtypes = [P]
+d = x.XOpenDisplay(sys.argv[1].encode())
+assert d
+W, H = 300, 200
+win = x.XCreateSimpleWindow(d, x.XDefaultRootWindow(d), 0, 0, W, H, 0, 0, 0)
+x.XMapWindow(d, win)
+buf = c.create_string_buffer(W * H * 4)
+img = x.XCreateImage(d, x.XDefaultVisual(d, 0), 24, 2, 0, c.cast(buf, P), W, H, 32, 0)
+while True:
+    c.memmove(buf, os.urandom(W * H * 4), W * H * 4)
+    x.XPutImage(d, win, x.XDefaultGC(d, 0), img, 0, 0, 0, 0, W, H)
+    x.XFlush(d)
+    time.sleep(1 / 30)
+"#;
+
 fn view_row(
     delay_ms: u32,
     loss_percent: f32,
     rate_kbit: u32,
     busy: i32,
+    noise: bool,
 ) -> (usize, Vec<Duration>, Option<String>, Option<String>) {
     use super::real_control::Daemon;
     use super::real_media::{
@@ -271,6 +304,16 @@ fn view_row(
         Duration::from_secs(45),
     )
     .expect("first picture on the clean link");
+    let mut painter = noise.then(|| {
+        Command::new("python3")
+            .args(["-c", NOISE, &host.display])
+            .spawn()
+            .unwrap()
+    });
+    if painter.is_some() {
+        // The encoder is at its steady busy rate before the link narrows.
+        thread::sleep(Duration::from_secs(2));
+    }
     let netem = Netem::apply(delay_ms, loss_percent, rate_kbit);
     let mut times = Vec::new();
     let mut ended = None;
@@ -292,6 +335,10 @@ fn view_row(
             break;
         }
         times.push(sent.elapsed());
+    }
+    if let Some(painter) = &mut painter {
+        let _ = painter.kill();
+        let _ = painter.wait();
     }
     drop(netem);
     if client.try_wait().unwrap().is_none() {
@@ -337,7 +384,8 @@ fn view_only_session_under_namespace_delay_and_loss() {
         .map(|&(d, l, r)| (d, l, r, true))
         .chain(limits.iter().map(|&(d, l, r)| (d, l, r, false)))
     {
-        let (steps, mut times, ended, repaired) = view_row(delay_ms, loss_percent, rate_kbit, 0);
+        let (steps, mut times, ended, repaired) =
+            view_row(delay_ms, loss_percent, rate_kbit, 0, false);
         times.sort();
         let rate = if rate_kbit == 0 {
             "unlimited".to_owned()
@@ -379,7 +427,7 @@ fn view_only_busy_screen_under_namespace_loss() {
     // printed limit that must hold, show a change late, or end with a named
     // cause.
     for (delay_ms, loss_percent, required) in [(0, 0.0, true), (20, 1.0, true), (20, 5.0, false)] {
-        let (steps, mut times, ended, media) = view_row(delay_ms, loss_percent, 0, 10);
+        let (steps, mut times, ended, media) = view_row(delay_ms, loss_percent, 0, 10, false);
         times.sort();
         let line = format!(
             "delay {delay_ms} ms (RTT {} ms) loss {loss_percent}% busy: changes shown {steps}/6, median {:?}, max {:?}, media {media:?}, ended {ended:?}",
@@ -390,6 +438,40 @@ fn view_only_busy_screen_under_namespace_loss() {
         println!("VIEW BUSY IMPAIRMENT {line}");
         if required {
             assert!(steps == 6 && ended.is_none(), "busy view must hold: {line}");
+        } else if let Some(ended) = &ended {
+            assert!(
+                (ended.contains("\"outcome\"") && !ended.contains("native_session_failed"))
+                    || ended.contains("not shown"),
+                "untyped end: {line}"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; tc netem on the namespace loopback"]
+fn view_only_incompressible_content_over_a_narrow_link() {
+    // A host window of random noise keeps the encoder at its 2 Mbit/s target
+    // (the test host's) while six measured root changes cross. Before the
+    // encoder had a VBV, libx265 emitted single pictures of up to 77 KB there,
+    // about 300 ms of link time at 2 Mbit/s, and the session ended within
+    // seconds even on a 3 or 4 Mbit/s link (0/6 and 1/6 shown). 3 Mbit/s must
+    // now hold; 2 Mbit/s (no headroom) is a printed limit that must hold, show
+    // a change late, or end with a named cause.
+    for (rate_kbit, required) in [(3000, true), (2000, false)] {
+        let (steps, mut times, ended, media) = view_row(3, 0.0, rate_kbit, 0, true);
+        times.sort();
+        let line = format!(
+            "rate {rate_kbit} kbit/s, noise window: changes shown {steps}/6, median {:?}, max {:?}, media {media:?}, ended {ended:?}",
+            times.get(times.len() / 2),
+            times.last()
+        );
+        println!("VIEW NOISE IMPAIRMENT {line}");
+        if required {
+            assert!(
+                steps == 6 && ended.is_none(),
+                "noisy view must hold: {line}"
+            );
         } else if let Some(ended) = &ended {
             assert!(
                 (ended.contains("\"outcome\"") && !ended.contains("native_session_failed"))

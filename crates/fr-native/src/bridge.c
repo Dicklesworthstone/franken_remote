@@ -91,6 +91,11 @@ int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int gop,FrEncoder
         av_dict_set(&opts,"zerolatency","1",0); av_dict_set(&opts,"rc-lookahead","0",0);
         av_dict_set(&opts,"forced-idr","1",0); av_dict_set(&opts,"delay","0",0);
     } else if (backend==2) {
+        /* Bound the short-term rate, not only the average: without a VBV,
+         * libx265's ABR emitted 77 KB P pictures at a 2 Mbit/s target on busy
+         * content, about 300 ms of link time for ONE picture, past the 250 ms
+         * reference horizon. A 200 ms buffer at the target rate caps them. */
+        c->rc_max_rate=bitrate; c->rc_buffer_size=bitrate/5;
         char params[256];
         snprintf(params,sizeof(params),"bframes=0:rc-lookahead=0:ref=1:keyint=%d:min-keyint=%d:scenecut=0:open-gop=0:repeat-headers=1:aud=1:pools=none:frame-threads=1:log-level=error",gop,gop);
         av_dict_set(&opts,"preset","ultrafast",0); av_dict_set(&opts,"tune","zerolatency",0);

@@ -111,6 +111,18 @@ The base revision retains the separately published `17854a7` correction to
 borrowed decoding. This increment does not replace that correction or its
 queued-dependent regression. The detached continuous path remains independent.
 
+The bitrate is fixed for a session, but the software encoder's **short-term**
+rate is bounded: libx265 runs with a VBV at the configured bitrate and a 200 ms
+buffer (`crates/fr-native/src/bridge.c`). Without it, libx265's average-rate
+control emitted single P pictures of up to 77 KB at a 2 Mbit/s target on
+incompressible content: about 300 ms of link time at that rate, past the 250 ms
+reference horizon. With it the largest P picture was about 17 KB and the IDR
+about half its former size. The namespace row
+`real_impairment::view_only_incompressible_content_over_a_narrow_link` (a noise
+window, the test host's 2 Mbit/s target) holds every change on a 3 Mbit/s link,
+where the session used to end within seconds (0/6 shown; also 1/6 at 4 Mbit/s).
+NVENC and VA-API still use their libavcodec defaults (not yet measured).
+
 Remaining work includes qualified runtime bitrate/quantizer/resolution changes,
 remote decoder and presentation feedback, aggregate host/path budgets, qualified
 damage-event and local-input wakeup, and platform/GUI policy selection. Collected
