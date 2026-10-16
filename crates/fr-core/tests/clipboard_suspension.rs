@@ -113,9 +113,15 @@ fn suspended_receive_resumes_original_cursor_without_admitting_work_while_stale(
     let reserved = session.reserved_bytes();
     state.paused.store(true, Ordering::Release);
     assert_eq!(session.maintain(at(2)), Err(Error::Suspended));
-    assert_eq!(session.chunk(b.stamp, 1, 1, b"b", at(3)), Err(Error::Suspended));
+    assert_eq!(
+        session.chunk(b.stamp, 1, 1, b"b", at(3)),
+        Err(Error::Suspended)
+    );
     let mut sink = Sink::default();
-    assert_eq!(session.commit(b.stamp, 2, &mut sink, || at(4)), Err(Error::Suspended));
+    assert_eq!(
+        session.commit(b.stamp, 2, &mut sink, || at(4)),
+        Err(Error::Suspended)
+    );
     assert_eq!(session.local_change(None, at(5)), Err(Error::Suspended));
     assert_eq!(session.buffered_bytes(), 1);
     assert_eq!(session.reserved_bytes(), reserved);
@@ -140,7 +146,10 @@ fn silence_while_suspended_expires_original_item_and_never_resets_sequence_floor
     assert_eq!(session.maintain(at(3_000_000)), Err(Error::Suspended));
     assert_eq!(session.reserved_bytes(), 0);
     state.paused.store(false, Ordering::Release);
-    assert_eq!(session.chunk(b.stamp, 0, 0, b"a", at(3_000_001)), Err(Error::UnknownTransfer));
+    assert_eq!(
+        session.chunk(b.stamp, 0, 0, b"a", at(3_000_001)),
+        Err(Error::UnknownTransfer)
+    );
     assert_eq!(session.begin(b, at(3_000_002)), Err(Error::Replay));
     assert!(!session.is_closed());
 }
@@ -187,11 +196,17 @@ fn suspension_during_preparation_cancels_without_publication_or_retry() {
         prepare_pause: Some(state.clone()),
         ..Sink::default()
     };
-    assert_eq!(session.commit(b.stamp, 2, &mut sink, || at(3)), Err(Error::Suspended));
+    assert_eq!(
+        session.commit(b.stamp, 2, &mut sink, || at(3)),
+        Err(Error::Suspended)
+    );
     assert_eq!((sink.prepared, sink.published, sink.cancelled), (1, 0, 1));
     assert!(!session.is_closed());
     state.paused.store(false, Ordering::Release);
-    assert_eq!(session.commit(b.stamp, 2, &mut sink, || at(4)), Err(Error::UnknownTransfer));
+    assert_eq!(
+        session.commit(b.stamp, 2, &mut sink, || at(4)),
+        Err(Error::UnknownTransfer)
+    );
     assert_eq!(session.begin(b, at(5)), Err(Error::Replay));
 }
 

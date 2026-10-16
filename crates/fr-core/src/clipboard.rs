@@ -405,7 +405,10 @@ impl ClipboardSession {
             .monitor
             .deadline(now)
             .map_err(|reason| self.authority_error(reason));
-        if deadline.as_ref().is_err_and(|error| *error != Error::Suspended) {
+        if deadline
+            .as_ref()
+            .is_err_and(|error| *error != Error::Suspended)
+        {
             return deadline;
         }
         // Observe switch generations even while suspended. An off/on cycle
