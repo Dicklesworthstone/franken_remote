@@ -207,7 +207,10 @@ fn a_waiting_epoch_does_not_bypass_ack_accounting_or_hold_another_lane() {
         assert_eq!(peers.server.usage().retained_send_records, 1);
 
         // The peer has not driven I/O since admission, so the first epoch has
-        // no ACK. These later admissions must not join that closed epoch.
+        // no ACK. Bulk admissions may join an epoch only during its fixed 10 ms
+        // fill window (3a4df0e); after it, these later admissions must not
+        // join that unacknowledged epoch.
+        std::thread::sleep(Duration::from_millis(11));
         send(&cx, &mut peers, 0, &waiting);
         send(&cx, &mut peers, 1, &other);
         peers

@@ -1,6 +1,7 @@
 //! Real UDP/TLS regression coverage for opportunistic bulk send batches.
 //! Application authority is a fixture; this is not impaired-tailnet evidence.
 #![cfg(target_os = "linux")]
+#[allow(dead_code)] // The shared TLS fixture also exposes helpers for other tests.
 mod support;
 
 use asupersync::cx::Cx;
@@ -80,7 +81,9 @@ fn staggered_bulk_batches_keep_fifo_bounds_and_release_every_charge() {
             assert!(usage.retained_send_records <= policy.retained_send_records);
             assert!(usage.retained_send_upper_bound <= policy.retained_send_bytes);
             assert_eq!(usage.critical_send_records, 0);
-            if sent == 128 && usage.retained_send_records == 0 {
+            // Released credit proves the host's epochs were ACKed, not that
+            // this turn's receive already delivered the final record.
+            if sent == 128 && received == 128 && usage.retained_send_records == 0 {
                 break;
             }
         }
