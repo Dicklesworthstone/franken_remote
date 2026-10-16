@@ -403,9 +403,20 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, consent: bool, visible: bool) {
                         |state, event| {
                             match state {
                                 ViewerControlState::Requesting(pending) => {
-                                    pending
-                                        .confirm_mapping(request.parent, target.view)
-                                        .unwrap();
+                                    if let Err(error) =
+                                        pending.confirm_mapping(request.parent, target.view)
+                                    {
+                                        // Without consent the request ends unanswered.
+                                        // Under load its own deadline can pass before
+                                        // the host's refusal ends this viewer; that is
+                                        // an error end too (asserted below). Nothing
+                                        // else may fail here.
+                                        assert!(
+                                            !consent && now(&c).unwrap() >= pending.deadline().0,
+                                            "{error:?}"
+                                        );
+                                        return Err(());
+                                    }
                                     if visible
                                         && let Some(p) = pending.presentation()
                                         && shown != Some(p.frame)
