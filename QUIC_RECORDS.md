@@ -100,9 +100,28 @@ also fitted every queued datagram. Under namespace `tc netem` loss, media kept
 that queue at the window limit, so host renewal challenges missed their send-by
 deadline and closed view-only sessions. Bulk prefixes still wait for the media
 queue, so a file or recovery transfer never gets ahead of media. Records on one
-stream remain stop-and-wait per epoch (the absence proof above). A record
-admitted while an earlier epoch is unacknowledged therefore waits up to one more
-round trip. Removing that wait needs the upstream retention query.
+stream keep bounded acknowledgment epochs (the absence proof above). Critical
+streams freeze their membership at the first native prefix. Bulk streams now
+allow newly admitted records to join for a fixed 10 ms from that first prefix,
+so a producer serviced on successive turns can fill the existing budget without
+waiting an extra RTT for every record. The first prefix is not delayed. Joining
+is decided at admission, even if congestion prevents a native prefix until later.
+After the fixed window, new records wait for the next epoch; continued traffic
+never slides the window. All original byte/count limits, critical connection
+credit, per-stream FIFO order and delivery deadlines remain unchanged. No byte
+is released until the entire current epoch is proven absent from both native
+queues. An empty epoch retires immediately, including inside its fill window.
+Per-record acknowledgment and a fully sliding send window still require an
+explicit upstream retention query.
+
+The batching policy's five direct-source unit tests and strict Clippy check
+pass on the pinned nightly. Reverting to always-closed batches or sliding the
+fill start makes four tests fail in each case. `bulk_epochs.rs` adds real
+UDP/TLS coverage for staggered FIFO delivery, bounded credit reclamation and
+unchanged earliest deadlines. Those transport tests are not yet qualified by
+this change: local compilation of the pinned Asupersync dependency was killed
+at the container's 4 GiB memory ceiling. No WAN throughput improvement or
+clipboard item ceiling is claimed without the corresponding live runs.
 
 Delivery allowance (2026-09-30). A reliable record's send-by is its usefulness
 deadline, enforced at admission: a record already past it is refused. Until

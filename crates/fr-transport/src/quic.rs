@@ -21,8 +21,10 @@ use std::{
 
 mod admission;
 mod datagrams;
+mod send_epoch;
 mod send_window;
 pub use admission::SendAdmission;
+use send_epoch::SendEpoch;
 
 mod lifetime;
 pub use lifetime::terminal::{
@@ -280,9 +282,15 @@ impl Default for Policy {
         }
     }
 }
-/// Freeze all records currently queued on this stream before its first native
-/// prefix. Later sends may queue but cannot join that epoch.
-fn freeze_epoch(senders: &mut [Sender], pending: &mut VecDeque<PendingWrite>, route: StreamRoute) {
+/// Start a batch at its first native prefix, including all records already
+/// queued. Later bulk admissions may join only during its fixed fill window;
+/// critical batches stay closed. No first-prefix delay or new queue is added.
+fn freeze_epoch(
+    senders: &mut [Sender],
+    pending: &mut VecDeque<PendingWrite>,
+    route: StreamRoute,
+    now: u64,
+) {
     let sender = senders
         .iter_mut()
         .find(|s| s.route == route)
@@ -290,10 +298,7 @@ fn freeze_epoch(senders: &mut [Sender], pending: &mut VecDeque<PendingWrite>, ro
     if sender.epoch.is_some() {
         return;
     }
-    let mut epoch = SendEpoch {
-        bytes: 0,
-        records: 0,
-    };
+    let mut epoch = SendEpoch::new(0, 0, route.priority == Priority::Bulk, now);
     for record in pending.iter_mut().filter(|p| p.route == route) {
         record.in_epoch = true;
         epoch.bytes += record.bytes.len();
@@ -344,14 +349,6 @@ impl EmptySendState {
         witness.stop_sending_error_code = live.stop_sending_error_code;
         witness == *live
     }
-}
-// A closed set of records staged to native STREAM buffers. New admissions stay
-// in pending_writes until this epoch is proven absent from BOTH native pending
-// and retransmission storage. Continuous traffic cannot pin an acknowledged old
-// deadline forever; no acknowledgement is guessed from queue size or flight.
-struct SendEpoch {
-    bytes: usize,
-    records: usize,
 }
 struct Sender {
     route: StreamRoute,
@@ -842,18 +839,26 @@ impl QuicRecords {
         }
         match route {
             Route::Stream(route) => {
-                self.pending_writes.push_back(PendingWrite {
-                    route,
-                    bytes: storage,
-                    offset: 0,
-                    deliver_by,
-                    in_epoch: false,
-                });
                 let sender = self
                     .senders
                     .iter_mut()
                     .find(|s| s.route == route)
                     .expect("validated outgoing route");
+                // Join at ADMISSION, not when congestion later permits a
+                // prefix. Otherwise a full flight would still force one RTT
+                // per producer turn. Every earlier gate has passed; both this
+                // record and the entire batch remain charged until proven ACKed.
+                let in_epoch = sender
+                    .epoch
+                    .as_mut()
+                    .is_some_and(|epoch| epoch.try_join(bytes.len(), current));
+                self.pending_writes.push_back(PendingWrite {
+                    route,
+                    bytes: storage,
+                    offset: 0,
+                    deliver_by,
+                    in_epoch,
+                });
                 sender.bytes += bytes.len();
                 sender.records += 1;
                 sender.until = Some(sender.until.map_or(deliver_by, |old| old.min(deliver_by)));
@@ -957,9 +962,11 @@ impl QuicRecords {
             self.close();
             return Err(peer.map_or(Error::Closed, Error::PeerClosed));
         }
-        // Retire only the CLOSED epoch, not every record admitted to this route.
-        // Waiting records stay counted with their own original deadlines. The
-        // live native stream is never cloned or modified to manufacture absence.
+        // Retire only this epoch, not records waiting for the next batch.
+        // Bulk filling does not delay retirement: exact native emptiness plus
+        // no queued member is sufficient even inside the short fill window.
+        // Waiting records keep their charges and original deadlines. The live
+        // native stream is never cloned or modified to manufacture absence.
         for sender in &mut self.senders {
             if sender.epoch.is_some()
                 && !self
@@ -1103,7 +1110,7 @@ impl QuicRecords {
             return Ok(None);
         };
         let route = self.pending_writes[index].route;
-        freeze_epoch(&mut self.senders, &mut self.pending_writes, route);
+        freeze_epoch(&mut self.senders, &mut self.pending_writes, route, now);
         let pending = &mut self.pending_writes[index];
         native
             .connection_mut()
