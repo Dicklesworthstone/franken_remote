@@ -72,20 +72,7 @@ impl Store {
     /// lock. Concurrent approval and sharing saves cannot lose one another.
     pub fn update(&self, change: Change) -> Result<Saved, Error> {
         let dir = self.directory(true)?.ok_or(Error::InvalidPath)?;
-        let lock = fs::openat(
-            &dir,
-            LOCK_NAME,
-            OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-            Mode::from_raw_mode(0o600),
-        )?;
-        regular_private(&lock)?;
-        fs::flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|e| {
-            if e == rustix::io::Errno::WOULDBLOCK {
-                Error::Busy
-            } else {
-                e.into()
-            }
-        })?;
+        let _lock = WriterLock::acquire(&dir)?;
         let mut policy = self.read(&dir)?;
         let old = policy;
         match change {
@@ -211,6 +198,36 @@ fn regular_private(fd: &OwnedFd) -> Result<(), Error> {
         return Err(Error::UnsafePath);
     }
     Ok(())
+}
+/// The local writer lock. Dropping it UNLOCKS before closing: another
+/// thread's fork (frd spawning a worker) holds a copy of this descriptor until
+/// its exec, and a bare close left the lock with that copy, so the next save
+/// failed with a spurious `Busy`. An unlock applies to the shared open file
+/// description, inherited copies included.
+struct WriterLock(OwnedFd);
+impl WriterLock {
+    fn acquire(dir: &OwnedFd) -> Result<Self, Error> {
+        let lock = fs::openat(
+            dir,
+            LOCK_NAME,
+            OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            Mode::from_raw_mode(0o600),
+        )?;
+        regular_private(&lock)?;
+        fs::flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|e| {
+            if e == rustix::io::Errno::WOULDBLOCK {
+                Error::Busy
+            } else {
+                e.into()
+            }
+        })?;
+        Ok(Self(lock))
+    }
+}
+impl Drop for WriterLock {
+    fn drop(&mut self) {
+        let _ = fs::flock(&self.0, FlockOperation::Unlock);
+    }
 }
 fn temporary(dir: &OwnedFd) -> Result<(String, OwnedFd), Error> {
     for _ in 0..16 {

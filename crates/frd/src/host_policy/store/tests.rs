@@ -72,6 +72,28 @@ fn changes_preserve_other_fields_and_repeated_saves_are_idempotent() {
     assert!(!same.changed);
     assert_eq!(same.policy, second.policy);
 }
+/// Another thread's fork holds a copy of the lock descriptor until its exec.
+/// Dropping the writer lock must release the lock itself, not just close our
+/// copy: in a parallel `cargo test` a later save failed with `Busy` (6d8).
+#[test]
+fn a_lock_copy_held_by_a_concurrent_fork_does_not_keep_the_writer_lock() {
+    let root = Root::new();
+    let store = root.store();
+    store.update(Change::Approval(Approval::Local)).unwrap();
+    let dir = store.directory(true).unwrap().unwrap();
+    let lock = WriterLock::acquire(&dir).unwrap();
+    // What a forked child holds between its fork and exec.
+    let inherited = rustix::io::dup(&lock.0).unwrap();
+    assert_eq!(
+        store.update(Change::Sharing(Sharing::Tailnet)),
+        Err(Error::Busy)
+    );
+    drop(lock);
+    let saved = store.update(Change::Sharing(Sharing::Tailnet)).unwrap();
+    assert!(saved.changed);
+    assert_eq!(saved.policy.revision, 2);
+    drop(inherited);
+}
 #[test]
 fn startup_loads_saved_policy_and_overrides_do_not_rewrite_it() {
     let root = Root::new();
