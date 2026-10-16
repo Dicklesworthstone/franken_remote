@@ -299,6 +299,25 @@ impl AudioJitterBuffer {
         if self.next.is_some_and(|(seq, _)| seq < first.sequence()) {
             return self.conceal();
         }
+        Ok(JitterDrainResult::Packet(self.take_packet()))
+    }
+    /// Hand the playout owner only the exact next real packet of an established
+    /// timeline. Startup still gets its whole reorder window, and an interior
+    /// or trailing hole can be concealed only when its device slot is due.
+    /// The owner must retain one outstanding decode and its original deadline;
+    /// this is not permission to free-run the decoder or submit PCM early.
+    pub(super) fn predecode_packet(&mut self) -> Option<AudioAccessUnit> {
+        if self.error.is_some() || self.is_prebuffering {
+            return None;
+        }
+        let (sequence, at) = self.next?;
+        let first = self.slots[0]?;
+        if first.sequence() != sequence || first.timestamp_samples() != at {
+            return None;
+        }
+        Some(self.take_packet())
+    }
+    fn take_packet(&mut self) -> AudioAccessUnit {
         let packet = self.pop_first_packet();
         // Checked at admission, including the last representable packet.
         self.next = Some((
@@ -307,7 +326,7 @@ impl AudioJitterBuffer {
         ));
         self.concealed_samples = 0;
         self.metrics.packets_played = self.metrics.packets_played.saturating_add(1);
-        Ok(JitterDrainResult::Packet(packet))
+        packet
     }
     /// Call once per due audio-clock frame, never in a free-running drain loop.
     /// Trailing loss receives the same finite concealment budget as an interior

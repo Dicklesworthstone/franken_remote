@@ -43,6 +43,24 @@ a microphone. Stop is idempotent. The outer owner must also stop/flush the actua
 device and supervise an unresponsive foreign decoder; callbacks are not a
 replacement for those platform/session boundaries.
 
+## Decode ahead without early playback
+
+After the first output, a queued packet on the exact next sequence/sample
+position may start decoding before its device slot is due. The process-backed
+Opus decoder then uses its existing one-job/one-result mailbox while the
+previous sound plays. The result is collected only at the original device
+slot; there is no extra PCM FIFO or output-clock adjustment. Startup keeps its
+full reorder window, and missing packets cannot cause early concealment.
+
+The same permission checks, original arrival expiry and missed-slot refusal
+apply to this prefetched work. Stop, clock regression and reconfiguration
+retire its native result before another epoch can output. Volume/mute still
+apply at submission, not predecode. `audio_predecode` covers delayed-codec
+scheduling and those fences; `opus_predecode` additionally runs the actual
+Opus child and compares its output with separately driven native decode using
+synthetic device clocks. These are not physical-device or live-network
+measurements, nor drift correction or recovery from a terminal audio gap.
+
 ## Native wire-to-Opus receive boundary
 
 Enable `fr-native`'s opt-in `linux-audio-playout` feature to use

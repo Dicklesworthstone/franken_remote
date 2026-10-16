@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
-//! Clock-paced, single-owner audio decode and immediate bounded submission.
+//! Clock-paced, single-owner audio decode and bounded submission.
+//!
+//! After startup, the exact next queued packet may decode one device slot
+//! ahead. Its single native PCM result stays with the decoder until that slot
+//! is due; no decoded FIFO, early output or speculative concealment is added.
 //!
 //! Supply an already admitted/acknowledged direction, a real worker-confined
 //! decoder, and the output device's 48 kHz sample clock. The local checkpoint
@@ -324,7 +328,9 @@ impl<D: PolledDecoder> AudioPlayout<D> {
     }
 
     /// At most one packet/PLC and one output submission. Repeated calls at the
-    /// same device position do nothing. A missed whole frame retires instead of
+    /// same device position never submit twice. Between slots, at most one
+    /// exact next packet may begin decode; startup and PLC still wait until due.
+    /// A missed whole frame retires instead of
     /// bursting through stale sound or silently changing the codec timeline.
     ///
     /// `checkpoint` must check live direction/epoch permission, including local
@@ -356,41 +362,43 @@ impl<D: PolledDecoder> AudioPlayout<D> {
                 == Some(self.config.expected_samples_per_frame())
             && pcm.timestamp_samples() == at
     }
+    fn begin_packet(&mut self, packet: &AudioAccessUnit) -> Result<Pending, PlayoutError> {
+        let entry = self
+            .arrivals
+            .iter_mut()
+            .find(|a| a.is_some_and(|a| a.sequence == packet.sequence()))
+            .ok_or(PlayoutError::CodecOutput)?;
+        let until = entry.take().ok_or(PlayoutError::CodecOutput)?.until;
+        self.decoder
+            .as_mut()
+            .ok_or(PlayoutError::Stopped)?
+            .submit_packet(packet)
+            .map_err(PlayoutError::Codec)?;
+        Ok(Pending {
+            sequence: packet.sequence(),
+            at: packet.timestamp_samples(),
+            concealed: false,
+            until,
+        })
+    }
     fn begin_decode(&mut self) -> Result<Option<(Pending, Option<AudioPcmFrame>)>, PlayoutError> {
         let missing_at = self.jitter.next_sample_timestamp();
-        let decoder = self.decoder.as_mut().ok_or(PlayoutError::Stopped)?;
         match self
             .jitter
             .drain_for_playout()
             .map_err(PlayoutError::Jitter)?
         {
             JitterDrainResult::Underrun => Ok(None),
-            JitterDrainResult::Packet(packet) => {
-                let entry = self
-                    .arrivals
-                    .iter_mut()
-                    .find(|a| a.is_some_and(|a| a.sequence == packet.sequence()))
-                    .ok_or(PlayoutError::CodecOutput)?;
-                let until = entry.take().ok_or(PlayoutError::CodecOutput)?.until;
-                decoder
-                    .submit_packet(&packet)
-                    .map_err(PlayoutError::Codec)?;
-                Ok(Some((
-                    Pending {
-                        sequence: packet.sequence(),
-                        at: packet.timestamp_samples(),
-                        concealed: false,
-                        until,
-                    },
-                    None,
-                )))
-            }
+            JitterDrainResult::Packet(packet) => Ok(Some((self.begin_packet(&packet)?, None))),
             JitterDrainResult::Plc {
                 missing_sequence,
                 duration_samples,
             } => {
                 let at = missing_at.ok_or(PlayoutError::CodecOutput)?;
-                let pcm = decoder
+                let pcm = self
+                    .decoder
+                    .as_mut()
+                    .ok_or(PlayoutError::Stopped)?
                     .submit_plc(duration_samples)
                     .map_err(PlayoutError::Codec)?;
                 Ok(Some((
@@ -416,6 +424,17 @@ impl<D: PolledDecoder> AudioPlayout<D> {
             return Ok(PlayoutResult::Waiting);
         };
         if clock.output_samples < due {
+            // The previous slot has completed before pending becomes None.
+            // Start only a real, contiguous packet, retaining its native result
+            // in the decoder's existing single slot until the output clock is
+            // due. This overlaps process-backed decode with playback, without
+            // closing a missing packet's reorder window or inventing PLC early.
+            if self.configured
+                && self.pending.is_none()
+                && let Some(packet) = self.jitter.predecode_packet()
+            {
+                self.pending = Some(self.begin_packet(&packet)?);
+            }
             return Ok(PlayoutResult::Waiting);
         }
         let next = due
