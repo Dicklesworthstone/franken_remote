@@ -21,7 +21,7 @@ use fr_wire::{
     input::{InputDelivery, InputDirection},
     receiver_metrics,
 };
-use std::{cell::Cell, future::Future, pin::pin, task::Poll, time::Duration};
+use std::{cell::Cell, future::Future, pin::pin, time::Duration};
 
 /// The parent a recovery keeps serving while old media is fenced: an
 /// observation session, or a control grant whose suspended input keeps its
@@ -554,8 +554,9 @@ async fn send_ack(
     }
 }
 
-/// Finish an already-polled parent network turn even when native success wins.
-/// A decoder wait never borrows QUIC and never stops observation challenge service.
+/// The same failure-safe join used by steady decoding and cursor redraws.
+/// Recovery retains its original budget and the parent's independent stop handle;
+/// neither native failure nor expiry abandons an already-polled network turn.
 async fn during<T>(
     link: &mut Link<'_>,
     budget: &Budget,
@@ -564,28 +565,27 @@ async fn during<T>(
     ui: &mut impl FnMut(acquisition::Dispatch<'_>, Option<Presentation>) -> Result<(), ()>,
     other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
 ) -> Result<T, Error> {
+    let control = super::StreamingViewerControl {
+        cx: budget.cx.clone(),
+        input: match &link.parent {
+            Parent::Observe(_) => None,
+            Parent::Control(viewer, _) => Some(viewer.control()),
+        },
+    };
     let mut native = pin!(native);
     loop {
-        let mut result = None;
-        {
-            let mut turn = pin!(link.drive(budget.turn()?, |r, b| dispatch.receive(r, b, other)));
-            std::future::poll_fn(|task| {
-                budget.remaining()?;
-                if result.is_none()
-                    && let Poll::Ready(value) = native.as_mut().poll(task)
-                {
-                    result = Some(value);
-                }
-                if let Some(Err(e)) = &result {
-                    return Poll::Ready(Err(Error::Startup(*e)));
-                }
-                turn.as_mut().poll(task)
-            })
-            .await?;
-        }
-        link.notify(budget, ui)?;
+        let wait = budget.turn().inspect_err(|_| control.stop())?;
+        let result = super::native_turn::checked(
+            native.as_mut(),
+            link.drive(wait, |r, b| dispatch.receive(r, b, other)),
+            &control,
+            Error::Startup,
+            || budget.remaining().map(|_| ()),
+        )
+        .await?;
+        link.notify(budget, ui).inspect_err(|_| control.stop())?;
         if let Some(value) = result {
-            return value.map_err(Error::Startup);
+            return Ok(value);
         }
     }
 }
@@ -782,3 +782,6 @@ impl super::StreamingViewer {
 
 #[cfg(test)]
 mod audio_tests;
+
+#[cfg(test)]
+mod native_tests;
