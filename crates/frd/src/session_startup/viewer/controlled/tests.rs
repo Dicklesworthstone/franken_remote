@@ -993,9 +993,8 @@ fn an_expired_deadline_is_named_by_what_expired() {
     run(|client_cx, host_cx| async move {
         let mut state = Box::pin(fixture(&client_cx, &host_cx)).await;
         let current = now(&client_cx).unwrap();
-        // Fresh view and a recently heard host: only a pending record or
-        // response deadline can be the one that passed.
-        assert_eq!(expired(&mut state.viewer, current), Error::Expired);
+        // Fresh view, recently heard host, nothing pending: nothing passed.
+        assert_eq!(expired(&mut state.viewer, current), None);
         let until = state
             .viewer
             .input
@@ -1005,17 +1004,29 @@ fn an_expired_deadline_is_named_by_what_expired() {
         while now(&client_cx).unwrap() < until {
             asupersync::time::sleep(client_cx.now(), Duration::from_millis(1)).await;
         }
-        // A lapsed view suspends input (plan 11.3); it is not the deadline that
-        // passed. Before, this was named View(ViewSuspended): an unnamed end.
+        // A lapsed view suspends input (plan 11.3); it is not a deadline that
+        // passed, so the drive turn continues. Before, the view was named here
+        // (View(ViewSuspended)): an unnamed end of a merely suspended session.
         let lapsed = now(&client_cx).unwrap();
-        assert_eq!(expired(&mut state.viewer, lapsed), Error::Expired);
+        assert_eq!(expired(&mut state.viewer, lapsed), None);
         assert!(state.viewer.input.suspended_since().is_some());
+        // A record that misses its own deadline during the suspension is named
+        // as that expiry (transport_deadline_expired), not as the view.
+        state.viewer.pending = Some(Pending {
+            bytes: [0; MAX_INPUT_RECORD_BYTES],
+            len: 0,
+            until: lapsed,
+            limit: fr_client::input::presentation::SendLimit::View,
+            unsent: Unsent::Pointer,
+        });
+        assert_eq!(expired(&mut state.viewer, lapsed), Some(Error::Expired));
+        state.viewer.pending = None;
         // A suspension that outlives its limit is the view's own expiry.
         let named = expired(
             &mut state.viewer,
             lapsed + fr_client::input::MAX_VIEW_SUSPENSION_US,
         );
-        assert!(matches!(named, Error::View(_)), "{named:?}");
+        assert!(matches!(named, Some(Error::View(_))), "{named:?}");
         state.viewer.close();
         state.host.close();
         assert!(state.driver.take().unwrap().await.handoff_safe());

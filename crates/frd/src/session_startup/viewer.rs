@@ -202,9 +202,11 @@ impl Viewer {
                     .as_ref()
                     .ok_or(Error::Closed)?
                     .deadline_us();
-                let remaining = until
-                    .checked_sub(now(&guard.viewer.cx)?)
-                    .ok_or(Error::Expired)?;
+                let Some(remaining) = until.checked_sub(now(&guard.viewer.cx)?) else {
+                    // It passed after the opening `tick`: name it the same way.
+                    guard.viewer.tick()?;
+                    return Err(Error::Expired);
+                };
                 let cx = &guard.viewer.cx;
                 // `tick`, before and after every drive, reports the deadline
                 // typed (`ApprovalUnanswered` while local approval is pending).

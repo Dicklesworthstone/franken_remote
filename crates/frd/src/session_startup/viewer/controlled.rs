@@ -829,9 +829,17 @@ impl ControlledViewer {
                 until = until.min(deadline);
             }
             let current = now(cx)?;
-            let Some(remaining) = until.checked_sub(current) else {
-                return Err(expired(viewer, current));
+            let remaining = match until.checked_sub(current) {
+                Some(remaining) => remaining,
+                // A view that lapsed since `until` was taken is a suspension
+                // with a later bound now; only a deadline that really passed
+                // ends the session. Otherwise finish this turn without waiting.
+                None => match expired(viewer, current) {
+                    Some(error) => return Err(error),
+                    None => 0,
+                },
             };
+            let cx = &viewer.session.cx;
             let view = std::cell::Cell::new(None);
             viewer
                 .session
@@ -910,20 +918,28 @@ fn maintenance_gate(
 fn input_deadline(input: &mut PresentedInput, t: ClientInstant) -> Result<ClientInstant, Error> {
     input.maintenance_deadline(t).map_err(Error::View)
 }
-/// Which local deadline had already passed: the view (its owner reports why),
-/// the session's host-silence bound, else a pending record or response. The
-/// view bound is the maintenance deadline `drive` used: a suspension within
-/// its limit has not expired. Naming it from `view_deadline`, which refuses
-/// while suspended, turned a record expiry during a suspension into an
-/// unnamed `ViewSuspended` end (`native_session_failed` at 40 ms RTT, 5% loss).
-fn expired(viewer: &mut ControlledViewer, current: u64) -> Error {
+/// Which local deadline has passed at `current`, if any: the view (its owner
+/// reports why), the session's host-silence bound, else a pending record or
+/// response. The view bound is the maintenance deadline `drive` uses: a
+/// suspension within its limit has not expired, and a view that lapsed after
+/// `drive` took its bound has become one. Naming the view from
+/// `view_deadline`, which refuses while suspended, turned a record expiry
+/// during a suspension into an unnamed `ViewSuspended` end
+/// (`native_session_failed` at 40 ms RTT, 5% loss).
+fn expired(viewer: &mut ControlledViewer, current: u64) -> Option<Error> {
     if let Err(view) = viewer.input.maintenance_deadline(ClientInstant(current)) {
-        return Error::View(view);
+        return Some(Error::View(view));
     }
     if current >= viewer.session.heard_until {
-        return Error::Session(super::Error::Expired);
+        return Some(Error::Session(super::Error::Expired));
     }
-    Error::Expired
+    let passed = |deadline: Option<u64>| deadline.is_some_and(|at| current >= at);
+    (passed(viewer.pending.as_ref().map(|p| p.until))
+        || passed(viewer.input.control_response_deadline().map(|at| at.0))
+        || passed(viewer.session.responder.response_deadline().map(|at| at.0))
+        || passed(viewer.files.deadline_us())
+        || passed(viewer.clipboard_setup.deadline_us()))
+    .then_some(Error::Expired)
 }
 /// Only this viewer's own view-gate refusal is relabelled. The transport checks
 /// its identity/lifetime gate first, so an identity refusal leaves `view` empty.
