@@ -10,12 +10,16 @@ use std::{
 /// None leaves the same pending native future with its caller for the next
 /// network turn. Some is one actual completion, not a presentation witness.
 /// The caller's serving guard fences cancellation before dropping either owner.
-pub(super) async fn drive<T>(
+///
+/// A plain function, not another async layer: the caller's future then holds
+/// `checked`'s state once instead of also keeping `network` alive beside it,
+/// which put every viewer serving future over Clippy's 16 KiB limit.
+pub(super) fn drive<T>(
     native: Pin<&mut impl Future<Output = Result<T, media::Error>>>,
     network: impl Future<Output = Result<(), Error>>,
     control: &StreamingViewerControl,
-) -> Result<Option<T>, Error> {
-    checked(native, network, control, Error::Media, || Ok(())).await
+) -> impl Future<Output = Result<Option<T>, Error>> {
+    checked(native, network, control, Error::Media, || Ok(()))
 }
 
 /// Recovery uses the same join, with its ORIGINAL absolute budget and typed
