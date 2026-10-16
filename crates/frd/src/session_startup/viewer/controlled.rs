@@ -911,9 +911,13 @@ fn input_deadline(input: &mut PresentedInput, t: ClientInstant) -> Result<Client
     input.maintenance_deadline(t).map_err(Error::View)
 }
 /// Which local deadline had already passed: the view (its owner reports why),
-/// the session's host-silence bound, else a pending record or response.
+/// the session's host-silence bound, else a pending record or response. The
+/// view bound is the maintenance deadline `drive` used: a suspension within
+/// its limit has not expired. Naming it from `view_deadline`, which refuses
+/// while suspended, turned a record expiry during a suspension into an
+/// unnamed `ViewSuspended` end (`native_session_failed` at 40 ms RTT, 5% loss).
 fn expired(viewer: &mut ControlledViewer, current: u64) -> Error {
-    if let Err(view) = viewer.input.view_deadline(ClientInstant(current)) {
+    if let Err(view) = viewer.input.maintenance_deadline(ClientInstant(current)) {
         return Error::View(view);
     }
     if current >= viewer.session.heard_until {

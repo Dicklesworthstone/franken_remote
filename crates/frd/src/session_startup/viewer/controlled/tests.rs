@@ -1005,7 +1005,16 @@ fn an_expired_deadline_is_named_by_what_expired() {
         while now(&client_cx).unwrap() < until {
             asupersync::time::sleep(client_cx.now(), Duration::from_millis(1)).await;
         }
-        let named = expired(&mut state.viewer, now(&client_cx).unwrap());
+        // A lapsed view suspends input (plan 11.3); it is not the deadline that
+        // passed. Before, this was named View(ViewSuspended): an unnamed end.
+        let lapsed = now(&client_cx).unwrap();
+        assert_eq!(expired(&mut state.viewer, lapsed), Error::Expired);
+        assert!(state.viewer.input.suspended_since().is_some());
+        // A suspension that outlives its limit is the view's own expiry.
+        let named = expired(
+            &mut state.viewer,
+            lapsed + fr_client::input::MAX_VIEW_SUSPENSION_US,
+        );
         assert!(matches!(named, Error::View(_)), "{named:?}");
         state.viewer.close();
         state.host.close();
