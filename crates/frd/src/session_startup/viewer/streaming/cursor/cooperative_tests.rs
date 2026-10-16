@@ -108,6 +108,8 @@ fn scenario(lose_picture: bool) {
                 required: true,
             });
         }
+        // An offer's capabilities are sorted by name; unsorted is Protocol(Invalid).
+        capabilities.sort_by(|a, b| a.name.cmp(&b.name));
         let (mut host, mut viewer) = pair_initialized(&c, &h, capabilities, |_| {}).await;
         let (hc, vc) = attach(
             &mut host,

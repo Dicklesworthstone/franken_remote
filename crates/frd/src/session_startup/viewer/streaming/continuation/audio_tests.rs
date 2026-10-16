@@ -19,7 +19,9 @@ use fr_transport::quic;
 use fr_wire::{audio as wire, negotiation::Capability};
 use std::{cell::RefCell, rc::Rc};
 
-const AUDIO_BINDING: u32 = 9;
+// Channel ids are monotonic: an attachment's id must exceed every installed
+// one, and the fixture attaches configuration, recovery and video as 18-20.
+const AUDIO_BINDING: u32 = 21;
 
 #[derive(Default)]
 struct Calls {
