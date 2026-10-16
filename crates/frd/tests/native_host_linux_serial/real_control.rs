@@ -1275,14 +1275,27 @@ fn stall_capture(ms: u64) {
 /// Each reference recovery replaces three channel pairs, and QUIC never reuses
 /// a stream id. With 16 lifetime streams (7 pairs) a controlled session with
 /// clipboard lanes could not recover even once, and an input-only one only
-/// once: both ended `video_reference_lost`. Two stalls here, clipboard on.
+/// once: both ended `video_reference_lost`. Here clipboard both ways and a
+/// file lane (input, clipboard, files: 6 pairs before any recovery) survive
+/// three stalls in a row. The directories live on the namespace's own /run.
 #[test]
 #[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays"]
-fn a_controlled_session_with_clipboard_recovers_from_repeated_capture_stalls() {
-    let mut s = Controlled::start_with(true, true);
+fn a_controlled_session_with_clipboard_and_files_recovers_from_repeated_capture_stalls() {
+    let base = PathBuf::from(format!("/run/fr-recovery-{}", std::process::id()));
+    let (drop_dir, source) = (base.join("drop"), base.join("source"));
+    for dir in [&drop_dir, &source] {
+        fs::create_dir_all(dir).unwrap();
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let file = source.join("report.bin");
+    fs::write(&file, vec![0x5a; 65_536]).unwrap();
+    let directory =
+        frd::native_files::Directory::open(&drop_dir, frd::native_files::Limits::default())
+            .unwrap();
+    let mut s = Controlled::start_full(true, true, Some(directory), &[file]);
     let painter = Painter::start(&s.host.display);
     thread::sleep(Duration::from_millis(1500));
-    for (n, target) in [(300, 250), (320, 260)].into_iter().enumerate() {
+    for (n, target) in [(300, 250), (320, 260), (280, 240)].into_iter().enumerate() {
         stall_capture(400);
         assert!(
             s.pointer_follows(target, Duration::from_secs(20)),
@@ -1298,14 +1311,19 @@ fn a_controlled_session_with_clipboard_recovers_from_repeated_capture_stalls() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let report: serde_json::Value = serde_json::from_str(stdout.trim())
         .unwrap_or_else(|_| panic!("fr: {stdout} {}", String::from_utf8_lossy(&output.stderr)));
-    println!("fr after two capture stalls with clipboard: {report}");
+    println!("fr after three capture stalls with clipboard and files: {report}");
     assert_eq!(report["outcome"], "stopped", "{report}");
     assert_eq!(report["attempts"], 1, "{report}");
+    assert_eq!(
+        report["files_sent"],
+        serde_json::json!([{"index": 0, "bytes": 65_536, "durable": true}]),
+        "the file lane was attached and used: {report}"
+    );
     assert!(
         report["last_attempt_media"]["recovered_streams"]
             .as_u64()
-            .is_some_and(|n| n >= 2),
-        "both late encoded pictures must be recovered on the same lease: {report}"
+            .is_some_and(|n| n >= 3),
+        "all three late encoded pictures must be recovered on the same lease: {report}"
     );
     s.daemon.finish();
 }
