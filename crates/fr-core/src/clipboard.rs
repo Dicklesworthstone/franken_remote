@@ -7,6 +7,7 @@
 //! records when this owner closes. Clipboard permission/approval is separate
 //! from permission to inject keys; only the local integration supplies it.
 use crate::{
+    authority::AuthorityError,
     ids::{InputLeaseId, RemoteSessionId},
     input_submission::{InputSession, Refusal},
     limits::ProtocolLimits,
@@ -116,6 +117,9 @@ impl Begin {
 pub enum Error {
     Permission,
     Disabled,
+    /// The original lease is still held, but no fresh view permits clipboard
+    /// work. Retry only after readiness returns, keeping all item deadlines.
+    Suspended,
     Closed,
     Binding,
     Source,
@@ -364,15 +368,28 @@ impl ClipboardSession {
         })?;
         Ok(true)
     }
-    /// Service this during network silence; a heartbeat never refreshes the
-    /// fixed transfer deadline. Authority failures terminally retire this owner.
+    /// Service this during network silence. A temporary view suspension blocks
+    /// work but does not retire the original owner or stop its item clocks.
+    /// Expired/revoked authority is still terminal and can never be resumed.
     pub fn maintain(&mut self, now: HostInstant) -> Result<(), Error> {
-        self.check(now)?;
-        if self.incoming.as_ref().is_some_and(|v| now >= v.deadline) {
+        let status = self.check(now);
+        let expired = self.incoming.as_ref().is_some_and(|v| now >= v.deadline);
+        if expired {
             self.incoming = None;
+        }
+        status?;
+        if expired {
             return Err(Error::Expired);
         }
         Ok(())
+    }
+    fn authority_error(&mut self, reason: Refusal) -> Error {
+        if reason == Refusal::Authority(AuthorityError::ViewUnready) {
+            Error::Suspended
+        } else {
+            self.close();
+            Error::Authority(reason)
+        }
     }
     fn check(&mut self, now: HostInstant) -> Result<HostInstant, Error> {
         if self.closed {
@@ -384,10 +401,15 @@ impl ClipboardSession {
             return Err(Error::Clock);
         }
         self.clock = now;
-        let deadline = self.monitor.deadline(now).map_err(|reason| {
-            self.close();
-            Error::Authority(reason)
-        })?;
+        let deadline = self
+            .monitor
+            .deadline(now)
+            .map_err(|reason| self.authority_error(reason));
+        if deadline.as_ref().is_err_and(|error| *error != Error::Suspended) {
+            return deadline;
+        }
+        // Observe switch generations even while suspended. An off/on cycle
+        // must still discard the old item rather than resume it with the view.
         let states = (self.switches.0.state(), self.switches.1.state());
         let changed = states != self.switch_states;
         self.switch_states = states;
@@ -395,7 +417,7 @@ impl ClipboardSession {
             self.incoming = None;
             return Err(Error::Disabled);
         }
-        Ok(deadline)
+        deadline
     }
 }
 impl Drop for ClipboardSession {

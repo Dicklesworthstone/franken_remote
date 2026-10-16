@@ -23,10 +23,10 @@ impl ClipboardSession {
         self.check(now)?;
         // Capped by the authorization deadline, not the host's input view
         // window (~130-390 ms); chunks and commit still check full authority.
-        let authority_deadline = self.monitor.item_deadline(now).map_err(|reason| {
-            self.close();
-            Error::Authority(reason)
-        })?;
+        let authority_deadline = self
+            .monitor
+            .item_deadline(now)
+            .map_err(|reason| self.authority_error(reason))?;
         begin.validate(&self.limits)?;
         if begin.binding != self.binding {
             return Err(Error::Binding);
