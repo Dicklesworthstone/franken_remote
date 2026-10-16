@@ -1,21 +1,26 @@
 //! Independently bounded receive custody for admitted DATAGRAM routes.
 //!
-//! A blocked consumer owns one record, not the connection's native datagram
-//! queue. Keep that original record/deadline, and let other routes' held
-//! records progress. A later arrival for a FULL route is parked, and no further
-//! native datagram is read until its route drains: a blocked or not-ready
-//! consumer (a clock-only or startup-only receive) delays later arrivals, which
-//! stay in the bounded native queue, but never loses one. Dropping them lost
-//! video fragments on a clean link whenever a partial receive pulled a turn of
-//! datagrams. The cost: a consumer that STAYS blocked while its route keeps
-//! arriving holds other routes back until its record drains or expires. In-tree
-//! consumers block for one partial pass, while the input agent is busy, or (a
-//! reference recovery) hold the new video generation until the decoder
-//! handshake completes, about one or two round trips: audio arriving behind it
-//! is delayed by that much, not lost.
-//! This does not make unreliable media reliable or replace the session's
-//! reference/freshness validation.
+//! Video and pointer routes preserve one held record and one parked arrival:
+//! partial/clock-only receives never discard reference fragments. Audio alone
+//! may buffer four more packets across a briefly blocked consumer. Once that
+//! fixed allowance is full, additional audio is discarded and counted instead
+//! of stopping native reads for unrelated video or input. The existing native
+//! examination budget still bounds work, including discarded packets.
+//!
+//! Audio custody is capped at the 100ms playout ceiling from FIRST application
+//! receipt, never renewed by queuing, promotion or later arrivals. This is not
+//! capture-age evidence or a timestamp for earlier native-network buffering.
+//! Each retained packet keeps its own original bytes and deadline. A video
+//! recovery can still delay audio behind a parked video fragment; this change
+//! does not discard video references to solve that separate limitation.
 use super::{Bytes, DatagramRoute, Disposition, Error, MAX_DATAGRAMS, Route};
+
+// Four overflow slots across ALL audio routes, not four per peer identifier.
+// The owner validates each payload against MAX_DATAGRAM_RECORD before custody,
+// so this adds at most 4 * 1150 payload bytes and fixed inline metadata.
+const AUDIO_OVERFLOW: usize = 4;
+const AUDIO_PACKET: u16 = 0x0062;
+const AUDIO_LIFETIME_US: u64 = fr_core::audio::MAX_JITTER_CEILING_MS as u64 * 1000;
 
 struct Pending {
     route: DatagramRoute,
@@ -30,6 +35,9 @@ pub(super) struct PendingDatagrams {
     /// The arrival whose route already holds a record; reading stops behind it.
     next: Option<Pending>,
     cursor: usize,
+    audio: [Option<Pending>; AUDIO_OVERFLOW],
+    audio_len: usize,
+    dropped_audio: u64,
 }
 
 impl PendingDatagrams {
@@ -38,13 +46,16 @@ impl PendingDatagrams {
             slots: std::array::from_fn(|_| None),
             next: None,
             cursor: 0,
+            audio: std::array::from_fn(|_| None),
+            audio_len: 0,
+            dropped_audio: 0,
         }
     }
 
-    /// Retain one validated record. `true`: held in its route's slot. `false`:
-    /// its route already holds a record, so it is parked with its own deadline
-    /// and the caller must read no further native datagram (see `waiting`). It
-    /// never renews the original deadline or consumes another route's slot.
+    /// `true`: the owner may read another native record (this one was held,
+    /// buffered, or counted as audio overflow). `false`: a non-audio route's
+    /// later arrival is parked; no further native read until `waiting` clears.
+    /// Existing bytes/deadlines and other routes' slots are never displaced.
     pub(super) fn hold(
         &mut self,
         route: DatagramRoute,
@@ -52,12 +63,30 @@ impl PendingDatagrams {
         current: u64,
         lifetime: u64,
     ) -> Result<bool, Error> {
+        let lifetime = if route.kind == AUDIO_PACKET {
+            lifetime.min(AUDIO_LIFETIME_US)
+        } else {
+            lifetime
+        };
         let until = current.checked_add(lifetime).ok_or(Error::Clock)?;
         self.expire(current);
         if self.next.is_some() {
             return Err(Error::Backpressure);
         }
         if self.slots.iter().flatten().any(|p| p.route == route) {
+            if route.kind == AUDIO_PACKET {
+                if self.audio_len == AUDIO_OVERFLOW {
+                    self.dropped_audio = self.dropped_audio.saturating_add(1);
+                } else {
+                    self.audio[self.audio_len] = Some(Pending {
+                        route,
+                        bytes,
+                        until,
+                    });
+                    self.audio_len += 1;
+                }
+                return Ok(true);
+            }
             self.next = Some(Pending {
                 route,
                 bytes,
@@ -100,7 +129,8 @@ impl PendingDatagrams {
                 .map_err(|()| Error::Handler)?
                 == Disposition::Consumed
             {
-                self.slots[index] = None;
+                let route = pending.route;
+                self.slots[index] = self.take_audio_for(route);
                 return Ok(1);
             }
         }
@@ -123,15 +153,73 @@ impl PendingDatagrams {
     pub(super) fn expire(&mut self, current: u64) {
         for slot in self.slots.iter_mut().chain(std::iter::once(&mut self.next)) {
             if slot.as_ref().is_some_and(|p| current >= p.until) {
+                if slot.as_ref().is_some_and(|p| p.route.kind == AUDIO_PACKET) {
+                    self.dropped_audio = self.dropped_audio.saturating_add(1);
+                }
                 *slot = None;
             }
         }
+        let mut index = 0;
+        while index < self.audio_len {
+            if self.audio[index]
+                .as_ref()
+                .is_some_and(|p| current >= p.until)
+            {
+                self.remove_audio(index);
+                self.dropped_audio = self.dropped_audio.saturating_add(1);
+            } else {
+                index += 1;
+            }
+        }
+        // A head can expire before a later packet. Promote its oldest live
+        // successor without changing that successor's original deadline.
+        for index in 0..MAX_DATAGRAMS {
+            if self.slots[index].is_some() {
+                continue;
+            }
+            if let Some(queued) = self.audio[..self.audio_len].iter().position(|p| {
+                p.as_ref().is_some_and(|p| {
+                    !self
+                        .slots
+                        .iter()
+                        .flatten()
+                        .any(|head| head.route == p.route)
+                })
+            }) {
+                self.slots[index] = self.remove_audio(queued);
+            }
+        }
+    }
+
+    fn take_audio_for(&mut self, route: DatagramRoute) -> Option<Pending> {
+        let index = self.audio[..self.audio_len]
+            .iter()
+            .position(|p| p.as_ref().is_some_and(|p| p.route == route))?;
+        self.remove_audio(index)
+    }
+
+    fn remove_audio(&mut self, index: usize) -> Option<Pending> {
+        let packet = self.audio[index].take();
+        self.audio[index..self.audio_len].rotate_left(1);
+        self.audio_len -= 1;
+        packet
     }
 
     pub(super) fn retire(&mut self, binding: u32) {
         for slot in self.slots.iter_mut().chain(std::iter::once(&mut self.next)) {
             if slot.as_ref().is_some_and(|p| p.route.binding == binding) {
                 *slot = None;
+            }
+        }
+        let mut index = 0;
+        while index < self.audio_len {
+            if self.audio[index]
+                .as_ref()
+                .is_some_and(|p| p.route.binding == binding)
+            {
+                self.remove_audio(index);
+            } else {
+                index += 1;
             }
         }
     }
@@ -141,6 +229,10 @@ impl PendingDatagrams {
             *slot = None;
         }
         self.next = None;
+        for packet in &mut self.audio {
+            *packet = None;
+        }
+        self.audio_len = 0;
         self.cursor = 0;
     }
 
@@ -148,11 +240,24 @@ impl PendingDatagrams {
         self.slots
             .iter()
             .chain(std::iter::once(&self.next))
+            .chain(self.audio[..self.audio_len].iter())
             .flatten()
             .map(|p| p.bytes.len())
             .sum()
     }
 }
+
+impl super::QuicRecords {
+    /// Audio packets discarded by the bounded receive backlog or its original
+    /// local-custody deadline. Includes drops before closure; no payload data.
+    pub fn dropped_audio_datagrams(&self) -> u64 {
+        self.pending_datagrams.dropped_audio
+    }
+}
+
+#[cfg(test)]
+#[path = "datagrams/audio_tests.rs"]
+mod audio_tests;
 
 #[cfg(test)]
 mod tests {
