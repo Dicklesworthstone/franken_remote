@@ -7,7 +7,8 @@
 //! unrelated test fails (fr-rc-gates-cargo-test-6d8). A child process writes
 //! the file instead, so this process never opens it for writing; the mode is
 //! set by path afterwards. Included by the frd library's tests and by each
-//! integration-test binary that writes worker images.
+//! integration-test binary that writes worker images (frd's, and fr-native's
+//! `viewer_window_x11`).
 use std::{
     io::Write,
     os::unix::fs::PermissionsExt,

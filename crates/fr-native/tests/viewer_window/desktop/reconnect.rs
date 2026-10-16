@@ -7,7 +7,6 @@ use frd::native_connection::reconnect::{Application, CallbackError, Failure, Sta
 use std::{
     cell::RefCell,
     future::Future,
-    os::unix::fs::PermissionsExt,
     path::PathBuf,
     rc::Rc,
     task::{Context, Poll, Waker},
@@ -303,8 +302,7 @@ fn decoder_image(mode: &str) -> PathBuf {
         "healthy" => source,
         _ => panic!("unknown explicit decoder fixture"),
     };
-    std::fs::write(&path, source).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::executable::write(&path, source);
     path
 }
 

@@ -16,6 +16,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+#[path = "../../frd/tests/support/executable.rs"]
+mod executable;
 #[allow(dead_code)]
 #[path = "../../fr-transport/tests/support/mod.rs"]
 mod support;
