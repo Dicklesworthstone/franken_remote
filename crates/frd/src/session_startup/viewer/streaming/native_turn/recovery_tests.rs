@@ -79,7 +79,10 @@ impl Future for Turn {
     fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
         assert!(!self.completed.get(), "completed network turn polled again");
         if self.requires_fence.get() {
-            assert!(self.control.is_stopped(), "I/O polled before authority fence");
+            assert!(
+                self.control.is_stopped(),
+                "I/O polled before authority fence"
+            );
         }
         if !self.ready.get() {
             return Poll::Pending;

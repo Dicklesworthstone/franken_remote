@@ -129,11 +129,7 @@ fn exercise(native_failure: bool) {
                 assert!(event.is_none(), "native wait synthesized a frame event");
                 assert!(!stop.is_stopped(), "UI ran after failure fence");
                 callbacks += 1;
-                if native_failure {
-                    Ok(())
-                } else {
-                    Err(())
-                }
+                if native_failure { Ok(()) } else { Err(()) }
             },
             &mut |_, _| Ok(Disposition::Blocked),
         )
