@@ -2,7 +2,7 @@
 //! services are the parent harness's `LocalAPI`, CA and ingress fixtures. Input
 //! effects come from an independent X client, audio from independent `PulseAudio`
 //! monitor recordings, never from a protocol acknowledgement or a test counter.
-use super::super::real_control::{Harness, eventually, host_pointer, indicator};
+use super::super::real_control::{Harness, eventually, host_pointer, indicator, stall_capture};
 use super::*;
 
 /// Independent host observer and viewer input driver, reusing the control
@@ -215,6 +215,98 @@ fn controlled_playback_and_input_share_the_same_live_session() {
         total >= 50 && seen == 0,
         "audio survived client closure: {seen}/{total}"
     );
+}
+
+/// fr-30yk: every optional lane on ONE controlled session (clipboard both ways,
+/// a file into the drop directory, host playback audio) through three
+/// consecutive capture stalls. Each reference recovery takes three channel
+/// pairs, so this needs the 31-pair budget (59a5037); 7 pairs before audio
+/// once stood for the whole lifetime. After every recovery input lands again
+/// and a NEW host tone reaches the client. The clipboard is not asserted after
+/// a stall: it still ends for the grant on a view suspension (fr-kz3k).
+#[test]
+#[ignore = "explicit isolated namespace; real XTest, HEVC/Opus workers, clipboard child, file lane and private PulseAudio null sinks"]
+fn every_lane_with_audio_recovers_from_repeated_capture_stalls() {
+    let host = Pulse::start("fr_host");
+    let client = Pulse::start("fr_view");
+    let base = PathBuf::from(format!("/run/fr-lanes-{}", std::process::id()));
+    let (drop_dir, source) = (base.join("drop"), base.join("source"));
+    for dir in [&drop_dir, &source] {
+        fs::create_dir_all(dir).unwrap();
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let file = source.join("report.bin");
+    fs::write(&file, vec![0x5a; 65_536]).unwrap();
+    let directory =
+        frd::native_files::Directory::open(&drop_dir, frd::native_files::Limits::default())
+            .unwrap();
+    let send = [file];
+    let mut player = Player::start(&host, WARMUP_HZ);
+    let (report, observed, diagnostics) = share_lanes(
+        &host,
+        &client,
+        Some(enabled(&host)),
+        true,
+        Lanes {
+            clipboard: true,
+            files: Some(directory),
+            send: &send,
+            paint: true,
+        },
+        |recorder, controls, _, _| {
+            let controls = controls.ok_or("missing real input observers")?;
+            recorder
+                .await_tone(WARMUP_HZ, Duration::from_secs(20))
+                .ok_or("no host tone reached the controlling client")?;
+            let stalls = [
+                ((300, 250), MARKER_HZ),
+                ((320, 260), WARMUP_HZ),
+                ((280, 240), MARKER_HZ),
+            ];
+            for (n, (target, hz)) in stalls.into_iter().enumerate() {
+                stall_capture(400);
+                if !controls.pointer_follows(target, Duration::from_secs(20)) {
+                    return Err(format!("control did not resume after stall {}", n + 1));
+                }
+                recorder.drain();
+                player.tone(hz);
+                recorder
+                    .await_tone(hz, Duration::from_secs(5))
+                    .ok_or_else(|| {
+                        format!("playback did not follow the host after stall {}", n + 1)
+                    })?;
+            }
+            Ok(())
+        },
+    );
+    println!("fr after three stalls with every lane and audio: {report}");
+    assert_eq!(observed, Ok(()), "{diagnostics}");
+    assert_eq!(report["outcome"], "stopped", "{diagnostics}");
+    assert_eq!(report["attempts"], 1, "{diagnostics}");
+    assert_eq!(report["control_granted"], true, "{diagnostics}");
+    assert_eq!(report["audio_active"], true, "{diagnostics}");
+    assert_eq!(report["clipboard_requested"], true, "{diagnostics}");
+    assert_eq!(
+        report["clipboard_absence"],
+        serde_json::Value::Null,
+        "{diagnostics}"
+    );
+    assert_eq!(
+        report["files_sent"],
+        serde_json::json!([{"index": 0, "bytes": 65_536, "durable": true}]),
+        "{diagnostics}"
+    );
+    assert_eq!(
+        fs::read(drop_dir.join("report.bin")).unwrap(),
+        vec![0x5a; 65_536]
+    );
+    assert!(
+        report["last_attempt_media"]["recovered_streams"]
+            .as_u64()
+            .is_some_and(|n| n >= 3),
+        "all three late pictures must be recovered on the same lease: {diagnostics}"
+    );
+    assert_eq!(report["cleanup_confirmed"], true, "{diagnostics}");
 }
 
 #[test]

@@ -387,18 +387,20 @@ fn options(
     }
 }
 
-/// The shipped client, with an explicit role and `--audio`, playing into `pulse`.
+/// The shipped `fr` (this binary's sibling), with an explicit role and
+/// `--audio`, playing into `pulse`.
+/// `lanes` adds `--clipboard` and `--send` for a controller.
 fn connect_audio(
-    fr: &Path,
     api: &Path,
     roots: &Path,
     display: &str,
     worker: &Path,
     pulse: &Pulse,
     control: bool,
+    lanes: &Lanes<'_>,
 ) -> Child {
     let port = address().port().to_string();
-    Command::new(fr)
+    Command::new(sibling("fr"))
         .args([
             "connect",
             "n-host",
@@ -406,6 +408,13 @@ fn connect_audio(
             "--audio",
             "--experimental-native",
         ])
+        .args(lanes.clipboard.then_some("--clipboard"))
+        .args(
+            lanes
+                .send
+                .iter()
+                .flat_map(|path| [std::ffi::OsStr::new("--send"), path.as_os_str()]),
+        )
         .args(["--display", "only", "--attempts", "1", "--json"])
         .arg("--socket")
         .arg(api)
@@ -457,6 +466,16 @@ fn share(
     )
 }
 
+/// Optional lanes beside audio on one controlled session (fr-30yk).
+#[derive(Default)]
+struct Lanes<'a> {
+    clipboard: bool,
+    files: Option<frd::native_files::Directory>,
+    send: &'a [PathBuf],
+    /// Keep painting on the host so a capture stall is a late picture.
+    paint: bool,
+}
+
 /// The SAME real source, client, recorder and cleanup, with optional real input
 /// observers. Existing view-only scenarios keep their original wrapper above.
 fn share_session(
@@ -471,8 +490,32 @@ fn share_session(
         &StopHandle,
     ) -> Result<(), String>,
 ) -> (serde_json::Value, Result<(), String>, String) {
+    share_lanes(
+        host_pulse,
+        client_pulse,
+        audio,
+        control,
+        Lanes::default(),
+        observe,
+    )
+}
+
+/// `share_session` with the clipboard, file and painting `lanes` as well.
+fn share_lanes(
+    host_pulse: &Pulse,
+    client_pulse: &Pulse,
+    audio: Option<AudioOptions>,
+    control: bool,
+    lanes: Lanes<'_>,
+    observe: impl FnOnce(
+        &Recorder,
+        Option<&mut controlled::Controls>,
+        &mut Child,
+        &StopHandle,
+    ) -> Result<(), String>,
+) -> (serde_json::Value, Result<(), String>, String) {
     private_root_home();
-    let (fr, worker) = (sibling("fr"), sibling("fr-media-worker"));
+    let worker = sibling("fr-media-worker");
     let host = Xvfb::start("640x480x24");
     let viewer = Xvfb::start("800x600x24");
     set_root(&host.display, COLOUR);
@@ -487,6 +530,8 @@ fn share_session(
     if control {
         options.input_agent = Some(sibling("fr-input-agent"));
     }
+    options.clipboard = lanes.clipboard;
+    options.files = lanes.files;
     let events = Arc::new(Mutex::new(Vec::new()));
     let sink = events.clone();
     let report: Reporter = Arc::new(move |event| sink.lock().unwrap().push(event));
@@ -504,15 +549,20 @@ fn share_session(
     );
     let client_api = ClientApi::new();
     let mut client = connect_audio(
-        &fr,
         &client_api.path,
         &roots,
         &viewer.display,
         &worker,
         client_pulse,
         control,
+        &Lanes {
+            files: None,
+            ..lanes
+        },
     );
     let window = await_window(&viewer.display, &mut client);
+    let painter = (lanes.paint && window.is_some())
+        .then(|| super::real_control::Painter::start(&host.display));
     let observed = match window {
         Some(window) => {
             let ready = controls
@@ -531,6 +581,7 @@ fn share_session(
                 .status();
         }
     }
+    drop(painter);
     let output = wait_for(client, Duration::from_secs(30));
     stop.request();
     let result = daemon.join().unwrap();

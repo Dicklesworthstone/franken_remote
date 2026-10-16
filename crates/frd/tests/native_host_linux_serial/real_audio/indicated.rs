@@ -11,7 +11,7 @@ use frd::host_run::policy::Configuration;
 #[ignore = "explicit isolated namespace; synthetic ingress; two Xvfb and two private PulseAudio daemons; Xvfb device attribution fixture"]
 fn the_observation_indicator_shows_during_an_audio_share_and_its_stop_ends_it() {
     private_root_home();
-    let (fr, worker) = (sibling("fr"), sibling("fr-media-worker"));
+    let worker = sibling("fr-media-worker");
     let host_pulse = Pulse::start("fr_host");
     let client_pulse = Pulse::start("fr_view");
     let _player = Player::start(&host_pulse, WARMUP_HZ);
@@ -47,13 +47,13 @@ fn the_observation_indicator_shows_during_an_audio_share_and_its_stop_ends_it() 
     let (shown, ..) = indicator(&host.display).expect("no Stop sharing indicator while listening");
     let client_api = ClientApi::new();
     let mut client = connect_audio(
-        &fr,
         &client_api.path,
         &roots,
         &viewer.display,
         &worker,
         &client_pulse,
         false,
+        &Lanes::default(),
     );
     let window = await_window(&viewer.display, &mut client);
     let heard = recorder.await_tone(WARMUP_HZ, Duration::from_secs(20));
