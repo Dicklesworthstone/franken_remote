@@ -76,8 +76,7 @@ pub(super) fn setup(rt: &Runtime, mode: &str) -> (Setup, ObservationControl, Ret
     if mode == "stall-capture" {
         script = script.replace("    reply(h, 258", &format!("    with open({:?}, 'a') as log: log.write('capture\\n')\n    import time\n    time.sleep(10)\n    reply(h, 258", trace.to_str().unwrap()));
     }
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::executable::write(&path, script);
     let control = source_control(rt);
     let (launch, retirement) = Launch::new(&path, ":0", None, WorkerRole::Capture, 91)
         .unwrap()

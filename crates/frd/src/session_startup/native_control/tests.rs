@@ -25,7 +25,6 @@ use fr_wire::negotiation::{Capability as WireCapability, Offer};
 use std::{
     cell::Cell,
     future::Future,
-    os::unix::fs::PermissionsExt,
     path::PathBuf,
     pin::Pin,
     sync::{
@@ -64,8 +63,7 @@ fn image() -> PathBuf {
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&p, include_str!("worker_fixture.py")).unwrap();
-    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::executable::write(&p, include_str!("worker_fixture.py"));
     p
 }
 fn launch(role: WorkerRole) -> Launch {

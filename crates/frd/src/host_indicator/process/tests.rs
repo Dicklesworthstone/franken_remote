@@ -124,7 +124,6 @@ fn failure_cause_is_available_without_a_lock_before_waking_the_host() {
 fn real_child_faults_gate_startup_stop_the_original_host_and_drain_before_return() {
     use crate::host_run::StopHandle;
     use fr_core::input_submission::process::{Signal, encode_signal};
-    use std::os::unix::fs::PermissionsExt;
     const FIXTURE: &str = r"#!/usr/bin/python3
 import socket, time
 mode = '@MODE@'
@@ -191,15 +190,13 @@ while True:
             "fr-indicator-fixture-{}-{mode}.py",
             std::process::id()
         ));
-        std::fs::write(
+        crate::executable::write(
             &path,
             FIXTURE
                 .replace("@MODE@", mode)
                 .replace("@SIGNAL@", &signal)
                 .replace("@FAILED@", &failed),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let launch = ProcessLaunch::new(&path, ":0", None, 29).unwrap();
         let mut owner = Owner::start(launch, move || on_stop.request()).unwrap();
         let called = AtomicBool::new(false);

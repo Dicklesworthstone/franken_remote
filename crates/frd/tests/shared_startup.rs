@@ -1,6 +1,8 @@
 //! Two independently authorized TLS/UDP peers start from one native-source IDR.
 //! Child encoder/decoder replies are synthetic; HEVC parameter validation is real.
 #![cfg(target_os = "linux")]
+#[path = "support/executable.rs"]
+mod executable;
 #[path = "shared_startup/support.rs"]
 mod support;
 use asupersync::{cx::Cx, time::sleep};

@@ -1,6 +1,8 @@
 //! Actual supervised child and pipe protocol; the child does not execute HEVC.
 #![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
+#[path = "support/executable.rs"]
+mod executable;
 use asupersync::{cx::Cx, runtime::RuntimeBuilder};
 use fr_core::ids::CodecConfigurationGeneration;
 use fr_media::{
@@ -8,7 +10,7 @@ use fr_media::{
     worker::{Backend, Configuration, Kind, Role, presentation::X11Target},
 };
 use frd::worker::{Deadline, Error, Launch, State, Worker};
-use std::{os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
+use std::{path::PathBuf, time::Duration};
 fn configuration() -> Configuration {
     Configuration {
         width: 320,
@@ -46,12 +48,10 @@ fn fixture(mode: &str) -> PathBuf {
         std::process::id(),
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    std::fs::write(
+    crate::executable::write(
         &path,
         include_str!("support/fitted_worker_fixture.py").replace("@MODE@", mode),
-    )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
     path
 }
 fn deadline(cx: &Cx, millis: u64) -> Deadline {

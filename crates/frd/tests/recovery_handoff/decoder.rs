@@ -93,15 +93,13 @@ async fn initial(
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(
+    crate::executable::write(
         &path,
         include_str!("../../src/media/presentation/decoder_fixture.py").replace(
             "time.sleep(@DECODE_SECONDS@)",
             "time.sleep(.5 if int.from_bytes(b[:8], 'big') == 9 else .01)",
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let mut startup = Viewer::start(
         cx.clone(),
         &link.c,

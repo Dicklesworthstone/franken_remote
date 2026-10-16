@@ -10,7 +10,6 @@ use asupersync::{
 };
 use fr_core::{clipboard::Endpoint, time::HostDuration};
 use std::{
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -24,24 +23,11 @@ pub(crate) fn fixture(mode: &str) -> (PathBuf, PathBuf) {
         std::process::id()
     ));
     let image = base.with_extension("py");
-    let source = base.with_extension("src");
     let log = base.with_extension("log");
     let script = include_str!("clipboard_fixture.py")
         .replace("@MODE@", mode)
         .replace("@LOG@", log.to_str().unwrap());
-    std::fs::write(&source, script).unwrap();
-    // A separate process writes the executable: this multi-threaded test
-    // process never holds a writable descriptor to it, so a concurrent fork
-    // in another test cannot make its exec fail with ETXTBSY.
-    assert!(
-        std::process::Command::new("cp")
-            .arg(&source)
-            .arg(&image)
-            .status()
-            .unwrap()
-            .success()
-    );
-    std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::executable::write(&image, script);
     (image, log)
 }
 pub(crate) fn transcript(log: &Path) -> Vec<String> {

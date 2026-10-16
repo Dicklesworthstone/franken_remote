@@ -454,10 +454,7 @@ fn actual_hevc_streams_after_network_startup_and_stays_idle_between_updates() {
 // still owns HEVC decoding and X11 submission. All children share the supervised
 // worker process group; cancellation must kill and reap the proxy too.
 fn decoder_proxy(image: &Path, delay: u64) -> std::path::PathBuf {
-    use std::{
-        os::unix::fs::PermissionsExt,
-        sync::atomic::{AtomicU64, Ordering},
-    };
+    use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let file = std::env::temp_dir().join(format!(
         "fr-decoder-proxy-{}-{}.py",
@@ -467,8 +464,7 @@ fn decoder_proxy(image: &Path, delay: u64) -> std::path::PathBuf {
     let script = include_str!("decoder_proxy.py")
         .replace("@IMAGE@", &format!("{:?}", image.to_str().unwrap()))
         .replace("@DELAY@", &delay.to_string());
-    std::fs::write(&file, script).unwrap();
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::executable::write(&file, script);
     file
 }
 fn worker_image() -> std::path::PathBuf {

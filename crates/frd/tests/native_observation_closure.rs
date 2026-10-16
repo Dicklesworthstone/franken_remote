@@ -3,6 +3,8 @@
 //! Metadata, approval, interface and firewall evidence are explicit fixtures.
 //! Execute only through `scripts/test_linux_serial_lifecycle.sh` in its fresh
 //! mount/user/network namespace; these tests do not qualify installed Tailscale.
+#[path = "support/executable.rs"]
+mod executable;
 #[allow(dead_code)]
 #[path = "native_host_accept/fixture.rs"]
 mod fixture;
@@ -56,8 +58,7 @@ impl Tools {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         for name in ["ip", "nft"] {
             let path = dir.join(name);
-            fs::write(&path, include_str!("native_host_linux_serial/tools.py")).unwrap();
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+            crate::executable::write(&path, include_str!("native_host_linux_serial/tools.py"));
         }
         Self(dir)
     }

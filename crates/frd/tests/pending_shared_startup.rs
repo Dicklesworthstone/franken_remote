@@ -1,6 +1,8 @@
 //! Bounded publisher-owned decoder startup on real TLS/UDP and child IPC.
 //! The native codec responses are synthetic, not HEVC/hardware qualification.
 #![cfg(target_os = "linux")]
+#[path = "support/executable.rs"]
+mod executable;
 #[path = "shared_startup/support.rs"]
 mod support;
 use asupersync::cx::Cx;

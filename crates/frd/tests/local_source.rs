@@ -1,6 +1,8 @@
 //! Independent selected-display ownership through actual supervised child IPC.
 //! The child is an explicit protocol fixture, not native capture or HEVC proof.
 #![cfg(target_os = "linux")]
+#[path = "support/executable.rs"]
+mod executable;
 use asupersync::{
     cx::Cx,
     runtime::{Runtime, RuntimeBuilder},
@@ -17,7 +19,6 @@ use frd::{
     worker::{Deadline, Launch, Retirement},
 };
 use std::{
-    os::unix::fs::PermissionsExt,
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
@@ -68,12 +69,10 @@ async fn discover(c: &ObservationControl, mode: &str) -> (DiscoveredSource, Reti
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(
+    crate::executable::write(
         &file,
         include_str!("support/local_source_fixture.py").replace("@MODE@", mode),
-    )
-    .unwrap();
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let (launch, retirement) = Launch::new(&file, ":0", None, Role::Capture, 71)
         .unwrap()
         .retain_cleanup()

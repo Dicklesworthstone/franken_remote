@@ -185,14 +185,12 @@ pub(super) fn fixture_launch(role: WorkerRole, mode: &str) -> Launch {
         use std::fmt::Write;
         write!(&mut hex, "{byte:02x}").unwrap();
     }
-    std::fs::write(
+    crate::executable::write(
         &path,
         include_str!("handoff_worker_fixture.py")
             .replace("@CATALOG@", &hex)
             .replace("@MODE@", mode),
-    )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
     Launch::new(&path, ":0", None, role, id as u128).unwrap()
 }
 async fn prepare(

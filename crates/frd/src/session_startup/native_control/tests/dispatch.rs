@@ -328,26 +328,14 @@ fn a_controlling_first_viewer_gets_the_exclusive_share_and_its_input_reaches_the
 /// clipboard PROTOCOL fixture, anything else the input one.
 fn agent_with_clipboard(input: &std::path::Path, clipboard: &std::path::Path) -> PathBuf {
     let image = input.with_extension("both.py");
-    let source = input.with_extension("both.src");
-    std::fs::write(
-        &source,
+    crate::executable::write(
+        &image,
         format!(
             "#!/usr/bin/python3\nimport os, sys\nimage = '{}' if sys.argv[1:2] == ['--clipboard'] else '{}'\nos.execv(image, [image] + sys.argv[1:])\n",
             clipboard.display(),
             input.display()
         ),
-    )
-    .unwrap();
-    // Written by another process: no writable descriptor here (ETXTBSY).
-    assert!(
-        std::process::Command::new("cp")
-            .arg(&source)
-            .arg(&image)
-            .status()
-            .unwrap()
-            .success()
     );
-    std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o700)).unwrap();
     image
 }
 

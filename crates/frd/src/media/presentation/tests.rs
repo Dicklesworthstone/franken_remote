@@ -12,7 +12,6 @@ use fr_wire::{
     encode_recovery,
 };
 use std::{
-    os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -35,8 +34,7 @@ pub(crate) async fn presenter(cx: &Cx, receiver: &mut ReceivePipeline, mode: &st
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&file, include_str!("fixture.py").replace("@MODE@", mode)).unwrap();
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::executable::write(&file, include_str!("fixture.py").replace("@MODE@", mode));
     let configuration = configuration();
     // Fixture setup, not the deadline under test: a Python worker start took
     // over 1 s with the whole library suite running in parallel on a loaded

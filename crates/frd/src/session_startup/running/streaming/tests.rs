@@ -24,7 +24,6 @@ pub(super) use fr_wire::{
     negotiation::Capability,
 };
 use std::{
-    os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{
         Arc,
@@ -50,12 +49,10 @@ pub(super) fn fixture_path(mode: &str) -> PathBuf {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(
+    crate::executable::write(
         &path,
         include_str!("capture_fixture.py").replace("@MODE@", mode),
-    )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
     path
 }
 #[allow(clippy::unnecessary_wraps)]

@@ -92,3 +92,8 @@ pub mod ingress_helper;
 // Private launcher shared by read-only and one-use consent UI children.
 #[cfg(target_os = "linux")]
 mod session_ui_process;
+
+// Executable test fixture images, shared with the integration tests.
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../tests/support/executable.rs"]
+mod executable;

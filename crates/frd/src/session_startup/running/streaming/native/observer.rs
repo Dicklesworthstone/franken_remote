@@ -11,7 +11,6 @@ use fr_wire::{
     negotiation::{ControlBinding, Offer, Role as Intent},
 };
 use std::{
-    os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{
         Arc,
@@ -263,8 +262,7 @@ fn configure_proxy(image: &Path) -> PathBuf {
             "if kind in (4, 6):",
             "if kind == 8: time.sleep(1.2)\n        if kind in (4, 6):",
         );
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::executable::write(&path, script);
     path
 }
 fn exercise(delayed: bool) {

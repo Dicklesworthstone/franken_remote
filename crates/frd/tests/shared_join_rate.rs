@@ -1,5 +1,7 @@
 //! Actual source IPC and the original encoder admission clock; synthetic media.
 #![cfg(target_os = "linux")]
+#[path = "support/executable.rs"]
+mod executable;
 #[path = "shared_startup/support.rs"]
 #[allow(dead_code)]
 mod support;

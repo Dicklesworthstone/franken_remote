@@ -4,6 +4,8 @@
 //! Privileged interface/firewall evidence and `LocalAPI` metadata are SYNTHETIC.
 //! Run via `scripts/test_linux_serial_lifecycle.sh` in its fresh mount/net namespace.
 //! These tests do NOT establish kernel ingress or installed-tailnet qualification.
+#[path = "support/executable.rs"]
+mod executable;
 #[allow(dead_code)]
 #[path = "native_host_accept/fixture.rs"]
 mod fixture;
@@ -57,8 +59,7 @@ impl Tools {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         for name in ["nft", "ip"] {
             let file = dir.join(name);
-            fs::write(&file, include_str!("native_host_linux_serial/tools.py")).unwrap();
-            fs::set_permissions(file, fs::Permissions::from_mode(0o700)).unwrap();
+            crate::executable::write(&file, include_str!("native_host_linux_serial/tools.py"));
         }
         Self(dir)
     }

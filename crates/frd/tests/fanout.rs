@@ -1,6 +1,8 @@
 //! Real independent TLS/UDP connections, packetizers and supervised child IPC.
 //! Canned HEVC configuration and synthetic decode replies are NOT codec evidence.
 #![cfg(target_os = "linux")]
+#[path = "support/executable.rs"]
+mod executable;
 #[path = "../../fr-transport/tests/support/mod.rs"]
 #[allow(dead_code)]
 mod net;

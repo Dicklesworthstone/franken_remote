@@ -128,18 +128,13 @@ pub(super) fn source_script(mode: &str) -> (PathBuf, PathBuf) {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     let trace = path.with_extension("trace");
-    fs::write(
-        &path,
-        include_str!("../support/local_source_fixture.py")
+    crate::executable::write(&path, include_str!("../support/local_source_fixture.py")
             .replace("@MODE@", mode)
             .replace("configured = False", &format!("with open({:?}, 'w') as trace: trace.write(str(os.getpid()))\nconfigured = False", trace.to_str().unwrap()))
             .replace(
                 "b\"synthetic-monitor-unit\"",
                 &format!("bytes.fromhex('{payload}')"),
-            ),
-    )
-    .unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            ));
     (path, trace)
 }
 fn setup(cx: Cx, mode: &str) -> (Setup, ObservationControl, Retirement, PathBuf) {

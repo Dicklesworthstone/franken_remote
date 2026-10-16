@@ -15,7 +15,6 @@ use fr_wire::{
 };
 use std::{
     future::{Future, poll_fn},
-    os::unix::fs::PermissionsExt,
     task::Poll,
     time::Duration,
 };
@@ -67,8 +66,7 @@ async fn source(control: &super::super::ObservationControl) -> CaptureSource {
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     let script=include_str!("../../../tests/support/recovery_worker_fixture.py").replace("@MODE@","healthy").replace("    if kind == 7 and not force", "    if kind == 7 and not force and last is not None:\n        time.sleep(0.1)\n    if kind == 7 and not force");
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::executable::write(&path, script);
     CaptureSource::start(
         control,
         Launch::new(&path, ":0", None, Role::Capture, 77).unwrap(),

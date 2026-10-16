@@ -37,8 +37,7 @@ async fn selected_publisher(rt: &Runtime) -> (Publisher, ObservationControl, Sha
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::executable::write(&path, script);
     let owner = source_control(rt);
     let discovery = DiscoveredSource::start(
         &owner,

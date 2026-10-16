@@ -1,6 +1,8 @@
 //! Production authority, capture owner, IPC and packetization with a test-only
 //! child process. This does not qualify HEVC, platform capture or transport.
 #![cfg(target_os = "linux")]
+#[path = "support/executable.rs"]
+mod executable;
 use asupersync::{cx::Cx, runtime::RuntimeBuilder, time::sleep};
 use fr_core::{
     authority::{AuthorityPolicy, SessionAuthority},
@@ -25,7 +27,7 @@ use frd::{
     media::{CaptureSource, Error, ObservationControl, Subscription, host_now},
     worker::{Deadline, Launch, State},
 };
-use std::{os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
+use std::{path::PathBuf, time::Duration};
 
 fn runtime() -> asupersync::runtime::Runtime {
     RuntimeBuilder::new()
@@ -95,12 +97,10 @@ fn fixture(mode: &str) -> PathBuf {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(
+    crate::executable::write(
         &path,
         include_str!("support/recovery_worker_fixture.py").replace("@MODE@", mode),
-    )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
     path
 }
 async fn source(control: &ObservationControl, mode: &str) -> CaptureSource {

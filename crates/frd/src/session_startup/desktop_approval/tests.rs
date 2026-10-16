@@ -151,7 +151,6 @@ fn exact_role_sequence_and_epoch_are_required_before_interpreting_consent() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn real_protocol_children_cannot_bypass_readiness_correlation_or_retirement() {
-    use std::os::unix::fs::PermissionsExt;
     const CHILD: &str = r"#!/usr/bin/python3
 import socket, time
 mode = '@MODE@'
@@ -204,14 +203,12 @@ while True:
                 "fr-approval-fixture-{}-{role:?}-{mode}.py",
                 std::process::id()
             ));
-            std::fs::write(
+            crate::executable::write(
                 &path,
                 CHILD
                     .replace("@MODE@", mode)
                     .replace("@ROLE@", if role == Role::Observe { "4" } else { "5" }),
-            )
-            .unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            );
             let launch = ProcessLaunch::new(&path, ":0", None, 29).unwrap();
             let mut prompt = Prompt::start(approval, launch).unwrap();
             let until = Instant::now() + Duration::from_secs(5);

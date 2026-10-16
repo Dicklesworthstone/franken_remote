@@ -24,10 +24,7 @@ impl Presenter {
     ) -> Self {
         use fr_core::{ids::CodecConfigurationGeneration, limits::ProtocolLimits};
         use fr_media::{config::*, hevc::HevcGuard, worker::*};
-        use std::{
-            os::unix::fs::PermissionsExt,
-            sync::atomic::{AtomicU64, Ordering},
-        };
+        use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let cfg = CodecConfiguration::new_baseline(
             CodecConfigurationGeneration::INITIAL,
@@ -55,12 +52,10 @@ impl Presenter {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::write(
+        crate::executable::write(
             &image,
             include_str!("decoder_fixture.py").replace("@DECODE_SECONDS@", decode_seconds),
-        )
-        .unwrap();
-        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let configuration = Configuration {
             width: 320,
             height: 240,

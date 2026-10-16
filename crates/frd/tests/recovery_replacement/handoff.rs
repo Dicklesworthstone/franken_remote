@@ -11,10 +11,7 @@ use frd::{
     worker::{Deadline, Launch},
 };
 use std::fmt::Write;
-use std::{
-    os::unix::fs::PermissionsExt,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 async fn source(cx: &Cx, control: &ObservationControl) -> CaptureSource {
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -47,8 +44,7 @@ async fn source(cx: &Cx, control: &ObservationControl) -> CaptureSource {
             "b\"test-only-unit\"",
             &format!("bytes.fromhex('{payload}')"),
         );
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::executable::write(&path, script);
     assert!(net::clock(cx) > 0);
     CaptureSource::start(
         control,

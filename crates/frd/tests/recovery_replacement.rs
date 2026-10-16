@@ -1,6 +1,8 @@
 #![cfg(target_os = "linux")]
 //! Real TLS/UDP and completed media attachments. Decode completion is simulated;
 //! these tests do not qualify HEVC, native presentation or live-tailnet admission.
+#[path = "support/executable.rs"]
+mod executable;
 #[path = "../../fr-transport/tests/support/mod.rs"]
 #[allow(dead_code)]
 mod net;

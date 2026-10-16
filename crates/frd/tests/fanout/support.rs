@@ -202,10 +202,7 @@ use frd::{
     media_quic::fanout::ReadySender,
     worker::{Deadline, Launch},
 };
-use std::{
-    os::unix::fs::PermissionsExt,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(super) fn gate(rt: &Runtime, session: u128) -> (ObservationControl, InputSession) {
     let cx = rt.request_cx_with_budget(Budget::INFINITE);
@@ -261,8 +258,7 @@ fn fixture(text: &str) -> std::path::PathBuf {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&path, text).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::executable::write(&path, text);
     path
 }
 pub(super) async fn source(control: &ObservationControl) -> CaptureSource {

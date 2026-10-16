@@ -21,7 +21,6 @@ use fr_core::{
 };
 use fr_wire::input::{InputDelivery, InputDirection, MAX_INPUT_RECORD_BYTES, encode_input};
 use std::{
-    os::unix::fs::PermissionsExt,
     sync::{
         atomic::{AtomicU64, Ordering},
         mpsc,
@@ -42,8 +41,7 @@ pub(crate) fn fixture(mode: &str) -> (PathBuf, PathBuf) {
     let script = include_str!("agent_fixture.py")
         .replace("@MODE@", mode)
         .replace("@LOG@", log.to_str().unwrap());
-    std::fs::write(&image, script).unwrap();
-    std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::executable::write(&image, script);
     (image, log)
 }
 pub(crate) fn transcript(log: &Path) -> Vec<String> {

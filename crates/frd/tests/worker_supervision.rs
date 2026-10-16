@@ -1,4 +1,6 @@
 #![cfg(target_os = "linux")]
+#[path = "support/executable.rs"]
+mod executable;
 use asupersync::{
     cx::Cx,
     runtime::{Runtime, RuntimeBuilder},
@@ -41,12 +43,10 @@ fn fixture(mode: &str) -> PathBuf {
         "fr-worker-fixture-{}-{n}-{mode}.py",
         std::process::id()
     ));
-    std::fs::write(
+    crate::executable::write(
         &path,
         include_str!("support/worker_fixture.py").replace("@MODE@", mode),
-    )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
     path
 }
 fn deadline(cx: &Cx, ms: u64) -> Deadline {
@@ -228,12 +228,10 @@ fn spawn_failures_are_sanitized_and_writable_image_recovers_after_reap() {
     run_worker!(cx, {
         let holder_image = fixture("hold-writer");
         let target = PathBuf::from(format!("{}.target", holder_image.display()));
-        std::fs::write(
+        crate::executable::write(
             &target,
             include_str!("support/worker_fixture.py").replace("@MODE@", "healthy"),
-        )
-        .unwrap();
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+        );
         let mut holder = Worker::start(
             &cx,
             Launch::new(&holder_image, ":0", None, Role::Capture, 77).unwrap(),

@@ -30,7 +30,6 @@ use fr_wire::{
 };
 use std::{
     fmt::Write,
-    os::unix::fs::PermissionsExt,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -86,8 +85,7 @@ async fn source(control: &ObservationControl, changing: bool) -> CaptureSource {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::executable::write(&path, script);
     CaptureSource::start(
         control,
         Launch::new(&path, ":0", None, WorkerRole::Capture, 45).unwrap(),

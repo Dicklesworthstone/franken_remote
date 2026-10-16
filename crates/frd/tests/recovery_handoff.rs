@@ -1,6 +1,8 @@
 #![cfg(target_os = "linux")]
 //! Real TLS/UDP and completed media attachments. Decode completion is simulated;
 //! these tests do not qualify HEVC, native presentation or live-tailnet admission.
+#[path = "support/executable.rs"]
+mod executable;
 #[path = "../../fr-transport/tests/support/mod.rs"]
 #[allow(dead_code)]
 mod net;
@@ -248,10 +250,7 @@ use frd::{
     media_quic::{Error, QuicEgress},
     worker::{Deadline, Launch},
 };
-use std::{
-    os::unix::fs::PermissionsExt,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 async fn source(control: &ObservationControl) -> CaptureSource {
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -260,12 +259,10 @@ async fn source(control: &ObservationControl) -> CaptureSource {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(
+    crate::executable::write(
         &path,
         include_str!("support/recovery_worker_fixture.py").replace("@MODE@", "healthy"),
-    )
-    .unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
     CaptureSource::start(
         control,
         Launch::new(&path, ":0", None, WorkerRole::Capture, 1).unwrap(),

@@ -223,8 +223,7 @@ fn frd_run_stops_on_consecutive_source_failures_with_a_typed_error() {
     let api = fixture::Api::new();
     let tools = Tools::new();
     let worker = fixture::pki().join("exiting-capture-worker.sh");
-    fs::write(&worker, "#!/bin/sh\nexit 3\n").unwrap();
-    fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
+    crate::executable::write(&worker, "#!/bin/sh\nexit 3\n");
     let options = Options {
         once: false,
         ..options(&api, &tools, worker)

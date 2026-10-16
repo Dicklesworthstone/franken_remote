@@ -31,12 +31,10 @@ async fn delayed(c: &ObservationControl, mode: &str) -> CaptureSource {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(
+    crate::executable::write(
         &file,
         include_str!("../support/shared_production_fixture.py").replace("@MODE@", mode),
-    )
-    .unwrap();
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
     CaptureSource::start(
         c,
         Launch::new(&file, ":0", None, Role::Capture, 77).unwrap(),

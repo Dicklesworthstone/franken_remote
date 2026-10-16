@@ -916,27 +916,13 @@ mod tests {
 
     /// A stand-in worker image speaking only the probe's one-line reply.
     fn probe_image(script: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
             "fr-probe-{}-{}.sh",
             std::process::id(),
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        let source = path.with_extension("src");
-        std::fs::write(&source, format!("#!/bin/sh\n{script}\n")).unwrap();
-        // A separate process writes the executable: this multi-threaded test
-        // process never holds a writable descriptor to it, so a concurrent fork
-        // in another test cannot make its exec fail with ETXTBSY.
-        assert!(
-            std::process::Command::new("cp")
-                .arg(&source)
-                .arg(&path)
-                .status()
-                .unwrap()
-                .success()
-        );
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::executable::write(&path, format!("#!/bin/sh\n{script}\n"));
         path
     }
     fn probe(script: &str, backend: &str, limit: Duration) -> Result<EncoderProbe, Error> {

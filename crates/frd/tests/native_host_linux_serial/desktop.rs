@@ -116,8 +116,7 @@ fn setup(handle: &RuntimeHandle) -> (Setup, ObservationControl, Retirement) {
             "b\"synthetic-monitor-unit\"",
             &format!("bytes.fromhex('{payload}')"),
         );
-    fs::write(&path, script).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    crate::executable::write(&path, script);
     let cx = handle.try_request_cx_with_budget(Budget::INFINITE).unwrap();
     let mut authority = SessionAuthority::new(
         RemoteSessionId::from_raw(100),

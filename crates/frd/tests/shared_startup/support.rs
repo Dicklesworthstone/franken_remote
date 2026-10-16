@@ -219,7 +219,6 @@ use frd::{
 };
 use std::{
     fmt::Write,
-    os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -264,8 +263,7 @@ fn fixture(script: &str, prefix: &str) -> PathBuf {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    crate::executable::write(&path, script);
     path
 }
 pub(super) async fn source(control: &ObservationControl, valid: bool) -> CaptureSource {

@@ -22,8 +22,7 @@ use std::cell::Cell;
 
 fn executable(name: &str, body: &str) -> PathBuf {
     let path = fixture::pki().join(name);
-    fs::write(&path, body).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    crate::executable::write(&path, body);
     path
 }
 fn input_fixture() -> (PathBuf, PathBuf) {

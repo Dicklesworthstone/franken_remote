@@ -1,6 +1,8 @@
 //! Real supervised child IPC and production source/authority/egress owners.
 //! Opaque encoded payloads and simulated receiver completions do NOT qualify HEVC.
 #![cfg(target_os = "linux")]
+#[path = "support/executable.rs"]
+mod executable;
 use asupersync::{
     cx::Cx,
     runtime::{Runtime, RuntimeBuilder},
@@ -33,7 +35,7 @@ use frd::{
     media_egress::{Admission, Egress, Lane, Progress},
     worker::{Deadline, Launch},
 };
-use std::{os::unix::fs::PermissionsExt, time::Duration};
+use std::time::Duration;
 
 fn runtime() -> Runtime {
     RuntimeBuilder::new()
@@ -131,13 +133,11 @@ async fn source(c: &ObservationControl, changing: bool) -> CaptureSource {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(
+    crate::executable::write(
         &file,
         include_str!("support/shared_capture_fixture.py")
             .replace("@CHANGING@", if changing { "True" } else { "False" }),
-    )
-    .unwrap();
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
     CaptureSource::start(
         c,
         Launch::new(&file, ":0", None, Role::Capture, 77).unwrap(),

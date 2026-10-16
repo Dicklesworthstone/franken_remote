@@ -1,6 +1,8 @@
 //! Actual TLS/UDP attachments, source IPC, packetization and reassembly. Decoder
 //! completions below are explicit fixtures, NOT HEVC/GPU/visibility qualification.
 #![cfg(target_os = "linux")]
+#[path = "support/executable.rs"]
+mod executable;
 #[path = "shared_startup/support.rs"]
 #[allow(dead_code)]
 mod support;

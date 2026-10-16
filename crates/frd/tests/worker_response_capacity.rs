@@ -1,5 +1,7 @@
 //! Real supervised pipes; opaque test payloads do not qualify a native codec.
 #![cfg(target_os = "linux")]
+#[path = "support/executable.rs"]
+mod executable;
 use asupersync::{cx::Cx, runtime::RuntimeBuilder};
 use fr_core::{ids::CodecConfigurationGeneration, limits::ProtocolLimits};
 use fr_media::{
@@ -7,7 +9,7 @@ use fr_media::{
     worker::{self, Backend, Configuration, Kind, Role},
 };
 use frd::worker::{Deadline, Error, Launch, State, Worker};
-use std::{os::unix::fs::PermissionsExt, time::Duration};
+use std::time::Duration;
 
 fn run(test: impl AsyncFnOnce(Cx)) {
     RuntimeBuilder::new()
@@ -28,13 +30,11 @@ async fn worker(cx: &Cx, header_only: bool) -> Worker {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(
+    crate::executable::write(
         &file,
         include_str!("support/response_capacity_fixture.py")
             .replace("@HEADER_ONLY@", if header_only { "True" } else { "False" }),
-    )
-    .unwrap();
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+    );
     Worker::start(
         cx,
         Launch::new(&file, ":0", None, Role::Capture, 77).unwrap(),
