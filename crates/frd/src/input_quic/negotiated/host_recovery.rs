@@ -20,7 +20,7 @@ impl NegotiatedInput {
         Ok(())
     }
     /// Only broker liveness may use these routes during the configuration gap.
-    /// Ordinary grant admission still calls broker_routes and therefore refuses.
+    /// Ordinary grant admission still calls `broker_routes` and therefore refuses.
     pub(in crate::input_quic) fn recovering_host_routes(
         &self,
         q: &QuicRecords,
