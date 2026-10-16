@@ -321,7 +321,7 @@ pub(super) fn endpoint_config() -> QuicUdpEndpointConfig {
 pub(super) fn connection_config() -> NativeQuicConnectionConfig {
     NativeQuicConnectionConfig {
         max_local_bidi: 0,
-        max_local_uni: 8,
+        max_local_uni: 32,
         send_window: 65_536,
         recv_window: 65_536,
         connection_send_limit: 524_288,
@@ -342,7 +342,9 @@ pub(super) fn transport_parameters() -> Result<Vec<u8>, Error> {
         initial_max_stream_data_bidi_remote: Some(cfg.recv_window),
         initial_max_stream_data_uni: Some(cfg.recv_window),
         initial_max_streams_bidi: Some(0),
-        initial_max_streams_uni: Some(8),
+        // fr-transport's MAX_STREAMS is twice this: lifetime unidirectional
+        // credit, sized for repeated reference recoveries (each takes 3 pairs).
+        initial_max_streams_uni: Some(32),
         max_datagram_frame_size: Some(1200),
         // The endpoint receives at most this many bytes per datagram
         // (`endpoint_config`); a peer must not send larger ones.

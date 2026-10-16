@@ -124,7 +124,8 @@ pub fn transport_parameters() -> Vec<u8> {
         initial_max_stream_data_bidi_remote: Some(65_536),
         initial_max_stream_data_uni: Some(65_536),
         initial_max_streams_bidi: Some(0),
-        initial_max_streams_uni: Some(8),
+        // Half of MAX_STREAMS (quic.rs): lifetime unidirectional stream credit.
+        initial_max_streams_uni: Some(32),
         max_datagram_frame_size: Some(1200),
         disable_active_migration: true,
         ..Default::default()
@@ -136,7 +137,7 @@ pub fn transport_parameters() -> Vec<u8> {
 fn native_configuration() -> NativeQuicConnectionConfig {
     NativeQuicConnectionConfig {
         max_local_bidi: 0,
-        max_local_uni: 8,
+        max_local_uni: 32,
         send_window: 65_536,
         recv_window: 65_536,
         connection_send_limit: 524_288,

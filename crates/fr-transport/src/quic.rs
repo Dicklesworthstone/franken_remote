@@ -45,7 +45,15 @@ mod peer_close;
 pub use peer_close::PeerClose;
 
 pub const ALPN: &[u8] = b"fr-remote/0";
-const MAX_STREAMS: usize = 16;
+/// Unidirectional streams per connection over its WHOLE lifetime: QUIC stream
+/// ids are never reused and retired channel pairs stay as tombstones. Two are
+/// the control pair; every other pair is one attachment, and a reference
+/// recovery replaces three. 16 (7 pairs) left a controlled session with
+/// clipboard and files no recovery at all, and an input-only one exactly one.
+/// 64 gives 31 pairs: a full controlled session (7) plus eight recoveries.
+/// Equal to twice the per-peer credit (`initial_max_streams_uni` and
+/// `max_local_uni`, 32) in quic/accept.rs and fr-tailnet's local/dial.rs.
+const MAX_STREAMS: usize = 64;
 /// Datagram ROUTES per connection (not queued records).
 const MAX_DATAGRAMS: usize = 4;
 const TURN_RECORDS: usize = 16;

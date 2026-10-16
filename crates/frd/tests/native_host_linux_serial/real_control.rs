@@ -1267,6 +1267,68 @@ fn a_capture_stall_during_motion_recovers_with_an_idr_on_the_same_lease() {
     s.daemon.finish();
 }
 
+/// Freeze every host capture worker for `ms`, as the stall test above does.
+fn stall_capture(ms: u64) {
+    let workers = capture_workers();
+    assert!(!workers.is_empty(), "no host capture worker found");
+    let frozen = Instant::now();
+    for pid in &workers {
+        assert!(
+            Command::new("kill")
+                .args(["-STOP", &pid.to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    if let Some(rest) = Duration::from_millis(ms).checked_sub(frozen.elapsed()) {
+        thread::sleep(rest);
+    }
+    for pid in &workers {
+        let _ = Command::new("kill")
+            .args(["-CONT", &pid.to_string()])
+            .status();
+    }
+}
+
+/// Each reference recovery replaces three channel pairs, and QUIC never reuses
+/// a stream id. With 16 lifetime streams (7 pairs) a controlled session with
+/// clipboard lanes could not recover even once, and an input-only one only
+/// once: both ended `video_reference_lost`. Two stalls here, clipboard on.
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays"]
+fn a_controlled_session_with_clipboard_recovers_from_repeated_capture_stalls() {
+    let mut s = Controlled::start_with(true, true);
+    let painter = Painter::start(&s.host.display);
+    thread::sleep(Duration::from_millis(1500));
+    for (n, target) in [(300, 250), (320, 260)].into_iter().enumerate() {
+        stall_capture(400);
+        assert!(
+            s.pointer_follows(target, Duration::from_secs(20)),
+            "control did not resume after stall {}: {}",
+            n + 1,
+            s.daemon.dump()
+        );
+        thread::sleep(Duration::from_millis(1500));
+    }
+    drop(painter);
+    s.close_viewer();
+    let output = wait_for(s.client, Duration::from_secs(30));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let report: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|_| panic!("fr: {stdout} {}", String::from_utf8_lossy(&output.stderr)));
+    println!("fr after two capture stalls with clipboard: {report}");
+    assert_eq!(report["outcome"], "stopped", "{report}");
+    assert_eq!(report["attempts"], 1, "{report}");
+    assert!(
+        report["last_attempt_media"]["recovered_streams"]
+            .as_u64()
+            .is_some_and(|n| n >= 2),
+        "both late encoded pictures must be recovered on the same lease: {report}"
+    );
+    s.daemon.finish();
+}
+
 #[test]
 #[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; one Xvfb display"]
 fn a_host_without_an_input_agent_refuses_fr_connect_control_by_type() {

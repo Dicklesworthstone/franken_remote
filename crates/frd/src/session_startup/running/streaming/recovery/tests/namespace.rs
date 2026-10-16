@@ -18,18 +18,25 @@ fn canonical_viewer_fences_original_native_owners_before_exposing_namespace_retr
             presenter,
             initial,
         } = Box::pin(fixture(&c, &h, "healthy", 2_000_000, Role::Observe, true)).await;
-        // Reserve a second real three-role set on both original endpoints. This
-        // tests the canonical exit/cleanup, not a second end-to-end recovery.
-        // recovery_replacement/exhaustion.rs separately consumes the namespace
-        // through an actual completed replacement and checks the same cause.
-        for (role, id) in [
-            (MediaRole::Configuration, 21),
-            (MediaRole::Recovery, 22),
-            (MediaRole::Video, 23),
-        ] {
+        // Reserve real attachments on both original endpoints until the
+        // lifetime namespace cannot hold another replacement set of three.
+        // This tests the canonical exit/cleanup, not repeated end-to-end
+        // recoveries; recovery_replacement/exhaustion.rs consumes the namespace
+        // through actual completed replacements and checks the same cause.
+        // Stream-only roles: an unpromoted video lane stays armed and
+        // (correctly) refuses the next offer.
+        for (role, id) in [MediaRole::Configuration, MediaRole::Recovery]
+            .into_iter()
+            .cycle()
+            .zip(21..)
+        {
+            if viewer.io().unwrap().0.remaining_channel_pairs() < 3 {
+                break;
+            }
             let _ = attach(host.host.session().unwrap(), &mut viewer, &c, &h, role, id).await;
         }
-        assert_eq!(viewer.io().unwrap().0.remaining_channel_pairs(), 1);
+        // Too few pairs remain for any replacement set of three.
+        assert!(viewer.io().unwrap().0.remaining_channel_pairs() < 3);
         let original_host = host.worker_id();
         let original_viewer = presenter.worker_id();
         assert!(original_host.is_some() && original_viewer.is_some());

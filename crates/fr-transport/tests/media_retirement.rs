@@ -531,7 +531,9 @@ fn retiring_media_does_not_recycle_consumed_streams_tickets_or_native_capacity()
     run_test!(cx, {
         let mut l = Link::new(&cx).await;
         enable(&mut l);
-        for id in 8..15 {
+        // Every pair the connection can ever hold, each retired again.
+        let mut id = 8;
+        while l.h.remaining_channel_pairs() > 0 {
             let (mut h, _c, _, ca) = attach(
                 &mut l,
                 &cx,
@@ -542,9 +544,11 @@ fn retiring_media_does_not_recycle_consumed_streams_tickets_or_native_capacity()
             .await;
             h.retire_media(&mut l.h, &cx).unwrap();
             retired(&mut l, &cx, ca, true).await;
+            id += 1;
         }
+        assert_eq!(id, 8 + 31, "the lifetime namespace holds 31 pairs");
         let before = l.h.usage();
-        assert_eq!(l.h.next_channel_binding().unwrap(), 15);
+        assert_eq!(l.h.next_channel_binding().unwrap(), id);
         let result = l.h.offer_media_role(
             &cx,
             ChannelScope {
@@ -553,7 +557,7 @@ fn retiring_media_does_not_recycle_consumed_streams_tickets_or_native_capacity()
                 selection: &l.selection,
             },
             ChannelRequest {
-                binding: binding(15),
+                binding: binding(id),
                 ticket: Ticket(9000),
                 timeout: Duration::from_secs(2),
             },

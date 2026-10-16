@@ -207,7 +207,7 @@ fn configuration_is_bounded_and_matches_the_native_dial_profile() {
     );
     let parameters = TransportParameters::decode(&transport_parameters()).unwrap();
     assert_eq!(parameters.initial_max_data, Some(524_288));
-    assert_eq!(parameters.initial_max_streams_uni, Some(8));
+    assert_eq!(parameters.initial_max_streams_uni, Some(32));
     assert_eq!(parameters.initial_max_streams_bidi, Some(0));
     assert!(parameters.disable_active_migration);
 }

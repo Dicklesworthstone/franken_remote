@@ -10,8 +10,12 @@ use frd::{
 
 async fn exhausted(cx: &Cx) -> (Link, NegotiatedMedia, ReceivePipeline) {
     let mut link = Link::new(cx, true).await;
-    let (host, viewer, _) = link.media(cx).await;
-    let (_, viewer) = replace(&mut link, cx, host, viewer).await;
+    let (mut host, mut viewer, _) = link.media(cx).await;
+    // Consume the lifetime namespace with actual completed replacements: each
+    // takes three pairs, and retired pairs are never recycled.
+    while link.c.remaining_channel_pairs() >= 3 {
+        (host, viewer) = replace(&mut link, cx, host, viewer).await;
+    }
     assert_eq!(link.c.remaining_channel_pairs(), 1);
     let config = viewer
         .receiver_config(&link.c, ReceivePolicy::default())

@@ -560,10 +560,10 @@ fn unrelated_renewal_and_actual_queue_pressure_do_not_consume_attachment_state()
     });
 }
 #[test]
-fn seven_retired_pairs_are_bounded_and_an_eighth_refuses_without_recycling() {
+fn thirty_one_pairs_are_bounded_and_a_thirty_second_refuses_without_recycling() {
     run_test!(cx, {
         let mut link = Link::new(&cx).await;
-        for i in 0..7 {
+        for i in 0..31 {
             let mut h = link.offer(&cx, 8 + i, 90 + u128::from(i));
             let mut c = link.viewer(&cx, &mut h).await;
             let (a, b) = link.attached(&cx, &mut h, &mut c).await;
@@ -580,7 +580,7 @@ fn seven_retired_pairs_are_bounded_and_an_eighth_refuses_without_recycling() {
                     selection: &link.selection
                 },
                 ChannelRequest {
-                    binding: binding(15),
+                    binding: binding(39),
                     ticket: Ticket(999),
                     timeout: Duration::from_secs(1)
                 },

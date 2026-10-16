@@ -108,7 +108,7 @@ pub fn native_pair_with_windows<'a>(
     Box::pin(async move {
         let cfg = NativeQuicConnectionConfig {
             max_local_bidi: 0,
-            max_local_uni: 8,
+            max_local_uni: 32,
             send_window: stream_window,
             recv_window: stream_window,
             connection_send_limit: connection_window,
@@ -123,7 +123,7 @@ pub fn native_pair_with_windows<'a>(
             initial_max_stream_data_bidi_remote: Some(cfg.recv_window),
             initial_max_stream_data_uni: Some(cfg.recv_window),
             initial_max_streams_bidi: Some(0),
-            initial_max_streams_uni: Some(8),
+            initial_max_streams_uni: Some(32),
             max_datagram_frame_size: Some(1200),
             ..Default::default()
         }

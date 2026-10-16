@@ -202,6 +202,12 @@ impl Link {
 fn tickets() -> [Ticket; 3] {
     [Ticket(8001), Ticket(8002), Ticket(8003)]
 }
+/// Single-use tickets for one more replacement on `link`: a ticket is never
+/// reusable, so repeated replacements cannot share `tickets()`.
+fn fresh_tickets(link: &Link) -> [Ticket; 3] {
+    let base = 9000 + 3 * u128::from(link.h.next_channel_binding().unwrap());
+    [Ticket(base), Ticket(base + 1), Ticket(base + 2)]
+}
 async fn complete(link: &mut Link, cx: &Cx, host: &mut Replacement, viewer: &mut Replacement) {
     let original = (host.deadline_micros(), viewer.deadline_micros());
     loop {
@@ -222,6 +228,7 @@ async fn replace(
     viewer: NegotiatedMedia,
 ) -> (NegotiatedMedia, NegotiatedMedia) {
     let until = net::clock(cx) + 1_500_000;
+    let tickets = fresh_tickets(link);
     let mut h = host
         .begin_replacement(
             cx,
@@ -229,7 +236,7 @@ async fn replace(
             link.hr,
             parent(),
             until,
-            Some(tickets()),
+            Some(tickets),
             || true,
         )
         .unwrap();
@@ -576,8 +583,10 @@ fn a_foreign_connection_cannot_advance_another_views_replacement() {
 fn namespace_exhaustion_refuses_before_discarding_the_working_replacement() {
     run_test!(cx, {
         let mut link = Link::new(&cx, true).await;
-        let (hm, vm, _) = link.media(&cx).await;
-        let (hm, vm) = replace(&mut link, &cx, hm, vm).await;
+        let (mut hm, mut vm, _) = link.media(&cx).await;
+        while link.h.remaining_channel_pairs() >= 3 {
+            (hm, vm) = replace(&mut link, &cx, hm, vm).await;
+        }
         assert_eq!(link.h.remaining_channel_pairs(), 1);
         let next = link.h.next_channel_binding().unwrap();
         let result = hm.begin_replacement(
