@@ -425,10 +425,13 @@ fn view_only_busy_screen_under_namespace_loss() {
     // row and 40 ms RTT with 1% loss must hold. The latter held 10/10 with
     // reference recovery offered (2abb861); planted negatives on 2026-09-28:
     // without recovery it froze 2/3, without repair AND recovery it ended 2/3
-    // (repair alone disabled still held 3/3: recovery covers it). 5% loss is a
-    // printed limit that must hold, show a change late, or end with a named
-    // cause.
-    for (delay_ms, loss_percent, required) in [(0, 0.0, true), (20, 1.0, true), (20, 5.0, false)] {
+    // (repair alone disabled still held 3/3: recovery covers it). 40 ms with
+    // 5% loss needs several reference recoveries in one session: with 7
+    // lifetime channel pairs (one recovery for a view-only session) it showed
+    // 3, 3 and 2 of 6 and ended video_reference_lost; with 31 (59a5037) it
+    // held 13/13 on ts1, so it is required too. The printed-limit branch below
+    // stays for rows that are not.
+    for (delay_ms, loss_percent, required) in [(0, 0.0, true), (20, 1.0, true), (20, 5.0, true)] {
         let (steps, mut times, ended, media) = view_row(delay_ms, loss_percent, 0, 10, false);
         times.sort();
         let line = format!(
