@@ -1211,32 +1211,13 @@ impl Drop for Painter {
 #[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays"]
 fn a_capture_stall_during_motion_recovers_with_an_idr_on_the_same_lease() {
     let mut s = Controlled::start();
-    let workers = capture_workers();
-    assert!(!workers.is_empty(), "no host capture worker found");
     let painter = Painter::start(&s.host.display);
     // Encoded pictures flow while the host screen changes continuously.
     thread::sleep(Duration::from_millis(600));
     // Freeze the capture worker for 400 ms, under the shortest capture
     // deadline (see the stale-view test): the capture issued before or during
     // the freeze completes past its reference horizon.
-    let frozen = Instant::now();
-    for pid in &workers {
-        assert!(
-            Command::new("kill")
-                .args(["-STOP", &pid.to_string()])
-                .status()
-                .unwrap()
-                .success()
-        );
-    }
-    if let Some(rest) = Duration::from_millis(400).checked_sub(frozen.elapsed()) {
-        thread::sleep(rest);
-    }
-    for pid in &workers {
-        let _ = Command::new("kill")
-            .args(["-CONT", &pid.to_string()])
-            .status();
-    }
+    stall_capture(400);
     // The same session and lease: control resumes once the recovery IDR has
     // refreshed the view. No reconnect, no new grant, the same executor.
     assert!(
@@ -1267,7 +1248,7 @@ fn a_capture_stall_during_motion_recovers_with_an_idr_on_the_same_lease() {
     s.daemon.finish();
 }
 
-/// Freeze every host capture worker for `ms`, as the stall test above does.
+/// Freeze every host capture worker (SIGSTOP) for `ms`, then resume it.
 fn stall_capture(ms: u64) {
     let workers = capture_workers();
     assert!(!workers.is_empty(), "no host capture worker found");

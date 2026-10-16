@@ -327,10 +327,11 @@ impl EmptySendState {
     }
     /// Whether a lane holds nothing unsent and nothing unacknowledged, even if
     /// it is finished or reset: the EMPTY witness with only the public
-    /// termination state taken from `live`. A local reset discards both queues
-    /// (RFC 9000 section 3.1), so a reset lane is drained at once; a finished
-    /// one once its data and FIN are acknowledged. Never the test for a stream
-    /// that must still carry a record: use `matches`.
+    /// termination state taken from `live`. Asupersync's local reset discards
+    /// both queues (no STREAM frame may follow `RESET_STREAM`, RFC 9000 section
+    /// 3.1), so a reset lane is drained at once; a finished one once its data
+    /// and FIN are acknowledged. Never the test for a stream that must still
+    /// carry a record: use `matches`.
     fn drained(&self, live: &QuicStream) -> bool {
         let mut witness = self.0.clone();
         witness.send_offset = live.send_offset;

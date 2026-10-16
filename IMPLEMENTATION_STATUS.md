@@ -171,7 +171,11 @@ allocation failure.
 during continuous motion: the late encoded picture is dropped, the host sends a
 recovery IDR on replaced channels, and the controller's input stays suspended
 until the recovered picture is shown. It passes 10/10 on ts1, with one recovery
-per run. The stale-view test, which hit the same path whenever its stalled
+per run. A second recovery used to be impossible: a connection held only 7
+channel pairs for its lifetime and each recovery takes 3, so a session with
+clipboard lanes could not recover even once. Since 59a5037 it holds 31, and a
+controlled session with clipboard recovers from two stalls in a row (namespace
+e2e). The stale-view test, which hit the same path whenever its stalled
 capture was an encoded picture, went from about 9 of 14 to 10/10. Three fixes
 were needed: the client suspends on the host's failure notice (1c0a989), its
 input lane follows the replaced configuration channel (302f321), and the host

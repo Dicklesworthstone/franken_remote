@@ -25,9 +25,11 @@ unselected feature or turn an observing selection into a control request.
 
 This activates existing runtime behavior; it does not qualify native transport,
 codec hardware, or end-to-end desktop operation. The experimental native opt-in
-and original identity/TLS/consent checks are unchanged. The fixed transport
-namespace still admits only one full replacement before typed exhaustion; this
-profile does not recycle streams, widen limits or silently reacquire control.
+and original identity/TLS/consent checks are unchanged. Each replacement takes
+three of a connection's 31 lifetime channel pairs (fr-transport `MAX_STREAMS`,
+59a5037), so even a fully attached controlled session can be replaced eight
+times before typed exhaustion; this profile does not recycle streams or
+silently reacquire control.
 
 Tests exchange actual startup records for every optional-feature intersection.
 The canonical running-peer loss tests use this exact offer, supervised synthetic
