@@ -62,7 +62,10 @@ transfers on disk-worker timer turns; cancellation is never rate-limited.
 `complete` verifies and flushes first, then resamples the qualified host clock,
 original authority, and file permission before the atomic rename. Lease expiry,
 local revoke, controller destruction, permission loss, and clock regression
-cannot publish the staged destination. Successful publication is not converted
+cannot publish the staged destination. A stale view that only suspends input
+(plan 11.3) neither refuses nor closes a transfer: the viewer keeps sending
+through it, and the lease, observation and bounded suspension limit still end
+it (fr-kz3k). Successful publication is not converted
 into a refusal by a later cancellation. Closing files does not revoke desktop
 control. All disk calls and cleanup still belong on the disk worker, not under
 an authority lock or on the reactor. This is a host-side application owner, not

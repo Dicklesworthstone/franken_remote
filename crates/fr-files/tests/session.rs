@@ -1,7 +1,7 @@
 #![cfg(target_os = "linux")]
 use asupersync::atp::object::ContentId;
 use fr_core::{
-    authority::{AuthorityError, AuthorityPolicy, SessionAuthority},
+    authority::{AuthorityError, AuthorityPolicy, ControlStatus, SessionAuthority},
     ids::*,
     input::*,
     input_submission::{Capabilities, InputSession, Refusal},
@@ -37,6 +37,35 @@ fn owner() -> InputSession {
     a.mark_capabilities_checked().unwrap();
     a.authorize_observation(at(0)).unwrap();
     a.mark_view_ready(at(0)).unwrap();
+    a.grant_lease(c.lease, at(0)).unwrap();
+    a.issue_input_ticket(c.lease, c.ticket, at(0)).unwrap();
+    InputSession::new(
+        a,
+        c,
+        InputBounds::new(DesktopPoint { x: 0, y: 0 }, 320, 240).unwrap(),
+        Capabilities::default(),
+        at(0),
+    )
+    .unwrap()
+}
+/// Evidence-bounded view until `view_until`; lease and observation from 0 (3 s).
+fn bounded_view_owner(view_until: u64) -> InputSession {
+    let c = InputCredentials {
+        session: RemoteSessionId::from_raw(1),
+        lease: InputLeaseId::from_raw(2),
+        ticket: InputTicketId::from_raw(3),
+        view: InputView {
+            geometry: DisplayGeometryGeneration::INITIAL,
+            viewport: ViewportMappingGeneration::INITIAL,
+            configuration: CodecConfigurationGeneration::INITIAL,
+            recovery: RecoveryGeneration::INITIAL,
+        },
+    };
+    let mut a = SessionAuthority::new(c.session, AuthorityPolicy::plan_defaults());
+    a.mark_capabilities_checked().unwrap();
+    a.authorize_observation(at(0)).unwrap();
+    a.require_view_evidence(at(0)).unwrap();
+    a.mark_view_ready_until(at(view_until), at(0)).unwrap();
     a.grant_lease(c.lease, at(0)).unwrap();
     a.issue_input_ticket(c.lease, c.ticket, at(0)).unwrap();
     InputSession::new(
@@ -137,6 +166,63 @@ fn publishes_only_complete_verified_bytes_under_original_control() {
     );
     assert!(session.progress().is_none());
     assert!(input.monitor().deadline(at(12)).is_ok());
+}
+
+/// A stale view suspends input (plan 11.3), not file receipt (fr-kz3k): a
+/// transfer begun under a live view keeps staging, idles through timer turns
+/// and publishes while the view is lapsed, and the lease is not revoked.
+#[test]
+fn a_view_suspension_neither_refuses_nor_closes_a_transfer() {
+    let scratch = Scratch::new();
+    let input = bounded_view_owner(100_000);
+    let mut session = scratch.session(&input);
+    begin(&mut session, 1, b"abc", 0);
+    assert!(matches!(
+        input.monitor().status(at(200_000)),
+        Ok(ControlStatus::Suspended { .. })
+    ));
+    session.service(at(200_000)).unwrap();
+    assert_eq!(
+        session
+            .write(session.binding(), 1, 0, b"abc", || at(300_000))
+            .unwrap()
+            .staged_bytes,
+        3
+    );
+    let receipt = session
+        .complete(session.binding(), 1, || at(400_000))
+        .unwrap();
+    assert_eq!(receipt.bytes, 3);
+    assert_eq!(receipt.publication, Publication::Durable);
+    assert_eq!(fs::read(scratch.0.join("item")).unwrap(), b"abc");
+    assert!(!session.is_closed());
+    assert!(!input.monitor().is_revoked());
+    // Input itself stays refused while the view is stale.
+    assert_eq!(
+        input.monitor().deadline(at(400_000)),
+        Err(Refusal::Authority(AuthorityError::ViewUnready))
+    );
+}
+
+/// A suspension never extends the lease: its expiry during the suspension is
+/// terminal for the transfer and the lane, exactly as under a live view.
+#[test]
+fn a_view_suspension_never_outlasts_the_lease_for_files() {
+    let scratch = Scratch::new();
+    let input = bounded_view_owner(100_000);
+    let mut session = scratch.session(&input);
+    begin(&mut session, 1, b"abc", 0);
+    session.service(at(200_000)).unwrap();
+    assert_eq!(
+        session.service(at(3_000_000)),
+        Err(Error::Authority(Refusal::Authority(
+            AuthorityError::ObservationExpired
+        )))
+    );
+    assert!(session.is_closed());
+    assert!(session.progress().is_none());
+    assert!(input.monitor().is_revoked());
+    scratch.empty();
 }
 
 #[test]

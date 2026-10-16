@@ -1136,7 +1136,7 @@ fn a_stale_view_suspends_input_before_it_reaches_the_host() {
 /// and is an encoded picture. Drawing on the root window instead was hidden
 /// under the session's other host windows and every capture came back
 /// unchanged.
-struct Painter(Child);
+pub(super) struct Painter(Child);
 impl Painter {
     const SCRIPT: &str = r#"
 import ctypes as c, sys, time
@@ -1177,7 +1177,7 @@ while True:
     i += 1
     time.sleep(0.02)
 "#;
-    fn start(display: &str) -> Self {
+    pub(super) fn start(display: &str) -> Self {
         Self(
             Command::new("python3")
                 .args(["-u", "-c", Self::SCRIPT, display])
@@ -1249,7 +1249,7 @@ fn a_capture_stall_during_motion_recovers_with_an_idr_on_the_same_lease() {
 }
 
 /// Freeze every host capture worker (SIGSTOP) for `ms`, then resume it.
-fn stall_capture(ms: u64) {
+pub(super) fn stall_capture(ms: u64) {
     let workers = capture_workers();
     assert!(!workers.is_empty(), "no host capture worker found");
     let frozen = Instant::now();

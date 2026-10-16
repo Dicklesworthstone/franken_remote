@@ -7,6 +7,7 @@
 use crate::receive::{self, DropDirectory, MAX_CHUNK_BYTES, PendingObject, Publication};
 use asupersync::atp::{object::ContentId, safety::validate_portable_path_component};
 use fr_core::{
+    authority::ControlStatus,
     ids::{InputLeaseId, InputTicketId, RemoteSessionId},
     input_submission::{InputMonitor, InputSession, Refusal},
     time::{HostDuration, HostInstant},
@@ -79,8 +80,22 @@ impl Authority {
     pub fn binding(&self) -> Binding {
         self.binding
     }
+    /// The authority deadline file receipt is held to; see `standing`.
     pub fn deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
-        self.monitor.deadline(now)
+        standing(&self.monitor, now)
+    }
+}
+/// The control status deadline at a fresh sample: lease, observation and view
+/// while live; lease, observation and suspension limit while a stale view
+/// suspends input. A stale view suspends INPUT (plan 11.3), not file receipt:
+/// the viewer keeps its file lane sending through a suspension (its view
+/// `gate`), and refusing here ended an in-flight transfer, and the lane for
+/// the rest of the lease, on a half-second capture stall (fr-kz3k).
+/// Revocation, lease or observation expiry and a suspension past its limit
+/// stay terminal.
+fn standing(monitor: &InputMonitor, now: HostInstant) -> Result<HostInstant, Refusal> {
+    match monitor.status(now)? {
+        ControlStatus::Live { until } | ControlStatus::Suspended { until, .. } => Ok(until),
     }
 }
 
@@ -491,7 +506,7 @@ impl HostReceiver {
             Some(Error::Clock)
         } else if !self.permission.is_approved() {
             Some(Error::Permission)
-        } else if let Err(error) = self.authority.deadline(now) {
+        } else if let Err(error) = standing(&self.authority, now) {
             Some(Error::Authority(error))
         } else if self
             .active

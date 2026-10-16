@@ -11,7 +11,7 @@
 //! and the user as in `real_control`. A namespace run is not a live tailnet,
 //! a desktop file manager or a drag-and-drop UI.
 use super::real_clipboard::{Peer, pasted, unique};
-use super::real_control::{Controlled, eventually, indicator, signal};
+use super::real_control::{Controlled, Painter, eventually, indicator, signal, stall_capture};
 use super::shipped_client::wait_for;
 use super::*;
 use frd::native_files::{Directory, Limits};
@@ -409,6 +409,96 @@ fn a_frozen_controller_leaves_no_partial_file_under_its_final_name() {
         String::from_utf8_lossy(&output.stdout)
     );
     assert!(drop_dir.entries().is_empty(), "{:?}", drop_dir.entries());
+    s.daemon.finish();
+}
+
+/// A host capture stall while a file is mid-transfer (fr-kz3k). The stall
+/// lapses the view, which suspends input, and forces a reference recovery that
+/// replaces the media lanes. Neither may end the file lane: control resumes on
+/// the same lease and the file still arrives whole. Before, the host's file
+/// receiver took the suspension for lost authority and refused the file
+/// (`host_permission`) after a half-second suspension.
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; real input agent and file lane"]
+fn a_capture_stall_mid_transfer_recovers_and_still_delivers_the_file() {
+    let drop_dir = Dir::new("drop");
+    let source = Dir::new("source");
+    let name = "stalled-transfer.bin";
+    let total = 32 * 1024 * 1024;
+    let bytes = random(total);
+    fs::write(source.0.join(name), &bytes).unwrap();
+    let mut s = Controlled::start_full(
+        false,
+        false,
+        Some(drop_dir.directory()),
+        &[source.0.join(name)],
+    );
+    let painter = Painter::start(&s.host.display);
+    // Stall only once the transfer is provably in flight.
+    let until = Instant::now() + Duration::from_secs(90);
+    let staged = loop {
+        assert!(
+            !drop_dir.0.join(name).exists(),
+            "published before the stall"
+        );
+        if let Some(len) = drop_dir
+            .unnamed_staging()
+            .into_iter()
+            .find(|&len| len > 0 && len < total as u64)
+        {
+            break len;
+        }
+        assert!(
+            Instant::now() < until,
+            "no staged transfer: {}; host: {}",
+            client_state(&mut s.client),
+            s.daemon.dump()
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    stall_capture(400);
+    println!("files e2e: stalled capture with {staged} of {total} bytes staged");
+    assert!(
+        s.pointer_follows((300, 250), Duration::from_secs(20)),
+        "control did not resume after a capture stall mid-transfer: {}",
+        s.daemon.dump()
+    );
+    let published = eventually(Duration::from_secs(90), || {
+        fs::metadata(drop_dir.0.join(name)).is_ok_and(|m| m.len() == total as u64)
+    });
+    // Collect the client's own account before asserting, so a failure says
+    // whether the file lane was refused, cancelled or just slow.
+    drop(painter);
+    s.close_viewer();
+    let output = wait_for(s.client, Duration::from_secs(30));
+    let report = completion(&output, &s.daemon.dump());
+    println!("fr after a capture stall mid-transfer: {report}");
+    assert!(
+        published,
+        "the file did not arrive after the stall: {:?}; {report}",
+        drop_dir.entries()
+    );
+    assert_eq!(
+        sha256(&fs::read(drop_dir.0.join(name)).unwrap()),
+        sha256(&bytes)
+    );
+    assert_eq!(report["outcome"], "stopped", "{report}");
+    assert_eq!(report["attempts"], 1, "{report}");
+    assert_eq!(
+        report["files_sent"],
+        serde_json::json!([{"index": 0, "bytes": total, "durable": true}]),
+        "{report}"
+    );
+    assert!(
+        report["last_attempt_media"]["recovered_streams"]
+            .as_u64()
+            .is_some_and(|n| n >= 1),
+        "the stall did not exercise a recovery: {report}"
+    );
+    assert!(
+        report["input_suspensions"].as_u64().is_some_and(|n| n >= 1),
+        "the stall did not suspend input, so it proves nothing: {report}"
+    );
     s.daemon.finish();
 }
 
