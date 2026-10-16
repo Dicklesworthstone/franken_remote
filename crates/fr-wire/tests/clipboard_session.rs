@@ -329,3 +329,6 @@ mod observation;
 
 #[path = "clipboard_session/egress.rs"]
 mod egress;
+
+#[path = "clipboard_session/suspension.rs"]
+mod suspension;

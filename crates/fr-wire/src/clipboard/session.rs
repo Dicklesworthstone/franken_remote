@@ -269,6 +269,18 @@ impl ChannelSession {
         self.pending = None;
         self.cancel = None;
     }
+    fn authority_error(&mut self, reason: fr_core::input_submission::Refusal) -> SessionError {
+        if reason
+            == fr_core::input_submission::Refusal::Authority(
+                fr_core::authority::AuthorityError::ViewUnready,
+            )
+        {
+            Error::Suspended.into()
+        } else {
+            self.close();
+            Error::Authority(reason).into()
+        }
+    }
     fn clipboard_error(&mut self, error: Error) -> SessionError {
         if self.receiver.is_closed() {
             self.close();
@@ -318,6 +330,10 @@ impl ChannelSession {
                 state.enabled = false;
                 self.discard_pending(CancelReason::Disabled);
             }
+            // Keep the same bounded transfer, sequence and deadline. The
+            // second pre-send check below still refuses every payload while
+            // suspended; maintenance continues expiring items during silence.
+            Err(Error::Suspended) => state.enabled = false,
             Err(Error::Expired) => state.incoming_expired = true,
             Err(error) => {
                 self.close();
@@ -380,10 +396,10 @@ impl ChannelSession {
             sequence,
         };
         // The item's cap: authorization, not the host's input view window.
-        let authority_deadline = self.monitor.item_deadline(now).map_err(|reason| {
-            self.close();
-            SessionError::Clipboard(Error::Authority(reason))
-        })?;
+        let authority_deadline = self
+            .monitor
+            .item_deadline(now)
+            .map_err(|reason| self.authority_error(reason))?;
         let deadline = now
             .checked_add(HostDuration::from_micros(3_000_000))
             .ok_or_else(|| {

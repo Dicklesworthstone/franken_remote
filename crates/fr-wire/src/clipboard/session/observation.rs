@@ -30,10 +30,10 @@ impl ChannelSession {
             return Err(Error::Disabled.into());
         }
         // The read's cap: authorization, not the host's input view window.
-        let authority_deadline = self.monitor.item_deadline(now).map_err(|reason| {
-            self.close();
-            SessionError::Clipboard(Error::Authority(reason))
-        })?;
+        let authority_deadline = self
+            .monitor
+            .item_deadline(now)
+            .map_err(|reason| self.authority_error(reason))?;
         let deadline = now
             .checked_add(HostDuration::from_micros(3_000_000))
             .ok_or_else(|| {
