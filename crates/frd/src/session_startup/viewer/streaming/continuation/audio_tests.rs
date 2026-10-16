@@ -161,7 +161,15 @@ async fn fixture(c: &Cx, h: &Cx) -> Fixture {
     let (_, config) = attach(&mut host, &mut viewer, c, h, MediaRole::Configuration, 18).await;
     let (_, recovery) = attach(&mut host, &mut viewer, c, h, MediaRole::Recovery, 19).await;
     let (_, video) = attach(&mut host, &mut viewer, c, h, MediaRole::Video, 20).await;
-    let (ha, va) = attach(&mut host, &mut viewer, c, h, MediaRole::AudioDown, AUDIO_BINDING).await;
+    let (ha, va) = attach(
+        &mut host,
+        &mut viewer,
+        c,
+        h,
+        MediaRole::AudioDown,
+        AUDIO_BINDING,
+    )
+    .await;
     let mut media = NegotiatedMedia::new(
         viewer.io().unwrap().0,
         host.selection(),
@@ -402,7 +410,10 @@ fn local_audio_failure_can_exchange_stop_and_new_epoch_without_ending_recovery()
         assert_eq!(f.calls.borrow().resets, 1);
         let until = now(&h).unwrap() + 500_000;
         while f.stops == 0 {
-            assert!(now(&h).unwrap() < until, "audio stop stalled during recovery");
+            assert!(
+                now(&h).unwrap() < until,
+                "audio stop stalled during recovery"
+            );
             turn(&mut f).await;
         }
         configure(&mut f, &h, 2).await;

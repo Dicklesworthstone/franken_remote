@@ -146,9 +146,7 @@ fn scenario(lose_picture: bool) {
             repair_interval_micros: 30_000,
             ..ReceivePolicy::default()
         };
-        let cfg = vm
-            .receiver_config(viewer.io().unwrap().0, policy)
-            .unwrap();
+        let cfg = vm.receiver_config(viewer.io().unwrap().0, policy).unwrap();
         let mut receiver =
             ReceivePipeline::new(cfg, MediaBudget::new(cfg.limits.protocol()).unwrap()).unwrap();
         let mut presenter = Presenter::stream_fixture_decoding(

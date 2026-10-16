@@ -25,8 +25,8 @@ use fr_media::{
     worker::overlay::Update,
 };
 use fr_transport::quic::{Disposition, QuicRecords, Route};
-use std::pin::pin;
 use fr_wire::{Kind, WireError, cursor as wire};
+use std::pin::pin;
 
 /// Bound local nonblocking ownership transitions before choosing one redraw.
 /// A redraw always returns the presenter to pixel decode before another one.

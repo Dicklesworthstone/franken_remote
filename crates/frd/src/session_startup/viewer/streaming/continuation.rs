@@ -65,9 +65,8 @@ impl Link<'_> {
         session.check().map_err(Error::Session)?;
         let cx = session.cx.clone();
         let heard_until = session.heard_until;
-        let mut live = || {
-            cx.checkpoint().is_ok() && now(&cx).is_ok_and(|current| current < heard_until)
-        };
+        let mut live =
+            || cx.checkpoint().is_ok() && now(&cx).is_ok_and(|current| current < heard_until);
         if let Some(audio) = audio.as_deref_mut() {
             audio.service(
                 &mut session.transport,
