@@ -5,6 +5,8 @@ only its original socket, inbound control parser/remainder and one fixed
 CloseRequest into a closing exchange. Unstaged application writes are discarded.
 Native retained/retransmission payloads, partially staged writes and queued
 outbound datagrams refuse instead of being flushed after the application fence.
+A lane holding none of them does not refuse, even if it was finished, reset or
+retired.
 The caller stops observation/input admission first; this API is not native input
 cleanup and does not authorize a reconnect or replay.
 

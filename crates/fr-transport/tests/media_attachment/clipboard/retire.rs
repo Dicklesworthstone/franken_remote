@@ -378,3 +378,56 @@ fn simultaneous_explicit_retirement_is_idempotent_under_crossed_stop_and_reset()
         l.c.tick(&cx, || true).unwrap();
     });
 }
+
+/// A retired lane is reset, so it is finished, yet it holds nothing: a later
+/// terminal report must still be the record, not the close-packet refusal.
+/// Before, any finished or reset lane made every terminal report on the
+/// connection refuse as backlog (seen live: a close exchange after a stale
+/// view had ended the clipboard lane).
+#[test]
+fn a_retired_lane_does_not_block_the_terminal_report() {
+    use fr_wire::closure::{Cleanup, Closed, ClosedReason, OutstandingEffects};
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let mut l = Link::new(&cx).await;
+        enable(&mut l);
+        let _input = attach(&mut l, &cx, 8, MediaRole::Input).await;
+        let (hp, cp, _, ca) = attach(&mut l, &cx, 9, MediaRole::Clipboard).await;
+        let mut h = ClipboardChannel::new(&l.h, hp, scope()).unwrap();
+        let _c = ClipboardChannel::new(&l.c, cp, scope()).unwrap();
+        quiet(&mut l, &cx).await;
+        h.retire(&mut l.h, &cx).unwrap();
+        peer_retired(&mut l, &cx, ca.outbound).await;
+        quiet(&mut l, &cx).await;
+        let original = l.h.binding();
+        let closing = l.h.close_with_closed(
+            &cx,
+            &original,
+            l.hr.outbound,
+            fr_wire::authority::Binding {
+                channel: 7,
+                session: parent().remote_session,
+            },
+            Closed {
+                reason: ClosedReason::HostStopping,
+                cleanup: Cleanup::Unconfirmed,
+                effects: OutstandingEffects::Unknown,
+            },
+        );
+        let done = Cell::new(false);
+        let (result, ()) = Box::pin(both(
+            async {
+                let result = closing.await;
+                done.set(true);
+                result
+            },
+            async {
+                while !done.get() {
+                    l.c.drive(&cx, WAIT, || true).await.unwrap();
+                }
+            },
+        ))
+        .await;
+        assert_eq!(result, Ok(()), "the record, not a backlog refusal");
+    });
+}

@@ -317,6 +317,24 @@ impl EmptySendState {
         }
         self.0 == *live
     }
+    /// Whether a lane holds nothing unsent and nothing unacknowledged, even if
+    /// it is finished or reset: the EMPTY witness with only the public
+    /// termination state taken from `live`. A local reset discards both queues
+    /// (RFC 9000 section 3.1), so a reset lane is drained at once; a finished
+    /// one once its data and FIN are acknowledged. Never the test for a stream
+    /// that must still carry a record: use `matches`.
+    fn drained(&self, live: &QuicStream) -> bool {
+        let mut witness = self.0.clone();
+        witness.send_offset = live.send_offset;
+        witness.recv_offset = live.recv_offset;
+        witness.read_offset = live.read_offset;
+        witness.send_credit = live.send_credit.clone();
+        witness.recv_credit = live.recv_credit.clone();
+        witness.send_final_size = live.send_final_size;
+        witness.send_reset = live.send_reset;
+        witness.stop_sending_error_code = live.stop_sending_error_code;
+        witness == *live
+    }
 }
 // A closed set of records staged to native STREAM buffers. New admissions stay
 // in pending_writes until this epoch is proven absent from BOTH native pending

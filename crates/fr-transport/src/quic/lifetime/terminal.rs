@@ -237,11 +237,15 @@ impl QuicRecords {
         }
         // Exact EMPTY witnesses cover private pending AND retransmission maps.
         // Packet counts, ACK counters and queue lengths do not prove absence.
+        // Another lane may be finished or reset (a retired clipboard or files
+        // lane, a configuration stream after a handoff); it only has to hold
+        // nothing. The report's own route must still be reusable.
         for sender in &mut self.senders {
             let live = streams
                 .stream(sender.route.stream)
                 .map_err(|_| Error::Native)?;
-            if !sender.empty.matches(live) {
+            if !sender.empty.matches(live) && (sender.route == route || !sender.empty.drained(live))
+            {
                 return Err(Error::Backpressure);
             }
         }

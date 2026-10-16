@@ -10,8 +10,9 @@ This reuses the existing lease-revocation registration and terminal drain. A
 connection can arm only one consumer of either kind. It has no second queue or
 post-fence application write permission. Unstaged records are discarded; native
 payload/retransmission backlog, partial records, and queued datagrams still
-refuse reporting. Returned cooperative I/O cancellation can transfer custody;
-abandoning an in-flight I/O future cannot recover its socket.
+refuse reporting. A lane holding none of them does not, even if it was finished,
+reset or retired. Returned cooperative I/O cancellation can transfer custody,
+and so can an I/O turn that is dropped rather than returned (see below).
 
 The original owner calls `ClosedReport::finish(report)` after its teardown to
 supply its actual typed reason, cleanup stage, and effect accounting. The private
