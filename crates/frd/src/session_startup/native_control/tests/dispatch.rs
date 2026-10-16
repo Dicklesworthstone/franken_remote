@@ -578,6 +578,13 @@ fn a_clipboard_profile_follows_the_lease_through_its_own_child_both_ways() {
             "clipboard child reaped"
         );
         assert!(!seat.is_occupied());
+        // Dropping the client fenced its clipboard worker, which closes the
+        // viewer's native owner on its own thread; a slow CI runner reached
+        // this assertion before that close (2026-10-16). Wait for it, bounded.
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while !os.lock().unwrap().closed && std::time::Instant::now() < until {
+            asupersync::time::sleep(cleanup.now(), Duration::from_millis(5)).await;
+        }
         let os = os.lock().unwrap();
         assert!(
             os.opened && os.closed,
