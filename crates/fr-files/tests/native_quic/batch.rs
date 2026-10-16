@@ -37,7 +37,9 @@ async fn finish(
     link: &mut Link,
     cx: &Cx,
 ) -> Report {
-    let until = clock(cx) + 2_000_000;
+    // Hang guards, not timing claims: this binary's wall-clock budgets
+    // failed under 64-way libtest load on ts1 (fr-rc-gates-cargo-test-6d8).
+    let until = clock(cx) + 10_000_000;
     loop {
         assert!(
             clock(cx) < until,
@@ -52,7 +54,7 @@ async fn finish(
     }
 }
 fn cleanup(sender: &mut Sender<'_>) -> Report {
-    let until = Instant::now() + Duration::from_secs(2);
+    let until = Instant::now() + Duration::from_secs(10);
     loop {
         assert!(Instant::now() < until, "original source failed to drain");
         let _ = sender.try_finish_cleanup();
@@ -114,7 +116,7 @@ fn actual_batch_publishes_selected_descriptors_and_empty_file_on_one_lane() {
         let mut sender =
             Sender::new(cx.clone(), &f.link.c, &mut f.client, Policy::default()).unwrap();
         sender
-            .begin_batch(&f.link.c, chosen, Duration::from_secs(2))
+            .begin_batch(&f.link.c, chosen, Duration::from_secs(10))
             .unwrap();
         assert_eq!(sender.stage(), Stage::Queued);
         assert_eq!(sender.batch_report().unwrap().started, 0);
@@ -163,7 +165,7 @@ fn actual_batch_publishes_selected_descriptors_and_empty_file_on_one_lane() {
             4
         );
         sender.cancel(&mut f.link.c).unwrap();
-        let until = Instant::now() + Duration::from_secs(2);
+        let until = Instant::now() + Duration::from_secs(10);
         while sender.take_result().is_none() {
             assert!(Instant::now() < until);
             std::thread::yield_now();
@@ -399,10 +401,10 @@ fn lost_second_proof_keeps_first_receipt_and_second_unknown_effect_without_retry
             .begin_batch(
                 &f.link.c,
                 selection(&path, &["first", "second", "never"]),
-                Duration::from_secs(2),
+                Duration::from_secs(10),
             )
             .unwrap();
-        let until = clock(&cx) + 1_000_000;
+        let until = clock(&cx) + 10_000_000;
         while sender.batch_report().unwrap().started != 2 || sender.stage() != Stage::AwaitingProof
         {
             assert!(clock(&cx) < until);
@@ -439,22 +441,29 @@ fn an_earlier_success_does_not_restart_the_batch_deadline_for_queued_files() {
         fs::write(&path, b"selected").unwrap();
         let mut sender =
             Sender::new(cx.clone(), &f.link.c, &mut f.client, Policy::default()).unwrap();
-        let begun = clock(&cx);
+        // The first file must finish inside the batch lifetime, which is a
+        // fixture margin here (200 ms failed under load): the property is
+        // that its success does not restart that lifetime for "never".
         sender
             .begin_batch(
                 &f.link.c,
                 selection(&path, &["first", "never"]),
-                Duration::from_millis(200),
+                Duration::from_secs(1),
             )
             .unwrap();
+        // Sampled AFTER begin_batch, so the batch started no later than this
+        // and its deadline has passed by `begun + 1_001_000`. Sampled before,
+        // a loaded begin_batch could start over 1 ms later and the check below
+        // could run just before the real deadline (Ok(Preparing)).
+        let begun = clock(&cx);
         while sender.batch_report().unwrap().receipts().len() == 0 {
-            assert!(clock(&cx) < begun + 200_000);
+            assert!(clock(&cx) < begun + 1_000_000);
             sender.service(&mut f.link.c, || true).unwrap();
             f.host.service(&mut f.link.h, || true).unwrap();
             f.link.drive(&cx).await;
         }
         std::thread::sleep(Duration::from_micros(
-            (begun + 201_000).saturating_sub(clock(&cx)),
+            (begun + 1_001_000).saturating_sub(clock(&cx)),
         ));
         assert_eq!(sender.service(&mut f.link.c, || true), Err(Error::Expired));
         let report = cleanup(&mut sender);

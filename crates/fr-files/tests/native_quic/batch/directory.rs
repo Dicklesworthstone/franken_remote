@@ -31,7 +31,7 @@ fn mixed_file_and_directory_batch_publishes_pinned_trees_in_selection_order() {
         let mut sender =
             Sender::new(cx.clone(), &f.link.c, &mut f.client, Policy::default()).unwrap();
         sender
-            .begin_batch(&f.link.c, chosen, Duration::from_secs(2))
+            .begin_batch(&f.link.c, chosen, Duration::from_secs(10))
             .unwrap();
         assert_eq!(sender.batch_report().unwrap().started, 0);
         let report = finish(&mut sender, &mut f.host, &mut f.link, &cx).await;
