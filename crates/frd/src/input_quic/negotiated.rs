@@ -1,5 +1,6 @@
 //! Join one completed input attachment to the existing native owner. Neither
 //! an attached stream nor a control-intent capability grants an input lease.
+mod host_recovery;
 use super::{Error, QuicInput, Routes};
 use crate::{input_agent::Agent, media::ObservationControl, media_quic::NegotiatedMedia};
 use asupersync::cx::Cx;

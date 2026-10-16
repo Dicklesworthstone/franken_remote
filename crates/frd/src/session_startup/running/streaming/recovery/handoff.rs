@@ -41,6 +41,11 @@ pub(super) async fn replace(
         .sender
         .schedule_recovery(&session.opened.transport, &mut host.stream.source, demand)
         .map_err(Error::MediaTransport)?;
+    // Suspend only the idle broker's configuration-lifetime check before any
+    // old channel retires. Pending consent/native initialization never rebases.
+    if let Some(acquisition) = acquisition.as_deref_mut() {
+        acquisition.begin_recovery(&session.opened.transport, &media, until)?;
+    }
     let mut waiting = Waiting {
         control: &control,
         until,
@@ -171,6 +176,9 @@ pub(super) async fn replace(
         .sender
         .join_stream(q, &host.stream.source, &control, binding)
         .map_err(Error::MediaTransport)?;
+    if let Some(acquisition) = acquisition.as_deref_mut() {
+        acquisition.finish_recovery(q, &media)?;
+    }
     Ok(media)
 }
 

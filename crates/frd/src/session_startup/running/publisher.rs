@@ -265,7 +265,7 @@ impl NativePublisher {
     ) -> impl Future<Output = Result<(), Error>> + 'a {
         let control = self.control.clone();
         let display = self.display;
-        let binding = self.view;
+        let mut binding = self.view;
         let future = self
             .input
             .take()
@@ -274,8 +274,15 @@ impl NativePublisher {
                 self.host.serve_accepting_control(
                     seat,
                     input,
-                    move |state| {
+                    move |mut state| {
                         use crate::session_startup::HostControlState;
+                        // Only the broker's completed successor can change the display
+                        // binding before a grant, never peer-supplied request metadata.
+                        if let HostControlState::Pending(pending) = &mut state
+                            && let Some(current) = pending.configuration()?
+                        {
+                            binding = current;
+                        }
                         let request = match &state {
                             HostControlState::Pending(pending) => pending.request(),
                             HostControlState::Active { request, .. } => Some(*request),

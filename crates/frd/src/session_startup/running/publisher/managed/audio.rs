@@ -59,7 +59,7 @@ impl NativePublisher {
     ) -> impl Future<Output = Result<(), Error>> + 'a {
         let control = self.control.clone();
         let display = self.display;
-        let binding = self.view;
+        let mut binding = self.view;
         let audio = profile
             .map(|profile| self.host.prepare_audio(profile))
             .transpose()
@@ -77,7 +77,14 @@ impl NativePublisher {
             let service = self.host.serve_control_services(
                 seat,
                 input,
-                move |state| {
+                move |mut state| {
+                    // Only the broker's completed successor can change the display
+                    // binding before a grant, never peer-supplied request metadata.
+                    if let HostControlState::Pending(pending) = &mut state
+                        && let Some(current) = pending.configuration()?
+                    {
+                        binding = current;
+                    }
                     let request = match &state {
                         HostControlState::Pending(pending) => pending.request(),
                         HostControlState::Active { request, .. } => Some(*request),

@@ -32,6 +32,11 @@ pub struct PendingControl<'a> {
     connection: &'a QuicRecords,
 }
 impl PendingControl<'_> {
+    /// Current completed configuration, not permission to approve. None while
+    /// media recovery holds the original input attachment without a display.
+    pub fn configuration(&mut self) -> Result<Option<fr_wire::decoder::Binding>, GrantError> {
+        self.broker.configuration(self.connection)
+    }
     pub fn request(&self) -> Option<Request> {
         self.broker.request()
     }
@@ -148,6 +153,31 @@ impl Acquisition {
             let controlled = session.into_controlled(input)?;
             self.active = Some(controlled.control());
             *host = Host::Control(controlled);
+        }
+        Ok(())
+    }
+    pub(super) fn begin_recovery(
+        &mut self,
+        q: &QuicRecords,
+        media: &crate::media_quic::NegotiatedMedia,
+        until: u64,
+    ) -> Result<(), Error> {
+        if let Some(broker) = &mut self.broker {
+            broker
+                .begin_reference_recovery(q, media, until)
+                .map_err(Error::ControlGrant)?;
+        }
+        Ok(())
+    }
+    pub(super) fn finish_recovery(
+        &mut self,
+        q: &QuicRecords,
+        media: &crate::media_quic::NegotiatedMedia,
+    ) -> Result<(), Error> {
+        if let Some(broker) = &mut self.broker {
+            broker
+                .finish_reference_recovery(q, media)
+                .map_err(Error::ControlGrant)?;
         }
         Ok(())
     }
@@ -360,3 +390,6 @@ impl StreamingHost {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod recovery_tests;

@@ -1,6 +1,7 @@
 //! Initial control grant over an existing authenticated connection. The broker
 //! reserves the OS share-session's Seat before minting authority, initializes the
 //! native owner outside the authority path, and publishes only after it is ready.
+mod recovery;
 use super::{NegotiatedInput, QuicInput, Routes, ticket::TICKET_CADENCE_US};
 use crate::{
     input_agent::{self, AdmissionGate, Driver, Phase, Seat},
@@ -103,6 +104,8 @@ pub struct GrantBroker {
     native: Option<NativeGrant>,
     last: u64,
     terminal: bool,
+    // The original media failure budget, not a new control-request allowance.
+    recovery_until: Option<u64>,
 }
 impl GrantBroker {
     /// Consume completed configuration/input negotiation on this same session.
@@ -212,6 +215,7 @@ impl GrantBroker {
             native: None,
             last,
             terminal: false,
+            recovery_until: None,
         })
     }
     /// Inspect the original host's view gate without reserving the Seat,
@@ -219,6 +223,9 @@ impl GrantBroker {
     pub fn view_ready(&mut self, connection: &QuicRecords) -> Result<bool, Error> {
         self.bound(connection)?;
         self.live(connection)?;
+        if self.recovery_until.is_some() {
+            return Ok(false);
+        }
         self.observation.view_ready().map_err(Error::Media)
     }
     fn bound(&mut self, connection: &QuicRecords) -> Result<(), Error> {
@@ -243,9 +250,12 @@ impl GrantBroker {
             return Err(Error::PeerClosed);
         }
         if let Some(input) = &self.negotiated {
-            input
-                .broker_routes(connection, self.parent, self.limits)
-                .map_err(Error::Input)?;
+            if self.recovery_until.is_some() {
+                input.recovering_host_routes(connection, self.parent, self.limits)
+            } else {
+                input.broker_routes(connection, self.parent, self.limits)
+            }
+            .map_err(Error::Input)?;
         }
         if !self.admission.permitted() {
             return Err(Error::Stopped);
@@ -263,6 +273,9 @@ impl GrantBroker {
             return Err(Error::Clock);
         }
         self.last = now;
+        if self.recovery_until.is_some_and(|until| now >= until) {
+            return Err(Error::Expired);
+        }
         if self.waiting.as_ref().is_some_and(|p| now >= p.until) {
             return Err(Error::Expired);
         }
@@ -364,6 +377,13 @@ impl GrantBroker {
         if route == Route::Stream(self.control_routes.inbound)
             && bytes.get(6..8) == Some(&(Kind::ControlRequest as u16).to_be_bytes())
         {
+            // A new-view request can follow the first-decode acknowledgement
+            // in this same turn. Keep it in its original bounded transport slot
+            // until the handoff installs that view; never admit it against old
+            // coordinates or start/restart a request budget during recovery.
+            if self.recovery_until.is_some() {
+                return Ok(Some(Disposition::Blocked));
+            }
             self.accept(bytes)?;
             return Ok(Some(Disposition::Consumed));
         }
