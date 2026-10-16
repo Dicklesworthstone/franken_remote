@@ -79,8 +79,10 @@ impl Server {
                 server.child.try_wait().unwrap().is_none(),
                 "private PulseAudio exited; retained daemon logs"
             );
+            // A hang guard on fixture setup, not a startup-latency claim: a
+            // loaded two-core CI runner took longer than 3 s (2026-10-16).
             assert!(
-                server.origin.elapsed() < Duration::from_secs(3),
+                server.origin.elapsed() < Duration::from_secs(15),
                 "private PulseAudio socket startup timed out"
             );
             std::thread::sleep(Duration::from_millis(2));

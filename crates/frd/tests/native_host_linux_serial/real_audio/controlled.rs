@@ -219,11 +219,12 @@ fn controlled_playback_and_input_share_the_same_live_session() {
 
 /// fr-30yk: every optional lane on ONE controlled session (clipboard both ways,
 /// a file into the drop directory, host playback audio) through three
-/// consecutive capture stalls. Each reference recovery takes three channel
-/// pairs, so this needs the 31-pair budget (59a5037); 7 pairs before audio
-/// once stood for the whole lifetime. After every recovery input lands again
-/// and a NEW host tone reaches the client. The clipboard is not asserted after
-/// a stall: it still ends for the grant on a view suspension (fr-kz3k).
+/// consecutive capture stalls. The lanes hold 7 channel pairs before any
+/// recovery and each recovery takes 3 more: 16 of the 31-pair lifetime budget
+/// (59a5037), where the old 7-pair budget allowed no recovery at all. After
+/// every recovery input lands again and a NEW host tone reaches the client.
+/// The clipboard is not asserted after a stall: it still ends for the grant
+/// on a view suspension (fr-kz3k).
 #[test]
 #[ignore = "explicit isolated namespace; real XTest, HEVC/Opus workers, clipboard child, file lane and private PulseAudio null sinks"]
 fn every_lane_with_audio_recovers_from_repeated_capture_stalls() {
