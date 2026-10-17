@@ -419,18 +419,19 @@ impl Attempt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fr_wire::negotiation::Role;
+    use fr_wire::{attachment, negotiation::Role};
     #[test]
     fn the_control_offer_and_capabilities_match_the_x11_host_profile_only() {
         let offer = offer(false);
         assert!(offer.validate().is_ok());
         assert_eq!(offer.role, Role::RequestControl);
         assert_eq!(offer, fr_client::native::control_offer());
-        // --clipboard adds only the three OPTIONAL clipboard boundaries.
+        // --clipboard adds three optional clipboard boundaries and the optional
+        // bulk-record extension; the required capability set stays unchanged.
         let clipboard = super::offer(true);
         assert!(clipboard.validate().is_ok());
         assert_eq!(clipboard.role, Role::RequestControl);
-        assert_eq!(clipboard.capabilities.len(), offer.capabilities.len() + 3);
+        assert_eq!(clipboard.capabilities.len(), offer.capabilities.len() + 4);
         assert_eq!(
             clipboard.capabilities.iter().filter(|c| c.required).count(),
             offer.capabilities.iter().filter(|c| c.required).count()
@@ -442,6 +443,17 @@ mod tests {
                 .filter(|c| c.name.contains("clipboard"))
                 .all(|c| !c.required)
         );
+        assert!(
+            offer
+                .capabilities
+                .iter()
+                .all(|c| c.name != attachment::BULK_RECORD_CAPABILITY)
+        );
+        assert!(clipboard.capabilities.iter().any(|c| {
+            c.name == attachment::BULK_RECORD_CAPABILITY
+                && c.version == attachment::BULK_RECORD_VERSION
+                && !c.required
+        }));
         let caps = capabilities();
         for granted in [
             Capability::Keys,

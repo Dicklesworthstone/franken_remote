@@ -1,7 +1,8 @@
 //! Original-client lifetime and conservative host-clock authority projection.
 use super::{Error, ProjectedClock};
-use crate::input::ClientInstant;
+use crate::input::{ClientInstant, MAX_VIEW_SUSPENSION_US};
 use fr_core::{
+    authority::AuthorityError,
     clipboard::{
         Binding,
         authority::{Authority, Monitor},
@@ -45,6 +46,30 @@ struct Metadata {
     mapped: bool,
     view_until: Option<u64>,
     obligations_until: u64,
+    last_view_until: Option<u64>,
+    paused_since: Option<u64>,
+    resume_ticket: bool,
+    reference_recovery: bool,
+}
+impl Metadata {
+    fn pause(&mut self, since: u64) {
+        if self.paused_since.is_none() {
+            self.resume_ticket = false;
+        }
+        self.paused_since = Some(self.paused_since.map_or(since, |old| old.min(since)));
+    }
+    fn resume_if_ready(&mut self, now: u64) {
+        if self.resume_ticket
+            && now < self.local_until
+            && self.last_host < self.host_until
+            && self.mapped
+            && self.view_until.is_some_and(|until| now < until)
+            && self.receiver.as_ref().is_none_or(ReceiverLifetime::is_live)
+        {
+            self.paused_since = None;
+            self.resume_ticket = false;
+        }
+    }
 }
 pub(super) struct State {
     pub(super) stopped: AtomicBool,
@@ -93,15 +118,49 @@ impl Owner {
                     mapped: false,
                     view_until: None,
                     obligations_until: u64::MAX,
+                    last_view_until: None,
+                    paused_since: None,
+                    resume_ticket: false,
+                    reference_recovery: false,
                 }),
             }),
         })
     }
     /// Installed once by the presented-input join, before an auxiliary worker
-    /// can escape. A new receiver requires a new grant, never equal numeric IDs.
+    /// can escape. A replacement is accepted only by the validated recovery join.
     pub(crate) fn bind_receiver(&self, lifetime: ReceiverLifetime) {
         if let Ok(mut inner) = self.state.inner.lock() {
             if inner.receiver.is_some() || !lifetime.is_live() {
+                self.stop();
+            } else {
+                inner.receiver = Some(lifetime);
+            }
+        } else {
+            self.stop();
+        }
+    }
+    /// Only the presented-input owner can allow its negotiated recovery to
+    /// pause a fenced receiver. A lost receiver grants no clipboard permission.
+    pub(crate) fn expect_reference_recovery(&self) {
+        if let Ok(mut inner) = self.state.inner.lock() {
+            inner.reference_recovery = true;
+        } else {
+            self.stop();
+        }
+    }
+    /// Called after the same presented-input grant validated the actual media
+    /// receiver lineage, unchanged configuration and newer recovery generation.
+    /// Numeric IDs alone never reach this join, and the old lifetime stays dead.
+    pub(crate) fn follow_recovery(&self, lifetime: ReceiverLifetime) {
+        if let Ok(mut inner) = self.state.inner.lock() {
+            if !inner.reference_recovery
+                || inner.paused_since.is_none()
+                || inner
+                    .receiver
+                    .as_ref()
+                    .is_none_or(|receiver| receiver.is_live() || !receiver.is_owner_live())
+                || !lifetime.is_live()
+            {
                 self.stop();
             } else {
                 inner.receiver = Some(lifetime);
@@ -127,11 +186,25 @@ impl Owner {
         mapped: bool,
         view_until: Option<ClientInstant>,
         obligations_until: u64,
+        suspended_since: Option<ClientInstant>,
     ) {
         if let Ok(mut inner) = self.state.inner.lock() {
+            // A late owner tick must retain the old view's actual deadline
+            // before the input owner replaces it with a suspended view.
+            let lapse = suspended_since
+                .map(|since| inner.view_until.map_or(since.0, |until| until.min(since.0)));
             inner.mapped = mapped;
             inner.view_until = view_until.map(|at| at.0);
+            if let Some(until) = view_until {
+                inner.last_view_until = Some(until.0);
+            }
             inner.obligations_until = obligations_until;
+            if let Some(since) = lapse {
+                inner.pause(since);
+            } else {
+                let now = inner.last_client;
+                inner.resume_if_ready(now);
+            }
         } else {
             self.stop();
         }
@@ -139,12 +212,15 @@ impl Owner {
     /// A queued control response is NOT evidence of host acceptance. Only a
     /// validated, newer authenticated ticket proves the host lease is live at
     /// least until that ticket's deadline. Never shorten the initial lease to
-    /// the ticket lifetime, nor revive an already expired original owner.
+    /// the ticket lifetime. A proof that lapsed during suspension can be replaced;
+    /// a terminal owner cannot. Only the input owner's validated post-lapse
+    /// ticket gate sets `resume_ticket`; a control response is not proof.
     pub(crate) fn ticket(
         &self,
         host_until: u64,
         clock: ClockCorrelation,
         now: ClientInstant,
+        resume_ticket: bool,
     ) -> Result<(), Error> {
         self.check(now)?;
         let result = (|| {
@@ -170,6 +246,10 @@ impl Owner {
             m.local_until = local_until;
             m.last_host = host;
             m.last_client = now.0;
+            if m.paused_since.is_some() {
+                m.resume_ticket |= resume_ticket;
+                m.resume_if_ready(now.0);
+            }
             Ok(())
         })();
         if result.is_err() {
@@ -181,6 +261,7 @@ impl Owner {
         &mut self,
         channel: u32,
         now: ClientInstant,
+        allow_paused: bool,
     ) -> Result<(Monitor, ProjectedClock), Error> {
         if self.attached {
             return Err(Error::AlreadyAttached);
@@ -195,7 +276,15 @@ impl Owner {
         {
             return Err(Error::WrongChannel);
         }
-        let at = self.state.sample(now, true)?;
+        let at = self.state.sample(now, !allow_paused)?;
+        if allow_paused {
+            let inner = self.state.inner.lock().map_err(|_| Error::Stopped)?;
+            // Attachment may finish during an already observed view's lapse.
+            // It never turns an unmapped or never-presented grant into a view.
+            if !inner.mapped || inner.last_view_until.is_none() {
+                return Err(Error::NotReady);
+            }
+        }
         let cursor = Arc::new(Mutex::new(Cursor {
             client: now.0,
             host: at.as_micros(),
@@ -241,25 +330,12 @@ impl State {
             self.stopped.store(true, Ordering::Release);
             Error::Stopped
         })?;
-        if m.receiver
-            .as_ref()
-            .is_some_and(|receiver| !receiver.is_live())
-        {
-            return self.failure(Error::Stopped);
-        }
         if now.0 < m.last_client {
             return self.failure(Error::Clock);
         }
-        if now.0 >= m.local_until
-            || now.0 >= m.obligations_until
-            || m.view_until.is_some_and(|at| now.0 >= at)
-        {
-            return self.failure(Error::Expired);
-        }
-        // A better correlation may lower its uncertainty, but must not make the
-        // accounting clock stand still and thereby extend an in-flight item's
-        // fixed lifetime. Advance at least by elapsed client time, while keeping
-        // the current correlation's full conservative host upper bound.
+        self.lifecycle(&mut m, now.0)?;
+        // A tighter correlation cannot stop the accounting clock and thereby
+        // extend an in-flight item's original fixed lifetime.
         let Some(rolling) = m.last_host.checked_add(now.0 - m.last_client) else {
             return self.failure(Error::Clock);
         };
@@ -267,30 +343,21 @@ impl State {
             Ok(host) => host.max(rolling),
             Err(_) => return self.failure(Error::Clock),
         };
-        if host >= m.host_until {
-            return self.failure(Error::Expired);
-        }
         m.last_client = now.0;
         m.last_host = host;
-        if require_view && (!m.mapped || m.view_until.is_none()) {
-            return Err(Error::NotReady);
-        }
-        // An independent local stop takes priority even while the metadata lock
-        // is held. No grant/clock/presentation update clears this bit.
-        if self.stopped.load(Ordering::Acquire) {
-            return Err(Error::Stopped);
-        }
+        self.ready_at(&mut m, now.0, host, require_view)?;
         Ok(HostInstant::from_micros(host))
     }
-    // The original input client advances Metadata; clipboard consumers each
-    // advance their own cursor. Overtaking across consumers is conservative,
-    // while regression within any one consumer remains a terminal clock fault.
+    // The original input client advances Metadata; each clipboard consumer
+    // advances its own cursor. Overtaking is conservative, while regression
+    // within any one consumer remains a terminal clock fault.
     pub(super) fn sample_cursor(
         &self,
         now: ClientInstant,
         cursor: &Mutex<Cursor>,
+        require_view: bool,
     ) -> Result<HostInstant, Error> {
-        let result = self.sample_cursor_inner(now, cursor);
+        let result = self.sample_cursor_inner(now, cursor, require_view);
         if result.as_ref().is_err_and(|e| *e != Error::NotReady) {
             self.stopped.store(true, Ordering::Release);
         }
@@ -300,14 +367,15 @@ impl State {
         &self,
         now: ClientInstant,
         cursor: &Mutex<Cursor>,
+        require_view: bool,
     ) -> Result<HostInstant, Error> {
         let mut c = cursor.lock().map_err(|_| Error::Stopped)?;
-        let m = self.inner.lock().map_err(|_| Error::Stopped)?;
+        let mut m = self.inner.lock().map_err(|_| Error::Stopped)?;
         if now.0 < c.client {
             return self.failure(Error::Clock);
         }
         let local = now.0.max(m.last_client);
-        self.ready_at(&m, local)?;
+        self.lifecycle(&mut m, local)?;
         let rolling = c.host.checked_add(now.0 - c.client).ok_or(Error::Clock)?;
         let base = m
             .last_host
@@ -319,27 +387,59 @@ impl State {
             .map_err(|_| Error::Clock)?
             .max(rolling)
             .max(base);
-        if host >= m.host_until {
-            return self.failure(Error::Expired);
-        }
+        // Paused samples still advance this cursor, including maintenance
+        // clocks. No fresh-looking fallback clock can extend a retained item.
         *c = Cursor {
             client: now.0,
             host,
         };
+        self.ready_at(&mut m, local, host, require_view)?;
         Ok(HostInstant::from_micros(host))
     }
-    fn ready_at(&self, m: &Metadata, local: u64) -> Result<(), Error> {
-        if self.stopped.load(Ordering::Acquire) || m.receiver.as_ref().is_some_and(|r| !r.is_live())
+    fn lifecycle(&self, m: &mut Metadata, local: u64) -> Result<(), Error> {
+        if self.stopped.load(Ordering::Acquire) {
+            return self.failure(Error::Stopped);
+        }
+        let lost_receiver = m.receiver.as_ref().is_some_and(|r| !r.is_live());
+        if m.receiver.as_ref().is_some_and(|r| !r.is_owner_live())
+            || (lost_receiver && !m.reference_recovery)
         {
             return self.failure(Error::Stopped);
         }
-        if local >= m.local_until
-            || local >= m.obligations_until
-            || m.view_until.is_some_and(|at| local >= at)
+        if local >= m.obligations_until {
+            return self.failure(Error::Expired);
+        }
+        // Lapse time never slides with later polls, tickets or clock samples.
+        // A worker can meet a fenced receiver before the input owner does.
+        let lapse = m
+            .view_until
+            .filter(|until| local >= *until)
+            .or_else(|| lost_receiver.then_some(local));
+        if let Some(since) = lapse {
+            m.pause(since);
+        }
+        if m.paused_since
+            .is_some_and(|since| local.saturating_sub(since) >= MAX_VIEW_SUSPENSION_US)
         {
             return self.failure(Error::Expired);
         }
-        if !m.mapped || m.view_until.is_none() {
+        Ok(())
+    }
+    fn ready_at(
+        &self,
+        m: &mut Metadata,
+        local: u64,
+        host: u64,
+        require_view: bool,
+    ) -> Result<(), Error> {
+        self.lifecycle(m, local)?;
+        // The last ticket proves a lower bound on the host's current lease.
+        // During suspension that proof may lapse, but grants no permission;
+        // only a newer authenticated ticket can replace it.
+        if (local >= m.local_until || host >= m.host_until) && m.paused_since.is_none() {
+            return self.failure(Error::Expired);
+        }
+        if require_view && (!m.mapped || m.view_until.is_none() || m.paused_since.is_some()) {
             return Err(Error::NotReady);
         }
         Ok(())
@@ -374,22 +474,31 @@ impl Authority for Projection {
             .cursor
             .lock()
             .map_err(|_| Refusal::AuthorityUnavailable)?;
-        let m = state
+        let mut m = state
             .inner
             .lock()
             .map_err(|_| Refusal::AuthorityUnavailable)?;
-        // The exact sample belongs to this native consumer, not another
-        // concurrent network/input check. Original-owner updates may only tighten
-        // its decision. No lock is held across native preparation/publication.
+        // This exact sample belongs to the native consumer. An original-owner
+        // update can only tighten its decision; no lock spans native work.
         let local = c.client.max(m.last_client);
-        if now.as_micros() != c.host
-            || state.ready_at(&m, local).is_err()
-            || m.clock
-                .age_upper_us(0, local)
-                .map_or(true, |at| at >= m.host_until)
-            || c.host >= m.host_until
-        {
+        if now.as_micros() != c.host {
             state.stopped.store(true, Ordering::Release);
+            return Err(Refusal::Revoked);
+        }
+        let status = (|| {
+            state.lifecycle(&mut m, local)?;
+            let host = m.clock.age_upper_us(0, local).map_err(|_| Error::Clock)?;
+            state.ready_at(&mut m, local, host.max(c.host), true)
+        })();
+        match status {
+            Ok(()) => {}
+            Err(Error::NotReady) => return Err(Refusal::Authority(AuthorityError::ViewUnready)),
+            Err(_) => {
+                state.stopped.store(true, Ordering::Release);
+                return Err(Refusal::Revoked);
+            }
+        }
+        if state.stopped.load(Ordering::Acquire) {
             return Err(Refusal::Revoked);
         }
         Ok(HostInstant::from_micros(m.host_until))

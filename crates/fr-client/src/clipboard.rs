@@ -38,7 +38,24 @@ impl ControllerTransport {
         self.transport.clone()
     }
     pub fn sample(&self, now: ClientInstant) -> Result<HostInstant, Error> {
+        if !self.transport.is_open() {
+            return Err(Error::Stopped);
+        }
         let at = self.clock.sample(now)?;
+        if !self.transport.is_open() {
+            return Err(Error::Stopped);
+        }
+        Ok(at)
+    }
+    /// Advance the original conservative clock while a view suspension blocks
+    /// clipboard work. This is time for expiring bounded items, not authority:
+    /// `sample` and the native publication monitor still return `NotReady`.
+    /// Revocation, clock faults and the fixed suspension limit remain terminal.
+    pub fn sample_maintenance(&self, now: ClientInstant) -> Result<HostInstant, Error> {
+        if !self.transport.is_open() {
+            return Err(Error::Stopped);
+        }
+        let at = self.clock.sample_maintenance(now)?;
         if !self.transport.is_open() {
             return Err(Error::Stopped);
         }
@@ -94,13 +111,19 @@ impl ProjectedClock {
         self.state
             .upgrade()
             .ok_or(Error::Stopped)?
-            .sample_cursor(now, &self.cursor)
+            .sample_cursor(now, &self.cursor, true)
+    }
+    fn sample_maintenance(&self, now: ClientInstant) -> Result<HostInstant, Error> {
+        self.state
+            .upgrade()
+            .ok_or(Error::Stopped)?
+            .sample_cursor(now, &self.cursor, false)
     }
     /// The core clock callback is infallible. On projection failure, fence FIRST
     /// and return only the previous sample. That sample is unusable authority,
     /// not a fabricated fresh clock; the immediately following check refuses it.
     fn checked(&self, now: ClientInstant, failure: &Cell<Option<Error>>) -> HostInstant {
-        match self.sample(now) {
+        match self.sample_maintenance(now) {
             Ok(at) => at,
             Err(error) => {
                 failure.set(Some(error));
@@ -129,7 +152,8 @@ impl InputClient {
     /// Called only after the authenticated attachment selected the clipboard
     /// capability for this exact session. `granted` includes local OS permission
     /// and approval; request-control negotiation alone is NOT a clipboard grant.
-    /// Mapping and genuine presentation must already be ready. The channel may
+    /// Mapping and genuine presentation must have been established. A current
+    /// suspension creates a paused channel with no payload permission. The channel may
     /// be attached only once for this input owner, even after a failed/dropped lane.
     pub fn attach_clipboard(
         &mut self,
@@ -187,8 +211,8 @@ impl InputClient {
         if limits.max_control_message_bytes() as usize <= fr_wire::clipboard::CHUNK_OVERHEAD {
             return Err(Error::InvalidLimits);
         }
-        let (monitor, clock) = projection.attach(outgoing.channel, now)?;
-        let at = clock.sample(now)?;
+        let (monitor, clock) = projection.attach(outgoing.channel, now, true)?;
+        let at = clock.sample_maintenance(now)?;
         let channel = ChannelSession::with_monitor(monitor, outgoing, limits, true, at)?;
         Ok(ControllerClipboard { channel, clock })
     }
@@ -207,7 +231,7 @@ impl InputClient {
             .clipboard_projection
             .as_mut()
             .ok_or(Error::NotGranted)?;
-        let (monitor, clock) = projection.attach(channel, now)?;
+        let (monitor, clock) = projection.attach(channel, now, false)?;
         ControllerImageClipboard::new(monitor, self.limits, true, clock, now)
     }
     pub(crate) fn clipboard_readiness(&self) {
@@ -220,7 +244,12 @@ impl InputClient {
                 .chain(self.control_response_deadline().map(|at| at.0))
                 .min()
                 .unwrap_or(u64::MAX);
-            owner.readiness(self.mapped, self.view_until, obligations);
+            owner.readiness(
+                self.mapped,
+                self.view_until,
+                obligations,
+                self.suspended_since,
+            );
         }
     }
 }
@@ -255,6 +284,7 @@ impl ControllerClipboard {
     ) -> Result<Offer, Error> {
         let at = match self.clock.sample(now) {
             Ok(at) => at,
+            Err(Error::NotReady) => return Err(Error::NotReady),
             Err(e) => {
                 self.close();
                 return Err(e);

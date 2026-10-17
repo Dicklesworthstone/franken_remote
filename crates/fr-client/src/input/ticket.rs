@@ -96,15 +96,6 @@ impl InputClient {
         if until <= now.0 {
             return Err(Error::TicketExpired);
         }
-        // A projection that cannot take this ticket has lapsed: the clipboard
-        // ends for this grant, never revived; the ticket still serves input.
-        if self
-            .clipboard_projection
-            .as_ref()
-            .is_some_and(|owner| owner.ticket(ticket.expires_at_us, clock, now).is_err())
-        {
-            self.retire_clipboard();
-        }
         self.credentials.ticket = c.ticket;
         if self.awaiting_recovery_ticket {
             // Unlike a same-generation freshness lapse, this exact new view
@@ -129,6 +120,22 @@ impl InputClient {
                 self.awaiting_ticket = false;
                 self.try_resume(now);
             }
+        }
+        self.clipboard_readiness();
+        // Only this validated same-lease ticket can extend clipboard proof.
+        // The existing input gate establishes whether it follows the host's
+        // lapse. Visibility and this ticket may arrive in either order.
+        if self.clipboard_projection.as_ref().is_some_and(|owner| {
+            owner
+                .ticket(
+                    ticket.expires_at_us,
+                    clock,
+                    now,
+                    !self.awaiting_ticket && !self.awaiting_recovery_ticket,
+                )
+                .is_err()
+        }) {
+            self.retire_clipboard();
         }
         Ok(())
     }

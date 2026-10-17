@@ -71,9 +71,7 @@ impl Transport {
         }
         deadline.map(drop).map_err(|reason| {
             SessionError::Clipboard(
-                if reason
-                    == Refusal::Authority(fr_core::authority::AuthorityError::ViewUnready)
-                {
+                if reason == Refusal::Authority(fr_core::authority::AuthorityError::ViewUnready) {
                     Error::Suspended
                 } else {
                     Error::Authority(reason)

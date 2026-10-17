@@ -482,6 +482,8 @@ struct InFlight {
 /// outstanding decoder inputs are bounded; it cannot be cloned into two owners.
 pub struct ReceivePipeline {
     scope: Arc<AtomicBool>,
+    // Stable owner lifetime across recovery epochs, never presentation authority.
+    lineage: Arc<AtomicBool>,
     config: ReceiveConfig,
     budget: MediaBudget,
     state: ReceiveState,
@@ -519,6 +521,7 @@ impl ReceivePipeline {
         }
         Ok(Self {
             scope: Arc::new(AtomicBool::new(true)),
+            lineage: Arc::new(AtomicBool::new(true)),
             config,
             budget,
             state: ReceiveState::AwaitingConfiguration,
@@ -536,6 +539,9 @@ impl ReceivePipeline {
     }
     pub(crate) fn presentation_scope(&self) -> (Arc<AtomicBool>, ReceiveConfig) {
         (self.scope.clone(), self.config)
+    }
+    pub(crate) fn presentation_lineage(&self) -> Arc<AtomicBool> {
+        self.lineage.clone()
     }
     /// Check the admitted delivery tuple without replacing the receiver or its
     /// unique decoder ownership. Policy and resource ceilings are not widened.
@@ -1153,6 +1159,7 @@ impl ReceivePipeline {
         Ok(())
     }
     pub fn close(&mut self) {
+        self.lineage.store(false, Ordering::Release);
         self.clear();
         self.state = ReceiveState::Closed;
     }
@@ -1190,6 +1197,7 @@ impl ReceivePipeline {
 
 impl Drop for ReceivePipeline {
     fn drop(&mut self) {
+        self.lineage.store(false, Ordering::Release);
         self.scope.store(false, Ordering::Release);
     }
 }

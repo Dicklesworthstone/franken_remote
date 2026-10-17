@@ -299,12 +299,9 @@ impl InputClient {
         {
             return self.fail(StopReason::ViewStale);
         }
-        // The projection proves only the clipboard lane's authority. Its
-        // failure (no newer ticket proving the lease, a media receiver fenced
-        // by a lost reference, a clock fault) ends that lane for this grant,
-        // as a suspension does; input stays under its own ticket, view and
-        // lease checks. Ending input here pre-empted reference recovery, the
-        // commonest end of lossy controlled sessions (fr-6hbo).
+        // A view suspension pauses the clipboard on the same grant. A terminal
+        // projection failure still ends only that lane: input has its own
+        // ticket, view and lease checks (fr-6hbo).
         if self
             .clipboard_projection
             .as_ref()
@@ -419,11 +416,6 @@ impl InputClient {
             self.suspended_since = Some(now);
             self.awaiting_ticket = true;
             self.suspensions = self.suspensions.saturating_add(1);
-            // The clipboard lane's authority projection cannot outlive a
-            // lapse: only a ticket proves the lease, none is issued while
-            // suspended, and an expired projection is never revived. The
-            // clipboard ends for this grant; input itself continues.
-            self.retire_clipboard();
             for (released, held) in self.released_keys.iter_mut().zip(self.keys) {
                 *released |= held;
             }
@@ -433,6 +425,7 @@ impl InputClient {
             self.keys = [false; 256];
             self.buttons = [false; 5];
         }
+        self.clipboard_readiness();
     }
     fn try_resume(&mut self, now: ClientInstant) {
         if let Some(since) = self.suspended_since

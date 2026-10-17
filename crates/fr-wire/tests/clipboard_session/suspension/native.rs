@@ -1,8 +1,7 @@
 //! Real core/wire owners with an explicitly recording native selection fixture.
 use super::*;
 use fr_wire::clipboard::session::synchronize::{
-    NativeChange, NativeChanges, NativeClipboard, NativeText, ReadProgress, Received,
-    Synchronizer,
+    NativeChange, NativeChanges, NativeClipboard, NativeText, ReadProgress, Received, Synchronizer,
 };
 use std::{cell::RefCell, rc::Rc};
 
@@ -20,7 +19,7 @@ struct Selection {
 }
 impl Selection {
     fn copy(&mut self, text: &str) {
-        self.text = text.to_owned();
+        text.clone_into(&mut self.text);
         self.revision += 1;
         self.dirty = true;
     }
@@ -43,7 +42,7 @@ impl ClipboardSink for Native {
     fn publish(&mut self, text: &str, _: Stamp) -> Publication {
         let mut state = self.0.borrow_mut();
         state.publications += 1;
-        state.text = text.to_owned();
+        text.clone_into(&mut state.text);
         Publication::SubmittedToOs
     }
 }
@@ -133,7 +132,13 @@ fn paused_native_owner_keeps_selection_and_sends_only_latest_copy_after_resume()
     assert!(matches!(begin.body, Body::Begin { total_bytes: 6, .. }));
     poll(&mut native, &mut gate, 200_000);
     let chunk = decode(&gate.last, context(Role::Host), &ProtocolLimits::ABSOLUTE).unwrap();
-    assert!(matches!(chunk.body, Body::Chunk { bytes: b"latest", .. }));
+    assert!(matches!(
+        chunk.body,
+        Body::Chunk {
+            bytes: b"latest",
+            ..
+        }
+    ));
     let state = state.borrow();
     assert_eq!((state.watches, state.reads, state.suspends), (1, 1, 0));
     assert!(!native.is_closed());
@@ -167,7 +172,13 @@ fn pause_after_native_change_read_does_not_lose_that_copy() {
     poll(&mut native, &mut gate, 200_000);
     poll(&mut native, &mut gate, 200_000);
     let chunk = decode(&gate.last, context(Role::Host), &ProtocolLimits::ABSOLUTE).unwrap();
-    assert!(matches!(chunk.body, Body::Chunk { bytes: b"racing", .. }));
+    assert!(matches!(
+        chunk.body,
+        Body::Chunk {
+            bytes: b"racing",
+            ..
+        }
+    ));
     assert_eq!(state.borrow().reads, 1);
     assert!(!native.is_closed());
 }
@@ -198,7 +209,13 @@ fn pause_before_read_admission_keeps_the_unread_candidate() {
     poll(&mut native, &mut gate, 200_000);
     poll(&mut native, &mut gate, 200_000);
     let chunk = decode(&gate.last, context(Role::Host), &ProtocolLimits::ABSOLUTE).unwrap();
-    assert!(matches!(chunk.body, Body::Chunk { bytes: b"unread", .. }));
+    assert!(matches!(
+        chunk.body,
+        Body::Chunk {
+            bytes: b"unread",
+            ..
+        }
+    ));
     assert_eq!(state.borrow().reads, 1);
 }
 
@@ -229,7 +246,11 @@ fn unconsumed_receive_waits_but_prepared_commit_is_never_retried() {
     assert_eq!(
         native
             .receive(&gate.last, || {
-                at(if state.borrow().prepared { 500_000 } else { 200_000 })
+                at(if state.borrow().prepared {
+                    500_000
+                } else {
+                    200_000
+                })
             })
             .unwrap(),
         Received::Refused(SessionError::Clipboard(Error::Suspended))

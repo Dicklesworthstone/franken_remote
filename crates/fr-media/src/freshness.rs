@@ -153,10 +153,19 @@ struct Candidate {
 /// not liveness: closing/dropping that receiver invalidates every copy. This is
 /// not visibility, freshness, decoding success, or permission to grant control.
 #[derive(Clone, Debug)]
-pub struct ReceiverLifetime(Arc<AtomicBool>);
+pub struct ReceiverLifetime {
+    scope: Arc<AtomicBool>,
+    lineage: Arc<AtomicBool>,
+}
 impl ReceiverLifetime {
     pub fn is_live(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.scope.load(Ordering::Acquire) && self.is_owner_live()
+    }
+    /// The original receiver still exists and has not been closed. An epoch
+    /// awaiting recovery can fail `is_live` while retaining this owner lifetime.
+    /// This is neither presentation evidence nor permission to perform work.
+    pub fn is_owner_live(&self) -> bool {
+        self.lineage.load(Ordering::Acquire)
     }
 }
 
@@ -169,6 +178,7 @@ impl ReceiverLifetime {
 #[derive(Debug)]
 pub struct ViewTracker {
     scope: Arc<AtomicBool>,
+    lineage: Arc<AtomicBool>,
     bindings: MediaBindings,
     epoch: MediaEpoch,
     clock: ClockCorrelation,
@@ -203,6 +213,7 @@ impl ViewTracker {
         clock.age_upper_us(clock.sample.host_sample_us, now_us)?;
         Ok(Self {
             scope,
+            lineage: receiver.presentation_lineage(),
             bindings: config.bindings,
             epoch: config.epoch,
             clock,
@@ -245,10 +256,29 @@ impl ViewTracker {
         }
         Ok(())
     }
+    /// Validate a recovered epoch of this SAME receiver owner. Unlike a normal
+    /// presentation check, the old epoch may already be fenced; a different
+    /// receiver with equal numeric IDs or a shared budget is never a successor.
+    /// This check grants no visibility or input authority.
+    pub fn check_recovery_receiver(&self, receiver: &ReceivePipeline) -> Result<(), Error> {
+        let (scope, config) = receiver.presentation_scope();
+        if !Arc::ptr_eq(&self.lineage, &receiver.presentation_lineage())
+            || !self.lineage.load(Ordering::Acquire)
+            || !scope.load(Ordering::Acquire)
+            || config.epoch.configuration != self.epoch.configuration
+            || !config.epoch.recovery.supersedes(self.epoch.recovery)
+        {
+            return Err(Error::StaleBinding);
+        }
+        Ok(())
+    }
     /// Retain the original receiver's cancellation fence for detached auxiliary
     /// workers. Numeric bindings on a replacement receiver never revive it.
     pub fn receiver_lifetime(&self) -> ReceiverLifetime {
-        ReceiverLifetime(self.scope.clone())
+        ReceiverLifetime {
+            scope: self.scope.clone(),
+            lineage: self.lineage.clone(),
+        }
     }
     /// Exact receiver channel bindings; this is identity metadata, not authority.
     pub const fn bindings(&self) -> MediaBindings {

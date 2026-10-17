@@ -231,19 +231,27 @@ fn genuine_new_host_ticket_extends_only_the_still_live_original_owner() {
 }
 
 #[test]
-fn view_staleness_and_clock_regression_are_checked_by_clipboard_during_silence() {
-    for elapsed in [1_500_000, 0] {
-        let (_input, mut lane) = attached();
-        lane.offer(1, "pending", None, client(1)).unwrap();
-        let mut gate = Gate::default();
-        assert!(
-            lane.pump(&mut scratch(), &mut gate, || client(elapsed))
-                .is_err()
-        );
-        assert!(lane.is_closed());
-        assert_eq!(gate.calls, 0);
-        assert_eq!(lane.retained_bytes(), 0);
-    }
+fn view_staleness_pauses_but_clock_regression_stops_clipboard_during_silence() {
+    let (_input, mut lane) = attached();
+    lane.offer(1, "pending", None, client(1)).unwrap();
+    let mut gate = Gate::default();
+    assert_eq!(
+        lane.pump(&mut scratch(), &mut gate, || client(1_500_000)),
+        Ok(Pump::Suspended)
+    );
+    assert!(!lane.is_closed());
+    assert_eq!(gate.calls, 0);
+    assert!(lane.retained_bytes() > 0);
+
+    let (_input, mut lane) = attached();
+    lane.offer(1, "pending", None, client(1)).unwrap();
+    assert_eq!(
+        lane.pump(&mut scratch(), &mut gate, || client(0)),
+        Err(Error::Clock)
+    );
+    assert!(lane.is_closed());
+    assert_eq!(gate.calls, 0);
+    assert_eq!(lane.retained_bytes(), 0);
 }
 
 #[test]

@@ -782,12 +782,10 @@ fn a_progress_record_after_a_lost_reference_suspends_for_recovery_instead_of_end
     assert_eq!(input.input_view().recovery, next);
     assert_eq!(input.stopped(), None);
 }
-/// fr-6hbo: a real grant's clipboard projection is bound to the original
-/// receiver, which a lost reference fences. Its lapse ends the clipboard, not
-/// the grant: the controller still suspends for the negotiated recovery. This
-/// was the commonest end of lossy controlled sessions (`InvalidControl`).
+/// fr-6hbo/fr-kz3k: reference loss fences the original receiver and suspends
+/// both input and clipboard under the same grant until negotiated recovery.
 #[test]
-fn a_lost_reference_suspends_a_granted_controller_despite_its_clipboard_projection() {
+fn a_lost_reference_suspends_a_granted_controller_and_its_clipboard_projection() {
     let (mut receiver, mut input, limits, d) = shown_with(setup_with(granted()));
     input.expect_reference_recovery();
     abandon_dependent_picture(&mut receiver, limits);
@@ -877,4 +875,187 @@ fn a_reference_recovery_rebinds_the_suspended_grant_to_the_recovered_receiver() 
     // the host's own lapse. The grant is suspended, not ended.
     assert_eq!(input.tick(ClientInstant(27_001)), Ok(false));
     assert_eq!(input.stopped(), None);
+}
+
+fn recovery_ticket(next: RecoveryGeneration) -> [u8; input_ticket::INPUT_TICKET_BYTES] {
+    let mut credentials = credentials();
+    credentials.ticket = InputTicketId::from_raw(4);
+    credentials.view.recovery = next;
+    let mut bytes = [0; input_ticket::INPUT_TICKET_BYTES];
+    input_ticket::encode(
+        input_ticket::Ticket {
+            credentials,
+            sequence: 1,
+            issued_at_us: 1_014_000,
+            expires_at_us: 2_014_000,
+        },
+        &mut bytes,
+        &ProtocolLimits::ABSOLUTE,
+        7,
+        InputDirection::HostToViewer,
+        InputDelivery::Reliable,
+    )
+    .unwrap();
+    bytes
+}
+
+#[test]
+fn clipboard_follows_only_the_recovered_receiver_and_waits_for_both_resume_gates() {
+    use fr_client::clipboard::Error as ClipboardError;
+    use fr_wire::clipboard::session::Offer;
+
+    for ticket_first in [false, true] {
+        let (mut receiver, mut input, limits, _) = shown_with(setup_with(granted()));
+        input.expect_reference_recovery();
+        let mut clipboard = input
+            .attach_clipboard(77, true, ClientInstant(22_000))
+            .unwrap();
+        clipboard.local_switch().set_enabled(true);
+        clipboard.peer_switch().set_enabled(true);
+        let network = clipboard.transport();
+        abandon_dependent_picture(&mut receiver, limits);
+        // The detached native/network owner meets the dead scope before input
+        // ticks. It must pause immediately without making recovery impossible.
+        assert_eq!(
+            network.sample(ClientInstant(23_250)),
+            Err(ClipboardError::NotReady)
+        );
+        assert_eq!(input.tick(ClientInstant(23_300)), Ok(false));
+        let next = RecoveryGeneration::INITIAL.next().unwrap();
+        receiver
+            .replace(
+                MediaEpoch {
+                    configuration: CodecConfigurationGeneration::INITIAL,
+                    recovery: next,
+                },
+                MediaBindings::new(11, 12, 13, 14).unwrap(),
+                24_000,
+            )
+            .unwrap();
+        input
+            .follow_recovery(&receiver, ClientInstant(24_000))
+            .unwrap();
+        let ticket = recovery_ticket(next);
+        if ticket_first {
+            input
+                .accept_ticket(&ticket, clock(), ClientInstant(24_500))
+                .unwrap();
+            assert_eq!(
+                network.sample(ClientInstant(24_500)),
+                Err(ClipboardError::NotReady)
+            );
+        }
+        show_recovered_idr(&mut receiver, &mut input, limits);
+        if !ticket_first {
+            assert_eq!(
+                network.sample(ClientInstant(27_000)),
+                Err(ClipboardError::NotReady)
+            );
+            input
+                .accept_ticket(&ticket, clock(), ClientInstant(27_001))
+                .unwrap();
+        }
+        assert_eq!(input.suspended_since(), None);
+        network.sample(ClientInstant(27_001)).unwrap();
+        assert!(matches!(
+            clipboard.offer(1, "new copy after recovery", None, ClientInstant(27_001)),
+            Ok(Offer::Queued(_))
+        ));
+        assert!(!clipboard.is_closed());
+    }
+}
+
+#[test]
+fn matching_recovery_numbers_on_an_unrelated_receiver_cannot_rebind_the_grant() {
+    let (mut receiver, mut input, limits, _) = shown_with(setup_with(granted()));
+    input.expect_reference_recovery();
+    let clipboard = input
+        .attach_clipboard(77, true, ClientInstant(22_000))
+        .unwrap();
+    let network = clipboard.transport();
+    abandon_dependent_picture(&mut receiver, limits);
+    assert_eq!(input.tick(ClientInstant(23_300)), Ok(false));
+    let next = RecoveryGeneration::INITIAL.next().unwrap();
+    let foreign = ReceivePipeline::new(
+        ReceiveConfig {
+            limits,
+            bindings: MediaBindings::new(11, 12, 13, 14).unwrap(),
+            epoch: MediaEpoch {
+                configuration: CodecConfigurationGeneration::INITIAL,
+                recovery: next,
+            },
+            policy: ReceivePolicy::default(),
+        },
+        MediaBudget::new(limits.protocol()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        input.follow_recovery(&foreign, ClientInstant(24_000)),
+        Err(Error::Media(freshness::Error::StaleBinding))
+    );
+    assert_eq!(input.input_view().recovery, RecoveryGeneration::INITIAL);
+    assert_eq!(
+        network.sample(ClientInstant(24_000)),
+        Err(fr_client::clipboard::Error::NotReady)
+    );
+    // The rejected foreign object did not consume the legitimate succession.
+    receiver
+        .replace(
+            MediaEpoch {
+                configuration: CodecConfigurationGeneration::INITIAL,
+                recovery: next,
+            },
+            MediaBindings::new(11, 12, 13, 14).unwrap(),
+            24_000,
+        )
+        .unwrap();
+    input
+        .follow_recovery(&receiver, ClientInstant(24_000))
+        .unwrap();
+    assert_eq!(input.input_view().recovery, next);
+}
+
+#[test]
+fn an_unnegotiated_receiver_loss_still_fences_the_detached_clipboard() {
+    let (mut receiver, mut input, limits, _) = shown_with(setup_with(granted()));
+    let mut clipboard = input
+        .attach_clipboard(77, true, ClientInstant(22_000))
+        .unwrap();
+    abandon_dependent_picture(&mut receiver, limits);
+    assert_eq!(
+        clipboard.transport().sample(ClientInstant(23_250)),
+        Err(fr_client::clipboard::Error::Stopped)
+    );
+    assert!(
+        clipboard
+            .offer(1, "cannot revive", None, ClientInstant(23_250))
+            .is_err()
+    );
+    assert!(clipboard.is_closed());
+}
+
+#[test]
+fn closing_or_dropping_a_receiver_is_terminal_even_when_recovery_was_negotiated() {
+    for close in [false, true] {
+        let (mut receiver, mut input, _, _) = shown_with(setup_with(granted()));
+        input.expect_reference_recovery();
+        let mut clipboard = input
+            .attach_clipboard(77, true, ClientInstant(22_000))
+            .unwrap();
+        if close {
+            receiver.close();
+        } else {
+            drop(receiver);
+        }
+        assert_eq!(
+            clipboard.transport().sample(ClientInstant(23_000)),
+            Err(fr_client::clipboard::Error::Stopped)
+        );
+        assert!(
+            clipboard
+                .offer(1, "closed owner", None, ClientInstant(23_000))
+                .is_err()
+        );
+        assert!(clipboard.is_closed());
+    }
 }

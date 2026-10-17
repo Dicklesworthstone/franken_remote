@@ -1400,19 +1400,20 @@ mod tests {
             control.capabilities.iter().filter(|c| c.required).count(),
             4
         );
-        // The clipboard enable adds three optional boundaries, only with control.
+        // Clipboard adds three optional boundaries and the optional bulk-record
+        // extension, only with control.
         assert_eq!(offer(None, true, false, false), observe);
         let clipboard = offer(Some(core()), true, false, false);
-        assert_eq!(clipboard.capabilities.len(), 13);
+        assert_eq!(clipboard.capabilities.len(), 14);
         assert_eq!(
             clipboard.capabilities.iter().filter(|c| c.required).count(),
             4
         );
-        // The drop directory adds three optional file boundaries, only with
-        // control; the required set never changes.
+        // The drop directory adds three optional file boundaries and the optional
+        // bulk-record extension, only with control; the required set stays fixed.
         assert_eq!(offer(None, false, false, true), observe);
         let files = offer(Some(core()), false, false, true);
-        assert_eq!(files.capabilities.len(), control.capabilities.len() + 3);
+        assert_eq!(files.capabilities.len(), control.capabilities.len() + 4);
         assert_eq!(files.capabilities.iter().filter(|c| c.required).count(), 4);
         for (name, version) in crate::session_startup::FILE_CAPABILITIES {
             assert!(
@@ -1424,6 +1425,19 @@ mod tests {
             );
         }
         assert!(files.validate().is_ok());
+        for enabled in [&clipboard, &files] {
+            assert!(enabled.capabilities.iter().any(|c| {
+                c.name == attachment::BULK_RECORD_CAPABILITY
+                    && c.version == attachment::BULK_RECORD_VERSION
+                    && !c.required
+            }));
+        }
+        assert!(
+            control
+                .capabilities
+                .iter()
+                .all(|c| c.name != attachment::BULK_RECORD_CAPABILITY)
+        );
         for allowed in [
             Capability::Keys,
             Capability::Repeat,

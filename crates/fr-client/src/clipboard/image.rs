@@ -88,6 +88,7 @@ impl ControllerImageClipboard {
     ) -> Result<(ImageBegin, ImageMetadata), Error> {
         let at = match self.clock.sample(now) {
             Ok(at) => at,
+            Err(Error::NotReady) => return Err(Error::NotReady),
             Err(e) => {
                 self.close();
                 return Err(e);

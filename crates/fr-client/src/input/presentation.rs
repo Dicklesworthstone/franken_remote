@@ -147,6 +147,9 @@ impl PresentedInput {
     /// failed or replaced receiver ends the grant at its next check.
     pub fn expect_reference_recovery(&mut self) {
         self.expects_recovery = true;
+        if let Some(owner) = &self.input.clipboard_projection {
+            owner.expect_reference_recovery();
+        }
     }
     /// The receiver lost a reference (plan 12.3): the view cannot advance until
     /// a recovery completes, so active input suspends now rather than at the
@@ -173,6 +176,7 @@ impl PresentedInput {
         let clock = self
             .recovering
             .unwrap_or_else(|| self.view.clock_correlation());
+        self.view.check_recovery_receiver(receiver)?;
         let view = ViewTracker::new(receiver, clock, self.view.max_source_age_us(), now.0)?;
         // A recovery restarts the reference chain of the same configuration;
         // a configuration change is not a recovery.
@@ -180,6 +184,9 @@ impl PresentedInput {
             return Err(Error::ViewMismatch);
         }
         self.input.advance_recovery(view.epoch().recovery, now)?;
+        if let Some(owner) = &self.input.clipboard_projection {
+            owner.follow_recovery(view.receiver_lifetime());
+        }
         self.recovering = None;
         self.view.close();
         self.view = view;
@@ -195,8 +202,9 @@ impl PresentedInput {
     }
     /// Join a separately admitted clipboard lane to this original grant and
     /// decoder-backed visible view. No input owner, media receiver or freshness
-    /// history is recreated. The returned native worker is fenced immediately
-    /// if the original receiver closes, even before this owner's next tick.
+    /// history is recreated. A lapse of a previously presented view constructs
+    /// a paused lane. A fenced receiver permits no clipboard work; only the
+    /// validated recovery join can follow its successor on the same grant.
     pub fn attach_clipboard(
         &mut self,
         channel: u32,
@@ -206,7 +214,7 @@ impl PresentedInput {
         if !granted {
             return Err(Error::Clipboard(crate::clipboard::Error::Permission));
         }
-        if !self.tick(now)? {
+        if !self.tick(now)? && !self.active {
             return Err(self.not_ready());
         }
         self.input
@@ -214,8 +222,8 @@ impl PresentedInput {
             .map_err(Error::Clipboard)
     }
     /// Use the completed dedicated route's exact scope and record allowance.
-    /// Like `attach_clipboard`, this requires real current presentation; numeric
-    /// route metadata never upgrades observation into control or OS permission.
+    /// Like `attach_clipboard`, this requires a genuinely presented original
+    /// grant. It may join paused; numeric metadata grants no payload permission.
     pub fn attach_clipboard_lane(
         &mut self,
         parent: fr_wire::negotiation::ControlBinding,
@@ -227,7 +235,7 @@ impl PresentedInput {
         if !granted {
             return Err(Error::Clipboard(crate::clipboard::Error::Permission));
         }
-        if !self.tick(now)? {
+        if !self.tick(now)? && !self.active {
             return Err(self.not_ready());
         }
         self.input
