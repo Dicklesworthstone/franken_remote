@@ -17,6 +17,8 @@ use fr_core::{
     limits::ProtocolLimits,
 };
 
+pub mod credit;
+
 pub const CAPABILITY: &str = "native-media-attachment";
 pub const VERSION: u16 = 1;
 /// Adds the recovery lane and the fixed video/progress/repair lane family.
