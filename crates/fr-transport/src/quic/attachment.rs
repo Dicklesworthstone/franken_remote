@@ -31,6 +31,7 @@ const ABANDONED: u8 = 3;
 const RETIRED: u8 = 4;
 
 mod multiplex;
+mod record_limit;
 mod retire;
 const MAX_WAIT_US: u64 = 2_000_000;
 
@@ -289,22 +290,24 @@ fn messages(role: MediaRole, host_direction: bool) -> Messages {
 }
 impl QuicRecords {
     fn attachment_allowance(&self, limits: &ProtocolLimits, role: MediaRole) -> u64 {
-        let base = u64::from(limits.max_control_message_bytes())
-            .min(self.policy.stream_window)
-            .min(self.policy.critical_send_bytes as u64);
-        match role {
-            MediaRole::Configuration => base,
-            MediaRole::Recovery | MediaRole::Clipboard | MediaRole::Files => {
-                base.min(self.policy.retained_send_bytes as u64)
-            }
-            // The same advertised cap bounds progress, repairs AND video; for
-            // audio-down, its packet datagrams and small reliable records.
-            // A smaller peer/record ceiling cannot be bypassed via DATAGRAM.
-            MediaRole::Video | MediaRole::AudioDown => {
-                base.min(self.policy.datagram_record_bytes as u64)
-            }
-            MediaRole::Input => base.min(fr_wire::input::MAX_INPUT_RECORD_BYTES as u64),
-        }
+        record_limit::maximum(
+            limits,
+            role,
+            self.policy.stream_window,
+            self.policy.critical_send_bytes,
+            self.policy.retained_send_bytes,
+            self.policy.datagram_record_bytes,
+        )
+    }
+    fn selected_attachment_allowance(&self, selection: &Selection, role: MediaRole) -> u64 {
+        record_limit::negotiated_maximum(
+            selection,
+            role,
+            self.policy.stream_window,
+            self.policy.critical_send_bytes,
+            self.policy.retained_send_bytes,
+            self.policy.datagram_record_bytes,
+        )
     }
     /// Next public channel ID in this connection's consumed namespace. This is
     /// a candidate, not a reservation or permission: offer/accept still validate
@@ -364,8 +367,7 @@ impl QuicRecords {
                 .unwrap_or(0)
             || ticket.is_some_and(|t| self.attachments.iter().any(|r| r.ticket == Some(t)))
             || allowance < GRANT_RECORD_BYTES as u64
-            || allowance > self.policy.stream_window
-            || allowance > self.policy.critical_send_bytes as u64
+            || allowance > self.attachment_allowance(&ProtocolLimits::ABSOLUTE, d.role)
         {
             return Err(Error::WrongRoute);
         }
@@ -596,7 +598,7 @@ impl QuicRecords {
         descriptor
             .validate(scope.parent)
             .map_err(|_| Error::WrongRoute)?;
-        let allowance = self.attachment_allowance(&scope.selection.limits, descriptor.role);
+        let allowance = self.selected_attachment_allowance(scope.selection, descriptor.role);
         let grant = Grant {
             descriptor,
             ticket: request.ticket,
@@ -654,7 +656,7 @@ impl QuicRecords {
             .checked_add(duration_us(timeout)?)
             .ok_or(Error::Clock)?;
         validate_role(&scope, d.role)?;
-        let allowance = self.attachment_allowance(&scope.selection.limits, d.role);
+        let allowance = self.selected_attachment_allowance(scope.selection, d.role);
         let (pair, state, retire) = self.reserve_pair(cx, d, until, None, allowance)?;
         let mut owner = MediaChannel::new(
             self.binding(),
@@ -1045,8 +1047,8 @@ impl MediaChannel {
             }
             let grant = self.grant.ok_or(Error::WrongRoute)?;
             let maximum = usize::try_from(grant.byte_allowance).map_err(|_| Error::TooLarge)?;
-            if maximum > q.policy.critical_send_bytes
-                || grant.byte_allowance > q.policy.stream_window
+            if grant.byte_allowance > self.allowance
+                || grant.byte_allowance > q.attachment_allowance(&self.limits, self.descriptor.role)
             {
                 return Err(Error::TooLarge);
             }

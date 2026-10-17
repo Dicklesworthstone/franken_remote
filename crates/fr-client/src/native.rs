@@ -63,6 +63,8 @@ pub fn control_offer() -> Offer {
 /// host without clipboard drops them and control still negotiates; the
 /// client then reports that absence. Selecting them opens nothing: the lane
 /// attaches only under the granted input attachment, after local consent.
+/// The optional bulk-record extension uses larger records only if the host
+/// selects it too; legacy hosts keep the smaller allowance.
 pub fn control_offer_with_clipboard() -> Offer {
     offer(
         Role::RequestControl,
@@ -99,7 +101,9 @@ pub fn control_offer_with_clipboard() -> Offer {
 /// A host without a drop directory drops them and control still negotiates;
 /// the client then reports that absence. Selecting them sends nothing: the
 /// lane is the host's one-use offer under the granted input attachment, and
-/// only files the local user explicitly selected are ever read.
+/// only files the local user explicitly selected are ever read. The optional
+/// bulk-record extension is separately selected, with legacy-sized records
+/// when the host omits it.
 pub fn control_offer_with_files() -> Offer {
     offer(
         Role::RequestControl,
@@ -208,6 +212,21 @@ fn offer(role: Role, extra: &[(&str, u16, bool)]) -> Offer {
     ]
     .iter()
     .chain(extra)
+    .chain(
+        [(
+            attachment::BULK_RECORD_CAPABILITY,
+            attachment::BULK_RECORD_VERSION,
+            false,
+        )]
+        .iter()
+        .filter(|_| {
+            role == Role::RequestControl
+                && extra.iter().any(|(name, _, _)| {
+                    *name == attachment::CLIPBOARD_CAPABILITY
+                        || *name == attachment::FILES_CAPABILITY
+                })
+        }),
+    )
     .chain(
         [(
             control::LINE_SCROLL_CAPABILITY,

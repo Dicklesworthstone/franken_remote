@@ -334,7 +334,7 @@ fn audio_offer_adds_only_the_optional_downlink_and_negotiates_both_ways() {
 fn combined_control_profile_completes_real_startup_within_the_capability_bound() {
     let combined = fr_client::native::control_offer_with_clipboard_and_files();
     combined.validate().unwrap();
-    assert_eq!(combined.capabilities.len(), 17);
+    assert_eq!(combined.capabilities.len(), 18);
     assert!(combined.capabilities.len() <= negotiation::MAX_CAPABILITIES);
     for cap in control_offer().capabilities {
         if cap.name == receiver_metrics::CAPABILITY {
@@ -404,3 +404,6 @@ fn combined_control_profile_completes_real_startup_within_the_capability_bound()
     startup.sent(17).unwrap();
     assert_eq!(startup.finish(18).unwrap().selection, selected);
 }
+
+#[path = "native_profile/bulk.rs"]
+mod bulk;

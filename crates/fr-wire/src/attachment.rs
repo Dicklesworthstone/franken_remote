@@ -37,6 +37,22 @@ pub const CLIPBOARD_VERSION: u16 = 1;
 /// approved. Requires the original completed input attachment, not observation.
 pub const FILES_CAPABILITY: &str = "native-file-receive";
 pub const FILES_VERSION: u16 = 1;
+/// Optional opt-in to clipboard/file record ceilings derived from their own
+/// bulk budgets instead of the critical-control reserve. Both peers must
+/// select it; absence preserves the legacy allowance and record encodings.
+/// This changes neither item limits nor any attachment/OS authority gate.
+pub const BULK_RECORD_CAPABILITY: &str = "native-bulk-records";
+pub const BULK_RECORD_VERSION: u16 = 1;
+
+/// Positive selection only, never an authority grant or a local budget override.
+pub fn bulk_records_selected(selection: &crate::negotiation::Selection) -> bool {
+    selection.role == crate::negotiation::Role::RequestControl
+        && selection.validate().is_ok()
+        && selection
+            .capabilities
+            .iter()
+            .any(|c| c.name == BULK_RECORD_CAPABILITY && c.version == BULK_RECORD_VERSION)
+}
 pub const BINDING_RECORD_BYTES: usize = HEADER_BYTES + 118;
 pub const GRANT_RECORD_BYTES: usize = BINDING_RECORD_BYTES + 44;
 

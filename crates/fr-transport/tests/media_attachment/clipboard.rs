@@ -307,3 +307,6 @@ mod allocation;
 
 #[path = "clipboard/multiplex.rs"]
 mod multiplex;
+
+#[path = "clipboard/bulk.rs"]
+mod bulk;
