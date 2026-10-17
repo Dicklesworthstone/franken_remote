@@ -131,6 +131,9 @@ impl World {
     async fn turn(&mut self) {
         self.serial += 1;
         authority::present(&self.cx, &mut self.viewer, self.grant, self.serial);
+        self.network_turn().await;
+    }
+    async fn network_turn(&mut self) {
         for app in &mut self.apps {
             app.pump().unwrap();
         }
@@ -145,6 +148,9 @@ impl World {
     }
     async fn transfer(&mut self, from: usize, text: &str, id: u64) {
         copy(&mut self.apps[from], text, id);
+        self.complete_transfer(from, text).await;
+    }
+    async fn complete_transfer(&mut self, from: usize, text: &str) {
         let until = Instant::now() + Duration::from_secs(3);
         loop {
             assert!(
@@ -443,5 +449,59 @@ fn foreign_connection_refusal_never_fences_either_worker_or_connection() {
         assert!(!w.link.h.is_closed() && !w.link.c.is_closed());
         w.transfer(0, "original workers still live", 1).await;
         w.shutdown().await;
+    });
+}
+
+#[test]
+fn view_suspension_preserves_both_real_clipboards_and_original_workers() {
+    runtime().block_on(async {
+        for from in [0, 1] {
+            let mut w = World::new(2048).await;
+            w.transfer(from, "selection before pause", 1).await;
+            let workers = w.worker_ids.lock().unwrap().clone();
+            let paused_at = clock(&w.cx);
+            w.viewer.suspend(fr_client::input::ClientInstant(paused_at));
+            copy(&mut w.apps[from], "copy made while paused", 2);
+            // Keep the actual QUIC connection and worker clocks moving. A new
+            // ticket must be issued beyond the host's possible source-age lapse.
+            while clock(&w.cx) < paused_at + 1_100_000 {
+                w.network_turn().await;
+            }
+            assert!(w.tasks.iter().all(|task| !task.is_finished()));
+            assert!(w.bridges[1 - from].take_received().unwrap().is_none());
+
+            // A separate native reader can still read the last publication;
+            // temporary suspension must not erase the destination selection.
+            let mut reader = open(&w.desktops[1 - from].display);
+            reader.begin_read().unwrap();
+            let until = Instant::now() + Duration::from_millis(500);
+            loop {
+                assert!(Instant::now() < until);
+                w.network_turn().await;
+                if let Some(text) = reader.poll_read().unwrap() {
+                    assert_eq!(text.as_str(), "selection before pause");
+                    break;
+                }
+            }
+            // Exercise both arrival orders. Either prerequisite alone leaves
+            // publication paused; these ticket/presentation inputs are fixtures.
+            if from == 0 {
+                w.serial += 1;
+                authority::present(&w.cx, &mut w.viewer, w.grant, w.serial);
+            } else {
+                authority::renew(&w.cx, &mut w.viewer, w.grant);
+            }
+            w.network_turn().await;
+            assert!(w.bridges[1 - from].take_received().unwrap().is_none());
+            if from == 0 {
+                authority::renew(&w.cx, &mut w.viewer, w.grant);
+            } else {
+                w.serial += 1;
+                authority::present(&w.cx, &mut w.viewer, w.grant, w.serial);
+            }
+            w.complete_transfer(from, "copy made while paused").await;
+            assert_eq!(*w.worker_ids.lock().unwrap(), workers);
+            w.shutdown().await;
+        }
     });
 }

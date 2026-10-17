@@ -444,3 +444,59 @@ fn a_copy_that_outlives_its_deadline_on_a_slow_path_ends_the_clipboard_not_contr
     drop((host, viewer));
     s.daemon.finish();
 }
+
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; real input agent and clipboard child"]
+fn a_capture_stall_keeps_the_clipboard_crossing_both_ways() {
+    use super::real_control::{Painter, stall_capture};
+
+    let mut s = Controlled::start_with(true, true);
+    let mut host = Peer::start(&s.host.display);
+    let mut viewer = Peer::start(&s.viewer.display);
+    let before = unique("before the stall");
+    viewer.copy(&before);
+    if let Err(last) = pasted(&mut host, &before, Duration::from_secs(20)) {
+        panic!(
+            "clipboard never worked (last {last:?}); {}",
+            s.daemon.dump()
+        );
+    }
+    let painter = Painter::start(&s.host.display);
+    thread::sleep(Duration::from_millis(1500));
+    stall_capture(400);
+    assert!(
+        s.pointer_follows((300, 250), Duration::from_secs(20)),
+        "control did not resume: {}",
+        s.daemon.dump()
+    );
+    let to_host = unique("viewer→host after the stall");
+    viewer.copy(&to_host);
+    let host_result = pasted(&mut host, &to_host, Duration::from_secs(20));
+    let to_viewer = unique("host→viewer after the stall");
+    host.copy(&to_viewer);
+    let viewer_result = pasted(&mut viewer, &to_viewer, Duration::from_secs(20));
+    let children = clipboard_children();
+    drop(painter);
+    s.close_viewer();
+    let output = wait_for(s.client, Duration::from_secs(30));
+    let report = completion(&output, &s.daemon.dump());
+    assert!(host_result.is_ok(), "viewer copy did not resume: {report}");
+    assert!(viewer_result.is_ok(), "host copy did not resume: {report}");
+    assert_eq!(children, 1, "the original lane keeps one native owner");
+    assert_eq!(report["outcome"], "stopped", "{report}");
+    assert_eq!(report["attempts"], 1, "{report}");
+    assert_eq!(report["clipboard_active"], true, "{report}");
+    assert_eq!(report["clipboard_absence"], serde_json::Value::Null);
+    assert!(
+        report["last_attempt_media"]["recovered_streams"]
+            .as_u64()
+            .is_some_and(|n| n >= 1),
+        "the capture stall did not exercise reference recovery: {report}"
+    );
+    assert!(
+        report["input_suspensions"].as_u64().is_some_and(|n| n >= 1),
+        "the capture stall did not suspend input: {report}"
+    );
+    drop((host, viewer));
+    s.daemon.finish();
+}

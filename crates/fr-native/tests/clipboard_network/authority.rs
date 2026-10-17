@@ -132,3 +132,41 @@ pub fn present(cx: &Cx, input: &mut InputClient, g: Granted, serial: u64) {
         )
         .unwrap();
 }
+
+pub fn renew(cx: &Cx, input: &mut InputClient, g: Granted) {
+    let now = clock(cx);
+    let mut credentials = g.credentials();
+    credentials.ticket = InputTicketId::from_raw(4);
+    let ticket = fr_wire::input_ticket::Ticket {
+        credentials,
+        sequence: 2,
+        issued_at_us: now,
+        expires_at_us: (now + 1_000_000).min(g.lease_until_us),
+    };
+    let mut bytes = [0; fr_wire::input_ticket::INPUT_TICKET_BYTES];
+    fr_wire::input_ticket::encode(
+        ticket,
+        &mut bytes,
+        &ProtocolLimits::ABSOLUTE,
+        g.input_channel,
+        InputDirection::HostToViewer,
+        InputDelivery::Reliable,
+    )
+    .unwrap();
+    let correlation = ClockCorrelation::new(
+        ClockSample {
+            host_boot: g.request.parent.host_boot,
+            client_sent_us: now,
+            client_received_us: now,
+            host_sample_us: now,
+        },
+        ClockPolicy {
+            drift_ppm: 0,
+            ..ClockPolicy::default()
+        },
+    )
+    .unwrap();
+    input
+        .accept_ticket(&bytes, correlation, ClientInstant(now))
+        .unwrap();
+}

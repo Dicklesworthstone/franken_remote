@@ -16,6 +16,20 @@ pub(super) enum Clock {
     Controller(ControllerTransport),
 }
 impl Clock {
+    /// Advance the actual owner clock even when clipboard payload authority is
+    /// paused. This sample maintains existing handoff deadlines; it grants no
+    /// permission to read, publish or transmit clipboard contents.
+    pub(super) fn sample_maintenance(&self, cx: &Cx) -> Result<(u64, HostInstant), Error> {
+        cx.checkpoint().map_err(|_| Error::Cancelled)?;
+        let local = now(cx)?;
+        let host = match self {
+            Self::Host(_) => HostInstant::from_micros(local),
+            Self::Controller(gate) => gate
+                .sample_maintenance(ClientInstant(local))
+                .map_err(Error::Controller)?,
+        };
+        Ok((local, host))
+    }
     pub(super) fn sample(&self, cx: &Cx) -> Result<(u64, HostInstant), Error> {
         cx.checkpoint().map_err(|_| Error::Cancelled)?;
         let local = now(cx)?;
@@ -158,7 +172,14 @@ impl RecordSink for Sink<'_> {
         bytes: &[u8],
         permit: Egress,
     ) -> Result<Admission, TransportFailure> {
-        let (local, host) = self.clock.sample(self.cx).map_err(|_| TransportFailure)?;
+        let (local, host) = match self.clock.sample(self.cx) {
+            Ok(sample) => sample,
+            // Readiness may lapse after the native owner prepared this record.
+            // Retain the exact operation and its original deadline until the
+            // same authority resumes; no bytes enter the handoff while paused.
+            Err(error) if error.is_suspended() => return Ok(Admission::Backpressure),
+            Err(_) => return Err(TransportFailure),
+        };
         permit.check_operation(host).map_err(|_| TransportFailure)?;
         if permit.context() != self.shared.gate.context() {
             return Err(TransportFailure);

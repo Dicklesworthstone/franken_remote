@@ -332,8 +332,11 @@ attached record allowance produces smaller chunks, never larger control messages
 The caller still retains and checks the non-cloneable transport route: matching
 numeric metadata alone does not establish original connection identity.
 `attach_clipboard` is the convenience form for an already validated lane with
-unchanged session limits. Mapping and qualified presentation must be ready, and
-the lane must differ from the control, display, and input bindings.
+unchanged session limits. Mapping and qualified presentation must have been
+established on that original owner. Attachment may finish during a temporary
+view pause; this retains ownership but permits no clipboard payload until
+readiness returns. The lane must differ from the control, display, and input
+bindings.
 Only one clipboard attachment is allowed per original input owner; closing the
 lane does not permit recreating its replay ledger under the same grant.
 
@@ -343,26 +346,36 @@ checks exclusive expiry before and after native preparation, and never compares
 unrelated host/client clock origins directly. A better correlation cannot make
 its accounting clock stand still or extend an existing item's original deadline.
 Sending a control response does not prove a host renewal: only a validated newer
-host ticket can extend the still-live original projection, and never an already
-expired one. Ticket-only expiry does not shorten an otherwise live control lease.
+host ticket can refresh proof of the original lease. A lapsed proof or temporary
+view loss returns `NotReady` without destroying the attachment. This bounded
+pause grants no observation or publication authority. Fresh, authenticated proof
+of the same lease and current visible presentation are both required to resume,
+in either arrival order. The pause cannot exceed the input owner's ten-second
+view-suspension bound, and it never extends an admitted item's deadline. An
+expired host lease, explicit revocation or stopped owner remains terminal; a
+new grant cannot revive the old clipboard. Ticket-only expiry does not itself
+shorten a lease still held and renewed by the host.
 
 `ControllerClipboard::into_native(X11Clipboard)` produces a
 `ControllerSynchronizer<X11Clipboard>`, using the existing bounded native
 synchronizer, XFixes watcher, UTF-8/INCR reader, publisher, and protocol owners.
 Every `poll` and `receive` callback supplies **client** monotonic time. Poll during
 silence as well as traffic. The worker does not retain the input owner: drop,
-focus loss, suspend, disconnect, view expiry, missed input/control obligations,
+focus loss, explicit lifecycle stop, disconnect, missed input/control obligations,
 and clock failure fence it. Closing the clipboard alone does not revoke input.
-Nor does a lapsed projection (no newer ticket in time, a receiver fenced by a
-lost reference, a clock fault): it ends the clipboard for that grant, and
-input keeps its own ticket, view and lease checks. Until 2026-10-14 the lapse
-also stopped input with `InvalidControl`. That came before negotiated
-reference recovery could suspend the grant, and it was the commonest end of
-lossy controlled sessions (fr-6hbo).
+A temporary view or proof lapse pauses this lane while input keeps its independent
+ticket, view and lease checks. Maintenance advances the conservative accounting
+clock and expires private buffers during the pause; it never supplies payload
+authority. Native watchers retain the current OS selection and coalesce copies
+made during the pause. Interrupted partial reads are consumed, and queued wire
+records retain their original bounds.
 The `PresentedInput` join also retains a read-only lifetime of its exact media
-receiver; closing or dropping that receiver fences detached clipboard work
-immediately, even before the next presented-input tick. Equal numeric bindings
-on another receiver do not replace or revoke that original lifetime.
+receiver. An explicitly negotiated reference recovery may replace the receiver's
+epoch under the same live receiver lineage, unchanged configuration, and a
+strictly newer recovery generation. This only permits waiting for fresh view and
+ticket evidence. Closing or dropping the original receiver fences detached
+clipboard work immediately, even before the next presented-input tick. Equal
+numeric bindings on another receiver do not replace or revoke that lifetime.
 
 The controller tests use actual grant, wire, authority, and media-receiver code
 with explicitly simulated grant/clock/decoder/visibility and record boundaries.

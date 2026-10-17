@@ -4,6 +4,7 @@ use super::{
     Error, HostInstant, IdentifierFailure, NativeClipboard, PlatformError, Received, Synchronizer,
     shared,
 };
+use fr_wire::clipboard::session::synchronize::SyncError;
 use shared::{Clock, Incoming, Shared, Sink, Turn};
 use std::thread::{self, JoinHandle};
 
@@ -55,7 +56,8 @@ impl WorkerSeed {
         mut self,
         factory: impl FnOnce() -> Result<N, PlatformError>,
     ) -> Result<Worker<N>, Error> {
-        self.clock.sample(&self.cx)?;
+        self.clock.sample_maintenance(&self.cx)?;
+        ready(&self.clock, &self.cx)?;
         let native = factory().map_err(Error::NativeSetup)?;
         let owner = match self.session.take().ok_or(Error::Closed)? {
             Session::Host(session) => Native::Host(Synchronizer::new(session, native)),
@@ -74,7 +76,7 @@ impl WorkerSeed {
             ],
             incoming: None,
         };
-        if let Err(error) = worker.clock.sample(&worker.cx) {
+        if let Err(error) = ready(&worker.clock, &worker.cx) {
             worker.close();
             return Err(error);
         }
@@ -170,7 +172,9 @@ impl<N: NativeClipboard> Worker<N> {
         mut new_id: impl FnMut() -> Result<u128, IdentifierFailure>,
     ) -> Result<(), Error> {
         let mut turn = Turn::new(&self.shared);
-        self.clock.sample(&self.cx)?;
+        let (local, host) = self.clock.sample_maintenance(&self.cx)?;
+        self.check_handoffs(local, host)?;
+        ready(&self.clock, &self.cx)?;
         let cx = &self.cx;
         let mut sink = Sink {
             shared: &self.shared,
@@ -178,17 +182,22 @@ impl<N: NativeClipboard> Worker<N> {
             cx,
         };
         // Cx was checked above; no callback/lock may hold a native operation.
+        // The synchronizer also runs maintenance while paused, expiring its
+        // private buffers and cancelling expired reads without observing new
+        // text, publishing or sending. Its submission checks own readiness.
         let local = || ClientInstant(shared::now(cx).unwrap_or(u64::MAX));
         let host = || HostInstant::from_micros(shared::now(cx).unwrap_or(u64::MAX));
-        match &mut self.owner {
-            Native::Host(n) => {
-                n.poll(&mut self.scratch, &mut sink, host, &mut new_id)
-                    .map_err(|_| Error::Native)?;
-            }
-            Native::Controller(n) => {
-                n.poll(&mut self.scratch, &mut sink, local, &mut new_id)
-                    .map_err(|_| Error::Native)?;
-            }
+        let polled = match &mut self.owner {
+            Native::Host(n) => n
+                .poll(&mut self.scratch, &mut sink, host, &mut new_id)
+                .map_err(native_error),
+            Native::Controller(n) => n
+                .poll(&mut self.scratch, &mut sink, local, &mut new_id)
+                .map_err(controller_error),
+        };
+        if paused(polled)? {
+            turn.complete();
+            return Ok(());
         }
         if self.incoming.is_none() {
             self.incoming = self
@@ -200,14 +209,25 @@ impl<N: NativeClipboard> Worker<N> {
                 .take();
         }
         if let Some(record) = &self.incoming {
-            self.clock.sample(cx)?;
+            if !ready(&self.clock, cx)? {
+                turn.complete();
+                return Ok(());
+            }
             let result = match &mut self.owner {
                 Native::Host(n) => n
                     .receive_before(&record.bytes.0, host, record.bound)
-                    .map_err(|_| Error::Native)?,
+                    .map_err(native_error),
                 Native::Controller(n) => n
                     .receive_before(&record.bytes.0, local, record.bound)
-                    .map_err(|_| Error::Native)?,
+                    .map_err(controller_error),
+            };
+            let result = match result {
+                Ok(result) => result,
+                Err(error) if error.is_suspended() => {
+                    turn.complete();
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
             };
             if result != Received::Deferred {
                 self.incoming = None;
@@ -224,9 +244,80 @@ impl<N: NativeClipboard> Worker<N> {
         turn.complete();
         Ok(())
     }
+
+    /// Pausing native calls never pauses original transfer time. The bridge
+    /// owns queued network records; the worker independently checks its one
+    /// deferred incoming record and the fixed slots it shares with that bridge.
+    fn check_handoffs(&self, local: u64, host: HostInstant) -> Result<(), Error> {
+        if !self.shared.gate.is_open() {
+            return Err(Error::Closed);
+        }
+        let until = self
+            .shared
+            .inbound_until
+            .load(std::sync::atomic::Ordering::Acquire);
+        if (until != 0 && local >= until)
+            || self
+                .incoming
+                .as_ref()
+                .is_some_and(|item| host >= item.bound)
+        {
+            return Err(Error::HandoffExpired);
+        }
+        match self.shared.outbox.try_lock() {
+            Ok(outbox) => {
+                if let Some(item) = &outbox.item {
+                    if local >= item.until {
+                        return Err(Error::HandoffExpired);
+                    }
+                    item.permit.check_operation(host).map_err(Error::Session)?;
+                }
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {}
+            Err(std::sync::TryLockError::Poisoned(_)) => return Err(Error::Poisoned),
+        }
+        Ok(())
+    }
 }
+
+/// A paused original grant remains a live owner. Native initialization is
+/// allowed because its factory contract prohibits observing clipboard text;
+/// the first and every later native work turn require a ready result.
+fn ready(clock: &Clock, cx: &Cx) -> Result<bool, Error> {
+    match clock.sample(cx) {
+        Ok(_) => Ok(true),
+        Err(error) if error.is_suspended() => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn paused<T>(result: Result<T, Error>) -> Result<bool, Error> {
+    match result {
+        Ok(_) => Ok(false),
+        Err(error) if error.is_suspended() => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
+fn native_error<E>(error: SyncError<E>) -> Error {
+    match error {
+        SyncError::Session(error) => Error::Session(error),
+        _ => Error::Native,
+    }
+}
+
+fn controller_error<E>(error: fr_client::clipboard::NativeError<E>) -> Error {
+    match error {
+        fr_client::clipboard::NativeError::Authority(error) => Error::Controller(error),
+        fr_client::clipboard::NativeError::Synchronizer(error) => native_error(error),
+    }
+}
+
 impl<N: NativeClipboard> Drop for Worker<N> {
     fn drop(&mut self) {
         self.close();
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -60,6 +60,38 @@ The default sink method preserves immediate synchronous adapters, not permission
 to ignore metadata in a queued adapter. A successful check is not delivery or OS
 publication, and cannot recall an operation already performed by a peer.
 
+## Temporary view suspension
+
+A stale view under a still-held controller lease pauses the original clipboard
+lane. `State::Active` means the attachment remains owned, not that a paused turn
+may admit payloads. The bridge preserves its sequence ledger, native worker and
+stream pair, services the original connection's control renewals, and blocks new
+clipboard enqueue and inbound dispatch until readiness returns. Previously
+admitted transport records retain their original permits and deadlines.
+
+`ControllerTransport::sample_maintenance` advances the conservative clock without
+granting clipboard authority. Both the bridge and worker check retained operation
+and handoff deadlines before treating a readiness refusal as a pause. A queued
+item, three-second handoff, switch transition, cancellation or terminal authority
+failure can therefore still retire the lane during a view pause. No deadline is
+restarted on resume.
+
+The native synchronizer retains its watcher and current OS selection. It does
+not call the native disable operation for a view pause, read new text, or publish
+incoming text while unready. It keeps at most the latest consumed change
+notification, so a copy racing the post-observation check is not lost. An
+unstarted candidate can resume; a partial read that already began is cancelled
+and cannot be retried with a new lifetime. An unconsumed wire record is deferred
+with its original ingress bound. A Commit that reached native preparation is a
+consumed refusal if readiness lapses before publication.
+
+A separately approved attachment may finish while its original controller is
+temporarily paused. Creating the unique channel and opening the bounded native
+owner does not read the clipboard; the first native observation still requires
+fresh readiness. Fresh same-lease ticket proof and qualified visible presentation
+must both return before the controller resumes, regardless of their arrival order.
+Receiver close/drop and actual lease revocation remain terminal.
+
 ## Native worker and network owner
 
 `frd::clipboard_quic::Bridge` joins the completed `ClipboardChannel` to the
@@ -124,7 +156,7 @@ The current network join is conservative: a switch transition (including
 an off/on cycle), expired queued work, or superseded in-flight payload retires
 the optional clipboard pair. It does not silently reopen the consumed channel
 or replay buffered text when a switch is re-enabled. Input and viewing continue
-when retirement is performed between I/O turns. A clipboard loss first seen
+when retirement is performed between I/O turns. A terminal clipboard loss first seen
 inside an active QUIC future (its authority, an item's deadline, a newer local
 copy, a switch, a stopped worker) retires the pair inside that same checked
 operation, before its I/O: the stream reset drops queued bytes and

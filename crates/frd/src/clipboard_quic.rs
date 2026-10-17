@@ -53,8 +53,30 @@ pub enum Error {
     ConsentRequired,
     Transport(quic::Error),
 }
+impl Error {
+    pub(crate) fn is_suspended(self) -> bool {
+        use fr_client::clipboard::Error as ControllerError;
+        use fr_client::input::presentation::Error as PresentationError;
+        use fr_core::clipboard::Error as ClipboardError;
+
+        match self {
+            Self::Session(SessionError::Clipboard(ClipboardError::Suspended)) => true,
+            Self::Controller(error) | Self::Presentation(PresentationError::Clipboard(error)) => {
+                matches!(
+                    error,
+                    ControllerError::NotReady
+                        | ControllerError::Session(SessionError::Clipboard(
+                            ClipboardError::Suspended
+                        ))
+                )
+            }
+            _ => false,
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
+    /// The original owner remains attached, including a bounded readiness pause.
     Active,
     Retired,
 }
@@ -207,16 +229,19 @@ impl Bridge {
     /// Between turns call `service` first so an optional stop can retire just
     /// this lane. A clipboard loss DURING I/O (its authority, an item's
     /// deadline, a newer local copy, a switch) is still fail-closed for the
-    /// clipboard: the connection retires this lane inside the same checked
+    /// clipboard: a terminal refusal retires this lane inside the same checked
     /// operation, before any I/O, dropping its queued bytes and
     /// retransmissions. Only cancellation and a missing clock still fence the
     /// connection. Before, any of these closed the whole session, so one copy
     /// that outlived its deadline on a slow path ended remote control.
+    /// A held lease's temporary view pause stops new payload admission while
+    /// control renewals and already admitted bounded transport work keep moving.
     pub(crate) fn permits_io(&self) -> bool {
         match self.admission() {
             _ if self.retired => true,
             Ok(_) => true,
             Err(Error::Cancelled | Error::Clock) => false,
+            Err(reason) if reason.is_suspended() => true,
             Err(_) => {
                 self.lane.request_retirement();
                 true
@@ -240,7 +265,12 @@ impl Bridge {
         clock: Clock,
         worker_clock: Clock,
     ) -> Result<(Self, WorkerSeed), Error> {
-        clock.sample(&cx)?;
+        clock.sample_maintenance(&cx)?;
+        if let Err(reason) = clock.sample(&cx)
+            && !reason.is_suspended()
+        {
+            return Err(reason);
+        }
         let (a, b) = gate.switches();
         let switches = (a.state(), b.state());
         let shared = Arc::new(Shared {
@@ -328,8 +358,7 @@ impl Bridge {
         if !self.retired
             && let Err(reason) = self.admission()
         {
-            self.reason = Some(reason);
-            self.retire(q)?;
+            return self.on_refusal(q, reason);
         }
         Ok(if self.retired {
             State::Retired
@@ -337,8 +366,17 @@ impl Bridge {
             State::Active
         })
     }
+    fn on_refusal(&mut self, q: &mut QuicRecords, reason: Error) -> Result<State, Error> {
+        if reason.is_suspended() {
+            return Ok(State::Active);
+        }
+        self.reason = Some(reason);
+        self.retire(q)?;
+        Ok(State::Retired)
+    }
     fn admission(&self) -> Result<(u64, HostInstant), Error> {
-        let (local, host) = self.clock.sample(&self.cx)?;
+        // Readiness never stops accounting for an already retained operation.
+        let (local, host) = self.clock.sample_maintenance(&self.cx)?;
         if !self.shared.gate.is_open() {
             return Err(Error::Closed);
         }
@@ -365,6 +403,7 @@ impl Bridge {
         if until != 0 && local >= until {
             return Err(Error::HandoffExpired);
         }
+        self.clock.sample(&self.cx)?;
         Ok((local, host))
     }
     fn release_handoff(&mut self) -> Result<(), Error> {
@@ -417,15 +456,11 @@ impl Bridge {
                 Err(std::sync::TryLockError::Poisoned(_)) => return Err(Error::Poisoned),
             }
         }
-        let (local, host) = match self.admission() {
-            Ok(v) => v,
-            Err(reason) => {
-                self.reason = Some(reason);
-                self.retire(q)?;
-                turn.complete();
-                return Ok(State::Retired);
-            }
-        };
+        if let Err(reason) = self.admission() {
+            let state = self.on_refusal(q, reason)?;
+            turn.complete();
+            return Ok(state);
+        }
         if let Some(p) = &self.pending {
             // The item's own validity is a per-record refusal: if it lapses
             // between this turn's admission and the enqueue, no byte is
@@ -436,10 +471,9 @@ impl Bridge {
                     self.admission().map(drop)
                 }) {
                 Ok(SendAdmission::Refused(reason)) => {
-                    self.reason = Some(reason);
-                    self.retire(q)?;
+                    let state = self.on_refusal(q, reason)?;
                     turn.complete();
-                    return Ok(State::Retired);
+                    return Ok(state);
                 }
                 Ok(SendAdmission::Accepted) => {
                     let p = self.pending.take().expect("accepted exact record");
@@ -459,13 +493,31 @@ impl Bridge {
                 Err(e) => return Err(Error::Transport(e)),
             }
         }
+        let state = match self.dispatch(q, &mut authorize)? {
+            Some(reason) => self.on_refusal(q, reason)?,
+            None => State::Active,
+        };
+        turn.complete();
+        Ok(state)
+    }
+    fn dispatch(
+        &self,
+        q: &mut QuicRecords,
+        authorize: impl FnMut() -> bool,
+    ) -> Result<Option<Error>, Error> {
+        let mut refused = None;
         self.lane
-            .dispatch(q, &self.cx, &mut authorize, |bytes| {
-                self.shared.accept(bytes, local, host)
+            .dispatch(q, &self.cx, authorize, |bytes| match self.admission() {
+                Ok((local, host)) => self.shared.accept(bytes, local, host),
+                Err(reason) => {
+                    // Preserve the exact unconsumed record. A terminal race
+                    // retires just this lane after dispatch returns.
+                    refused = Some(reason);
+                    Ok(Disposition::Blocked)
+                }
             })
             .map_err(Error::Transport)?;
-        turn.complete();
-        Ok(State::Active)
+        Ok(refused)
     }
     /// Drives the EXISTING connection. Keep the containing session's admission
     /// callback and service its other routes separately. Cancellation DURING an
