@@ -240,3 +240,24 @@ fn clock_regression_while_suspended_revokes_original_authority() {
     assert!(session.is_closed());
     assert!(state.revoked.load(Ordering::Acquire));
 }
+
+#[test]
+fn attachment_during_suspension_retains_one_owner_without_admitting_payloads() {
+    let (state, original) = setup();
+    drop(original);
+    state.paused.store(true, Ordering::Release);
+    let mut session = ClipboardSession::with_monitor(
+        Monitor::new(Owner(state.clone())),
+        Endpoint::Host,
+        ProtocolLimits::ABSOLUTE,
+        true,
+        at(1),
+    )
+    .unwrap();
+    assert_eq!(session.begin(begin(), at(1)), Err(Error::Suspended));
+    assert_eq!(session.reserved_bytes(), 0);
+    assert!(!session.is_closed());
+    state.paused.store(false, Ordering::Release);
+    session.begin(begin(), at(2)).unwrap();
+    assert!(session.reserved_bytes() > 0);
+}

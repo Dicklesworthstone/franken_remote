@@ -139,3 +139,42 @@ fn host_lease_expiry_while_paused_still_retires_the_channel() {
     assert_eq!(sender.retained_bytes(), 0);
     assert!(input.monitor().is_revoked());
 }
+
+#[test]
+fn attachment_and_egress_distinguish_a_held_paused_lease_from_revocation() {
+    use fr_wire::clipboard::session::Readiness;
+
+    let (shared, input) = shared_owner();
+    let mut channel = ClipboardChannel::new(
+        &input,
+        context(Role::Host),
+        ProtocolLimits::ABSOLUTE,
+        true,
+        at(100_000),
+    )
+    .unwrap();
+    let transport = channel.transport();
+    assert_eq!(
+        transport.check(at(100_000)),
+        Err(SessionError::Clipboard(Error::Suspended))
+    );
+    let state = channel.maintain(at(100_000)).unwrap();
+    assert!(!state.enabled);
+    assert_eq!(state.readiness, Readiness::Suspended);
+    assert_eq!(
+        channel.offer(7, "waiting", None, at(100_000)),
+        Err(SessionError::Clipboard(Error::Suspended))
+    );
+    assert_eq!(channel.retained_bytes(), 0);
+    resume(&shared, &input);
+    transport.check(at(200_000)).unwrap();
+    channel.offer(7, "ready", None, at(200_000)).unwrap();
+    input.revoke_handle().revoke();
+    assert!(matches!(
+        transport.check(at(200_000)),
+        Err(SessionError::Clipboard(Error::Authority(_)))
+    ));
+}
+
+#[path = "suspension/native.rs"]
+mod native;

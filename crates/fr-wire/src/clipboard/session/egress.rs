@@ -65,13 +65,21 @@ impl Transport {
         if !self.live.load(Ordering::Acquire) {
             return Err(Error::Closed.into());
         }
-        self.monitor
-            .deadline(now)
-            .map_err(|e| SessionError::Clipboard(Error::Authority(e)))?;
+        let deadline = self.monitor.deadline(now);
         if !self.live.load(Ordering::Acquire) {
             return Err(Error::Closed.into());
         }
-        Ok(())
+        deadline.map(drop).map_err(|reason| {
+            SessionError::Clipboard(
+                if reason
+                    == Refusal::Authority(fr_core::authority::AuthorityError::ViewUnready)
+                {
+                    Error::Suspended
+                } else {
+                    Error::Authority(reason)
+                },
+            )
+        })
     }
     /// Fence clipboard work only. Never revoke the input monitor.
     pub fn close(&self) {

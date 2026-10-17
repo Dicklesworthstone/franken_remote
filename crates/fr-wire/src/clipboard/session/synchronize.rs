@@ -5,7 +5,7 @@
 //! host-clock projection, item randomness and the separately attached record lane.
 use super::{
     CancelReason, ChannelSession, ClipboardSink, ClipboardSwitch, Error, HostInstant, Offer, Pump,
-    Receipt, RecordSink, SessionError, Stamp,
+    Readiness, Receipt, RecordSink, SessionError, Stamp,
 };
 use core::fmt;
 
@@ -111,6 +111,8 @@ pub struct Synchronizer<N: NativeClipboard> {
     native: N,
     reading: Option<Reading>,
     candidate: Option<NativeChange>,
+    deferred_change: Option<NativeChange>,
+    readiness: Readiness,
     seen_revision: u64,
     generation: u64,
     watching: bool,
@@ -148,6 +150,8 @@ impl<N: NativeClipboard> Synchronizer<N> {
             native,
             reading: None,
             candidate: None,
+            deferred_change: None,
+            readiness: Readiness::Ready,
             seen_revision: 0,
             generation,
             watching: false,
@@ -177,6 +181,7 @@ impl<N: NativeClipboard> Synchronizer<N> {
         self.channel.close();
         self.reading = None;
         self.candidate = None;
+        self.deferred_change = None;
         self.watching = false;
         if !self.closed {
             self.closed = true;
@@ -187,9 +192,19 @@ impl<N: NativeClipboard> Synchronizer<N> {
         self.reading = None;
         self.native.cancel_read();
     }
+    // A temporary view pause keeps the native watcher and current selection.
+    // Only unpublished partial reads are consumed; no retry gets a new lifetime.
+    fn pause(&mut self) {
+        self.readiness = Readiness::Suspended;
+        if self.reading.is_some() {
+            self.retire_read();
+        }
+    }
     fn suspend(&mut self) -> Result<(), SyncError<N::Error>> {
         self.reading = None;
         self.candidate = None;
+        self.deferred_change = None;
+        self.readiness = Readiness::Disabled;
         self.generation = self.channel.observation_generation;
         if self.watching {
             self.watching = false;
@@ -202,10 +217,17 @@ impl<N: NativeClipboard> Synchronizer<N> {
             return Err(SessionError::Clipboard(Error::Closed).into());
         }
         let state = self.channel.maintain(now)?;
-        if !state.enabled || self.generation != self.channel.observation_generation {
+        if self.generation != self.channel.observation_generation
+            || state.readiness == Readiness::Disabled
+        {
             self.suspend()?;
             return Ok(false);
         }
+        if state.readiness == Readiness::Suspended {
+            self.pause();
+            return Ok(false);
+        }
+        self.readiness = Readiness::Ready;
         Ok(true)
     }
     fn native_changes(
@@ -228,6 +250,11 @@ impl<N: NativeClipboard> Synchronizer<N> {
             }
         }
         let changes = self.native.changes().map_err(SyncError::Native)?;
+        // The OS notification has been consumed. Retain just its latest bounded
+        // metadata if readiness lapses during this call, before any text read.
+        if changes.latest.is_some() {
+            self.deferred_change = changes.latest;
+        }
         let now = clock();
         if !self.admit(now)? {
             return Ok(false);
@@ -235,7 +262,7 @@ impl<N: NativeClipboard> Synchronizer<N> {
         if self.native.revision() < self.seen_revision {
             return Err(SyncError::NativeRevision);
         }
-        if let Some(change) = changes.latest {
+        if let Some(change) = self.deferred_change.take() {
             if change.revision == 0
                 || change.revision > self.native.revision()
                 || change.revision < self.seen_revision
@@ -286,6 +313,15 @@ impl<N: NativeClipboard> Synchronizer<N> {
             .poll_inner(scratch.0, sink, &mut clock, &mut new_id)
         {
             Ok(progress) => progress,
+            Err(SyncError::Session(SessionError::Clipboard(Error::Suspended)))
+                if !turn.owner.is_closed() =>
+            {
+                turn.owner.pause();
+                Progress {
+                    read: ReadProgress::Suspended,
+                    send: Pump::Suspended,
+                }
+            }
             Err(SyncError::Session(SessionError::Clipboard(Error::Disabled)))
                 if !turn.owner.is_closed() =>
             {
@@ -308,6 +344,12 @@ impl<N: NativeClipboard> Synchronizer<N> {
         new_id: &mut impl FnMut() -> Result<u128, IdentifierFailure>,
     ) -> Result<Progress<N::Error>, SyncError<N::Error>> {
         let settled = self.native_changes(clock)?;
+        if self.readiness == Readiness::Suspended {
+            return Ok(Progress {
+                read: ReadProgress::Suspended,
+                send: Pump::Suspended,
+            });
+        }
         if !self.watching {
             // Release-only cancellation may still be admitted while disabled.
             let send = self.channel.pump(scratch, sink, &mut *clock)?;
@@ -324,6 +366,12 @@ impl<N: NativeClipboard> Synchronizer<N> {
             });
         }
         let read = self.read_step(clock, new_id)?;
+        if self.readiness == Readiness::Suspended {
+            return Ok(Progress {
+                read,
+                send: Pump::Suspended,
+            });
+        }
         // poll_read may itself service ownership changes. Retire/fence before
         // any stale bytes escape; the next bounded turn reports the new revision.
         if self.native.revision() != self.seen_revision {
@@ -346,7 +394,7 @@ impl<N: NativeClipboard> Synchronizer<N> {
         new_id: &mut impl FnMut() -> Result<u128, IdentifierFailure>,
     ) -> Result<ReadProgress<N::Error>, SyncError<N::Error>> {
         if self.reading.is_none() {
-            let Some(change) = self.candidate.take() else {
+            let Some(change) = self.candidate else {
                 return Ok(ReadProgress::Idle);
             };
             let now = clock();
@@ -354,6 +402,7 @@ impl<N: NativeClipboard> Synchronizer<N> {
                 return Ok(ReadProgress::Suspended);
             }
             let deadline = self.channel.observe(now)?.deadline();
+            self.candidate = None;
             let id = new_id().map_err(|_| SyncError::Identifier)?;
             if id == 0 {
                 return Err(SyncError::Identifier);
@@ -448,6 +497,12 @@ impl<N: NativeClipboard> Synchronizer<N> {
         };
         let settled = match turn.owner.native_changes(&mut clock) {
             Ok(settled) => settled,
+            Err(SyncError::Session(SessionError::Clipboard(Error::Suspended)))
+                if !turn.owner.is_closed() =>
+            {
+                turn.owner.pause();
+                false
+            }
             Err(SyncError::Session(SessionError::Clipboard(Error::Disabled)))
                 if !turn.owner.is_closed() =>
             {
@@ -464,11 +519,13 @@ impl<N: NativeClipboard> Synchronizer<N> {
         let mut publication = PublicationGuard {
             native: &mut turn.owner.native,
             revision: turn.owner.seen_revision,
+            prepared: false,
         };
         let result = turn
             .owner
             .channel
             .receive_before(bytes, &mut publication, &mut clock, bound);
+        let prepared = publication.prepared;
         let result = match result {
             Ok(receipt) => {
                 if turn.owner.channel.last_publication != previous {
@@ -478,6 +535,12 @@ impl<N: NativeClipboard> Synchronizer<N> {
                     turn.owner.candidate = None;
                 }
                 Received::Consumed(receipt)
+            }
+            Err(SessionError::Clipboard(Error::Suspended)) if !prepared => {
+                // No Begin/Chunk cursor or commit preparation was consumed.
+                // Keep this exact record and its original ingress deadline.
+                turn.owner.pause();
+                Received::Deferred
             }
             Err(error) if !turn.owner.channel.is_closed() => {
                 if turn.owner.generation != turn.owner.channel.observation_generation {
@@ -502,6 +565,7 @@ impl<N: NativeClipboard> Drop for Synchronizer<N> {
 struct PublicationGuard<'a, N: NativeClipboard> {
     native: &'a mut N,
     revision: u64,
+    prepared: bool,
 }
 impl<N: NativeClipboard> ClipboardSink for PublicationGuard<'_, N> {
     fn prepare(
@@ -509,6 +573,7 @@ impl<N: NativeClipboard> ClipboardSink for PublicationGuard<'_, N> {
         text: &str,
         stamp: Stamp,
     ) -> Result<(), fr_core::clipboard::PlatformError> {
+        self.prepared = true;
         self.native.prepare_for_revision(text, stamp, self.revision)
     }
     fn publish(&mut self, text: &str, stamp: Stamp) -> fr_core::clipboard::Publication {

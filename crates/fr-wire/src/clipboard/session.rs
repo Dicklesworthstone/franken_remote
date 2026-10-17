@@ -61,10 +61,27 @@ pub enum Offer {
     EchoSuppressed,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Readiness {
+    Ready,
+    Disabled,
+    Suspended,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Maintenance {
+    /// Whether this turn may admit payloads; `readiness` explains a pause.
     pub enabled: bool,
+    pub readiness: Readiness,
     pub incoming_expired: bool,
     pub outgoing_expired: bool,
+}
+impl Maintenance {
+    fn require_ready(self) -> Result<(), SessionError> {
+        match self.readiness {
+            Readiness::Ready => Ok(()),
+            Readiness::Disabled => Err(Error::Disabled.into()),
+            Readiness::Suspended => Err(Error::Suspended.into()),
+        }
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Admission {
@@ -320,6 +337,7 @@ impl ChannelSession {
     pub fn maintain(&mut self, now: HostInstant) -> Result<Maintenance, SessionError> {
         let mut state = Maintenance {
             enabled: true,
+            readiness: Readiness::Ready,
             incoming_expired: false,
             outgoing_expired: false,
         };
@@ -328,12 +346,16 @@ impl ChannelSession {
             Err(Error::Disabled) => {
                 self.invalidate_observations();
                 state.enabled = false;
+                state.readiness = Readiness::Disabled;
                 self.discard_pending(CancelReason::Disabled);
             }
             // Keep the same bounded transfer, sequence and deadline. The
             // second pre-send check below still refuses every payload while
             // suspended; maintenance continues expiring items during silence.
-            Err(Error::Suspended) => state.enabled = false,
+            Err(Error::Suspended) => {
+                state.enabled = false;
+                state.readiness = Readiness::Suspended;
+            }
             Err(Error::Expired) => state.incoming_expired = true,
             Err(error) => {
                 self.close();
@@ -357,9 +379,7 @@ impl ChannelSession {
         origin: Option<Stamp>,
         now: HostInstant,
     ) -> Result<Offer, SessionError> {
-        if !self.maintain(now)?.enabled {
-            return Err(Error::Disabled.into());
-        }
+        self.maintain(now)?.require_ready()?;
         match self.receiver.local_change(origin, now) {
             Ok(false) => return Ok(Offer::EchoSuppressed),
             Ok(true) => {}
@@ -377,9 +397,7 @@ impl ChannelSession {
         now: HostInstant,
         observation_deadline: Option<HostInstant>,
     ) -> Result<Offer, SessionError> {
-        if !self.maintain(now)?.enabled {
-            return Err(Error::Disabled.into());
-        }
+        self.maintain(now)?.require_ready()?;
         self.discard_pending(CancelReason::Superseded);
         if id == 0 {
             return Err(WireError::InvalidValue.into());

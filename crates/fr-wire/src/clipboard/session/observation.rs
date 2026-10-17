@@ -26,9 +26,7 @@ impl ChannelSession {
     /// calls. A new grant, lease renewal or off/on cycle cannot extend the read.
     /// This does not open/read a clipboard or fabricate viewer authority.
     pub fn observe(&mut self, now: HostInstant) -> Result<Observation<'_>, SessionError> {
-        if !self.maintain(now)?.enabled {
-            return Err(Error::Disabled.into());
-        }
+        self.maintain(now)?.require_ready()?;
         // The read's cap: authorization, not the host's input view window.
         let authority_deadline = self
             .monitor
@@ -61,9 +59,7 @@ impl Observation<'_> {
         }
         // Fail closed even if a future authority implementation unwinds.
         self.finished = true;
-        if !self.channel.maintain(now)?.enabled {
-            return Err(Error::Disabled.into());
-        }
+        self.channel.maintain(now)?.require_ready()?;
         if now >= self.deadline {
             return Err(Error::Expired.into());
         }

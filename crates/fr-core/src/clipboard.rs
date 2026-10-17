@@ -312,7 +312,13 @@ impl ClipboardSession {
             local_revision: 0,
             published: None,
         };
-        session.check(now)?;
+        // Attachment can finish while an already granted controller is waiting
+        // for a fresh view. Retain this unique owner and its replay ledger, but
+        // every payload operation must still pass the normal readiness check.
+        match session.check(now) {
+            Ok(_) | Err(Error::Suspended) => {}
+            Err(error) => return Err(error),
+        }
         Ok(session)
     }
     pub const fn binding(&self) -> Binding {
