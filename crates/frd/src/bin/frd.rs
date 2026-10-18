@@ -74,12 +74,17 @@ OPTIONS:
     --clipboard     With --input-agent: the controller's UTF-8 text clipboard
                     follows its lease, both directions (the agent's per-lane
                     --clipboard child owns X11 CLIPBOARD). Off by default
-    --files DIR     With --input-agent: the controller may send regular files
+    --files DIR     With --input-agent: the controller may send files or portable
+                    directory trees
                     (fr connect --control --send) into DIR, an existing absolute
                     directory owned by this user and not group/other-writable,
                     reached without symlinks. Only under the live input lease;
-                    never overwrites (a taken name is refused); staged privately
-                    and published atomically. Off by default
+                    never overwrites; staged privately and published atomically.
+                    Off by default
+    --files-conflict reject|keep-both  Taken destination names are refused by
+                    default. keep-both publishes the complete verified file/tree
+                    under a conflict-marked name; never merges or overwrites.
+                    Requires --files; selected only by this host operator
     --files-max-file-bytes N     Largest accepted file (default 268435456)
     --files-max-session-bytes N  Total declared bytes per controlled session,
                     refused offers included (default 1073741824)
@@ -735,20 +740,8 @@ fn files(
     options: &frd::host_policy::options::RunOptions,
     json: bool,
 ) -> Result<Option<frd::native_files::Directory>, ExitCode> {
-    use frd::native_files::{Directory, DirectoryRefusal, Limits};
-    let Some(path) = &options.files else {
-        return Ok(None);
-    };
-    let defaults = Limits::default();
-    let limits = Limits {
-        max_file_bytes: options
-            .files_max_file_bytes
-            .unwrap_or(defaults.max_file_bytes),
-        max_session_bytes: options
-            .files_max_session_bytes
-            .unwrap_or(defaults.max_session_bytes),
-    };
-    Directory::open(path, limits).map(Some).map_err(|refusal| {
+    use frd::native_files::DirectoryRefusal;
+    options.open_files().map_err(|refusal| {
         let detail = match refusal {
             DirectoryRefusal::Relative => "--files needs an absolute directory path",
             DirectoryRefusal::Missing => "--files names no existing directory; create it first",

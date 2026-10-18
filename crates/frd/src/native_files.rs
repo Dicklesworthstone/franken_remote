@@ -34,7 +34,7 @@ use std::{
     time::Duration,
 };
 
-pub use fr_files::receive::Publication;
+pub use fr_files::receive::{ConflictPolicy, Publication};
 pub use fr_files::sender::batch::Report;
 
 /// At most this many `--send` selections per connection (the batch owner's
@@ -165,6 +165,14 @@ impl Directory {
             _ => DirectoryRefusal::Unavailable,
         })?;
         Ok(Self { directory, limits })
+    }
+    /// A host-operator choice, never an option taken from the transfer manifest.
+    /// The pinned directory and shared reservations survive changes on a clone;
+    /// changing this preference grants no new input or file authority.
+    #[must_use]
+    pub fn with_conflict_policy(mut self, policy: ConflictPolicy) -> Self {
+        self.directory = self.directory.with_conflict_policy(policy);
+        self
     }
     pub const fn limits(&self) -> Limits {
         self.limits

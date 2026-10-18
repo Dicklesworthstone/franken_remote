@@ -1,6 +1,10 @@
 //! Strict local command parsing and startup resolution. No filesystem mutation.
 use super::{Approval, Change, Error, Policy, Sharing, Store, default_path};
-use crate::host_run::{Encoder, video};
+use crate::{
+    host_run::{Encoder, video},
+    native_files::ConflictPolicy,
+};
+mod files;
 use std::path::PathBuf;
 
 /// Effective startup options; overrides never modify the saved policy.
@@ -61,6 +65,8 @@ pub struct RunOptions {
     /// `--files DIR`: the controller's drop directory (needs `input_agent`;
     /// the caller validates it by type before any I/O).
     pub files: Option<PathBuf>,
+    /// Local collision handling for both files and whole trees. Absent: reject.
+    pub files_conflict: Option<ConflictPolicy>,
     /// Per-file byte limit for `--files` (default in `native_files`).
     pub files_max_file_bytes: Option<u64>,
     /// Per-controlled-session cumulative byte limit for `--files`.
@@ -160,6 +166,9 @@ impl RunOptions {
                 "--audio-server" => set(&mut options.audio_server, PathBuf::from(value))?,
                 "--audio-sink" => set(&mut options.audio_sink, value.to_owned())?,
                 "--files" => set(&mut options.files, PathBuf::from(value))?,
+                "--files-conflict" => {
+                    set(&mut options.files_conflict, files::parse_conflict(value)?)?;
+                }
                 "--files-max-file-bytes" => set(&mut options.files_max_file_bytes, bytes(value)?)?,
                 "--files-max-session-bytes" => {
                     set(&mut options.files_max_session_bytes, bytes(value)?)?;
@@ -194,12 +203,8 @@ impl RunOptions {
         if !options.audio && (options.audio_server.is_some() || options.audio_sink.is_some()) {
             return Err(Error::InvalidArgument);
         }
-        // So are file limits without a drop directory.
-        if options.files.is_none()
-            && (options.files_max_file_bytes.is_some() || options.files_max_session_bytes.is_some())
-        {
-            return Err(Error::InvalidArgument);
-        }
+        // File limits or conflict choices cannot implicitly enable receiving.
+        let _ = options.file_conflict_policy()?;
         Ok(options)
     }
     /// Resolve only explicit operator input; absence never selects hardware or
@@ -222,6 +227,7 @@ impl RunOptions {
         .map_err(|_| Error::InvalidArgument)
     }
     pub fn resolve(&self) -> Result<Effective, Error> {
+        let _ = self.file_conflict_policy()?;
         let _ = self.selected_encoder()?;
         let _ = self.video_profile()?;
         if self.port == Some(0) {

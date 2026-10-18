@@ -224,3 +224,6 @@ const fn system_kind() -> ServiceKind {
 mod encoder_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod file_conflict_tests;
