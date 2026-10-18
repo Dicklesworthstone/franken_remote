@@ -296,6 +296,24 @@ impl ControlledViewer {
         }
         self.files.stop(&mut self.session.transport)
     }
+    /// Poll cleanup of an already stopped file lane without stopping desktop
+    /// control, awaiting a worker or blocking on a kernel read. Keep this owner
+    /// until success; pending and failed cleanup never permit a replacement.
+    /// Completed receipts remain available, including publication uncertainty.
+    pub fn try_finish_file_cleanup(&mut self) -> Option<Result<(), Error>> {
+        if !self.files.stopped || self.files.pending.is_some() {
+            return None;
+        }
+        let result = self
+            .files
+            .sender
+            .as_mut()
+            .map_or(Some(Ok(())), Sender::try_finish_cleanup);
+        if let Some(Err(error)) = result {
+            self.files.failure.get_or_insert(error);
+        }
+        result
+    }
     /// Stop files, then join the already-finished original disk source using a separate
     /// cleanup context. Expiry/cancellation/drop keep the sender and receipt here;
     /// there is no detached replacement, renewed deadline or blocking thread join.

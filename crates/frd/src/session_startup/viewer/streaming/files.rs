@@ -1,50 +1,49 @@
-//! `fr connect --control --send`: the user's explicit selection rides THIS
-//! controller's one-use drop lane (`file-channel-scope`), never a new grant,
-//! connection or retry.
-//!
-//! Ordering is the safety property: `viewer` runs at the start of every
-//! network turn, before the controller drives, so the drop expectation exists
-//! before this controller can answer its first control challenge. The host
-//! offers only after that renewal (`running::streaming::files`), hence never
-//! to a viewer that does not expect it. The batch starts only once the lane
-//! is established; reading, hashing and sending stay on the sender's bounded
-//! disk thread. Status is content-free (indices, sizes, typed outcomes).
+//! The explicit selection rides THIS controller's one-use drop lane. The host
+//! offers after the first control renewal, so even cancellation before control
+//! must install the expectation and settle that original bounded handshake.
+//! Source cancellation/cleanup never borrows or cancels the desktop context.
 use super::super::controlled::ControlledViewer;
 use crate::native_files::{Absence, SETUP_TIMEOUT, SendControl, SendPhase, SendRequest};
-use fr_files::{sender::Stage, session::Permission};
+use fr_files::{
+    sender::{Error, Policy, Progress, Stage, batch::Report},
+    session::Permission,
+};
 
 pub(in crate::session_startup) struct Lane {
     request: Option<SendRequest>,
+    policy: Policy,
     control: SendControl,
     expecting: bool,
+    cancelled: bool,
 }
 impl Lane {
     pub(in crate::session_startup) fn new(request: SendRequest, control: SendControl) -> Self {
         Self {
+            policy: request.policy,
             request: Some(request),
             control,
             expecting: false,
+            cancelled: false,
         }
     }
-    /// Bounded and nonblocking: no source is opened or read here.
-    pub(in crate::session_startup) fn viewer(&mut self, viewer: &mut ControlledViewer) {
+    /// No source read, blocking join, alternate transport pump or renewed grant.
+    pub(in crate::session_startup) fn viewer(&mut self, viewer: &mut impl Endpoint) {
+        let cancel = self.control.cancel_requested();
+        if cancel {
+            // Release queued descriptors now, but keep the agreed attachment's
+            // policy/expectation. Skipping it would make the host's offer fatal.
+            self.request = None;
+        }
         if !self.expecting {
-            let Some(request) = &self.request else {
-                return;
-            };
-            // The user's explicit `--send` is this side's local permission.
-            match viewer.expect_file_drop(Permission::new(true), request.policy, SETUP_TIMEOUT) {
+            match viewer.expect(self.policy) {
                 Ok(()) => {
                     self.expecting = true;
                     self.control
                         .update(|status| status.phase = SendPhase::Negotiating);
                 }
-                // Only a momentarily stale view refuses a live controller here
-                // (fresh permission, selection already checked). Nothing was
-                // spent: no channel, no deadline. Retry next turn; a host offer
-                // that races ahead of it fails this session, as any unexpected
-                // attachment record does, and never publishes anything.
-                Err(fr_files::sender::Error::Cancelled) if !viewer.is_closed() => {}
+                // Nothing was spent on a momentarily stale view: retry only
+                // this unstarted expectation, not the source or a sent record.
+                Err(Error::Cancelled) if !viewer.closed() => {}
                 Err(error) => {
                     self.expecting = true;
                     self.request = None;
@@ -53,35 +52,109 @@ impl Lane {
             }
             return;
         }
-        if self.request.is_some() && !viewer.file_send_negotiating() {
-            let Some(request) = self.request.take() else {
+        if viewer.negotiating() {
+            self.observe(viewer);
+            return;
+        }
+        if cancel {
+            // Observe first: cancellation cannot rewrite a success that arrived
+            // on the preceding network turn, nor invent rollback of an effect.
+            self.observe(viewer);
+            if self.control.status().report.is_some_and(|r| r.complete) {
                 return;
-            };
-            if viewer.file_stage() == Some(Stage::Idle) {
-                match viewer.send_files(request.selection, request.lifetime) {
+            }
+            if !self.cancelled {
+                self.cancelled = true;
+                if let Err(error) = viewer.cancel() {
+                    self.control.end(Absence::Refused(error));
+                }
+            }
+            self.poll_cleanup(viewer);
+            if self.control.status().report.is_none()
+                && self.control.snapshot().cleanup == Some(Ok(()))
+            {
+                self.control.end(Absence::Refused(Error::Cancelled));
+            }
+            return;
+        }
+        if let Some(request) = self.request.take() {
+            if viewer.stage() == Some(Stage::Idle) {
+                match viewer.start(request) {
                     Ok(()) => self
                         .control
                         .update(|status| status.phase = SendPhase::Sending),
                     Err(error) => self.control.end(Absence::Refused(error)),
                 }
             } else {
-                let failure = viewer
-                    .file_failure()
-                    .unwrap_or(fr_files::sender::Error::Closed);
-                self.control.end(Absence::SetupFailed(failure));
+                self.control.end(Absence::SetupFailed(
+                    viewer.failure().unwrap_or(Error::Closed),
+                ));
             }
         }
+        // A failed sender also needs nonblocking cleanup while the desktop
+        // stays open. Its stopped Slot no longer runs ordinary sender service.
+        self.poll_cleanup(viewer);
+    }
+    fn poll_cleanup(&self, viewer: &mut impl Endpoint) {
+        self.control.cleaned(viewer.cleanup());
         self.observe(viewer);
     }
-    /// Copy the ordered receipts, including after closure or source reaping.
-    pub(in crate::session_startup) fn observe(&self, viewer: &ControlledViewer) {
-        if let Some(report) = viewer.file_batch_report() {
-            self.control.update(|status| {
-                status.report = Some(report);
-                if report.complete {
-                    status.phase = SendPhase::Finished;
-                }
-            });
-        }
+    /// Called on ordinary turns AND after final parent cleanup. Keep the real
+    /// ordered receipts; bytes queued alone never advance the phase to Finished.
+    pub(in crate::session_startup) fn observe(&self, viewer: &impl Endpoint) {
+        let report = viewer.report();
+        self.control
+            .observe(report.as_ref(), viewer.stage(), viewer.progress());
     }
 }
+
+/// The production adapter retains all admission, authority, publication and
+/// cleanup decisions in `ControlledViewer`. Tests script only these boundaries,
+/// not a replacement transport or evidence of a live session.
+pub(in crate::session_startup) trait Endpoint {
+    fn expect(&mut self, policy: Policy) -> Result<(), Error>;
+    fn closed(&self) -> bool;
+    fn negotiating(&self) -> bool;
+    fn stage(&self) -> Option<Stage>;
+    fn failure(&self) -> Option<Error>;
+    fn start(&mut self, request: SendRequest) -> Result<(), Error>;
+    fn cancel(&mut self) -> Result<(), Error>;
+    fn cleanup(&mut self) -> Option<Result<(), Error>>;
+    fn report(&self) -> Option<Report>;
+    fn progress(&self) -> Option<Progress>;
+}
+impl Endpoint for ControlledViewer {
+    fn expect(&mut self, policy: Policy) -> Result<(), Error> {
+        self.expect_file_drop(Permission::new(true), policy, SETUP_TIMEOUT)
+    }
+    fn closed(&self) -> bool {
+        self.is_closed()
+    }
+    fn negotiating(&self) -> bool {
+        self.file_send_negotiating()
+    }
+    fn stage(&self) -> Option<Stage> {
+        self.file_stage()
+    }
+    fn failure(&self) -> Option<Error> {
+        self.file_failure()
+    }
+    fn start(&mut self, request: SendRequest) -> Result<(), Error> {
+        self.send_files(request.selection, request.lifetime)
+    }
+    fn cancel(&mut self) -> Result<(), Error> {
+        self.cancel_files()
+    }
+    fn cleanup(&mut self) -> Option<Result<(), Error>> {
+        self.try_finish_file_cleanup()
+    }
+    fn report(&self) -> Option<Report> {
+        self.file_batch_report()
+    }
+    fn progress(&self) -> Option<Progress> {
+        self.file_progress()
+    }
+}
+
+#[cfg(test)]
+mod tests;

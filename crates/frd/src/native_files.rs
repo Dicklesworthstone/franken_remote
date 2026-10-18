@@ -30,7 +30,6 @@ use std::{
     io,
     os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
 
@@ -425,44 +424,8 @@ pub struct SendStatus {
     /// The batch's ordered, content-free receipts, retained after closure.
     pub report: Option<Report>,
 }
-/// Content-free UI handle for ONE attempt's selection. A clone never grants
-/// authority, retries a file or starts another selection.
-#[derive(Clone)]
-pub struct SendControl(Arc<Mutex<SendStatus>>);
-impl fmt::Debug for SendControl {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("FileSendControl")
-            .field(&self.status())
-            .finish()
-    }
-}
-impl SendControl {
-    pub(crate) fn new() -> Self {
-        Self(Arc::new(Mutex::new(SendStatus {
-            phase: SendPhase::WaitingForControl,
-            absence: None,
-            report: None,
-        })))
-    }
-    fn lock(&self) -> MutexGuard<'_, SendStatus> {
-        // Plain status; no caller code runs under this lock.
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-    pub fn status(&self) -> SendStatus {
-        *self.lock()
-    }
-    pub(crate) fn update(&self, change: impl FnOnce(&mut SendStatus)) {
-        change(&mut self.lock());
-    }
-    pub(crate) fn end(&self, absence: Absence) {
-        self.update(|status| {
-            status.phase = SendPhase::Ended;
-            status.absence.get_or_insert(absence);
-        });
-    }
-}
+mod control;
+pub use control::{SendControl, SendSnapshot};
 
 #[cfg(test)]
 mod tests;
