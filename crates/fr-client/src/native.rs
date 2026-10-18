@@ -198,6 +198,11 @@ fn offer(role: Role, extra: &[(&str, u16, bool)]) -> Offer {
         (attachment::CAPABILITY, 1, true),
         (attachment::DELIVERY_CAPABILITY, 1, true),
         (
+            attachment::credit::CAPABILITY,
+            attachment::credit::VERSION,
+            false,
+        ),
+        (
             receiver_metrics::CAPABILITY,
             receiver_metrics::VERSION,
             false,

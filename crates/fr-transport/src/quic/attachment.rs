@@ -127,6 +127,9 @@ pub struct MediaChannel {
     result: Option<AttachedChannel>,
     receive_armed: bool,
     allowance: u64,
+    /// Fixed by this connection's bilateral selection, never inferred from an
+    /// incoming layout or a generous generic protocol limit.
+    credit: bool,
 }
 impl fmt::Debug for MediaChannel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -706,6 +709,7 @@ impl MediaChannel {
             result: None,
             receive_armed: !host,
             allowance,
+            credit: attachment::credit::selected(scope.selection),
         }
     }
     pub const fn deadline_us(&self) -> u64 {
@@ -795,6 +799,26 @@ impl MediaChannel {
     fn stage(&mut self, m: Message) -> Result<(), Error> {
         if self.len != 0 {
             return Err(Error::WrongRoute);
+        }
+        if self.credit
+            && let Message::Accepted(binding) = m
+        {
+            // The viewer has already reserved the pair against its original
+            // local policy. This acceptance communicates that exact ceiling;
+            // it cannot enlarge a queue, grant authority or replace a ticket.
+            self.len = attachment::credit::encode(
+                attachment::credit::Accepted {
+                    binding,
+                    byte_allowance: self.allowance,
+                },
+                self.parent,
+                &self.limits,
+                &mut self.pending,
+                InputDirection::ViewerToHost,
+                InputDelivery::Reliable,
+            )
+            .map_err(|_| Error::Malformed)?;
+            return Ok(());
         }
         self.len = attachment::encode(
             m,
@@ -956,6 +980,33 @@ impl MediaChannel {
         Ok(())
     }
     fn received(&mut self, bytes: &[u8], binding: u32) -> Result<(), Error> {
+        if self.credit && self.host && self.phase == Phase::BindingAck {
+            let accepted = attachment::credit::decode(
+                bytes,
+                self.parent,
+                &self.limits,
+                InputDirection::ViewerToHost,
+                InputDelivery::Reliable,
+            )
+            .map_err(|_| Error::Malformed)?;
+            if binding != self.parent.id || accepted.binding != self.descriptor.binding.parent.id {
+                return Err(Error::WrongRoute);
+            }
+            let grant = accepted
+                .negotiate(
+                    self.grant.ok_or(Error::WrongRoute)?,
+                    self.parent,
+                    &self.limits,
+                )
+                .map_err(|_| Error::Malformed)?;
+            // Narrow before the one-use Ticket and native receive window are
+            // exposed. Attach, Attached and final promotion all compare this
+            // same immutable grant; no subsequent acceptance can rewrite it.
+            self.grant = Some(grant);
+            self.stage(Message::Ticket(grant))?;
+            self.phase = Phase::Ticket;
+            return Ok(());
+        }
         let m = attachment::decode(
             bytes,
             self.parent,

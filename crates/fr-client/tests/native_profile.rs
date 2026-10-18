@@ -63,7 +63,7 @@ fn shipped_profile_is_observation_only_with_mandatory_bootstrap_and_optional_rec
     let offer = observation_offer();
     offer.validate().unwrap();
     assert_eq!(offer.role, Role::Observe);
-    assert_eq!(offer.capabilities.len(), 7);
+    assert_eq!(offer.capabilities.len(), 8);
     for name in [
         display::CAPABILITY,
         decoder::CAPABILITY,
@@ -78,6 +78,7 @@ fn shipped_profile_is_observation_only_with_mandatory_bootstrap_and_optional_rec
         receiver_metrics::CAPABILITY,
         recovery_request::CAPABILITY,
         fr_wire::cursor::CAPABILITY,
+        attachment::credit::CAPABILITY,
     ] {
         let cap = offer.capabilities.iter().find(|c| c.name == name).unwrap();
         assert!(!cap.required);
@@ -334,7 +335,7 @@ fn audio_offer_adds_only_the_optional_downlink_and_negotiates_both_ways() {
 fn combined_control_profile_completes_real_startup_within_the_capability_bound() {
     let combined = fr_client::native::control_offer_with_clipboard_and_files();
     combined.validate().unwrap();
-    assert_eq!(combined.capabilities.len(), 18);
+    assert_eq!(combined.capabilities.len(), 19);
     assert!(combined.capabilities.len() <= negotiation::MAX_CAPABILITIES);
     for cap in control_offer().capabilities {
         if cap.name == receiver_metrics::CAPABILITY {
@@ -407,3 +408,6 @@ fn combined_control_profile_completes_real_startup_within_the_capability_bound()
 
 #[path = "native_profile/bulk.rs"]
 mod bulk;
+
+#[path = "native_profile/credit.rs"]
+mod credit;

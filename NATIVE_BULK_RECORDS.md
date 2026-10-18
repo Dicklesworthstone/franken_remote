@@ -13,7 +13,11 @@ selected protocol bytes, local stream window and local retained bulk bytes.
 Default policies therefore allow 65,536 bytes rather than 8,192. Reservation,
 received grants and final promotion all retain their local/negotiated bounds;
 a peer with a smaller local pool refuses an oversized grant before promotion.
-The native grant is not a negotiation of otherwise unadvertised pool sizes.
+This bulk-record capability alone does not negotiate otherwise unadvertised pool
+sizes. When both peers also select [`native-attachment-credit`
+v1](NATIVE_ATTACHMENT_CREDIT.md), the same exchange narrows the host's grant to
+the viewer's local role allowance before issuing its ticket, allowing asymmetric
+endpoint budgets to interoperate within the smaller bound.
 
 Configuration, input, recovery, video and audio limits do not grow. Recovery
 still fits both its bulk forward and critical reverse pools. No aggregate queue

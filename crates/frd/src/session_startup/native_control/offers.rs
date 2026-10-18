@@ -77,6 +77,13 @@ pub fn host_offer_with_files(control: bool, clipboard: bool, audio: bool, files:
     let mut capabilities: Vec<_> = observation
         .iter()
         .map(|&(name, version)| (name, version, true))
+        // Each endpoint advertises its existing role-specific ceiling in the
+        // attachment exchange. This can only narrow the host's reserved grant.
+        .chain([(
+            attachment::credit::CAPABILITY,
+            attachment::credit::VERSION,
+            false,
+        )])
         .chain(
             controlling
                 .iter()

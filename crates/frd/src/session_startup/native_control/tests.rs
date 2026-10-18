@@ -113,12 +113,13 @@ fn host_offer_makes_control_optional_and_never_upgrades_an_observer() {
     use fr_client::native::{control_offer, observation_offer};
     let observe_only = host_offer(false);
     assert!(observe_only.validate().is_ok());
-    assert_eq!(observe_only.capabilities.len(), 6);
-    // Only remote-cursor forwarding and reference recovery are optional;
+    assert_eq!(observe_only.capabilities.len(), 7);
+    // Cursor forwarding, reference recovery and attachment credit are optional;
     // bootstrap stays mandatory.
     assert!(observe_only.capabilities.iter().all(|c| c.required
         != (c.name == fr_wire::cursor::CAPABILITY
-            || c.name == fr_wire::recovery_request::CAPABILITY)));
+            || c.name == fr_wire::recovery_request::CAPABILITY
+            || c.name == fr_wire::attachment::credit::CAPABILITY)));
     // Without control, a controller is a typed required-capability refusal.
     assert!(matches!(
         observe_only.intersect(&control_offer()),
@@ -126,7 +127,7 @@ fn host_offer_makes_control_optional_and_never_upgrades_an_observer() {
     ));
     let control = host_offer(true);
     assert!(control.validate().is_ok());
-    assert_eq!(control.capabilities.len(), 10);
+    assert_eq!(control.capabilities.len(), 11);
     assert_eq!(
         control.capabilities.iter().filter(|c| c.required).count(),
         4
@@ -160,7 +161,7 @@ fn clipboard_is_offered_optionally_only_with_control_and_the_local_enable() {
     assert_eq!(host_offer_with(false, true), host_offer(false));
     let host = host_offer_with(true, true);
     assert!(host.validate().is_ok());
-    assert_eq!(host.capabilities.len(), 14);
+    assert_eq!(host.capabilities.len(), 15);
     assert_eq!(host.capabilities.iter().filter(|c| c.required).count(), 4);
     let client = control_offer_with_clipboard();
     assert!(client.validate().is_ok());
@@ -648,7 +649,7 @@ fn the_drop_lane_and_clipboard_require_independent_positive_selection() {
             .cloned(),
     );
     both_lanes.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
-    assert_eq!(both_lanes.capabilities.len(), 19);
+    assert_eq!(both_lanes.capabilities.len(), 20);
     assert!(both_lanes.validate().is_ok());
     // The bounded combined profile negotiates each lane independently.
     let mut minimal = host_offer_with_files(true, true, false, true);
@@ -657,7 +658,7 @@ fn the_drop_lane_and_clipboard_require_independent_positive_selection() {
     assert_eq!(files_lane(&clipboard), Ok(()));
     let combined = fr_client::native::control_offer_with_clipboard_and_files();
     assert!(combined.validate().is_ok());
-    assert_eq!(combined.capabilities.len(), 18);
+    assert_eq!(combined.capabilities.len(), 19);
     for (clipboard, files) in [(false, false), (true, false), (false, true), (true, true)] {
         let selection = select(
             host_offer_with_files(true, clipboard, false, files),

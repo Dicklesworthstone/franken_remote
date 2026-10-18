@@ -52,19 +52,35 @@ impl MediaChannel {
         // Validate the complete original-session record before classifying it.
         // An unknown ACK, malformed record or wrong tuple on our own binding
         // stays a protocol error, never an ignored message or another grant.
-        let message = attachment::decode(
-            bytes,
-            self.parent,
-            self.parent.id,
-            &self.limits,
-            if self.host {
-                InputDirection::ViewerToHost
+        let message =
+            if self.credit && self.host && bytes.get(6..8) == Some(&0x001c_u16.to_be_bytes()) {
+                // Sibling dispatch must use the SAME positively selected layout as
+                // the owner. Validate its complete credit before deferring; only
+                // the matching owner may intersect that credit with its reservation.
+                let accepted = attachment::credit::decode(
+                    bytes,
+                    self.parent,
+                    &self.limits,
+                    InputDirection::ViewerToHost,
+                    InputDelivery::Reliable,
+                )
+                .map_err(|_| Error::Malformed)?;
+                Message::Accepted(accepted.binding)
             } else {
-                InputDirection::HostToViewer
-            },
-            InputDelivery::Reliable,
-        )
-        .map_err(|_| Error::Malformed)?;
+                attachment::decode(
+                    bytes,
+                    self.parent,
+                    self.parent.id,
+                    &self.limits,
+                    if self.host {
+                        InputDirection::ViewerToHost
+                    } else {
+                        InputDirection::HostToViewer
+                    },
+                    InputDelivery::Reliable,
+                )
+                .map_err(|_| Error::Malformed)?
+            };
         Ok(match message {
             // The other viewer-side acceptor has not reserved its pair yet.
             // Leave its offer in the original parser, without allocation.

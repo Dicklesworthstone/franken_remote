@@ -49,7 +49,41 @@ clipboard, files, audio or input by itself. A controller with 8 KiB of local
 bulk storage can agree with a 64 KiB host without accepting a 64 KiB record.
 A smaller input, video or audio allowance likewise cannot enlarge another role.
 
-## Codec checkpoint
+## Native integration
+
+The shipped host and client offers advertise this optional capability for
+observation and control. Every native auxiliary role uses the selected exchange,
+including replacement media channels during recovery. The connection's existing
+`MediaChannel` owner retains the selection, stages the viewer's reserved local
+allowance, intersects the host grant before Ticket, and promotes the exact same
+grant into both reliable routes and applicable datagram bounds.
+
+Concurrent clipboard and file attachments share the original control stream.
+Their dispatcher validates the same selected acceptance layout before deferring
+a sibling's record. Reversed acknowledgement order therefore keeps each role's
+own reservation and ticket. Unknown bindings, malformed credit and unselected
+extended records remain refusals. No body-length guessing or in-session
+downgrade is introduced.
+
+The regression targets are:
+
+```sh
+cargo test --locked -p fr-transport --test media_attachment
+cargo test --locked -p fr-client --test native_profile
+cargo test --locked -p frd --lib session_startup::native_control
+```
+
+The transport tests use real local UDP/TLS connections with synthetic admitted
+identities and payload fixtures. They cover all seven roles with asymmetric
+endpoint policies in both directions, repeated bounded records, oversized
+refusal without additional retained storage, concurrent clipboard/file
+attachment, both layout mismatches, invalid credit, consumed-binding replay
+and incompatible optional versions. Native host/client profile tests use the
+actual offer and negotiation codecs and preserve all other selected
+capabilities when either peer lacks the extension. These tests do not establish
+native-device, live-tailnet or WAN performance qualification.
+
+## Earlier codec checkpoint
 
 The wire codec and immutable grant intersection pass six dedicated tests,
 including an independently written 36-byte fixture, every stream split and
@@ -58,10 +92,8 @@ allowances, malformed grants and bilateral version selection. They run within
 458 passing fr-core/fr-wire tests (zero failures/ignored) on the pinned
 nightly-2026-08-31. All-target fr-wire Clippy with warnings denied passes.
 
-This checkpoint does not advertise the capability or change native attachment
-orchestration yet. Those changes require wiring the same selected decoder into
-the attachment owner and the shared clipboard/file dispatcher. A codec test is
-not native transport, live-tailnet or device qualification. Tests used verified
-retained c45b547 sources plus the exact previously published bulk-record files;
-the edited attachment baseline matches main 9805165. This is a scoped component
-check, not a complete current-main workspace build.
+That earlier checkpoint preceded native orchestration. It used verified retained
+c45b547 sources plus the exact previously published bulk-record files; the edited
+attachment baseline matched main 9805165. Its results are a scoped component
+check, not a complete current-main workspace build or qualification of the
+native integration above.

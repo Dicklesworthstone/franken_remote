@@ -48,6 +48,14 @@ fn every_host_option_combination_preserves_explicit_opt_in_and_required_gates() 
                 for audio in [false, true] {
                     let offer = host_offer_with_files(control, clipboard, audio, files);
                     offer.validate().unwrap();
+                    let credit = offer
+                        .capabilities
+                        .iter()
+                        .filter(|cap| cap.name == attachment::credit::CAPABILITY)
+                        .collect::<Vec<_>>();
+                    assert_eq!(credit.len(), 1);
+                    assert_eq!(credit[0].version, attachment::credit::VERSION);
+                    assert!(!credit[0].required);
                     assert!(offer.capabilities.len() <= negotiation::MAX_CAPABILITIES);
                     assert_eq!(offer.limits, ProtocolLimits::ABSOLUTE);
                     let required: Vec<_> =
@@ -79,6 +87,7 @@ fn every_host_option_combination_preserves_explicit_opt_in_and_required_gates() 
                     }
                     let observed = select(&offer, &observation_offer_with_audio());
                     assert_eq!(observed.role, Role::Observe);
+                    assert!(attachment::credit::selected(&observed));
                     assert!(!attachment::bulk_records_selected(&observed));
                     assert_eq!(fr_wire::audio_control::downlink_selected(&observed), audio);
                     if !control {
@@ -105,6 +114,7 @@ fn real_host_and_client_round_trip_every_independent_lane_combination() {
                             let client = control_offer_with_auxiliary(cc, cf, ca);
                             let selected = select(&host, &client);
                             assert_eq!(selected.role, Role::RequestControl);
+                            assert!(attachment::credit::selected(&selected));
                             assert_eq!(selected.limits, ProtocolLimits::ABSOLUTE);
                             assert_eq!(
                                 attachment::bulk_records_selected(&selected),
@@ -177,5 +187,48 @@ fn unknown_optional_bulk_version_is_not_a_failed_control_or_an_upgrade() {
         let selected = select(&h, &c);
         assert_eq!(selected, expected);
         assert!(!attachment::bulk_records_selected(&selected));
+    }
+}
+
+#[test]
+fn attachment_credit_negotiates_independently_and_preserves_legacy_peers() {
+    for (host, client) in [
+        (host_offer(false), fr_client::native::observation_offer()),
+        (
+            host_offer_with_audio(false, false, true),
+            observation_offer_with_audio(),
+        ),
+        (
+            with_line_scroll(host_offer_with_files(true, true, true, true)),
+            control_offer_with_auxiliary(true, true, true),
+        ),
+    ] {
+        let mut expected = select(&host, &client);
+        assert!(attachment::credit::selected(&expected));
+        expected
+            .capabilities
+            .retain(|cap| cap.name != attachment::credit::CAPABILITY);
+        for change_host in [false, true] {
+            for omit in [false, true] {
+                let mut h = host.clone();
+                let mut c = client.clone();
+                let changed = if change_host { &mut h } else { &mut c };
+                if omit {
+                    changed
+                        .capabilities
+                        .retain(|cap| cap.name != attachment::credit::CAPABILITY);
+                } else {
+                    changed
+                        .capabilities
+                        .iter_mut()
+                        .find(|cap| cap.name == attachment::credit::CAPABILITY)
+                        .unwrap()
+                        .version += 1;
+                }
+                let selected = select(&h, &c);
+                assert_eq!(selected, expected);
+                assert!(!attachment::credit::selected(&selected));
+            }
+        }
     }
 }
