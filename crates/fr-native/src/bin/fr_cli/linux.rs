@@ -1031,7 +1031,12 @@ mod tests {
         assert!(offer.validate().is_ok());
         assert_eq!(offer.role, fr_wire::negotiation::Role::Observe);
         assert_eq!(offer, fr_client::native::observation_offer());
-        assert_eq!(offer.capabilities.len(), 7);
+        assert_eq!(offer.capabilities.len(), 8);
+        assert!(offer.capabilities.iter().any(|c| {
+            c.name == fr_wire::attachment::credit::CAPABILITY
+                && c.version == fr_wire::attachment::credit::VERSION
+                && !c.required
+        }));
         assert!(offer.capabilities.iter().all(|c| !c.name.contains("input")
             && !c.name.contains("clipboard")
             && !c.name.contains("audio")));

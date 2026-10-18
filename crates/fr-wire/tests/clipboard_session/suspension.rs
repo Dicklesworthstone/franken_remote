@@ -129,6 +129,59 @@ fn second_authority_check_defers_payload_without_advancing_its_cursor() {
 }
 
 #[test]
+fn suspension_at_the_final_send_check_keeps_the_pending_cancel() {
+    let (shared, input) = shared_owner();
+    let mut sender = session(&input, Role::Controller);
+    let old = stamp(sender.offer(4, "old", None, at(0)).unwrap());
+    let mut gate = Gate::default();
+    assert_eq!(pump(&mut sender, &mut gate, 0), Pump::RecordAccepted);
+    sender.offer(5, "replacement", None, at(1)).unwrap();
+
+    let mut calls = 0;
+    let mut scratch = vec![0xa5; 16_477];
+    assert_eq!(
+        sender
+            .pump(&mut scratch, &mut gate, || {
+                calls += 1;
+                at(if calls == 1 { 99_999 } else { 100_000 })
+            })
+            .unwrap(),
+        Pump::Deferred
+    );
+    assert_eq!(gate.calls, 1);
+    assert!(scratch.iter().all(|byte| *byte == 0));
+    assert_eq!(pump(&mut sender, &mut gate, 100_000), Pump::Suspended);
+    assert_eq!(gate.calls, 1);
+    assert!(!sender.is_closed());
+
+    resume(&shared, &input);
+    assert_eq!(
+        pump(&mut sender, &mut gate, 200_000),
+        Pump::CancelAccepted(old)
+    );
+    let cancel = decode(
+        &gate.last,
+        context(Role::Controller),
+        &ProtocolLimits::ABSOLUTE,
+    )
+    .unwrap();
+    assert_eq!(cancel.stamp, old);
+    assert!(matches!(
+        cancel.body,
+        Body::Cancel(CancelReason::Superseded)
+    ));
+    assert_eq!(pump(&mut sender, &mut gate, 200_000), Pump::RecordAccepted);
+    let replacement = decode(
+        &gate.last,
+        context(Role::Controller),
+        &ProtocolLimits::ABSOLUTE,
+    )
+    .unwrap();
+    assert!(matches!(replacement.body, Body::Begin { .. }));
+    assert_ne!(replacement.stamp, old);
+}
+
+#[test]
 fn host_lease_expiry_while_paused_still_retires_the_channel() {
     let (_, input) = shared_owner();
     let mut sender = session(&input, Role::Controller);

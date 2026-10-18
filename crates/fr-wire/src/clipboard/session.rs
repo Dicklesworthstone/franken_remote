@@ -452,6 +452,9 @@ impl ChannelSession {
             .min(self.limits.max_control_message_bytes() as usize);
         let scratch = Scratch(&mut scratch[..size]);
         let state = self.maintain(clock())?;
+        if state.readiness == Readiness::Suspended {
+            return Ok(Pump::Suspended);
+        }
         let (stamp, cancellation, len) = if let Some((stamp, reason)) = self.cancel {
             let len = encode(
                 Message {
@@ -475,7 +478,9 @@ impl ChannelSession {
         };
         let now = clock();
         let state = self.maintain(now)?;
-        let still_current = if cancellation {
+        let still_current = if state.readiness == Readiness::Suspended {
+            false
+        } else if cancellation {
             self.cancel.is_some_and(|(current, _)| current == stamp)
         } else {
             state.enabled

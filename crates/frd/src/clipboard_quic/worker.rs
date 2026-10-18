@@ -190,12 +190,12 @@ impl<N: NativeClipboard> Worker<N> {
         let polled = match &mut self.owner {
             Native::Host(n) => n
                 .poll(&mut self.scratch, &mut sink, host, &mut new_id)
-                .map_err(native_error),
+                .map_err(|error| native_error(&error)),
             Native::Controller(n) => n
                 .poll(&mut self.scratch, &mut sink, local, &mut new_id)
-                .map_err(controller_error),
+                .map_err(|error| controller_error(&error)),
         };
-        if paused(polled)? {
+        if paused(&polled)? {
             turn.complete();
             return Ok(());
         }
@@ -216,10 +216,10 @@ impl<N: NativeClipboard> Worker<N> {
             let result = match &mut self.owner {
                 Native::Host(n) => n
                     .receive_before(&record.bytes.0, host, record.bound)
-                    .map_err(native_error),
+                    .map_err(|error| native_error(&error)),
                 Native::Controller(n) => n
                     .receive_before(&record.bytes.0, local, record.bound)
-                    .map_err(controller_error),
+                    .map_err(|error| controller_error(&error)),
             };
             let result = match result {
                 Ok(result) => result,
@@ -282,7 +282,8 @@ impl<N: NativeClipboard> Worker<N> {
 
 /// A paused original grant remains a live owner. Native initialization is
 /// allowed because its factory contract prohibits observing clipboard text;
-/// the first and every later native work turn require a ready result.
+/// text reads and remote publication require readiness. An existing watcher
+/// can service bounded metadata and already-published local selections.
 fn ready(clock: &Clock, cx: &Cx) -> Result<bool, Error> {
     match clock.sample(cx) {
         Ok(_) => Ok(true),
@@ -291,24 +292,24 @@ fn ready(clock: &Clock, cx: &Cx) -> Result<bool, Error> {
     }
 }
 
-fn paused<T>(result: Result<T, Error>) -> Result<bool, Error> {
+fn paused<T>(result: &Result<T, Error>) -> Result<bool, Error> {
     match result {
         Ok(_) => Ok(false),
         Err(error) if error.is_suspended() => Ok(true),
-        Err(error) => Err(error),
+        Err(error) => Err(*error),
     }
 }
 
-fn native_error<E>(error: SyncError<E>) -> Error {
+fn native_error<E>(error: &SyncError<E>) -> Error {
     match error {
-        SyncError::Session(error) => Error::Session(error),
+        SyncError::Session(error) => Error::Session(*error),
         _ => Error::Native,
     }
 }
 
-fn controller_error<E>(error: fr_client::clipboard::NativeError<E>) -> Error {
+fn controller_error<E>(error: &fr_client::clipboard::NativeError<E>) -> Error {
     match error {
-        fr_client::clipboard::NativeError::Authority(error) => Error::Controller(error),
+        fr_client::clipboard::NativeError::Authority(error) => Error::Controller(*error),
         fr_client::clipboard::NativeError::Synchronizer(error) => native_error(error),
     }
 }

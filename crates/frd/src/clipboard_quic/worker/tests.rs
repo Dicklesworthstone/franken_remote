@@ -271,7 +271,11 @@ fn pause_keeps_subscription_and_sends_the_latest_local_copy_after_resume() {
     f.copy("latest while paused");
     f.clock.advance_to(Time::from_millis(500));
     f.step().unwrap();
-    assert_eq!(f.os.lock().unwrap().changes, changes);
+    {
+        let os = f.os.lock().unwrap();
+        assert_eq!(os.changes, changes + 2);
+        assert_eq!((os.reads, os.publications, os.suspends), (0, 0, 0));
+    }
     assert!(f.shared.outbox.lock().unwrap().item.is_none());
     f.permission.paused.store(false, Ordering::Release);
     let mut chunks = Vec::new();

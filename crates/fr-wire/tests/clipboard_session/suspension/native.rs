@@ -121,11 +121,19 @@ fn paused_native_owner_keeps_selection_and_sends_only_latest_copy_after_resume()
     {
         let state = state.borrow();
         assert_eq!(state.text, "copy during pause");
-        assert_eq!(state.changes, changes);
+        assert_eq!(state.changes, changes + 1);
         assert_eq!((state.reads, state.publications, state.suspends), (0, 0, 0));
     }
     assert_eq!(gate.calls, 0);
     state.borrow_mut().copy("latest");
+    poll(&mut native, &mut gate, 150_000);
+    {
+        let state = state.borrow();
+        assert_eq!(state.changes, changes + 2);
+        assert!(!state.dirty, "metadata was retained for resumption");
+        assert_eq!((state.reads, state.publications, state.suspends), (0, 0, 0));
+    }
+    assert_eq!(gate.calls, 0);
     resume(&shared, &input);
     poll(&mut native, &mut gate, 200_000);
     let begin = decode(&gate.last, context(Role::Host), &ProtocolLimits::ABSOLUTE).unwrap();

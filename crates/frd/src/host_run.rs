@@ -1355,47 +1355,23 @@ mod tests {
         ] {
             assert!(names.iter().any(|n| n == required), "{required}");
         }
-        // Only remote-cursor forwarding and reference recovery are optional;
-        // bootstrap stays mandatory. Recovery is offered and used in both
+        // Cursor forwarding, reference recovery and attachment credit are
+        // optional; bootstrap stays mandatory. Recovery is used in both
         // modes: a controller's input stays suspended until it completes.
         assert!(observe.capabilities.iter().all(|c| c.required
             != (c.name == fr_wire::cursor::CAPABILITY
-                || c.name == fr_wire::recovery_request::CAPABILITY)));
+                || c.name == fr_wire::recovery_request::CAPABILITY
+                || c.name == attachment::credit::CAPABILITY)));
+        assert!(observe.capabilities.iter().any(|c| {
+            c.name == attachment::credit::CAPABILITY && c.version == attachment::credit::VERSION
+        }));
         assert!(observe.capabilities.iter().any(|c| {
             c.name == fr_wire::recovery_request::CAPABILITY
                 && c.version == fr_wire::recovery_request::VERSION
         }));
         // Control boundaries are offered only with an input agent, optionally.
         let control = offer(Some(core()), false, false, false);
-        assert_eq!(control.capabilities.len(), 10);
-        // Audio-down is offered only with the local enable, and optionally.
-        for control_offer in [false, true] {
-            let without = offer(control_offer.then(core), false, false, false);
-            assert!(
-                without
-                    .capabilities
-                    .iter()
-                    .all(|c| c.name != fr_wire::audio::CAPABILITY)
-            );
-            let with = offer(control_offer.then(core), false, true, false);
-            // Control also offers the optional native-audio-control extension.
-            assert_eq!(
-                with.capabilities.len(),
-                without.capabilities.len() + 1 + usize::from(control_offer)
-            );
-            assert_eq!(
-                with.capabilities
-                    .iter()
-                    .any(|c| { c.name == fr_wire::audio_control::CAPABILITY && !c.required }),
-                control_offer
-            );
-            assert!(with.capabilities.iter().any(|c| {
-                c.name == fr_wire::audio::CAPABILITY
-                    && c.version == fr_wire::audio::VERSION
-                    && !c.required
-            }));
-            assert!(with.validate().is_ok());
-        }
+        assert_eq!(control.capabilities.len(), 11);
         assert_eq!(
             control.capabilities.iter().filter(|c| c.required).count(),
             4
@@ -1404,7 +1380,7 @@ mod tests {
         // extension, only with control.
         assert_eq!(offer(None, true, false, false), observe);
         let clipboard = offer(Some(core()), true, false, false);
-        assert_eq!(clipboard.capabilities.len(), 14);
+        assert_eq!(clipboard.capabilities.len(), 15);
         assert_eq!(
             clipboard.capabilities.iter().filter(|c| c.required).count(),
             4
@@ -1453,6 +1429,38 @@ mod tests {
             Capability::Relative,
         ] {
             assert!(!control_capabilities().contains(absent));
+        }
+    }
+
+    #[test]
+    fn host_audio_offer_requires_local_enable_and_preserves_the_control_extension() {
+        // Audio-down is offered only with the local enable, and optionally.
+        for control_offer in [false, true] {
+            let without = offer(control_offer.then(core), false, false, false);
+            assert!(
+                without
+                    .capabilities
+                    .iter()
+                    .all(|c| c.name != fr_wire::audio::CAPABILITY)
+            );
+            let with = offer(control_offer.then(core), false, true, false);
+            // Control also offers the optional native-audio-control extension.
+            assert_eq!(
+                with.capabilities.len(),
+                without.capabilities.len() + 1 + usize::from(control_offer)
+            );
+            assert_eq!(
+                with.capabilities
+                    .iter()
+                    .any(|c| { c.name == fr_wire::audio_control::CAPABILITY && !c.required }),
+                control_offer
+            );
+            assert!(with.capabilities.iter().any(|c| {
+                c.name == fr_wire::audio::CAPABILITY
+                    && c.version == fr_wire::audio::VERSION
+                    && !c.required
+            }));
+            assert!(with.validate().is_ok());
         }
     }
 

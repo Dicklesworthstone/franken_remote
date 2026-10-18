@@ -39,6 +39,9 @@ pub trait NativeClipboard: ClipboardSink {
     type Error: fmt::Debug;
     /// Start a fresh subscription and return its bootstrap revision.
     fn watch(&mut self) -> Result<u64, Self::Error>;
+    /// Service bounded events and report only change metadata, never request
+    /// text. An existing watcher also services its last published selection
+    /// during a view pause; new reads and publications still require readiness.
     fn changes(&mut self) -> Result<NativeChanges, Self::Error>;
     fn revision(&self) -> u64;
     /// Prepare without publishing, then service bounded native change metadata
@@ -234,7 +237,7 @@ impl<N: NativeClipboard> Synchronizer<N> {
         &mut self,
         clock: &mut impl FnMut() -> HostInstant,
     ) -> Result<bool, SyncError<N::Error>> {
-        if !self.admit(clock())? {
+        if !self.admit(clock())? && (self.readiness != Readiness::Suspended || !self.watching) {
             return Ok(false);
         }
         if !self.watching {
@@ -249,6 +252,9 @@ impl<N: NativeClipboard> Synchronizer<N> {
                 return Ok(false);
             }
         }
+        // The original watcher must keep serving already-published native
+        // selections during a pause. This bounded metadata turn cannot read
+        // text; its latest change stays deferred until the readiness check.
         let changes = self.native.changes().map_err(SyncError::Native)?;
         // The OS notification has been consumed. Retain just its latest bounded
         // metadata if readiness lapses during this call, before any text read.
