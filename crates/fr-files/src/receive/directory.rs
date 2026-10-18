@@ -1,6 +1,10 @@
 //! Portable ATP file trees, staged beneath one private directory and published
 //! with one no-replace rename. No peer path is resolved from the process cwd.
-use super::{Error, MAX_CHUNK_BYTES, Publication, Reservation, STAGING_PREFIX, State};
+use super::conflict::{MAX_CONFLICT_ATTEMPTS, conflict_name};
+use super::{
+    ConflictPolicy, Error, MAX_CHUNK_BYTES, Publication, Reservation, STAGING_PREFIX, State,
+};
+
 use asupersync::net::atp::{
     transport_common::{StagedEntryReceive, flat_merkle_root_from_digests, hex_encode},
     transport_tcp::ManifestEntry,
@@ -10,6 +14,10 @@ use rustix::{
     fs::{self, AtFlags, Mode, OFlags, RenameFlags},
 };
 use std::{collections::BTreeMap, fs::File, io::Write};
+
+/// Local outcome for a whole published tree. Names are private to the receiving
+/// UI; both durability variants mean publication has happened and forbid replay.
+pub type PublishedDirectory = super::PublishedFile;
 
 /// Bounds include implicit directories, not just content bytes. Empty files
 /// cannot evade descriptor, inode, manifest, or cleanup-work admission.
@@ -147,10 +155,14 @@ struct Entry {
 /// All descriptors and exact created names are owned until cleanup/publication.
 /// Cleanup never recursively walks peer-controlled or newly inserted paths.
 pub struct PendingDirectory {
-    reservation: Reservation,
-    directories: Vec<Directory>,
+    // After cleanup, close every data/directory fd before releasing its shared
+    // reservation: unlinked but open inodes still own the staged disk bytes.
     entries: Vec<Entry>,
+    directories: Vec<Directory>,
+    reservation: Reservation,
     destination: String,
+    conflict_policy: ConflictPolicy,
+    nonce: u128,
     root: String,
     received: u64,
     state: State,
@@ -165,7 +177,8 @@ impl super::DropDirectory {
         let mut reservation = Reservation::new(self.0.clone(), manifest.size)?;
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).map_err(|_| Error::Io(std::io::ErrorKind::Other))?;
-        let name = format!("{STAGING_PREFIX}{:032x}", u128::from_be_bytes(random));
+        let nonce = u128::from_be_bytes(random);
+        let name = format!("{STAGING_PREFIX}{nonce:032x}");
         fs::mkdirat(&self.0.fd, name.as_str(), Mode::from_raw_mode(0o700))?;
         let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
         let fd = match fs::openat(&self.0.fd, name.as_str(), flags, Mode::empty()) {
@@ -185,6 +198,8 @@ impl super::DropDirectory {
             }],
             entries: Vec::new(),
             destination: manifest.name,
+            conflict_policy: self.1,
+            nonce,
             root: manifest.root,
             received: 0,
             state: State::Receiving,
@@ -327,27 +342,56 @@ impl PendingDirectory {
         self.state = State::Verified;
         Ok(())
     }
-    pub fn publish(mut self) -> Result<Publication, Error> {
+    /// Atomically publish the verified tree under the locally selected conflict
+    /// policy. The default rejects collisions; keep-both never merges trees.
+    /// Call only after rechecking the original controller's file permission.
+    pub fn publish(self) -> Result<Publication, Error> {
+        self.publish_named().map(|result| result.publication())
+    }
+
+    /// Publish the entire tree with its actual local basename retained. The
+    /// original entry paths and ATP Merkle root were verified BEFORE renaming;
+    /// choosing a conflict basename never changes or reinterprets that evidence.
+    /// Each candidate is one no-replace rename relative to the pinned directory.
+    pub fn publish_named(mut self) -> Result<PublishedDirectory, Error> {
         if self.state != State::Verified {
             return Err(Error::Retired);
         }
         self.state = State::Failed;
-        match fs::renameat_with(
-            &self.reservation.root.fd,
-            self.directories[0].name.as_str(),
-            &self.reservation.root.fd,
-            self.destination.as_str(),
-            RenameFlags::NOREPLACE,
-        ) {
-            Ok(()) => (),
-            Err(rustix::io::Errno::EXIST) => return Err(Error::Conflict),
-            Err(error) => return Err(error.into()),
+        let original = self.destination.clone();
+        let mut attempt = 0;
+        loop {
+            match fs::renameat_with(
+                &self.reservation.root.fd,
+                self.directories[0].name.as_str(),
+                &self.reservation.root.fd,
+                self.destination.as_str(),
+                RenameFlags::NOREPLACE,
+            ) {
+                Ok(()) => break,
+                Err(rustix::io::Errno::EXIST)
+                    if self.conflict_policy == ConflictPolicy::KeepBoth
+                        && attempt < MAX_CONFLICT_ATTEMPTS =>
+                {
+                    self.destination = conflict_name(&original, self.nonce, attempt);
+                    attempt += 1;
+                }
+                Err(rustix::io::Errno::EXIST) => return Err(Error::Conflict),
+                Err(error) => return Err(error.into()),
+            }
         }
+        // A successful rename commits the ENTIRE tree. Even a failed root sync
+        // must not allow Drop to unlink children through their still-open fds.
         self.state = State::Published;
-        Ok(if fs::fsync(&self.reservation.root.fd).is_ok() {
+        let publication = if fs::fsync(&self.reservation.root.fd).is_ok() {
             Publication::Durable
         } else {
             Publication::DurabilityUnknown
+        };
+        Ok(PublishedDirectory {
+            name: std::mem::take(&mut self.destination),
+            publication,
+            renamed: attempt != 0,
         })
     }
     pub fn cancel(mut self) -> Result<(), Error> {
@@ -402,3 +446,7 @@ impl Drop for PendingDirectory {
         let _ = self.cleanup();
     }
 }
+
+#[cfg(test)]
+#[path = "directory/conflict_tests.rs"]
+mod conflict_tests;

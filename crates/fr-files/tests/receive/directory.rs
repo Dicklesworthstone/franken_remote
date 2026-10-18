@@ -230,3 +230,9 @@ fn directory_reservation_is_aggregate_and_released_on_cancel() {
         .unwrap();
     assert_eq!(scratch.entries(), 0);
 }
+
+#[path = "directory/conflicts.rs"]
+mod conflicts;
+
+#[path = "directory/lifecycle.rs"]
+mod lifecycle;

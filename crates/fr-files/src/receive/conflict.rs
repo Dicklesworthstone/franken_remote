@@ -9,14 +9,15 @@ pub enum ConflictPolicy {
     /// Refuse a conflicting publication. This is the backwards-compatible default.
     #[default]
     Reject,
-    /// Atomically keep the new file under a clearly marked, bounded conflict name.
+    /// Atomically keep the new file or tree under a bounded conflict name.
     /// Never replaces or renames the existing entry, and never retries a transfer.
     KeepBoth,
 }
 
 /// Local result of a publication, not a diagnostic or a wire receipt. The name
 /// identifies the entry in the originally selected directory, not a reopened path.
-/// Both durability variants mean the file was published; neither permits replay.
+/// A file or complete tree is one entry; keep-both never merges its contents.
+/// Both durability variants mean the entry was published; neither permits replay.
 pub struct PublishedFile {
     pub(super) name: String,
     pub(super) publication: Publication,

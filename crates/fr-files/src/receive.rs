@@ -32,7 +32,7 @@ use std::{
 /// A record is rejected before disk I/O when it exceeds this bound.
 pub const MAX_CHUNK_BYTES: usize = 64 * 1024;
 pub mod directory;
-pub use directory::{DirectoryManifest, PendingDirectory};
+pub use directory::{DirectoryManifest, PendingDirectory, PublishedDirectory};
 
 const STAGING_PREFIX: &str = ".fr-part-";
 
