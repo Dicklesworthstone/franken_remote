@@ -260,6 +260,17 @@ impl Output {
             }
         }
     }
+    fn account_retired(&mut self) -> bool {
+        if self.job.as_ref().is_some_and(|job| {
+            !job.thread.is_finished() || !job.shared.retired.load(Ordering::Acquire)
+        }) {
+            return false;
+        }
+        // Retirement makes the worker's final PCM and fault stores stable. It
+        // can finish after configure's first snapshot but before this check.
+        self.account();
+        true
+    }
     fn authorize(&self, live: &mut dyn FnMut() -> bool) -> Result<(), ViewerAudioRefused> {
         let job = self.job.as_ref().ok_or(ViewerAudioRefused)?;
         if !live() {
@@ -284,9 +295,7 @@ impl ViewerAudioOutput for Output {
             || offer.direction != AudioDirection::Downlink
             || self.last.is_some_and(|last| offer.generation <= last)
             || offer.validate().is_err()
-            || self.job.as_ref().is_some_and(|job| {
-                !job.thread.is_finished() || !job.shared.retired.load(Ordering::Acquire)
-            })
+            || !self.account_retired()
         {
             return Err(ViewerAudioRefused);
         }

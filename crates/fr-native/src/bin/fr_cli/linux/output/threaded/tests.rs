@@ -359,3 +359,54 @@ fn only_the_current_healthy_worker_can_clear_a_previous_absence() {
     release.send(()).unwrap();
     retired(&shared);
 }
+
+#[test]
+fn retirement_collects_final_pcm_and_faults_before_replacement() {
+    for (fault, expired, failed, first_failure) in [
+        (Fault::Expired, 1, 0, None),
+        (Fault::Native, 0, 1, Some("audio_output_failed")),
+    ] {
+        let (release, blocked) = mpsc::sync_channel(1);
+        let (mut output, shared, _) = fixture(move |shared, _, _| {
+            blocked.recv_timeout(Duration::from_secs(2)).unwrap();
+            // These are the final stores for PCM already submitted and a
+            // fault already detected before the session fenced this worker.
+            shared.submitted.store(9, Ordering::Release);
+            shared.fail(fault);
+            true
+        });
+        output.report.borrow_mut().acknowledged = true;
+        shared.submitted.store(4, Ordering::Release);
+        output.reset();
+        assert!(!output.account_retired());
+        {
+            let report = output.report.borrow();
+            assert_eq!(report.submitted, 4);
+            assert_eq!(report.expired_generations, 0);
+            assert_eq!(report.failed_generations, 0);
+            assert_eq!(report.first_failure, None);
+        }
+
+        // Force completion between the earlier account and the successful
+        // retirement guard, without relying on a scheduler race or native audio.
+        release.send(()).unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        while !output.job.as_ref().unwrap().thread.is_finished() {
+            assert!(Instant::now() < until, "released fixture must finish");
+            thread::sleep(TICK);
+        }
+        assert!(shared.retired.load(Ordering::Acquire));
+        assert!(output.current.is_none());
+        for _ in 0..2 {
+            assert!(output.account_retired());
+            let report = output.report.borrow();
+            assert_eq!(report.submitted, 9);
+            assert_eq!(report.expired_generations, expired);
+            assert_eq!(report.failed_generations, failed);
+            assert_eq!(report.first_failure, first_failure);
+            assert_eq!(report.absence, Some(reason(fault as u8)));
+            assert_eq!(report.recovered_generations, 0);
+            assert!(!report.active());
+        }
+    }
+}
