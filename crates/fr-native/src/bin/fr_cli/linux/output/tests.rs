@@ -12,6 +12,32 @@ use pulse_support::Server;
 use std::{process::Command, sync::Mutex, thread, time::Duration};
 static SERIAL: Mutex<()> = Mutex::new(());
 const BINDING: u32 = 61;
+
+#[test]
+fn the_native_refusal_keeps_freshness_expiry_distinct_from_device_failure() {
+    let report = Rc::new(RefCell::new(Report::default()));
+    let mut output = Output::new(PathBuf::from("/unused"), None, report);
+    output.refuse(PlayoutError::Device(DeviceError::Expired));
+    assert_eq!(output.failure, Some(Failure::Expired));
+    output.refuse(PlayoutError::Device(DeviceError::Denied));
+    assert_eq!(
+        output.failure,
+        Some(Failure::Expired),
+        "keep the first cause"
+    );
+    output.reset();
+    assert_eq!(output.failure, None);
+    for error in [
+        PlayoutError::Device(DeviceError::Denied),
+        PlayoutError::Device(DeviceError::Clock),
+        PlayoutError::Closed,
+    ] {
+        output.refuse(error);
+        assert_eq!(output.failure, Some(Failure::Native));
+        output.reset();
+    }
+}
+
 fn offer(generation: u64) -> AudioConfiguration {
     AudioConfiguration {
         direction: AudioDirection::Downlink,

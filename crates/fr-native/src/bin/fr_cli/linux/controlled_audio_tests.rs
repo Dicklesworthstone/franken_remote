@@ -47,9 +47,10 @@ fn control_completion_preserves_independent_audio_presence_and_submission() {
                 submitted: 19,
                 resets: 2,
                 absence: Some("local_output_failed"),
+                ..audio::Report::default()
             }),
             true,
-            true,
+            false,
             19,
             2,
             Some("local_output_failed"),
@@ -108,4 +109,43 @@ fn text_completion_names_audio_absence_without_losing_control_results() {
     assert!(completion(&pending, false, None).contains("no playback confirmed"));
     let no_request = progress(None, true);
     assert!(!completion(&no_request, false, None).contains("Host audio"));
+}
+
+#[test]
+fn observer_and_controller_expose_recovered_generations_without_hiding_failures() {
+    for control in [false, true] {
+        let mut progress = progress(
+            Some(audio::Report {
+                acknowledged: true,
+                submitted: 19,
+                generation_start: 18,
+                resets: 3,
+                expired_generations: 2,
+                failed_generations: 1,
+                recovered_generations: 3,
+                first_failure: Some("audio_output_worker_stalled"),
+                ..audio::Report::default()
+            }),
+            true,
+        );
+        if !control {
+            progress.control = None;
+        }
+        let json: serde_json::Value =
+            serde_json::from_str(&completion(&progress, true, None)).unwrap();
+        assert_eq!(json["audio_active"], true);
+        assert_eq!(json["audio_frames_submitted"], 19);
+        assert_eq!(json["audio_output_expired_generations"], 2);
+        assert_eq!(json["audio_output_failed_generations"], 1);
+        assert_eq!(json["audio_output_recovered_generations"], 3);
+        assert_eq!(
+            json["audio_output_first_failure"],
+            "audio_output_worker_stalled"
+        );
+        assert_eq!(json["audio_absence"], serde_json::Value::Null);
+        assert_eq!(json["audibility_proven"], false);
+        let text = completion(&progress, false, None);
+        assert!(text.contains("2 expired, 1 failed, 3 recovered"));
+        assert!(text.contains("First output failure: audio_output_worker_stalled"));
+    }
 }

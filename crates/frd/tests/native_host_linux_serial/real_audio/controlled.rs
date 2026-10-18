@@ -286,6 +286,25 @@ fn every_lane_with_audio_recovers_from_repeated_capture_stalls() {
     assert_eq!(report["attempts"], 1, "{diagnostics}");
     assert_eq!(report["control_granted"], true, "{diagnostics}");
     assert_eq!(report["audio_active"], true, "{diagnostics}");
+    assert_eq!(
+        report["audio_absence"],
+        serde_json::Value::Null,
+        "{diagnostics}"
+    );
+    assert_eq!(
+        report["audio_output_failed_generations"], 0,
+        "{diagnostics}"
+    );
+    assert_eq!(
+        report["audio_output_first_failure"],
+        serde_json::Value::Null,
+        "{diagnostics}"
+    );
+    let expired = report["audio_output_expired_generations"].as_u64().unwrap();
+    assert_eq!(
+        report["audio_output_recovered_generations"], expired,
+        "each expired output must be followed by fresh playback: {diagnostics}"
+    );
     assert_eq!(report["clipboard_requested"], true, "{diagnostics}");
     assert_eq!(
         report["clipboard_absence"],

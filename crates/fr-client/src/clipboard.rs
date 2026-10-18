@@ -248,7 +248,7 @@ impl InputClient {
                 self.mapped,
                 self.view_until,
                 obligations,
-                self.suspended_since,
+                self.suspended_since(),
             );
         }
     }

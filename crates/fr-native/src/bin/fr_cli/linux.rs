@@ -824,41 +824,18 @@ fn completion_with_lease(
     if let Some(control) = progress.control {
         return control_completion(progress, control, json, closure, lease);
     }
-    let audio = progress.audio.as_ref().map(|report| report.borrow());
-    let (requested, active, played, resets, absence) =
-        audio.as_ref().map_or((false, false, 0, 0, None), |report| {
-            (
-                true,
-                report.active(),
-                report.submitted,
-                report.resets,
-                report.absence,
-            )
-        });
+    let audio = audio_completion(progress, json);
     if json {
         let closure = closure.map_or_else(|| "null".to_owned(), crate::closure::Report::json);
         format!(
-            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"observe\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{},\"audio_requested\":{},\"audio_active\":{},\"audio_frames_submitted\":{},\"audio_output_resets\":{},\"audio_absence\":{},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false,\"audibility_proven\":false,\"close_exchange\":{closure}}}\n",
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"observe\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{}{audio},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false,\"close_exchange\":{closure}}}\n",
             output::timestamp(),
             progress.attempts,
             progress.opened,
             progress.presented,
             media_json(progress.media.as_ref()),
-            requested,
-            active,
-            played,
-            resets,
-            absence.map_or_else(|| "null".to_owned(), |a| format!("\"{a}\"")),
         )
     } else {
-        let audio = match (requested, active, absence) {
-            (false, ..) => String::new(),
-            (true, true, _) => format!(
-                " Host audio: {played} decoded frame(s) submitted to the local audio server (not audibility proof)."
-            ),
-            (true, false, Some(reason)) => format!(" Host audio absent: {reason}."),
-            (true, false, None) => " Host audio: configured but nothing played.".to_owned(),
-        };
         let closure = closure.map_or_else(
             || {
                 "No completed close exchange; host cleanup and outstanding effects are unknown."
@@ -902,7 +879,7 @@ fn media_json(media: Option<&frd::session_startup::ViewerStatistics>) -> String 
 /// The controller uses the same content-free audio report as an observer.
 /// Configuration alone is not playback, and submitted PCM is not audibility.
 #[cfg(feature = "linux-desktop")]
-fn control_audio_completion(progress: &Progress, json: bool) -> String {
+fn audio_completion(progress: &Progress, json: bool) -> String {
     let audio = progress.audio.as_ref().map(|report| report.borrow());
     let (requested, active, played, resets, absence) =
         audio.as_ref().map_or((false, false, 0, 0, None), |report| {
@@ -914,20 +891,41 @@ fn control_audio_completion(progress: &Progress, json: bool) -> String {
                 report.absence,
             )
         });
+    let (expired, failed, recovered, first_failure) =
+        audio.as_ref().map_or((0, 0, 0, None), |report| {
+            (
+                report.expired_generations,
+                report.failed_generations,
+                report.recovered_generations,
+                report.first_failure,
+            )
+        });
     if json {
         let absence = absence.map_or_else(|| "null".to_owned(), |a| format!("\"{a}\""));
+        let first_failure = first_failure.map_or_else(|| "null".to_owned(), |a| format!("\"{a}\""));
         format!(
-            ",\"audio_requested\":{requested},\"audio_active\":{active},\"audio_frames_submitted\":{played},\"audio_output_resets\":{resets},\"audio_absence\":{absence},\"audibility_proven\":false"
+            ",\"audio_requested\":{requested},\"audio_active\":{active},\"audio_frames_submitted\":{played},\"audio_output_resets\":{resets},\"audio_output_expired_generations\":{expired},\"audio_output_failed_generations\":{failed},\"audio_output_recovered_generations\":{recovered},\"audio_output_first_failure\":{first_failure},\"audio_absence\":{absence},\"audibility_proven\":false"
         )
     } else {
-        match (requested, active, absence) {
+        let mut text = match (requested, active, absence) {
             (false, ..) => String::new(),
-            (true, true, _) => format!(
+            (true, true, None) => format!(
                 " Host audio: {played} decoded frame(s) submitted to the local audio server (not audibility proof)."
             ),
-            (true, false, Some(reason)) => format!(" Host audio absent: {reason}."),
+            (true, _, Some(reason)) => format!(" Host audio absent: {reason}."),
             (true, false, None) => " Host audio: requested but no playback confirmed.".to_owned(),
+        };
+        if expired > 0 || failed > 0 {
+            use std::fmt::Write;
+            let _ = write!(
+                text,
+                " Audio output generations: {expired} expired, {failed} failed, {recovered} recovered after fresh submission."
+            );
+            if let Some(reason) = first_failure {
+                let _ = write!(text, " First output failure: {reason}.");
+            }
         }
+        text
     }
 }
 /// Counts are host-reported stages, not local effect proof; visibility stays
@@ -946,7 +944,7 @@ fn control_completion(
         .files
         .as_ref()
         .map_or_else(files::Summary::not_requested, files::Local::summary);
-    let audio = control_audio_completion(progress, json);
+    let audio = audio_completion(progress, json);
     let clipboard = control.clipboard.unwrap_or_default();
     let absence = control
         .clipboard

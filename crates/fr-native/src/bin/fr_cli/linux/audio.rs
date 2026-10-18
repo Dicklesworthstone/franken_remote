@@ -17,17 +17,58 @@ pub(super) struct Report {
     pub submitted: u64,
     /// Local output resets, each followed by a fresh host epoch.
     pub resets: u64,
-    /// First typed reason audio was absent or ended.
+    /// Output generations retired by the original audio freshness deadline.
+    pub expired_generations: u64,
+    /// Output generations retired for another native/worker failure.
+    pub failed_generations: u64,
+    /// Prior retired generations followed by acknowledged, submitted fresh PCM.
+    pub recovered_generations: u64,
+    /// First non-freshness output failure, retained even if playback recovers.
+    pub first_failure: Option<&'static str>,
+    /// Typed reason audio is absent or ended; a proven replacement can clear it.
     pub absence: Option<&'static str>,
+    /// Lifetime submissions at the start of the current output generation.
+    pub generation_start: u64,
 }
 impl Report {
     pub(super) fn active(&self) -> bool {
-        self.acknowledged && self.submitted > 0
+        self.acknowledged && self.submitted > self.generation_start && self.absence.is_none()
     }
     pub(super) fn absent(&mut self, reason: &'static str) {
         self.absence.get_or_insert(reason);
     }
+    #[cfg(any(feature = "linux-audio", test))]
+    fn begin_generation(&mut self) {
+        self.acknowledged = false;
+        self.generation_start = self.submitted;
+    }
+    #[cfg(any(feature = "linux-audio", test))]
+    fn failed_generation(&mut self, reason: &'static str, expired: bool) {
+        if expired {
+            self.expired_generations = self.expired_generations.saturating_add(1);
+        } else {
+            self.failed_generations = self.failed_generations.saturating_add(1);
+            self.first_failure.get_or_insert(reason);
+        }
+        self.acknowledged = false;
+        self.absence = Some(reason);
+    }
+    /// Called only for the current, fault-free worker. Configuration, silence,
+    /// old-generation submissions and cleanup cannot count as recovery.
+    #[cfg(any(feature = "linux-audio", test))]
+    fn recovered(&mut self) {
+        if self.acknowledged && self.submitted > self.generation_start {
+            self.recovered_generations = self
+                .expired_generations
+                .saturating_add(self.failed_generations);
+            self.absence = None;
+        }
+    }
 }
+
+#[cfg(test)]
+#[path = "audio/report_tests.rs"]
+mod report_tests;
 
 /// The view-only offer: the optional audio-down capability only with `--audio`.
 pub(super) fn observation_offer(audio: bool) -> fr_wire::negotiation::Offer {
@@ -104,7 +145,7 @@ mod output {
     };
     use fr_native::pulse::{
         Error as DeviceError, PlaybackDevice, Selection, State,
-        playout::{PulsePlayout, RenderResult},
+        playout::{Error as PlayoutError, PulsePlayout, RenderResult},
     };
     use fr_wire::audio::AudioConfiguration;
     use frd::session_startup::{ViewerAudioEnd, ViewerAudioOutput, ViewerAudioRefused};
@@ -112,6 +153,22 @@ mod output {
 
     /// At most this many decode/render steps per service turn.
     const RENDERS_PER_TURN: usize = 4;
+
+    /// Preserve the native cause across the session trait's content-free refusal.
+    /// Expiring old sound is a freshness refusal, not a broken output device.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Failure {
+        Expired,
+        Native,
+    }
+    impl From<PlayoutError> for Failure {
+        fn from(error: PlayoutError) -> Self {
+            match error {
+                PlayoutError::Device(DeviceError::Expired) => Self::Expired,
+                _ => Self::Native,
+            }
+        }
+    }
 
     enum Stage {
         Idle,
@@ -132,6 +189,7 @@ mod output {
         sink: Option<String>,
         origin: Instant,
         stage: Stage,
+        failure: Option<Failure>,
         report: Rc<RefCell<Report>>,
     }
     impl Output {
@@ -143,11 +201,16 @@ mod output {
                 sink,
                 origin: Instant::now(),
                 stage: Stage::Idle,
+                failure: None,
                 report,
             }
         }
     }
     impl Output {
+        fn refuse(&mut self, error: PlayoutError) -> ViewerAudioRefused {
+            self.failure.get_or_insert(error.into());
+            ViewerAudioRefused
+        }
         fn receive_at(
             &mut self,
             bytes: &[u8],
@@ -166,7 +229,7 @@ mod output {
                 Stage::Playing(mut playout) => {
                     match playout
                         .receive_record_at(bytes, arrived, &mut checkpoint)
-                        .map_err(|_| ViewerAudioRefused)?
+                        .map_err(|error| self.refuse(error))?
                     {
                         ReceiveResult::Stopped(_) => self.stage = Stage::Stopping(playout),
                         ReceiveResult::Queued | ReceiveResult::Ignored => {
@@ -255,7 +318,7 @@ mod output {
                 } => {
                     let state = device
                         .poll(&mut checkpoint)
-                        .map_err(|_| ViewerAudioRefused)?;
+                        .map_err(|error| self.refuse(PlayoutError::Device(error)))?;
                     if state != State::Ready {
                         self.stage = Stage::Starting {
                             device,
@@ -282,13 +345,13 @@ mod output {
                         &mut checkpoint,
                         decoder,
                     )
-                    .map_err(|_| ViewerAudioRefused)?;
+                    .map_err(|error| self.refuse(error))?;
                     self.stage = Stage::Configuring(playout);
                 }
                 Stage::Configuring(mut playout) => {
                     if !playout
                         .poll_ready(&mut checkpoint)
-                        .map_err(|_| ViewerAudioRefused)?
+                        .map_err(|error| self.refuse(error))?
                     {
                         self.stage = Stage::Configuring(playout);
                         return Ok(());
@@ -297,18 +360,18 @@ mod output {
                         .acknowledge(&mut checkpoint, |record| {
                             acknowledge(record).map_err(|_| ())
                         })
-                        .map_err(|_| ViewerAudioRefused)?;
+                        .map_err(|error| self.refuse(error))?;
                     self.report.borrow_mut().acknowledged = true;
                     self.stage = Stage::Playing(playout);
                 }
                 Stage::Playing(mut playout) => {
                     playout
                         .service(&mut checkpoint)
-                        .map_err(|_| ViewerAudioRefused)?;
+                        .map_err(|error| self.refuse(error))?;
                     for _ in 0..RENDERS_PER_TURN {
                         match playout
                             .render(&mut checkpoint)
-                            .map_err(|_| ViewerAudioRefused)?
+                            .map_err(|error| self.refuse(error))?
                         {
                             RenderResult::Submitted(_) => {
                                 let mut report = self.report.borrow_mut();
@@ -346,8 +409,10 @@ mod output {
                 retirement.stop();
             }
             self.stage = Stage::Idle;
+            self.failure = None;
             let mut report = self.report.borrow_mut();
             report.resets = report.resets.saturating_add(1);
+            report.begin_generation();
         }
         fn ended(&mut self, end: ViewerAudioEnd) {
             self.report.borrow_mut().absent(end_reason(end));

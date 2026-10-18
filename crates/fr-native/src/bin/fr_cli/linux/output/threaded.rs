@@ -44,6 +44,7 @@ enum Fault {
     Permission,
     Backpressure,
     Acknowledgement,
+    Expired,
 }
 fn reason(code: u8) -> &'static str {
     match code {
@@ -51,7 +52,16 @@ fn reason(code: u8) -> &'static str {
         3 => "audio_output_permission_expired",
         4 => "audio_output_backpressure",
         5 => "audio_output_acknowledgement_failed",
+        6 => "audio_output_late",
         _ => "audio_output_failed",
+    }
+}
+impl From<super::Failure> for Fault {
+    fn from(failure: super::Failure) -> Self {
+        match failure {
+            super::Failure::Expired => Self::Expired,
+            super::Failure::Native => Self::Native,
+        }
     }
 }
 
@@ -141,6 +151,7 @@ struct Job {
     thread: JoinHandle<()>,
     acknowledged: bool,
     counted: u64,
+    fault_counted: bool,
 }
 impl Job {
     fn spawn(
@@ -175,6 +186,7 @@ impl Job {
             thread,
             acknowledged: false,
             counted: 0,
+            fault_counted: false,
         })
     }
     fn stop(&self) {
@@ -239,8 +251,12 @@ impl Output {
                 .saturating_add(submitted.saturating_sub(job.counted));
             job.counted = submitted;
             let fault = job.shared.fault.load(Ordering::Acquire);
-            if fault != 0 {
-                report.absent(reason(fault));
+            if fault != 0 && !job.fault_counted {
+                report.failed_generation(reason(fault), fault == Fault::Expired as u8);
+                job.fault_counted = true;
+            }
+            if fault == 0 && self.current.is_some() && !job.shared.stopped.load(Ordering::Acquire) {
+                report.recovered();
             }
         }
     }
@@ -298,7 +314,7 @@ impl ViewerAudioOutput for Output {
         self.job = Some(job);
         self.last = Some(offer.generation);
         self.current = Some((binding, offer));
-        self.report.borrow_mut().acknowledged = false;
+        self.report.borrow_mut().begin_generation();
         Ok(())
     }
     fn service(
@@ -410,7 +426,7 @@ impl ViewerAudioOutput for Output {
         self.account();
         let mut report = self.report.borrow_mut();
         report.resets = report.resets.saturating_add(1);
-        report.acknowledged = false;
+        report.begin_generation();
         // Keep the original job until its thread AND decoder have retired.
     }
 }
@@ -419,6 +435,7 @@ impl Drop for Output {
         if let Some(job) = &self.job {
             job.stop();
         }
+        self.current = None;
         self.account();
     }
 }
@@ -509,8 +526,13 @@ fn native(
             thread::park_timeout(TICK);
         }
     })();
+    // A service turn may submit fresh PCM before a later operation fails. Its
+    // committed output must still be counted, even when the turn returned Err.
+    shared
+        .submitted
+        .store(report.borrow().submitted, Ordering::Release);
     if result.is_err() && !shared.stopped.load(Ordering::Acquire) {
-        shared.fail(Fault::Native);
+        shared.fail(output.failure.unwrap_or(super::Failure::Native).into());
     }
     shared.stop();
     // All foreign cleanup stays here. On timeout, the process-wide slot remains

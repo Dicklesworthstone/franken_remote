@@ -284,3 +284,78 @@ fn matching_stop_bypasses_a_full_inbox_without_renewing_permission() {
     release.send(()).unwrap();
     retired(&shared);
 }
+
+#[test]
+fn a_failed_worker_is_counted_once_through_service_reset_and_cleanup() {
+    let (release, blocked) = mpsc::sync_channel(1);
+    let (mut output, shared, _) = fixture(move |_, _, _| {
+        blocked.recv_timeout(Duration::from_secs(2)).unwrap();
+        true
+    });
+    output.report.borrow_mut().acknowledged = true;
+    shared.submitted.store(7, Ordering::Release);
+    shared.fail(Fault::Expired);
+    for _ in 0..3 {
+        output.account();
+    }
+    assert!(output.service(&mut || true, &mut |_| Ok(())).is_err());
+    output.reset();
+    output.account();
+    let report = output.report.borrow();
+    assert_eq!(report.submitted, 7, "committed PCM survives the error");
+    assert_eq!(report.expired_generations, 1);
+    assert_eq!(report.failed_generations, 0);
+    assert_eq!(report.first_failure, None);
+    assert!(!report.active());
+    assert_eq!(report.recovered_generations, 0);
+    assert_eq!(report.absence, Some("audio_output_late"));
+    drop(report);
+    release.send(()).unwrap();
+    retired(&shared);
+    output.account();
+    assert_eq!(output.report.borrow().expired_generations, 1);
+}
+
+#[test]
+fn only_the_current_healthy_worker_can_clear_a_previous_absence() {
+    let (release, blocked) = mpsc::sync_channel(1);
+    let (mut output, shared, _) = fixture(move |_, _, _| {
+        blocked.recv_timeout(Duration::from_secs(2)).unwrap();
+        true
+    });
+    {
+        let mut report = output.report.borrow_mut();
+        report.failed_generation("audio_output_failed", false);
+        report.submitted = 12;
+        report.begin_generation();
+        report.acknowledged = true;
+    }
+    output.account();
+    assert!(!output.report.borrow().active());
+    assert_eq!(output.report.borrow().recovered_generations, 0);
+    shared.submitted.store(1, Ordering::Release);
+    output.account();
+    {
+        let report = output.report.borrow();
+        assert!(report.active());
+        assert_eq!(report.recovered_generations, 1);
+        assert_eq!(report.absence, None);
+        assert_eq!(report.first_failure, Some("audio_output_failed"));
+    }
+    shared.fail(Fault::Native);
+    output.account();
+    output.current = None;
+    // The final snapshot can include an earlier committed write. Cleanup must
+    // count it without pretending this failed, retired generation recovered.
+    shared.submitted.store(2, Ordering::Release);
+    output.account();
+    let report = output.report.borrow();
+    assert_eq!(report.submitted, 14);
+    assert_eq!(report.failed_generations, 2);
+    assert_eq!(report.recovered_generations, 1);
+    assert_eq!(report.absence, Some("audio_output_failed"));
+    assert!(!report.active());
+    drop(report);
+    release.send(()).unwrap();
+    retired(&shared);
+}

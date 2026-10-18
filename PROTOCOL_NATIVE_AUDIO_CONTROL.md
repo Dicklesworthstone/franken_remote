@@ -61,8 +61,20 @@ Controlled-session completion now includes the existing playback report:
 `audio_requested`, `audio_active`, `audio_frames_submitted`,
 `audio_output_resets`, `audio_absence`, and `audibility_proven: false`.
 `audio_active` records acknowledged playback with at least one submitted frame
-during the attempt, not proof that a device is still playing after closure.
+in the latest output generation, not proof that a device is still playing after
+closure. A replacement that only configures or receives no PCM cannot reuse
+the previous generation's submitted-frame count to claim playback.
 An older host without the extension continues control with typed audio absence.
+
+The completion distinguishes output freshness expiry (`audio_output_late`) from
+an actual native/worker failure. Each retired output generation is counted once
+in `audio_output_expired_generations` or `audio_output_failed_generations`.
+Only acknowledged, fresh PCM submission by a replacement output clears the
+current `audio_absence` and advances `audio_output_recovered_generations`.
+`audio_output_first_failure` retains the first non-freshness failure even after
+recovery; all generation counters and the lifetime `audio_frames_submitted`
+count remain intact. Expired PCM is still refused at its original deadline and
+never retried. These fields describe output submission, not audibility.
 
 ## Combined-session acceptance tests
 
