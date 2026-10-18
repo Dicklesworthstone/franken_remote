@@ -278,6 +278,14 @@ where
             self.input.control().stop(StopReason::ViewInvalidated);
             return Err(Error::Closed);
         }
+        // A peer may finish and cancel Files within the preceding native I/O
+        // turn. Retire that final exchange before a generic control receiver
+        // reads its reset; ordinary file work keeps its post-input turn below.
+        self.files
+            .retire_pending_peer(q, || {
+                self.renewal.permitted() && self.observation.check().is_ok()
+            })
+            .map_err(Error::Transport)?;
         if let Some((channel, granted)) = self
             .clipboard_setup
             .service(q, || {

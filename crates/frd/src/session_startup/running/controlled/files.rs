@@ -15,7 +15,7 @@ use fr_files::{
 };
 use fr_transport::quic::{self, MediaChannel, QuicRecords, Route, files::FilesChannel};
 use fr_wire::{files, negotiation::Role};
-use negotiation::Pending;
+use negotiation::{Advance, Pending};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -73,6 +73,28 @@ impl Slot {
             _ => true,
         }
     }
+    /// Before generic control receive can read an ARMED stream's reset. This
+    /// only retires a proven final Files exchange; no payload or worker starts.
+    pub(super) fn retire_pending_peer(
+        &mut self,
+        q: &mut QuicRecords,
+        authorize: impl FnMut() -> bool,
+    ) -> Result<(), quic::Error> {
+        if let Some(pending) = &mut self.pending {
+            match pending.retire_peer(q, authorize) {
+                Ok(false) => {}
+                Ok(true) => {
+                    self.pending = None;
+                    self.reason.get_or_insert(Error::Cancelled);
+                }
+                Err(error) => {
+                    self.reason.get_or_insert(Error::Transport(error));
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
     pub(super) fn service(
         &mut self,
         q: &mut QuicRecords,
@@ -80,8 +102,15 @@ impl Slot {
     ) -> Result<(), quic::Error> {
         if let Some(pending) = &mut self.pending {
             match pending.advance(q, &mut authorize) {
-                Ok(false) => return Ok(()),
-                Ok(true) => {}
+                Ok(Advance::Waiting) => return Ok(()),
+                Ok(Advance::Ready) => {}
+                Ok(Advance::PeerRetired) => {
+                    // The transport retired the original reservation. Dropping
+                    // this spent owner cannot abandon the desktop connection.
+                    self.pending = None;
+                    self.reason.get_or_insert(Error::Cancelled);
+                    return Ok(());
+                }
                 Err(error) => {
                     self.reason.get_or_insert(Error::Transport(error));
                     // An unfinished ticket exchange has no independently retired

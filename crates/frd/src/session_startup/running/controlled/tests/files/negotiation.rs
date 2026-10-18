@@ -2,6 +2,9 @@
 //! ordinary drive, not the standalone attachment helper or private maintenance.
 use super::*;
 
+#[path = "negotiation/peer_retirement.rs"]
+mod peer_retirement;
+
 fn request(host: &ControlledHost, timeout: Duration) -> ChannelRequest {
     ChannelRequest {
         binding: Binding {

@@ -10,6 +10,12 @@ use fr_transport::quic::{
 };
 use fr_wire::{attachment, files, negotiation::Role};
 
+pub(super) enum Advance {
+    Waiting,
+    Ready,
+    PeerRetired,
+}
+
 pub(super) struct Pending {
     cx: Cx,
     connection: ConnectionBinding,
@@ -52,10 +58,10 @@ impl Pending {
             }))
             || matches!(route, Route::Stream(r) if r.binding == self.channel.descriptor().binding.parent.id)
     }
-    pub(super) fn advance(
+    pub(super) fn retire_peer(
         &mut self,
         q: &mut QuicRecords,
-        mut authorize: impl FnMut() -> bool,
+        authorize: impl FnMut() -> bool,
     ) -> Result<bool, quic::Error> {
         // Verify opaque ownership BEFORE any call that can close/modify q. IDs
         // and route equality on a different connection do not confer authority.
@@ -63,11 +69,26 @@ impl Pending {
             return Err(quic::Error::WrongRoute);
         }
         self.check()?;
+        self.channel
+            .retire_files_if_peer_cancelled(q, &self.cx, authorize)
+    }
+    pub(super) fn advance(
+        &mut self,
+        q: &mut QuicRecords,
+        mut authorize: impl FnMut() -> bool,
+    ) -> Result<Advance, quic::Error> {
+        if self.retire_peer(q, &mut authorize)? {
+            return Ok(Advance::PeerRetired);
+        }
         self.channel.transmit(q, &self.cx, &mut authorize)?;
         self.channel.dispatch(q, &self.cx, &mut authorize)?;
         let complete = self.channel.finish(q, &self.cx, &mut authorize)?.is_some();
         self.check()?;
-        Ok(complete)
+        Ok(if complete {
+            Advance::Ready
+        } else {
+            Advance::Waiting
+        })
     }
     pub(super) fn start_receiver(self, q: &mut QuicRecords) -> Result<HostReceiver, Error> {
         if !q.is_bound_to(&self.connection) {

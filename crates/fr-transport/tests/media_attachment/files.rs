@@ -6,6 +6,9 @@ use fr_wire::{
     files::{self as wire, Body, Message as FileMessage},
 };
 
+#[path = "files/peer_retirement.rs"]
+mod peer_retirement;
+
 fn enable(l: &mut Link) {
     l.selection.role = Role::RequestControl;
     for (name, version) in [

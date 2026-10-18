@@ -87,12 +87,24 @@ is pending, without reading the supplied descriptor. Pending clipboard and file
 handshakes are serialized on the common control route; established lanes remain
 independent. Duplicate expectations cannot spend another channel slot.
 
-Cancellation, permission loss, malformed/foreign binding or expiry during the
-uncompleted exchange fences the parent. There is no safely completed file lane
-to retire independently yet. Established file transfer still cancels separately.
-A failed sender construction after attachment also fences instead of discarding
-an unacknowledged peer handshake. No setup failure fabricates a publication or
-source-cleanup receipt.
+Cancellation before the authenticated final acknowledgement fences the parent:
+there is no completed file lane to retire independently yet. Permission loss,
+malformed/foreign bindings and the original setup expiry retain their normal
+failure paths. A failed sender construction after attachment also fences instead
+of discarding an unacknowledged peer handshake. No setup failure fabricates a
+publication or source-cleanup receipt.
+
+A viewer can finish its attachment and cancel files before the host next runs
+its attachment owner. The host recognizes that peer cancellation only on the
+original Files attachment, after validating the exact Attach and staging its
+final Attached reply, or after its own completed attachment. It retires the
+matching file streams before generic receive processing can treat their reset
+as an unfinished handshake failure. The host consumes the one-use file slot,
+records cancellation and starts no disk receiver; desktop control continues.
+Any first file bytes already sent by that viewer are discarded under the same
+bounded native receive-credit accounting, without parsing or publication. The
+consumed ticket, binding and stream IDs remain unavailable for reuse. This uses
+the existing file-retirement code and introduces no new wire format or authority.
 
 Nine additional UDP/TLS controller tests cover automatic establishment and real
 120,007-byte publication with input, local refusals before admission, capability

@@ -772,29 +772,41 @@ impl MediaChannel {
         authorize: &mut impl FnMut() -> bool,
     ) -> Result<u64, Error> {
         let result = (|| {
-            let n = q.check(cx, authorize)?;
-            if !q.is_bound_to(&self.connection) || self.phase == Phase::Closed {
-                return Err(Error::WrongRoute);
-            }
-            if n < self.last {
-                return Err(Error::Clock);
-            }
-            if n >= self.until && self.phase != Phase::Complete {
-                return Err(Error::Expired);
-            }
-            if q.receive_ended(self.control.inbound)?
-                || (self.receive_armed && q.receive_ended(self.pair.inbound)?)
-            {
+            let now = self.check_parent(q, cx, authorize)?;
+            if self.receive_armed && q.receive_ended(self.pair.inbound)? {
                 return Err(Error::Closed);
             }
-            self.last = n;
-            Ok(n)
+            Ok(now)
         })();
         if result.is_err() {
             self.close();
             q.close();
         }
         result
+    }
+    /// Shared authority, deadline and critical-stream checks. Only the explicit
+    /// final Files cancellation path may handle its own reset separately.
+    fn check_parent(
+        &mut self,
+        q: &mut QuicRecords,
+        cx: &Cx,
+        authorize: &mut impl FnMut() -> bool,
+    ) -> Result<u64, Error> {
+        let now = q.check(cx, authorize)?;
+        if !q.is_bound_to(&self.connection) || self.phase == Phase::Closed {
+            return Err(Error::WrongRoute);
+        }
+        if now < self.last {
+            return Err(Error::Clock);
+        }
+        if now >= self.until && self.phase != Phase::Complete {
+            return Err(Error::Expired);
+        }
+        if q.receive_ended(self.control.inbound)? {
+            return Err(Error::Closed);
+        }
+        self.last = now;
+        Ok(now)
     }
     fn stage(&mut self, m: Message) -> Result<(), Error> {
         if self.len != 0 {

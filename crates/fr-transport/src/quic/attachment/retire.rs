@@ -1,4 +1,5 @@
 //! Completed auxiliary-channel cleanup, never abandonment of a partial handshake.
+mod files_setup;
 use super::{ACTIVE, MediaChannel, MediaRole, Ordering, Phase, QuicRecords, RETIRED};
 use crate::quic::{Cx, Error};
 use asupersync::bytes::Bytes;
@@ -123,11 +124,16 @@ impl QuicRecords {
         self.refresh_retired_credit(cx)
     }
     fn retire_optional_at(&mut self, cx: &Cx, index: usize) -> Result<(), Error> {
-        let r = &self.attachments[index];
-        let code = retirement_code(r.role).ok_or(Error::WrongRoute)?;
-        if r.state.load(Ordering::Acquire) != ACTIVE {
+        if self.attachments[index].state.load(Ordering::Acquire) != ACTIVE {
             return Err(Error::WrongRoute);
         }
+        self.retire_reservation_at(cx, index)
+    }
+    /// The ordinary path requires ACTIVE. The only other caller proves the
+    /// original host Files exchange reached its staged final response.
+    fn retire_reservation_at(&mut self, cx: &Cx, index: usize) -> Result<(), Error> {
+        let r = &self.attachments[index];
+        let code = retirement_code(r.role).ok_or(Error::WrongRoute)?;
         let (outbound, inbound, binding) = (r.outbound, r.inbound, r.binding);
         let native = self.native.as_mut().ok_or(Error::Closed)?;
         let outgoing = native
