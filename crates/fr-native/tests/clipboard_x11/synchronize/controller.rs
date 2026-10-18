@@ -17,8 +17,8 @@ const CLIENT_ORIGIN: u64 = 7_000_000_000_000;
 fn client(elapsed: u64) -> ClientInstant {
     ClientInstant(CLIENT_ORIGIN + 100 + elapsed)
 }
-fn controller() -> InputClient {
-    let g = Granted {
+fn grant() -> Granted {
+    Granted {
         request: Request {
             parent: ControlBinding {
                 id: 7,
@@ -48,7 +48,25 @@ fn controller() -> InputClient {
         ticket_until_us: 1_000_000,
         first_action: 0,
         first_pointer: 0,
-    };
+    }
+}
+fn correlation(elapsed: u64) -> ClockCorrelation {
+    ClockCorrelation::new(
+        ClockSample {
+            host_boot: grant().request.parent.host_boot,
+            client_sent_us: CLIENT_ORIGIN + elapsed,
+            client_received_us: client(elapsed).0,
+            host_sample_us: elapsed,
+        },
+        ClockPolicy {
+            drift_ppm: 0,
+            ..ClockPolicy::default()
+        },
+    )
+    .unwrap()
+}
+fn controller() -> InputClient {
+    let g = grant();
     let mut request = RequestControl::new(
         g.request,
         g.input_channel,
@@ -66,19 +84,7 @@ fn controller() -> InputClient {
         InputDelivery::Reliable,
     )
     .unwrap();
-    let clock = ClockCorrelation::new(
-        ClockSample {
-            host_boot: g.request.parent.host_boot,
-            client_sent_us: CLIENT_ORIGIN,
-            client_received_us: client(0).0,
-            host_sample_us: 0,
-        },
-        ClockPolicy {
-            drift_ppm: 0,
-            ..ClockPolicy::default()
-        },
-    )
-    .unwrap();
+    let clock = correlation(0);
     let (_, mut input) = request
         .accept(
             &bytes,
@@ -120,6 +126,7 @@ struct ControllerPair {
     scratch: Vec<u8>,
     ids: [u128; 2],
     receipts: [usize; 2],
+    elapsed: u64,
     desktops: [Desktop; 2],
 }
 impl ControllerPair {
@@ -176,6 +183,7 @@ impl ControllerPair {
             scratch: vec![0; 65_536],
             ids: [0, 0],
             receipts: [0, 0],
+            elapsed: 0,
             desktops,
         };
         pair.step();
@@ -199,7 +207,7 @@ impl ControllerPair {
             .poll(
                 &mut self.scratch,
                 &mut self.to_host,
-                || client(0),
+                || client(self.elapsed),
                 || {
                     self.ids[1] += 1;
                     Ok(1000 + self.ids[1])
@@ -208,7 +216,7 @@ impl ControllerPair {
             .unwrap();
         if let Some(bytes) = self.to_viewer.bytes.as_deref() {
             assert!(bytes.len() <= 2048);
-            let received = self.viewer.receive(bytes, || client(0)).unwrap();
+            let received = self.viewer.receive(bytes, || client(self.elapsed)).unwrap();
             if received != Received::Deferred {
                 self.to_viewer.clear();
                 match received {
@@ -294,7 +302,7 @@ fn accepted_controller_automatically_copies_both_ways_between_real_x11_desktops(
 }
 
 #[test]
-fn stopped_dropped_or_stale_viewer_cancels_real_incr_and_preserves_native_copy() {
+fn stopped_dropped_or_expired_viewer_cancels_real_incr_and_preserves_native_copy() {
     let _guard = SERIAL.lock().unwrap();
     if display().is_none() {
         return;
@@ -315,15 +323,26 @@ fn stopped_dropped_or_stale_viewer_cancels_real_incr_and_preserves_native_copy()
         let result = pair.viewer.poll(
             &mut pair.scratch,
             &mut pair.to_host,
-            || client(if mode == 2 { 1_500_000 } else { 0 }),
+            || {
+                client(if mode == 2 {
+                    // A view lapse pauses the lane; its fixed suspension cap
+                    // remains terminal even if the input owner never ticks.
+                    1_500_000 + fr_client::input::MAX_VIEW_SUSPENSION_US
+                } else {
+                    0
+                })
+            },
             || panic!("no retry"),
         );
-        assert!(matches!(
-            result,
-            Err(NativeError::Authority(
-                ControllerError::Stopped | ControllerError::Expired
-            ))
-        ));
+        assert!(
+            matches!(
+                &result,
+                Err(NativeError::Authority(
+                    ControllerError::Stopped | ControllerError::Expired
+                ))
+            ),
+            "terminal mode {mode}: {result:?}"
+        );
         assert!(pair.viewer.is_closed());
         assert_eq!(pair.viewer.retained_channel_bytes(), 0);
         assert_eq!(pair.to_host.accepted, 0);
@@ -341,6 +360,107 @@ fn stopped_dropped_or_stale_viewer_cancels_real_incr_and_preserves_native_copy()
                 .is_err()
         );
     }
+}
+
+fn assert_viewer_paused(pair: &mut ControllerPair) {
+    let progress = pair
+        .viewer
+        .poll(
+            &mut pair.scratch,
+            &mut pair.to_host,
+            || client(pair.elapsed),
+            || panic!("a paused native read cannot restart"),
+        )
+        .unwrap();
+    assert!(matches!(progress.read, ReadProgress::Suspended));
+    assert_eq!(progress.send, Pump::Suspended);
+    assert!(!pair.viewer.is_closed());
+    assert_eq!(pair.viewer.retained_channel_bytes(), 0);
+    assert_eq!(pair.to_host.accepted, 0);
+    assert_eq!(pair.receipts[0], 0);
+}
+
+fn renew_viewer_ticket(pair: &mut ControllerPair) {
+    let mut ticket = grant().initial_ticket();
+    ticket.sequence = 1;
+    ticket.credentials.ticket = InputTicketId::from_raw(4);
+    ticket.issued_at_us = pair.elapsed;
+    ticket.expires_at_us = pair.elapsed + 1_000_000;
+    let mut bytes = [0; fr_wire::input_ticket::INPUT_TICKET_BYTES];
+    fr_wire::input_ticket::encode(
+        ticket,
+        &mut bytes,
+        &ProtocolLimits::ABSOLUTE,
+        grant().input_channel,
+        InputDirection::HostToViewer,
+        InputDelivery::Reliable,
+    )
+    .unwrap();
+    pair.viewer_input
+        .as_mut()
+        .unwrap()
+        .accept_ticket(&bytes, correlation(pair.elapsed), client(pair.elapsed))
+        .unwrap();
+}
+
+#[test]
+fn stale_viewer_cancels_real_incr_and_resumes_only_after_fresh_view_and_ticket() {
+    let _guard = SERIAL.lock().unwrap();
+    if display().is_none() {
+        return;
+    }
+    let mut pair = ControllerPair::new();
+    let original = "x".repeat(1_048_576);
+    publish(&mut pair.viewer_app, &original, 1);
+    pair.until(|p| p.viewer_app.active_readers() == 1);
+
+    // The clipboard worker observes the lapse before its input owner ticks.
+    pair.elapsed = 1_500_000;
+    assert_viewer_paused(&mut pair);
+    pair.viewer_input
+        .as_mut()
+        .unwrap()
+        .tick(client(pair.elapsed))
+        .unwrap();
+    pair.until(|p| p.viewer_app.active_readers() == 0);
+    assert_eq!(pair.text(1), original);
+    assert_eq!(pair.viewer_app.current_origin().unwrap(), Some(stamp(1)));
+    assert_eq!(pair.ids[1], 1);
+    assert_viewer_paused(&mut pair);
+
+    pair.elapsed = 2_700_000;
+    let credentials = grant().credentials();
+    pair.viewer_input
+        .as_mut()
+        .unwrap()
+        .presented(
+            PresentedObservation {
+                session: credentials.session,
+                view: credentials.view,
+                serial: 2,
+                received_at: client(pair.elapsed),
+                source_age_upper_us: 100,
+            },
+            client(pair.elapsed),
+        )
+        .unwrap();
+    assert_viewer_paused(&mut pair);
+    renew_viewer_ticket(&mut pair);
+    assert_eq!(pair.viewer_input.as_ref().unwrap().suspended_since(), None);
+    for _ in 0..30 {
+        pair.step();
+    }
+    assert_eq!(pair.ids[1], 1, "the cancelled selection cannot be retried");
+    assert_eq!(pair.to_host.accepted, 0);
+    assert_eq!(pair.receipts[0], 0);
+    assert!(!pair.viewer.is_closed());
+
+    publish(&mut pair.viewer_app, "a new copy after view and ticket", 2);
+    pair.until(|p| p.receipts[0] == 1);
+    assert_eq!(pair.text(0), "a new copy after view and ticket");
+    assert_eq!(pair.ids[1], 2);
+    assert_eq!(pair.viewer.retained_channel_bytes(), 0);
+    assert!(pair.host_input.monitor().deadline(at(100)).is_ok());
 }
 
 #[test]
