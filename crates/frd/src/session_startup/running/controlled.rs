@@ -278,11 +278,11 @@ where
             self.input.control().stop(StopReason::ViewInvalidated);
             return Err(Error::Closed);
         }
-        // A peer may finish and cancel Files within the preceding native I/O
-        // turn. Retire that final exchange before a generic control receiver
-        // reads its reset; ordinary file work keeps its post-input turn below.
+        // The viewer may finish Files before this host's next turn. Retire or
+        // promote its staged final exchange before generic receive; handshake
+        // transmission and disk work retain their post-input turn below.
         self.files
-            .retire_pending_peer(q, || {
+            .prepare_pending_receive(q, || {
                 self.renewal.permitted() && self.observation.check().is_ok()
             })
             .map_err(Error::Transport)?;

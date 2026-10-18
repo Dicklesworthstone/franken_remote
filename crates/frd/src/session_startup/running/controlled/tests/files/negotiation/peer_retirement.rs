@@ -315,6 +315,120 @@ fn cancelled_before_receiver_starts(payload: bool) {
 }
 
 #[test]
+fn acknowledged_file_offer_before_host_promotion_completes_on_ordinary_control_turns() {
+    run(|c, h| async move {
+        let Fixture {
+            mut host,
+            mut viewer,
+            driver,
+            effects,
+            seat,
+            ..
+        } = Box::pin(fixture_capabilities(&c, &h, None, false, true)).await;
+        let directory = Directory::new();
+        let connection = host.io().unwrap().0.binding();
+        let ((), shutdown) = Box::pin(support::both(
+            async {
+                host.offer_files(
+                    request(&host, Duration::from_secs(1)),
+                    71,
+                    directory.configuration(Permission::new(true)),
+                )
+                .unwrap();
+                let (channel, _) = viewer_finished_first(&mut host, &mut viewer, &c, &h).await;
+                let mut lane = FilesChannel::new(
+                    viewer.session.io().unwrap().0,
+                    channel,
+                    credentials().lease,
+                    71,
+                )
+                .unwrap();
+                let mut sender = Sender::new(
+                    c.clone(),
+                    viewer.session.io().unwrap().0,
+                    &mut lane,
+                    fr_files::sender::Policy::default(),
+                )
+                .unwrap();
+                admit_source_offer(&mut sender, &mut host, &mut viewer, &c, &h, &directory).await;
+                assert_eq!(host.file_receive_cleanup(), FileReceiveCleanup::NotStarted);
+                assert_eq!(sender.result(), None);
+                assert!(!directory.0.join("discarded").exists());
+                let (mut n, mut t) = (4000, 7000);
+                let proof = complete_file_with_input(
+                    &mut host,
+                    &mut viewer,
+                    &mut sender,
+                    &c,
+                    &mut n,
+                    &mut t,
+                )
+                .await;
+                assert_eq!(
+                    proof.outcome,
+                    Outcome::HostPublished {
+                        bytes: 257,
+                        publication: Publication::Durable,
+                    }
+                );
+                assert_eq!(
+                    fs::read(directory.0.join("discarded")).unwrap(),
+                    [37_u8; 257]
+                );
+                assert_eq!(host.file_receive_state(), Some(State::Active));
+                assert!(!host.file_receive_negotiating());
+                let published = host.file_receive_result().unwrap();
+                sender.cancel(viewer.session.io().unwrap().0).unwrap();
+                host.retire_files().unwrap();
+                let cleanup = host
+                    .reap_files(
+                        &c,
+                        crate::worker::Deadline::after(&c, Duration::from_secs(1)).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(matches!(cleanup, FileReceiveCleanup::Finished(_)));
+                assert_eq!(host.file_receive_result(), Some(published));
+                assert!(host.io().unwrap().0.is_bound_to(&connection));
+                assert!(!host.control().is_stopped());
+                host.close();
+            },
+            driver,
+        ))
+        .await;
+        assert!(shutdown.handoff_safe());
+        assert!(!seat.is_occupied());
+        assert_eq!(effects.lock().unwrap().events, [true, false]);
+    });
+}
+
+async fn complete_file_with_input(
+    host: &mut ControlledHost,
+    viewer: &mut View,
+    sender: &mut Sender<'_>,
+    c: &Cx,
+    n: &mut u128,
+    t: &mut u128,
+) -> fr_files::sender::Receipt {
+    let until = now(c).unwrap() + 2_000_000;
+    viewer.visible(c);
+    viewer.queue_key(c, true);
+    let mut proof = None;
+    while proof.is_none() || viewer.receipts < 1 {
+        assert!(now(c).unwrap() < until, "file transfer or input stopped");
+        step(host, viewer, sender, c, n, t).await;
+        proof = proof.or_else(|| sender.take_result());
+    }
+    viewer.visible(c);
+    viewer.queue_key(c, false);
+    while viewer.receipts < 2 {
+        assert!(now(c).unwrap() < until, "input release stopped");
+        step(host, viewer, sender, c, n, t).await;
+    }
+    proof.unwrap()
+}
+
+#[test]
 fn peer_cancel_after_attached_keeps_control_and_never_starts_file_receiver() {
     cancelled_before_receiver_starts(false);
 }

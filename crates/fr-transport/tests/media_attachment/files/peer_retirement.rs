@@ -121,6 +121,66 @@ async fn cancelled_before_host_promotion(cx: &Cx, payload: bool) {
 }
 
 #[test]
+fn acknowledged_files_payload_survives_host_promotion_on_the_original_stream() {
+    run_test!(cx, {
+        let mut l = Link::new(&cx).await;
+        enable(&mut l);
+        let (_host_input, _viewer_input, hi, ci) = attach(&mut l, &cx, 8, MediaRole::Input).await;
+        let connection = l.h.binding();
+        let (mut host, viewer, viewer_routes) = viewer_finished_first(&mut l, &cx).await;
+        let viewer = FilesChannel::new(&l.c, viewer, InputLeaseId::from_raw(123), 456).unwrap();
+        let bytes = encoded_file(&viewer);
+        let until = clock(&cx) + 1_000_000;
+        viewer.send(&mut l.c, &cx, &bytes, until, || true).unwrap();
+        assert!(!viewer.send_drained(&l.c).unwrap());
+        while !viewer.send_drained(&l.c).unwrap() {
+            assert!(clock(&cx) < until, "native file prefix did not drain");
+            l.drive(&cx).await;
+        }
+        assert!(!host.is_complete());
+        let routes = host.finish(&mut l.h, &cx, || true).unwrap().unwrap();
+        assert_eq!(routes.inbound.messages, Messages::Files);
+        assert_eq!(routes.descriptor, viewer_routes.descriptor);
+        assert_eq!(routes.inbound.stream, viewer_routes.outbound.stream);
+        let host = FilesChannel::new(&l.h, host, InputLeaseId::from_raw(123), 456).unwrap();
+        let mut received = false;
+        host.dispatch(
+            &mut l.h,
+            &cx,
+            || true,
+            |record| {
+                assert!(!received);
+                assert_eq!(record, bytes);
+                received = true;
+                Ok(Disposition::Consumed)
+            },
+        )
+        .unwrap();
+        assert!(received);
+        assert!(l.h.is_bound_to(&connection));
+        input::transfer(
+            &mut l,
+            &cx,
+            false,
+            Route::Stream(ci.outbound),
+            Route::Stream(hi.inbound),
+            &record(0x40, 8, 128),
+        )
+        .await;
+        let (outgoing, incoming) = (l.hr.outbound, l.cr.inbound);
+        input::transfer(
+            &mut l,
+            &cx,
+            true,
+            Route::Stream(outgoing),
+            Route::Stream(incoming),
+            &record(0x12, 7, 128),
+        )
+        .await;
+    });
+}
+
+#[test]
 fn peer_files_reset_after_attached_retires_before_host_promotion() {
     run_test!(cx, {
         cancelled_before_host_promotion(&cx, false).await;

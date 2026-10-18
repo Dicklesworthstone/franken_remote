@@ -73,17 +73,18 @@ impl Slot {
             _ => true,
         }
     }
-    /// Before generic control receive can read an ARMED stream's reset. This
-    /// only retires a proven final Files exchange; no payload or worker starts.
-    pub(super) fn retire_pending_peer(
+    /// Retire or promote a proven final Files exchange before generic receive
+    /// can frame its reset or first payload under the old handshake route. The
+    /// pending owner remains here until post-input service starts its worker.
+    pub(super) fn prepare_pending_receive(
         &mut self,
         q: &mut QuicRecords,
         authorize: impl FnMut() -> bool,
     ) -> Result<(), quic::Error> {
         if let Some(pending) = &mut self.pending {
-            match pending.retire_peer(q, authorize) {
-                Ok(false) => {}
-                Ok(true) => {
+            match pending.preflight(q, authorize) {
+                Ok(Advance::Waiting | Advance::Ready) => {}
+                Ok(Advance::PeerRetired) => {
                     self.pending = None;
                     self.reason.get_or_insert(Error::Cancelled);
                 }

@@ -58,27 +58,42 @@ impl Pending {
             }))
             || matches!(route, Route::Stream(r) if r.binding == self.channel.descriptor().binding.parent.id)
     }
-    pub(super) fn retire_peer(
+    pub(super) fn preflight(
         &mut self,
         q: &mut QuicRecords,
-        authorize: impl FnMut() -> bool,
-    ) -> Result<bool, quic::Error> {
+        mut authorize: impl FnMut() -> bool,
+    ) -> Result<Advance, quic::Error> {
         // Verify opaque ownership BEFORE any call that can close/modify q. IDs
         // and route equality on a different connection do not confer authority.
         if !q.is_bound_to(&self.connection) {
             return Err(quic::Error::WrongRoute);
         }
         self.check()?;
-        self.channel
-            .retire_files_if_peer_cancelled(q, &self.cx, authorize)
+        if self
+            .channel
+            .retire_files_if_peer_cancelled(q, &self.cx, &mut authorize)?
+        {
+            return Ok(Advance::PeerRetired);
+        }
+        // The peer can send Files immediately after receiving Attached. Only
+        // finish its already-staged final route transition here; transmission,
+        // attachment dispatch and receiver construction stay after input.
+        let complete = self.channel.finish(q, &self.cx, &mut authorize)?.is_some();
+        self.check()?;
+        Ok(if complete {
+            Advance::Ready
+        } else {
+            Advance::Waiting
+        })
     }
     pub(super) fn advance(
         &mut self,
         q: &mut QuicRecords,
         mut authorize: impl FnMut() -> bool,
     ) -> Result<Advance, quic::Error> {
-        if self.retire_peer(q, &mut authorize)? {
-            return Ok(Advance::PeerRetired);
+        match self.preflight(q, &mut authorize)? {
+            Advance::Waiting => {}
+            outcome => return Ok(outcome),
         }
         self.channel.transmit(q, &self.cx, &mut authorize)?;
         self.channel.dispatch(q, &self.cx, &mut authorize)?;

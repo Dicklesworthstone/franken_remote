@@ -1094,7 +1094,10 @@ impl MediaChannel {
             {
                 return Err(Error::WrongRoute);
             }
-            if self.host {
+            // A Files viewer can send as soon as it receives Attached. Keep
+            // those bytes native until its authenticated routes are installed;
+            // the old handshake framing and remainder above must still be empty.
+            if self.host && self.descriptor.role != MediaRole::Files {
                 let s = q
                     .native
                     .as_ref()

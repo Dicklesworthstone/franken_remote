@@ -87,6 +87,15 @@ is pending, without reading the supplied descriptor. Pending clipboard and file
 handshakes are serialized on the common control route; established lanes remain
 independent. Duplicate expectations cannot spend another channel slot.
 
+The host promotes a fully staged final Files attachment before generic control
+receive. A viewer that has already consumed Attached may send its first file
+record before the host next runs its attachment owner. Those unread native bytes
+then enter the negotiated Files parser, retaining the existing record limits and
+deadline checks. The disk receiver still starts in the ordinary file-service turn
+after input and control renewal. This transport preflight does not grant file
+permission or start disk work; incomplete attachment framing and other roles
+retain their existing checks.
+
 Cancellation before the authenticated final acknowledgement fences the parent:
 there is no completed file lane to retire independently yet. Permission loss,
 malformed/foreign bindings and the original setup expiry retain their normal
