@@ -1,4 +1,5 @@
 //! Original-client lifetime and conservative host-clock authority projection.
+pub(crate) mod files;
 use super::{Error, ProjectedClock};
 use crate::input::{ClientInstant, MAX_VIEW_SUSPENSION_US};
 use fr_core::{

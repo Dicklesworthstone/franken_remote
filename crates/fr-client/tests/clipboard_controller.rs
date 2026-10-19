@@ -621,3 +621,6 @@ mod lane;
 
 #[path = "clipboard_controller/handoff.rs"]
 mod handoff;
+
+#[path = "clipboard_controller/files.rs"]
+mod files;

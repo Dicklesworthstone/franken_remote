@@ -584,6 +584,7 @@ name = "fr-files"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "fr-client",
  "fr-core",
  "fr-transport",
  "fr-wire",

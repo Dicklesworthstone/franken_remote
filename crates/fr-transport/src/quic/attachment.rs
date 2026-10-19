@@ -130,6 +130,7 @@ pub struct MediaChannel {
     /// Fixed by this connection's bilateral selection, never inferred from an
     /// incoming layout or a generous generic protocol limit.
     credit: bool,
+    pub(super) files_download: bool,
 }
 impl fmt::Debug for MediaChannel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -710,6 +711,10 @@ impl MediaChannel {
             receive_armed: !host,
             allowance,
             credit: attachment::credit::selected(scope.selection),
+            files_download: scope.selection.capabilities.iter().any(|c| {
+                c.name == fr_wire::files::DOWNLOAD_CAPABILITY
+                    && c.version == fr_wire::files::DOWNLOAD_VERSION
+            }),
         }
     }
     pub const fn deadline_us(&self) -> u64 {
@@ -1088,9 +1093,15 @@ impl MediaChannel {
                 .position(|r| r.route == self.pair.inbound)
                 .ok_or(Error::WrongRoute)?;
             let receiving = &q.inbound[slot];
+            // A download source may send immediately after staging Attached.
+            // Only its exact authenticated viewer ACK can carry an unparsed
+            // native read suffix into Files; old partially framed bytes still fail.
+            let download_suffix = !self.host
+                && self.files_download
+                && self.descriptor.role == MediaRole::Files;
             if receiving.fin
                 || receiving.framing.buffered_bytes() != 0
-                || !receiving.remainder.is_empty()
+                || (!download_suffix && !receiving.remainder.is_empty())
             {
                 return Err(Error::WrongRoute);
             }

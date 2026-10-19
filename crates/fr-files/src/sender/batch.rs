@@ -83,6 +83,7 @@ impl Selection {
 pub enum Stop {
     Local(Error),
     HostRefused(Reason),
+    ControllerRefused(Reason),
     /// Publication may have happened. This selection is NEVER resubmitted.
     PublicationUnknown,
     /// Publication is known, durability is not. Keep that original receipt.
@@ -270,9 +271,16 @@ impl Sender<'_> {
                     Outcome::HostPublished {
                         publication: Publication::Durable,
                         ..
+                    }
+                    | Outcome::ControllerPublished {
+                        publication: Publication::Durable,
+                        ..
                     } => None,
-                    Outcome::HostPublished { .. } => Some(Stop::DurabilityUnknown),
+                    Outcome::HostPublished { .. } | Outcome::ControllerPublished { .. } => {
+                        Some(Stop::DurabilityUnknown)
+                    }
                     Outcome::HostRefused(reason) => Some(Stop::HostRefused(reason)),
+                    Outcome::ControllerRefused(reason) => Some(Stop::ControllerRefused(reason)),
                     Outcome::PublicationUnknown => Some(Stop::PublicationUnknown),
                     Outcome::InterruptedBeforePublication(error) => Some(Stop::Local(error)),
                 };

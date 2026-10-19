@@ -19,6 +19,9 @@ pub mod control_grant;
 /// Controller-only clipboard tied to the original accepted grant.
 pub mod clipboard;
 
+/// File receipt bound to the original accepted controller and its live grant.
+pub mod files;
+
 /// Shared client session core, auto-reconnect, presentation policy, and input fencing.
 pub mod session;
 pub use session::{

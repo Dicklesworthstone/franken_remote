@@ -14,7 +14,7 @@ use asupersync::cx::Cx;
 use fr_core::input_submission::InputSession;
 use fr_wire::{
     WireError,
-    files::{self, Body, Context, Direction, Disposition, Limits, Message, Reason, Role},
+    files::{self, Body, Context, Disposition, Limits, Message, Reason},
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -28,10 +28,11 @@ impl Settings {
         self.incoming.validate().map_err(Error::Wire)?;
         self.outgoing.validate().map_err(Error::Wire)?;
         let scope = authority.binding();
-        if self.incoming.sender != Role::Controller
-            || self.outgoing.sender != Role::Host
-            || self.incoming.direction != Direction::ToHost
-            || self.outgoing.direction != Direction::ToHost
+        let direction = authority.direction();
+        if self.incoming.sender != direction.source()
+            || self.outgoing.sender != direction.receiver()
+            || self.incoming.direction != direction
+            || self.outgoing.direction != direction
         {
             return Err(Error::Wire(WireError::WrongRole));
         }
@@ -41,6 +42,7 @@ impl Settings {
             || self.outgoing.lease != scope.lease
             || self.incoming.handle != self.outgoing.handle
             || self.incoming.channel != self.outgoing.channel
+            || !authority.matches_channel(self.incoming.channel)
         {
             return Err(Error::Wire(WireError::InvalidBinding));
         }
@@ -75,6 +77,9 @@ pub struct HostReceiver {
     progress: Option<Progress>,
     last: Option<ResultReceipt>,
 }
+/// Receive either selected direction; the legacy host name remains compatible.
+pub type Receiver = HostReceiver;
+
 impl std::fmt::Debug for HostReceiver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("HostFileWire([original attachment])")

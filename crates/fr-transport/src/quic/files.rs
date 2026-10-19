@@ -11,7 +11,7 @@ use fr_wire::{
 };
 use std::cell::Cell;
 
-/// Controller-to-host file data and reverse acceptance/completion on one pair.
+/// Positively selected file direction and reverse receipts on one original pair.
 /// Non-cloneable and connection-identity checked, not just numerically bound.
 pub struct FilesChannel {
     attachment: MediaChannel,
@@ -63,7 +63,11 @@ impl FilesChannel {
                 handle,
                 channel: routes.descriptor.binding.parent.id,
                 sender,
-                direction: Direction::ToHost,
+                direction: if attachment.files_download {
+                    Direction::ToController
+                } else {
+                    Direction::ToHost
+                },
                 lane: Lane::Files,
             };
             outgoing.validate().map_err(|_| Error::WrongRoute)?;

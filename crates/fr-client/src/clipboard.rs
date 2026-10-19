@@ -4,7 +4,7 @@
 //! integration still supplies the separately approved clipboard capability and
 //! dedicated authenticated lane, and fences already accepted bytes on closure.
 pub mod image;
-mod projection;
+pub(crate) mod projection;
 mod synchronize;
 use crate::input::{ClientInstant, InputClient};
 use fr_core::{
@@ -235,7 +235,10 @@ impl InputClient {
         ControllerImageClipboard::new(monitor, self.limits, true, clock, now)
     }
     pub(crate) fn clipboard_readiness(&self) {
-        if let Some(owner) = &self.clipboard_projection {
+        for owner in [&self.clipboard_projection, &self.files_projection]
+            .into_iter()
+            .flatten()
+        {
             let obligations = self
                 .pending
                 .iter()

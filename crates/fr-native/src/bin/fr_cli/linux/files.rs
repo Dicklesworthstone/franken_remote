@@ -116,7 +116,9 @@ fn absence_code(absence: Absence) -> &'static str {
 }
 fn refusal_reason(outcome: FileSendOutcome) -> Option<&'static str> {
     Some(match outcome {
-        FileSendOutcome::HostPublished { .. } => return None,
+        FileSendOutcome::HostPublished { .. } | FileSendOutcome::ControllerPublished { .. } => {
+            return None;
+        }
         FileSendOutcome::HostRefused(reason) => match reason {
             Reason::Conflict => "host_conflict",
             Reason::Resource => "host_limit",
@@ -127,6 +129,17 @@ fn refusal_reason(outcome: FileSendOutcome) -> Option<&'static str> {
             Reason::UnknownEffect => "publication_unknown",
             Reason::Cancelled | Reason::User => "host_cancelled",
             Reason::None => "host_refused",
+        },
+        FileSendOutcome::ControllerRefused(reason) => match reason {
+            Reason::Conflict => "controller_conflict",
+            Reason::Resource => "controller_limit",
+            Reason::Permission => "controller_permission",
+            Reason::Expired => "controller_expired",
+            Reason::Integrity => "controller_integrity",
+            Reason::Invalid => "controller_invalid",
+            Reason::UnknownEffect => "publication_unknown",
+            Reason::Cancelled | Reason::User => "controller_cancelled",
+            Reason::None => "controller_refused",
         },
         FileSendOutcome::PublicationUnknown => "publication_unknown",
         FileSendOutcome::InterruptedBeforePublication(error) => match error {
@@ -183,7 +196,10 @@ fn summary(sizes: &[Option<u64>], status: Result<&SendStatus, &'static str>) -> 
     let mut receipts = report.receipts();
     for (index, &size) in sizes.iter().enumerate() {
         match receipts.next().map(|receipt| receipt.outcome) {
-            Some(FileSendOutcome::HostPublished { bytes, publication }) => {
+            Some(
+                FileSendOutcome::HostPublished { bytes, publication }
+                | FileSendOutcome::ControllerPublished { bytes, publication },
+            ) => {
                 out.sent
                     .push((index, bytes, publication == Publication::Durable));
             }

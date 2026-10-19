@@ -161,3 +161,6 @@ mod sender;
 
 #[path = "native_quic/batch.rs"]
 mod batch;
+
+#[path = "native_quic/receive_cleanup.rs"]
+mod receive_cleanup;

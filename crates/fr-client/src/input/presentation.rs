@@ -19,6 +19,7 @@ use fr_wire::MediaLimits;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Clipboard(crate::clipboard::Error),
+    Files(crate::files::Error),
     Input(super::Error),
     Media(freshness::Error),
     ViewMismatch,
@@ -86,7 +87,10 @@ impl PresentedInput {
         {
             return Err(Error::ViewMismatch);
         }
-        if let Some(owner) = &input.clipboard_projection {
+        for owner in [&input.clipboard_projection, &input.files_projection]
+            .into_iter()
+            .flatten()
+        {
             owner.bind_receiver(view.receiver_lifetime());
         }
         Ok(Self {
@@ -129,7 +133,10 @@ impl PresentedInput {
             return Err(Error::ViewMismatch);
         }
         let evidence = view.evidence(now.0)?;
-        if let Some(owner) = &input.clipboard_projection {
+        for owner in [&input.clipboard_projection, &input.files_projection]
+            .into_iter()
+            .flatten()
+        {
             owner.bind_receiver(view.receiver_lifetime());
         }
         let mut this = Self {
@@ -147,7 +154,10 @@ impl PresentedInput {
     /// failed or replaced receiver ends the grant at its next check.
     pub fn expect_reference_recovery(&mut self) {
         self.expects_recovery = true;
-        if let Some(owner) = &self.input.clipboard_projection {
+        for owner in [&self.input.clipboard_projection, &self.input.files_projection]
+            .into_iter()
+            .flatten()
+        {
             owner.expect_reference_recovery();
         }
     }
@@ -184,7 +194,10 @@ impl PresentedInput {
             return Err(Error::ViewMismatch);
         }
         self.input.advance_recovery(view.epoch().recovery, now)?;
-        if let Some(owner) = &self.input.clipboard_projection {
+        for owner in [&self.input.clipboard_projection, &self.input.files_projection]
+            .into_iter()
+            .flatten()
+        {
             owner.follow_recovery(view.receiver_lifetime());
         }
         self.recovering = None;
@@ -241,6 +254,23 @@ impl PresentedInput {
         self.input
             .attach_clipboard_lane(parent, outgoing, limits, true, now)
             .map_err(Error::Clipboard)
+    }
+    /// Hand the original controller's file authority to its one admitted receive
+    /// lane. Mapping and a genuinely observed view are required; a bounded input
+    /// suspension does not stop an already authorized file transfer.
+    pub fn file_receive_authority(
+        &mut self,
+        parent: fr_wire::negotiation::ControlBinding,
+        channel: u32,
+        lease: fr_core::ids::InputLeaseId,
+        now: ClientInstant,
+    ) -> Result<crate::files::ControllerAuthority, Error> {
+        if !self.tick(now)? && !self.active {
+            return Err(self.not_ready());
+        }
+        self.input
+            .file_receive_authority(parent, channel, lease, now)
+            .map_err(Error::Files)
     }
     /// Validate the exact receiver underlying the input's presentation evidence.
     /// Equal IDs on a different receiver do not authorize media or repairs.
@@ -441,13 +471,16 @@ impl PresentedInput {
         // No input ticket is issued while the host view is suspended. Keep
         // its independent authenticated clock exchanges available to clipboard
         // maintenance, without turning one into authority or a fresh view.
-        if self
-            .input
-            .clipboard_projection
-            .as_ref()
-            .is_some_and(|owner| owner.synchronize(clock, now).is_err())
-        {
-            self.input.retire_clipboard();
+        for projection in [
+            &mut self.input.clipboard_projection,
+            &mut self.input.files_projection,
+        ] {
+            if projection
+                .as_ref()
+                .is_some_and(|owner| owner.synchronize(clock, now).is_err())
+            {
+                drop(projection.take());
+            }
         }
         Ok(())
     }

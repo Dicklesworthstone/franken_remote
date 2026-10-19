@@ -14,6 +14,10 @@ use fr_core::{
 
 pub const CAPABILITY: &str = "file-atp-full";
 pub const VERSION: u16 = 1;
+/// Explicitly selects host-to-controller data on the sole Files lane. Both
+/// endpoints still require original control and separately approved local paths.
+pub const DOWNLOAD_CAPABILITY: &str = "file-download";
+pub const DOWNLOAD_VERSION: u16 = 1;
 /// Optional, positively negotiated scope agreement for a host drop directory.
 /// Its handle is the completed Files attachment's binding ID, widened to u128.
 /// This names an already locally approved endpoint; it grants no authority.
@@ -64,10 +68,16 @@ pub enum Direction {
     ToController,
 }
 impl Direction {
-    fn source(self) -> Role {
+    pub const fn source(self) -> Role {
         match self {
             Self::ToHost => Role::Controller,
             Self::ToController => Role::Host,
+        }
+    }
+    pub const fn receiver(self) -> Role {
+        match self {
+            Self::ToHost => Role::Host,
+            Self::ToController => Role::Controller,
         }
     }
 }

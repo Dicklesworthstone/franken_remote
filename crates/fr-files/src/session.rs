@@ -1,7 +1,8 @@
-//! Host file receipt tied to an existing native controller, never a new grant.
+//! File receipt tied to an existing original controller, never a new grant.
 //!
 //! This synchronous owner belongs on a disk worker. Clock callbacks are trusted
-//! local monotonic reads in the original host's domain, never wire timestamps.
+//! local monotonic reads projected into the original host's domain, never wire
+//! timestamps. The worker obtains that projection from its opaque authority.
 //! There is one active object, bounded shared disk reservations, and no payload
 //! queue. Transport attachment and positive capability negotiation are separate.
 use crate::receive::{self, DropDirectory, MAX_CHUNK_BYTES, PendingObject, Publication};
@@ -53,13 +54,18 @@ pub struct Binding {
     pub lease: InputLeaseId,
 }
 
-/// Read-only handoff from the original native input owner to its file worker.
-/// Only a real `InputSession` can create this value. Clones retain the same
-/// opaque native-owner identity; numeric session/lease values are not authority.
+/// Read-only handoff from an original host input owner or accepted viewer grant.
+/// Clones retain the same opaque lifetime; numeric session/lease IDs never
+/// construct file authority, and the handoff cannot renew or replace that owner.
 #[derive(Clone)]
 pub struct Authority {
-    monitor: InputMonitor,
+    source: AuthoritySource,
     binding: Binding,
+}
+#[derive(Clone)]
+enum AuthoritySource {
+    Host(InputMonitor),
+    Controller(fr_client::files::ControllerAuthority),
 }
 impl fmt::Debug for Authority {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -70,19 +76,60 @@ impl Authority {
     pub fn from_input(input: &InputSession) -> Self {
         let scope = input.ticket_credentials(InputTicketId::from_raw(0));
         Self {
-            monitor: input.monitor(),
+            source: AuthoritySource::Host(input.monitor()),
             binding: Binding {
                 session: scope.session,
                 lease: scope.lease,
             },
         }
     }
+    pub fn from_controller(authority: fr_client::files::ControllerAuthority) -> Self {
+        Self {
+            binding: Binding {
+                session: authority.session(),
+                lease: authority.lease(),
+            },
+            source: AuthoritySource::Controller(authority),
+        }
+    }
     pub fn binding(&self) -> Binding {
         self.binding
     }
+    pub fn direction(&self) -> fr_wire::files::Direction {
+        match &self.source {
+            AuthoritySource::Host(_) => fr_wire::files::Direction::ToHost,
+            AuthoritySource::Controller(_) => fr_wire::files::Direction::ToController,
+        }
+    }
+    /// Sample the recipient's trusted local monotonic microseconds. A viewer
+    /// sample is conservatively projected by its original grant, not compared
+    /// directly with a host deadline or replaced with a wire clock.
+    pub fn sample(&self, local_us: u64) -> Result<HostInstant, Refusal> {
+        match &self.source {
+            AuthoritySource::Host(_) => Ok(HostInstant::from_micros(local_us)),
+            AuthoritySource::Controller(authority) => {
+                authority.sample(fr_client::input::ClientInstant(local_us))
+            }
+        }
+    }
     /// The authority deadline file receipt is held to; see `standing`.
     pub fn deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
-        standing(&self.monitor, now)
+        match &self.source {
+            AuthoritySource::Host(monitor) => standing(monitor, now),
+            AuthoritySource::Controller(authority) => authority.deadline(now),
+        }
+    }
+    pub(crate) fn matches_channel(&self, channel: u32) -> bool {
+        match &self.source {
+            AuthoritySource::Host(_) => true,
+            AuthoritySource::Controller(authority) => authority.channel() == channel,
+        }
+    }
+    pub(crate) fn matches_parent(&self, parent: fr_wire::negotiation::ControlBinding) -> bool {
+        match &self.source {
+            AuthoritySource::Host(_) => true,
+            AuthoritySource::Controller(authority) => authority.parent() == parent,
+        }
     }
 }
 /// The control status deadline at a fresh sample: lease, observation and view
@@ -221,14 +268,14 @@ impl Active {
     }
 }
 
-/// Original host controller + separately approved local drop directory.
-/// Construction requires a real `InputSession`; a view-only session has no such
-/// owner. This monitor checks opaque native-owner identity as well as IDs, so
-/// dropping/replacing the controller cannot resurrect old transfers.
+/// Original controller authority + separately approved local drop directory.
+/// Construction requires a real host input session or accepted viewer handoff;
+/// a view-only session has neither. Opaque owner lifetime is checked as well as
+/// IDs, so dropping/replacing the controller cannot resurrect old transfers.
 /// Exactly one instance must be owned by the original negotiated file lane.
 pub struct HostReceiver {
     directory: DropDirectory,
-    authority: InputMonitor,
+    authority: Authority,
     binding: Binding,
     permission: Permission,
     policy: Policy,
@@ -239,6 +286,9 @@ pub struct HostReceiver {
     active: Option<Active>,
     closed: bool,
 }
+/// Direction-neutral name for new receive integrations; the legacy name remains compatible.
+pub type Receiver = HostReceiver;
+
 impl fmt::Debug for HostReceiver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HostFileReceiver")
@@ -275,7 +325,7 @@ impl HostReceiver {
         let mut result = Self {
             directory,
             binding: authority.binding,
-            authority: authority.monitor,
+            authority,
             permission,
             policy,
             usage: Usage::default(),
@@ -506,7 +556,7 @@ impl HostReceiver {
             Some(Error::Clock)
         } else if !self.permission.is_approved() {
             Some(Error::Permission)
-        } else if let Err(error) = standing(&self.authority, now) {
+        } else if let Err(error) = self.authority.deadline(now) {
             Some(Error::Authority(error))
         } else if self
             .active

@@ -451,3 +451,6 @@ fn actual_host_conflict_is_a_refusal_and_cannot_overwrite_or_resubmit() {
 
 #[path = "sender/directory.rs"]
 mod directory;
+
+#[path = "sender/stop.rs"]
+mod stop;

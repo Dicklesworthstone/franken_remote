@@ -130,7 +130,7 @@ impl QuicRecords {
         self.retire_reservation_at(cx, index)
     }
     /// The ordinary path requires ACTIVE. The only other caller proves the
-    /// original host Files exchange reached its staged final response.
+    /// original Files exchange reached its direction-specific staged final boundary.
     fn retire_reservation_at(&mut self, cx: &Cx, index: usize) -> Result<(), Error> {
         let r = &self.attachments[index];
         let code = retirement_code(r.role).ok_or(Error::WrongRoute)?;

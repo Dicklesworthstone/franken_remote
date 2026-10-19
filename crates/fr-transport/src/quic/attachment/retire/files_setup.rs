@@ -1,4 +1,4 @@
-//! A peer may cancel Files after receiving Attached but before the host promotes.
+//! A Files source or recipient may cancel at its authenticated final handoff.
 use super::{
     super::{ACTIVE, ARMED, MediaChannel, MediaRole, Ordering, Phase, QuicRecords, RETIRED},
     FILES_RETIRED,
@@ -7,12 +7,13 @@ use crate::quic::{Cx, Error};
 use std::sync::Arc;
 
 impl MediaChannel {
-    /// Recognize peer cancellation at the original host's final Files boundary.
-    /// A validated Attach and fully staged Attached are required before promotion;
-    /// completed attachments may already have a peer-retired tombstone. No disk
-    /// receiver should be constructed after `true`. The spent binding and stream
-    /// IDs stay retired. Earlier phases, other roles and unknown reset codes keep
-    /// their existing failure behavior; parent authority and deadlines still win.
+    /// Retire a peer-cancelled Files lane at its original final boundary. The
+    /// host requires validated Attach and fully staged Attached. A positively
+    /// selected download viewer requires the exact Ticket and fully staged
+    /// Attach; RESET may discard its still-unread Attached. This is retirement,
+    /// not successful attachment or receive authority. Completed attachments may
+    /// already have a peer-retired tombstone. No disk receiver starts after true.
+    /// Earlier phases, other roles, parent expiry and unknown codes stay strict.
     pub fn retire_files_if_peer_cancelled(
         &mut self,
         q: &mut QuicRecords,
@@ -21,7 +22,7 @@ impl MediaChannel {
     ) -> Result<bool, Error> {
         // Foreign objects must not mutate either owner before being refused.
         if !q.is_bound_to(&self.connection)
-            || !self.host
+            || (!self.host && !self.files_download)
             || self.descriptor.role != MediaRole::Files
         {
             return Err(Error::WrongRoute);
@@ -54,13 +55,14 @@ impl MediaChannel {
 
     fn cancelled_files_reservation(&self, q: &QuicRecords) -> Result<Option<usize>, Error> {
         let state = self.state.load(Ordering::Acquire);
-        if !matches!(
+        let final_phase = matches!(
             (self.phase, state),
             (Phase::Promote, ARMED) | (Phase::Complete, ACTIVE | RETIRED)
-        ) {
+        ) || (!self.host && self.files_download && self.phase == Phase::Attached && state == ARMED);
+        if !final_phase {
             return Ok(None);
         }
-        if self.phase == Phase::Promote
+        if self.phase != Phase::Complete
             && (!self.receive_armed || self.len != 0 || !q.send_staged(self.pair.outbound)?)
         {
             return Ok(None);
@@ -88,9 +90,9 @@ impl MediaChannel {
         if !files_retirement_requested(reset, stop) {
             return Ok(None);
         }
-        // Attach was already authenticated. Any later bytes belong only to
-        // this spent file lane: retirement discards them and charges RESET's
-        // final size without parsing data or starting a disk receiver.
+        // This final exchange is bound to the original validated ticket. Any
+        // unread ACK or data belongs only to this spent lane: retirement charges
+        // RESET's final size without parsing it or starting a disk receiver.
         Ok(Some(index))
     }
 }

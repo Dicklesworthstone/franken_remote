@@ -340,3 +340,6 @@ fn record(kind: u16, binding: u32, len: usize) -> Vec<u8> {
     b[16..20].copy_from_slice(&binding.to_be_bytes());
     b
 }
+
+#[path = "files/download.rs"]
+mod download;

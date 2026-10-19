@@ -13,7 +13,6 @@ use crate::{
 use asupersync::{cx::Cx, time::TimerDriverHandle};
 use fr_core::input_submission::InputSession;
 use fr_transport::quic::{self, ConnectionBinding, Disposition, QuicRecords, files::FilesChannel};
-use fr_wire::files::Role;
 use std::time::Duration;
 
 pub struct Configuration {
@@ -58,6 +57,9 @@ pub struct HostReceiver {
     sent: bool,
     state: State,
 }
+/// Receive into the approved endpoint for the selected Files direction.
+pub type Receiver = HostReceiver;
+
 impl std::fmt::Debug for HostReceiver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NativeFileReceiver")
@@ -93,8 +95,13 @@ impl HostReceiver {
         lane.check(q).map_err(Error::Transport)?;
         let setup = (|| {
             cx.checkpoint().map_err(|_| Error::Cancelled)?;
-            if lane.outgoing().sender != Role::Host {
+            if lane.outgoing().sender != authority.direction().receiver()
+                || lane.outgoing().direction != authority.direction()
+            {
                 return Err(Error::WrongRole);
+            }
+            if !authority.matches_parent(lane.parent()) {
+                return Err(Error::File(wire::Error::Wire(fr_wire::WireError::InvalidBinding)));
             }
             let reply_lifetime =
                 u64::try_from(config.reply_lifetime.as_micros()).map_err(|_| Error::Limits)?;
@@ -173,11 +180,18 @@ impl HostReceiver {
     /// Explicit file-only reset. A foreign connection is untouched. A completed
     /// or racing disk outcome remains available through `collect_after_close`.
     pub fn retire(&mut self, q: &mut QuicRecords) -> Result<(), Error> {
+        let cx = self.cx.clone();
+        self.retire_on(q, &cx)
+    }
+    /// Fence disk publication and retire only this lane on the caller's live
+    /// cleanup context after the receive task's original context was cancelled.
+    /// Actual or uncertain disk receipts remain collectable after retirement.
+    pub fn retire_on(&mut self, q: &mut QuicRecords, cleanup: &Cx) -> Result<(), Error> {
         self.check_identity(q)?;
         self.receiver.stop();
         self.task.stop();
         if self.state != State::Retired && !q.is_closed() {
-            self.lane.retire(q, &self.cx).map_err(Error::Transport)?;
+            self.lane.retire(q, cleanup).map_err(Error::Transport)?;
         }
         self.state = State::Retired;
         self.reply.fill(0);

@@ -24,7 +24,7 @@ use asupersync::{
 use fr_transport::quic::{self, ConnectionBinding, QuicRecords, files::FilesChannel};
 use fr_wire::{
     WireError,
-    files::{self, Body, Disposition, Message, Reason, Role},
+    files::{self, Body, Direction, Disposition, Message, Reason},
 };
 use source::{Event, Source};
 use std::{fs::File, io, time::Duration};
@@ -78,7 +78,7 @@ impl std::fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 
-/// The host reports publication; this is not independent filesystem observation.
+/// The selected recipient reports publication; this is not independent filesystem observation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     HostPublished {
@@ -86,10 +86,29 @@ pub enum Outcome {
         publication: Publication,
     },
     HostRefused(Reason),
-    /// No completion request was admitted; the host may still own private staging.
+    ControllerPublished {
+        bytes: u64,
+        publication: Publication,
+    },
+    ControllerRefused(Reason),
+    /// No completion request was admitted; the recipient may still own private staging.
     InterruptedBeforePublication(Error),
-    /// Completion was admitted or the host reports uncertainty. Never auto-retry.
+    /// Completion was admitted or the recipient reports uncertainty. Never auto-retry.
     PublicationUnknown,
+}
+impl Outcome {
+    fn published(direction: Direction, bytes: u64, publication: Publication) -> Self {
+        match direction {
+            Direction::ToHost => Self::HostPublished { bytes, publication },
+            Direction::ToController => Self::ControllerPublished { bytes, publication },
+        }
+    }
+    fn refused(direction: Direction, reason: Reason) -> Self {
+        match direction {
+            Direction::ToHost => Self::HostRefused(reason),
+            Direction::ToController => Self::ControllerRefused(reason),
+        }
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Receipt {
@@ -229,7 +248,7 @@ impl<'a> Sender<'a> {
         policy: Policy,
     ) -> Result<Self, Error> {
         lane.check(q).map_err(Error::Transport)?;
-        if lane.outgoing().sender != Role::Controller {
+        if lane.outgoing().sender != lane.outgoing().direction.source() {
             return Err(Error::WrongRole);
         }
         if policy.max_file_bytes == 0
@@ -322,7 +341,7 @@ impl<'a> Sender<'a> {
         self.begin_until(q, file, name, None)
     }
     /// Send an explicitly selected directory descriptor as one atomic, portable
-    /// ATP tree. No data is sent until the host accepts the directory profile.
+    /// ATP tree. No data is sent until the recipient accepts the directory profile.
     pub fn begin_directory(
         &mut self,
         q: &QuicRecords,
@@ -428,6 +447,12 @@ impl<'a> Sender<'a> {
         self.transfer = None;
         Some(result)
     }
+    /// Fence source work without touching transport or losing an actual receipt.
+    /// Closing sessions use this before their separate control drain/reset path.
+    pub fn stop(&mut self) {
+        self.fail(Error::Cancelled);
+        self.settle_batch();
+    }
     /// Local file-only cancellation is out of band from bulk queue capacity.
     /// The caller can keep servicing the original desktop connection normally.
     pub fn cancel(&mut self, q: &mut QuicRecords) -> Result<(), Error> {
@@ -441,8 +466,7 @@ impl<'a> Sender<'a> {
     /// file-lane stop would take the closing exchange's socket with it.
     pub fn cancel_on(&mut self, q: &mut QuicRecords, cleanup: &Cx) -> Result<(), Error> {
         self.identity(q)?;
-        self.fail(Error::Cancelled);
-        self.settle_batch();
+        self.stop();
         self.retire_on(q, cleanup)
     }
     pub fn service(
@@ -517,7 +541,10 @@ impl<'a> Sender<'a> {
         };
         if let Some(receipt) = t.result {
             t.source.stop();
-            if !matches!(receipt.outcome, Outcome::HostPublished { .. }) {
+            if !matches!(
+                receipt.outcome,
+                Outcome::HostPublished { .. } | Outcome::ControllerPublished { .. }
+            ) {
                 self.retire(q)?;
             }
             return Ok(());
@@ -820,7 +847,7 @@ impl Transfer {
                     return Err(Error::Protocol);
                 }
                 let outcome = match disposition {
-                    Disposition::Refused => Outcome::HostRefused(reason),
+                    Disposition::Refused => Outcome::refused(context.direction, reason),
                     Disposition::UnknownEffect => Outcome::PublicationUnknown,
                     Disposition::PublishedDurable | Disposition::PublishedDurabilityUnknown => {
                         if self.stage != Stage::AwaitingProof || self.total != Some(published_bytes)
@@ -844,14 +871,15 @@ impl Transfer {
                         {
                             return Err(Error::Protocol);
                         }
-                        Outcome::HostPublished {
-                            bytes: published_bytes,
-                            publication: if disposition == Disposition::PublishedDurable {
+                        Outcome::published(
+                            context.direction,
+                            published_bytes,
+                            if disposition == Disposition::PublishedDurable {
                                 Publication::Durable
                             } else {
                                 Publication::DurabilityUnknown
                             },
-                        }
+                        )
                     }
                 };
                 self.result = Some(Receipt {

@@ -151,6 +151,7 @@ pub(crate) struct Pending {
 /// A missing result is uncertainty, never a claim that the host did nothing.
 pub struct InputClient {
     pub(crate) clipboard_projection: Option<crate::clipboard::Owner>,
+    pub(crate) files_projection: Option<crate::clipboard::Owner>,
     viewport_owner: Arc<()>,
     credentials: InputCredentials,
     binding: ResultBinding,
@@ -214,6 +215,7 @@ impl InputClient {
         }
         Ok(Self {
             clipboard_projection: None,
+            files_projection: None,
             viewport_owner: Arc::new(()),
             credentials,
             binding: ResultBinding {
@@ -254,7 +256,10 @@ impl InputClient {
     }
     pub fn stop(&mut self, reason: StopReason) {
         self.stopped.get_or_insert(reason);
-        if let Some(owner) = &self.clipboard_projection {
+        for owner in [&self.clipboard_projection, &self.files_projection]
+            .into_iter()
+            .flatten()
+        {
             owner.stop();
         }
         if let Some(response) = &mut self.control_response {
@@ -309,12 +314,25 @@ impl InputClient {
         {
             self.retire_clipboard();
         }
+        if self
+            .files_projection
+            .as_ref()
+            .is_some_and(|owner| owner.check_files(now).is_err())
+        {
+            self.retire_files();
+        }
         Ok(())
     }
     /// End the clipboard lane's authority for this grant. It is never revived:
     /// only a new grant has a clipboard again.
     fn retire_clipboard(&mut self) {
         if let Some(owner) = self.clipboard_projection.take() {
+            owner.stop();
+        }
+    }
+    /// End only file authority; replacing this handoff requires a new grant.
+    fn retire_files(&mut self) {
+        if let Some(owner) = self.files_projection.take() {
             owner.stop();
         }
     }

@@ -15,7 +15,7 @@ use asupersync::{
 use fr_core::{input_submission::InputSession, time::HostInstant};
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Mutex, OnceLock, TryLockError},
+    sync::{Arc, Mutex, OnceLock, TryLockError, atomic::{AtomicU64, Ordering}},
     thread::{self, JoinHandle, Thread},
     time::Duration,
 };
@@ -95,6 +95,8 @@ struct Shared {
     permission: Permission,
     cx: Cx,
     clock: TimerDriverHandle,
+    authority: session::Authority,
+    last_sample: AtomicU64,
     wake: OnceLock<Thread>,
 }
 impl Shared {
@@ -104,7 +106,18 @@ impl Shared {
         if self.cx.checkpoint().is_err() {
             self.permission.revoke();
         }
-        HostInstant::from_micros(self.clock.now().as_nanos() / 1000)
+        match self.authority.sample(self.clock.now().as_nanos() / 1000) {
+            Ok(now) => {
+                self.last_sample.store(now.as_micros(), Ordering::Release);
+                now
+            }
+            Err(_) => {
+                // Clock callbacks are infallible. Fence FIRST; the returned
+                // previous sample grants no authority at the next disk gate.
+                self.permission.revoke();
+                HostInstant::from_micros(self.last_sample.load(Ordering::Acquire))
+            }
+        }
     }
     fn wake(&self) {
         if let Some(thread) = self.wake.get() {
@@ -339,9 +352,12 @@ pub fn spawn_with_authority(
 ) -> Result<(Mailbox, Task), Error> {
     cx.checkpoint().map_err(|_| Error::Cancelled)?;
     let clock = cx.timer_driver().ok_or(Error::Clock)?;
-    let now = HostInstant::from_micros(clock.now().as_nanos() / 1000);
-    let receiver = HostReceiver::with_authority(authority, root, permission.clone(), policy, now)
-        .map_err(Error::Session)?;
+    let now = authority
+        .sample(clock.now().as_nanos() / 1000)
+        .map_err(|error| Error::Session(session::Error::Authority(error)))?;
+    let receiver = HostReceiver::with_authority(
+        authority.clone(), root, permission.clone(), policy, now,
+    ).map_err(Error::Session)?;
     let binding = receiver.binding();
     let shared = Arc::new(Shared {
         inbox: Mutex::new(Inbox {
@@ -351,6 +367,8 @@ pub fn spawn_with_authority(
         permission,
         cx,
         clock,
+        authority,
+        last_sample: AtomicU64::new(now.as_micros()),
         wake: OnceLock::new(),
     });
     let running = shared.clone();

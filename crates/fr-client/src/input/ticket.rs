@@ -122,22 +122,21 @@ impl InputClient {
             }
         }
         self.clipboard_readiness();
-        // Only this validated same-lease ticket can extend clipboard proof.
-        // The existing input gate establishes whether it follows the host's
-        // lapse. Visibility and this ticket may arrive in either order.
-        if self.clipboard_projection.as_ref().is_some_and(|owner| {
-            owner
-                .ticket(
-                    ticket.expires_at_us,
-                    clock,
-                    now,
-                    !self.awaiting_ticket && !self.awaiting_recovery_ticket,
-                )
-                .is_err()
-        }) {
-            self.retire_clipboard();
-        }
+        self.auxiliary_ticket(ticket.expires_at_us, clock, now);
         Ok(())
+    }
+    /// Only the input owner's validated same-lease ticket extends auxiliary
+    /// proof. Each lane keeps independent lifetime and one-use attachment state.
+    fn auxiliary_ticket(&mut self, host_until: u64, clock: ClockCorrelation, now: ClientInstant) {
+        let resumed = !self.awaiting_ticket && !self.awaiting_recovery_ticket;
+        for projection in [&mut self.clipboard_projection, &mut self.files_projection] {
+            if projection
+                .as_ref()
+                .is_some_and(|owner| owner.ticket(host_until, clock, now, resumed).is_err())
+            {
+                drop(projection.take());
+            }
+        }
     }
     pub fn ticket_deadline(&self) -> Option<ClientInstant> {
         if self.awaiting_recovery_ticket {
