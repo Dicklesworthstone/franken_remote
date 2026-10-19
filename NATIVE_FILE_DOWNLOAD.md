@@ -78,6 +78,10 @@ Both endpoints retain their original disk owners through teardown.
 `reap_files` uses an independently live cleanup context and its original absolute
 deadline. Expired or abandoned cleanup does not imply rollback or a joined
 worker; actual publication receipts remain readable after session closure.
+An ordinary permission or lease fence can finish cleanly. Cleanup success
+requires the observed join and final cleanup of every owned staging reservation;
+failed removal or unreleased accounting remains a cleanup failure. Those results
+are independent of a transfer's publication or refusal receipt.
 
 ## Implementation and coverage
 

@@ -418,10 +418,9 @@ fn configure_clipboard(
     .ok()?;
     publisher.configure_clipboard(configuration).ok()
 }
-/// Only a joined (or never started) disk worker is clean. `Finished(Err(..))`
-/// is the joined thread's own exit reason (the fenced lease or revoked file
-/// permission that ended it), not a cleanup failure; a panicked worker, a
-/// missed deadline or cancellation keeps the share's owners for later.
+/// Clean means never started or an observed join with successful disk cleanup.
+/// The worker separately retains its original permission/lease stop reason.
+/// Failed cleanup, a missed deadline or cancellation keeps the share's owners.
 fn files_cleanup(
     result: Result<
         crate::session_startup::FileReceiveCleanup,
@@ -430,10 +429,8 @@ fn files_cleanup(
 ) -> Result<(), crate::worker::Error> {
     use crate::session_startup::{FileReceiveCleanup as Cleanup, FileReceiveError as E};
     match result {
-        Ok(Cleanup::Finished(Err(fr_files::worker::Error::Panicked))) => {
-            Err(crate::worker::Error::Unavailable)
-        }
-        Ok(Cleanup::NotStarted | Cleanup::Finished(_)) => Ok(()),
+        Ok(Cleanup::NotStarted | Cleanup::Finished(Ok(()))) => Ok(()),
+        Ok(Cleanup::Finished(Err(_))) => Err(crate::worker::Error::Unavailable),
         Ok(Cleanup::Pending) | Err(E::CleanupPending) => Err(crate::worker::Error::Deadline),
         Err(E::Cancelled) => Err(crate::worker::Error::Cancelled),
         Err(E::Clock) => Err(crate::worker::Error::ClockRegression),

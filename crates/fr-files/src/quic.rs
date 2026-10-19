@@ -168,8 +168,10 @@ impl HostReceiver {
     pub fn cleanup_finished(&self) -> bool {
         self.task.is_finished()
     }
+    /// Join the original disk owner and report actual staging cleanup separately
+    /// from the transfer's retained publication/refusal outcome.
     pub fn try_finish_cleanup(&mut self) -> Option<Result<(), worker::Error>> {
-        self.task.try_finish()
+        self.task.try_finish_cleanup()
     }
     /// Local stop fences publication immediately and wakes the disk owner. The
     /// session must still call `service` for bounded proof draining/retirement.

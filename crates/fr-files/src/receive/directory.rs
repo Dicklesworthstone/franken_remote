@@ -174,7 +174,7 @@ impl std::fmt::Debug for PendingDirectory {
 }
 impl super::DropDirectory {
     pub fn begin_directory(&self, manifest: DirectoryManifest) -> Result<PendingDirectory, Error> {
-        let mut reservation = Reservation::new(self.0.clone(), manifest.size)?;
+        let mut reservation = Reservation::new(self.0.clone(), manifest.size, self.2.clone())?;
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).map_err(|_| Error::Io(std::io::ErrorKind::Other))?;
         let nonce = u128::from_be_bytes(random);

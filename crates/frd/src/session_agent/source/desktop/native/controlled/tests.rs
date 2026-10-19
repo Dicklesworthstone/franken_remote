@@ -114,23 +114,35 @@ fn served_reports_one_viewer_with_its_own_ending() {
     );
 }
 #[test]
-fn a_joined_file_worker_is_clean_whatever_fenced_it_but_a_pending_one_is_not() {
+fn a_file_worker_requires_observed_join_and_successful_disk_cleanup() {
     use crate::session_startup::{FileReceiveCleanup as Cleanup, FileReceiveError as E};
     use fr_files::{session::Error as SessionError, worker::Error as WorkerError};
-    // The joined thread's exit reason is how it was fenced, not a failure.
-    for joined in [
-        Ok(Cleanup::NotStarted),
-        Ok(Cleanup::Finished(Ok(()))),
-        Ok(Cleanup::Finished(Err(WorkerError::Session(
-            SessionError::Permission,
-        )))),
-        Ok(Cleanup::Finished(Err(WorkerError::Session(
-            SessionError::Closed,
-        )))),
-    ] {
+    // Normal permission/lease stops are separated from actual cleanup by the
+    // disk owner. This adapter must not turn any remaining error into success.
+    for joined in [Ok(Cleanup::NotStarted), Ok(Cleanup::Finished(Ok(())))] {
         assert_eq!(files_cleanup(joined), Ok(()));
     }
     for (kept, error) in [
+        (
+            Ok(Cleanup::Finished(Err(WorkerError::Cleanup))),
+            crate::worker::Error::Unavailable,
+        ),
+        (
+            Ok(Cleanup::Finished(Err(WorkerError::Session(
+                SessionError::Permission,
+            )))),
+            crate::worker::Error::Unavailable,
+        ),
+        (
+            Ok(Cleanup::Finished(Err(WorkerError::Session(
+                SessionError::Closed,
+            )))),
+            crate::worker::Error::Unavailable,
+        ),
+        (
+            Ok(Cleanup::Finished(Err(WorkerError::Poisoned))),
+            crate::worker::Error::Unavailable,
+        ),
         (
             Ok(Cleanup::Finished(Err(WorkerError::Panicked))),
             crate::worker::Error::Unavailable,

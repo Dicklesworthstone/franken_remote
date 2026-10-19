@@ -74,11 +74,47 @@ fn revocation_and_idle_expiry_remove_every_directory_entry_without_publication()
             f.input.take();
         }
         wait(|| task.is_finished());
-        let _ = task.try_finish();
+        assert_eq!(task.try_finish_cleanup(), Some(Ok(())));
         f.empty();
         assert!(r.is_closed());
     }
 }
+#[test]
+fn failed_directory_cleanup_stays_charged_and_does_not_affect_another_worker() {
+    let f = Fixture::new();
+    let (mut r, mut task) = f.spawn(Policy::conservative(), 8192);
+    let (_other, mut other_task) = f.spawn(Policy::conservative(), 8192);
+    send(&mut r, &offered(&tree()));
+    send(&mut r, &data(0, 0, b"abc"));
+    let staging = fs::read_dir(&f.root)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let unowned = staging.join("unowned.txt");
+    fs::write(&unowned, b"local content must survive").unwrap();
+
+    task.stop();
+    wait(|| task.is_finished());
+    assert_eq!(task.try_finish_cleanup(), Some(Err(worker::Error::Cleanup)));
+    assert_eq!(task.try_finish_cleanup(), Some(Err(worker::Error::Cleanup)));
+    assert!(matches!(
+        task.try_finish(),
+        Some(Err(worker::Error::Session(_)))
+    ));
+    assert_eq!(fs::read(&unowned).unwrap(), b"local content must survive");
+    assert!(!staging.join("src").exists());
+    assert!(!staging.join("empty").exists());
+    assert!(!f.root.join("project").exists());
+    assert!(matches!(
+        f.directory.begin("second", 0, ContentId::from_bytes(b"")),
+        Err(receive::Error::Quota)
+    ));
+    stop(&mut other_task);
+    f.input_live();
+}
+
 #[test]
 fn directory_cannot_be_smuggled_through_legacy_profile_or_change_profile_mid_transfer() {
     let f = Fixture::new();

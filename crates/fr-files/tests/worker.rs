@@ -139,7 +139,11 @@ fn collect(mailbox: &Mailbox, sequence: u64) -> Completion {
 }
 fn finish(task: &mut Task) {
     let end = Instant::now() + Duration::from_secs(10);
-    while task.try_finish().is_none() {
+    loop {
+        if let Some(result) = task.try_finish_cleanup() {
+            result.unwrap();
+            break;
+        }
         assert!(Instant::now() < end, "disk worker did not finish");
         std::thread::yield_now();
     }
@@ -170,6 +174,21 @@ fn disk_receipt_publishes_verified_bytes_and_preserves_input_authority() {
             .is_ok()
     );
 }
+#[test]
+fn joined_cleanup_is_distinct_from_the_original_stop_reason() {
+    let f = Fixture::new();
+    let (m, mut task) = f.spawn();
+    stage(&m);
+    m.stop();
+    finish(&mut task);
+    assert_eq!(
+        task.try_finish(),
+        Some(Err(Error::Session(fr_files::session::Error::Permission)))
+    );
+    assert_eq!(task.try_finish_cleanup(), Some(Ok(())));
+    f.empty();
+}
+
 #[test]
 fn single_slot_includes_queued_executing_and_uncollected_result() {
     let f = Fixture::new();

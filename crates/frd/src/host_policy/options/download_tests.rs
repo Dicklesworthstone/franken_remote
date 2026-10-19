@@ -25,7 +25,7 @@ fn download_selection_is_explicit_bounded_and_requires_one_controlled_share() {
     );
     assert!(options.clipboard && options.audio && options.once);
     assert!(options.files.is_none());
-    assert!(parse(&[]).unwrap().send.is_empty());
+    assert_eq!(parse(&[]).unwrap().send, [] as [std::path::PathBuf; 0]);
     for args in [
         &["--send", "/local/file"][..],
         &["--once", "--send", "/local/file"][..],

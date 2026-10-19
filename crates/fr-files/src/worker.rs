@@ -4,7 +4,7 @@
 //! thread; revoke and mailbox admission never wait for that thread. A stuck OS
 //! call cannot be safely killed as a Rust thread, and is not claimed cancelled.
 use crate::{
-    receive::{DropDirectory, Expected, MAX_CHUNK_BYTES},
+    receive::{CleanupStatus, DropDirectory, Expected, MAX_CHUNK_BYTES},
     session::{self, Binding, HostReceiver, Permission, Policy, Progress, VerifiedOffer},
 };
 use asupersync::{
@@ -38,6 +38,7 @@ pub enum Error {
     Clock,
     Cancelled,
     Panicked,
+    Cleanup,
     Session(session::Error),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -297,6 +298,8 @@ impl Drop for Mailbox {
 pub struct Task {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<Result<(), Error>>>,
+    result: Option<Result<(), Error>>,
+    cleanup: CleanupStatus,
 }
 impl std::fmt::Debug for Task {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -310,13 +313,39 @@ impl Task {
     pub fn is_finished(&self) -> bool {
         self.thread.as_ref().is_none_or(JoinHandle::is_finished)
     }
+    /// Join the finished worker and retain its original termination reason.
+    /// Repeated reads, including after `try_finish_cleanup`, return the same
+    /// result; absence is never converted into successful cleanup.
     pub fn try_finish(&mut self) -> Option<Result<(), Error>> {
+        if let Some(result) = self.result {
+            return Some(result);
+        }
         if !self.is_finished() {
             return None;
         }
-        self.thread
-            .take()
-            .map(|t| t.join().unwrap_or(Err(Error::Panicked)))
+        let result = self.thread.take()?.join().unwrap_or(Err(Error::Panicked));
+        self.result = Some(result);
+        Some(result)
+    }
+    /// Observe cleanup separately from why the original transfer stopped.
+    /// A normal permission/authority fence succeeds only after a real join
+    /// and final cleanup of every owned reservation. Publication and refusal
+    /// receipts remain in the mailbox, even when cleanup itself fails.
+    pub fn try_finish_cleanup(&mut self) -> Option<Result<(), Error>> {
+        let result = match self.try_finish()? {
+            Err(Error::Session(
+                session::Error::Permission
+                | session::Error::Closed
+                | session::Error::Expired
+                | session::Error::Authority(_),
+            )) => Ok(()),
+            result => result,
+        };
+        if result.is_ok() && self.cleanup.failed() {
+            Some(Err(Error::Cleanup))
+        } else {
+            Some(result)
+        }
     }
 }
 impl Drop for Task {
@@ -355,9 +384,15 @@ pub fn spawn_with_authority(
     let now = authority
         .sample(clock.now().as_nanos() / 1000)
         .map_err(|error| Error::Session(session::Error::Authority(error)))?;
-    let receiver =
-        HostReceiver::with_authority(authority.clone(), root, permission.clone(), policy, now)
-            .map_err(Error::Session)?;
+    let cleanup = CleanupStatus::default();
+    let receiver = HostReceiver::with_authority(
+        authority.clone(),
+        root.with_cleanup_status(cleanup.clone()),
+        permission.clone(),
+        policy,
+        now,
+    )
+    .map_err(Error::Session)?;
     let binding = receiver.binding();
     let shared = Arc::new(Shared {
         inbox: Mutex::new(Inbox {
@@ -387,6 +422,8 @@ pub fn spawn_with_authority(
         Task {
             shared,
             thread: Some(thread),
+            result: None,
+            cleanup,
         },
     ))
 }

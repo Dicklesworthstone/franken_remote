@@ -227,7 +227,7 @@ fn event(receiver: &mut Receiver) -> Event {
 fn stop(task: &mut Task) {
     task.stop();
     wait(|| task.is_finished());
-    let _ = task.try_finish().unwrap();
+    assert_eq!(task.try_finish_cleanup(), Some(Ok(())));
 }
 fn begin(receiver: &mut Receiver, id: u64, offering: &TransferManifest) -> Event {
     push(receiver, id, &offered(offering));

@@ -92,7 +92,14 @@ permission, including the check after verification and immediately before
 publication. A timer turn services lease expiry even without incoming traffic.
 Stop revokes only file permission. Completed publication receipts survive stop
 and worker exit; an in-flight syscall is not claimed to be cancellable, and
-`Task::try_finish` reports actual thread completion separately.
+`Task::try_finish` reports actual thread completion and retains the original
+termination reason across repeated reads. `Task::try_finish_cleanup` reports the
+separate cleanup outcome after the same observed join. Normal permission and
+lease fences can clean up successfully; failed staging removal or poisoned,
+unreleased reservation accounting reports `worker::Error::Cleanup` and retains
+the quota charge. This accounting belongs to the original worker even when
+several workers share a pinned directory. Cleanup failures cannot erase actual
+publication or refusal receipts.
 
 Eight additional real-filesystem/thread/core-authority tests pass, along with
 all 24 existing file tests and strict pedantic Clippy, using the pinned compiler

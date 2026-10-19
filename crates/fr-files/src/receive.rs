@@ -26,7 +26,10 @@ use std::{
     fmt,
     io::{self, Write},
     path::{Component, Path},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 /// A record is rejected before disk I/O when it exceeds this bound.
@@ -103,7 +106,18 @@ struct Root {
 /// Renaming/replacing the original path does not redirect writes to another
 /// directory. Clones share both its descriptor and its aggregate reservations.
 #[derive(Clone)]
-pub struct DropDirectory(Arc<Root>, ConflictPolicy);
+pub struct DropDirectory(Arc<Root>, ConflictPolicy, Option<CleanupStatus>);
+
+/// Per-worker evidence from the final disposition of each owned reservation.
+/// This is separate from the shared root/quota, so another worker's orphan
+/// cannot change this owner's cleanup result. Read only after its thread joins.
+#[derive(Clone, Default)]
+pub(crate) struct CleanupStatus(Arc<AtomicBool>);
+impl CleanupStatus {
+    pub(crate) fn failed(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
 impl fmt::Debug for DropDirectory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("DropDirectory([local directory])")
@@ -151,7 +165,13 @@ impl DropDirectory {
                 reserved: Mutex::new(Reserved::default()),
             }),
             ConflictPolicy::Reject,
+            None,
         ))
+    }
+
+    pub(crate) fn with_cleanup_status(mut self, status: CleanupStatus) -> Self {
+        self.2 = Some(status);
+        self
     }
 
     /// Choose conflict handling locally before attaching this directory to a
@@ -201,7 +221,7 @@ impl DropDirectory {
         {
             return Err(Error::InvalidName);
         }
-        let reservation = Reservation::new(self.0.clone(), size)?;
+        let reservation = Reservation::new(self.0.clone(), size, self.2.clone())?;
         let mut random = [0_u8; 16];
         getrandom::fill(&mut random).map_err(|_| Error::Io(io::ErrorKind::Other))?;
         let suffix = u128::from_be_bytes(random);
@@ -243,9 +263,10 @@ struct Reservation {
     // Failed cleanup keeps the charge: an orphan must not turn into a quota
     // bypass. The directory must be inspected locally before reuse/reset.
     release: bool,
+    cleanup: Option<CleanupStatus>,
 }
 impl Reservation {
-    fn new(root: Arc<Root>, size: u64) -> Result<Self, Error> {
+    fn new(root: Arc<Root>, size: u64, cleanup: Option<CleanupStatus>) -> Result<Self, Error> {
         {
             let mut held = root.reserved.lock().map_err(|_| Error::Retired)?;
             let total = held.bytes.checked_add(size).ok_or(Error::Quota)?;
@@ -262,6 +283,7 @@ impl Reservation {
             root,
             size,
             release: true,
+            cleanup,
         })
     }
 }
@@ -272,7 +294,14 @@ impl Drop for Reservation {
             if let Ok(mut held) = self.root.reserved.lock() {
                 held.bytes -= self.size;
                 held.transfers -= 1;
+                return;
             }
+        }
+        // PendingFile/PendingDirectory have already attempted final cleanup
+        // and closed their descriptors. A retained charge is actual evidence
+        // of incomplete cleanup/accounting, including a consumed error path.
+        if let Some(cleanup) = &self.cleanup {
+            cleanup.0.store(true, Ordering::Release);
         }
     }
 }

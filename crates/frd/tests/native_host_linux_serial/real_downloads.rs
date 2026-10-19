@@ -113,10 +113,20 @@ fn host_selections_download_atomically_while_control_and_clipboard_stay_live() {
     assert!(s.pointer_follows((222, 111), Duration::from_secs(10)));
     let to_host = unique("download-viewer-copy");
     viewer_app.copy(&to_host);
-    assert!(pasted(&mut host_app, &to_host, Duration::from_secs(15)));
+    if let Err(last) = pasted(&mut host_app, &to_host, Duration::from_secs(15)) {
+        panic!(
+            "host never pasted the viewer's copy (last {last:?}); host: {}",
+            s.daemon.dump()
+        );
+    }
     let to_viewer = unique("download-host-copy");
     host_app.copy(&to_viewer);
-    assert!(pasted(&mut viewer_app, &to_viewer, Duration::from_secs(15)));
+    if let Err(last) = pasted(&mut viewer_app, &to_viewer, Duration::from_secs(15)) {
+        panic!(
+            "viewer never pasted the host's copy (last {last:?}); host: {}",
+            s.daemon.dump()
+        );
+    }
     assert!(s.pointer_follows((180, 180), Duration::from_secs(10)));
     s.close_viewer();
     let output = wait_for(s.client, Duration::from_secs(30));
@@ -235,7 +245,7 @@ fn no_host_selection_reports_download_absence_and_preserves_control() {
         "{report}"
     );
     assert_eq!(report["files_receive_cleanup"], "not_started", "{report}");
-    assert!(destination.entries().is_empty());
+    assert_eq!(destination.entries(), [] as [String; 0]);
     assert_private(&output, &host, &[&destination.0], &[]);
 }
 
@@ -281,8 +291,9 @@ fn an_expired_download_lease_cannot_publish_a_partially_received_file() {
         Controlled::start_downloads(false, false, &[source.0.join(name)], Some(&destination.0));
     let until = Instant::now() + Duration::from_secs(90);
     let staged = loop {
-        assert!(
-            destination.entries().is_empty(),
+        assert_eq!(
+            destination.entries(),
+            [] as [String; 0],
             "a partial final name appeared"
         );
         if let Some(size) = staged_sizes(&destination, s.client.id())
@@ -303,8 +314,9 @@ fn an_expired_download_lease_cannot_publish_a_partially_received_file() {
     let resume = ResumeOnDrop(s.client.id());
     println!("download e2e: froze the viewer with {staged} of {total} bytes privately staged");
     let fenced = eventually(Duration::from_secs(20), || {
-        assert!(
-            destination.entries().is_empty(),
+        assert_eq!(
+            destination.entries(),
+            [] as [String; 0],
             "an expired download was published"
         );
         indicator(&mut s.observer).is_none()
@@ -318,8 +330,9 @@ fn an_expired_download_lease_cannot_publish_a_partially_received_file() {
     // neither reacquire control nor publish the already-admitted private inode.
     drop(resume);
     let cleaned = eventually(Duration::from_secs(15), || {
-        assert!(
-            destination.entries().is_empty(),
+        assert_eq!(
+            destination.entries(),
+            [] as [String; 0],
             "resuming resurrected a download"
         );
         staged_sizes(&destination, s.client.id()).is_empty()
@@ -334,6 +347,6 @@ fn an_expired_download_lease_cannot_publish_a_partially_received_file() {
     let report = completion(&output, &host);
     assert_eq!(report["files_receive_requested"], true, "{report}");
     assert_eq!(report["files_received"], serde_json::json!([]), "{report}");
-    assert!(destination.entries().is_empty());
+    assert_eq!(destination.entries(), [] as [String; 0]);
     assert_private(&output, &host, &[&source.0, &destination.0], &[name]);
 }

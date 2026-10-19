@@ -929,7 +929,7 @@ mod tests {
         };
         assert_eq!(selected.receive, Some(PathBuf::from("/home/u/downloads")));
         assert!(selected.control && selected.clipboard && selected.audio.is_some());
-        assert!(selected.send.is_empty());
+        assert_eq!(selected.send, [] as [PathBuf; 0]);
         for (flags, code) in [
             ("--view-only --receive /a", "receive_requires_control"),
             (

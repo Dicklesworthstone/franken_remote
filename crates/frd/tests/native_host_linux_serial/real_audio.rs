@@ -558,7 +558,6 @@ fn share_lanes(
         control,
         &Lanes {
             files: None,
-            file_send: None,
             ..lanes
         },
     );

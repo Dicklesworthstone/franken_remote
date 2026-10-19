@@ -206,8 +206,8 @@ fn regular_controller_transfers_verified_files_while_input_and_renewal_continue(
                     Ok(fr_files::worker::Completion::Published(_))
                 ));
                 assert_eq!(host.file_receive_reason(), None);
-                // File retirement revokes the independent file permission. Preserve
-                // the worker's Permission stop reason, not a fabricated clean exit.
+                // File retirement revokes only file permission. Successful cleanup
+                // requires the joined owner and removal of its private staging.
                 host.retire_files().unwrap();
                 assert!(!host.control().is_stopped());
                 assert!(host.io().unwrap().0.is_bound_to(&connection));
@@ -217,18 +217,14 @@ fn regular_controller_transfers_verified_files_while_input_and_renewal_continue(
                         crate::worker::Deadline::after(&c, Duration::from_secs(1)).unwrap()
                     )
                     .await,
-                    Ok(FileReceiveCleanup::Finished(Err(
-                        fr_files::worker::Error::Session(fr_files::session::Error::Permission,)
-                    )))
+                    Ok(FileReceiveCleanup::Finished(Ok(())))
                 );
                 assert_eq!(host.file_receive_result(), Some(published));
                 sender.cancel(viewer.session.io().unwrap().0).unwrap();
                 host.close();
                 assert_eq!(
                     host.file_receive_cleanup(),
-                    FileReceiveCleanup::Finished(Err(fr_files::worker::Error::Session(
-                        fr_files::session::Error::Permission,
-                    )))
+                    FileReceiveCleanup::Finished(Ok(()))
                 );
                 assert_eq!(host.file_receive_result(), Some(published));
             },
@@ -286,8 +282,8 @@ fn cancelling_partial_files_reclaims_staging_without_stopping_desktop_control() 
                     step(&mut host, &mut viewer, &mut sender, &c, &mut n, &mut t).await;
                 }
                 assert_eq!(sender.stage(), Stage::Streaming);
-                // File retirement revokes the independent file permission. Preserve
-                // the worker's Permission stop reason, not a fabricated clean exit.
+                // File retirement revokes only file permission. Successful cleanup
+                // requires the joined owner and removal of its private staging.
                 host.retire_files().unwrap();
                 assert_eq!(host.file_receive_state(), Some(State::Retired));
                 assert_eq!(
@@ -296,9 +292,7 @@ fn cancelling_partial_files_reclaims_staging_without_stopping_desktop_control() 
                         crate::worker::Deadline::after(&c, Duration::from_secs(1)).unwrap()
                     )
                     .await,
-                    Ok(FileReceiveCleanup::Finished(Err(
-                        fr_files::worker::Error::Session(fr_files::session::Error::Permission,)
-                    )))
+                    Ok(FileReceiveCleanup::Finished(Ok(())))
                 );
                 assert!(!directory.0.join("unfinished").exists());
                 assert!(fs::read_dir(&directory.0).unwrap().all(|p| {

@@ -151,7 +151,7 @@ fn host_downloads_files_empty_file_and_directory_with_ordered_client_receipts() 
                         .all(|r| matches!(r.outcome, Ok(Completion::Published(_))))
                 );
                 assert_eq!(fs::read(dest.0.join("data")).unwrap(), bytes);
-                assert!(fs::read(dest.0.join("empty")).unwrap().is_empty());
+                assert_eq!(fs::read(dest.0.join("empty")).unwrap(), [] as [u8; 0]);
                 assert_eq!(
                     fs::read(dest.0.join("tree/nested-dir/payload")).unwrap(),
                     b"selected directory"
@@ -215,7 +215,7 @@ fn early_download_cancel_settles_attachment_without_starting_a_client_disk_worke
                 let status = control.status();
                 assert_eq!(status.absence, Some(Absence::Refused(SendError::Cancelled)));
                 assert_eq!(status.cleanup, Some(Ok(())));
-                assert!(status.results.is_empty());
+                assert_eq!(status.results, [] as [fr_files::wire::ResultReceipt; 0]);
                 assert!(!state.viewer.is_closed() && !state.host.control().is_stopped());
                 assert_eq!(state.effects.lock().unwrap().keys, [true]);
                 retire(&mut state, &cleanup).await;

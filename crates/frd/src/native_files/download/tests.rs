@@ -72,7 +72,7 @@ fn progress_is_not_a_result_and_publication_survives_terminal_updates() {
         });
         let status = control.status();
         assert_eq!(status.progress, Some(progress));
-        assert!(status.results.is_empty());
+        assert_eq!(status.results, [] as [fr_files::wire::ResultReceipt; 0]);
     }
     let receipt = published(7);
     control.observe(receipt);
