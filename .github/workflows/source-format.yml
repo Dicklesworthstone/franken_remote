@@ -1,0 +1,34 @@
+name: Source formatting
+
+# Return the exact pinned formatter patch independently of native codegen.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.rs'
+      - '**/Cargo.toml'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/source-format.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-format-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    # Formatting needs no Linux native SDK or newer libopus ABI.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - name: Install repository-pinned toolchain
+        run: rustup show active-toolchain
+      - name: Verify source formatting and show the exact patch
+        run: |
+          cargo fmt --all
+          git diff --no-ext-diff --no-color --exit-code

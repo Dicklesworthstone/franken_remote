@@ -75,7 +75,7 @@ async fn retire(state: &mut Fixture, cleanup: &Cx) {
 fn host_downloads_files_empty_file_and_directory_with_ordered_client_receipts() {
     run(|c, h| async move {
         let cleanup = Cx::current().unwrap();
-        let mut state = setup_download(&c, &h).await;
+        let mut state = Box::pin(setup_download(&c, &h)).await;
         let source = Disk::new();
         let dest = Disk::new();
         let bytes = vec![0x57; 120_007];
@@ -178,7 +178,7 @@ fn host_downloads_files_empty_file_and_directory_with_ordered_client_receipts() 
 fn early_download_cancel_settles_attachment_without_starting_a_client_disk_worker() {
     run(|c, h| async move {
         let cleanup = Cx::current().unwrap();
-        let mut state = setup_download(&c, &h).await;
+        let mut state = Box::pin(setup_download(&c, &h)).await;
         let source = Disk::new();
         let dest = Disk::new();
         let control = ReceiveControl::new();
@@ -231,7 +231,7 @@ fn early_download_cancel_settles_attachment_without_starting_a_client_disk_worke
 fn revoked_client_file_permission_removes_partial_download_and_keeps_input_live() {
     run(|c, h| async move {
         let cleanup = Cx::current().unwrap();
-        let mut state = setup_download(&c, &h).await;
+        let mut state = Box::pin(setup_download(&c, &h)).await;
         let source = Disk::new();
         let dest = Disk::new();
         let config = dest.config();
@@ -284,7 +284,7 @@ fn revoked_client_file_permission_removes_partial_download_and_keeps_input_live(
 #[test]
 fn legacy_upload_scope_cannot_authorize_download_or_spend_its_channel() {
     run(|c, h| async move {
-        let mut state = setup(&c, &h).await;
+        let mut state = Box::pin(setup(&c, &h)).await;
         let source = Disk::new();
         let dest = Disk::new();
         assert_eq!(

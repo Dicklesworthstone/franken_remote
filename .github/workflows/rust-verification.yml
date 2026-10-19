@@ -18,6 +18,7 @@ on:
       - 'scripts/count.py'
       - 'scripts/audit.py'
       - 'scripts/test_verify_lanes.py'
+      - 'scripts/test_linux_serial_lifecycle.sh'
       - '.github/workflows/rust-verification.yml'
   workflow_dispatch:
 

@@ -491,7 +491,7 @@ async fn paused_setup(c: &Cx, h: &Cx) -> Fixture {
 #[test]
 fn initial_host_clipboard_offer_survives_a_real_view_suspension() {
     run(|c, h| async move {
-        let mut state = paused_setup(&c, &h).await;
+        let mut state = Box::pin(paused_setup(&c, &h)).await;
         begin(&mut state, true, true);
         let driver = state.driver.take().unwrap();
         let ((), done) = Box::pin(support::both(
@@ -521,7 +521,7 @@ fn initial_host_clipboard_offer_survives_a_real_view_suspension() {
 #[test]
 fn initial_host_clipboard_offer_does_not_treat_revocation_as_a_view_pause() {
     run(|c, h| async move {
-        let mut state = paused_setup(&c, &h).await;
+        let mut state = Box::pin(paused_setup(&c, &h)).await;
         state
             .host
             .control()

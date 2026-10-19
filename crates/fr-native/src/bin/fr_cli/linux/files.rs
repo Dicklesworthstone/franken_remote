@@ -7,6 +7,7 @@
 //! control ever reads one (an attempt that asked for control ends
 //! reconnection, so a selection is never resent). The completion record is
 //! content-free: indices, local sizes, host-reported outcomes, typed reasons.
+#[path = "files/download.rs"]
 pub(super) mod download;
 use super::Failure;
 use fr_native::desktop::{Desktop, Error as DesktopError};

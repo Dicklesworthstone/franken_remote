@@ -432,11 +432,11 @@ async fn fixture_with_clipboard(
     let session = observation
         .input_session(creds(), bounds(), capabilities)
         .unwrap();
-    // Grant metadata must report the ORIGINAL host owner, not an invented
-    // two-second horizon counted from a subsequently issued input ticket.
+    // Grant metadata reports the original lease/observation lifetime. The
+    // input-ready deadline can be shorter because it also includes the view.
     let lease_until = session
         .monitor()
-        .deadline(HostInstant::from_micros(now(host_cx).unwrap()))
+        .authorization_deadline(HostInstant::from_micros(now(host_cx).unwrap()))
         .unwrap();
     let effects = Arc::new(Mutex::new(Effects::default()));
     let sink = effects.clone();
