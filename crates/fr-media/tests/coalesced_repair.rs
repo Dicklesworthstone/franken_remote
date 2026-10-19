@@ -246,7 +246,7 @@ fn duplicate_and_subset_requests_do_not_consume_rounds_or_restart_the_cursor() {
 }
 
 #[test]
-fn overflowing_range_union_preserves_existing_work_and_retry_credit() {
+fn overflowing_range_union_retains_new_losses_within_original_retry_credit() {
     let c = config(4);
     let (mut sender, _) = setup(
         c,
@@ -266,17 +266,18 @@ fn overflowing_range_union_preserves_existing_work_and_retry_credit() {
     )
     .unwrap();
     let charged = sender.cached_bytes();
+    request(c, &mut sender, 10, &[(8, 9)], 40_000).unwrap();
+    assert_eq!(sender.cached_bytes(), charged);
+    // One real extension spends one round; bridging cannot mint another.
     assert_eq!(
-        request(c, &mut sender, 10, &[(8, 9)], 40_000),
+        request(c, &mut sender, 10, &[(1, 6)], 40_001),
         Err(SendError::RepairBusy)
     );
-    assert_eq!(sender.cached_bytes(), charged);
-    request(c, &mut sender, 10, &[(1, 6)], 40_001).unwrap();
     assert_eq!(
-        (0..7)
+        (0..6)
             .map(|_| repair(c, &mut sender, 40_001).unwrap())
             .collect::<Vec<_>>(),
-        [0, 1, 2, 3, 4, 5, 6]
+        [0, 2, 4, 6, 7, 8]
     );
     assert_eq!(repair(c, &mut sender, 40_001), None);
 }
@@ -392,3 +393,6 @@ fn coalescing_cannot_change_a_prepared_transport_packets_bytes_or_deadline() {
     assert_eq!(repair(c, &mut sender, 40_000), Some(5));
     assert_eq!(repair(c, &mut sender, 40_000), None);
 }
+
+#[path = "coalesced_repair/compaction.rs"]
+mod compaction;
