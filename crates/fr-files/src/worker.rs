@@ -109,17 +109,14 @@ impl Shared {
         if self.cx.checkpoint().is_err() {
             self.permission.revoke();
         }
-        match self.authority.sample(self.clock.now().as_nanos() / 1000) {
-            Ok(now) => {
-                self.last_sample.store(now.as_micros(), Ordering::Release);
-                now
-            }
-            Err(_) => {
-                // Clock callbacks are infallible. Fence FIRST; the returned
-                // previous sample grants no authority at the next disk gate.
-                self.permission.revoke();
-                HostInstant::from_micros(self.last_sample.load(Ordering::Acquire))
-            }
+        if let Ok(now) = self.authority.sample(self.clock.now().as_nanos() / 1000) {
+            self.last_sample.store(now.as_micros(), Ordering::Release);
+            now
+        } else {
+            // Clock callbacks are infallible. Fence FIRST; the returned
+            // previous sample grants no authority at the next disk gate.
+            self.permission.revoke();
+            HostInstant::from_micros(self.last_sample.load(Ordering::Acquire))
         }
     }
     fn wake(&self) {

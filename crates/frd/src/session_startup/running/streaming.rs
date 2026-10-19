@@ -230,7 +230,7 @@ impl StreamingHost {
     pub(crate) fn file_download_report(&self) -> Option<fr_files::sender::batch::Report> {
         match &self.host {
             Host::Control(host) => host.file_batch_report(),
-            Host::Observe(_) => None,
+            Host::Observe(_) | Host::Closed => None,
         }
     }
     pub(crate) fn configure_clipboard(

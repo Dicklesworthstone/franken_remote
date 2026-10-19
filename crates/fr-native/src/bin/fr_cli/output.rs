@@ -28,7 +28,9 @@ pub fn quoted(value: &str) -> String {
 /// it replaced ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Earlier {
-    ends: [(u8, &'static str); 2],
+    // Store bytes together so each code does not carry a separate alignment pad.
+    codes: [&'static str; 2],
+    attempts: [u8; 2],
     len: u8,
 }
 impl Default for Earlier {
@@ -38,22 +40,32 @@ impl Default for Earlier {
 }
 impl Earlier {
     pub const NONE: Self = Self {
-        ends: [(0, ""); 2],
+        codes: [""; 2],
+        attempts: [0; 2],
         len: 0,
     };
     #[cfg(any(test, all(target_os = "linux", feature = "linux-desktop")))]
     pub fn push(&mut self, attempt: u8, code: &'static str) {
-        if let Some(slot) = self.ends.get_mut(usize::from(self.len)) {
-            *slot = (attempt, code);
+        let index = usize::from(self.len);
+        if let Some(slot) = self.codes.get_mut(index) {
+            *slot = code;
+            self.attempts[index] = attempt;
             self.len += 1;
         }
+    }
+    fn entries(&self) -> impl Iterator<Item = (u8, &'static str)> + '_ {
+        self.attempts
+            .iter()
+            .zip(&self.codes)
+            .take(usize::from(self.len))
+            .map(|(&attempt, &code)| (attempt, code))
     }
     /// The ends of attempts before `last` only.
     #[cfg(any(test, all(target_os = "linux", feature = "linux-desktop")))]
     #[must_use]
     pub fn before(self, last: u8) -> Self {
         let mut kept = Self::NONE;
-        for &(attempt, code) in &self.ends[..usize::from(self.len)] {
+        for (attempt, code) in self.entries() {
             if attempt < last {
                 kept.push(attempt, code);
             }
@@ -65,16 +77,16 @@ impl Earlier {
         if self.len == 0 {
             return String::new();
         }
-        let ends = self.ends[..usize::from(self.len)]
-            .iter()
-            .map(|&(attempt, code)| format!("{{\"attempt\":{attempt},\"code\":{}}}", quoted(code)))
+        let ends = self
+            .entries()
+            .map(|(attempt, code)| format!("{{\"attempt\":{attempt},\"code\":{}}}", quoted(code)))
             .collect::<Vec<_>>()
             .join(",");
         format!(",\"attempts_ended\":[{ends}]")
     }
     pub fn text(self) -> String {
         let mut text = String::new();
-        for &(attempt, code) in &self.ends[..usize::from(self.len)] {
+        for (attempt, code) in self.entries() {
             let _ = write!(text, " Attempt {attempt} had ended: {code}.");
         }
         text

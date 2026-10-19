@@ -7,7 +7,7 @@ use fr_files::{
     sender::{self, Policy, Sender, batch},
     session::{Authority, Permission},
 };
-use fr_transport::quic::{self, ChannelRequest, QuicRecords};
+use fr_transport::quic::{ChannelRequest, QuicRecords};
 use std::time::Duration;
 
 pub(super) struct Outgoing {

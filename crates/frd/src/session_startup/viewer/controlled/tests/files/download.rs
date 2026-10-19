@@ -151,7 +151,7 @@ fn host_downloads_files_empty_file_and_directory_with_ordered_client_receipts() 
                         .all(|r| matches!(r.outcome, Ok(Completion::Published(_))))
                 );
                 assert_eq!(fs::read(dest.0.join("data")).unwrap(), bytes);
-                assert_eq!(fs::read(dest.0.join("empty")).unwrap(), []);
+                assert!(fs::read(dest.0.join("empty")).unwrap().is_empty());
                 assert_eq!(
                     fs::read(dest.0.join("tree/nested-dir/payload")).unwrap(),
                     b"selected directory"
