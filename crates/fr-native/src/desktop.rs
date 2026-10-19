@@ -255,6 +255,22 @@ impl Desktop {
             .configure_file_send(request)
             .map_err(Error::Files)
     }
+    /// Receive the host's explicit selections into this locally pinned directory.
+    /// This is consent for the original control lease, not another input grant.
+    /// No disk owner starts until the matching download capability is attached.
+    pub fn request_receive_files(
+        &mut self,
+        request: frd::native_files::ReceiveRequest,
+    ) -> Result<frd::native_files::ReceiveControl, Error> {
+        if self.state() != State::Viewing {
+            return Err(Error::NotViewing);
+        }
+        self.observer
+            .as_mut()
+            .ok_or(Error::NotViewing)?
+            .request_receive_files(request)
+            .map_err(Error::Files)
+    }
     /// Install the local playback output for this observer's attached
     /// audio-down lane, before serving. `Audio(NotSelected)` is typed absence:
     /// the host did not enable/offer audio, or this is a controlled session.

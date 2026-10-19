@@ -71,10 +71,32 @@ The content-free completion still identifies selections by their zero-based
 content size. For a directory whose size has not been measured,
 `files_refused[].bytes` is JSON `null`, not an inode size or a fabricated zero.
 Empty roots are supported; empty non-root directories and other exclusions above
-are still refused. There is no download, picker, delta or resumable-transfer UI.
+are still refused. The content-only profile does not provide picker, delta or resumable-transfer UI.
 
 Regression targets include `fr-files --test directory_batch`, native selection
 unit tests, and the controlled-loop
 `selected_directory_uses_the_native_controlled_owners_and_keeps_input_live` test.
 These distinguish source/unit/fixture coverage from real graphical desktop or
 live-tailnet qualification; selecting a directory does not establish either.
+
+## Host-to-controller downloads
+
+The optional `file-download` v1 capability fixes an attached native Files lane's
+direction as `ToController`. Its absence retains the original `ToHost` direction.
+The retained capability selection determines direction before parsing any
+application payload; neither the sender's first record nor a caller-supplied role
+can change it. Native download offers replace `file-channel-scope` with this
+capability, and the application refuses simultaneous upload/download scope.
+
+The host chooses a finite local source selection and the controller chooses a
+private local destination. Both derive the nonzero scope handle from the
+authenticated completed channel binding. The receiver's authority comes from
+the original viewer input owner and uses conservative host-clock projection;
+it does not manufacture a host-side input session. Existing ATP profiles, byte
+and count limits, one-use attachment, lease checks, atomic publication and
+explicit unknown-effect outcomes apply in either direction.
+
+`frd run --input-agent PATH --once --send PATH` and
+`fr connect NODE --control --receive DIR` expose this workflow. See
+[NATIVE_FILE_DOWNLOAD.md](NATIVE_FILE_DOWNLOAD.md) for selection, cancellation and
+retained-receipt semantics.

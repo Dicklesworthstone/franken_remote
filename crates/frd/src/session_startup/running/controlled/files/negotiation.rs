@@ -4,16 +4,42 @@
 use super::{Configuration, ControlledHost, Error, FilesChannel, HostReceiver, MediaChannel};
 use asupersync::cx::Cx;
 use fr_core::time::HostInstant;
-use fr_files::session::Authority;
+use fr_files::{
+    sender::{self, Sender, batch},
+    session::{Authority, Permission},
+};
 use fr_transport::quic::{
     self, ChannelRequest, ChannelScope, ConnectionBinding, ControlRoutes, QuicRecords, Route,
 };
 use fr_wire::{attachment, files, negotiation::Role};
+use std::time::Duration;
 
 pub(super) enum Advance {
     Waiting,
     Ready,
     PeerRetired,
+}
+
+pub(super) enum Target {
+    Receive(Configuration),
+    Send {
+        selection: batch::Selection,
+        permission: Permission,
+        policy: sender::Policy,
+        lifetime: Duration,
+    },
+}
+impl Target {
+    fn permission(&self) -> &Permission {
+        match self {
+            Self::Receive(configuration) => &configuration.permission,
+            Self::Send { permission, .. } => permission,
+        }
+    }
+}
+pub(super) enum Attached {
+    Receiver(Box<HostReceiver>),
+    Sender(Box<super::download::Outgoing>),
 }
 
 pub(super) struct Pending {
@@ -23,10 +49,13 @@ pub(super) struct Pending {
     channel: MediaChannel,
     authority: Authority,
     handle: u128,
-    configuration: Configuration,
+    target: Target,
     last: u64,
 }
 impl Pending {
+    pub(super) fn is_download(&self) -> bool {
+        matches!(self.target, Target::Send { .. })
+    }
     pub(super) fn check(&mut self) -> Result<(), quic::Error> {
         self.cx.checkpoint().map_err(|_| quic::Error::Cancelled)?;
         let now = self
@@ -45,7 +74,7 @@ impl Pending {
         self.authority
             .deadline(HostInstant::from_micros(now))
             .map_err(|_| quic::Error::Unauthorized)?;
-        if !self.configuration.permission.is_approved() {
+        if !self.target.permission().is_approved() {
             return Err(quic::Error::Unauthorized);
         }
         self.last = now;
@@ -105,14 +134,38 @@ impl Pending {
             Advance::Waiting
         })
     }
-    pub(super) fn start_receiver(self, q: &mut QuicRecords) -> Result<HostReceiver, Error> {
+    pub(super) fn start(self, q: &mut QuicRecords) -> Result<Attached, Error> {
         if !q.is_bound_to(&self.connection) {
             return Err(Error::WrongBinding);
         }
         let lane = FilesChannel::new(q, self.channel, self.authority.binding().lease, self.handle)
             .map_err(Error::Transport)?;
-        HostReceiver::spawn_with_authority(self.cx, q, lane, self.authority, self.configuration)
-            .map_err(Error::Receiver)
+        match self.target {
+            Target::Receive(configuration) => {
+                HostReceiver::spawn_with_authority(self.cx, q, lane, self.authority, configuration)
+                    .map(|receiver| Attached::Receiver(Box::new(receiver)))
+                    .map_err(Error::Receiver)
+            }
+            Target::Send {
+                selection,
+                permission,
+                policy,
+                lifetime,
+            } => {
+                let mut sender =
+                    Sender::owning(self.cx.clone(), q, lane, policy).map_err(Error::Sender)?;
+                if let Err(error) = sender.begin_batch(q, selection, lifetime) {
+                    let _ = sender.cancel(q);
+                    return Err(Error::Sender(error));
+                }
+                Ok(Attached::Sender(Box::new(super::download::Outgoing {
+                    sender,
+                    authority: self.authority,
+                    permission,
+                    cx: self.cx,
+                })))
+            }
+        }
     }
 }
 impl ControlledHost {
@@ -156,6 +209,20 @@ impl ControlledHost {
         handle: u128,
         configuration: Configuration,
     ) -> Result<(), Error> {
+        if self.session.opened.selected.capabilities.iter().any(|cap| {
+            cap.name == files::DOWNLOAD_CAPABILITY && cap.version == files::DOWNLOAD_VERSION
+        }) {
+            return Err(Error::NotNegotiated);
+        }
+        self.offer_file_target(request, handle, Target::Receive(configuration))
+    }
+
+    pub(super) fn offer_file_target(
+        &mut self,
+        request: ChannelRequest,
+        handle: u128,
+        target: Target,
+    ) -> Result<(), Error> {
         if self.files.used {
             return Err(Error::AlreadyAttached);
         }
@@ -181,7 +248,7 @@ impl ControlledHost {
         if handle == 0 {
             return Err(Error::WrongBinding);
         }
-        if !configuration.permission.is_approved() {
+        if !target.permission().is_approved() {
             return Err(Error::PermissionRequired);
         }
         let cx = &self.session.opened.cx;
@@ -216,7 +283,7 @@ impl ControlledHost {
             channel,
             authority,
             handle,
-            configuration,
+            target,
             last,
         });
         self.files.used = true;

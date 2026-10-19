@@ -1,23 +1,17 @@
-//! Explicit file sending from the CONTROLLING native viewer into the host's
-//! operator-approved drop directory (`fr connect --control --send PATH` into
-//! `frd run --input-agent PATH --files DIR`), plan §15.6.
+//! Explicit files and portable directory roots on the original control lease.
 //!
-//! This module holds only local decisions and content-free status. The lane is
-//! the existing one-use `native-file-receive` attachment with `file-channel-scope`
-//! v1 (both OPTIONAL capabilities), opened only under the controller's ACTIVE
-//! input attachment. Bytes travel the existing ATP full-object profiles through
-//! `fr_files` (bounded disk worker, private staging, no-replace atomic rename). The
-//! host's receipt checks the controller's input lease before every write and
-//! immediately before publication; a revoked or expired lease fences the
-//! transfer and its private staging file is removed, never published.
+//! Local source selection and local destination consent precede network startup.
+//! Legacy upload uses file-channel-scope v1; host download requires the positive
+//! file-download v1 capability. The immutable one-use attachment fixes direction.
+//! Both paths use the existing ATP full-object profiles and bounded disk owners.
+//! Private staging is published atomically without replacing an existing name,
+//! only while the original accepted grant and its bounded view remain live.
 //!
-//! Stated limits of this slice: viewer to host only; one explicit selection
-//! per connection, sent in order, stopping at the first failure (existing
-//! batch semantics). Clipboard has independent consent, tickets and workers on
-//! the same controlling session; neither lane grants permission to the other;
-//! no resumption, downloads, synchronization or picker UI. Explicit directories
-//! use the existing portable full-tree profile, with no implicit child transfers.
-//! Names and contents never appear in `Debug`, errors or status.
+//! A batch is consumed once, in order, and stops at its first failure. Clipboard
+//! and files have independent consent, tickets, workers and cancellation. Neither
+//! grants authority to the other. There is no automatic replay, resumption,
+//! browsing, synchronization or picker UI. Status retains actual publication
+//! separately from progress, refusal and cleanup, without names or contents.
 use fr_files::{
     receive::{DropDirectory, Limits as DirectoryLimits},
     sender::{self, batch},
@@ -416,6 +410,8 @@ pub enum Absence {
     Refused(sender::Error),
     /// The one-use exchange ended without a lane.
     SetupFailed(sender::Error),
+    /// The attached local receiver ended; retained publication results still apply.
+    ReceiveFailed(fr_files::quic::Error),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SendStatus {
@@ -426,6 +422,10 @@ pub struct SendStatus {
 }
 mod control;
 pub use control::{SendControl, SendSnapshot};
+mod download;
+pub use download::{
+    HostSelection, MAX_RECEIVE_RESULTS, ReceiveControl, ReceivePhase, ReceiveRequest, ReceiveStatus,
+};
 
 #[cfg(test)]
 mod tests;

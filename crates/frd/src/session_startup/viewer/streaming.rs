@@ -513,6 +513,24 @@ impl StreamingViewer {
         self.files = Some(files::Lane::new(request, control.clone()));
         Ok(control)
     }
+    /// Register one explicitly approved local destination before serving.
+    /// The host can address only this pinned directory, on this original
+    /// controller, after the direction-specific Files attachment completes.
+    pub(crate) fn request_receive_files(
+        &mut self,
+        request: crate::native_files::ReceiveRequest,
+    ) -> Result<crate::native_files::ReceiveControl, crate::native_files::Absence> {
+        use crate::native_files::Absence;
+        if self.served || self.files.is_some() {
+            return Err(Absence::Unavailable);
+        }
+        let (session, _) = self.peer.parts().map_err(|_| Absence::Unavailable)?;
+        session.check().map_err(|_| Absence::Unavailable)?;
+        super::super::native_control::file_download_lane(&session.opened.selection)?;
+        let control = crate::native_files::ReceiveControl::new();
+        self.files = Some(files::Lane::download(request, control.clone()));
+        Ok(control)
+    }
     pub(crate) async fn reap_clipboard(
         &mut self,
         cx: &Cx,
@@ -573,6 +591,9 @@ impl StreamingViewer {
         self.close();
         async move {
             let Some(viewer) = self.peer.controlled() else {
+                if let Some(lane) = &mut self.files {
+                    lane.without_control();
+                }
                 return Ok(());
             };
             let result = viewer.reap_files(cleanup, deadline).await;

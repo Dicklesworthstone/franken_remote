@@ -7,6 +7,7 @@
 //! control ever reads one (an attempt that asked for control ends
 //! reconnection, so a selection is never resent). The completion record is
 //! content-free: indices, local sizes, host-reported outcomes, typed reasons.
+pub(super) mod download;
 use super::Failure;
 use fr_native::desktop::{Desktop, Error as DesktopError};
 use fr_wire::files::Reason;
@@ -112,6 +113,7 @@ fn absence_code(absence: Absence) -> &'static str {
         Absence::Unavailable => "files_unavailable",
         Absence::Refused(_) => "files_refused_locally",
         Absence::SetupFailed(_) => "files_setup_failed",
+        Absence::ReceiveFailed(_) => "files_receive_failed",
     }
 }
 fn refusal_reason(outcome: FileSendOutcome) -> Option<&'static str> {

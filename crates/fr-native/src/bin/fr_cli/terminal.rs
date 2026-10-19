@@ -58,6 +58,7 @@ pub(super) fn closed_by_code(reason: Reason) -> Failure {
         revocation: None,
         closure: None,
         earlier: crate::output::Earlier::NONE,
+        files_receive: None,
     }
 }
 
@@ -98,12 +99,32 @@ pub(super) fn failure(value: Revoked) -> Failure {
         revocation: Some(report),
         closure: None,
         earlier: crate::output::Earlier::NONE,
+        files_receive: None,
     }
 }
 
 /// Terminal reports have their own outcome. Generic failures keep the existing
 /// output contract unchanged and never infer a host reason from connection loss.
 pub(super) fn output(error: Failure, json: bool) -> String {
+    let mut rendered = failure_output(error, json);
+    if let Some(receive) = error.files_receive {
+        if json {
+            // Every terminal formatter produces one complete JSON object.
+            // Append the already bounded, content-free publication evidence.
+            if let Some(end) = rendered.rfind('}') {
+                rendered.insert_str(end, &receive.json);
+            }
+        } else {
+            if rendered.ends_with('\n') {
+                rendered.pop();
+            }
+            rendered.push_str(&receive.text);
+            rendered.push('\n');
+        }
+    }
+    rendered
+}
+fn failure_output(error: Failure, json: bool) -> String {
     let Some(report) = error.revocation else {
         return error.closure.map_or_else(
             || crate::output::failure(error, json),

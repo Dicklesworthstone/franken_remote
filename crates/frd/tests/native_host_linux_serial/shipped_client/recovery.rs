@@ -35,6 +35,7 @@ impl Hosted {
             clipboard: false,
             audio: None,
             files: None,
+            file_send: None,
             session_monitor: None,
         };
         let events = Arc::new(Mutex::new(Vec::new()));

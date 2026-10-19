@@ -24,6 +24,13 @@ struct Failure {
     closure: Option<closure::Report>,
     /// Earlier attempts' typed ends, when a reconnect's own end would hide them.
     earlier: output::Earlier,
+    /// Bounded receive evidence retained through every terminal error formatter.
+    files_receive: Option<&'static FileReceiveReport>,
+}
+#[derive(Debug, PartialEq, Eq)]
+struct FileReceiveReport {
+    json: String,
+    text: String,
 }
 impl Failure {
     const fn new(code: &'static str, next: &'static str, exit: u8) -> Self {
@@ -34,6 +41,7 @@ impl Failure {
             revocation: None,
             closure: None,
             earlier: output::Earlier::NONE,
+            files_receive: None,
         }
     }
 }
@@ -51,7 +59,8 @@ fr connect NODE_ID --view-only|--control --experimental-native
     --display HANDLE|only|choose [--worker /absolute/fr-media-worker] [--trust-roots /absolute/ca-roots.pem]
     [--by-name] [--x-display :0] [--socket /absolute/tailscaled.sock]
     [--port 8443] [--ipv6] [--attempts 1..32] [--fit WIDTHxHEIGHT] [--clipboard]
-    [--send /absolute/file]... [--audio [--audio-server /absolute/pulse/native] [--audio-sink NAME]] [--json]
+    [--send /absolute/file-or-directory]... | [--receive /absolute/private-directory]
+    [--audio [--audio-server /absolute/pulse/native] [--audio-sink NAME]] [--json]
 fr robot session open NODE_ID [--role view|control] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
 fr robot session close NODE_ID [--lease LEASE] [--socket /absolute/tailscaled.sock] [--json]
 fr robot observe NODE_ID [--display N] [--screenshot /path/screen.png] [--evidence-level decoded|submitted_to_compositor|instrumentally_observed] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
@@ -89,12 +98,23 @@ attempts' ends (the reconnect's own end, e.g. host_not_answering after a
 --clipboard (with --control; build with linux-clipboard) lets the UTF-8 text
 CLIPBOARD follow the control lease both ways, when the host runs frd run
 --clipboard too; otherwise the completion reports clipboard absence by type.
---send PATH (with --control, repeatable up to 8) sends those regular files, in
-order, into the host's drop directory after control is granted, when the host
-runs frd run --files DIR; symlinks, directories and special files are refused
-before connecting. The host never overwrites: a taken name is refused. The
-completion reports each file by index and size only (host-reported outcome), or
-the typed reason nothing was sent. --clipboard and --send may be combined.
+--send PATH (with --control, repeatable up to 8) sends those regular files or
+portable directory roots, in order, into the host's drop directory after control
+is granted, when the host runs frd run --files DIR. Symlinks and special files
+are refused before connecting. The host never overwrites: a taken name is
+refused. Completion reports each selection by index and size only, with the
+host-reported outcome or a typed refusal.
+--receive DIR (with --control) accepts the host's explicit selections into an
+existing absolute local directory owned by you and not writable by other users
+or groups. No path component may be a symlink. The host must run frd run --once
+--input-agent PATH --send PATH... . Each complete file or portable directory is
+published atomically without overwriting an existing name; empty files and
+empty selected directory roots are supported. No received item is opened or run.
+--receive and --send are mutually exclusive. Either may accompany --clipboard
+and --audio. Files follow this original control lease and are never resumed or
+replayed automatically. Completion reports local publications separately from
+progress, by index, byte count and durability, with typed refusal, absence and
+actual cleanup status; filenames and paths are omitted, including on cancellation.
 --audio (with --view-only or --control) asks for host playback audio; without it no audio
 capability is offered. The host must run frd run --audio. Output goes to the local
 PulseAudio server (--audio-server, else PULSE_SERVER, else

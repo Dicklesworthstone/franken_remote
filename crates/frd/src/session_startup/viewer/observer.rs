@@ -186,6 +186,18 @@ impl NativeObserver {
         }
         self.viewer.configure_file_send(request)
     }
+    /// Register this attempt's explicitly selected client destination before
+    /// native control service. The returned handle retains every actual terminal
+    /// result and can cancel only this optional file operation.
+    pub fn request_receive_files(
+        &mut self,
+        request: crate::native_files::ReceiveRequest,
+    ) -> Result<crate::native_files::ReceiveControl, crate::native_files::Absence> {
+        if self.input.is_none() {
+            return Err(crate::native_files::Absence::Unavailable);
+        }
+        self.viewer.request_receive_files(request)
+    }
     /// Nonblocking transfer of at most one retained terminal receipt to the UI
     /// handle, including after close. Call again after collecting a full UI slot.
     pub fn collect_clipboard(&mut self) -> Result<(), crate::clipboard_quic::Error> {

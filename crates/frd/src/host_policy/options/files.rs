@@ -10,6 +10,26 @@ pub(super) fn parse_conflict(value: &str) -> Result<ConflictPolicy, Error> {
     }
 }
 impl RunOptions {
+    /// A host selection is consumed once. Never persist it in a restartable
+    /// daemon or infer control consent from a source path.
+    pub fn validate_file_send(&self) -> Result<(), Error> {
+        if self.send.is_empty() {
+            return Ok(());
+        }
+        if !self.once
+            || self.input_agent.is_none()
+            || self.files.is_some()
+            || self.send.len() > crate::native_files::MAX_SENDS
+            || self.send.iter().any(|path| {
+                !path.is_absolute()
+                    || path.components().any(|part| part == std::path::Component::ParentDir)
+            })
+        {
+            return Err(Error::InvalidArgument);
+        }
+        Ok(())
+    }
+
     /// Reject orphaned file settings for programmatic callers as well as CLI
     /// input. No spelling can select replacement, merging or automatic resume.
     pub fn file_conflict_policy(&self) -> Result<ConflictPolicy, Error> {

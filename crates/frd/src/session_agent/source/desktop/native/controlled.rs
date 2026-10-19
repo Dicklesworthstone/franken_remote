@@ -83,6 +83,7 @@ pub struct ControlProfile {
     clipboard: bool,
     /// `frd run --files DIR`: the operator's pinned drop directory.
     files: Option<crate::native_files::Directory>,
+    file_download: Option<crate::native_files::HostSelection>,
 }
 impl ControlProfile {
     /// `input_agent` is the locally installed `fr-input-agent` image, `display`
@@ -116,6 +117,7 @@ impl ControlProfile {
             backend,
             clipboard: false,
             files: None,
+            file_download: None,
         })
     }
     /// The operator's separate local drop directory (`frd run --files`). Under
@@ -129,6 +131,17 @@ impl ControlProfile {
     }
     pub const fn files(&self) -> bool {
         self.files.is_some()
+    }
+    /// The operator's explicit, one-use host selection for the controller.
+    #[must_use]
+    pub fn with_file_download(mut self, selection: crate::native_files::HostSelection) -> Self {
+        self.file_download = Some(selection);
+        self
+    }
+    pub fn file_download(&self) -> bool {
+        self.file_download
+            .as_ref()
+            .is_some_and(crate::native_files::HostSelection::is_available)
     }
     /// The operator's separate local enable for the controller's text
     /// clipboard (`frd run --clipboard`). Under the explicit `approval none`
@@ -168,6 +181,7 @@ impl fmt::Debug for ControlProfile {
             .field("capabilities", &self.capabilities)
             .field("clipboard", &self.clipboard)
             .field("files", &self.files.is_some())
+            .field("file_download", &self.file_download())
             .finish_non_exhaustive()
     }
 }
@@ -294,6 +308,10 @@ impl ControlledDesktop {
                     .as_ref()
                     .map(|directory| publisher.configure_files(directory)),
                 self.profile
+                    .file_download
+                    .as_ref()
+                    .map(|selection| publisher.configure_file_download(selection)),
+                self.profile
                     .clipboard
                     .then(|| configure_clipboard(publisher, &self.profile, &cx, ids))
                     .flatten(),
@@ -310,7 +328,7 @@ impl ControlledDesktop {
             Media::Reaped(_) => Err(Error::Closed),
         };
         async move {
-            let (_files, clipboard, observation, service) = prepared?;
+            let (_files, _download, clipboard, observation, service) = prepared?;
             let mut service = pin!(service);
             let mut timer = Wake {
                 driver: cx.timer_driver().ok_or(Error::Clock)?,

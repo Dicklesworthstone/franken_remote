@@ -52,7 +52,7 @@ jobs:
       # fr-native links libXtst/Xdamage/Xrandr/Xfixes/X11-xcb/opus/pulse by exact
       # soname (#[link(..., modifiers = "+verbatim")]); each must be installed.
       - name: Install Linux native media SDKs
-        run: sudo apt-get update && sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxcb-render0-dev libxcb1-dev libxtst6 libxi6 libxdamage1 libxrandr2 libxfixes3 libx11-xcb1 libopus0 libpulse0 pulseaudio pkg-config xvfb xauth xfonts-base
+        run: sudo apt-get update && sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxcb-render0-dev libxcb1-dev libxtst6 libxi6 libxdamage1 libxrandr2 libxfixes3 libx11-xcb1 libopus0 libpulse0 pulseaudio pkg-config xvfb xauth xfonts-base iproute2 nftables
       - name: Format
         id: fmt
         continue-on-error: true
@@ -69,6 +69,32 @@ jobs:
         id: test
         continue-on-error: true
         run: ./scripts/verify.sh test
+      - name: Exercise host downloads through the actual native commands
+        id: file_download
+        continue-on-error: true
+        run: |
+          cargo build --workspace --all-features --locked --bins
+          cargo test -p frd --all-features --locked --test native_host_linux_serial --no-run --message-format=json > "$RUNNER_TEMP/download-test.json"
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          binaries = []
+          for line in Path(os.environ['RUNNER_TEMP'], 'download-test.json').read_text().splitlines():
+              row = json.loads(line)
+              if (row.get('reason') == 'compiler-artifact'
+                      and row.get('profile', {}).get('test')
+                      and row.get('target', {}).get('name') == 'native_host_linux_serial'
+                      and row.get('executable')):
+                  binaries.append(os.path.abspath(row['executable']))
+          assert len(binaries) == 1, 'one exact native download test binary required'
+          listed = subprocess.check_output([binaries[0], '--list'], text=True)
+          tests = [line for line in listed.splitlines()
+                   if line.startswith('real_files::real_downloads::') and line.endswith(': test')]
+          assert len(tests) >= 4, 'native download regression tests must be present'
+          env = dict(os.environ, FR_NS_SUDO='1')
+          subprocess.run(['bash', 'scripts/test_linux_serial_lifecycle.sh', binaries[0],
+              'real_files::real_downloads'], check=True, env=env)
+          PY
       - name: Examples
         id: examples
         continue-on-error: true
@@ -109,6 +135,7 @@ jobs:
             check=${{ steps.check.outcome }}
             clippy=${{ steps.clippy.outcome }}
             test=${{ steps.test.outcome }}
+            file_download=${{ steps.file_download.outcome }}
             examples=${{ steps.examples.outcome }}
             indicator=${{ steps.indicator.outcome }}
             viewer_input=${{ steps.viewer_input.outcome }}

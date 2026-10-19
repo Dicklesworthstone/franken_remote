@@ -3,6 +3,7 @@
 //! Disk work stays in fr-files' single bounded worker. The regular control turn
 //! services this lane only after input and renewal; no application callback sees
 //! its records. Retirement never erases an already committed publication.
+mod download;
 mod negotiation;
 use super::ControlledHost;
 use crate::worker::Deadline;
@@ -29,6 +30,7 @@ pub enum Error {
     CleanupPending,
     Transport(quic::Error),
     Receiver(fr_files::quic::Error),
+    Sender(fr_files::sender::Error),
 }
 
 /// Finished means the original disk thread was joined, not just asked to stop.
@@ -44,6 +46,7 @@ pub(super) struct Slot {
     used: bool,
     pending: Option<Pending>,
     receiver: Option<HostReceiver>,
+    sender: Option<Box<download::Outgoing>>,
     reason: Option<Error>,
     cleanup: Option<Result<(), worker::Error>>,
 }
@@ -55,6 +58,9 @@ impl Slot {
         if let Some(receiver) = &mut self.receiver {
             receiver.stop();
         }
+        if let Some(outgoing) = &mut self.sender {
+            outgoing.sender.stop();
+        }
     }
     pub(super) fn owns(&self, route: Route, bytes: &[u8]) -> bool {
         self.pending.as_ref().is_some_and(|p| p.owns(route, bytes))
@@ -62,6 +68,10 @@ impl Slot {
                 .receiver
                 .as_ref()
                 .is_some_and(|r| r.owns_inbound(route))
+            || self
+                .sender
+                .as_ref()
+                .is_some_and(|s| s.sender.owns_inbound(route))
     }
     /// Recheck the pending exchange during actual UDP I/O, not just admission.
     pub(super) fn permitted(&mut self) -> bool {
@@ -120,9 +130,10 @@ impl Slot {
                 }
             }
             let pending = self.pending.take().ok_or(quic::Error::Closed)?;
-            let result = pending.start_receiver(q);
+            let result = pending.start(q);
             match result {
-                Ok(receiver) => self.receiver = Some(receiver),
+                Ok(negotiation::Attached::Receiver(receiver)) => self.receiver = Some(*receiver),
+                Ok(negotiation::Attached::Sender(sender)) => self.sender = Some(sender),
                 Err(Error::Transport(error)) => {
                     self.reason.get_or_insert(Error::Transport(error));
                     return Err(error);
@@ -135,6 +146,21 @@ impl Slot {
                     return Err(quic::Error::Handler);
                 }
             }
+        }
+        if let Some(outgoing) = &mut self.sender {
+            if let Err(error) = outgoing.service(q, &mut authorize) {
+                self.reason.get_or_insert(Error::Sender(error));
+                if error == fr_files::sender::Error::WrongConnection || q.is_closed() {
+                    return Err(quic::Error::Handler);
+                }
+                // Retire only the completed optional pair. The sender keeps
+                // actual publication/unknown-effect receipts and source custody.
+                outgoing
+                    .sender
+                    .cancel(q)
+                    .map_err(|_| quic::Error::Handler)?;
+            }
+            return Ok(());
         }
         let Some(receiver) = &mut self.receiver else {
             return Ok(());
@@ -195,7 +221,9 @@ impl ControlledHost {
         }
         self.session.check().map_err(|_| Error::Closed)?;
         let selection = &self.session.opened.selected;
-        if selection.role != Role::RequestControl
+        if selection.capabilities.iter().any(|cap| {
+            cap.name == files::DOWNLOAD_CAPABILITY && cap.version == files::DOWNLOAD_VERSION
+        }) || selection.role != Role::RequestControl
             || !selection
                 .capabilities
                 .iter()
@@ -264,6 +292,12 @@ impl ControlledHost {
             self.close();
             return Err(Error::Cancelled);
         }
+        if let Some(outgoing) = &mut self.files.sender {
+            outgoing
+                .sender
+                .cancel(&mut self.session.opened.transport)
+                .map_err(Error::Sender)?;
+        }
         if let Some(receiver) = &mut self.files.receiver {
             let result = receiver
                 .retire(&mut self.session.opened.transport)
@@ -304,9 +338,16 @@ impl ControlledHost {
             if current >= deadline.time() {
                 return Err(Error::CleanupPending);
             }
-            let result = self.file_receive_cleanup();
-            if result != Cleanup::Pending {
-                return Ok(result);
+            if let Some(outgoing) = &mut self.files.sender {
+                if let Some(result) = outgoing.sender.try_finish_cleanup() {
+                    result.map_err(Error::Sender)?;
+                    return Ok(Cleanup::Finished(Ok(())));
+                }
+            } else {
+                let result = self.file_receive_cleanup();
+                if result != Cleanup::Pending {
+                    return Ok(result);
+                }
             }
             previous = Some(current);
             sleep_until(

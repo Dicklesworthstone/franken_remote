@@ -8,6 +8,7 @@ build = "build.rs"
 
 [dependencies]
 fr-client = { workspace = true, optional = true }
+fr-files = { workspace = true, optional = true }
 fr-core.workspace = true
 fr-media.workspace = true
 fr-wire.workspace = true
@@ -53,7 +54,7 @@ linux-local-approval = ["linux-session-ui", "linux-logind"]
 linux-viewer-input = ["dep:frd"]
 linux-viewer-window = ["linux-viewer-input"]
 cli = ["dep:asupersync", "dep:frd", "dep:fr-tailnet", "dep:fr-client"]
-linux-desktop = ["cli", "linux-viewer-window"]
+linux-desktop = ["cli", "linux-viewer-window", "dep:fr-files"]
 linux-input-agent = ["linux-input", "dep:frd", "dep:asupersync"]
 
 [lints.rust]

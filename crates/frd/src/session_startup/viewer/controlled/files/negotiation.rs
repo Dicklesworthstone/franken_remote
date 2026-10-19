@@ -1,9 +1,11 @@
 //! One expected file-role attachment on the original viewer connection.
 //! Configuration is bounded metadata; no source thread exists before `send_file`.
 use super::{ControlledViewer, Error, Permission, Policy};
+use crate::native_files::{ReceiveControl, ReceivePhase};
 use asupersync::cx::Cx;
+use fr_client::input::{ClientInstant, presentation::PresentedInput};
 use fr_core::ids::InputLeaseId;
-use fr_files::sender::Sender;
+use fr_files::{quic::Configuration, sender::Sender};
 use fr_transport::quic::{
     ChannelScope, ConnectionBinding, ControlRoutes, Disposition, MediaChannel, QuicRecords, Route,
     files::FilesChannel,
@@ -16,6 +18,21 @@ use fr_wire::{
 };
 use std::time::Duration;
 
+pub(super) enum Destination {
+    Send(Policy),
+    Receive(Configuration, ReceiveControl),
+}
+pub(super) enum Advance {
+    Waiting,
+    Ready,
+    PeerRetired,
+}
+pub(super) enum Attached {
+    Cancelled,
+    Sender(Box<Sender<'static>>, Permission),
+    Receiver(Box<super::download::Receiving>, Permission),
+}
+
 pub(super) struct Pending {
     cx: Cx,
     connection: ConnectionBinding,
@@ -26,7 +43,7 @@ pub(super) struct Pending {
     lease: InputLeaseId,
     handle: Option<u128>,
     permission: Permission,
-    policy: Policy,
+    destination: Destination,
     until: u64,
     last: u64,
     channel: Option<MediaChannel>,
@@ -37,6 +54,15 @@ fn attachment_kind(bytes: &[u8]) -> bool {
         .is_some_and(|kind| (0x0018..=0x001c).contains(&u16::from_be_bytes([kind[0], kind[1]])))
 }
 impl Pending {
+    pub(super) fn is_download(&self) -> bool {
+        matches!(self.destination, Destination::Receive(_, _))
+    }
+    pub(super) fn stopped(&self) {
+        if let Destination::Receive(_, control) = &self.destination {
+            control.end(crate::native_files::Absence::Refused(Error::Cancelled));
+            control.cleaned(Ok(()));
+        }
+    }
     pub(super) fn check(&mut self) -> Result<u64, Error> {
         self.cx.checkpoint().map_err(|_| Error::Cancelled)?;
         let now = self.cx.timer_driver().ok_or(Error::Clock)?.now().as_nanos() / 1000;
@@ -59,11 +85,11 @@ impl Pending {
         (route==Route::Stream(self.control.inbound) && attachment_kind(bytes))
         || self.channel.as_ref().is_some_and(|channel|matches!(route,Route::Stream(r) if r.binding==channel.descriptor().binding.parent.id))
     }
-    pub(super) fn advance(
+    pub(super) fn preflight(
         &mut self,
         q: &mut QuicRecords,
         mut authorize: impl FnMut() -> bool,
-    ) -> Result<bool, Error> {
+    ) -> Result<Advance, Error> {
         if !q.is_bound_to(&self.connection) {
             return Err(Error::WrongConnection);
         }
@@ -71,11 +97,42 @@ impl Pending {
         if !authorize() {
             return Err(Error::Closed);
         }
+        let download = self.is_download();
+        let Some(channel) = &mut self.channel else {
+            return Ok(Advance::Waiting);
+        };
+        if download
+            && channel
+                .retire_files_if_peer_cancelled(q, &self.cx, &mut authorize)
+                .map_err(Error::Transport)?
+        {
+            return Ok(Advance::PeerRetired);
+        }
+        let complete = channel
+            .finish(q, &self.cx, &mut authorize)
+            .map_err(Error::Transport)?
+            .is_some();
+        self.check()?;
+        Ok(if complete {
+            Advance::Ready
+        } else {
+            Advance::Waiting
+        })
+    }
+    pub(super) fn advance(
+        &mut self,
+        q: &mut QuicRecords,
+        mut authorize: impl FnMut() -> bool,
+    ) -> Result<Advance, Error> {
+        match self.preflight(q, &mut authorize)? {
+            Advance::Waiting => {}
+            outcome => return Ok(outcome),
+        }
         if self.channel.is_none() {
             self.accept(q, &mut authorize)?;
         }
         let Some(channel) = &mut self.channel else {
-            return Ok(false);
+            return Ok(Advance::Waiting);
         };
         channel
             .transmit(q, &self.cx, &mut authorize)
@@ -88,7 +145,11 @@ impl Pending {
             .map_err(Error::Transport)?
             .is_some();
         self.check()?;
-        Ok(complete)
+        Ok(if complete {
+            Advance::Ready
+        } else {
+            Advance::Waiting
+        })
     }
     fn accept(
         &mut self,
@@ -165,21 +226,54 @@ impl Pending {
         }
         Ok(())
     }
-    pub(super) fn start(mut self, q: &QuicRecords) -> Result<(Sender<'static>, Permission), Error> {
+    pub(super) fn start(
+        mut self,
+        q: &mut QuicRecords,
+        input: &mut PresentedInput,
+    ) -> Result<Attached, Error> {
         if !q.is_bound_to(&self.connection) {
             return Err(Error::WrongConnection);
         }
-        self.check()?;
+        let now = self.check()?;
         let channel = self.channel.take().ok_or(Error::Closed)?;
-        // Read the scope only from the exact completed attachment. The existing
-        // full-view check and role-specific ticket exchange have already bound it
-        // to this controller; a copied numeric handle is never permission.
-        let handle = self
-            .handle
-            .unwrap_or_else(|| u128::from(channel.descriptor().binding.parent.id));
-        let lane = FilesChannel::new(q, channel, self.lease, handle).map_err(Error::Transport)?;
-        let sender = Sender::owning(self.cx, q, lane, self.policy)?;
-        Ok((sender, self.permission))
+        // The scope comes from the exact completed attachment, never a path.
+        let id = channel.descriptor().binding.parent.id;
+        let handle = self.handle.unwrap_or_else(|| u128::from(id));
+        let mut lane =
+            FilesChannel::new(q, channel, self.lease, handle).map_err(Error::Transport)?;
+        match self.destination {
+            Destination::Send(policy) => {
+                let sender = Sender::owning(self.cx, q, lane, policy)?;
+                Ok(Attached::Sender(Box::new(sender), self.permission))
+            }
+            Destination::Receive(configuration, control) => {
+                if control.cancel_requested() {
+                    lane.retire(q, &self.cx).map_err(Error::Transport)?;
+                    control.end(crate::native_files::Absence::Refused(Error::Cancelled));
+                    control.cleaned(Ok(()));
+                    return Ok(Attached::Cancelled);
+                }
+                let authority = input
+                    .file_receive_authority(self.parent, id, self.lease, ClientInstant(now))
+                    .map_err(|_| Error::Cancelled)?;
+                let receiver = fr_files::quic::Receiver::spawn_with_authority(
+                    self.cx,
+                    q,
+                    lane,
+                    fr_files::session::Authority::from_controller(authority),
+                    configuration,
+                )
+                .map_err(|error| {
+                    control.end(crate::native_files::Absence::ReceiveFailed(error));
+                    super::download::send_error(error)
+                })?;
+                control.set_phase(ReceivePhase::Receiving);
+                Ok(Attached::Receiver(
+                    Box::new(super::download::Receiving::new(receiver, control)),
+                    self.permission,
+                ))
+            }
+        }
     }
 }
 impl ControlledViewer {
@@ -231,6 +325,28 @@ impl ControlledViewer {
         policy: Policy,
         timeout: Duration,
     ) -> Result<(), Error> {
+        if self
+            .session
+            .opened
+            .selection
+            .capabilities
+            .iter()
+            .any(|cap| {
+                cap.name == fr_wire::files::DOWNLOAD_CAPABILITY
+                    && cap.version == fr_wire::files::DOWNLOAD_VERSION
+            })
+        {
+            return Err(Error::WrongRole);
+        }
+        self.expect_file_target(handle, permission, Destination::Send(policy), timeout)
+    }
+    pub(super) fn expect_file_target(
+        &mut self,
+        handle: Option<u128>,
+        permission: Permission,
+        destination: Destination,
+        timeout: Duration,
+    ) -> Result<(), Error> {
         if self.files.used || self.files.stopped {
             return Err(Error::Busy);
         }
@@ -255,7 +371,7 @@ impl ControlledViewer {
             lease: self.input.binding().lease,
             handle,
             permission,
-            policy,
+            destination,
             until,
             last,
             channel: None,

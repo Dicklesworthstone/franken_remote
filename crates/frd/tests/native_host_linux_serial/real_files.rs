@@ -534,3 +534,6 @@ fn a_host_without_files_keeps_control_and_the_client_reports_typed_absence() {
     );
     s.daemon.finish();
 }
+
+#[path = "real_downloads.rs"]
+mod real_downloads;

@@ -74,6 +74,10 @@ OPTIONS:
     --clipboard     With --input-agent: the controller's UTF-8 text clipboard
                     follows its lease, both directions (the agent's per-lane
                     --clipboard child owns X11 CLIPBOARD). Off by default
+    --send PATH     With --once and --input-agent: send this explicit absolute
+                    file or portable directory root to a controller using --receive.
+                    Repeat up to 8 times. No browsing or automatic replay; cannot
+                    combine with --files.
     --files DIR     With --input-agent: the controller may send files or portable
                     directory trees
                     (fr connect --control --send) into DIR, an existing absolute
@@ -559,6 +563,10 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         Ok(files) => files,
         Err(code) => return code,
     };
+    let file_send = match send(&options, json) {
+        Ok(selection) => selection,
+        Err(code) => return code,
+    };
     // Keep the Xvfb owner alive for the whole run; dropping it stops the server
     // and removes its private cookie.
     let (display, xauthority, headless) = match select_desktop(&options, json) {
@@ -618,6 +626,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         clipboard: options.clipboard,
         audio,
         files,
+        file_send,
         session_monitor,
     };
     let profile = Profile {
@@ -731,6 +740,30 @@ fn input_agent(
         )),
         agent => Ok(agent.clone()),
     }
+}
+
+/// Pin only the operator's explicit sources before desktop or network startup.
+#[cfg(target_os = "linux")]
+fn send(
+    options: &frd::host_policy::options::RunOptions,
+    json: bool,
+) -> Result<Option<frd::native_files::HostSelection>, ExitCode> {
+    if options.send.is_empty() {
+        return Ok(None);
+    }
+    frd::native_files::HostSelection::select(&options.send)
+        .map(Some)
+        .map_err(|refusal| {
+            run_refusal(
+                json,
+                refusal.reason.code(),
+                &format!(
+                    "host file selection {} was refused; select an existing absolute regular file or portable directory root",
+                    refusal.index + 1
+                ),
+                2,
+            )
+        })
 }
 
 /// The optional drop directory: validated by type and pinned by descriptor

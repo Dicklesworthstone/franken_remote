@@ -10,7 +10,7 @@
 //! The disk worker, byte limits and lease checks are `fr_files`' own; revoke
 //! or expiry fences the lane and a staged file is removed, never published.
 use super::ControlledHost;
-use crate::native_files::{Directory, SETUP_TIMEOUT};
+use crate::native_files::{Directory, SETUP_TIMEOUT, SendRequest};
 use fr_files::quic::Configuration;
 use fr_transport::quic::ChannelRequest;
 use fr_wire::{attachment::Ticket, decoder::Binding, negotiation::ControlBinding};
@@ -31,11 +31,19 @@ pub(super) fn between_turns(
 pub(in crate::session_startup) struct Lane {
     /// Taken by the one offer attempt; never re-offered after any outcome.
     configuration: Option<Configuration>,
+    selection: Option<SendRequest>,
 }
 impl Lane {
     pub(in crate::session_startup) fn new(directory: &Directory) -> Self {
         Self {
             configuration: Some(directory.configuration()),
+            selection: None,
+        }
+    }
+    pub(in crate::session_startup) fn download(selection: SendRequest) -> Self {
+        Self {
+            configuration: None,
+            selection: Some(selection),
         }
     }
     /// Between complete network turns, never inside a transport callback.
@@ -46,12 +54,13 @@ impl Lane {
         view: Binding,
         nonce: &mut impl FnMut() -> Result<u128, ()>,
     ) {
-        if self.configuration.is_none() || host.control_renewed_until().is_none() {
+        if (self.configuration.is_none() && self.selection.is_none())
+            || host.control_renewed_until().is_none()
+        {
             return;
         }
-        let Some(configuration) = self.configuration.take() else {
-            return;
-        };
+        let configuration = self.configuration.take();
+        let selection = self.selection.take();
         let id = match host.io() {
             Ok((q, _)) => q.next_channel_binding().ok().filter(|&id| id != 0),
             Err(_) => None,
@@ -71,6 +80,16 @@ impl Lane {
         // Refusals are typed on the ControlledHost (`file_receive_reason`);
         // the local permission is fresh, so only transport/clock state or a
         // missing selection can refuse here.
-        let _ = host.offer_file_drop(request, configuration);
+        if let Some(configuration) = configuration {
+            let _ = host.offer_file_drop(request, configuration);
+        } else if let Some(selection) = selection {
+            let _ = host.offer_file_download(
+                request,
+                selection.selection,
+                fr_files::session::Permission::new(true),
+                selection.policy,
+                selection.lifetime,
+            );
+        }
     }
 }

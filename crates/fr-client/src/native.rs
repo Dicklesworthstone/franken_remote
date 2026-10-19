@@ -191,6 +191,22 @@ pub fn control_offer_with_auxiliary(clipboard: bool, files: bool, audio: bool) -
     combined
 }
 
+/// Explicit host-to-controller delivery to a locally selected destination.
+/// The positive direction capability replaces the legacy upload scope, so a
+/// source-only host cannot be mistaken for an approved upload directory. A
+/// legacy host may omit this optional feature while desktop control continues.
+pub fn control_offer_with_download(clipboard: bool, audio: bool) -> Offer {
+    let mut offer = control_offer_with_auxiliary(clipboard, true, audio);
+    for cap in &mut offer.capabilities {
+        if cap.name == fr_wire::files::CHANNEL_SCOPE_CAPABILITY {
+            cap.name = fr_wire::files::DOWNLOAD_CAPABILITY.into();
+            cap.version = fr_wire::files::DOWNLOAD_VERSION;
+        }
+    }
+    offer.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    offer
+}
+
 fn offer(role: Role, extra: &[(&str, u16, bool)]) -> Offer {
     let mut capabilities: Vec<_> = [
         (display::CAPABILITY, 1, true),

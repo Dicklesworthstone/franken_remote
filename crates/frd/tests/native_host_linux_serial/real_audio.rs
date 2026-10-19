@@ -383,6 +383,7 @@ fn options(
         clipboard: false,
         audio,
         files: None,
+        file_send: None,
         session_monitor: None,
     }
 }
@@ -557,6 +558,7 @@ fn share_lanes(
         control,
         &Lanes {
             files: None,
+            file_send: None,
             ..lanes
         },
     );

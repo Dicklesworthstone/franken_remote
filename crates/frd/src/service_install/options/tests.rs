@@ -343,3 +343,40 @@ fn frd_run_options_that_every_start_would_refuse_are_refused_at_install() {
         .is_ok()
     );
 }
+
+#[test]
+#[cfg(target_os = "linux")]
+fn one_shot_downloads_cannot_be_persisted_as_restartable_services() {
+    for once in [false, true] {
+        let mut run_args = vec![
+            "--input-agent".to_owned(),
+            "/local/fr-input-agent".to_owned(),
+            "--send".to_owned(),
+            "/private/selected-file".to_owned(),
+        ];
+        if once {
+            run_args.push("--once".to_owned());
+        }
+        // The explicit one-shot selection is valid for foreground hosting only.
+        // A runtime failure must never reselect it through systemd restart.
+        let options = InstallOptions {
+            kind: ServiceKind::SystemdUser,
+            exec_path: PathBuf::from("/local/frd"),
+            software_explicit: true,
+            dry_run: true,
+            run_args: run_args.clone(),
+            ..InstallOptions::default()
+        };
+        assert_eq!(preflight_check(&options), Err(ServiceError::InvalidOptions));
+        let mut args = vec![
+            "--software-explicit".to_owned(),
+            "--dry-run".to_owned(),
+            "--".to_owned(),
+        ];
+        args.extend(run_args);
+        assert_eq!(
+            InstallOptions::parse_cli(&args).err(),
+            Some(ServiceError::InvalidOptions)
+        );
+    }
+}

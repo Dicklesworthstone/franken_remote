@@ -159,6 +159,28 @@ pub fn host_offer_with_files(control: bool, clipboard: bool, audio: bool, files:
     }
 }
 
+/// The independently selected host source, using the Files pair in the reverse
+/// direction. It never advertises a legacy upload scope without a local drop
+/// directory. An older viewer can still control the desktop, but cannot request
+/// this direction without the explicit download capability.
+#[allow(clippy::fn_params_excessive_bools)]
+pub fn host_offer_with_download(
+    control: bool,
+    clipboard: bool,
+    audio: bool,
+    download: bool,
+) -> Offer {
+    let mut offer = host_offer_with_files(control, clipboard, audio, download);
+    for cap in &mut offer.capabilities {
+        if cap.name == fr_wire::files::CHANNEL_SCOPE_CAPABILITY {
+            cap.name = fr_wire::files::DOWNLOAD_CAPABILITY.into();
+            cap.version = fr_wire::files::DOWNLOAD_VERSION;
+        }
+    }
+    offer.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    offer
+}
+
 /// Only for a control-capable host whose probed input executor can scroll by
 /// lines: the optional `native-input-line-scroll` boundary. A controller asks
 /// for `LineScroll` only when both peers select it; without it the wheel alone

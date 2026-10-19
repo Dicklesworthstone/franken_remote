@@ -3,8 +3,9 @@
 # Pass the compiled native_host_linux_serial test binary. No production network,
 # system bus, firewall, sysfs, or /run state is changed outside the fresh namespace.
 set -euo pipefail
-[[ $# == 1 && -x "$1" ]] || { echo 'usage: test_linux_serial_lifecycle.sh TEST_BINARY' >&2; exit 2; }
+[[ $# -ge 1 && -x "$1" ]] || { echo 'usage: test_linux_serial_lifecycle.sh TEST_BINARY [TEST_FILTER]' >&2; exit 2; }
 binary=$(realpath -- "$1")
+shift
 parent_netns=$(readlink /proc/self/ns/net)
 # Hosts that restrict unprivileged user namespaces (Ubuntu's AppArmor
 # kernel.apparmor_restrict_unprivileged_userns=1) can opt into real root in the
@@ -37,5 +38,7 @@ exec "${enter[@]}" bash -ec '
     "    type filter hook prerouting priority -450; policy accept;" \
     "    ip frag-off & 0x3fff != 0 counter drop" \
     "  }" "}" | nft -f -
-  exec "$1" --ignored --test-threads=1
-' sh "$binary" "$parent_netns"
+  binary=$1
+  shift 2
+  exec "$binary" --ignored --test-threads=1 "$@"
+' sh "$binary" "$parent_netns" "$@"

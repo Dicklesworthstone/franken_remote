@@ -1,5 +1,11 @@
 # Native file sending
 
+The shipped native workflow supports explicit uploads and downloads. Uploads use
+`fr connect --control --send PATH` with `frd run --files DIR`; downloads use
+`frd run --once --send PATH` with `fr connect --control --receive DIR`.
+See [NATIVE_FILE_DOWNLOAD.md](NATIVE_FILE_DOWNLOAD.md) for the download workflow.
+The sections below describe the original upload API and its later integrations.
+
 `fr_files::sender::Sender` exclusively borrows or consumes the original completed
 `FilesChannel`; its parent continues to own and drive the existing QUIC
 connection. `begin` accepts a locally selected `std::fs::File` and a portable
@@ -41,8 +47,8 @@ hostile acceptance, contradictory proofs, missing proof after real publication,
 no-overwrite conflicts, and queued record expiry without destroying control.
 These use explicit admission/controller fixtures, not live Tailscale or native
 file-picker authority. Running host/viewer optional-channel setup is described below; user-facing
-file selection still needs integration. Resumption, folder sync and host-to-client
-sending are not implemented by this single regular-file profile.
+file and directory selection is integrated into the native commands. Resumption
+and folder synchronization remain separate work.
 
 ## Running controller integration
 
@@ -67,8 +73,8 @@ ATP hashing and filesystem publication. They cover successive 120,007-byte and
 empty files, input and renewal beyond the initial lease, partial cancellation,
 local file-permission denial, and abandoning an unpolled drive. Their initial
 consent, source-visibility evidence and counted input sink are explicit fixtures,
-not native desktop or live-Tailscale qualification. Native file selection, file-scope agreement, resumption, downloads and folder
-synchronization are not completed by this slice.
+not native desktop or live-Tailscale qualification. Resumption and folder
+synchronization remain separate work.
 
 ## Automatic viewer attachment
 
@@ -120,7 +126,7 @@ Nine additional UDP/TLS controller tests cover automatic establishment and real
 denial, original-deadline expiry (both idle and serviced), unfinished cancellation,
 permission revocation, unpolled abandonment and another display's offer. Together
 with the four running-sender cases these are 13 integration tests, not a complete
-native picker, live-tailnet, download, resumption or folder-sync qualification.
+native picker, live-tailnet, resumption or folder-sync qualification.
 
 ## Closing native desktops with file work
 
@@ -168,9 +174,9 @@ Five real UDP/TLS/controller/ATP/filesystem tests exercise scope agreement and
 selection or local permission, the immutable pre-poll deadline, and another
 selected display's authenticated offer. Native input effects and presentation
 are explicit fixtures, not hardware or live-tailnet qualification. This removes
-the pre-agreed numeric-scope prerequisite for the drop APIs; graphical selection,
-a complete command-line upload workflow, downloads, resume and folder sync still
-require their separate implementations.
+the pre-agreed numeric-scope prerequisite for the drop APIs. Native command-line
+uploads and downloads use these same scope and authority boundaries; graphical
+selection, resume and folder sync remain separate work.
 
 ## Explicit portable directories
 
@@ -210,10 +216,12 @@ each path by type before connecting and hands one attempt's duplicated
 descriptors to the batch sender (`native_files::Selection`). The viewer installs
 `expect_file_drop` at the start of its first controlled turn; the host calls
 `offer_file_drop` only after the controller's first lease renewal, so the one-use
-offer never reaches a viewer that is not expecting it. Clipboard and files are
-never set up on the same session in this slice. The host's disk worker is reaped
+offer never reaches a viewer that is not expecting it. Clipboard and files use
+independent lanes on the same controlling session. The host's disk worker is reaped
 with the controlled share. The CLI completion reports content-free per-index
 outcomes. Evidence: `crates/frd/tests/native_host_linux_serial/real_files.rs`
 (namespace e2e with real files, including a SIGSTOP mid-transfer and two planted
 negatives) and the unit tests in `crates/frd/src/native_files/tests.rs`. Not a
-live tailnet, picker, drag-and-drop, download, directory or resumption path.
+live-tailnet, picker, drag-and-drop or resumption qualification. Explicit
+directory selection uses the profile-2 path above; downloads use the same ATP
+machinery in the direction described in NATIVE_FILE_DOWNLOAD.md.

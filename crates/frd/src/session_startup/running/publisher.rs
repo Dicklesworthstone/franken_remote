@@ -219,6 +219,22 @@ impl NativePublisher {
         }
         self.host.configure_files(directory)
     }
+    /// Select host-to-controller delivery for this admitted native attempt.
+    /// Clones of the local selection share one consumption, so uncertainty or
+    /// reconnecting cannot silently replay a previously spent batch.
+    pub fn configure_file_download(
+        &mut self,
+        selection: &crate::native_files::HostSelection,
+    ) -> Result<(), crate::native_files::Absence> {
+        if self.input.is_none() {
+            return Err(crate::native_files::Absence::Unavailable);
+        }
+        self.host.configure_file_download(selection)
+    }
+    /// Ordered download publication receipts retained after session shutdown.
+    pub fn file_download_report(&mut self) -> Option<fr_files::sender::batch::Report> {
+        self.host.file_download_report()
+    }
     /// Observe the drop lane's disk worker joined; a timeout keeps it for a
     /// later reap. Media/input/clipboard cleanup stay separate operations.
     pub async fn reap_files(

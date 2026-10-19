@@ -384,8 +384,23 @@ pub(super) fn connect(
     clipboard: bool,
     send: &[PathBuf],
 ) -> Child {
+    connect_command(fr, api, roots, display, worker, clipboard, send)
+        .spawn()
+        .unwrap()
+}
+
+fn connect_command(
+    fr: &Path,
+    api: &Path,
+    roots: &Path,
+    display: &str,
+    worker: &Path,
+    clipboard: bool,
+    send: &[PathBuf],
+) -> Command {
     let port = address().port().to_string();
-    Command::new(fr)
+    let mut command = Command::new(fr);
+    command
         .args(["connect", "n-host", "--control", "--experimental-native"])
         .args(clipboard.then_some("--clipboard"))
         .args(
@@ -404,9 +419,8 @@ pub(super) fn connect(
         .env_remove("XAUTHORITY")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap()
+        .stderr(Stdio::piped());
+    command
 }
 
 /// `frd run` (in process, the production composition) on the host display.
@@ -414,8 +428,9 @@ pub(super) struct Daemon {
     events: Arc<Mutex<Vec<Event>>>,
     stop: Arc<StopHandle>,
     thread: Option<JoinHandle<Result<(), host_run::Error>>>,
+    cli: Option<DaemonCli>,
     _api: fixture::Api,
-    _tools: Tools,
+    tools: Tools,
 }
 impl Daemon {
     fn start(
@@ -457,6 +472,7 @@ impl Daemon {
             clipboard,
             audio: None,
             files,
+            file_send: None,
             session_monitor,
         };
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -469,8 +485,9 @@ impl Daemon {
             events,
             stop,
             thread: Some(thread),
+            cli: None,
             _api: api,
-            _tools: tools,
+            tools,
         };
         assert!(
             wait_for_event(&daemon.events, Duration::from_secs(20), |e| matches!(
@@ -483,7 +500,10 @@ impl Daemon {
         daemon
     }
     pub(super) fn dump(&self) -> String {
-        format!("{:?}", self.events.lock().unwrap())
+        self.cli.as_ref().map_or_else(
+            || format!("{:?}", self.events.lock().unwrap()),
+            DaemonCli::dump,
+        )
     }
     pub(super) fn events(&self) -> Vec<Event> {
         self.events.lock().unwrap().clone()
@@ -535,6 +555,190 @@ impl Drop for Daemon {
     }
 }
 
+/// The same namespace fixture through the shipped host CLI. Only this child's
+/// private mount namespace substitutes the existing synthetic ingress tools;
+/// the transport, input executor and file owners remain the production ones.
+struct DaemonCli {
+    child: Child,
+    stdout: PathBuf,
+    stderr: PathBuf,
+}
+impl DaemonCli {
+    fn output(path: &Path) -> String {
+        use std::io::Read as _;
+        const LIMIT: u64 = 1024 * 1024;
+        let mut text = String::new();
+        fs::File::open(path)
+            .unwrap()
+            .take(LIMIT + 1)
+            .read_to_string(&mut text)
+            .unwrap();
+        assert!(text.len() as u64 <= LIMIT, "unbounded frd diagnostic output");
+        text
+    }
+    fn dump(&self) -> String {
+        format!(
+            "frd stdout: {}; stderr: {}",
+            Self::output(&self.stdout),
+            Self::output(&self.stderr)
+        )
+    }
+    fn listening(&mut self) -> bool {
+        assert!(
+            self.child.try_wait().unwrap().is_none(),
+            "frd exited before listening: {}",
+            self.dump()
+        );
+        Self::output(&self.stdout).lines().any(|line| {
+            serde_json::from_str::<serde_json::Value>(line)
+                .is_ok_and(|event| event["event"] == "listening")
+        })
+    }
+}
+impl Drop for DaemonCli {
+    fn drop(&mut self) {
+        if !matches!(self.child.try_wait(), Ok(None)) {
+            return;
+        }
+        let _ = Command::new("kill")
+            .args(["-INT", &self.child.id().to_string()])
+            .status();
+        if !eventually(Duration::from_secs(5), || {
+            self.child.try_wait().is_ok_and(|status| status.is_some())
+        }) {
+            let _ = self.child.kill();
+            let _ = eventually(Duration::from_secs(5), || {
+                self.child.try_wait().is_ok_and(|status| status.is_some())
+            });
+        }
+    }
+}
+impl Daemon {
+    fn start_downloads(
+        display: &str,
+        worker: &Path,
+        input_agent: &Path,
+        clipboard: bool,
+        sources: &[PathBuf],
+    ) -> Self {
+        const MOUNTS: &str = "\
+mount --make-rprivate /
+mount --bind \"$1\" /usr/sbin/nft
+mount --bind \"$2\" /usr/sbin/ip
+shift 2
+exec \"$@\"
+";
+        let api = fixture::Api::new();
+        let tools = Tools::new();
+        // tools.py locates its state beside its real source. These wrappers
+        // retain that location when mounted on the CLI's protected tool paths.
+        let wrappers: Vec<_> = ["nft", "ip"]
+            .into_iter()
+            .map(|name| {
+                let wrapper = tools.0.join(format!("cli-{name}"));
+                crate::executable::write(
+                    &wrapper,
+                    &format!("#!/bin/sh\nexec '{}' \"$@\"\n", tools.0.join(name).display()),
+                );
+                wrapper
+            })
+            .collect();
+        let stdout = tools.0.join("frd-stdout.jsonl");
+        let stderr = tools.0.join("frd-stderr.txt");
+        let child = Command::new("unshare")
+            .args(["--mount", "--", "sh", "-ec", MOUNTS, "frd-download-fixture"])
+            .args(&wrappers)
+            .arg(sibling("frd"))
+            .args(["run", "--once", "--json", "--encoder", "software"])
+            .args(["--approval", "none", "--sharing", "own-user"])
+            .args(["--interface", "fr-fixture", "--fps", "15", "--bitrate", "2000000"])
+            .arg("--config")
+            .arg(tools.0.join("policy.json"))
+            .arg("--socket")
+            .arg(&api.path)
+            .arg("--port")
+            .arg(address().port().to_string())
+            .arg("--display")
+            .arg(display)
+            .arg("--worker")
+            .arg(worker)
+            .arg("--input-agent")
+            .arg(input_agent)
+            .arg("--trust-roots")
+            .arg(fixture::pki().join("ca.pem"))
+            .args(clipboard.then_some("--clipboard"))
+            .args(
+                sources
+                    .iter()
+                    .flat_map(|path| [std::ffi::OsStr::new("--send"), path.as_os_str()]),
+            )
+            .env_remove("DISPLAY")
+            .env_remove("XAUTHORITY")
+            .stdin(Stdio::null())
+            .stdout(fs::File::create_new(&stdout).unwrap())
+            .stderr(fs::File::create_new(&stderr).unwrap())
+            .spawn()
+            .unwrap();
+        let mut daemon = Self {
+            events: Arc::new(Mutex::new(Vec::new())),
+            stop: Arc::new(StopHandle::default()),
+            thread: None,
+            cli: Some(DaemonCli { child, stdout, stderr }),
+            _api: api,
+            tools,
+        };
+        assert!(
+            eventually(Duration::from_secs(30), || daemon.cli.as_mut().unwrap().listening()),
+            "frd never listened: {}",
+            daemon.dump()
+        );
+        daemon
+    }
+
+    /// Require the CLI's one-shot run to exit by itself after viewer departure.
+    /// No stop request hides a host that accidentally keeps serving selections.
+    pub(super) fn finish_once(mut self) -> String {
+        assert!(
+            eventually(Duration::from_secs(30), || {
+                self.cli
+                    .as_mut()
+                    .unwrap()
+                    .child
+                    .try_wait()
+                    .unwrap()
+                    .is_some()
+            }),
+            "frd --once did not exit: {}",
+            self.dump()
+        );
+        let cli = self.cli.as_mut().unwrap();
+        let status = cli.child.try_wait().unwrap().unwrap();
+        let diagnostic = cli.dump();
+        assert!(status.success(), "{diagnostic}");
+        let events: Vec<serde_json::Value> = DaemonCli::output(&cli.stdout)
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(
+            events.iter().all(|event| event["event"] != "cleanup_failed"),
+            "{diagnostic}"
+        );
+        assert_eq!(
+            events.last().unwrap()["event"], "stopped",
+            "{diagnostic}"
+        );
+        assert_eq!(self.tools.state()["created"], 1, "{diagnostic}");
+        assert_eq!(self.tools.state()["deleted"], 1, "{diagnostic}");
+        assert!(UdpSocket::bind(address()).is_ok(), "listener retired");
+        diagnostic
+    }
+}
+
+struct Downloads<'a> {
+    sources: &'a [PathBuf],
+    destination: Option<&'a Path>,
+}
+
 pub(super) struct Controlled {
     pub(super) observer: Harness,
     driver: Harness,
@@ -560,17 +764,35 @@ impl Controlled {
         files: Option<frd::native_files::Directory>,
         send: &[PathBuf],
     ) -> Self {
-        Self::start_all(host_clipboard, client_clipboard, files, send, None, false)
+        Self::start_all(host_clipboard, client_clipboard, files, send, None, false, None)
+    }
+    /// Real host --once --send selections and viewer --receive consent, using
+    /// the same display, input and clipboard fixtures as the upload tests.
+    pub(super) fn start_downloads(
+        host_clipboard: bool,
+        client_clipboard: bool,
+        sources: &[PathBuf],
+        destination: Option<&Path>,
+    ) -> Self {
+        Self::start_all(
+            host_clipboard,
+            client_clipboard,
+            None,
+            &[],
+            None,
+            false,
+            Some(Downloads { sources, destination }),
+        )
     }
     /// A plain controlled session whose host also watches the selected
     /// session through `image` (a monitor image) and logind session name.
     pub(super) fn start_monitored(image: PathBuf, session: String) -> Self {
-        Self::start_all(false, false, None, &[], Some((image, session)), false)
+        Self::start_all(false, false, None, &[], Some((image, session)), false, None)
     }
     /// A host display whose pointer map lacks the horizontal wheel buttons
     /// (logical 6/7) BEFORE `frd run` starts and probes its input executor.
     fn start_without_wheel() -> Self {
-        Self::start_all(false, false, None, &[], None, true)
+        Self::start_all(false, false, None, &[], None, true, None)
     }
     fn start_all(
         host_clipboard: bool,
@@ -579,6 +801,7 @@ impl Controlled {
         send: &[PathBuf],
         monitor: Option<(PathBuf, String)>,
         unmap_wheel: bool,
+        downloads: Option<Downloads<'_>>,
     ) -> Self {
         let (fr, worker, agent) = (
             sibling("fr"),
@@ -603,19 +826,29 @@ impl Controlled {
                 display: host.display.clone(),
             },
         });
-        let daemon = Daemon::start_monitored(
-            &host.display,
-            &worker,
-            Some(agent),
-            host_clipboard,
-            files,
-            monitor,
-        );
+        let daemon = if let Some(downloads) = &downloads {
+            Daemon::start_downloads(
+                &host.display,
+                &worker,
+                &agent,
+                host_clipboard,
+                downloads.sources,
+            )
+        } else {
+            Daemon::start_monitored(
+                &host.display,
+                &worker,
+                Some(agent),
+                host_clipboard,
+                files,
+                monitor,
+            )
+        };
         // No viewer, no lease: the executor (and its indicator) is per lease.
         assert_eq!(indicator(&mut observer), None);
         let client_api = ClientApi::new();
         let roots = fixture::pki().join("ca.pem");
-        let client = connect(
+        let mut command = connect_command(
             &fr,
             &client_api.path,
             &roots,
@@ -624,6 +857,10 @@ impl Controlled {
             client_clipboard,
             send,
         );
+        if let Some(destination) = downloads.and_then(|files| files.destination) {
+            command.arg("--receive").arg(destination);
+        }
+        let client = command.spawn().unwrap();
         let mut session = Self {
             observer,
             driver,

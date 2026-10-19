@@ -65,6 +65,8 @@ pub struct RunOptions {
     /// `--files DIR`: the controller's drop directory (needs `input_agent`;
     /// the caller validates it by type before any I/O).
     pub files: Option<PathBuf>,
+    /// Explicit host source files or portable directory roots for one control lease.
+    pub send: Vec<PathBuf>,
     /// Local collision handling for both files and whole trees. Absent: reject.
     pub files_conflict: Option<ConflictPolicy>,
     /// Per-file byte limit for `--files` (default in `native_files`).
@@ -166,6 +168,7 @@ impl RunOptions {
                 "--audio-server" => set(&mut options.audio_server, PathBuf::from(value))?,
                 "--audio-sink" => set(&mut options.audio_sink, value.to_owned())?,
                 "--files" => set(&mut options.files, PathBuf::from(value))?,
+                "--send" => options.send.push(PathBuf::from(value)),
                 "--files-conflict" => {
                     set(&mut options.files_conflict, files::parse_conflict(value)?)?;
                 }
@@ -205,6 +208,7 @@ impl RunOptions {
         }
         // File limits or conflict choices cannot implicitly enable receiving.
         let _ = options.file_conflict_policy()?;
+        options.validate_file_send()?;
         Ok(options)
     }
     /// Resolve only explicit operator input; absence never selects hardware or
@@ -228,6 +232,7 @@ impl RunOptions {
     }
     pub fn resolve(&self) -> Result<Effective, Error> {
         let _ = self.file_conflict_policy()?;
+        self.validate_file_send()?;
         let _ = self.selected_encoder()?;
         let _ = self.video_profile()?;
         if self.port == Some(0) {
@@ -309,6 +314,8 @@ fn value<'a>(iter: &mut std::slice::Iter<'a, String>) -> Result<&'a str, Error> 
         .ok_or(Error::InvalidArgument)
 }
 
+#[cfg(test)]
+mod download_tests;
 #[cfg(test)]
 mod encoder_tests;
 #[cfg(test)]

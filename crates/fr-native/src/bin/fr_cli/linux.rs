@@ -323,6 +323,7 @@ fn connect(
     }
     // Classify every --send path by type before any network I/O.
     let sends = files::select(&connection.send)?;
+    let downloads = files::download::select(connection.receive.as_deref())?;
     let configuration = desktop_configuration(cx, connection)?;
     let audio_output = audio::resolve(connection.audio.as_ref())?;
     let state = Rc::new(RefCell::new(Progress {
@@ -336,6 +337,7 @@ fn connect(
             .as_ref()
             .map(|_| Rc::new(RefCell::new(audio::Report::default()))),
         files: sends,
+        downloads,
         ..Progress::default()
     }));
     let clipboard = if connection.clipboard {
@@ -384,7 +386,12 @@ fn connect(
         ..Default::default()
     };
     let result = if connection.control {
-        let offer = if connection.audio.is_some() {
+        let offer = if connection.receive.is_some() {
+            fr_client::native::control_offer_with_download(
+                connection.clipboard,
+                connection.audio.is_some(),
+            )
+        } else if connection.audio.is_some() {
             fr_client::native::control_offer_with_auxiliary(
                 connection.clipboard,
                 !connection.send.is_empty(),
@@ -480,6 +487,9 @@ fn completed(
     // Name earlier attempts' ends too: a reconnect's own end can hide them.
     crate::closure::preserve(result, close_outcome(application)).map_err(|mut failure| {
         failure.earlier = progress.ended.before(progress.attempts);
+        if let Some(downloads) = &progress.downloads {
+            downloads.summary().preserve(&mut failure);
+        }
         failure
     })
 }
@@ -651,6 +661,8 @@ struct Progress {
     audio: Option<Rc<RefCell<audio::Report>>>,
     /// Some only with `--send`: the explicit selection and its outcome.
     files: Option<files::Local>,
+    /// Some only with `--receive`: the pinned local directory and actual receipts.
+    downloads: Option<files::download::Local>,
     /// The last attempt's content-free viewer counters (set after the run).
     media: Option<frd::session_startup::ViewerStatistics>,
     /// Each failed attempt's typed end, recorded as it is cleaned up.
@@ -721,6 +733,9 @@ impl Ui for Interface {
         }
         if let Some(files) = p.files.as_mut() {
             files.configure(desktop);
+        }
+        if let Some(downloads) = p.downloads.as_mut() {
+            downloads.configure(desktop);
         }
         if let (Some((server, request)), Some(report)) = (&self.audio, &p.audio) {
             install_audio(desktop, server, request, report);
@@ -944,6 +959,11 @@ fn control_completion(
         .files
         .as_ref()
         .map_or_else(files::Summary::not_requested, files::Local::summary);
+    let downloads = progress.downloads.as_ref().map_or_else(
+        files::download::Summary::not_requested,
+        files::download::Local::summary,
+    );
+    let downloads = if json { downloads.json() } else { downloads.text() };
     let audio = audio_completion(progress, json);
     let clipboard = control.clipboard.unwrap_or_default();
     let absence = control
@@ -952,7 +972,7 @@ fn control_completion(
         .unwrap_or("not_requested");
     if json {
         format!(
-            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{},\"control_requested\":{},\"control_granted\":{},\"control_capabilities_granted\":{},\"wheel_unavailable\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"input_suspensions\":{},\"input_suspended_ms\":{},\"input_dropped_aged\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{},\"clipboard_ended\":{}{}{audio},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false,\"close_exchange\":{},\"lease_report\":{}}}\n",
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{},\"control_requested\":{},\"control_granted\":{},\"control_capabilities_granted\":{},\"wheel_unavailable\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"input_suspensions\":{},\"input_suspended_ms\":{},\"input_dropped_aged\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{},\"clipboard_ended\":{}{}{downloads}{audio},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false,\"close_exchange\":{},\"lease_report\":{}}}\n",
             output::timestamp(),
             progress.attempts,
             progress.opened,
@@ -994,7 +1014,7 @@ fn control_completion(
         )
     } else {
         format!(
-            "Control session stopped; {} attempt(s), {} opened session(s), control {}, {} host input result(s) ({} submitted to the host OS), clipboard {}, cleanup confirmed.{}{audio} Native transport/hardware remain unqualified.\n",
+            "Control session stopped; {} attempt(s), {} opened session(s), control {}, {} host input result(s) ({} submitted to the host OS), clipboard {}, cleanup confirmed.{}{downloads}{audio} Native transport/hardware remain unqualified.\n",
             progress.attempts,
             progress.opened,
             match (control.requested, control.granted) {
@@ -1590,6 +1610,7 @@ mod tests {
             clipboard: false,
             audio: None,
             send: Vec::new(),
+            receive: None,
         };
         let runtime = RuntimeBuilder::current_thread()
             .enable_platform_reactor(true)

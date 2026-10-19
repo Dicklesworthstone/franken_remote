@@ -1,4 +1,5 @@
 //! One file sender carried by the original running controller, never a new grant.
+mod download;
 mod negotiation;
 use super::{ControlledViewer, permitted};
 use asupersync::cx::Cx;
@@ -15,7 +16,7 @@ use fr_wire::{
     decoder::Binding,
     negotiation::{ControlBinding, Role},
 };
-use negotiation::Pending;
+use negotiation::{Advance, Pending};
 use std::{fs::File, time::Duration};
 
 #[derive(Default)]
@@ -23,6 +24,7 @@ pub(super) struct Slot {
     used: bool,
     pending: Option<Pending>,
     sender: Option<Sender<'static>>,
+    receiver: Option<Box<download::Receiving>>,
     permission: Option<Permission>,
     failure: Option<Error>,
     stopped: bool,
@@ -31,6 +33,10 @@ impl Slot {
     pub(super) fn owns(&self, route: Route, bytes: &[u8]) -> bool {
         self.pending.as_ref().is_some_and(|p| p.owns(route, bytes))
             || self.sender.as_ref().is_some_and(|s| s.owns_inbound(route))
+            || self
+                .receiver
+                .as_ref()
+                .is_some_and(|r| r.receiver.owns_inbound(route))
     }
     pub(super) fn deadline_us(&self) -> Option<u64> {
         self.pending.as_ref().map(Pending::deadline)
@@ -46,7 +52,9 @@ impl Slot {
     }
     pub(super) fn permits_io(&mut self) -> bool {
         self.check_pending().is_ok()
-            && (self.stopped || self.permission.as_ref().is_none_or(Permission::is_approved))
+            && (self.receiver.is_some()
+                || self.stopped
+                || self.permission.as_ref().is_none_or(Permission::is_approved))
     }
     pub(super) fn stop(&mut self, q: &mut QuicRecords) -> Result<(), Error> {
         self.stop_on(q, None)
@@ -61,11 +69,15 @@ impl Slot {
         q: &mut QuicRecords,
         cleanup: Option<&Cx>,
     ) -> Result<(), Error> {
-        if self.pending.take().is_some() {
+        if let Some(pending) = self.pending.take() {
+            pending.stopped();
             self.failure.get_or_insert(Error::Cancelled);
         }
         if !self.stopped {
             self.stopped = true;
+            if let Some(receiving) = &mut self.receiver {
+                receiving.stop(q, cleanup)?;
+            }
             if let Some(sender) = &mut self.sender {
                 match cleanup {
                     Some(_)
@@ -80,15 +92,42 @@ impl Slot {
         }
         Ok(())
     }
+    pub(super) fn prepare_pending_receive(
+        &mut self,
+        q: &mut QuicRecords,
+        authorize: impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        if let Some(pending) = &mut self.pending {
+            match pending.preflight(q, authorize)? {
+                Advance::Waiting | Advance::Ready => {}
+                Advance::PeerRetired => {
+                    pending.stopped();
+                    self.pending = None;
+                    self.stopped = true;
+                    self.failure.get_or_insert(Error::Cancelled);
+                }
+            }
+        }
+        Ok(())
+    }
     pub(super) fn service(
         &mut self,
         q: &mut QuicRecords,
-        mut authorize: impl FnMut() -> bool,
+        input: &mut fr_client::input::presentation::PresentedInput,
+        control: &super::ViewerControl,
+        cx: &Cx,
     ) -> Result<(), Error> {
         if let Some(pending) = &mut self.pending {
-            match pending.advance(q, &mut authorize) {
-                Ok(false) => return Ok(()),
-                Ok(true) => {}
+            match pending.advance(q, || permitted(input, control, cx)) {
+                Ok(Advance::Waiting) => return Ok(()),
+                Ok(Advance::Ready) => {}
+                Ok(Advance::PeerRetired) => {
+                    pending.stopped();
+                    self.pending = None;
+                    self.stopped = true;
+                    self.failure.get_or_insert(Error::Cancelled);
+                    return Ok(());
+                }
                 Err(error) => {
                     self.failure.get_or_insert(error);
                     // The peer may still own its final handshake response. An
@@ -96,9 +135,17 @@ impl Slot {
                     return Err(error);
                 }
             }
-            match self.pending.take().ok_or(Error::Closed)?.start(q) {
-                Ok((sender, permission)) => {
-                    self.sender = Some(sender);
+            match self.pending.take().ok_or(Error::Closed)?.start(q, input) {
+                Ok(negotiation::Attached::Cancelled) => {
+                    self.stopped = true;
+                    self.failure.get_or_insert(Error::Cancelled);
+                }
+                Ok(negotiation::Attached::Sender(sender, permission)) => {
+                    self.sender = Some(*sender);
+                    self.permission = Some(permission);
+                }
+                Ok(negotiation::Attached::Receiver(receiver, permission)) => {
+                    self.receiver = Some(receiver);
                     self.permission = Some(permission);
                 }
                 Err(error) => {
@@ -114,9 +161,12 @@ impl Slot {
         if self.stopped {
             return Ok(());
         }
+        if let Some(receiving) = &mut self.receiver {
+            return receiving.service(q, || permitted(input, control, cx));
+        }
         if let Some(sender) = &mut self.sender {
             let permission = self.permission.as_ref().ok_or(Error::Closed)?;
-            let mut authorize = authorize;
+            let mut authorize = || permitted(input, control, cx);
             if let Err(error) = sender.service(q, || permission.is_approved() && authorize()) {
                 self.failure.get_or_insert(error);
                 // Local source/proof failure is terminal for files, not for desktop
@@ -149,6 +199,19 @@ impl ControlledViewer {
             return Err(Error::Busy);
         }
         self.files_admitted(&permission)?;
+        if self
+            .session
+            .opened
+            .selection
+            .capabilities
+            .iter()
+            .any(|cap| {
+                cap.name == fr_wire::files::DOWNLOAD_CAPABILITY
+                    && cap.version == fr_wire::files::DOWNLOAD_VERSION
+            })
+        {
+            return Err(Error::WrongRole);
+        }
         let q = &self.session.transport;
         let expected = Binding {
             parent: ControlBinding {
@@ -283,9 +346,14 @@ impl ControlledViewer {
     }
     pub fn file_cleanup_finished(&self) -> bool {
         self.files
-            .sender
+            .receiver
             .as_ref()
-            .is_none_or(Sender::cleanup_finished)
+            .is_none_or(|r| r.receiver.cleanup_finished())
+            && self
+                .files
+                .sender
+                .as_ref()
+                .is_none_or(Sender::cleanup_finished)
     }
     /// A completed file lane retires independently. An unfinished attachment
     /// instead fences the parent: a partially acknowledged pair is not clean.
@@ -304,11 +372,16 @@ impl ControlledViewer {
         if !self.files.stopped || self.files.pending.is_some() {
             return None;
         }
-        let result = self
-            .files
-            .sender
-            .as_mut()
-            .map_or(Some(Ok(())), Sender::try_finish_cleanup);
+        let result = if let Some(receiving) = &mut self.files.receiver {
+            receiving
+                .collect()
+                .map(|result| result.map_err(|_| Error::Worker))
+        } else {
+            self.files
+                .sender
+                .as_mut()
+                .map_or(Some(Ok(())), Sender::try_finish_cleanup)
+        };
         if let Some(Err(error)) = result {
             self.files.failure.get_or_insert(error);
         }
@@ -335,12 +408,7 @@ impl ControlledViewer {
                 return Err(Error::Expired);
             }
             previous = now;
-            if let Some(result) = self
-                .files
-                .sender
-                .as_mut()
-                .map_or(Some(Ok(())), Sender::try_finish_cleanup)
-            {
+            if let Some(result) = self.try_finish_file_cleanup() {
                 if let Err(error) = result {
                     self.files.failure.get_or_insert(error);
                 }
@@ -360,9 +428,12 @@ impl ControlledViewer {
             return Ok(());
         }
         self.files
-            .service(&mut self.session.transport, || {
-                permitted(&mut self.input, &self.control, &self.session.cx)
-            })
+            .service(
+                &mut self.session.transport,
+                &mut self.input,
+                &self.control,
+                &self.session.cx,
+            )
             .map_err(super::Error::Files)
     }
 }

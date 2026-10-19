@@ -232,3 +232,47 @@ fn attachment_credit_negotiates_independently_and_preserves_legacy_peers() {
         }
     }
 }
+
+#[test]
+fn downloads_negotiate_direction_without_advertising_a_legacy_upload_directory() {
+    for clipboard in [false, true] {
+        for audio in [false, true] {
+            let host = with_line_scroll(host_offer_with_download(true, clipboard, audio, true));
+            let client = fr_client::native::control_offer_with_download(clipboard, audio);
+            for offer in [&host, &client] {
+                offer.validate().unwrap();
+                assert!(offer.capabilities.len() <= negotiation::MAX_CAPABILITIES);
+                assert!(!present(offer, fr_wire::files::CHANNEL_SCOPE_CAPABILITY));
+                assert!(present(offer, fr_wire::files::DOWNLOAD_CAPABILITY));
+            }
+            let selected = select(&host, &client);
+            super::super::file_download_lane(&selected).unwrap();
+            assert!(super::super::files_lane(&selected).is_err());
+            assert_eq!(fr_wire::audio_control::downlink_selected(&selected), audio);
+            for &(name, version) in &CLIPBOARD_CAPABILITIES {
+                assert_eq!(
+                    selected
+                        .capabilities
+                        .iter()
+                        .any(|c| c.name == name && c.version == version),
+                    clipboard
+                );
+            }
+            let old_client = control_offer_with_auxiliary(clipboard, true, audio);
+            let old_host = host_offer_with_files(true, clipboard, audio, true);
+            for selected in [select(&host, &old_client), select(&old_host, &client)] {
+                assert_eq!(selected.role, Role::RequestControl);
+                assert!(super::super::file_download_lane(&selected).is_err());
+                assert!(super::super::files_lane(&selected).is_err());
+            }
+            let disabled = host_offer_with_download(true, clipboard, audio, false);
+            assert!(!present(&disabled, fr_wire::files::DOWNLOAD_CAPABILITY));
+            assert!(!present(
+                &disabled,
+                fr_wire::files::CHANNEL_SCOPE_CAPABILITY
+            ));
+            let observing = select(&host, &fr_client::native::observation_offer());
+            assert!(super::super::file_download_lane(&observing).is_err());
+        }
+    }
+}

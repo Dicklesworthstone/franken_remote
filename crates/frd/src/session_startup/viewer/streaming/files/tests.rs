@@ -1,5 +1,6 @@
 //! Deterministic application-order tests. Scripted endpoints are NOT network,
 //! disk, authority or publication qualification; real sender fixtures cover those.
+use super::Sending as Lane;
 use super::*;
 use fr_files::sender::batch::Selection;
 use std::{fs::File, time::Duration};

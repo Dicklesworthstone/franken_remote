@@ -194,6 +194,23 @@ impl StreamingHost {
         self.files = Some(files::Lane::new(directory));
         Ok(())
     }
+    /// Consume one host-selected batch for this positively negotiated attempt.
+    /// Merely moving pinned descriptors reads no content. The one-use offer and
+    /// source worker wait for the original grant and completed Files attachment.
+    pub(crate) fn configure_file_download(
+        &mut self,
+        selection: &crate::native_files::HostSelection,
+    ) -> Result<(), crate::native_files::Absence> {
+        use crate::native_files::Absence;
+        if self.stream.served || self.files.is_some() {
+            return Err(Absence::Unavailable);
+        }
+        let session = self.host.session().map_err(|_| Absence::Unavailable)?;
+        session.check().map_err(|_| Absence::Unavailable)?;
+        super::super::native_control::file_download_lane(&session.opened.selected)?;
+        self.files = Some(files::Lane::download(selection.take_request()?));
+        Ok(())
+    }
     /// Fence at call time, then observe the ORIGINAL disk worker joined under
     /// the caller's absolute deadline. An unfinished one-use exchange has no
     /// disk worker yet; closing the session is its whole cleanup.
@@ -209,6 +226,12 @@ impl StreamingHost {
             host.close();
         }
         host.reap_files(cx, deadline).await
+    }
+    pub(crate) fn file_download_report(&self) -> Option<fr_files::sender::batch::Report> {
+        match &self.host {
+            Host::Control(host) => host.file_batch_report(),
+            Host::Observe(_) => None,
+        }
     }
     pub(crate) fn configure_clipboard(
         &mut self,

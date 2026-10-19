@@ -9,14 +9,55 @@ use fr_files::{
     session::Permission,
 };
 
-pub(in crate::session_startup) struct Lane {
+mod download;
+
+/// One selected direction on the original one-use Files attachment.
+pub(in crate::session_startup) enum Lane {
+    Send(Box<Sending>),
+    Receive(Box<download::Lane>),
+}
+impl Lane {
+    pub(in crate::session_startup) fn new(request: SendRequest, control: SendControl) -> Self {
+        Self::Send(Box::new(Sending::new(request, control)))
+    }
+    pub(in crate::session_startup) fn download(
+        request: crate::native_files::ReceiveRequest,
+        control: crate::native_files::ReceiveControl,
+    ) -> Self {
+        Self::Receive(Box::new(download::Lane::new(request, control)))
+    }
+    pub(in crate::session_startup) fn viewer(&mut self, viewer: &mut ControlledViewer) {
+        match self {
+            Self::Send(lane) => lane.viewer(viewer),
+            Self::Receive(lane) => lane.viewer(viewer),
+        }
+    }
+    pub(in crate::session_startup) fn observe(&self, viewer: &ControlledViewer) {
+        match self {
+            Self::Send(lane) => lane.observe(viewer),
+            Self::Receive(lane) => lane.observe(viewer),
+        }
+    }
+    pub(in crate::session_startup) fn without_control(&mut self) {
+        match self {
+            Self::Send(lane) => {
+                lane.request = None;
+                lane.control.end(Absence::Unavailable);
+                lane.control.cleaned(Some(Ok(())));
+            }
+            Self::Receive(lane) => lane.without_control(),
+        }
+    }
+}
+
+pub(in crate::session_startup) struct Sending {
     request: Option<SendRequest>,
     policy: Policy,
     control: SendControl,
     expecting: bool,
     cancelled: bool,
 }
-impl Lane {
+impl Sending {
     pub(in crate::session_startup) fn new(request: SendRequest, control: SendControl) -> Self {
         Self {
             policy: request.policy,

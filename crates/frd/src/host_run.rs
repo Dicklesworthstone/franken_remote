@@ -41,7 +41,7 @@ use crate::{
         },
     },
     session_monitor::{self, Monitor, Status as Lifetime},
-    session_startup::{Configuration, host_offer_with_files, shared_viewers, with_line_scroll},
+    session_startup::{Configuration, host_offer_with_download, host_offer_with_files, shared_viewers, with_line_scroll},
     worker::{Deadline, EncoderProbe, Launch, Retirement},
 };
 use asupersync::{
@@ -113,6 +113,8 @@ pub struct Options {
     /// controller's explicit sends. Requires `input_agent`. `None` keeps the
     /// file capabilities unoffered (a controller asking gets typed absence).
     pub files: Option<crate::native_files::Directory>,
+    /// One explicit host selection, shared by clones but consumed only once.
+    pub file_send: Option<crate::native_files::HostSelection>,
     /// The operator's selected local session and its read-only monitor image.
     /// `Some`: fresh logind evidence is required before binding, and lock,
     /// logout, switch, suspend or lost evidence ends every share and the run
@@ -359,7 +361,7 @@ fn request(
     host_boot: HostBootId,
     os_session: u32,
     scope: Scope,
-    (control, clipboard, files): (Option<Capabilities>, bool, bool),
+    (control, clipboard, files, download): (Option<Capabilities>, bool, bool, bool),
     audio: bool,
 ) -> Result<Request, serial::Error> {
     let fresh = |_| serial::Error::Configuration;
@@ -371,7 +373,16 @@ fn request(
             ..GrantPolicy::default()
         },
         session: Configuration {
-            offer: offer(control, clipboard, audio, files),
+            offer: if download {
+                let selected = host_offer_with_download(control.is_some(), clipboard, audio, true);
+                if control.is_some_and(|c| c.contains(Capability::LineScroll)) {
+                    with_line_scroll(selected)
+                } else {
+                    selected
+                }
+            } else {
+                offer(control, clipboard, audio, files)
+            },
             binding: ControlBinding {
                 id: u32::try_from(attempt % u64::from(u32::MAX))
                     .unwrap_or(1)
@@ -786,6 +797,8 @@ fn check(options: &Options) -> Result<(), Error> {
             .is_some_and(|p| !p.is_absolute())
         || (options.clipboard && options.input_agent.is_none())
         || (options.files.is_some() && options.input_agent.is_none())
+        || (options.file_send.is_some()
+            && (!options.once || options.input_agent.is_none() || options.files.is_some()))
     {
         return Err(Error::Configuration);
     }
@@ -966,8 +979,12 @@ impl Share<'_> {
             } else {
                 profile
             };
-            agent = agent.with_control(match &self.options.files {
+            let profile = match &self.options.files {
                 Some(directory) => profile.with_files(directory.clone()),
+                None => profile,
+            };
+            agent = agent.with_control(match &self.options.file_send {
+                Some(selection) => profile.with_file_download(selection.clone()),
                 None => profile,
             });
         }
@@ -1130,6 +1147,10 @@ impl Share<'_> {
             self.control,
             self.options.clipboard,
             self.options.files.is_some(),
+            self.options
+                .file_send
+                .as_ref()
+                .is_some_and(crate::native_files::HostSelection::is_available),
         );
         let audio = self.options.audio.is_some();
         let report = self.report.clone();
@@ -1467,13 +1488,13 @@ mod tests {
     #[test]
     fn every_request_allocates_fresh_unpredictable_identifiers() {
         let boot = HostBootId::from_raw(9);
-        let a = request(1, boot, 5, Scope::OwnUser, (None, false, false), false).unwrap();
+        let a = request(1, boot, 5, Scope::OwnUser, (None, false, false, false), false).unwrap();
         let b = request(
             2,
             boot,
             5,
             Scope::OwnUser,
-            (Some(core()), false, false),
+            (Some(core()), false, false, false),
             false,
         )
         .unwrap();
@@ -1482,17 +1503,17 @@ mod tests {
             boot,
             5,
             Scope::OwnUser,
-            (Some(core()), true, false),
+            (Some(core()), true, false, false),
             false,
         )
         .unwrap();
-        let d = request(4, boot, 5, Scope::OwnUser, (None, false, false), true).unwrap();
+        let d = request(4, boot, 5, Scope::OwnUser, (None, false, false, false), true).unwrap();
         let files = request(
             5,
             boot,
             5,
             Scope::OwnUser,
-            (Some(core()), false, true),
+            (Some(core()), false, true, false),
             false,
         )
         .unwrap();
@@ -1531,6 +1552,7 @@ mod tests {
             clipboard: false,
             audio: None,
             files: None,
+            file_send: None,
             session_monitor: None,
         };
         let report: Reporter = Arc::new(|_| {});

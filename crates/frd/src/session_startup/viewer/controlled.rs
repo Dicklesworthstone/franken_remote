@@ -628,6 +628,18 @@ impl ControlledViewer {
         result: &mut impl FnMut(ResultEvent),
         other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
     ) -> Result<(), Error> {
+        // Complete or retire only a proven final Files exchange before a
+        // generic receive can frame its early payload/reset under handshake rules.
+        self.files
+            .prepare_pending_receive(&mut self.session.transport, || {
+                maintenance_gate(
+                    &mut self.input,
+                    &self.control,
+                    &self.session.cx,
+                    &std::cell::Cell::new(None),
+                )
+            })
+            .map_err(Error::Files)?;
         self.service_clipboard()?;
         self.check_inner()?;
         self.clock

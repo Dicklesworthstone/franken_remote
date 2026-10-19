@@ -98,6 +98,9 @@ pub struct Connection {
     /// user explicitly selected, sent in order into the host's drop directory
     /// after control is granted. Empty offers no file capability at all.
     pub send: Vec<PathBuf>,
+    /// `--receive DIR`: the explicit local destination for host-selected files.
+    /// This requires control and excludes `--send`; neither direction is implicit.
+    pub receive: Option<PathBuf>,
 }
 /// At most this many `--send` files per connection (frd's native bound).
 pub const MAX_SENDS: usize = 8;
@@ -551,6 +554,7 @@ fn parse_command(
     let (mut port, mut attempts) = (8443_u16, 5_u8);
     let mut fit_window = None;
     let mut send = Vec::new();
+    let mut receive = None;
     while index < args.len() {
         let flag = args[index].as_str();
         index += 1;
@@ -593,6 +597,7 @@ fn parse_command(
             "--port" if remote || doctor => port = next_port(args, &mut index)?,
             "--attempts" if connect => attempts = next_parsed(args, &mut index)?,
             "--send" if connect => send.push(next_path(args, &mut index)?),
+            "--receive" if connect => receive = Some(next_path(args, &mut index)?),
             _ => return Err(usage()),
         }
     }
@@ -618,6 +623,20 @@ fn parse_command(
             return Err(Failure::new(
                 "send_requires_control",
                 "Files are sent only on your own control lease; pass --control with --send. A view-only session never sends files.",
+                2,
+            ));
+        }
+        if receive.is_some() && !control {
+            return Err(Failure::new(
+                "receive_requires_control",
+                "Files are received only on your own control lease; pass --control with --receive. A view-only session never receives files.",
+                2,
+            ));
+        }
+        if receive.is_some() && !send.is_empty() {
+            return Err(Failure::new(
+                "files_direction_conflict",
+                "Choose --send or --receive for this connection; file direction is fixed for the original control lease.",
                 2,
             ));
         }
@@ -665,6 +684,7 @@ fn parse_command(
                     sink: audio_sink,
                 }),
                 send,
+                receive,
             })
         }
     } else if doctor {
@@ -889,6 +909,54 @@ mod tests {
             assert_eq!(options(refused).err().unwrap().code, "invalid_arguments");
         }
     }
+    #[test]
+    fn receive_requires_one_explicit_control_only_destination() {
+        let base = "n-host --experimental-native --worker /opt/fr/worker --display only";
+        let Command::Connect(plain) = options(&format!("connect {base} --control"))
+            .unwrap()
+            .command
+        else {
+            unreachable!("connection required");
+        };
+        assert!(plain.receive.is_none());
+        let Command::Connect(selected) = options(&format!(
+            "connect {base} --control --clipboard --audio --receive /home/u/downloads"
+        ))
+        .unwrap()
+        .command
+        else {
+            unreachable!("connection required");
+        };
+        assert_eq!(selected.receive, Some(PathBuf::from("/home/u/downloads")));
+        assert!(selected.control && selected.clipboard && selected.audio.is_some());
+        assert!(selected.send.is_empty());
+        for (flags, code) in [
+            ("--view-only --receive /a", "receive_requires_control"),
+            ("--control --send /a --receive /b", "files_direction_conflict"),
+            ("--control --receive /b --send /a", "files_direction_conflict"),
+            ("--control --receive relative", "invalid_arguments"),
+            ("--control --receive /a/../b", "invalid_arguments"),
+            ("--control --receive", "invalid_arguments"),
+            ("--control --receive /a --receive /b", "invalid_arguments"),
+        ] {
+            assert_eq!(
+                options(&format!("connect {base} {flags}"))
+                    .err()
+                    .unwrap()
+                    .code,
+                code,
+                "{flags}"
+            );
+        }
+        for refused in [
+            "displays n-host --experimental-native --receive /a",
+            "hosts --receive /a",
+            "doctor --receive /a",
+        ] {
+            assert_eq!(options(refused).err().unwrap().code, "invalid_arguments");
+        }
+    }
+
     #[test]
     fn parses_only_explicit_bounded_connection_settings() {
         let o = options("connect n-host --view-only --experimental-native --worker /opt/fr/worker --trust-roots /opt/fr/ca.pem --display 9 --ipv6 --attempts 2 --json").unwrap();
