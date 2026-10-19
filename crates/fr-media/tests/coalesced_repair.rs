@@ -324,14 +324,13 @@ fn an_unissued_extension_cannot_delay_already_eligible_repair_work() {
         original(&mut sender, 1_000);
     } // announcement plus four originals
     request(c, &mut sender, 8, &[(0, 1)], 20_000).unwrap();
-    assert_eq!(
-        request(c, &mut sender, 8, &[(6, 7)], 40_000),
-        Err(SendError::RepairBusy)
-    );
+    request(c, &mut sender, 8, &[(6, 7)], 40_000).unwrap();
     assert_eq!(repair(c, &mut sender, 40_000), Some(0));
+    assert_eq!(repair(c, &mut sender, 40_000), None);
     finish(&mut sender, 40_001);
-    request(c, &mut sender, 8, &[(6, 7)], 40_002).unwrap();
+    // No extra receiver request/round trip after the originals progress.
     assert_eq!(repair(c, &mut sender, 40_002), Some(6));
+    assert_eq!(repair(c, &mut sender, 40_002), None);
 }
 
 #[test]
@@ -396,3 +395,6 @@ fn coalescing_cannot_change_a_prepared_transport_packets_bytes_or_deadline() {
 
 #[path = "coalesced_repair/compaction.rs"]
 mod compaction;
+
+#[path = "coalesced_repair/extension.rs"]
+mod extension;

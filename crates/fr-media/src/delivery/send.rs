@@ -604,12 +604,10 @@ impl SendCache {
             }
         }
         let job = if let Some(pending) = &p.repair {
-            // Preserve the existing admission ceiling for unissued extensions.
-            // A peer cannot grow the pending job farther into the future until
-            // those originals progress; the existing accepted job stays intact.
-            if ranges[count - 1].end > p.next_original.max(pending.ranges[pending.count - 1].end) {
-                return Err(SendError::RepairBusy);
-            }
+            // A later tail may not have been issued yet. Retain it under the
+            // same fixed job/deadline: next_repair_packet gates each fragment
+            // behind its own original, so the tail cannot block an issued
+            // prefix. Refusing it here wastes the receiver's bounded attempt.
             pending.coalesce(
                 &ranges[..count],
                 usize::from(self.limits.max_repair_ranges()),
