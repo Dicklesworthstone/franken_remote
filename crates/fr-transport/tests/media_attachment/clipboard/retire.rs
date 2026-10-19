@@ -5,6 +5,9 @@ use fr_core::clipboard::{Binding as Scope, Endpoint, Stamp};
 use fr_transport::quic::clipboard::ClipboardChannel;
 use fr_wire::clipboard::{self as wire, Body, Message};
 
+#[path = "retire_io.rs"]
+mod io;
+
 fn scope() -> Scope {
     Scope {
         session: parent().remote_session,

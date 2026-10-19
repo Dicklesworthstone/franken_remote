@@ -2,7 +2,7 @@
 //! application caller's authorization closure. This adds no peer permission.
 pub(super) mod terminal;
 
-use super::{Error, QuicRecords, now};
+use super::{Error, QuicRecords, attachment::Reservation, now};
 use asupersync::cx::Cx;
 use std::{
     future::{Future, poll_fn},
@@ -61,6 +61,7 @@ pub(super) async fn poll_io<T, E>(
     cx: &Cx,
     gate: Option<&(dyn Fn() -> bool + Send + Sync)>,
     authorize: &mut impl FnMut() -> bool,
+    attachments: &[Reservation],
     started: u64,
     until: Option<u64>,
     io: impl Future<Output = Result<T, E>>,
@@ -73,13 +74,23 @@ pub(super) async fn poll_io<T, E>(
         if gate.is_some_and(|check| !check()) || !authorize() {
             return Poll::Ready(Err(Error::Unauthorized));
         }
-        match now(cx) {
+        let at = match now(cx) {
             Err(error) => return Poll::Ready(Err(error)),
             Ok(at) if at < started => return Poll::Ready(Err(Error::Clock)),
             Ok(at) if until.is_some_and(|end| at >= end) => {
                 return Poll::Ready(Err(Error::Expired));
             }
-            Ok(_) => {}
+            Ok(at) => at,
+        };
+        if attachments.iter().any(|r| r.expired(at)) {
+            return Poll::Ready(Err(Error::Expired));
+        }
+        if attachments.iter().any(Reservation::retirement_pending) {
+            // check() cannot retire streams while this future owns the native
+            // connection. Its private protected packets cannot be selectively
+            // retracted, so do not poll or resume it after a late retirement.
+            // Held returns custody only to close, never another ordinary turn.
+            return Poll::Ready(Err(Error::OptionalRetirementDuringIo));
         }
         io.as_mut()
             .poll(task)

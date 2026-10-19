@@ -115,6 +115,10 @@ pub enum Error {
     TooLarge,
     Backpressure,
     Expired,
+    /// An optional lane requested retirement while native I/O may own staged or
+    /// protected output. The connection is terminal; this does not confirm
+    /// per-stream cleanup, payload delivery, or rollback of earlier effects.
+    OptionalRetirementDuringIo,
     Unauthorized,
     Cancelled,
     Closed,
@@ -418,6 +422,9 @@ pub struct QuicRecords {
     display_selection_claimed: bool,
     attachments: Vec<attachment::Reservation>,
     native: Option<NativeQuicUdpConnection>,
+    // Native protected packets are private. This remains true across a failed
+    // or dropped payload-bearing operation, even if stream queues look empty.
+    native_io_unsettled: bool,
     streams: Vec<StreamRoute>,
     datagrams: Vec<DatagramRoute>,
     inbound: Vec<Inbound>,
@@ -529,6 +536,15 @@ impl QuicRecords {
                 });
             }
         }
+        // Configuring inbound routes above creates each missing native stream.
+        // An extra native stream cannot hide behind a previously missing route.
+        if native.connection().inner().streams().len() != streams.len() {
+            return Err(Error::InvalidPolicy);
+        }
+        // Zero is an exact generation-history witness at the pinned native
+        // revision: no DATAGRAM has ever entered protected output. Otherwise
+        // only our own successfully completed native flush can prove absence.
+        let native_io_unsettled = native.connection().inner().datagrams_sent() != 0;
         Ok(Self {
             identity: Arc::new(()),
             lifetime_check: None,
@@ -538,6 +554,7 @@ impl QuicRecords {
             display_selection_claimed: false,
             attachments: Vec::new(),
             native: Some(native),
+            native_io_unsettled,
             streams: streams.to_vec(),
             datagrams: datagrams.to_vec(),
             inbound,
@@ -928,13 +945,15 @@ impl QuicRecords {
             // Native ownership stays outside self across every await: dropping
             // or unwinding an in-flight operation cannot resume its queued data.
             let mut held = self.hold()?;
+            let (native, attachments) = held.io_parts();
             let result = lifetime::poll_io(
                 cx,
                 gate.as_deref(),
                 authorize,
+                attachments,
                 current,
                 until,
-                held.native().flush(cx),
+                native.flush(cx),
             )
             .await;
             let native = held.release();
@@ -948,13 +967,15 @@ impl QuicRecords {
         let current = self.check(cx, authorize)?;
         let until = self.senders.iter().filter_map(|s| s.until).min();
         let mut held = self.hold()?;
+        let (native, attachments) = held.io_parts();
         let result = lifetime::poll_io(
             cx,
             gate.as_deref(),
             authorize,
+            attachments,
             current,
             until,
-            held.native().drive_io_once(cx, wait),
+            native.drive_io_once(cx, wait),
         )
         .await;
         let native = held.release();
@@ -1001,22 +1022,48 @@ impl QuicRecords {
     }
     // A *returned* cancelled/failed I/O turn may transfer custody only into
     // close. Never resume ordinary I/O after that error. The terminal drain must
-    // independently prove absence of native payload/retransmissions; uncertain
-    // or partially staged work is refused. A DROPPED I/O turn (an outer timeout
-    // or an abandoned session) goes the same way through `Held`, so no
+    // independently prove absence of native payload/retransmissions AND hidden
+    // protected output; uncertain or partially staged work is refused. A DROPPED
+    // I/O turn (an outer timeout or an abandoned session) goes through `Held`, so no
     // abandoned operation can be resumed and an armed report is not lost.
     fn hold(&mut self) -> Result<Held<'_>, Error> {
         let native = self.native.take().ok_or(Error::Closed)?;
+        self.native_io_unsettled = self.native_io_unsettled || !self.native_payload_empty(&native);
         Ok(Held {
             records: self,
             native: Some(native),
         })
+    }
+    // A completed prior native operation drained its protected packet queue.
+    // If there is no application payload at entry either, the exclusively
+    // borrowed native future cannot manufacture it from peer control frames.
+    // Preserve terminal reports for that proven empty idle operation.
+    fn native_payload_empty(&self, native: &NativeQuicUdpConnection) -> bool {
+        let connection = native.connection().inner();
+        let streams = connection.streams();
+        let known = self
+            .streams
+            .iter()
+            .filter(|route| streams.stream(route.stream).is_ok())
+            .count();
+        connection.pending_outbound_datagram_count() == 0
+            && known == streams.len()
+            && self.senders.iter().all(|sender| {
+                streams
+                    .stream(sender.route.stream)
+                    .is_ok_and(|live| sender.empty.drained(live))
+            })
     }
     fn finish_native_io<T>(
         &mut self,
         native: NativeQuicUdpConnection,
         result: Result<T, Error>,
     ) -> Result<T, Error> {
+        // Successful flush/drive completion empties private protected output.
+        // A failure preserves the entry witness through close and Held::Drop.
+        if result.is_ok() {
+            self.native_io_unsettled = false;
+        }
         self.native = Some(native);
         if result.is_err() {
             self.close();
@@ -1359,8 +1406,11 @@ struct Held<'a> {
     native: Option<NativeQuicUdpConnection>,
 }
 impl Held<'_> {
-    fn native(&mut self) -> &mut NativeQuicUdpConnection {
-        self.native.as_mut().expect("held until released")
+    fn io_parts(&mut self) -> (&mut NativeQuicUdpConnection, &[attachment::Reservation]) {
+        (
+            self.native.as_mut().expect("held until released"),
+            &self.records.attachments,
+        )
     }
     fn release(mut self) -> NativeQuicUdpConnection {
         self.native.take().expect("held until released")

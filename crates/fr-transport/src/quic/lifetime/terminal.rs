@@ -224,6 +224,12 @@ impl QuicRecords {
     }
     fn terminal_sender(&mut self, route: StreamRoute) -> Result<EmptySendState, Error> {
         let native = self.native.as_ref().ok_or(Error::Closed)?;
+        // Private protected packets can outlive a failed or dropped native
+        // operation after DATAGRAMs leave the visible queue. Only the existing
+        // content-free native close fallback may own that uncertain output.
+        if self.native_io_unsettled {
+            return Err(Error::Backpressure);
+        }
         let streams = native.connection().inner().streams();
         if streams.len() > self.streams.len()
             || native
@@ -332,6 +338,8 @@ impl Drain {
                 &self.cx,
                 self.gate.as_deref(),
                 &mut || true,
+                // Detached only after proving absence of ordinary native data.
+                &[],
                 at,
                 Some(self.until),
                 self.native.drive_io_once(&self.cx, wait),

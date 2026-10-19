@@ -11,7 +11,7 @@ const FILES_RETIRED: u64 = 0x4652_4649;
 const MEDIA_RETIRED: u64 = 0x4652_4d44;
 const AUDIO_RETIRED: u64 = 0x4652_4144;
 
-fn retirement_code(role: MediaRole) -> Option<u64> {
+pub(super) fn retirement_code(role: MediaRole) -> Option<u64> {
     match role {
         MediaRole::Clipboard => Some(CLIPBOARD_RETIRED),
         MediaRole::Files => Some(FILES_RETIRED),

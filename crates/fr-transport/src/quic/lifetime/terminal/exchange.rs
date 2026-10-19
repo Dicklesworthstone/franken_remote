@@ -412,6 +412,8 @@ impl Exchange {
                     &self.cx,
                     self.gate.as_deref(),
                     &mut || true,
+                    // This detached exchange owns no ordinary attachment I/O.
+                    &[],
                     at,
                     Some(self.until),
                     self.native.flush(&self.cx),
@@ -424,6 +426,8 @@ impl Exchange {
                 &self.cx,
                 self.gate.as_deref(),
                 &mut || true,
+                // Its construction already refused ordinary native backlog.
+                &[],
                 at,
                 Some(self.until),
                 self.native.drive_io_once(&self.cx, wait),

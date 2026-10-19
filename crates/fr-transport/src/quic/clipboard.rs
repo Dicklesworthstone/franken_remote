@@ -154,9 +154,11 @@ impl ClipboardChannel {
         self.attachment.retire_clipboard(q, cx)
     }
     /// Have the original connection retire this pair at its next checked
-    /// operation, before that operation's I/O. For a clipboard fault seen
-    /// inside an authorization callback: the clipboard's queued bytes and
-    /// retransmissions stop there, and the connection is not fenced for it.
+    /// operation, before that operation's I/O. Between native I/O operations,
+    /// retirement clears this pair while preserving the other routes. If an
+    /// authorization callback requests retirement during a native operation,
+    /// the connection is fenced before its next native poll: protected packets
+    /// may already contain bytes that a stream reset cannot selectively retract.
     pub fn request_retirement(&self) {
         self.attachment.request_retirement();
     }

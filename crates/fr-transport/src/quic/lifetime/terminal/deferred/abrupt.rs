@@ -112,6 +112,9 @@ impl ClosePacket {
                 &cx,
                 gate.as_deref(),
                 &mut || true,
+                // Native close discards protected application packets first;
+                // this detached owner can send only the terminal close packet.
+                &[],
                 at,
                 Some(until),
                 self.native.close(&cx, code),

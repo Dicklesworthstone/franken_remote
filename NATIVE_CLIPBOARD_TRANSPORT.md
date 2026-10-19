@@ -198,16 +198,44 @@ an off/on cycle), queued work outside the safe cases above, or
 superseded in-flight payload retires
 the optional clipboard pair. It does not silently reopen the consumed channel
 or replay buffered text when a switch is re-enabled. Input and viewing continue
-when retirement is performed between I/O turns. A terminal clipboard loss first seen
-inside an active QUIC future (its authority, an item's deadline, a newer local
-copy, a switch, a stopped worker) retires the pair inside that same checked
-operation, before its I/O: the stream reset drops queued bytes and
-retransmissions as a closed connection would, and input and viewing continue.
-Until 2026-10-14 it closed the whole connection, so on a 120 ms path a 40 KB
-copy that outlived its deadline ended remote control. Task cancellation and a
-missing clock still fence the connection, and dropping an unpolled bridge-drive
-future still fences its original connection and worker. No operation touches
-an equal-ID foreign connection.
+when retirement is performed between I/O turns. The mutable connection check
+also services a retirement request before staging the next native prefix.
+
+A terminal clipboard loss can instead arrive after a prefix was staged, just
+before an already-held native I/O future is polled. The pinned native future may
+retain protected packets across pending polls; resetting one stream cannot prove
+those packets were removed. The transport therefore returns
+`OptionalRetirementDuringIo` and fences the original connection if an active
+optional lane requests retirement at this boundary. It checks after the
+authorizer and before every native poll, including a resumed poll. The original
+attachment's abandonment and setup deadlines are rechecked there too. No native
+poll runs after that refusal, and the closed owner cannot resume its queued work.
+Ordinary retirement handled before the native operation remains confined to its
+lane; already-retired tombstones and an unsupported input-only retirement request
+do not trigger this fallback.
+
+Terminal custody separately tracks whether an interrupted native operation could
+retain protected application output. A failed or dropped operation that entered
+with payload, or whose earlier output is still uncertain, cannot transfer its
+socket to an application report or close exchange. A registered host report uses
+the existing content-free native connection-close fallback, preserving the exact
+input fence before socket release and the original cleanup gate and deadline.
+That fallback first discards protected application packets; its result remains
+`Backpressure`, not a delivered report or confirmation of remote cleanup.
+
+Idle operations retain their existing terminal-report behavior when the original
+native state proves there was no application payload at entry. This proof covers
+every actual native stream, all reliable pending/retransmission state, and the
+outbound DATAGRAM queue. Initial custody also retains uncertainty when the native
+connection previously generated DATAGRAM frames; an empty visible queue alone
+cannot prove the absence of protected packets. A successfully completed native
+flush clears that uncertainty. These checks add no replacement connection or
+permission and never replay clipboard publication.
+
+Task cancellation and a missing clock still fence the connection, and dropping
+an unpolled bridge-drive future still fences its original connection and worker.
+No operation touches an equal-ID foreign connection. Bytes already sent or
+submitted to an OS are not rolled back or silently retried.
 
 `clipboard_network` runs two actual Xvfb desktops, separate native worker
 threads, the production clipboard protocol, and encrypted UDP/TLS connections.

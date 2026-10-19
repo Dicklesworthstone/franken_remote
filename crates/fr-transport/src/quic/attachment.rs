@@ -61,6 +61,13 @@ impl Reservation {
     pub(super) fn retired(&self) -> bool {
         self.state.load(Ordering::Acquire) == RETIRED
     }
+    pub(super) fn retirement_pending(&self) -> bool {
+        // Completed tombstones retain their request bit; Input deliberately has
+        // no optional retirement. Match the ordinary check() service exactly.
+        retire::retirement_code(self.role).is_some()
+            && self.state.load(Ordering::Acquire) == ACTIVE
+            && self.retire.load(Ordering::Acquire)
+    }
     pub(super) fn expired(&self, now: u64) -> bool {
         match self.state.load(Ordering::Acquire) {
             ACTIVE | RETIRED => false,
@@ -760,6 +767,9 @@ impl MediaChannel {
     /// record deadline or I/O work. Safe inside an authorization callback: no
     /// connection is borrowed. It only narrows; retirement still resets the
     /// pair's native send and retransmission state exactly as `retire_*` does.
+    /// If first observed while a native I/O future owns the connection, the
+    /// connection closes with `Error::OptionalRetirementDuringIo`: protected
+    /// output cannot be selectively retracted at that late boundary.
     pub fn request_retirement(&self) {
         self.retire.store(true, Ordering::Release);
     }

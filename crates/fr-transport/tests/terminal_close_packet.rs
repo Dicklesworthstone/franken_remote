@@ -36,7 +36,13 @@ struct Pair {
 }
 async fn pair(cx: &Cx) -> Pair {
     let (client, server) = support::native_pair(cx, "localhost", ALPN).await;
-    let (mut client, mut server) = (client.unwrap(), server.unwrap());
+    from_native_pair(cx, client.unwrap(), server.unwrap())
+}
+fn from_native_pair(
+    cx: &Cx,
+    mut client: NativeQuicUdpConnection,
+    mut server: NativeQuicUdpConnection,
+) -> Pair {
     let control = StreamRoute {
         stream: server.connection_mut().open_uni_stream(cx).unwrap(),
         binding: 7,
@@ -80,6 +86,9 @@ async fn pair(cx: &Cx) -> Pair {
         video,
     }
 }
+
+#[path = "terminal_close_packet/io_custody.rs"]
+mod io_custody;
 fn binding() -> Binding {
     Binding {
         channel: 7,
