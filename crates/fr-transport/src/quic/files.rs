@@ -6,7 +6,7 @@ use super::{
 use fr_core::ids::InputLeaseId;
 use fr_wire::{
     attachment::MediaRole,
-    files::{self, Context, Direction, Lane, Limits, Role},
+    files::{self, Context, Lane, Limits, Role},
     negotiation::ControlBinding,
 };
 use std::cell::Cell;
@@ -63,11 +63,7 @@ impl FilesChannel {
                 handle,
                 channel: routes.descriptor.binding.parent.id,
                 sender,
-                direction: if attachment.files_download {
-                    Direction::ToController
-                } else {
-                    Direction::ToHost
-                },
+                direction: attachment.files_direction,
                 lane: Lane::Files,
             };
             outgoing.validate().map_err(|_| Error::WrongRoute)?;

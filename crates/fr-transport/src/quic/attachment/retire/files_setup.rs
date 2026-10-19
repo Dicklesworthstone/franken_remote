@@ -4,6 +4,7 @@ use super::{
     FILES_RETIRED,
 };
 use crate::quic::{Cx, Error};
+use fr_wire::files::Direction;
 use std::sync::Arc;
 
 impl MediaChannel {
@@ -22,7 +23,7 @@ impl MediaChannel {
     ) -> Result<bool, Error> {
         // Foreign objects must not mutate either owner before being refused.
         if !q.is_bound_to(&self.connection)
-            || (!self.host && !self.files_download)
+            || (!self.host && self.files_direction != Direction::ToController)
             || self.descriptor.role != MediaRole::Files
         {
             return Err(Error::WrongRoute);
@@ -59,7 +60,7 @@ impl MediaChannel {
             (self.phase, state),
             (Phase::Promote, ARMED) | (Phase::Complete, ACTIVE | RETIRED)
         ) || (!self.host
-            && self.files_download
+            && self.files_direction == Direction::ToController
             && self.phase == Phase::Attached
             && state == ARMED);
         if !final_phase {

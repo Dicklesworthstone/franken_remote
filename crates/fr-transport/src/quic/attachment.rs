@@ -11,6 +11,7 @@ use fr_core::limits::ProtocolLimits;
 use fr_wire::{
     attachment::{self, Descriptor, GRANT_RECORD_BYTES, Grant, MediaRole, Message, Ticket},
     decoder::Binding,
+    files::Direction as FileDirection,
     input::{InputDelivery, InputDirection},
     negotiation::{ControlBinding, Selection},
 };
@@ -130,7 +131,7 @@ pub struct MediaChannel {
     /// Fixed by this connection's bilateral selection, never inferred from an
     /// incoming layout or a generous generic protocol limit.
     credit: bool,
-    pub(super) files_download: bool,
+    pub(super) files_direction: FileDirection,
 }
 impl fmt::Debug for MediaChannel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -711,10 +712,14 @@ impl MediaChannel {
             receive_armed: !host,
             allowance,
             credit: attachment::credit::selected(scope.selection),
-            files_download: scope.selection.capabilities.iter().any(|c| {
+            files_direction: if scope.selection.capabilities.iter().any(|c| {
                 c.name == fr_wire::files::DOWNLOAD_CAPABILITY
                     && c.version == fr_wire::files::DOWNLOAD_VERSION
-            }),
+            }) {
+                FileDirection::ToController
+            } else {
+                FileDirection::ToHost
+            },
         }
     }
     pub const fn deadline_us(&self) -> u64 {
@@ -1096,8 +1101,9 @@ impl MediaChannel {
             // A download source may send immediately after staging Attached.
             // Only its exact authenticated viewer ACK can carry an unparsed
             // native read suffix into Files; old partially framed bytes still fail.
-            let download_suffix =
-                !self.host && self.files_download && self.descriptor.role == MediaRole::Files;
+            let download_suffix = !self.host
+                && self.files_direction == FileDirection::ToController
+                && self.descriptor.role == MediaRole::Files;
             if receiving.fin
                 || receiving.framing.buffered_bytes() != 0
                 || (!download_suffix && !receiving.remainder.is_empty())
