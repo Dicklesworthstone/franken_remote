@@ -1,6 +1,7 @@
 //! Bridge boundaries use the existing loopback TLS/QUIC attachment fixtures.
-//! Native-worker cancellation/publication is covered by worker::tests.
+//! Native-worker cancellation/publication is covered by `worker::tests`.
 use super::*;
+use crate::session_startup::test_network as transport_support;
 use fr_core::{clipboard::Binding, limits::ProtocolLimits};
 use fr_wire::{
     attachment::MediaRole,
@@ -14,9 +15,6 @@ mod attachment;
 #[path = "../../../fr-native/tests/clipboard_network/authority.rs"]
 #[allow(dead_code)]
 mod authority;
-#[path = "../../../fr-transport/tests/support/mod.rs"]
-#[allow(dead_code)]
-mod transport_support;
 
 struct Fixture {
     cx: Cx,

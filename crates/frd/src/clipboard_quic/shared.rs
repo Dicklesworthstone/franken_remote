@@ -88,7 +88,7 @@ impl Outgoing {
     }
     /// Only a still-incomplete wire Sender can release a discarded handoff with
     /// its existing Cancel. The one busy slot prevents it advancing to Commit.
-    /// LocalChanged proves that owner already fenced the item. Host expiry uses
+    /// `LocalChanged` proves that owner already fenced the item. Host expiry uses
     /// the same actual timer as the wire owner, whose next maintenance cancels it.
     /// Controller cursors are independent: neither their expiry nor a tighter
     /// local handoff bound proves that the wire Sender has expired.

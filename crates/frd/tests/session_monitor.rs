@@ -263,6 +263,7 @@ fn frd_run_refuses_to_listen_without_fresh_session_evidence() {
             clipboard: false,
             audio: None,
             files: None,
+            file_send: None,
             session_monitor: Some(configuration(mode)),
         };
         let events = Arc::new(Mutex::new(Vec::new()));
