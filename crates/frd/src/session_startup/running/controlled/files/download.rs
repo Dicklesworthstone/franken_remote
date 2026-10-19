@@ -63,7 +63,7 @@ impl ControlledHost {
             },
         )
     }
-    /// Original, ordered receipts. ControllerPublished means the receiver
+    /// Original, ordered receipts. `ControllerPublished` means the receiver
     /// verified ATP and reported publication; transport acknowledgements do not.
     pub fn file_batch_report(&self) -> Option<batch::Report> {
         self.files

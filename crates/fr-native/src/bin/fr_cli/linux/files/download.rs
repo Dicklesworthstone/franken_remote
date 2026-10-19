@@ -122,11 +122,16 @@ impl Summary {
             absence: if started {
                 None
             } else {
-                status.absence.map(absence_code).or(Some(match status.phase {
-                    ReceivePhase::WaitingForControl => "control_not_granted",
-                    ReceivePhase::Negotiating => "files_receive_setup_incomplete",
-                    ReceivePhase::Receiving | ReceivePhase::Ended => "files_receive_unavailable",
-                }))
+                status
+                    .absence
+                    .map(absence_code)
+                    .or(Some(match status.phase {
+                        ReceivePhase::WaitingForControl => "control_not_granted",
+                        ReceivePhase::Negotiating => "files_receive_setup_incomplete",
+                        ReceivePhase::Receiving | ReceivePhase::Ended => {
+                            "files_receive_unavailable"
+                        }
+                    }))
             },
             ended: if started {
                 status.absence.map(absence_code)
@@ -158,7 +163,10 @@ impl Summary {
     fn receipt(&mut self, result: ResultReceipt) {
         // Progress is never evidence of publication, including a fully staged
         // object or an empty file. Only the disk worker's Published counts.
-        if matches!(result.outcome, Ok(Completion::Begun(_) | Completion::Written(_))) {
+        if matches!(
+            result.outcome,
+            Ok(Completion::Begun(_) | Completion::Written(_))
+        ) {
             return;
         }
         let Some(index) = result.id.checked_sub(1) else {
@@ -203,13 +211,17 @@ impl Summary {
             }
             let _ = write!(out, "{{\"index\":{index},\"reason\":\"{reason}\"}}");
         }
-        let absence = self.absence.map_or_else(|| "null".to_owned(), crate::output::quoted);
-        let ended = self.ended.map_or_else(|| "null".to_owned(), crate::output::quoted);
+        let absence = self
+            .absence
+            .map_or_else(|| "null".to_owned(), crate::output::quoted);
+        let ended = self
+            .ended
+            .map_or_else(|| "null".to_owned(), crate::output::quoted);
         let progress = self.progress.map_or_else(
             || "null".to_owned(),
-            |(index, staged, total)| format!(
-                "{{\"index\":{index},\"staged_bytes\":{staged},\"total_bytes\":{total}}}"
-            ),
+            |(index, staged, total)| {
+                format!("{{\"index\":{index},\"staged_bytes\":{staged},\"total_bytes\":{total}}}")
+            },
         );
         let _ = write!(
             out,
@@ -339,7 +351,11 @@ mod tests {
     fn published(id: u64, bytes: u64, publication: Publication) -> ResultReceipt {
         ResultReceipt {
             id,
-            outcome: Ok(Completion::Published(session::Receipt { id, bytes, publication })),
+            outcome: Ok(Completion::Published(session::Receipt {
+                id,
+                bytes,
+                publication,
+            })),
         }
     }
 
@@ -349,12 +365,22 @@ mod tests {
 
     #[test]
     fn only_actual_publication_counts_even_for_empty_or_fully_staged_objects() {
-        let progress = session::Progress { id: 3, staged_bytes: 17, total_bytes: 17 };
+        let progress = session::Progress {
+            id: 3,
+            staged_bytes: 17,
+            total_bytes: 17,
+        };
         let state = status(vec![
             published(1, 0, Publication::Durable),
             published(2, 9, Publication::DurabilityUnknown),
-            ResultReceipt { id: 3, outcome: Ok(Completion::Begun(progress)) },
-            ResultReceipt { id: 3, outcome: Ok(Completion::Written(progress)) },
+            ResultReceipt {
+                id: 3,
+                outcome: Ok(Completion::Begun(progress)),
+            },
+            ResultReceipt {
+                id: 3,
+                outcome: Ok(Completion::Written(progress)),
+            },
         ]);
         let report = json(&Summary::from_status(&state));
         assert_eq!(
@@ -394,7 +420,10 @@ mod tests {
     fn pending_cleanup_and_unavailable_host_are_distinct_from_joined_cleanup() {
         let mut state = status(Vec::new());
         state.cleanup = None;
-        assert_eq!(json(&Summary::from_status(&state))["files_receive_cleanup"], "pending");
+        assert_eq!(
+            json(&Summary::from_status(&state))["files_receive_cleanup"],
+            "pending"
+        );
         state.absence = Some(Absence::ReceiveFailed(fr_files::quic::Error::Cancelled));
         let report = json(&Summary::from_status(&state));
         assert_eq!(report["files_receive_cleanup"], "pending");
@@ -405,7 +434,11 @@ mod tests {
         assert_eq!(report["files_receive_absence"], "host_download_unavailable");
         assert_eq!(report["files_receive_cleanup"], "not_started");
         assert_eq!(report["files_received"], serde_json::json!([]));
-        assert!(!json(&Summary::not_requested())["files_receive_requested"].as_bool().unwrap());
+        assert!(
+            !json(&Summary::not_requested())["files_receive_requested"]
+                .as_bool()
+                .unwrap()
+        );
     }
 
     #[test]
@@ -424,11 +457,22 @@ mod tests {
 
     #[test]
     fn oversized_owner_status_stays_bounded_and_reports_truncation() {
-        let state = status((1..=70).map(|id| published(id, id, Publication::Durable)).collect());
+        let state = status(
+            (1..=70)
+                .map(|id| published(id, id, Publication::Durable))
+                .collect(),
+        );
         let report = json(&Summary::from_status(&state));
-        assert_eq!(report["files_received"].as_array().unwrap().len(), MAX_RESULTS);
+        assert_eq!(
+            report["files_received"].as_array().unwrap().len(),
+            MAX_RESULTS
+        );
         assert_eq!(report["files_receive_results_truncated"], true);
-        assert!(Summary::from_status(&state).text().contains("do not infer no effect"));
+        assert!(
+            Summary::from_status(&state)
+                .text()
+                .contains("do not infer no effect")
+        );
     }
 
     #[test]

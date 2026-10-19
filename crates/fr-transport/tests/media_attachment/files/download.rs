@@ -53,22 +53,38 @@ fn selected_download_preserves_native_file_bytes_before_viewer_promotion() {
         assert!(!viewer.is_complete());
         // Direction belongs to the original selection, not caller metadata
         // that can change between handshake completion and typed construction.
-        l.selection.capabilities.retain(|c| c.name != wire::DOWNLOAD_CAPABILITY);
+        l.selection
+            .capabilities
+            .retain(|c| c.name != wire::DOWNLOAD_CAPABILITY);
         viewer.dispatch(&mut l.c, &cx, || true).unwrap();
         let promoted = viewer.finish(&mut l.c, &cx, || true).unwrap().unwrap();
         assert_eq!(promoted.inbound.stream, routes.outbound.stream);
         let viewer = FilesChannel::new(&l.c, viewer, InputLeaseId::from_raw(123), 456).unwrap();
         assert_eq!(viewer.incoming().direction, wire::Direction::ToController);
         let mut got = false;
-        viewer.dispatch(&mut l.c, &cx, || true, |record| {
-            assert_eq!(record, bytes);
-            got = true;
-            Ok(Disposition::Consumed)
-        }).unwrap();
+        viewer
+            .dispatch(
+                &mut l.c,
+                &cx,
+                || true,
+                |record| {
+                    assert_eq!(record, bytes);
+                    got = true;
+                    Ok(Disposition::Consumed)
+                },
+            )
+            .unwrap();
         assert!(got);
         assert!(l.c.is_bound_to(&original));
-        input::transfer(&mut l, &cx, false, Route::Stream(ci.outbound),
-            Route::Stream(hi.inbound), &record(0x40, 8, 128)).await;
+        input::transfer(
+            &mut l,
+            &cx,
+            false,
+            Route::Stream(ci.outbound),
+            Route::Stream(hi.inbound),
+            &record(0x40, 8, 128),
+        )
+        .await;
     });
 }
 
@@ -101,8 +117,18 @@ fn host_download_cancel_before_viewer_attached_dispatch_retires_only_the_spent_l
         drop(viewer);
         l.c.tick(&cx, || true).unwrap();
         l.h.tick(&cx, || true).unwrap();
-        assert!(matches!(offer(&mut l, &cx, 10, MediaRole::Files), Err(Error::WrongRoute)));
-        input::transfer(&mut l, &cx, false, Route::Stream(ci.outbound),
-            Route::Stream(hi.inbound), &record(0x40, 8, 128)).await;
+        assert!(matches!(
+            offer(&mut l, &cx, 10, MediaRole::Files),
+            Err(Error::WrongRoute)
+        ));
+        input::transfer(
+            &mut l,
+            &cx,
+            false,
+            Route::Stream(ci.outbound),
+            Route::Stream(hi.inbound),
+            &record(0x40, 8, 128),
+        )
+        .await;
     });
 }

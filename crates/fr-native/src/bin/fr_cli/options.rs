@@ -932,8 +932,14 @@ mod tests {
         assert!(selected.send.is_empty());
         for (flags, code) in [
             ("--view-only --receive /a", "receive_requires_control"),
-            ("--control --send /a --receive /b", "files_direction_conflict"),
-            ("--control --receive /b --send /a", "files_direction_conflict"),
+            (
+                "--control --send /a --receive /b",
+                "files_direction_conflict",
+            ),
+            (
+                "--control --receive /b --send /a",
+                "files_direction_conflict",
+            ),
             ("--control --receive relative", "invalid_arguments"),
             ("--control --receive /a/../b", "invalid_arguments"),
             ("--control --receive", "invalid_arguments"),

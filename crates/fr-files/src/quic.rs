@@ -101,7 +101,9 @@ impl HostReceiver {
                 return Err(Error::WrongRole);
             }
             if !authority.matches_parent(lane.parent()) {
-                return Err(Error::File(wire::Error::Wire(fr_wire::WireError::InvalidBinding)));
+                return Err(Error::File(wire::Error::Wire(
+                    fr_wire::WireError::InvalidBinding,
+                )));
             }
             let reply_lifetime =
                 u64::try_from(config.reply_lifetime.as_micros()).map_err(|_| Error::Limits)?;

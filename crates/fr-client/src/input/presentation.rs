@@ -154,9 +154,12 @@ impl PresentedInput {
     /// failed or replaced receiver ends the grant at its next check.
     pub fn expect_reference_recovery(&mut self) {
         self.expects_recovery = true;
-        for owner in [&self.input.clipboard_projection, &self.input.files_projection]
-            .into_iter()
-            .flatten()
+        for owner in [
+            &self.input.clipboard_projection,
+            &self.input.files_projection,
+        ]
+        .into_iter()
+        .flatten()
         {
             owner.expect_reference_recovery();
         }
@@ -194,9 +197,12 @@ impl PresentedInput {
             return Err(Error::ViewMismatch);
         }
         self.input.advance_recovery(view.epoch().recovery, now)?;
-        for owner in [&self.input.clipboard_projection, &self.input.files_projection]
-            .into_iter()
-            .flatten()
+        for owner in [
+            &self.input.clipboard_projection,
+            &self.input.files_projection,
+        ]
+        .into_iter()
+        .flatten()
         {
             owner.follow_recovery(view.receiver_lifetime());
         }

@@ -10,15 +10,20 @@ fn stop_fences_idle_queued_and_preparing_sources_without_resetting_control() {
             let mut f = Running::new(&cx).await;
             let source = f.path.join("source");
             fs::write(&source, b"selected local bytes").unwrap();
-            let mut sender = Sender::new(
-                cx.clone(), &f.link.c, &mut f.client, Policy::default(),
-            ).unwrap();
+            let mut sender =
+                Sender::new(cx.clone(), &f.link.c, &mut f.client, Policy::default()).unwrap();
             if mode == 1 {
                 let mut selected = Selection::new();
-                selected.push(File::open(&source).unwrap(), "queued").unwrap();
-                sender.begin_batch(&f.link.c, selected, Duration::from_secs(1)).unwrap();
+                selected
+                    .push(File::open(&source).unwrap(), "queued")
+                    .unwrap();
+                sender
+                    .begin_batch(&f.link.c, selected, Duration::from_secs(1))
+                    .unwrap();
             } else if mode == 2 {
-                sender.begin(&f.link.c, File::open(&source).unwrap(), "preparing").unwrap();
+                sender
+                    .begin(&f.link.c, File::open(&source).unwrap(), "preparing")
+                    .unwrap();
             }
             let before = f.link.c.usage();
             sender.stop();
@@ -57,7 +62,9 @@ fn stop_preserves_the_actual_publication_receipt_and_original_connection() {
         fs::write(&source, b"durable").unwrap();
         let mut sender =
             Sender::new(cx.clone(), &f.link.c, &mut f.client, Policy::default()).unwrap();
-        sender.begin(&f.link.c, File::open(&source).unwrap(), "received").unwrap();
+        sender
+            .begin(&f.link.c, File::open(&source).unwrap(), "received")
+            .unwrap();
         let until = clock(&cx) + 1_500_000;
         while sender.result().is_none() {
             assert!(clock(&cx) < until, "publication proof did not arrive");
@@ -66,7 +73,10 @@ fn stop_preserves_the_actual_publication_receipt_and_original_connection() {
         let actual = sender.result().unwrap();
         assert_eq!(
             actual.outcome,
-            Outcome::HostPublished { bytes: 7, publication: Publication::Durable }
+            Outcome::HostPublished {
+                bytes: 7,
+                publication: Publication::Durable
+            }
         );
         let before = f.link.c.usage();
         sender.stop();

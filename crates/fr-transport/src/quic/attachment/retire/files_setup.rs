@@ -58,7 +58,10 @@ impl MediaChannel {
         let final_phase = matches!(
             (self.phase, state),
             (Phase::Promote, ARMED) | (Phase::Complete, ACTIVE | RETIRED)
-        ) || (!self.host && self.files_download && self.phase == Phase::Attached && state == ARMED);
+        ) || (!self.host
+            && self.files_download
+            && self.phase == Phase::Attached
+            && state == ARMED);
         if !final_phase {
             return Ok(None);
         }

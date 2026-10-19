@@ -573,7 +573,10 @@ impl DaemonCli {
             .take(LIMIT + 1)
             .read_to_string(&mut text)
             .unwrap();
-        assert!(text.len() as u64 <= LIMIT, "unbounded frd diagnostic output");
+        assert!(
+            text.len() as u64 <= LIMIT,
+            "unbounded frd diagnostic output"
+        );
         text
     }
     fn dump(&self) -> String {
@@ -638,7 +641,10 @@ exec \"$@\"
                 let wrapper = tools.0.join(format!("cli-{name}"));
                 crate::executable::write(
                     &wrapper,
-                    &format!("#!/bin/sh\nexec '{}' \"$@\"\n", tools.0.join(name).display()),
+                    &format!(
+                        "#!/bin/sh\nexec '{}' \"$@\"\n",
+                        tools.0.join(name).display()
+                    ),
                 );
                 wrapper
             })
@@ -651,7 +657,14 @@ exec \"$@\"
             .arg(sibling("frd"))
             .args(["run", "--once", "--json", "--encoder", "software"])
             .args(["--approval", "none", "--sharing", "own-user"])
-            .args(["--interface", "fr-fixture", "--fps", "15", "--bitrate", "2000000"])
+            .args([
+                "--interface",
+                "fr-fixture",
+                "--fps",
+                "15",
+                "--bitrate",
+                "2000000",
+            ])
             .arg("--config")
             .arg(tools.0.join("policy.json"))
             .arg("--socket")
@@ -683,12 +696,20 @@ exec \"$@\"
             events: Arc::new(Mutex::new(Vec::new())),
             stop: Arc::new(StopHandle::default()),
             thread: None,
-            cli: Some(DaemonCli { child, stdout, stderr }),
+            cli: Some(DaemonCli {
+                child,
+                stdout,
+                stderr,
+            }),
             _api: api,
             tools,
         };
         assert!(
-            eventually(Duration::from_secs(30), || daemon.cli.as_mut().unwrap().listening()),
+            eventually(Duration::from_secs(30), || daemon
+                .cli
+                .as_mut()
+                .unwrap()
+                .listening()),
             "frd never listened: {}",
             daemon.dump()
         );
@@ -720,13 +741,12 @@ exec \"$@\"
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
         assert!(
-            events.iter().all(|event| event["event"] != "cleanup_failed"),
+            events
+                .iter()
+                .all(|event| event["event"] != "cleanup_failed"),
             "{diagnostic}"
         );
-        assert_eq!(
-            events.last().unwrap()["event"], "stopped",
-            "{diagnostic}"
-        );
+        assert_eq!(events.last().unwrap()["event"], "stopped", "{diagnostic}");
         assert_eq!(self.tools.state()["created"], 1, "{diagnostic}");
         assert_eq!(self.tools.state()["deleted"], 1, "{diagnostic}");
         assert!(UdpSocket::bind(address()).is_ok(), "listener retired");
@@ -764,7 +784,15 @@ impl Controlled {
         files: Option<frd::native_files::Directory>,
         send: &[PathBuf],
     ) -> Self {
-        Self::start_all(host_clipboard, client_clipboard, files, send, None, false, None)
+        Self::start_all(
+            host_clipboard,
+            client_clipboard,
+            files,
+            send,
+            None,
+            false,
+            None,
+        )
     }
     /// Real host --once --send selections and viewer --receive consent, using
     /// the same display, input and clipboard fixtures as the upload tests.
@@ -781,7 +809,10 @@ impl Controlled {
             &[],
             None,
             false,
-            Some(Downloads { sources, destination }),
+            Some(Downloads {
+                sources,
+                destination,
+            }),
         )
     }
     /// A plain controlled session whose host also watches the selected

@@ -15,7 +15,10 @@ use asupersync::{
 use fr_core::{input_submission::InputSession, time::HostInstant};
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Mutex, OnceLock, TryLockError, atomic::{AtomicU64, Ordering}},
+    sync::{
+        Arc, Mutex, OnceLock, TryLockError,
+        atomic::{AtomicU64, Ordering},
+    },
     thread::{self, JoinHandle, Thread},
     time::Duration,
 };
@@ -355,9 +358,9 @@ pub fn spawn_with_authority(
     let now = authority
         .sample(clock.now().as_nanos() / 1000)
         .map_err(|error| Error::Session(session::Error::Authority(error)))?;
-    let receiver = HostReceiver::with_authority(
-        authority.clone(), root, permission.clone(), policy, now,
-    ).map_err(Error::Session)?;
+    let receiver =
+        HostReceiver::with_authority(authority.clone(), root, permission.clone(), policy, now)
+            .map_err(Error::Session)?;
     let binding = receiver.binding();
     let shared = Arc::new(Shared {
         inbox: Mutex::new(Inbox {

@@ -144,7 +144,11 @@ impl ReceiveControl {
         }
         let mut state = self.lock();
         state.progress = None;
-        if let Some(previous) = state.results.iter_mut().find(|previous| previous.id == result.id) {
+        if let Some(previous) = state
+            .results
+            .iter_mut()
+            .find(|previous| previous.id == result.id)
+        {
             // A later drain can establish a real external effect after an
             // earlier cancellation or uncertain result. Preserve that evidence;
             // no subsequent cleanup failure can erase an actual publication.

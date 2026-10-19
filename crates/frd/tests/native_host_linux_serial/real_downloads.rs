@@ -23,12 +23,7 @@ fn assert_entries(path: &Path, expected: &[&str]) {
 }
 
 /// These are the actual CLI stdout/stderr, including the host's final events.
-fn assert_private(
-    output: &std::process::Output,
-    host: &str,
-    paths: &[&Path],
-    names: &[&str],
-) {
+fn assert_private(output: &std::process::Output, host: &str, paths: &[&Path], names: &[&str]) {
     let diagnostics = format!(
         "{}\n{}\n{host}",
         String::from_utf8_lossy(&output.stdout),
@@ -140,7 +135,11 @@ fn host_selections_download_atomically_while_control_and_clipboard_stay_live() {
         ]),
         "{report}"
     );
-    assert_eq!(report["files_receive_refused"], serde_json::json!([]), "{report}");
+    assert_eq!(
+        report["files_receive_refused"],
+        serde_json::json!([]),
+        "{report}"
+    );
     assert!(report["files_receive_absence"].is_null(), "{report}");
     assert_eq!(report["files_receive_cleanup"], "finished", "{report}");
     assert_eq!(report["clipboard_active"], true, "{report}");
@@ -165,7 +164,11 @@ fn a_download_conflict_preserves_existing_content_and_the_live_controller() {
     let fresh = random(32 * 1024);
     let original = random(4096);
     let replacement = random(64 * 1024);
-    let names = ["first-private.bin", "private-notes.txt", "never-offered.bin"];
+    let names = [
+        "first-private.bin",
+        "private-notes.txt",
+        "never-offered.bin",
+    ];
     fs::write(source.0.join(names[0]), &fresh).unwrap();
     fs::write(source.0.join(names[1]), &replacement).unwrap();
     fs::write(source.0.join(names[2]), random(4096)).unwrap();
@@ -173,7 +176,10 @@ fn a_download_conflict_preserves_existing_content_and_the_live_controller() {
     let selected: Vec<_> = names.iter().map(|name| source.0.join(name)).collect();
     let mut s = Controlled::start_downloads(false, false, &selected, Some(&destination.0));
     assert!(
-        eventually(Duration::from_secs(60), || destination.0.join(names[0]).exists()),
+        eventually(Duration::from_secs(60), || destination
+            .0
+            .join(names[0])
+            .exists()),
         "first download did not publish: {}; host: {}",
         client_state(&mut s.client),
         s.daemon.dump()
@@ -219,7 +225,11 @@ fn no_host_selection_reports_download_absence_and_preserves_control() {
     let report = completion(&output, &host);
     assert_download_report(&report);
     assert_eq!(report["files_received"], serde_json::json!([]), "{report}");
-    assert_eq!(report["files_receive_refused"], serde_json::json!([]), "{report}");
+    assert_eq!(
+        report["files_receive_refused"],
+        serde_json::json!([]),
+        "{report}"
+    );
     assert_eq!(
         report["files_receive_absence"], "host_download_unavailable",
         "{report}"
@@ -267,15 +277,14 @@ fn an_expired_download_lease_cannot_publish_a_partially_received_file() {
     let name = "private-unfinished.bin";
     let total = 32 * 1024 * 1024;
     fs::write(source.0.join(name), random(total)).unwrap();
-    let mut s = Controlled::start_downloads(
-        false,
-        false,
-        &[source.0.join(name)],
-        Some(&destination.0),
-    );
+    let mut s =
+        Controlled::start_downloads(false, false, &[source.0.join(name)], Some(&destination.0));
     let until = Instant::now() + Duration::from_secs(90);
     let staged = loop {
-        assert!(destination.entries().is_empty(), "a partial final name appeared");
+        assert!(
+            destination.entries().is_empty(),
+            "a partial final name appeared"
+        );
         if let Some(size) = staged_sizes(&destination, s.client.id())
             .into_iter()
             .find(|&size| size > 0 && size < total as u64)
@@ -294,15 +303,25 @@ fn an_expired_download_lease_cannot_publish_a_partially_received_file() {
     let resume = ResumeOnDrop(s.client.id());
     println!("download e2e: froze the viewer with {staged} of {total} bytes privately staged");
     let fenced = eventually(Duration::from_secs(20), || {
-        assert!(destination.entries().is_empty(), "an expired download was published");
+        assert!(
+            destination.entries().is_empty(),
+            "an expired download was published"
+        );
         indicator(&mut s.observer).is_none()
     });
-    assert!(fenced, "frozen viewer retained input authority: {}", s.daemon.dump());
+    assert!(
+        fenced,
+        "frozen viewer retained input authority: {}",
+        s.daemon.dump()
+    );
     // The host's real input lease is terminal. Resuming the same process must
     // neither reacquire control nor publish the already-admitted private inode.
     drop(resume);
     let cleaned = eventually(Duration::from_secs(15), || {
-        assert!(destination.entries().is_empty(), "resuming resurrected a download");
+        assert!(
+            destination.entries().is_empty(),
+            "resuming resurrected a download"
+        );
         staged_sizes(&destination, s.client.id()).is_empty()
     });
     assert!(cleaned, "the cancelled receive retained its staging inode");

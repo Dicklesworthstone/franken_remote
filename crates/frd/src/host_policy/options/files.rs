@@ -22,7 +22,9 @@ impl RunOptions {
             || self.send.len() > crate::native_files::MAX_SENDS
             || self.send.iter().any(|path| {
                 !path.is_absolute()
-                    || path.components().any(|part| part == std::path::Component::ParentDir)
+                    || path
+                        .components()
+                        .any(|part| part == std::path::Component::ParentDir)
             })
         {
             return Err(Error::InvalidArgument);

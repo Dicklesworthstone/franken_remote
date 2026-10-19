@@ -963,7 +963,11 @@ fn control_completion(
         files::download::Summary::not_requested,
         files::download::Local::summary,
     );
-    let downloads = if json { downloads.json() } else { downloads.text() };
+    let downloads = if json {
+        downloads.json()
+    } else {
+        downloads.text()
+    };
     let audio = audio_completion(progress, json);
     let clipboard = control.clipboard.unwrap_or_default();
     let absence = control

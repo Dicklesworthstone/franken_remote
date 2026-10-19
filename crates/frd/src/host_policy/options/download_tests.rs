@@ -31,14 +31,34 @@ fn download_selection_is_explicit_bounded_and_requires_one_controlled_share() {
         &["--once", "--send", "/local/file"][..],
         &["--input-agent", "/local/agent", "--send", "/local/file"][..],
         &[
-            "--once", "--input-agent", "/local/agent",
-            "--send", "/local/file", "--files", "/local/drop",
+            "--once",
+            "--input-agent",
+            "/local/agent",
+            "--send",
+            "/local/file",
+            "--files",
+            "/local/drop",
         ][..],
-        &["--once", "--input-agent", "/local/agent", "--send", "relative"][..],
-        &["--once", "--input-agent", "/local/agent", "--send", "/local/../file"][..],
+        &[
+            "--once",
+            "--input-agent",
+            "/local/agent",
+            "--send",
+            "relative",
+        ][..],
+        &[
+            "--once",
+            "--input-agent",
+            "/local/agent",
+            "--send",
+            "/local/../file",
+        ][..],
         &["--once", "--input-agent", "/local/agent", "--send"][..],
     ] {
-        assert!(matches!(parse(args), Err(Error::InvalidArgument)), "{args:?}");
+        assert!(
+            matches!(parse(args), Err(Error::InvalidArgument)),
+            "{args:?}"
+        );
     }
     let mut many = vec!["--once", "--input-agent", "/local/agent"];
     for _ in 0..=crate::native_files::MAX_SENDS {
@@ -57,11 +77,20 @@ fn programmatic_download_options_keep_the_same_scope_and_conflict_checks() {
     };
     assert!(options.validate_file_send().is_ok());
     options.once = false;
-    assert!(matches!(options.validate_file_send(), Err(Error::InvalidArgument)));
+    assert!(matches!(
+        options.validate_file_send(),
+        Err(Error::InvalidArgument)
+    ));
     options.once = true;
     options.files = Some(PathBuf::from("/local/drop"));
-    assert!(matches!(options.validate_file_send(), Err(Error::InvalidArgument)));
+    assert!(matches!(
+        options.validate_file_send(),
+        Err(Error::InvalidArgument)
+    ));
     options.files = None;
     options.input_agent = None;
-    assert!(matches!(options.validate_file_send(), Err(Error::InvalidArgument)));
+    assert!(matches!(
+        options.validate_file_send(),
+        Err(Error::InvalidArgument)
+    ));
 }

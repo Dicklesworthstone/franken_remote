@@ -24,7 +24,7 @@ pub struct ControllerAuthority {
     channel: u32,
 }
 impl std::fmt::Debug for ControllerAuthority {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ControllerFileAuthority([original owner])")
     }
 }
@@ -62,8 +62,14 @@ impl ControllerAuthority {
     /// tighten the decision, never extend an in-flight file's fixed lifetime.
     pub fn deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
         let state = self.state.upgrade().ok_or(Refusal::Revoked)?;
-        let c = self.cursor.lock().map_err(|_| Refusal::AuthorityUnavailable)?;
-        let mut m = state.inner.lock().map_err(|_| Refusal::AuthorityUnavailable)?;
+        let c = self
+            .cursor
+            .lock()
+            .map_err(|_| Refusal::AuthorityUnavailable)?;
+        let mut m = state
+            .inner
+            .lock()
+            .map_err(|_| Refusal::AuthorityUnavailable)?;
         if now.as_micros() != c.host {
             state.stopped.store(true, Ordering::Release);
             return Err(Refusal::Revoked);
@@ -72,10 +78,15 @@ impl ControllerAuthority {
         if state.lifecycle(&mut m, local).is_err() {
             return Err(Refusal::Revoked);
         }
-        let host = m.clock.age_upper_us(0, local).map_err(|_| {
-            state.stopped.store(true, Ordering::Release);
-            Refusal::Revoked
-        })?.max(c.host).max(m.last_host);
+        let host = m
+            .clock
+            .age_upper_us(0, local)
+            .map_err(|_| {
+                state.stopped.store(true, Ordering::Release);
+                Refusal::Revoked
+            })?
+            .max(c.host)
+            .max(m.last_host);
         if local >= m.local_until || host >= m.host_until {
             state.stopped.store(true, Ordering::Release);
             return Err(Refusal::Authority(AuthorityError::LeaseExpired));
@@ -101,8 +112,12 @@ impl Owner {
             return Err(Error::AlreadyAttached);
         }
         if channel == 0
-            || [self.state.parent.id, self.state.display_channel, self.state.input_channel]
-                .contains(&channel)
+            || [
+                self.state.parent.id,
+                self.state.display_channel,
+                self.state.input_channel,
+            ]
+            .contains(&channel)
         {
             return Err(Error::WrongChannel);
         }

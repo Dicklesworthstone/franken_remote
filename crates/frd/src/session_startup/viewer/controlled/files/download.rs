@@ -163,7 +163,7 @@ impl ControlledViewer {
             .is_some_and(super::negotiation::Pending::is_download)
     }
     /// Nonblocking original-worker collection, including after parent closure.
-    /// The actual result also updates the retained native ReceiveControl.
+    /// The actual result also updates the retained native `ReceiveControl`.
     pub fn try_finish_file_receive_cleanup(&mut self) -> Option<Result<(), worker::Error>> {
         let receiving = self.files.receiver.as_mut()?;
         if receiving.receiver.state() == State::Active {

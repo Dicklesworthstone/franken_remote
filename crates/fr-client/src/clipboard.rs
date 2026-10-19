@@ -1,6 +1,6 @@
 //! Controller clipboard bound to a real accepted grant and its original client.
 //!
-//! No host InputSession is synthesized from wire IDs. The native/transport
+//! No host `InputSession` is synthesized from wire IDs. The native/transport
 //! integration still supplies the separately approved clipboard capability and
 //! dedicated authenticated lane, and fences already accepted bytes on closure.
 pub mod image;

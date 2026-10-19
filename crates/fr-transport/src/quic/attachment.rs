@@ -1096,9 +1096,8 @@ impl MediaChannel {
             // A download source may send immediately after staging Attached.
             // Only its exact authenticated viewer ACK can carry an unparsed
             // native read suffix into Files; old partially framed bytes still fail.
-            let download_suffix = !self.host
-                && self.files_download
-                && self.descriptor.role == MediaRole::Files;
+            let download_suffix =
+                !self.host && self.files_download && self.descriptor.role == MediaRole::Files;
             if receiving.fin
                 || receiving.framing.buffered_bytes() != 0
                 || (!download_suffix && !receiving.remainder.is_empty())

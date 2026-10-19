@@ -41,7 +41,10 @@ use crate::{
         },
     },
     session_monitor::{self, Monitor, Status as Lifetime},
-    session_startup::{Configuration, host_offer_with_download, host_offer_with_files, shared_viewers, with_line_scroll},
+    session_startup::{
+        Configuration, host_offer_with_download, host_offer_with_files, shared_viewers,
+        with_line_scroll,
+    },
     worker::{Deadline, EncoderProbe, Launch, Retirement},
 };
 use asupersync::{
@@ -1488,7 +1491,15 @@ mod tests {
     #[test]
     fn every_request_allocates_fresh_unpredictable_identifiers() {
         let boot = HostBootId::from_raw(9);
-        let a = request(1, boot, 5, Scope::OwnUser, (None, false, false, false), false).unwrap();
+        let a = request(
+            1,
+            boot,
+            5,
+            Scope::OwnUser,
+            (None, false, false, false),
+            false,
+        )
+        .unwrap();
         let b = request(
             2,
             boot,
@@ -1507,7 +1518,15 @@ mod tests {
             false,
         )
         .unwrap();
-        let d = request(4, boot, 5, Scope::OwnUser, (None, false, false, false), true).unwrap();
+        let d = request(
+            4,
+            boot,
+            5,
+            Scope::OwnUser,
+            (None, false, false, false),
+            true,
+        )
+        .unwrap();
         let files = request(
             5,
             boot,
