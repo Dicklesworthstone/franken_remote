@@ -4,6 +4,7 @@
 //! from the peer is opened. Each transfer is offered once, and a lost publication
 //! proof is unknown, never an invitation to retry. Service before/after network I/O.
 pub mod batch;
+mod flow;
 mod source;
 use crate::{
     atp,
@@ -164,6 +165,7 @@ pub struct Sender<'a> {
     batch: Option<batch::Batch>,
     transfer: Option<Transfer>,
     closed: bool,
+    paused: bool,
 }
 // Both entry points use the same transfer state machine and sequence domain.
 // Owning the channel avoids a self-referential running session; borrowing keeps
@@ -207,6 +209,7 @@ impl std::fmt::Debug for Sender<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FileSender")
             .field("stage", &self.stage())
+            .field("paused", &self.paused)
             .finish_non_exhaustive()
     }
 }
@@ -251,6 +254,7 @@ impl<'a> Sender<'a> {
             batch: None,
             transfer: None,
             closed: false,
+            paused: false,
         })
     }
     /// The containing session must reserve this route for this owner, including
@@ -468,6 +472,8 @@ impl<'a> Sender<'a> {
         }
         Ok(self.stage())
     }
+    // Keep receipt processing, expiry, drain and new admission in one ordered turn.
+    #[allow(clippy::too_many_lines)]
     fn turn(
         &mut self,
         q: &mut QuicRecords,
@@ -475,6 +481,11 @@ impl<'a> Sender<'a> {
     ) -> Result<(), Error> {
         self.cx.checkpoint().map_err(|_| Error::Cancelled)?;
         self.lane.check(q).map_err(Error::Transport)?;
+        // A paused turn may have neither inbound traffic nor an outbound send.
+        // It must still observe revocation instead of retaining a dead source.
+        if !authorize() {
+            return Err(Error::Cancelled);
+        }
         let now = self.now();
         if let Some(t) = &self.transfer
             && t.result.is_none()
@@ -522,6 +533,11 @@ impl<'a> Sender<'a> {
                 return Ok(());
             }
             t.waiting = false;
+        }
+        // Drain admitted records and consume receipts above, but do not prepare
+        // another record, admit payload/completion, or request a source read.
+        if self.paused {
+            return t.pause_turn(now);
         }
         t.prepare(
             self.lane.outgoing(),

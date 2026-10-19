@@ -225,7 +225,7 @@ impl Sender<'_> {
                 return Err(error);
             }
             self.batch.as_mut().expect("original batch retained").last = now;
-            if self.transfer.is_none() {
+            if self.transfer.is_none() && !self.paused {
                 self.start_selected(q)?;
             }
         }
