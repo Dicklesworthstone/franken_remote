@@ -78,10 +78,23 @@ impl Authority for Host {
         self.binding
     }
     fn deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
-        self.input.deadline(now)
+        let result = self.input.deadline(now);
+        // A terminal suspension-limit decision also reports ViewUnready, but
+        // revokes the native owner during that read. It must never escape as
+        // a resumable clipboard suspension, including on the first check.
+        if self.input.is_revoked() {
+            Err(Refusal::Revoked)
+        } else {
+            result
+        }
     }
     fn item_deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
-        self.input.authorization_deadline(now)
+        let result = self.input.authorization_deadline(now);
+        if self.input.is_revoked() {
+            Err(Refusal::Revoked)
+        } else {
+            result
+        }
     }
     fn revoke(&self) {
         self.input.revoke();

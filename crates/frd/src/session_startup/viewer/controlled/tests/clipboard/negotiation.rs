@@ -463,5 +463,80 @@ fn newly_negotiated_workers_transfer_full_item_limit_in_both_directions() {
     }
 }
 
+// Use a real finite host view deadline. Waiting for the original clock to pass
+// it exercises InputMonitor's production suspension, without synthetic authority
+// errors or moving a checked clock backwards.
+async fn paused_setup(c: &Cx, h: &Cx) -> Fixture {
+    let mut state = Box::pin(fixture_with_clipboard(
+        c,
+        h,
+        caps(),
+        false,
+        false,
+        false,
+        ClipboardMode::NegotiatePaused,
+    ))
+    .await;
+    let until = now(h).unwrap() + 1_100_000;
+    let (mut n, mut t) = (60_000, 70_000);
+    while state.observation.view_ready().unwrap() {
+        assert!(now(h).unwrap() < until, "finite host view never suspended");
+        drive(&mut state, c, h, &mut n, &mut t).await;
+    }
+    assert!(state.observation.check_lease().is_ok());
+    assert!(!state.host.control().is_stopped());
+    state
+}
+
+#[test]
+fn initial_host_clipboard_offer_survives_a_real_view_suspension() {
+    run(|c, h| async move {
+        let mut state = paused_setup(&c, &h).await;
+        begin(&mut state, true, true);
+        let driver = state.driver.take().unwrap();
+        let ((), done) = Box::pin(support::both(
+            async {
+                let (mut n, mut t) = (80_000, 90_000);
+                finish(&mut state, &c, &h, &mut n, &mut t).await;
+                let host = state.host.take_clipboard_worker().unwrap();
+                let viewer = state.viewer.take_clipboard_worker().unwrap();
+                assert!(state.host.clipboard_reason().is_none());
+                assert!(state.viewer.clipboard_reason().is_none());
+                assert!(!state.observation.view_ready().unwrap());
+                assert!(!state.host.control().is_stopped() && !state.viewer.is_closed());
+                // Both one-use seeds stay owned without opening either OS.
+                assert!(state.host.take_clipboard_worker().is_none());
+                assert!(state.viewer.take_clipboard_worker().is_none());
+                state.viewer.close();
+                state.host.close();
+                drop((host, viewer));
+            },
+            driver,
+        ))
+        .await;
+        assert!(done.handoff_safe());
+    });
+}
+
+#[test]
+fn initial_host_clipboard_offer_does_not_treat_revocation_as_a_view_pause() {
+    run(|c, h| async move {
+        let mut state = paused_setup(&c, &h).await;
+        state
+            .host
+            .control()
+            .stop(crate::input_watchdog::StopReason::LocalRevoke);
+        assert_eq!(
+            state.host.offer_clipboard(request(&state), true),
+            Err(ClipboardError::Closed)
+        );
+        assert!(!state.host.clipboard_negotiating());
+        assert!(state.host.take_clipboard_worker().is_none());
+        state.viewer.close();
+        state.host.close();
+        assert!(state.driver.take().unwrap().await.handoff_safe());
+    });
+}
+
 #[path = "negotiation/multiplex.rs"]
 mod multiplex;

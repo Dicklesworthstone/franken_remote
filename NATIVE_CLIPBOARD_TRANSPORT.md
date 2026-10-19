@@ -90,7 +90,11 @@ temporarily paused. Creating the unique channel and opening the bounded native
 owner does not read the clipboard; the first native observation still requires
 fresh readiness. Fresh same-lease ticket proof and qualified visible presentation
 must both return before the controller resumes, regardless of their arrival order.
-Receiver close/drop and actual lease revocation remain terminal.
+Receiver close/drop and actual lease revocation remain terminal. The initial
+host attachment offer also permits this bounded pause while exchanging metadata;
+it does not close the parent connection merely because the view is unready.
+Host deadline queries recheck native-owner revocation after reading authority,
+so the first check at the suspension limit is already terminal.
 
 ## Native worker and network owner
 

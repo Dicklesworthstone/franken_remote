@@ -185,6 +185,7 @@ enum ClipboardMode {
     Disabled,
     Attached,
     Negotiate,
+    NegotiatePaused,
     Files,
     FilesNegotiate,
     FileDrop,
@@ -216,7 +217,10 @@ async fn fixture_with_clipboard(
     .collect();
     if matches!(
         clipboard,
-        ClipboardMode::Attached | ClipboardMode::Negotiate | ClipboardMode::Combined
+        ClipboardMode::Attached
+            | ClipboardMode::Negotiate
+            | ClipboardMode::NegotiatePaused
+            | ClipboardMode::Combined
     ) {
         for name in [
             attachment::CLIPBOARD_CAPABILITY,
@@ -231,7 +235,7 @@ async fn fixture_with_clipboard(
     }
     if matches!(
         clipboard,
-        ClipboardMode::Negotiate | ClipboardMode::Combined
+        ClipboardMode::Negotiate | ClipboardMode::NegotiatePaused | ClipboardMode::Combined
     ) {
         wire_capabilities.push(WireCapability {
             name: fr_wire::clipboard::startup::CAPABILITY.into(),
@@ -272,7 +276,19 @@ async fn fixture_with_clipboard(
     let (mut host, mut viewer) = pair_initialized(client_cx, host_cx, wire_capabilities, |host| {
         let host_result = host.authority.as_mut().unwrap();
         let stamp = HostInstant::from_micros(now(host_cx).unwrap());
-        host_result.mark_view_ready(stamp).unwrap();
+        if clipboard == ClipboardMode::NegotiatePaused {
+            host_result.require_view_evidence(stamp).unwrap();
+            host_result
+                .mark_view_ready_until(
+                    stamp
+                        .checked_add(fr_core::time::HostDuration::from_micros(1_000_000))
+                        .unwrap(),
+                    stamp,
+                )
+                .unwrap();
+        } else {
+            host_result.mark_view_ready(stamp).unwrap();
+        }
         host_result.grant_lease(creds().lease, stamp).unwrap();
         host_result
             .issue_input_ticket(creds().lease, creds().ticket, stamp)

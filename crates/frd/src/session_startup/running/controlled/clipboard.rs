@@ -3,7 +3,10 @@ use super::ControlledHost;
 use crate::clipboard_quic::{Bridge, Error, WorkerSeed};
 use crate::session_startup::clipboard::Consent;
 use asupersync::cx::Cx;
-use fr_core::clipboard::ClipboardSwitch;
+use fr_core::{
+    authority::AuthorityError, clipboard::ClipboardSwitch, input_submission::Refusal,
+    time::HostInstant,
+};
 use fr_transport::quic::{
     ChannelRequest, ChannelScope, MediaChannel, QuicRecords, clipboard::ClipboardChannel,
 };
@@ -66,9 +69,13 @@ impl ControlledHost {
             || {
                 observation.check().is_ok()
                     && crate::session_startup::now(cx).is_ok_and(|t| {
-                        monitor
-                            .deadline(fr_core::time::HostInstant::from_micros(t))
-                            .is_ok()
+                        // This exchanges attachment metadata, not clipboard text.
+                        // The original host monitor turns every terminal status
+                        // into revocation before returning a resumable pause.
+                        matches!(
+                            monitor.deadline(HostInstant::from_micros(t)),
+                            Ok(_) | Err(Refusal::Authority(AuthorityError::ViewUnready))
+                        )
                     })
             },
         )
