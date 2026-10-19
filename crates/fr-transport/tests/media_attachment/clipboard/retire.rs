@@ -184,6 +184,73 @@ fn a_retirement_request_in_an_authorization_callback_retires_only_the_pair() {
 }
 
 #[test]
+fn final_authorization_retirement_refuses_new_bytes_and_preserves_critical_routes() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let mut l = Link::new(&cx).await;
+        enable(&mut l);
+        let (_hi, _ci, hi, ci) = attach(&mut l, &cx, 8, MediaRole::Input).await;
+        let (hp, cp, ha, ca) = attach(&mut l, &cx, 9, MediaRole::Clipboard).await;
+        let mut h = ClipboardChannel::new(&l.h, hp, scope()).unwrap();
+        let c = ClipboardChannel::new(&l.c, cp, scope()).unwrap();
+        quiet(&mut l, &cx).await;
+        let mut authorizations = 0;
+        let mut prepared = 0;
+        assert_eq!(
+            h.send_prepared(
+                &mut l.h,
+                &cx,
+                &chunk(&h),
+                clock(&cx) + 1_000_000,
+                || {
+                    authorizations += 1;
+                    if authorizations == 2 {
+                        h.request_retirement();
+                    }
+                    true
+                },
+                || {
+                    prepared += 1;
+                    Ok::<(), core::convert::Infallible>(())
+                },
+            ),
+            Err(Error::WrongRoute)
+        );
+        assert_eq!(authorizations, 2, "must reach final connection check");
+        assert_eq!(prepared, 2, "record checks passed before retirement");
+        assert!(!l.h.is_closed());
+        assert!(!l.h.has_route(Route::Stream(ha.outbound)));
+        assert_eq!(l.h.usage().retained_send_records, 0);
+        assert_eq!(l.h.usage().retained_send_upper_bound, 0);
+        assert!(h.check(&l.h).is_err());
+        peer_retired(&mut l, &cx, ca.outbound).await;
+        assert!(c.check(&l.c).is_err());
+        let hr = l.hr;
+        let cr = l.cr;
+        for (host, send, receive, kind, binding) in [
+            (true, hr.outbound, cr.inbound, 0x12, 7),
+            (false, cr.outbound, hr.inbound, 0x12, 7),
+            (true, hi.outbound, ci.inbound, 0x17, 8),
+            (false, ci.outbound, hi.inbound, 0x40, 8),
+        ] {
+            input::transfer(
+                &mut l,
+                &cx,
+                host,
+                Route::Stream(send),
+                Route::Stream(receive),
+                &record(kind, binding, 96),
+            )
+            .await;
+        }
+        h.retire(&mut l.h, &cx).unwrap();
+        drop((h, c));
+        l.h.tick(&cx, || true).unwrap();
+        l.c.tick(&cx, || true).unwrap();
+    });
+}
+
+#[test]
 fn retire_discards_native_prefix_and_partial_receive_without_replaying_on_ack() {
     runtime().block_on(async {
         let cx = Cx::current().unwrap();

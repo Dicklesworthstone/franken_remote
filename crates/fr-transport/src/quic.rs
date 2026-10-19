@@ -837,6 +837,12 @@ impl QuicRecords {
         if current >= send_by_micros {
             return Err(Error::Expired);
         }
+        // The final connection check can service an optional retirement
+        // requested by either callback. Numeric stream/sender tombstones stay
+        // installed, but must never regain queue ownership after retirement.
+        if !self.has_route(route) {
+            return Err(Error::WrongRoute);
+        }
         match route {
             Route::Stream(route) => {
                 let sender = self

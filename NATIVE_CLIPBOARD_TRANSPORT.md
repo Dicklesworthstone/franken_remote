@@ -163,6 +163,16 @@ actual thread completion from that request. `finish` never blocks on an ongoing
 foreign call. A stuck OS call cannot be safely killed as a Rust thread; dropping
 the handle does not claim successful native cleanup or rollback.
 
+Prepared transport admission checks the original route again after the final
+connection authorizer, which may request an optional lane's retirement. A retired
+stream retains its numeric tombstone to prevent reuse, but cannot acquire new
+queued bytes or send accounting. Such a late retirement returns `WrongRoute`
+without closing the original connection. Cancellation, lost connection authority,
+retained-record expiry, and typed record refusals keep their existing precedence.
+The authenticated QUIC regression retires the clipboard at this exact boundary
+and then transfers control and input records in both directions on the same
+connection.
+
 An obsolete Begin or Chunk still owned exclusively by the worker outbox or
 bridge pending slot has not entered QUIC. The owner discards that record and
 releases its one handoff slot when the wire owner has already superseded the
