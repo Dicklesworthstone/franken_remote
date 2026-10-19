@@ -265,12 +265,17 @@ impl<N: NativeClipboard> Worker<N> {
             return Err(Error::HandoffExpired);
         }
         match self.shared.outbox.try_lock() {
-            Ok(outbox) => {
-                if let Some(item) = &outbox.item {
-                    if local >= item.until {
-                        return Err(Error::HandoffExpired);
+            Ok(mut outbox) => {
+                if let Some(item) = &outbox.item
+                    && let Err(reason) = item.check_operation(local, host)
+                {
+                    if !item.can_discard(reason, &self.clock, &self.shared.gate.limits()) {
+                        return Err(reason);
                     }
-                    item.permit.check_operation(host).map_err(Error::Session)?;
+                    // No byte left this slot. The existing wire owner emits its
+                    // Cancel before a replacement; never replay the old cursor.
+                    outbox.item = None;
+                    outbox.busy = false;
                 }
             }
             Err(std::sync::TryLockError::WouldBlock) => {}

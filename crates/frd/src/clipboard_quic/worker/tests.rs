@@ -237,6 +237,13 @@ impl Fixture {
     fn step(&mut self) -> Result<(), Error> {
         self.worker.step(|| Ok(91))
     }
+    fn take(&self) -> super::super::Outgoing {
+        let mut outbox = self.shared.outbox.lock().unwrap();
+        let record = outbox.item.take().expect("one accepted handoff");
+        assert!(outbox.busy);
+        outbox.busy = false;
+        record
+    }
 }
 
 #[test]
@@ -334,4 +341,258 @@ fn revocation_remains_terminal_while_the_worker_is_paused() {
     assert_eq!(f.step(), Err(Error::Closed));
     let os = f.os.lock().unwrap();
     assert_eq!((os.watches, os.reads, os.publications), (0, 0, 0));
+}
+
+#[derive(Default)]
+struct Published(Vec<String>);
+impl ClipboardSink for Published {
+    fn prepare(&mut self, _: &str, _: Stamp) -> Result<(), PlatformError> {
+        Ok(())
+    }
+    fn publish(&mut self, text: &str, _: Stamp) -> Publication {
+        self.0.push(text.into());
+        Publication::SubmittedToOs
+    }
+}
+
+#[test]
+fn superseded_unsent_begin_or_chunk_cancels_before_the_latest_copy() {
+    for discard_chunk in [false, true] {
+        let mut f = Fixture::new(false);
+        let mut peer = ChannelSession::with_monitor(
+            Monitor::new(Owner(f.permission.clone())),
+            Context {
+                sender: Role::Controller,
+                ..context()
+            },
+            ProtocolLimits::ABSOLUTE,
+            true,
+            HostInstant::ORIGIN,
+        )
+        .unwrap();
+        let mut published = Published::default();
+        f.step().unwrap();
+        f.copy("old local item");
+        f.step().unwrap();
+        if discard_chunk {
+            let begin = f.take();
+            assert_eq!(
+                peer.receive(&begin.bytes.0, &mut published, || HostInstant::ORIGIN),
+                Ok(None)
+            );
+            f.step().unwrap();
+        }
+        let old = {
+            let outbox = f.shared.outbox.lock().unwrap();
+            let record = outbox.item.as_ref().unwrap();
+            decode(&record.bytes.0, context(), &ProtocolLimits::ABSOLUTE)
+                .unwrap()
+                .stamp
+        };
+        f.permission.paused.store(true, Ordering::Release);
+        f.copy("first replacement");
+        f.step().unwrap();
+        f.copy("latest replacement");
+        f.step().unwrap();
+        assert!(f.shared.gate.is_open());
+        assert!(!f.shared.outbox.lock().unwrap().busy);
+        assert_eq!(f.os.lock().unwrap().reads, 1);
+        f.permission.paused.store(false, Ordering::Release);
+        f.step().unwrap();
+        let cancel = f.take();
+        let message = decode(&cancel.bytes.0, context(), &ProtocolLimits::ABSOLUTE).unwrap();
+        assert_eq!(message.stamp, old);
+        assert_eq!(
+            message.body,
+            Body::Cancel(fr_wire::clipboard::CancelReason::Superseded)
+        );
+        let released = peer.receive(&cancel.bytes.0, &mut published, || HostInstant::ORIGIN);
+        if discard_chunk {
+            assert_eq!(released, Ok(None));
+        } else {
+            assert_eq!(
+                released,
+                Err(fr_wire::clipboard::session::SessionError::Clipboard(
+                    fr_core::clipboard::Error::UnknownTransfer
+                ))
+            );
+        }
+        assert!(!peer.is_closed());
+        for _ in 0..3 {
+            f.step().unwrap();
+            let record = f.take();
+            let message = decode(&record.bytes.0, context(), &ProtocolLimits::ABSOLUTE).unwrap();
+            assert!(message.stamp.sequence > old.sequence);
+            peer.receive(&record.bytes.0, &mut published, || HostInstant::ORIGIN)
+                .unwrap();
+        }
+        assert_eq!(published.0, ["latest replacement"]);
+        assert!(f.shared.gate.is_open());
+        let os = f.os.lock().unwrap();
+        assert_eq!(
+            (os.opens, os.watches, os.reads, os.suspends, os.closes),
+            (1, 1, 2, 0, 0)
+        );
+    }
+}
+
+#[test]
+fn host_expiry_during_pause_releases_only_the_incomplete_unsent_item() {
+    let mut f = Fixture::new(false);
+    f.step().unwrap();
+    f.copy("expired local item");
+    f.step().unwrap();
+    let permit = f
+        .shared
+        .outbox
+        .lock()
+        .unwrap()
+        .item
+        .as_ref()
+        .unwrap()
+        .permit
+        .clone();
+    assert_eq!(permit.deadline(), HostInstant::from_micros(3_000_000));
+    f.permission.paused.store(true, Ordering::Release);
+    f.clock.advance_to(Time::from_millis(3_000));
+    f.step().unwrap();
+    assert!(f.shared.gate.is_open());
+    assert!(!f.shared.outbox.lock().unwrap().busy);
+    f.copy("fresh after expiry");
+    f.step().unwrap();
+    f.permission.paused.store(false, Ordering::Release);
+    f.step().unwrap();
+    let cancel = f.take();
+    assert_eq!(
+        decode(&cancel.bytes.0, context(), &ProtocolLimits::ABSOLUTE)
+            .unwrap()
+            .body,
+        Body::Cancel(fr_wire::clipboard::CancelReason::Expired)
+    );
+    f.step().unwrap();
+    let begin = f.take();
+    assert!(matches!(
+        decode(&begin.bytes.0, context(), &ProtocolLimits::ABSOLUTE)
+            .unwrap()
+            .body,
+        Body::Begin { .. }
+    ));
+    assert_eq!(permit.deadline(), HostInstant::from_micros(3_000_000));
+    assert_eq!(begin.permit.deadline(), HostInstant::from_micros(6_000_000));
+    assert!(f.shared.gate.is_open());
+}
+
+#[test]
+fn a_pause_preserves_an_unexpired_handoff_and_its_original_deadline() {
+    let mut f = Fixture::new(false);
+    f.step().unwrap();
+    f.copy("held during pause");
+    f.step().unwrap();
+    let original = f
+        .shared
+        .outbox
+        .lock()
+        .unwrap()
+        .item
+        .as_ref()
+        .unwrap()
+        .bytes
+        .0
+        .clone();
+    f.permission.paused.store(true, Ordering::Release);
+    f.clock.advance_to(Time::from_millis(500));
+    f.step().unwrap();
+    f.permission.paused.store(false, Ordering::Release);
+    f.step().unwrap();
+    let record = f.take();
+    assert_eq!(record.bytes.0, original);
+    assert_eq!(record.until, 3_000_000);
+    assert_eq!(f.os.lock().unwrap().reads, 1);
+    assert!(f.shared.gate.is_open());
+}
+
+#[test]
+fn a_local_only_deadline_cannot_skip_a_still_live_wire_sender() {
+    let mut f = Fixture::new(false);
+    f.step().unwrap();
+    f.copy("must not skip");
+    f.step().unwrap();
+    f.shared.outbox.lock().unwrap().item.as_mut().unwrap().until = 1;
+    f.clock.advance_to(Time::from_nanos(1_000));
+    assert_eq!(f.step(), Err(Error::HandoffExpired));
+    assert!(!f.shared.gate.is_open());
+}
+
+#[test]
+fn superseded_unsent_commit_remains_terminal() {
+    let mut f = Fixture::new(false);
+    f.step().unwrap();
+    f.copy("commit already consumed by wire sender");
+    for _ in 0..2 {
+        f.step().unwrap();
+        f.take();
+    }
+    f.step().unwrap();
+    {
+        let outbox = f.shared.outbox.lock().unwrap();
+        assert!(matches!(
+            decode(
+                &outbox.item.as_ref().unwrap().bytes.0,
+                context(),
+                &ProtocolLimits::ABSOLUTE
+            )
+            .unwrap()
+            .body,
+            Body::Commit { .. }
+        ));
+    }
+    f.permission.paused.store(true, Ordering::Release);
+    f.copy("new selection");
+    f.step().unwrap();
+    assert_eq!(
+        f.step(),
+        Err(Error::Session(
+            fr_wire::clipboard::session::SessionError::Clipboard(
+                fr_core::clipboard::Error::LocalChanged
+            )
+        ))
+    );
+    assert!(!f.shared.gate.is_open());
+    assert!(f.shared.outbox.lock().unwrap().item.is_none());
+    f.permission.paused.store(false, Ordering::Release);
+    assert_eq!(f.step(), Err(Error::Closed));
+}
+
+#[test]
+fn expired_unsent_cancel_remains_terminal() {
+    let mut f = Fixture::new(false);
+    f.step().unwrap();
+    f.copy("old item");
+    f.step().unwrap();
+    f.copy("replacement");
+    f.step().unwrap();
+    f.step().unwrap();
+    {
+        let outbox = f.shared.outbox.lock().unwrap();
+        assert!(matches!(
+            decode(
+                &outbox.item.as_ref().unwrap().bytes.0,
+                context(),
+                &ProtocolLimits::ABSOLUTE
+            )
+            .unwrap()
+            .body,
+            Body::Cancel(_)
+        ));
+    }
+    f.clock.advance_to(Time::from_millis(1_000));
+    assert_eq!(
+        f.step(),
+        Err(Error::Session(
+            fr_wire::clipboard::session::SessionError::Clipboard(
+                fr_core::clipboard::Error::Expired
+            )
+        ))
+    );
+    assert!(!f.shared.gate.is_open());
 }

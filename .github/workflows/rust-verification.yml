@@ -96,6 +96,30 @@ jobs:
           subprocess.run(['bash', 'scripts/test_linux_serial_lifecycle.sh', binaries[0],
               'real_files::real_downloads'], check=True, env=env)
           PY
+      - name: Exercise native clipboard recovery across a capture stall
+        id: clipboard_capture_stall
+        continue-on-error: true
+        run: |
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          binaries = []
+          for line in Path(os.environ['RUNNER_TEMP'], 'download-test.json').read_text().splitlines():
+              row = json.loads(line)
+              if (row.get('reason') == 'compiler-artifact'
+                      and row.get('profile', {}).get('test')
+                      and row.get('target', {}).get('name') == 'native_host_linux_serial'
+                      and row.get('executable')):
+                  binaries.append(os.path.abspath(row['executable']))
+          assert len(binaries) == 1, 'one exact native clipboard test binary required'
+          test = 'real_clipboard::a_capture_stall_keeps_the_clipboard_crossing_both_ways'
+          listed = subprocess.check_output(
+              [binaries[0], '--list', '--ignored', '--exact', test], text=True)
+          assert listed.splitlines().count(f'{test}: test') == 1, 'native clipboard capture-stall test must be present'
+          env = dict(os.environ, FR_NS_SUDO='1')
+          subprocess.run(['bash', 'scripts/test_linux_serial_lifecycle.sh', binaries[0],
+              '--exact', test], check=True, env=env)
+          PY
       - name: Examples
         id: examples
         continue-on-error: true
@@ -137,6 +161,7 @@ jobs:
             clippy=${{ steps.clippy.outcome }}
             test=${{ steps.test.outcome }}
             file_download=${{ steps.file_download.outcome }}
+            clipboard_capture_stall=${{ steps.clipboard_capture_stall.outcome }}
             examples=${{ steps.examples.outcome }}
             indicator=${{ steps.indicator.outcome }}
             viewer_input=${{ steps.viewer_input.outcome }}

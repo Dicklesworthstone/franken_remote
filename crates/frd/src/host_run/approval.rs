@@ -304,7 +304,12 @@ mod tests {
             HostBootId::from_raw(9),
             5,
             Scope::OwnUser,
-            (Some(super::super::control_capabilities()), true, true, false),
+            (
+                Some(super::super::control_capabilities()),
+                true,
+                true,
+                false,
+            ),
             true,
         )
         .unwrap();

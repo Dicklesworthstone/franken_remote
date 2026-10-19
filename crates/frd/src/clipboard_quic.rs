@@ -86,6 +86,11 @@ pub enum State {
 // whole native lane drains. The worker still has only one handoff slot.
 const MAX_INFLIGHT_RECORDS: usize = 4;
 
+enum OutboundRefusal {
+    Lane(Error),
+    Record(Error),
+}
+
 /// At most four native in-flight permits, one outbound handoff record, and one
 /// incoming queued/executing/deferred/uncollected record. Other lanes retain
 /// their original transport budgets. No payload history or unbounded queue.
@@ -355,16 +360,35 @@ impl Bridge {
     /// an error is never permission to continue a partially retired channel.
     pub(crate) fn maintain(&mut self, q: &mut QuicRecords) -> Result<State, Error> {
         self.bound(q)?;
-        if !self.retired
-            && let Err(reason) = self.admission()
+        if self.retired {
+            return Ok(State::Retired);
+        }
+        if self.lane.check(q).is_err() {
+            return self.on_refusal(q, Error::Closed);
+        }
+        if self.inflight.iter().any(Option::is_some) {
+            match self.lane.send_drained(q) {
+                // Consume the exact native empty-send witness BEFORE checking
+                // old permits. Completed transport work retains no payload.
+                Ok(true) => self.inflight.fill(None),
+                Ok(false) => {}
+                Err(_) => return self.on_refusal(q, Error::Closed),
+            }
+        }
+        let (local, host) = match self.clock.sample_maintenance(&self.cx) {
+            Ok(sample) => sample,
+            Err(reason) => return self.on_refusal(q, reason),
+        };
+        if let Some(p) = &self.pending
+            && let Err(reason) = p.check_operation(local, host)
+            && !self.discard_pending(reason)?
         {
             return self.on_refusal(q, reason);
         }
-        Ok(if self.retired {
-            State::Retired
-        } else {
-            State::Active
-        })
+        if let Err(reason) = self.admission() {
+            return self.on_refusal(q, reason);
+        }
+        Ok(State::Active)
     }
     fn on_refusal(&mut self, q: &mut QuicRecords, reason: Error) -> Result<State, Error> {
         if reason.is_suspended() {
@@ -390,11 +414,11 @@ impl Bridge {
                 return Err(Error::HandoffExpired);
             }
         }
-        if let Some(p) = &self.pending {
-            p.permit.check_operation(host).map_err(Error::Session)?;
-            if local >= p.until {
-                return Err(Error::HandoffExpired);
-            }
+        if let Some(p) = &self.pending
+            && let Err(reason) = p.check_operation(local, host)
+            && !p.can_discard(reason, &self.clock, &self.shared.gate.limits())
+        {
+            return Err(reason);
         }
         let until = self
             .shared
@@ -405,6 +429,29 @@ impl Bridge {
         }
         self.clock.sample(&self.cx)?;
         Ok((local, host))
+    }
+    fn discard_pending(&mut self, reason: Error) -> Result<bool, Error> {
+        if !self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.can_discard(reason, &self.clock, &self.shared.gate.limits()))
+        {
+            return Ok(false);
+        }
+        // This exact record is exclusively local. Its Sender still owes Cancel;
+        // Commit/Cancel and anything admitted to QUIC never enter this path.
+        self.pending = None;
+        self.release_outbox = true;
+        self.release_handoff()?;
+        Ok(true)
+    }
+    fn refuse_unsent(&mut self, q: &mut QuicRecords, reason: Error) -> Result<State, Error> {
+        if self.discard_pending(reason)? {
+            // A discarded record cannot conceal another lane/owner failure.
+            self.maintain(q)
+        } else {
+            self.on_refusal(q, reason)
+        }
     }
     fn release_handoff(&mut self) -> Result<(), Error> {
         if self.release_outbox {
@@ -440,11 +487,6 @@ impl Bridge {
             turn.complete();
             return Ok(State::Retired);
         }
-        if self.inflight.iter().any(Option::is_some)
-            && self.lane.send_drained(q).map_err(Error::Transport)?
-        {
-            self.inflight.fill(None);
-        }
         self.release_handoff()?;
         if self.pending.is_none()
             && !self.release_outbox
@@ -462,16 +504,23 @@ impl Bridge {
             return Ok(state);
         }
         if let Some(p) = &self.pending {
-            // The item's own validity is a per-record refusal: if it lapses
-            // between this turn's admission and the enqueue, no byte is
-            // admitted and only this lane retires, not the connection.
+            // General I/O can tolerate a discardable local handoff. The exact
+            // record must STILL pass both immediate pre-enqueue checks; it has
+            // not entered QUIC when this callback returns a record refusal.
             match self
                 .lane
                 .send_prepared(q, &self.cx, &p.bytes.0, p.until, &mut authorize, || {
-                    self.admission().map(drop)
+                    let (local, host) = self.admission().map_err(OutboundRefusal::Lane)?;
+                    p.check_operation(local, host)
+                        .map_err(OutboundRefusal::Record)
                 }) {
-                Ok(SendAdmission::Refused(reason)) => {
+                Ok(SendAdmission::Refused(OutboundRefusal::Lane(reason))) => {
                     let state = self.on_refusal(q, reason)?;
+                    turn.complete();
+                    return Ok(state);
+                }
+                Ok(SendAdmission::Refused(OutboundRefusal::Record(reason))) => {
+                    let state = self.refuse_unsent(q, reason)?;
                     turn.complete();
                     return Ok(state);
                 }
@@ -490,6 +539,26 @@ impl Bridge {
                     self.release_handoff()?;
                 }
                 Err(quic::Error::Backpressure) => {}
+                Err(quic::Error::Expired) if !q.is_closed() => {
+                    // send_prepared can hit its local deadline before invoking
+                    // the record callback. Only an open connection proves this
+                    // refusal concerned unadmitted bytes, not expired retention.
+                    let (local, host) = match self.clock.sample_maintenance(&self.cx) {
+                        Ok(sample) => sample,
+                        Err(reason) => {
+                            let state = self.on_refusal(q, reason)?;
+                            turn.complete();
+                            return Ok(state);
+                        }
+                    };
+                    let reason = p
+                        .check_operation(local, host)
+                        .err()
+                        .unwrap_or(Error::HandoffExpired);
+                    let state = self.refuse_unsent(q, reason)?;
+                    turn.complete();
+                    return Ok(state);
+                }
                 Err(e) => return Err(Error::Transport(e)),
             }
         }
@@ -567,3 +636,6 @@ impl Drop for Drive<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

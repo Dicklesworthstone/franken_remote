@@ -163,8 +163,29 @@ actual thread completion from that request. `finish` never blocks on an ongoing
 foreign call. A stuck OS call cannot be safely killed as a Rust thread; dropping
 the handle does not claim successful native cleanup or rollback.
 
-The current network join is conservative: a switch transition (including
-an off/on cycle), expired queued work, or superseded in-flight payload retires
+An obsolete Begin or Chunk still owned exclusively by the worker outbox or
+bridge pending slot has not entered QUIC. The owner discards that record and
+releases its one handoff slot when the wire owner has already superseded the
+item, preserving the existing Cancel-before-replacement ordering and sequence
+floors. Host-side item expiry permits the same cleanup because the worker and
+bridge use the same actual host timer. Controller-side expiry does not: its
+independent conservative clock cursors may disagree about when the native
+sender expires. A local handoff deadline alone also cannot authorize discarding
+an otherwise live sender's record. These cases remain terminal.
+
+Unsent Commit and Cancel records also retain the terminal fallback: the wire
+sender may already have finished or consumed its one cancellation, so dropping
+one could leave the peer's incomplete item unreleased. No consumed publication
+or uncertain OS effect is retried. Between I/O turns, the bridge checks the
+original lane's exact `ClipboardChannel::send_drained` witness before validating
+old in-flight permits; acknowledged work no longer retires the lane just because
+its retained permit expires later. Potentially transmitted invalid records
+still require retirement, including failures first detected within an active
+I/O operation.
+
+The current network join remains conservative: a switch transition (including
+an off/on cycle), queued work outside the safe cases above, or
+superseded in-flight payload retires
 the optional clipboard pair. It does not silently reopen the consumed channel
 or replay buffered text when a switch is re-enabled. Input and viewing continue
 when retirement is performed between I/O turns. A terminal clipboard loss first seen

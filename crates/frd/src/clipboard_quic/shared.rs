@@ -78,6 +78,43 @@ pub(super) struct Outgoing {
     pub(super) permit: Egress,
     pub(super) until: u64,
 }
+impl Outgoing {
+    pub(super) fn check_operation(&self, local: u64, host: HostInstant) -> Result<(), Error> {
+        self.permit.check_operation(host).map_err(Error::Session)?;
+        if local >= self.until {
+            return Err(Error::HandoffExpired);
+        }
+        Ok(())
+    }
+    /// Only a still-incomplete wire Sender can release a discarded handoff with
+    /// its existing Cancel. The one busy slot prevents it advancing to Commit.
+    /// LocalChanged proves that owner already fenced the item. Host expiry uses
+    /// the same actual timer as the wire owner, whose next maintenance cancels it.
+    /// Controller cursors are independent: neither their expiry nor a tighter
+    /// local handoff bound proves that the wire Sender has expired.
+    pub(super) fn can_discard(
+        &self,
+        reason: Error,
+        clock: &Clock,
+        limits: &fr_core::limits::ProtocolLimits,
+    ) -> bool {
+        use fr_core::clipboard::Error as ClipboardError;
+        use fr_wire::clipboard::{Body, decode, session::SessionError};
+
+        let fenced = matches!(
+            reason,
+            Error::Session(SessionError::Clipboard(ClipboardError::LocalChanged))
+        ) || (matches!(clock, Clock::Host(_))
+            && matches!(
+                reason,
+                Error::Session(SessionError::Clipboard(ClipboardError::Expired))
+            ));
+        fenced
+            && decode(&self.bytes.0, self.permit.context(), limits).is_ok_and(|message| {
+                matches!(message.body, Body::Begin { .. } | Body::Chunk { .. })
+            })
+    }
+}
 /// `busy` covers queued, executing, deferred AND uncollected results, not just
 /// whether a Vec is currently inside the mutex. Taking cannot expand capacity.
 #[derive(Default)]
