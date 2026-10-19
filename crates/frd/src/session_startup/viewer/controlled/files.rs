@@ -328,6 +328,24 @@ impl ControlledViewer {
             .as_mut()
             .and_then(Sender::take_batch_report)
     }
+    /// Pacing intent only: preserve the original connection-checked sender API.
+    /// This neither creates authority nor renews any transfer/record deadline.
+    /// The next service turn still checks the original controller permission.
+    pub fn set_files_paused(&mut self, paused: bool) -> Result<(), Error> {
+        if self.files.stopped {
+            return Err(Error::Closed);
+        }
+        self.files
+            .sender
+            .as_mut()
+            .ok_or(Error::Closed)?
+            .set_paused(&self.session.transport, paused)
+    }
+    /// Last local admission gate, not proof that admitted bytes stopped or that
+    /// a remote effect was rolled back. Read the original receipt for effects.
+    pub fn file_is_paused(&self) -> Option<bool> {
+        self.files.sender.as_ref().map(Sender::is_paused)
+    }
     pub fn file_stage(&self) -> Option<Stage> {
         self.files.sender.as_ref().map(Sender::stage)
     }

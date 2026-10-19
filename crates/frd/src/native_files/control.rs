@@ -17,6 +17,12 @@ pub struct SendSnapshot {
     pub current: Option<Progress>,
     /// A local request, NOT proof of retirement, rollback or completed cleanup.
     pub cancel_requested: bool,
+    /// Latest local pacing intent. Unlike cancellation this is reversible, but
+    /// never changes the original selection lifetime or controller authority.
+    pub pause_requested: bool,
+    /// Original sender's last observed admission gate, not an acknowledgement of the
+    /// latest UI request. `None` means no sender has supplied an observation yet.
+    pub paused: Option<bool>,
     /// Set only after polling the original stopped source. `None` is pending or
     /// not requested; `Ok` proves local source cleanup, not remote publication.
     pub cleanup: Option<Result<(), Error>>,
@@ -44,6 +50,8 @@ impl SendControl {
             stage: None,
             current: None,
             cancel_requested: false,
+            pause_requested: false,
+            paused: None,
             cleanup: None,
         })))
     }
@@ -75,6 +83,32 @@ impl SendControl {
         state.cancel_requested = true;
         true
     }
+    /// Request same-connection pacing of this selection, including before its
+    /// lane is established. The owner settles the original handshake and queues
+    /// the selection once, then pauses it before any source starts. Ordinary
+    /// deadlines, permission checks, receipts and cancellation continue to run.
+    pub fn pause(&self) -> bool {
+        self.set_paused(true)
+    }
+    /// Resume the same selection, never retry or recreate a cancelled/expired
+    /// sender. A stale UI handle cannot reactivate terminal work.
+    pub fn resume(&self) -> bool {
+        self.set_paused(false)
+    }
+    fn set_paused(&self, paused: bool) -> bool {
+        let mut state = self.lock();
+        if state.cancel_requested
+            || matches!(state.status.phase, SendPhase::Finished | SendPhase::Ended)
+            || state.pause_requested == paused
+        {
+            return false;
+        }
+        state.pause_requested = paused;
+        true
+    }
+    pub(crate) fn pause_requested(&self) -> bool {
+        self.lock().pause_requested
+    }
     pub(crate) fn cancel_requested(&self) -> bool {
         self.lock().cancel_requested
     }
@@ -92,10 +126,12 @@ impl SendControl {
         report: Option<&Report>,
         stage: Option<Stage>,
         current: Option<Progress>,
+        paused: Option<bool>,
     ) {
         let mut snapshot = self.lock();
         snapshot.stage = stage;
         snapshot.current = current;
+        snapshot.paused = paused;
         if let Some(report) = report {
             snapshot.status.report = Some(*report);
             if report.complete {
@@ -112,3 +148,6 @@ impl SendControl {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod pause_tests;

@@ -132,6 +132,23 @@ impl Sending {
                 ));
             }
         }
+        // begin_batch only queues descriptors. Apply the latest pacing intent
+        // BEFORE the next ordinary controller turn can start its first source.
+        // Repeated observation never starts another batch or renews its deadline.
+        if self.control.status().phase == SendPhase::Sending
+            && let Err(error) = viewer.set_paused(self.control.pause_requested())
+            && !matches!(viewer.stage(), Some(Stage::Finished | Stage::Closed))
+        {
+            // Refusal cannot become an implicit retry. Stop this completed file
+            // attachment once; the original desktop context remains independent.
+            self.control.end(Absence::Refused(error));
+            if !self.cancelled {
+                self.cancelled = true;
+                if let Err(error) = viewer.cancel() {
+                    self.control.end(Absence::Refused(error));
+                }
+            }
+        }
         // A failed sender also needs nonblocking cleanup while the desktop
         // stays open. Its stopped Slot no longer runs ordinary sender service.
         self.poll_cleanup(viewer);
@@ -144,8 +161,12 @@ impl Sending {
     /// ordered receipts; bytes queued alone never advance the phase to Finished.
     pub(in crate::session_startup) fn observe(&self, viewer: &impl Endpoint) {
         let report = viewer.report();
-        self.control
-            .observe(report.as_ref(), viewer.stage(), viewer.progress());
+        self.control.observe(
+            report.as_ref(),
+            viewer.stage(),
+            viewer.progress(),
+            viewer.paused(),
+        );
     }
 }
 
@@ -163,6 +184,8 @@ pub(in crate::session_startup) trait Endpoint {
     fn cleanup(&mut self) -> Option<Result<(), Error>>;
     fn report(&self) -> Option<Report>;
     fn progress(&self) -> Option<Progress>;
+    fn set_paused(&mut self, paused: bool) -> Result<(), Error>;
+    fn paused(&self) -> Option<bool>;
 }
 impl Endpoint for ControlledViewer {
     fn expect(&mut self, policy: Policy) -> Result<(), Error> {
@@ -195,7 +218,16 @@ impl Endpoint for ControlledViewer {
     fn progress(&self) -> Option<Progress> {
         self.file_progress()
     }
+    fn set_paused(&mut self, paused: bool) -> Result<(), Error> {
+        self.set_files_paused(paused)
+    }
+    fn paused(&self) -> Option<bool> {
+        self.file_is_paused()
+    }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod pause_tests;

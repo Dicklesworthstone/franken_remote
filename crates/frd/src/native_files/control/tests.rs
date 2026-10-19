@@ -16,7 +16,7 @@ fn queued_bytes_and_unknown_sizes_never_fabricate_publication() {
             queued_bytes: queued,
             total_bytes: size,
         };
-        control.observe(None, Some(stage), Some(progress));
+        control.observe(None, Some(stage), Some(progress), None);
         let snapshot = control.snapshot();
         assert_eq!(snapshot.status.phase, SendPhase::Sending);
         assert!(snapshot.status.report.is_none());
@@ -70,8 +70,9 @@ fn disappearing_current_transfer_is_not_an_old_files_progress() {
             queued_bytes: 4,
             total_bytes: Some(4),
         }),
+        None,
     );
-    control.observe(None, Some(Stage::Queued), None);
+    control.observe(None, Some(Stage::Queued), None, None);
     assert!(control.snapshot().current.is_none());
     control.observe(
         None,
@@ -81,6 +82,7 @@ fn disappearing_current_transfer_is_not_an_old_files_progress() {
             queued_bytes: 0,
             total_bytes: None,
         }),
+        None,
     );
     assert_eq!(control.snapshot().current.unwrap().id, 2);
     assert_eq!(control.snapshot().current.unwrap().total_bytes, None);

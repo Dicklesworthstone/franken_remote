@@ -80,6 +80,12 @@ impl Endpoint for Peer {
     fn progress(&self) -> Option<Progress> {
         self.progress
     }
+    fn set_paused(&mut self, _: bool) -> Result<(), Error> {
+        Ok(())
+    }
+    fn paused(&self) -> Option<bool> {
+        None
+    }
 }
 fn lane() -> (Lane, SendControl) {
     let mut selection = Selection::new();
