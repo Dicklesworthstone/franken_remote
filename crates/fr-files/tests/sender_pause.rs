@@ -1,6 +1,7 @@
 #![cfg(target_os = "linux")]
 //! Real UDP/TLS/ATP/disk pause/resume on one original file lane. Authority and
 //! admission fixtures are local; these are not live-tailnet qualification tests.
+#[allow(dead_code)] // Shared support module: native_quic uses the remaining helpers.
 mod native_support;
 use asupersync::cx::Cx;
 use fr_files::{

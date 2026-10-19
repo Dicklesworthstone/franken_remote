@@ -470,6 +470,10 @@ impl InputClient {
             // Replaceable pointer state: the host tolerates missing datagrams.
             Unsent::Pointer => {}
         }
+        // A never-admitted action no longer owes a receipt. Keep detached
+        // clipboard consumers from expiring on that retired obligation while
+        // preserving every other pending action's original deadline.
+        self.clipboard_readiness();
         Ok(())
     }
     /// Since when input is suspended by a stale view, if it is now.

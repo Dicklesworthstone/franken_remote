@@ -258,8 +258,15 @@ impl<N: NativeClipboard> Synchronizer<N> {
         let changes = self.native.changes().map_err(SyncError::Native)?;
         // The OS notification has been consumed. Retain just its latest bounded
         // metadata if readiness lapses during this call, before any text read.
-        if changes.latest.is_some() {
-            self.deferred_change = changes.latest;
+        if let Some(change) = changes.latest {
+            if change.revision > self.seen_revision {
+                // Fence already handed-off payloads before a second authority
+                // read can observe recovery. This needs no new authority and
+                // cannot extend the old item; echo admission still happens
+                // below, using its unchanged publication provenance.
+                self.channel.discard_pending(CancelReason::Superseded);
+            }
+            self.deferred_change = Some(change);
         }
         let now = clock();
         if !self.admit(now)? {

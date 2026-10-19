@@ -74,13 +74,20 @@ granting clipboard authority. Both the bridge and worker check retained operatio
 and handoff deadlines before treating a readiness refusal as a pause. A queued
 item, three-second handoff, switch transition, cancellation or terminal authority
 failure can therefore still retire the lane during a view pause. No deadline is
-restarted on resume.
+restarted on resume. Authenticated clock exchanges refresh only the conservative
+clock model during ordinary suspension and negotiated reference recovery. They
+do not renew lease proof or supply a resume ticket, and cannot revive an expired
+clock or owner. Abandoning an input action that never entered transport removes
+its obsolete receipt obligation; all other obligations retain their deadlines.
 
 The native synchronizer retains its watcher and current OS selection. It does
 not call the native disable operation for a view pause, read new text, or publish
 incoming text while unready. It keeps at most the latest consumed change
-notification, so a copy racing the post-observation check is not lost. An
-unstarted candidate can resume; a partial read that already began is cancelled
+notification, so a copy racing the post-observation check is not lost. Every
+newly consumed native revision immediately invalidates older queued payload
+permits before the next authority check can observe recovery, even when a Commit
+has already left the sender buffer. The original publication provenance still
+controls echo suppression. An unstarted candidate can resume; a partial read that already began is cancelled
 and cannot be retried with a new lifetime. An unconsumed wire record is deferred
 with its original ingress bound. A Commit that reached native preparation is a
 consumed refusal if readiness lapses before publication.

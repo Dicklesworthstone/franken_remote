@@ -366,9 +366,13 @@ and clock failure fence it. Closing the clipboard alone does not revoke input.
 A temporary view or proof lapse pauses this lane while input keeps its independent
 ticket, view and lease checks. Maintenance advances the conservative accounting
 clock and expires private buffers during the pause; it never supplies payload
-authority. Native watchers retain the current OS selection and coalesce copies
-made during the pause. Interrupted partial reads are consumed, and queued wire
-records retain their original bounds.
+authority. Independent authenticated clock exchanges update that model while
+preserving lease proof, the required resume ticket and the fixed suspension
+limit. An expired model or terminal owner cannot be revived by a late exchange.
+Native watchers retain and service the current OS selection and coalesce copies
+made during the pause. A newer consumed revision fences older queued payloads
+before an authority recheck can observe recovery. Interrupted partial reads are
+consumed, and queued wire records retain their original bounds.
 The `PresentedInput` join also retains a read-only lifetime of its exact media
 receiver. An explicitly negotiated reference recovery may replace the receiver's
 epoch under the same live receiver lineage, unchanged configuration, and a

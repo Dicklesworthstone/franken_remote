@@ -181,6 +181,37 @@ impl Owner {
     pub(crate) fn check(&self, now: ClientInstant) -> Result<(), Error> {
         self.state.sample(now, false).map(|_| ())
     }
+    /// Refresh only the authenticated clock model. The previous model must
+    /// still be valid; neither a late sample nor a better correlation revives
+    /// this owner, renews lease proof, resumes a view or moves an item deadline.
+    pub(crate) fn synchronize(
+        &self,
+        clock: ClockCorrelation,
+        now: ClientInstant,
+    ) -> Result<(), Error> {
+        self.check(now)?;
+        let result = (|| {
+            let mut m = self.state.inner.lock().map_err(|_| Error::Stopped)?;
+            if clock.host_boot() != m.clock.host_boot()
+                || clock.received_at_us() < m.clock.received_at_us()
+            {
+                return Err(Error::Clock);
+            }
+            let host = clock
+                .age_upper_us(0, now.0)
+                .map_err(|_| Error::Clock)?
+                .max(m.last_host);
+            m.clock = clock;
+            m.last_host = host;
+            // Keep local_until, host_until, resume_ticket and paused_since.
+            // The rolling host cursor preserves all previously started bounds.
+            self.state.ready_at(&mut m, now.0, host, false)
+        })();
+        if result.is_err() {
+            self.stop();
+        }
+        result
+    }
     pub(crate) fn readiness(
         &self,
         mapped: bool,

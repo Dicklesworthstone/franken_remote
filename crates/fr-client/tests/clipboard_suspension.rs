@@ -3,7 +3,11 @@
 #[path = "clipboard_controller/mod.rs"]
 pub mod support;
 
-use fr_client::clipboard::Error;
+use fr_client::{
+    clipboard::Error,
+    input::{Action, Unsent},
+};
+use fr_core::input::{KeyTransition, PhysicalKey};
 use fr_wire::clipboard::session::{Offer, Pump};
 use support::*;
 
@@ -318,4 +322,61 @@ fn closing_a_paused_lane_is_terminal_for_both_transport_clock_apis() {
         network.sample_maintenance(client(500_000)),
         Err(Error::Stopped)
     );
+}
+
+#[test]
+fn abandoning_a_never_admitted_action_removes_its_clipboard_receipt_obligation() {
+    let (mut input, mut lane) = attached();
+    let network = lane.transport();
+    let encoded = input
+        .action(
+            Action::Key {
+                key: PhysicalKey::new(4).unwrap(),
+                transition: KeyTransition::Press,
+            },
+            &mut [0; 256],
+            client(100_000),
+        )
+        .unwrap();
+    input.suspend(client(200_000));
+    // The caller's unsent slot was never admitted to transport. Suspension
+    // consumes it locally; there can be no host receipt for these bytes.
+    input
+        .abandon_unsent(Unsent::Action(encoded.sequence))
+        .unwrap();
+    assert_eq!(input.pending_actions(), 0);
+    let old_receipt_deadline = 100_000 + policy().receipt_timeout_us;
+    // A detached worker checks the old deadline before any new input event
+    // can refresh the projection. Only the view gate should still block it.
+    assert_eq!(
+        network
+            .sample_maintenance(client(old_receipt_deadline))
+            .unwrap(),
+        host_at(old_receipt_deadline)
+    );
+    assert_eq!(
+        network.sample(client(old_receipt_deadline)),
+        Err(Error::NotReady)
+    );
+    input.tick(client(old_receipt_deadline)).unwrap();
+
+    ready(&mut input, 1, 1_600_000);
+    input
+        .accept_ticket(
+            &ticket(1, H + 1_600_000, H + 2_600_000),
+            correlation(1_600_000),
+            client(1_600_000),
+        )
+        .unwrap();
+    assert_eq!(input.suspended_since(), None);
+    assert!(matches!(
+        lane.offer(
+            1,
+            "same clipboard after unsent action",
+            None,
+            client(1_600_000)
+        ),
+        Ok(Offer::Queued(_))
+    ));
+    assert!(!lane.is_closed());
 }

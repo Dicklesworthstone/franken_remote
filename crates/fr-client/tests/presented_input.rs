@@ -1059,3 +1059,169 @@ fn closing_or_dropping_a_receiver_is_terminal_even_when_recovery_was_negotiated(
         assert!(clipboard.is_closed());
     }
 }
+
+fn later_clock(now: u64) -> ClockCorrelation {
+    ClockCorrelation::new(
+        ClockSample {
+            host_boot: HostBootId::from_raw(1),
+            client_sent_us: now - 100,
+            host_sample_us: 1_000_000 + now - 100,
+            client_received_us: now,
+        },
+        ClockPolicy {
+            drift_ppm: 0,
+            ..ClockPolicy::default()
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn clock_sync_preserves_paused_clipboard_without_proving_lease_or_visibility() {
+    use fr_client::clipboard::Error as ClipboardError;
+    use fr_wire::clipboard::session::Offer;
+
+    let (_receiver, mut input, limits, descriptor) = shown_with(setup_with(granted()));
+    let mut clipboard = input
+        .attach_clipboard(77, true, ClientInstant(22_000))
+        .unwrap();
+    clipboard.local_switch().set_enabled(true);
+    clipboard.peer_switch().set_enabled(true);
+    let network = clipboard.transport();
+    suspended_at(&mut input, 255_000);
+    let correlation = later_clock(6_000_000);
+    input
+        .synchronize(correlation, ClientInstant(6_000_000))
+        .unwrap();
+    let now = 10_050_000;
+    assert!(now > clock().valid_until_us());
+    assert_eq!(
+        network.sample_maintenance(ClientInstant(now)).unwrap(),
+        HostInstant::from_micros(1_000_000 + now)
+    );
+    assert_eq!(
+        network.sample(ClientInstant(now)),
+        Err(ClipboardError::NotReady)
+    );
+
+    // A genuinely unchanged source observation of this exact visible picture
+    // restores freshness, but the clock exchange supplied no new lease proof.
+    progress(
+        &mut input,
+        limits,
+        descriptor,
+        1_000_000 + now - 100,
+        SourceObservation::QualifiedUnchanged,
+        now,
+    )
+    .unwrap();
+    assert_eq!(
+        network.sample(ClientInstant(now)),
+        Err(ClipboardError::NotReady)
+    );
+    let mut credentials = credentials();
+    credentials.ticket = InputTicketId::from_raw(4);
+    let mut bytes = [0; input_ticket::INPUT_TICKET_BYTES];
+    input_ticket::encode(
+        input_ticket::Ticket {
+            credentials,
+            sequence: 1,
+            issued_at_us: 1_000_000 + now,
+            expires_at_us: 2_000_000 + now,
+        },
+        &mut bytes,
+        &ProtocolLimits::ABSOLUTE,
+        7,
+        InputDirection::HostToViewer,
+        InputDelivery::Reliable,
+    )
+    .unwrap();
+    input
+        .accept_ticket(&bytes, correlation, ClientInstant(now))
+        .unwrap();
+    assert_eq!(input.suspended_since(), None);
+    assert!(matches!(
+        clipboard.offer(1, "same lane after clock refresh", None, ClientInstant(now)),
+        Ok(Offer::Queued(_))
+    ));
+}
+
+#[test]
+fn clock_sync_does_not_move_the_original_pause_limit_even_during_reference_recovery() {
+    use fr_client::clipboard::Error as ClipboardError;
+
+    for recovering in [false, true] {
+        let (mut receiver, mut input, limits, _) = shown_with(setup_with(granted()));
+        let clipboard = input
+            .attach_clipboard(77, true, ClientInstant(22_000))
+            .unwrap();
+        let network = clipboard.transport();
+        if recovering {
+            input.expect_reference_recovery();
+            abandon_dependent_picture(&mut receiver, limits);
+            assert_eq!(input.tick(ClientInstant(23_300)), Ok(false));
+        } else {
+            suspended_at(&mut input, 255_000);
+        }
+        let since = input.suspended_since().unwrap();
+        let limit = since.0 + input::MAX_VIEW_SUSPENSION_US;
+        assert!(limit > clock().valid_until_us());
+        input
+            .synchronize(later_clock(6_000_000), ClientInstant(6_000_000))
+            .unwrap();
+        assert_eq!(input.suspended_since(), Some(since));
+        assert!(network.sample_maintenance(ClientInstant(limit - 1)).is_ok());
+        assert_eq!(
+            network.sample(ClientInstant(limit - 1)),
+            Err(ClipboardError::NotReady)
+        );
+        assert_eq!(
+            network.sample_maintenance(ClientInstant(limit)),
+            Err(ClipboardError::Expired)
+        );
+        assert!(
+            input
+                .synchronize(later_clock(limit), ClientInstant(limit))
+                .is_err()
+        );
+        assert_eq!(
+            network.sample_maintenance(ClientInstant(limit)),
+            Err(ClipboardError::Stopped)
+        );
+    }
+}
+
+#[test]
+fn a_fresh_clock_cannot_revive_clipboard_after_old_clock_expiry_or_revocation() {
+    use fr_client::clipboard::Error as ClipboardError;
+
+    for revoked in [false, true] {
+        let (_receiver, mut input, _, _) = shown_with(setup_with(granted()));
+        let clipboard = input
+            .attach_clipboard(77, true, ClientInstant(22_000))
+            .unwrap();
+        let network = clipboard.transport();
+        suspended_at(&mut input, 255_000);
+        let now = if revoked {
+            input.hidden();
+            6_000_000
+        } else {
+            clock().valid_until_us()
+        };
+        // Healthy exchanges must arrive before the old model expires. The
+        // first late refresh itself must fence the old clipboard projection.
+        let result = input.synchronize(later_clock(now), ClientInstant(now));
+        if revoked {
+            assert_eq!(
+                result,
+                Err(Error::Input(input::Error::Stopped(StopReason::FocusLost)))
+            );
+        } else {
+            result.unwrap();
+        }
+        assert_eq!(
+            network.sample_maintenance(ClientInstant(now)),
+            Err(ClipboardError::Stopped)
+        );
+    }
+}

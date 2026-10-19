@@ -425,10 +425,31 @@ impl PresentedInput {
     ) -> Result<(), Error> {
         self.input.tick(now)?;
         if let Some(pending) = &mut self.recovering {
+            // Recovery retains the original receiver and clock identity, even
+            // though its fenced view tracker cannot be serviced until rebind.
+            if clock.host_boot() != pending.host_boot() {
+                return Err(Error::Media(freshness::Error::StaleBinding));
+            }
+            if clock.received_at_us() <= pending.received_at_us() {
+                return Err(Error::Media(freshness::Error::Obsolete));
+            }
+            clock.age_upper_us(0, now.0)?;
             *pending = clock;
-            return Ok(());
+        } else {
+            self.view.synchronize(clock, now.0)?;
         }
-        self.view.synchronize(clock, now.0).map_err(Error::Media)
+        // No input ticket is issued while the host view is suspended. Keep
+        // its independent authenticated clock exchanges available to clipboard
+        // maintenance, without turning one into authority or a fresh view.
+        if self
+            .input
+            .clipboard_projection
+            .as_ref()
+            .is_some_and(|owner| owner.synchronize(clock, now).is_err())
+        {
+            self.input.retire_clipboard();
+        }
+        Ok(())
     }
     /// Actual, bound `MediaProgress` only. Unknown source state stops active input
     /// even when the old pixel timestamp would otherwise still be within budget.
