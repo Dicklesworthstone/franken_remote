@@ -324,8 +324,7 @@ impl PendingControl {
                             return Ok(Disposition::Consumed);
                         }
                         if route == inbound
-                            && bytes.get(6..8)
-                                == Some(&(Kind::LeaseRevoked as u16).to_be_bytes())
+                            && bytes.get(6..8) == Some(&(Kind::LeaseRevoked as u16).to_be_bytes())
                         {
                             return Err(self.revoked(bytes));
                         }

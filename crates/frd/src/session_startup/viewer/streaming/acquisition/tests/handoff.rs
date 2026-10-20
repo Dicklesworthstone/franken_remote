@@ -33,8 +33,17 @@ struct GrantedPair {
 }
 fn pending(
     stream: &mut StreamingViewer,
-) -> (&mut ViewerSession, &crate::media_quic::NegotiatedMedia, &mut PendingControl) {
-    let Peer::Acquiring { session, media, request } = &mut stream.peer else {
+) -> (
+    &mut ViewerSession,
+    &crate::media_quic::NegotiatedMedia,
+    &mut PendingControl,
+) {
+    let Peer::Acquiring {
+        session,
+        media,
+        request,
+    } = &mut stream.peer
+    else {
         panic!("the original request is no longer pending");
     };
     (session, media, request)
@@ -69,17 +78,33 @@ async fn poll_driver(driver: &mut Driver) {
 }
 async fn requesting(c: &Cx, h: &Cx) -> Requesting {
     let Fixture {
-        mut stream, host, broker, channels, seat, request, feedback, media, ..
+        mut stream,
+        host,
+        broker,
+        channels,
+        seat,
+        request,
+        feedback,
+        media,
+        ..
     } = Box::pin(fixture(c, h)).await;
-    let Peer::Observe { session, media: viewer_media } =
-        std::mem::replace(&mut stream.peer, Peer::Closed)
+    let Peer::Observe {
+        session,
+        media: viewer_media,
+    } = std::mem::replace(&mut stream.peer, Peer::Closed)
     else {
         panic!("fixture did not retain observation");
     };
     let mut control = PendingControl::new(
-        &session, channels, request,
-        Policy { view_age_us: 1_500_000, ..Policy::default() },
-    ).unwrap();
+        &session,
+        channels,
+        request,
+        Policy {
+            view_age_us: 1_500_000,
+            ..Policy::default()
+        },
+    )
+    .unwrap();
     control.decoded(stream.initial.take().unwrap()).unwrap();
     stream.peer = Peer::Acquiring {
         session,
@@ -88,7 +113,15 @@ async fn requesting(c: &Cx, h: &Cx) -> Requesting {
     };
     let (session, _, control) = pending(&mut stream);
     control.service(session).unwrap();
-    Requesting { stream, host, broker, seat, request, feedback, media }
+    Requesting {
+        stream,
+        host,
+        broker,
+        seat,
+        request,
+        feedback,
+        media,
+    }
 }
 async fn grant(c: &Cx, h: &Cx) -> GrantedPair {
     let mut f = Box::pin(requesting(c, h)).await;
@@ -99,8 +132,11 @@ async fn grant(c: &Cx, h: &Cx) -> GrantedPair {
         let (session, _, request) = pending(&mut f.stream);
         request.service(session).unwrap();
         let (host, viewer) = Box::pin(support::both(
-            f.host.drive(Duration::from_millis(1), || nonce(&mut n), block),
-            session.transport.drive(c, Duration::from_millis(1), || true),
+            f.host
+                .drive(Duration::from_millis(1), || nonce(&mut n), block),
+            session
+                .transport
+                .drive(c, Duration::from_millis(1), || true),
         ))
         .await;
         host.unwrap();
@@ -109,23 +145,33 @@ async fn grant(c: &Cx, h: &Cx) -> GrantedPair {
     }
     let effects = Arc::new(Mutex::new(Vec::new()));
     let native_effects = effects.clone();
-    let mut driver = f.broker.approve(
-        f.host.io().unwrap().0,
-        target(),
-        || Some((InputLeaseId::from_raw(19), InputTicketId::from_raw(23))),
-        move || Ok(Sink(native_effects)),
-        |_| true,
-    ).unwrap();
+    let mut driver = f
+        .broker
+        .approve(
+            f.host.io().unwrap().0,
+            target(),
+            || Some((InputLeaseId::from_raw(19), InputTicketId::from_raw(23))),
+            move || Ok(Sink(native_effects)),
+            |_| true,
+        )
+        .unwrap();
     loop {
         assert!(now(h).unwrap() < until);
         poll_driver(&mut driver).await;
-        if f.broker.service(f.host.io().unwrap().0, Some(target())).unwrap() == Event::GrantQueued {
+        if f.broker
+            .service(f.host.io().unwrap().0, Some(target()))
+            .unwrap()
+            == Event::GrantQueued
+        {
             break;
         }
         let (session, _, _) = pending(&mut f.stream);
         raw_turn(c, h, f.host.io().unwrap().0, &mut session.transport).await;
     }
-    let input = f.broker.finish(f.host.io().unwrap().0, Some(target())).unwrap();
+    let input = f
+        .broker
+        .finish(f.host.io().unwrap().0, Some(target()))
+        .unwrap();
     GrantedPair {
         stream: f.stream,
         host: f.host.into_controlled(input).unwrap(),
@@ -147,12 +193,15 @@ fn front(q: &mut QuicRecords, cx: &Cx, route: StreamRoute) -> Vec<u8> {
             assert!(retained.replace(bytes.to_vec()).is_none());
             Ok(Disposition::Blocked)
         },
-    ).unwrap();
+    )
+    .unwrap();
     retained.expect("record must remain in its original transport slot")
 }
 async fn pending_turn(stream: &mut StreamingViewer) -> Result<(), Error> {
     let (session, media, request) = pending(stream);
-    request.drive(session, media, Duration::from_millis(1), |_, _| Err(())).await
+    request
+        .drive(session, media, Duration::from_millis(1), |_, _| Err(()))
+        .await
 }
 async fn reap_granted(mut f: GrantedPair, cleanup: &Cx) {
     f.media.check(f.host.io().unwrap().0).unwrap();
@@ -160,10 +209,13 @@ async fn reap_granted(mut f: GrantedPair, cleanup: &Cx) {
     f.host.close();
     assert!(f.driver.await.handoff_safe());
     assert!(!f.seat.is_occupied());
-    f.stream.reap_media(
-        cleanup,
-        Deadline::after(cleanup, Duration::from_secs(1)).unwrap(),
-    ).await.unwrap();
+    f.stream
+        .reap_media(
+            cleanup,
+            Deadline::after(cleanup, Duration::from_secs(1)).unwrap(),
+        )
+        .await
+        .unwrap();
 }
 async fn stage_challenge(f: &mut GrantedPair, c: &Cx, h: &Cx) {
     let (session, _, _) = pending(&mut f.stream);
@@ -171,15 +223,23 @@ async fn stage_challenge(f: &mut GrantedPair, c: &Cx, h: &Cx) {
     let mut n = 90_000;
     let (host, viewer) = Box::pin(support::both(
         f.host.drive(
-            Duration::from_millis(1), || nonce(&mut n),
-            || Some(InputTicketId::from_raw(24)), block,
+            Duration::from_millis(1),
+            || nonce(&mut n),
+            || Some(InputTicketId::from_raw(24)),
+            block,
         ),
-        session.transport.drive(c, Duration::from_millis(1), || true),
-    )).await;
+        session
+            .transport
+            .drive(c, Duration::from_millis(1), || true),
+    ))
+    .await;
     host.unwrap();
     viewer.unwrap();
     drain_host(c, h, f.host.io().unwrap().0, &mut session.transport).await;
-    assert!(n > 90_000, "the real control renewal must issue a challenge");
+    assert!(
+        n > 90_000,
+        "the real control renewal must issue a challenge"
+    );
     assert!(f.host.control_renewed_until().is_none());
     // Both the grant and real challenge were natively ACKed while the pending
     // viewer has consumed neither, so later dispatch does not rely on timing.
@@ -190,16 +250,24 @@ async fn stage_challenge(f: &mut GrantedPair, c: &Cx, h: &Cx) {
 }
 fn promote(f: &mut GrantedPair) {
     notify(
-        &mut f.stream.peer, &f.stream.receiver, &mut f.stream.control, None,
+        &mut f.stream.peer,
+        &f.stream.receiver,
+        &mut f.stream.control,
+        None,
         &mut |state, _| {
             let Dispatch::Existing(State::Requesting(request)) = state else {
                 panic!("control was exposed before local acknowledgement");
             };
-            request.confirm_mapping(f.request.parent, f.request.target.view).unwrap();
-            request.visible(request.presentation().unwrap().frame.as_raw()).unwrap();
+            request
+                .confirm_mapping(f.request.parent, f.request.target.view)
+                .unwrap();
+            request
+                .visible(request.presentation().unwrap().frame.as_raw())
+                .unwrap();
             Ok(())
         },
-    ).unwrap();
+    )
+    .unwrap();
     assert!(matches!(f.stream.peer, Peer::Control(_)));
 }
 async fn renew(f: &mut GrantedPair, c: &Cx, h: &Cx) {
@@ -211,7 +279,8 @@ async fn renew(f: &mut GrantedPair, c: &Cx, h: &Cx) {
         poll_driver(&mut f.driver).await;
         let (host, viewer) = Box::pin(support::both(
             f.host.drive(
-                Duration::from_millis(1), || nonce(&mut n),
+                Duration::from_millis(1),
+                || nonce(&mut n),
                 || {
                     ticket += 1;
                     Some(InputTicketId::from_raw(ticket))
@@ -219,10 +288,12 @@ async fn renew(f: &mut GrantedPair, c: &Cx, h: &Cx) {
                 block,
             ),
             f.stream.peer.controlled().unwrap().drive(
-                Duration::from_millis(1), |_| panic!("no input was submitted"),
+                Duration::from_millis(1),
+                |_| panic!("no input was submitted"),
                 |_, _| Err(()),
             ),
-        )).await;
+        ))
+        .await;
         host.unwrap();
         viewer.unwrap();
     }
@@ -249,12 +320,23 @@ fn acknowledged_grant_and_immediate_challenge_wait_for_the_original_control_owne
         ));
         pending_turn(&mut f.stream).await.unwrap();
         let (session, _, request) = pending(&mut f.stream);
-        assert_eq!(front(&mut session.transport, &c, session.routes.inbound), challenge);
+        assert_eq!(
+            front(&mut session.transport, &c, session.routes.inbound),
+            challenge
+        );
         assert!(!request.local.mapped);
         assert_eq!(*f.effects.lock().unwrap(), [] as [InputOperation; 0]);
         promote(&mut f);
         Box::pin(renew(&mut f, &c, &h)).await;
-        assert!(f.stream.peer.parts().unwrap().0.transport.is_bound_to(&connection));
+        assert!(
+            f.stream
+                .peer
+                .parts()
+                .unwrap()
+                .0
+                .transport
+                .is_bound_to(&connection)
+        );
         assert_eq!(*f.effects.lock().unwrap(), [] as [InputOperation; 0]);
         Box::pin(reap_granted(f, &h)).await;
     });
@@ -263,7 +345,9 @@ fn acknowledged_grant_and_immediate_challenge_wait_for_the_original_control_owne
 fn input_feedback_before_the_grant_is_retained_without_inventing_control() {
     run(|c, h| async move {
         let mut f = Box::pin(requesting(&c, &h)).await;
-        let Route::Stream(feedback) = f.feedback else { panic!("feedback must be reliable") };
+        let Route::Stream(feedback) = f.feedback else {
+            panic!("feedback must be reliable")
+        };
         let (session, _, _) = pending(&mut f.stream);
         drain_host(&c, &h, f.host.io().unwrap().0, &mut session.transport).await;
         let at = now(&h).unwrap();
@@ -274,14 +358,26 @@ fn input_feedback_before_the_grant_is_retained_without_inventing_control() {
                 ticket: InputTicketId::from_raw(24),
                 view: f.request.target.view,
             },
-            sequence: 1, issued_at_us: at, expires_at_us: at + 500_000,
+            sequence: 1,
+            issued_at_us: at,
+            expires_at_us: at + 500_000,
         };
         let mut bytes = [0; input_ticket::INPUT_TICKET_BYTES];
         let count = input_ticket::encode(
-            ticket, &mut bytes, &f.host.selection().limits, feedback.binding,
-            InputDirection::HostToViewer, InputDelivery::Reliable,
-        ).unwrap();
-        f.host.io().unwrap().0.send(&h, f.feedback, &bytes[..count], at + 500_000, || true).unwrap();
+            ticket,
+            &mut bytes,
+            &f.host.selection().limits,
+            feedback.binding,
+            InputDirection::HostToViewer,
+            InputDelivery::Reliable,
+        )
+        .unwrap();
+        f.host
+            .io()
+            .unwrap()
+            .0
+            .send(&h, f.feedback, &bytes[..count], at + 500_000, || true)
+            .unwrap();
         let (session, _, request) = pending(&mut f.stream);
         let original_deadline = request.deadline();
         let (_, inbound, _) = request.channels.viewer_routes(&session.transport).unwrap();
@@ -297,7 +393,10 @@ fn input_feedback_before_the_grant_is_retained_without_inventing_control() {
         f.stream.close();
         f.host.close();
         drop(f.broker);
-        f.stream.reap_media(&h, Deadline::after(&h, Duration::from_secs(1)).unwrap()).await.unwrap();
+        f.stream
+            .reap_media(&h, Deadline::after(&h, Duration::from_secs(1)).unwrap())
+            .await
+            .unwrap();
     });
 }
 #[test]
@@ -309,19 +408,17 @@ fn a_real_host_revocation_ends_the_received_grant_before_mapping_or_visibility()
         pending_turn(&mut f.stream).await.unwrap();
         let control = f.host.control();
         let ((delivery, report), shutdown) = Box::pin(support::both(
-            support::both(
-                f.host.revoke_and_close(HostStop::LocalRevoke),
-                async {
-                    loop {
-                        match pending_turn(&mut f.stream).await {
-                            Err(Error::Control(ControlError::LeaseRevoked(report))) => break report,
-                            result => result.unwrap(),
-                        }
+            support::both(f.host.revoke_and_close(HostStop::LocalRevoke), async {
+                loop {
+                    match pending_turn(&mut f.stream).await {
+                        Err(Error::Control(ControlError::LeaseRevoked(report))) => break report,
+                        result => result.unwrap(),
                     }
-                },
-            ),
+                }
+            }),
             f.driver,
-        )).await;
+        ))
+        .await;
         assert!(matches!(delivery, Ok(()) | Err(quic::Error::Expired)));
         assert_eq!(report.lease, InputLeaseId::from_raw(19));
         assert_eq!(report.reason, Reason::LocalRevoke);
@@ -337,6 +434,9 @@ fn a_real_host_revocation_ends_the_received_grant_before_mapping_or_visibility()
         assert_eq!(*f.effects.lock().unwrap(), [] as [InputOperation; 0]);
         assert!(shutdown.handoff_safe());
         assert!(!f.seat.is_occupied());
-        f.stream.reap_media(&h, Deadline::after(&h, Duration::from_secs(1)).unwrap()).await.unwrap();
+        f.stream
+            .reap_media(&h, Deadline::after(&h, Duration::from_secs(1)).unwrap())
+            .await
+            .unwrap();
     });
 }

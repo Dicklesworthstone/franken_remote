@@ -3,7 +3,7 @@
 use super::*;
 use asupersync::types::{Budget, CancelKind};
 use fr_core::{ids::*, limits::ProtocolLimits};
-use fr_transport::quic::{ALPN, Policy};
+use fr_transport::quic::{ALPN, MAX_DELIVERY_ALLOWANCE_US, Policy};
 use fr_wire::{
     decoder::Binding,
     input::{InputDelivery, InputDirection},
@@ -121,7 +121,14 @@ fn expired_retained_bytes_are_still_a_terminal_transport_failure() {
         let at = support::clock(cx);
         q.send(cx, route, &bytes(), at + 1_000_000, || true)
             .unwrap();
-        std::thread::sleep(Duration::from_millis(1100));
+        assert_eq!(q.usage().retained_send_records, 1);
+        // Before an RTT sample, admitted bytes retain the full path allowance,
+        // even after their send-by usefulness ends. Keep the original record
+        // unacknowledged and cross that bounded delivery deadline, not send-by.
+        let retention_bound = support::clock(cx) + MAX_DELIVERY_ALLOWANCE_US;
+        std::thread::sleep(Duration::from_micros(MAX_DELIVERY_ALLOWANCE_US + 100_000));
+        assert!(support::clock(cx) >= retention_bound);
+        assert_eq!(q.usage().retained_send_records, 1);
         let result = send_with_clock(q, cx, route, &bytes(), at, at + 3_000_000, || {
             panic!("retained expiry is checked before prepared-record usefulness")
         });

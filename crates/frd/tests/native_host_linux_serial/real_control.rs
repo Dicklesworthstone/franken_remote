@@ -641,7 +641,7 @@ exec \"$@\"
                 let wrapper = tools.0.join(format!("cli-{name}"));
                 crate::executable::write(
                     &wrapper,
-                    &format!(
+                    format!(
                         "#!/bin/sh\nexec '{}' \"$@\"\n",
                         tools.0.join(name).display()
                     ),
