@@ -1,21 +1,25 @@
-//! Bounded, opportunistic bulk batching; never an acknowledgment witness.
+//! Bounded, opportunistic batching; never an acknowledgment witness.
 //!
-//! Critical streams keep their closed batches. Bulk streams may add already
-//! admitted records for a fixed ten milliseconds after the first native prefix.
-//! There is no batching delay: the first record is sent immediately. This lets
-//! a producer serviced on successive scheduler turns use the existing retained
-//! budget rather than waiting one RTT for every small record. The owner still
-//! enforces every original delivery deadline and releases credit only after
-//! BOTH native pending and retransmission storage are proven empty.
+//! Already admitted records may join for a fixed ten milliseconds after the
+//! first native prefix. There is no batching delay: the first record is sent
+//! immediately. Critical batches admit at most four records this way, so a
+//! burst of clock, renewal or input feedback need not wait one RTT per record
+//! while a busy producer cannot pin an unbounded flight. An initially frozen
+//! batch may already be larger; its original membership is not changed.
+//!
+//! Bulk batching and the connection's separate byte/count budgets are unchanged.
+//! Every original delivery deadline remains in force. Credit is released only
+//! after BOTH native pending and retransmission storage are proven empty.
 
-const BULK_FILL_MICROS: u64 = 10_000;
+const FILL_MICROS: u64 = 10_000;
+const CRITICAL_FILL_RECORDS: usize = 4;
 
 pub(super) struct SendEpoch {
     pub(super) bytes: usize,
     pub(super) records: usize,
-    // None for critical streams. Keep the start, not a sliding last-admission
-    // time; a busy producer cannot indefinitely keep a batch open.
-    fill_started: Option<u64>,
+    // Keep the first-prefix time, not a sliding last-admission time.
+    fill_started: u64,
+    bulk: bool,
 }
 
 impl SendEpoch {
@@ -23,7 +27,8 @@ impl SendEpoch {
         Self {
             bytes,
             records,
-            fill_started: if bulk { Some(now) } else { None },
+            fill_started: now,
+            bulk,
         }
     }
 
@@ -32,10 +37,10 @@ impl SendEpoch {
     /// in the next batch, with its original charge and delivery deadline.
     /// This never stages native bytes or reclaims credit.
     pub(super) fn try_join(&mut self, bytes: usize, now: u64) -> bool {
-        let Some(elapsed) = self.fill_started.and_then(|start| now.checked_sub(start)) else {
+        let Some(elapsed) = now.checked_sub(self.fill_started) else {
             return false;
         };
-        if elapsed >= BULK_FILL_MICROS {
+        if elapsed >= FILL_MICROS || (!self.bulk && self.records >= CRITICAL_FILL_RECORDS) {
             return false;
         }
         let Some(total_bytes) = self.bytes.checked_add(bytes) else {
@@ -68,12 +73,47 @@ mod tests {
     }
 
     #[test]
-    fn critical_batches_never_admit_later_records() {
-        let mut epoch = SendEpoch::new(64, 1, false, 100);
-        for now in [99, 100, 101, 1099, 10_099, 10_100, u64::MAX] {
-            assert!(!epoch.try_join(64, now));
-            assert_eq!((epoch.bytes, epoch.records), (64, 1));
+    fn critical_bursts_join_without_waiting_for_the_first_records_ack() {
+        let mut epoch = SendEpoch::new(64, 1, false, 100_000);
+        for now in [101_000, 105_000, 109_999] {
+            assert!(epoch.try_join(64, now));
         }
+        assert_eq!((epoch.bytes, epoch.records), (256, CRITICAL_FILL_RECORDS));
+        // This is still the original flight; no ACK or credit release was
+        // fabricated to admit these already-budgeted records to it.
+        assert!(!epoch.try_join(64, 109_999));
+        assert_eq!((epoch.bytes, epoch.records), (256, CRITICAL_FILL_RECORDS));
+    }
+
+    #[test]
+    fn critical_fill_has_an_exclusive_fixed_deadline_not_a_sliding_one() {
+        let mut epoch = SendEpoch::new(64, 1, false, 7);
+        assert!(epoch.try_join(64, 10_006));
+        for now in [10_007, 10_008, 20_000, u64::MAX] {
+            assert!(!epoch.try_join(64, now));
+            assert_eq!((epoch.bytes, epoch.records), (128, 2));
+        }
+    }
+
+    #[test]
+    fn an_initially_full_critical_batch_keeps_its_membership() {
+        for records in [CRITICAL_FILL_RECORDS, 16, usize::MAX] {
+            let mut epoch = SendEpoch::new(512, records, false, 100);
+            assert!(!epoch.try_join(64, 100));
+            assert_eq!((epoch.bytes, epoch.records), (512, records));
+        }
+    }
+
+    #[test]
+    fn rejected_critical_joins_do_not_spend_slots_or_restart_time() {
+        let mut epoch = SendEpoch::new(usize::MAX - 10, 1, false, 100);
+        assert!(!epoch.try_join(1, 99));
+        assert!(!epoch.try_join(11, 101));
+        assert_eq!((epoch.bytes, epoch.records), (usize::MAX - 10, 1));
+        assert!(epoch.try_join(10, 10_099));
+        assert_eq!((epoch.bytes, epoch.records), (usize::MAX, 2));
+        assert!(!epoch.try_join(0, 10_100));
+        assert_eq!((epoch.bytes, epoch.records), (usize::MAX, 2));
     }
 
     #[test]
