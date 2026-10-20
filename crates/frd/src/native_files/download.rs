@@ -78,6 +78,20 @@ pub struct ReceiveStatus {
     pub cancel_requested: bool,
     pub cleanup: Option<Result<(), worker::Error>>,
 }
+impl ReceiveStatus {
+    /// Whether this evidence requires treating a disk owner as possibly started.
+    /// An ended receive failure can precede its first result; missing progress
+    /// or receipts cannot prove that cleanup is unnecessary. A pre-start absence
+    /// remains distinct unless later progress, results or a join prove otherwise.
+    pub fn may_have_started(&self) -> bool {
+        self.cleanup.is_some()
+            || self.progress.is_some()
+            || !self.results.is_empty()
+            || self.phase == ReceivePhase::Receiving
+            || matches!(self.absence, Some(Absence::ReceiveFailed(_)))
+            || (self.phase == ReceivePhase::Ended && self.absence.is_none())
+    }
+}
 
 /// Clones can inspect or stop one receive attempt, never approve another
 /// destination, renew authority, retry a transfer or start a disk worker.

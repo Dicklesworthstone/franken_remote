@@ -7,6 +7,9 @@
 use super::*;
 use std::path::Path;
 
+#[path = "real_downloads/progress.rs"]
+mod progress;
+
 fn assert_file(path: &Path, expected: &[u8]) {
     let actual = fs::read(path).unwrap();
     assert_eq!(actual.len(), expected.len());

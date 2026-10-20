@@ -1,5 +1,6 @@
-//! Bounded, content-free presentation of ONE original sender snapshot.
-use super::Action;
+//! Bounded, content-free presentation of ONE original transfer snapshot.
+mod receive;
+use super::{Action, Snapshot};
 use fr_files::{
     receive::Publication,
     sender::{Outcome, Stage},
@@ -16,11 +17,18 @@ pub(super) const COLUMNS: usize = 104;
 pub(super) struct Frame {
     pub(super) lines: [[u8; COLUMNS]; ROWS],
     /// -1 means unknown, including an empty object awaiting a receipt. Otherwise
-    /// this is current-object QUEUED progress in thousandths, never completion.
+    /// this is current-object queued (upload) or staged (download) progress in
+    /// thousandths, never completion.
     pub(super) progress: i32,
     pub(super) actions: u32,
 }
 impl Frame {
+    pub(super) fn snapshot(snapshot: &Snapshot) -> Self {
+        match snapshot {
+            Snapshot::Upload(status) => Self::new(status),
+            Snapshot::Download(status) => Self::receive(status),
+        }
+    }
     pub(super) fn new(s: &SendSnapshot) -> Self {
         let active = !s.cancel_requested
             && !matches!(s.status.phase, SendPhase::Finished | SendPhase::Ended)

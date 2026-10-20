@@ -1,8 +1,11 @@
-//! Optional, non-focus-taking upload progress on the ORIGINAL desktop attempt.
-//! Only content-free snapshots and local pause/resume/cancel requests are used.
+//! Optional, non-focus-taking transfer progress on the ORIGINAL desktop attempt.
+//! Only content-free snapshots and supported local control requests are used.
 //! Failure or closing this panel never closes the session or cancels a transfer.
 mod model;
-use frd::{native_files::SendControl, session_startup::StreamingViewerControl};
+use frd::{
+    native_files::{ReceiveControl, ReceiveStatus, SendControl, SendSnapshot},
+    session_startup::StreamingViewerControl,
+};
 use model::Frame;
 use std::{
     ffi::{CString, c_char, c_int, c_void},
@@ -18,6 +21,50 @@ const TURN: Duration = Duration::from_millis(10);
 const REFRESH: Duration = Duration::from_millis(100);
 const MAX_CLICK_AGE: Duration = Duration::from_millis(250);
 const MAX_EVENTS: usize = 64;
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Direction {
+    Upload = 0,
+    Download = 1,
+}
+
+// One coherent original-owner snapshot, never a download projected into a
+// fictitious sender. The larger fixed upload report has one bounded allocation
+// on this optional UI thread; no snapshot survives the current rendering turn.
+enum Snapshot {
+    Upload(Box<SendSnapshot>),
+    Download(ReceiveStatus),
+}
+
+enum Transfer {
+    Upload(SendControl),
+    Download(ReceiveControl),
+}
+impl Transfer {
+    fn direction(&self) -> Direction {
+        match self {
+            Self::Upload(_) => Direction::Upload,
+            Self::Download(_) => Direction::Download,
+        }
+    }
+    fn snapshot(&self) -> Snapshot {
+        match self {
+            Self::Upload(source) => Snapshot::Upload(Box::new(source.snapshot())),
+            Self::Download(source) => Snapshot::Download(source.status()),
+        }
+    }
+    fn action(&self, action: Action) {
+        match self {
+            Self::Upload(source) => action.apply(source),
+            Self::Download(source) => {
+                if action == Action::Cancel {
+                    let _accepted = source.cancel();
+                }
+            }
+        }
+    }
+}
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,7 +142,9 @@ impl Control {
 }
 impl std::fmt::Debug for Control {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("UploadPanel").field(&self.status()).finish()
+        f.debug_tuple("FileProgressPanel")
+            .field(&self.status())
+            .finish()
     }
 }
 /// Retain through `finish()`; stop/hide is not proof that foreign XCB cleanup
@@ -113,6 +162,24 @@ impl Panel {
         parent: crate::viewer_input::Window,
         session: StreamingViewerControl,
         source: SendControl,
+    ) -> Result<Self, Error> {
+        Self::start_transfer(display, parent, session, Transfer::Upload(source))
+    }
+    /// Show this original receive attempt. Only file-only cancellation is
+    /// supported; this never starts a disk worker or creates receiver authority.
+    pub fn start_receive(
+        display: &str,
+        parent: crate::viewer_input::Window,
+        session: StreamingViewerControl,
+        source: ReceiveControl,
+    ) -> Result<Self, Error> {
+        Self::start_transfer(display, parent, session, Transfer::Download(source))
+    }
+    fn start_transfer(
+        display: &str,
+        parent: crate::viewer_input::Window,
+        session: StreamingViewerControl,
+        source: Transfer,
     ) -> Result<Self, Error> {
         let valid =
             |s: &str| !s.is_empty() && s.len() <= 5 && s.bytes().all(|b| b.is_ascii_digit());
@@ -136,7 +203,10 @@ impl Panel {
         let control = Control(Arc::new(AtomicU8::new(0)));
         let shared = control.0.clone();
         let task = thread::Builder::new()
-            .name("fr-upload-ui".into())
+            .name(match source.direction() {
+                Direction::Upload => "fr-upload-ui".into(),
+                Direction::Download => "fr-download-ui".into(),
+            })
             .spawn(move || {
                 let _fence = Fence(shared.clone());
                 let reason = run(&display, parent, &shared, &NativeTarget { session, source });
@@ -176,8 +246,15 @@ impl Drop for Fence {
     }
 }
 unsafe extern "C" {
-    fn fr_upload_open(display: *const c_char, parent: u32, width: u32, height: u32) -> *mut c_void;
+    fn fr_upload_open(
+        display: *const c_char,
+        parent: u32,
+        width: u32,
+        height: u32,
+        direction: u32,
+    ) -> *mut c_void;
     fn fr_upload_draw(native: *mut c_void, frame: *const Frame) -> c_int;
+    fn fr_upload_validate(native: *mut c_void) -> c_int;
     fn fr_upload_next(native: *mut c_void, kind: *mut u32, action: *mut u32) -> c_int;
     fn fr_upload_close(native: *mut c_void);
     fn fr_upload_disarm(native: *mut c_void);
@@ -194,22 +271,26 @@ impl Drop for Native {
 // Test seam is private: production always keeps the exact original handles.
 trait Target {
     fn stopped(&self) -> bool;
-    fn snapshot(&self) -> frd::native_files::SendSnapshot;
+    fn direction(&self) -> Direction;
+    fn snapshot(&self) -> Snapshot;
     fn action(&self, action: Action);
 }
 struct NativeTarget {
     session: StreamingViewerControl,
-    source: SendControl,
+    source: Transfer,
 }
 impl Target for NativeTarget {
     fn stopped(&self) -> bool {
         self.session.is_stopped()
     }
-    fn snapshot(&self) -> frd::native_files::SendSnapshot {
+    fn direction(&self) -> Direction {
+        self.source.direction()
+    }
+    fn snapshot(&self) -> Snapshot {
         self.source.snapshot()
     }
     fn action(&self, action: Action) {
-        action.apply(&self.source);
+        self.source.action(action);
     }
 }
 fn run(
@@ -226,7 +307,13 @@ fn run(
     }
     // SAFETY: live NUL string, scalars only; the C owner retains no Rust pointer.
     let Some(native) = NonNull::new(unsafe {
-        fr_upload_open(display.as_ptr(), parent.id, parent.width, parent.height)
+        fr_upload_open(
+            display.as_ptr(),
+            parent.id,
+            parent.width,
+            parent.height,
+            target.direction() as u32,
+        )
     }) else {
         return StopReason::NativeFailure;
     };
@@ -290,6 +377,16 @@ fn events(native: &Native, state: &AtomicU8, target: &impl Target) -> StopReason
         if !drained {
             return StopReason::EventFlood;
         }
+        // Refresh geometry even when the content-free frame did not change.
+        // A WM can move a reparenting ancestor without an event on our client.
+        if redraw || used != 0 {
+            // SAFETY: same live, thread-confined native owner; no Rust pointers.
+            match unsafe { fr_upload_validate(native.0.as_ptr()) } {
+                1 => {}
+                0 => return StopReason::Hidden,
+                _ => return StopReason::NativeFailure,
+            }
+        }
         if fresh && Instant::now().duration_since(now) < MAX_CLICK_AGE {
             for action in actions[..used].iter().flatten().copied() {
                 if target.stopped() {
@@ -301,7 +398,7 @@ fn events(native: &Native, state: &AtomicU8, target: &impl Target) -> StopReason
                 // Recheck both what was displayed and the original CURRENT
                 // snapshot: a shortcut or terminal receipt can race a click.
                 if previous.as_ref().is_some_and(|p| p.permits(action))
-                    && Frame::new(&target.snapshot()).permits(action)
+                    && Frame::snapshot(&target.snapshot()).permits(action)
                 {
                     target.action(action);
                     redraw = true;
@@ -318,7 +415,7 @@ fn events(native: &Native, state: &AtomicU8, target: &impl Target) -> StopReason
             if target.stopped() {
                 return StopReason::SessionEnded;
             }
-            let frame = Frame::new(&target.snapshot());
+            let frame = Frame::snapshot(&target.snapshot());
             if damage || previous.as_ref() != Some(&frame) {
                 // SAFETY: fixed C-compatible record, borrowed only for this call.
                 if unsafe { fr_upload_draw(native.0.as_ptr(), &raw const frame) } != 1 {

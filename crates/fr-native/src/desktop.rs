@@ -231,9 +231,9 @@ impl Desktop {
     pub fn input(&self) -> Option<crate::viewer_input::CaptureControl> {
         self.input.clone()
     }
-    /// This attempt's optional upload panel: status/hide only, or its local
-    /// startup refusal. None means no successful upload configuration. Native
-    /// failure remains visible through the handle and never cancels the upload.
+    /// This attempt's optional transfer panel: status/hide only, or its local
+    /// startup refusal. None means no successful file configuration. Native
+    /// failure remains visible through the handle and never cancels the transfer.
     pub fn file_progress(
         &self,
     ) -> Option<Result<crate::file_progress::Control, crate::file_progress::Error>> {
@@ -301,6 +301,9 @@ impl Desktop {
     /// Receive the host's explicit selections into this locally pinned directory.
     /// This is consent for the original control lease, not another input grant.
     /// No disk owner starts until the matching download capability is attached.
+    /// The optional download panel observes this original owner and can request
+    /// file-only cancellation. Its refusal never undoes accepted configuration;
+    /// closing it hides progress without cancelling the transfer or the desktop.
     pub fn request_receive_files(
         &mut self,
         request: frd::native_files::ReceiveRequest,
@@ -308,11 +311,27 @@ impl Desktop {
         if self.state() != State::Viewing {
             return Err(Error::NotViewing);
         }
-        self.observer
-            .as_mut()
-            .ok_or(Error::NotViewing)?
+        let observer = self.observer.as_mut().ok_or(Error::NotViewing)?;
+        let controls = observer
             .request_receive_files(request)
-            .map_err(Error::Files)
+            .map_err(Error::Files)?;
+        let session = observer.control();
+        // Consent was accepted once by the original observer before native UI.
+        // The panel gets status/cancel handles, never a directory or disk owner.
+        let panel = self
+            .window()
+            .and_then(|window| window.input_window().ok())
+            .ok_or(crate::file_progress::Error::InvalidParent)
+            .and_then(|parent| {
+                crate::file_progress::Panel::start_receive(
+                    &self.configuration.display,
+                    parent,
+                    session,
+                    controls.clone(),
+                )
+            });
+        self.file_progress = Some(panel);
+        Ok(controls)
     }
     /// Install the local playback output for this observer's attached
     /// audio-down lane, before serving. `Audio(NotSelected)` is typed absence:
@@ -745,7 +764,7 @@ impl Desktop {
         }
         self.state = State::Stopped;
     }
-    /// All local viewing surfaces must finish, including an optional upload
+    /// All local viewing surfaces must finish, including an optional transfer
     /// panel. A hidden/failed panel can still have pending foreign cleanup; the
     /// existing reconnect gate must retain this Desktop until that thread joins.
     pub fn window_cleanup(&mut self) -> WindowCleanup {

@@ -1,5 +1,6 @@
 //! Actual C drawing/events plus the production Rust loop. Session authority and
 //! file outcomes are explicit fixtures, not authenticated transfer qualification.
+mod receive;
 use super::*;
 use frd::native_files::{SendPhase, SendSnapshot, SendStatus};
 use std::{
@@ -40,6 +41,9 @@ impl Probe {
             stalled: AtomicBool::new(false),
         }
     }
+    fn sample(&self) -> SendSnapshot {
+        *self.sample.lock().unwrap()
+    }
 }
 impl Target for Probe {
     fn stopped(&self) -> bool {
@@ -51,8 +55,11 @@ impl Target for Probe {
         }
         self.stopped.load(Ordering::Acquire)
     }
-    fn snapshot(&self) -> SendSnapshot {
-        *self.sample.lock().unwrap()
+    fn direction(&self) -> Direction {
+        Direction::Upload
+    }
+    fn snapshot(&self) -> Snapshot {
+        Snapshot::Upload(Box::new(self.sample()))
     }
     fn action(&self, action: Action) {
         let mut commands = self.commands.lock().unwrap();
@@ -74,6 +81,22 @@ struct Peer {
 }
 impl Peer {
     fn new() -> Option<(Self, CString)> {
+        Self::new_direction("upload")
+    }
+    fn new_direction(direction: &str) -> Option<(Self, CString)> {
+        Self::new_layout(direction, false)
+    }
+    fn new_layout(direction: &str, full_screen: bool) -> Option<(Self, CString)> {
+        Self::new_window(
+            direction,
+            if full_screen {
+                "full-screen"
+            } else {
+                "ordinary"
+            },
+        )
+    }
+    fn new_window(direction: &str, layout: &str) -> Option<(Self, CString)> {
         let Ok(display) = std::env::var("DISPLAY") else {
             assert!(
                 std::env::var_os("FR_NATIVE_UPLOAD_PANEL_REQUIRED").is_none(),
@@ -88,6 +111,8 @@ impl Peer {
                 "/tests/upload_progress/peer.py"
             ))
             .arg(&display)
+            .arg(direction)
+            .arg(layout)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -96,16 +121,21 @@ impl Peer {
         let mut output = BufReader::new(child.stdout.take().unwrap());
         let mut line = String::new();
         output.read_line(&mut line).unwrap();
+        let mut fields = line
+            .split_ascii_whitespace()
+            .map(|f| f.parse::<u32>().unwrap());
+        let window = crate::viewer_input::Window {
+            id: fields.next().unwrap(),
+            width: fields.next().unwrap(),
+            height: fields.next().unwrap(),
+        };
+        assert!(fields.next().is_none());
         Some((
             Self {
                 child,
                 input,
                 output,
-                window: crate::viewer_input::Window {
-                    id: line.trim().parse().unwrap(),
-                    width: 320,
-                    height: 240,
-                },
+                window,
             },
             CString::new(display).unwrap(),
         ))
@@ -165,6 +195,7 @@ fn actual_buttons_request_file_only_pause_resume_cancel_without_taking_focus() {
     let (probe, state, task) = start(display, peer.window);
     wait(|| peer.command("mapped") == "yes");
     assert_eq!(peer.command("hints"), "nonfocus");
+    assert_eq!(peer.command("placement"), "separate");
     assert_eq!(peer.command("focus"), "parent");
     for (index, command) in ["click pause", "click resume", "click cancel"]
         .into_iter()
@@ -234,8 +265,8 @@ fn real_pixels_reflect_queued_progress_not_a_completion_claim() {
         .unwrap()
         .queued_bytes = 10;
     wait(|| peer.command("bar") == "602");
-    assert_eq!(probe.snapshot().status.phase, SendPhase::WaitingForControl);
-    assert!(probe.snapshot().status.report.is_none());
+    assert_eq!(probe.sample().status.phase, SendPhase::WaitingForControl);
+    assert!(probe.sample().status.report.is_none());
     finish(&probe, &state, task);
 }
 #[test]
@@ -254,7 +285,7 @@ fn whole_batch_close_and_parent_loss_withhold_commands_without_cancelling_files(
         wait(|| task.is_finished());
         assert_eq!(task.join().unwrap(), StopReason::Hidden);
         assert_eq!(*probe.commands.lock().unwrap(), []);
-        assert!(!probe.snapshot().cancel_requested);
+        assert!(!probe.sample().cancel_requested);
         assert_eq!(
             status(state.load(Ordering::Acquire)),
             Status::Stopped(StopReason::Hidden)

@@ -840,7 +840,9 @@ impl Controlled {
             sibling("fr-input-agent"),
         );
         let host = Xvfb::start("640x480x24");
-        let viewer = Xvfb::start("800x600x24");
+        // Keep the exact 640x480 decoder/input drawable, with room beside it
+        // for the optional transfer panel without obscuring the controlled view.
+        let viewer = Xvfb::start("1600x900x24");
         let mut observer = Harness::start(HOST_OBSERVER, &host.display, "READY");
         let driver = Harness::start(VIEWER_DRIVER, &viewer.display, "WATCHING");
         if unmap_wheel {

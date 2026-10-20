@@ -132,6 +132,11 @@ jobs:
         id: viewer_input
         continue-on-error: true
         run: FR_NATIVE_INPUT_CAPTURE_REQUIRED=1 xvfb-run -a -s '-screen 0 1280x1024x24 -noreset -nolisten tcp' cargo test -p fr-native --features linux-viewer-input --lib --locked
+      - name: Exercise native transfer progress and local cancellation controls
+        id: file_progress
+        continue-on-error: true
+        run: |
+          FR_NATIVE_UPLOAD_PANEL_REQUIRED=1 xvfb-run -a -s '-screen 0 1600x900x24 -noreset -nolisten tcp' cargo test -p fr-native --features linux-desktop --lib --locked file_progress::
       - name: Exercise X11 clipboard workers over the authenticated QUIC lane
         id: clipboard
         continue-on-error: true
@@ -165,6 +170,7 @@ jobs:
             examples=${{ steps.examples.outcome }}
             indicator=${{ steps.indicator.outcome }}
             viewer_input=${{ steps.viewer_input.outcome }}
+            file_progress=${{ steps.file_progress.outcome }}
             clipboard=${{ steps.clipboard.outcome }}
             hevc=${{ steps.hevc.outcome }}
             docs=${{ steps.docs.outcome }}

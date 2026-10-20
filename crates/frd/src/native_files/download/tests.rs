@@ -147,3 +147,30 @@ fn a_late_real_publication_replaces_uncertainty_but_never_loses_to_cleanup() {
         assert!(!control.cancel());
     }
 }
+
+#[test]
+fn cleanup_evidence_distinguishes_pre_start_absence_from_an_unjoined_owner() {
+    for absence in [
+        Absence::NotNegotiated,
+        Absence::WithClipboard,
+        Absence::Unavailable,
+    ] {
+        let control = ReceiveControl::new();
+        assert!(!control.status().may_have_started());
+        control.end(absence);
+        assert!(!control.status().may_have_started());
+        // A later real receipt is stronger evidence than the earlier absence.
+        control.observe(published(1));
+        assert!(control.status().may_have_started());
+    }
+    let control = ReceiveControl::new();
+    control.end(Absence::ReceiveFailed(fr_files::quic::Error::Cancelled));
+    let status = control.status();
+    assert_eq!(status.results, [] as [ResultReceipt; 0]);
+    assert_eq!(status.cleanup, None);
+    assert!(status.may_have_started());
+    // An explicit join also establishes an owner even before a progress sample.
+    let control = ReceiveControl::new();
+    control.cleaned(Ok(()));
+    assert!(control.status().may_have_started());
+}

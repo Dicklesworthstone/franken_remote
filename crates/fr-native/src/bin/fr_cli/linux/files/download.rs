@@ -111,12 +111,7 @@ impl Summary {
         // label its unconfirmed cleanup as finished. A receive failure before
         // the first result may still have started an owner, so missing join
         // evidence stays pending even without a progress sample or receipt.
-        let started = status.cleanup.is_some()
-            || status.progress.is_some()
-            || !status.results.is_empty()
-            || status.phase == ReceivePhase::Receiving
-            || matches!(status.absence, Some(Absence::ReceiveFailed(_)))
-            || (status.phase == ReceivePhase::Ended && status.absence.is_none());
+        let started = status.may_have_started();
         let mut summary = Self {
             requested: true,
             absence: if started {

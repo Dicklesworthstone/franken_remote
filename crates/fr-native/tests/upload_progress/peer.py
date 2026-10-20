@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent Xlib/XTest driver for the production upload panel. No third-party Python modules."""
+"""Independent Xlib/XTest driver for production transfer panels. No third-party Python modules."""
 import ctypes as C
 import sys
 import time
@@ -31,6 +31,9 @@ warp = bind(x, "XWarpPointer", I, D, U, U, I, I, C.c_uint, C.c_uint, I, I)
 button = bind(t, "XTestFakeButtonEvent", I, D, C.c_uint, I, U)
 unmap = bind(x, "XUnmapWindow", I, D, U)
 resize = bind(x, "XResizeWindow", I, D, U, C.c_uint, C.c_uint)
+move = bind(x, "XMoveWindow", I, D, U, I, I)
+translate = bind(x, "XTranslateCoordinates", I, D, U, U, I, I,
+                 C.POINTER(I), C.POINTER(I), C.POINTER(U))
 send = bind(x, "XSendEvent", I, D, U, I, C.c_long, D)
 get_image = bind(x, "XGetImage", D, D, U, I, I, C.c_uint, C.c_uint, U, I)
 pixel = bind(x, "XGetPixel", U, D, I, I)
@@ -61,19 +64,54 @@ def viewable(window):
 
 d = open_display(sys.argv[1].encode())
 assert d, "X display unavailable"
+direction = sys.argv[2] if len(sys.argv) > 2 else "upload"
+assert direction in ("upload", "download")
+panel_class = ("franken-remote-" + direction).encode() + b"\0FrankenRemote\0"
 root = root_window(d)
-parent = create(d, root, 680, 20, 320, 240, 0, 0, 0xffffff)
+full_screen = len(sys.argv) > 3 and sys.argv[3] == "full-screen"
+framed = len(sys.argv) > 3 and sys.argv[3] == "framed"
+root_attrs = Attributes()
+assert attributes(d, root, C.byref(root_attrs))
+parent_width, parent_height = (root_attrs.width, root_attrs.height) if full_screen else (320, 240)
+frame = create(d, root, 680, 20, parent_width, parent_height, 0, 0, 0xffffff) if framed else 0
+parent = create(d, frame or root, 0 if full_screen or framed else 680, 0 if full_screen or framed else 20,
+                parent_width, parent_height, 0, 0, 0xffffff)
 # Match the real fixed-size viewer rather than an unconstrained toy parent.
 size = (C.c_long * 18)(); size[0] = (1 << 4) | (1 << 5)
-size[5] = size[7] = 320; size[6] = size[8] = 240
+size[5] = size[7] = parent_width; size[6] = size[8] = parent_height
 change_prop(d, parent, atom(d, b"WM_NORMAL_HINTS", 0), atom(d, b"WM_SIZE_HINTS", 0), 32, 0, size, 18)
-map_window(d, parent); sync(d, 0)
+if frame:
+    change_prop(d, frame, atom(d, b"WM_NORMAL_HINTS", 0), atom(d, b"WM_SIZE_HINTS", 0), 32, 0, size, 18)
+map_window(d, parent)
+if frame: map_window(d, frame)
+sync(d, 0)
 until = time.monotonic() + 3
 while not viewable(parent):
     assert time.monotonic() < until, "test parent was not mapped"
     time.sleep(0.01)
 focus(d, parent, 1, 0); sync(d, 0)
-print(parent, flush=True)
+print(parent, parent_width, parent_height, flush=True)
+
+def outer(window):
+    for _ in range(8):
+        r, p, children, count = U(), U(), C.POINTER(U)(), C.c_uint()
+        assert query(d, window, C.byref(r), C.byref(p), C.byref(children), C.byref(count))
+        if children: free(children)
+        assert r.value == root and p.value
+        if p.value == root: return window
+        window = p.value
+    raise AssertionError("unbounded local window ancestry")
+
+def rectangle(window):
+    window = outer(window)
+    a, xx, yy, child = Attributes(), I(), I(), U()
+    assert attributes(d, window, C.byref(a))
+    assert translate(d, window, root, 0, 0, C.byref(xx), C.byref(yy), C.byref(child))
+    return xx.value - a.border_width, yy.value - a.border_width, a.width + 2 * a.border_width, a.height + 2 * a.border_width
+
+def separate(a, b):
+    ax, ay, aw, ah = a; bx, by, bw, bh = b
+    return ax + aw <= bx or bx + bw <= ax or ay + ah <= by or by + bh <= ay
 
 def prop(window, name):
     typ, fmt, count, rest, data = U(), I(), U(), U(), D()
@@ -96,7 +134,7 @@ def panel(window=None, depth=0):
     finally:
         if children: free(children)
     for child in candidates:
-        if prop(child, b"WM_TRANSIENT_FOR") == [parent] and prop(child, b"WM_CLASS") == b"franken-remote-upload\0FrankenRemote\0":
+        if prop(child, b"WM_TRANSIENT_FOR") == [parent] and prop(child, b"WM_CLASS") == panel_class:
             return child
         found = panel(child, depth + 1)
         if found: return found
@@ -114,19 +152,31 @@ for raw in sys.stdin:
     result = "ok"
     if command == "exists": result = "yes" if w else "no"
     elif command == "mapped": result = "yes" if viewable(w) else "no"
+    elif command == "title": result = prop(w, b"_NET_WM_NAME").decode("ascii")
     elif command == "focus":
         f, revert = U(), I(); get_focus(d, C.byref(f), C.byref(revert))
         result = "parent" if f.value == parent else "other"
     elif command == "hints":
         h = prop(w, b"WM_HINTS")
         result = "nonfocus" if h and h[0] & 1 and h[1] == 0 else "invalid"
+    elif command == "placement":
+        px, py, pw, ph = rectangle(w)
+        result = "separate" if separate(rectangle(parent), (px, py, pw, ph)) and px >= 0 and py >= 0 and px + pw <= root_attrs.width and py + ph <= root_attrs.height else "invalid"
+    elif command in ("parent_overlap", "panel_overlap", "panel_offscreen"):
+        if command == "parent_overlap":
+            xx, yy, _, _ = rectangle(w); target = outer(parent)
+        elif command == "panel_overlap":
+            xx, yy, _, _ = rectangle(parent); target = outer(w)
+        else: xx, yy, target = -100, -100, outer(w)
+        move(d, target, xx, yy)
     elif command in ("click", "press", "release"):
         xx, yy = point(parts[1]); warp(d, 0, w, 0, 0, 0, 0, xx, yy)
         if command in ("click", "press"): button(d, 1, 1, 0)
         if command in ("click", "release"): button(d, 1, 0, 0)
     elif command == "synthetic":
+        xx, yy = point(parts[1] if len(parts) > 1 else "pause")
         for typ in (4, 5):
-            e = Event(); e.button = Button(typ, 0, 1, d, w, root, 0, 0, 100, 250, 100, 250, 0, 1, 1)
+            e = Event(); e.button = Button(typ, 0, 1, d, w, root, 0, 0, xx, yy, xx, yy, 0, 1, 1)
             send(d, w, 0, 4 if typ == 4 else 8, C.byref(e))
     elif command == "close":
         e = Event(); e.message.type = 33; e.message.display = d; e.message.window = w

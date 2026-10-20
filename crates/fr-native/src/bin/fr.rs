@@ -122,6 +122,9 @@ or groups. No path component may be a symlink. The host must run frd run --once
 --input-agent PATH --send PATH... . Each complete file or portable directory is
 published atomically without overwriting an existing name; empty files and
 empty selected directory roots are supported. No received item is opened or run.
+A download progress panel shows privately staged bytes separately from actual
+publication receipts and cleanup. Cancel download requests file-only cancellation;
+closing the panel only hides it. The panel never retries or resumes a download.
 --receive and --send are mutually exclusive. Either may accompany --clipboard
 and --audio. Files follow this original control lease and are never resumed or
 replayed automatically. Completion reports local publications separately from

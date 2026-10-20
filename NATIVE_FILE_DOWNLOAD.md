@@ -45,6 +45,28 @@ The one Files lane has one direction per connection. Host `--send` and `--files`
 are mutually exclusive; client `--receive` and `--send` are mutually exclusive.
 Clipboard and playback audio keep their own independent opt-ins.
 
+## Watch or cancel a download
+
+An accepted `--receive` configuration opens an optional **Download progress**
+panel beside the Linux X11 viewer when there is enough room. Its bar shows
+bytes privately staged for the current object. Separate counts report actual
+publications, durability uncertainty, refusals and uncertain outcomes; cleanup
+has its own status. A full bar does not prove that an object was published, and
+even an empty object needs a publication receipt.
+
+**Cancel download** requests cancellation through this attempt's original receive
+owner. It does not grant another transfer, resume an interrupted item or undo an
+earlier publication. Cancellation and cleanup remain subject to the original
+transport and disk-owner rules below. Downloads have no pause/resume buttons.
+
+Closing the panel only hides progress; the transfer and desktop continue. The
+panel does not take keyboard focus or change the viewer's size or input mapping.
+If there is no safe space beside the viewer, or the optional native UI fails,
+the accepted transfer remains configured and its terminal results remain
+available. A hidden panel is not automatically reopened. See
+[native transfer progress](NATIVE_FILE_PROGRESS.md) for the display and input
+bounds.
+
 ## Authority, publication and results
 
 Both peers must positively select `file-download` version 1. This direction
