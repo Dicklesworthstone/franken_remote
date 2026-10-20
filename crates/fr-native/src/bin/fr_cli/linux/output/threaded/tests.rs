@@ -125,15 +125,12 @@ fn full_inbox_and_drop_return_while_foreign_work_is_still_blocked() {
             .receive(&packet(u64::try_from(sequence).unwrap()), &mut || true)
             .unwrap();
     }
-    assert!(
-        output
-            .receive(&packet(u64::try_from(PACKETS).unwrap()), &mut || true)
-            .is_err()
-    );
-    assert_eq!(
-        shared.fault.load(Ordering::Acquire),
-        Fault::Backpressure as u8
-    );
+    output
+        .receive(&packet(u64::try_from(PACKETS).unwrap()), &mut || true)
+        .unwrap();
+    assert_eq!(output.report.borrow().dropped_packets, 1);
+    assert_eq!(shared.fault.load(Ordering::Acquire), 0);
+    assert!(!shared.stopped.load(Ordering::Acquire));
     drop(output);
     assert!(shared.stopped.load(Ordering::Acquire));
     assert!(
@@ -410,3 +407,5 @@ fn retirement_collects_final_pcm_and_faults_before_replacement() {
         }
     }
 }
+
+mod overflow;

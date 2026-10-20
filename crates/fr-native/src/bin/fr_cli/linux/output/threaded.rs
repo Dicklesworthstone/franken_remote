@@ -14,7 +14,7 @@ use std::{
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
-        mpsc::{self, Receiver, SyncSender, TryRecvError},
+        mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -42,15 +42,13 @@ enum Fault {
     Native = 1,
     Stalled,
     Permission,
-    Backpressure,
-    Acknowledgement,
+    Acknowledgement = 5,
     Expired,
 }
 fn reason(code: u8) -> &'static str {
     match code {
         2 => "audio_output_worker_stalled",
         3 => "audio_output_permission_expired",
-        4 => "audio_output_backpressure",
         5 => "audio_output_acknowledgement_failed",
         6 => "audio_output_late",
         _ => "audio_output_failed",
@@ -411,9 +409,20 @@ impl ViewerAudioOutput for Output {
             return Err(ViewerAudioRefused);
         }
         let packet = Packet::new(bytes, arrived)?;
-        if job.packets.try_send(packet).is_err() {
-            job.shared.fail(Fault::Backpressure);
-            return Err(ViewerAudioRefused);
+        match job.packets.try_send(packet) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                // This optional datagram never entered worker custody. Keep
+                // the eight original records/arrivals, discard only this one,
+                // and let the existing finite jitter/PLC policy handle loss.
+                // A full inbox is not permission to restart an audio epoch.
+                let mut report = self.report.borrow_mut();
+                report.dropped_packets = report.dropped_packets.saturating_add(1);
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                job.shared.fail(Fault::Native);
+                return Err(ViewerAudioRefused);
+            }
         }
         job.thread.thread().unpark();
         Ok(())

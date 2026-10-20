@@ -15,6 +15,9 @@ pub(super) struct Report {
     pub acknowledged: bool,
     /// Decoded frames the local audio server accepted (not audibility).
     pub submitted: u64,
+    /// Valid packets discarded before worker custody because its fixed inbox
+    /// was full. Not codec loss, concealment, submitted PCM or a failed epoch.
+    pub dropped_packets: u64,
     /// Local output resets, each followed by a fresh host epoch.
     pub resets: u64,
     /// Output generations retired by the original audio freshness deadline.
