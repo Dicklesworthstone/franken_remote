@@ -43,6 +43,29 @@ a microphone. Stop is idempotent. The outer owner must also stop/flush the actua
 device and supervise an unresponsive foreign decoder; callbacks are not a
 replacement for those platform/session boundaries.
 
+## Startup loss without an unnecessary generation restart
+
+The paced owner starts its first real packet when the ORIGINAL device-clock
+reorder interval has elapsed, even if loss left fewer packets than the nominal
+prebuffer count. Waiting for that count after the interval made a buffered first
+packet miss its device slot. Reordering remains available for the whole interval;
+no decode or concealment runs early, and missing sequences before the earliest
+real packet do not become invented codec history. Subsequent holes use the same
+finite, nominal-duration concealment on the original sample timeline.
+
+This is the clocked `drain_for_playout` path only. Unclocked `drain_checked` keeps
+its packet-count gate. Neither path extends first-arrival expiry, moves an output
+slot, relaxes permission or revives a stopped generation. An absent source still
+exhausts the existing 100 ms concealment/progress bound.
+
+`audio_startup_loss` exercises startup clocks, loss, reordering, empty input,
+permission, expiry and both drain contracts with an explicit codec fixture.
+`opus_playout::startup_loss` additionally drives actual libopus encode, FRD0
+records, loss, jitter, decode/PLC and a borrowed PCM sink: all 544 bounded loss
+patterns across 10/20 ms mono/stereo match a separately driven native decoder's
+history, with exactly the injected losses concealed. Device clocks and loss are
+injected; this is not a live-network, speaker or complete-workspace result.
+
 ## Decode ahead without early playback
 
 After the first output, a queued packet on the exact next sequence/sample

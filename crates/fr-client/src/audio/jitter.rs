@@ -329,9 +329,16 @@ impl AudioJitterBuffer {
         packet
     }
     /// Call once per due audio-clock frame, never in a free-running drain loop.
+    /// The first call must be after the playout owner's ORIGINAL startup reorder
+    /// interval. That clock deadline, not a count of successfully received packets,
+    /// ends prebuffering: loss must not strand playable audio until its slot lapses.
+    /// Unclocked callers retain the count-based gate in `drain_checked`.
     /// Trailing loss receives the same finite concealment budget as an interior
     /// hole. No PLC is produced before the first real packet anchors the codec.
     pub fn drain_for_playout(&mut self) -> Result<JitterDrainResult, JitterError> {
+        if self.error.is_none() && self.next.is_none() && self.slot_count != 0 {
+            self.is_prebuffering = false;
+        }
         if self.error.is_none() && self.slot_count == 0 && self.next.is_some() {
             self.conceal()
         } else {
