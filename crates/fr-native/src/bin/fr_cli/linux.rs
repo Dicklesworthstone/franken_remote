@@ -941,11 +941,12 @@ fn audio_completion(progress: &Progress, json: bool) -> String {
                 report.first_failure,
             )
         });
+    let dropped = audio.as_ref().map_or(0, |report| report.dropped_packets);
     if json {
         let absence = absence.map_or_else(|| "null".to_owned(), |a| format!("\"{a}\""));
         let first_failure = first_failure.map_or_else(|| "null".to_owned(), |a| format!("\"{a}\""));
         format!(
-            ",\"audio_requested\":{requested},\"audio_active\":{active},\"audio_frames_submitted\":{played},\"audio_output_resets\":{resets},\"audio_output_expired_generations\":{expired},\"audio_output_failed_generations\":{failed},\"audio_output_recovered_generations\":{recovered},\"audio_output_first_failure\":{first_failure},\"audio_absence\":{absence},\"audibility_proven\":false"
+            ",\"audio_requested\":{requested},\"audio_active\":{active},\"audio_frames_submitted\":{played},\"audio_output_resets\":{resets},\"audio_output_dropped_packets\":{dropped},\"audio_output_expired_generations\":{expired},\"audio_output_failed_generations\":{failed},\"audio_output_recovered_generations\":{recovered},\"audio_output_first_failure\":{first_failure},\"audio_absence\":{absence},\"audibility_proven\":false"
         )
     } else {
         let mut text = match (requested, active, absence) {
@@ -965,6 +966,13 @@ fn audio_completion(progress: &Progress, json: bool) -> String {
             if let Some(reason) = first_failure {
                 let _ = write!(text, " First output failure: {reason}.");
             }
+        }
+        if dropped > 0 {
+            use std::fmt::Write;
+            let _ = write!(
+                text,
+                " Audio output inbox: {dropped} packet(s) dropped at capacity."
+            );
         }
         text
     }
@@ -1711,3 +1719,7 @@ mod tests {
 #[cfg(all(test, feature = "linux-desktop"))]
 #[path = "linux/controlled_audio_tests.rs"]
 mod controlled_audio_tests;
+
+#[cfg(all(test, feature = "linux-desktop"))]
+#[path = "linux/audio_overflow_tests.rs"]
+mod audio_overflow_tests;
