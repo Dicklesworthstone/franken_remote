@@ -418,3 +418,6 @@ fn either_local_clock_regression_fences_a_prefetched_reply() {
         assert_eq!(c.owner.queued_packets(), 0);
     }
 }
+
+#[path = "audio_predecode/volume.rs"]
+mod volume;

@@ -8,78 +8,101 @@
 //! - Settings can be persisted per remote host identifier.
 
 use fr_media::audio::AudioPcmFrame;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU32, Ordering},
+};
+
+// Admitted nonnegative f32 gains leave the sign bit free. One atomic holds both
+// fields so the output takes a coherent snapshot, and concurrent changes to gain
+// and mute cannot overwrite each other. No PCM, commands or permission live here.
+const MUTED: u32 = 1 << 31;
+fn gain(volume: f32) -> f32 {
+    if volume.is_nan() {
+        0.0
+    } else {
+        volume.clamp(0.0, 1.0)
+    }
+    .abs()
+}
 
 /// Default initial volume level (100%).
 pub const DEFAULT_VOLUME: f32 = 1.0;
 
-/// Local client audio volume and mute controller.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Local client audio volume and mute controller. Clones intentionally control
+/// the SAME playback preference, across the shell and its output worker. A new
+/// connection creates a new control; this handle cannot enable or revive audio.
+/// All setters are allocation-free and never wait for a lock or host response.
+#[derive(Debug, Clone)]
 pub struct AudioVolumeControl {
-    volume: f32,
-    muted: bool,
+    state: Arc<AtomicU32>,
 }
-
+impl PartialEq for AudioVolumeControl {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+            || self.state.load(Ordering::Acquire) == other.state.load(Ordering::Acquire)
+    }
+}
 impl Default for AudioVolumeControl {
     fn default() -> Self {
         Self::new()
     }
 }
-
 impl AudioVolumeControl {
-    /// Creates a volume controller initialized to unmuted 100% volume.
+    /// Creates an independent unmuted 100% controller, not a global preference.
     #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            volume: DEFAULT_VOLUME,
-            muted: false,
-        }
+    pub fn new() -> Self {
+        Self::from_parts(DEFAULT_VOLUME, false)
     }
-
-    /// Creates a controller with specific volume and mute states.
+    /// Creates an independent controller. Non-finite NaN is conservative silence;
+    /// infinities and finite values saturate to the documented [0, 1] range.
     #[must_use]
     pub fn from_parts(volume: f32, muted: bool) -> Self {
         Self {
-            volume: volume.clamp(0.0, 1.0),
-            muted,
+            state: Arc::new(AtomicU32::new(
+                gain(volume).to_bits() | if muted { MUTED } else { 0 },
+            )),
         }
     }
-
-    /// Returns current nominal volume level in `[0.0, 1.0]`.
+    /// One coherent value for rendering or persistence, never another live handle.
     #[must_use]
-    pub const fn volume(&self) -> f32 {
-        self.volume
+    pub fn snapshot(&self) -> (f32, bool) {
+        let state = self.state.load(Ordering::Acquire);
+        (f32::from_bits(state & !MUTED), state & MUTED != 0)
     }
-
-    /// Sets the volume level, clamped to `[0.0, 1.0]`.
+    #[must_use]
+    pub fn volume(&self) -> f32 {
+        self.snapshot().0
+    }
+    /// Preserve a simultaneous mute update. Clones share this change immediately;
+    /// the output observes it at its next submission, not when decode begins.
     pub fn set_volume(&mut self, volume: f32) {
-        self.volume = volume.clamp(0.0, 1.0);
+        let bits = gain(volume).to_bits();
+        let _ = self
+            .state
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+                Some((old & MUTED) | bits)
+            });
     }
-
-    /// Returns whether audio is currently muted.
     #[must_use]
-    pub const fn is_muted(&self) -> bool {
-        self.muted
+    pub fn is_muted(&self) -> bool {
+        self.snapshot().1
     }
-
-    /// Sets mute state directly.
     pub fn set_muted(&mut self, muted: bool) {
-        self.muted = muted;
+        if muted {
+            self.state.fetch_or(MUTED, Ordering::AcqRel);
+        } else {
+            self.state.fetch_and(!MUTED, Ordering::AcqRel);
+        }
     }
-
-    /// Toggles mute state instantly with 0 host round trips.
-    ///
-    /// Returns the new mute state.
+    /// Local-only toggle; does not discard codec history or change admission.
     pub fn toggle_mute(&mut self) -> bool {
-        self.muted = !self.muted;
-        self.muted
+        self.state.fetch_xor(MUTED, Ordering::AcqRel) & MUTED == 0
     }
-
-    /// Returns the effective linear multiplier in `[0.0, 1.0]`.
-    ///
-    /// If muted, returns `0.0`. Otherwise returns `self.volume`.
     #[must_use]
     pub fn effective_gain(&self) -> f32 {
-        if self.muted { 0.0 } else { self.volume }
+        let (volume, muted) = self.snapshot();
+        if muted { 0.0 } else { volume }
     }
 
     /// Applies volume gain or mute in-place to an [`AudioPcmFrame`] using saturating arithmetic.
@@ -172,15 +195,13 @@ impl HostAudioStore {
 
     /// Saves or updates the volume settings for a given host.
     pub fn save_settings(&mut self, host_id: &str, control: &AudioVolumeControl) {
+        let (volume, muted) = control.snapshot();
         if let Some(entry) = self.records.iter_mut().find(|r| r.host_id == host_id) {
-            entry.volume = control.volume();
-            entry.muted = control.is_muted();
+            entry.volume = volume;
+            entry.muted = muted;
         } else {
-            self.records.push(HostAudioSettings::new(
-                host_id,
-                control.volume(),
-                control.is_muted(),
-            ));
+            self.records
+                .push(HostAudioSettings::new(host_id, volume, muted));
         }
     }
 

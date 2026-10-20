@@ -416,3 +416,6 @@ fn new_epoch_has_fresh_native_history_and_old_wire_packets_do_not_enter_it() {
 
 #[path = "opus_playout/startup_loss.rs"]
 mod startup_loss;
+
+#[path = "opus_playout/volume.rs"]
+mod volume;
