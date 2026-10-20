@@ -191,7 +191,7 @@ fn optional_features_cannot_refresh_the_original_startup_deadline() {
     assert_eq!(startup.tick(20), Err(Error::Closed));
 }
 #[test]
-fn control_profile_adds_mandatory_boundaries_and_optional_scroll_and_authority_tickets() {
+fn control_profile_adds_mandatory_boundaries_and_optional_scroll_and_ticket_profiles() {
     let offer = control_offer();
     offer.validate().unwrap();
     assert_eq!(offer.role, Role::RequestControl);
@@ -204,7 +204,7 @@ fn control_profile_adds_mandatory_boundaries_and_optional_scroll_and_authority_t
         .iter()
         .filter(|c| !observation.capabilities.contains(c))
         .collect();
-    assert_eq!(added.len(), 6);
+    assert_eq!(added.len(), 7);
     // Wheel input is optional: a host whose executor lacks it omits it.
     assert!(
         added
@@ -217,6 +217,11 @@ fn control_profile_adds_mandatory_boundaries_and_optional_scroll_and_authority_t
     assert!(added.iter().any(|c| {
         c.name == fr_wire::input_ticket::AUTHORITY_CAPABILITY
             && c.version == fr_wire::input_ticket::AUTHORITY_VERSION
+            && !c.required
+    }));
+    assert!(added.iter().any(|c| {
+        c.name == fr_wire::input_ticket::READINESS_CAPABILITY
+            && c.version == fr_wire::input_ticket::READINESS_VERSION
             && !c.required
     }));
     for (name, version) in [
@@ -340,7 +345,7 @@ fn audio_offer_adds_only_the_optional_downlink_and_negotiates_both_ways() {
 fn combined_control_profile_completes_real_startup_within_the_capability_bound() {
     let combined = fr_client::native::control_offer_with_clipboard_and_files();
     combined.validate().unwrap();
-    assert_eq!(combined.capabilities.len(), 20);
+    assert_eq!(combined.capabilities.len(), 21);
     assert!(combined.capabilities.len() <= negotiation::MAX_CAPABILITIES);
     for cap in control_offer().capabilities {
         if cap.name == receiver_metrics::CAPABILITY {

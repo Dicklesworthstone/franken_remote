@@ -1,7 +1,7 @@
 //! Join one completed input attachment to the existing native owner. Neither
 //! an attached stream nor a control-intent capability grants an input lease.
 mod host_recovery;
-use super::{Error, QuicInput, Routes};
+use super::{Error, QuicInput, Routes, ticket_bytes};
 use crate::{input_agent::Agent, media::ObservationControl, media_quic::NegotiatedMedia};
 use asupersync::cx::Cx;
 use fr_core::{ids::RecoveryGeneration, input::InputView, limits::ProtocolLimits};
@@ -14,6 +14,7 @@ use fr_wire::{
     control::Request,
     decoder::Binding,
     input::{InputDelivery, InputDirection, decode_input},
+    input_ticket::{self, Profile},
     negotiation::{ControlBinding, Role, Selection},
 };
 
@@ -26,7 +27,7 @@ pub struct NegotiatedInput {
     configuration: AttachedChannel,
     parent: ControlBinding,
     limits: ProtocolLimits,
-    authority_tickets: bool,
+    ticket_profile: Profile,
     reference_recovery: bool,
     /// The reference-recovery generation input records must name: the original
     /// attachment's, advanced only by [`NegotiatedInput::follow_recovery`].
@@ -80,8 +81,7 @@ impl NegotiatedInput {
         {
             return Err(Error::InvalidRoutes);
         }
-        let authority_tickets =
-            fr_wire::input_ticket::authority_selected(selection).map_err(Error::Wire)?;
+        let ticket_profile = input_ticket::selected_profile(selection).map_err(Error::Wire)?;
         let parent = input.completed_parent(q).map_err(Error::Transport)?;
         if configuration
             .completed_parent(q)
@@ -92,10 +92,10 @@ impl NegotiatedInput {
         }
         let configuration = configuration.completed_on(q).map_err(Error::Transport)?;
         let attached = input.completed_on(q).map_err(Error::Transport)?;
-        if authority_tickets
+        if ticket_profile != Profile::Legacy
             && ![attached.inbound, attached.outbound].iter().any(|route| {
                 route.messages == Messages::InputFeedback
-                    && route.maximum >= fr_wire::input_ticket::AUTHORITY_TICKET_BYTES
+                    && route.maximum >= ticket_bytes(ticket_profile)
             })
         {
             return Err(Error::InvalidRoutes);
@@ -117,7 +117,7 @@ impl NegotiatedInput {
             configuration,
             parent,
             limits: selection.limits,
-            authority_tickets,
+            ticket_profile,
             reference_recovery: selection.capabilities.iter().any(|cap| {
                 cap.name == fr_wire::recovery_request::CAPABILITY
                     && cap.version == fr_wire::recovery_request::VERSION
@@ -153,10 +153,14 @@ impl NegotiatedInput {
     pub const fn limits(&self) -> ProtocolLimits {
         self.limits
     }
-    /// The exact ticket profile selected on this original input attachment.
-    /// It changes feedback metadata only, never input readiness or authority.
+    /// Whether the original negotiated profile includes the actual authority cap.
     pub const fn authority_tickets(&self) -> bool {
-        self.authority_tickets
+        matches!(self.ticket_profile, Profile::Authority | Profile::Readiness)
+    }
+    /// The exact profile selected on this original input attachment. Decoders
+    /// never infer it from a record's length or downgrade it after admission.
+    pub const fn ticket_profile(&self) -> Profile {
+        self.ticket_profile
     }
     /// The view input records must name: the attachment's, at the current
     /// recovery generation.
@@ -300,7 +304,7 @@ impl NegotiatedInput {
             return Err(Error::InvalidRoutes);
         }
         let routes = Routes::new(a.inbound, a.outbound, Some(pointer))?;
-        QuicInput::with_ticket_profile(cx, agent, q, routes, self.authority_tickets)
+        QuicInput::with_ticket_profile(cx, agent, q, routes, self.ticket_profile)
     }
     /// Viewer routes stay checked against their original connection. The caller
     /// must still use `InputClient`'s lease, ticket, mapping and presented-state

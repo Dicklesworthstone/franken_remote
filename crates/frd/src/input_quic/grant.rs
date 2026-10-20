@@ -2,7 +2,7 @@
 //! reserves the OS share-session's Seat before minting authority, initializes the
 //! native owner outside the authority path, and publishes only after it is ready.
 mod recovery;
-use super::{NegotiatedInput, QuicInput, Routes, ticket::TICKET_CADENCE_US};
+use super::{NegotiatedInput, QuicInput, Routes, ticket::TICKET_CADENCE_US, ticket_bytes};
 use crate::{
     input_agent::{self, AdmissionGate, Driver, Phase, Seat},
     input_watchdog::StopReason,
@@ -21,6 +21,7 @@ use fr_wire::{
     Kind, WireError,
     control::{self, GRANTED_BYTES, Granted, Request, Target},
     input::{InputDelivery, InputDirection},
+    input_ticket::{self, Profile},
     negotiation::{ControlBinding, Role, Selection},
 };
 use std::time::Duration;
@@ -98,7 +99,7 @@ pub struct GrantBroker {
     input_routes: Routes,
     negotiated: Option<NegotiatedInput>,
     limits: ProtocolLimits,
-    authority_tickets: bool,
+    ticket_profile: Profile,
     seat: Seat,
     floor: Option<u64>,
     waiting: Option<Waiting>,
@@ -120,8 +121,8 @@ impl GrantBroker {
         scope: Scope<'_>,
         input: NegotiatedInput,
     ) -> Result<Self, Error> {
-        if input.authority_tickets()
-            != fr_wire::input_ticket::authority_selected(scope.selection).map_err(Error::Wire)?
+        if input.ticket_profile()
+            != input_ticket::selected_profile(scope.selection).map_err(Error::Wire)?
         {
             return Err(Error::InvalidRoutes);
         }
@@ -149,11 +150,9 @@ impl GrantBroker {
         {
             return Err(Error::NotNegotiated);
         }
-        let authority_tickets =
-            fr_wire::input_ticket::authority_selected(scope.selection).map_err(Error::Wire)?;
-        if authority_tickets
-            && input_routes.results.maximum < fr_wire::input_ticket::AUTHORITY_TICKET_BYTES
-        {
+        let ticket_profile =
+            input_ticket::selected_profile(scope.selection).map_err(Error::Wire)?;
+        if input_routes.results.maximum < ticket_bytes(ticket_profile) {
             return Err(Error::InvalidRoutes);
         }
         let (cx, admission) = observation.input_origin().map_err(Error::Media)?;
@@ -222,7 +221,7 @@ impl GrantBroker {
             input_routes,
             negotiated: None,
             limits,
-            authority_tickets,
+            ticket_profile,
             seat,
             floor: None,
             waiting: None,
@@ -512,7 +511,7 @@ impl GrantBroker {
             agent,
             connection,
             self.input_routes,
-            self.authority_tickets,
+            self.ticket_profile,
         )
         .map_err(Error::Input)?;
         // LeaseGranted already transports ticket sequence zero. Renewal must not

@@ -4,6 +4,7 @@
 //! regenerate an uncertain action with a fresh ticket. Only metadata is retained.
 mod control;
 pub mod held;
+mod readiness;
 pub mod ticket;
 pub mod viewport;
 use fr_core::{
@@ -175,6 +176,8 @@ pub struct InputClient {
     receipts: [Option<InputResult>; MAX_PENDING_ACTIONS],
     receipt_cursor: usize,
     ticket_state: Option<ticket::State>,
+    /// Present only for the explicitly selected causal presentation profile.
+    readiness: Option<readiness::State>,
     /// A recovered view needs its own wire ticket. Keep the old ticket's replay
     /// high-water mark, but never authorize the new view with that old ticket.
     awaiting_recovery_ticket: bool,
@@ -242,6 +245,7 @@ impl InputClient {
             receipts: [None; MAX_PENDING_ACTIONS],
             receipt_cursor: 0,
             ticket_state: None,
+            readiness: None,
             awaiting_recovery_ticket: false,
             control_response: None,
             keys: [false; 256],
@@ -355,7 +359,13 @@ impl InputClient {
             return self.fail(StopReason::ViewChanged);
         }
         self.credentials.view.recovery = generation;
+        // Evidence from the retired generation can never satisfy the new
+        // ticket, even if a picture briefly returned while awaiting an ack.
+        self.view_until = None;
         self.awaiting_recovery_ticket = true;
+        if let Some(readiness) = &mut self.readiness {
+            readiness.reset_recovery();
+        }
         self.observation = None;
         Ok(())
     }
@@ -429,7 +439,17 @@ impl InputClient {
     /// lapse arrive. The host releases remotely held keys and buttons at that
     /// lapse, so the local held-state mirror starts empty again.
     pub fn suspend(&mut self, now: ClientInstant) {
-        self.view_until = None;
+        let was_fresh = self.view_until.take().is_some();
+        // A second fresh-to-stale transition needs a new causal barrier even
+        // while the original suspension is still waiting for its first ack.
+        // Keep the original suspension timer and all consumed input identities.
+        if (was_fresh || self.suspended_since.is_none())
+            && self.stopped.is_none()
+            && let Some(readiness) = &mut self.readiness
+        {
+            readiness.lapse();
+            self.awaiting_ticket = true;
+        }
         if self.suspended_since.is_none() && self.stopped.is_none() {
             self.suspended_since = Some(now);
             self.awaiting_ticket = true;

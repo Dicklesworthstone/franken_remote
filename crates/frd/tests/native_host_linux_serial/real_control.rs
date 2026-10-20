@@ -1083,6 +1083,7 @@ impl Controlled {
     }
 }
 
+#[path = "real_control/system_shortcuts.rs"]
 mod system_shortcuts;
 
 /// A wheel notch on the VIEWER (logical button 4, one line up) reaches the

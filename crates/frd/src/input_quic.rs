@@ -18,7 +18,9 @@ use fr_wire::{
     Kind, WireError,
     input::{InputDelivery, InputDirection, MAX_INPUT_RECORD_BYTES},
     input_result::{INPUT_RESULT_BYTES, InputResult, encode_input_result},
-    input_ticket::{AUTHORITY_TICKET_BYTES, INPUT_TICKET_BYTES, Ticket},
+    input_ticket::{
+        AUTHORITY_TICKET_BYTES, INPUT_TICKET_BYTES, Profile, READINESS_TICKET_BYTES, Ticket,
+    },
 };
 use std::{cell::Cell, time::Duration};
 
@@ -29,6 +31,14 @@ pub use negotiated::NegotiatedInput;
 mod ticket;
 
 const RECEIPT_LIFETIME_US: u64 = 1_000_000;
+
+const fn ticket_bytes(profile: Profile) -> usize {
+    match profile {
+        Profile::Legacy => INPUT_TICKET_BYTES,
+        Profile::Authority => AUTHORITY_TICKET_BYTES,
+        Profile::Readiness => READINESS_TICKET_BYTES,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -139,7 +149,7 @@ enum Feedback {
 }
 struct Pending {
     feedback: Feedback,
-    bytes: [u8; AUTHORITY_TICKET_BYTES],
+    bytes: [u8; READINESS_TICKET_BYTES],
     length: usize,
     until: u64,
 }
@@ -167,7 +177,7 @@ pub struct QuicInput {
     connection: ConnectionBinding,
     routes: Routes,
     limits: ProtocolLimits,
-    authority_tickets: bool,
+    ticket_profile: Profile,
     command: Option<Command>,
     pending: Option<Pending>,
     last_reply: Option<InputReply>,
@@ -205,7 +215,7 @@ impl QuicInput {
         connection: &QuicRecords,
         routes: Routes,
     ) -> Result<Self, Error> {
-        Self::with_ticket_profile(cx, agent, connection, routes, false)
+        Self::with_ticket_profile(cx, agent, connection, routes, Profile::Legacy)
     }
     /// Only the retained authenticated selection chooses this profile. Public
     /// low-level construction keeps the exact legacy feedback representation.
@@ -214,16 +224,16 @@ impl QuicInput {
         agent: Agent,
         connection: &QuicRecords,
         routes: Routes,
-        authority_tickets: bool,
+        ticket_profile: Profile,
     ) -> Result<Self, Error> {
         if connection.is_closed() {
             return Err(Error::Closed);
         }
-        if authority_tickets
+        if ticket_profile != Profile::Legacy
             && (routes.results.messages != Messages::InputFeedback
-                || routes.results.maximum < AUTHORITY_TICKET_BYTES
+                || routes.results.maximum < ticket_bytes(ticket_profile)
                 || (agent.protocol_limits().max_control_message_bytes() as usize)
-                    < AUTHORITY_TICKET_BYTES)
+                    < ticket_bytes(ticket_profile))
         {
             return Err(Error::InvalidRoutes);
         }
@@ -249,7 +259,7 @@ impl QuicInput {
             connection: connection.binding(),
             routes,
             limits,
-            authority_tickets,
+            ticket_profile,
             command: None,
             pending: None,
             last_reply: None,
@@ -340,7 +350,7 @@ impl QuicInput {
                 self.last_reply = Some(reply);
                 match reply {
                     InputReply::Record(result) => {
-                        let mut bytes = [0; AUTHORITY_TICKET_BYTES];
+                        let mut bytes = [0; READINESS_TICKET_BYTES];
                         let length = encode_input_result(
                             result,
                             &mut bytes,

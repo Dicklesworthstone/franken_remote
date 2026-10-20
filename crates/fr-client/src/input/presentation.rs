@@ -13,6 +13,7 @@ use fr_core::{
 use fr_media::{
     delivery::{DecodedFrame, ReceivePipeline},
     freshness::{self, ClockCorrelation, ViewEvidence, ViewTracker},
+    presented::{AdmittedCursor, QueuedReport},
 };
 use fr_wire::MediaLimits;
 
@@ -409,6 +410,49 @@ impl PresentedInput {
         }
         self.input.accept_authority_ticket(bytes, clock, now)?;
         Ok(())
+    }
+    /// The selected host acknowledgement proves a later applied presentation,
+    /// independently of this original receiver's own current visible evidence.
+    pub fn accept_readiness_ticket(
+        &mut self,
+        bytes: &[u8],
+        clock: ClockCorrelation,
+        now: ClientInstant,
+    ) -> Result<(), Error> {
+        if clock.host_boot() != self.view.host_boot() {
+            self.stop(StopReason::InvalidTicket);
+            return Err(Error::Media(freshness::Error::StaleBinding));
+        }
+        self.input.accept_readiness_ticket(bytes, clock, now)?;
+        Ok(())
+    }
+    pub fn expect_readiness_feedback(&mut self, now: ClientInstant) -> Result<(), Error> {
+        self.input
+            .expect_readiness_feedback(now)
+            .map_err(Error::Input)
+    }
+    /// The runtime supplies its original reporter, already matched to this
+    /// receiver's complete negotiated binding and authenticated connection.
+    pub fn bind_readiness_reporter(
+        &mut self,
+        cursor: AdmittedCursor,
+        now: ClientInstant,
+    ) -> Result<(), Error> {
+        self.input
+            .bind_readiness_reporter(cursor, now)
+            .map_err(Error::Input)
+    }
+    pub fn needs_loss_report(&self) -> bool {
+        self.input.needs_loss_report()
+    }
+    pub fn report_admitted(
+        &mut self,
+        receipt: QueuedReport,
+        now: ClientInstant,
+    ) -> Result<(), Error> {
+        self.input
+            .report_admitted(receipt, now)
+            .map_err(Error::Input)
     }
     pub fn enable_control_renewal(
         &mut self,

@@ -20,6 +20,7 @@ use frd::{
     input_watchdog::{StopReason, host_now},
 };
 use std::{
+    num::NonZeroU64,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -51,6 +52,9 @@ fn credentials() -> InputCredentials {
     }
 }
 fn session(cx: &Cx, lease_us: u64) -> InputSession {
+    session_with_presented(cx, lease_us, None)
+}
+fn session_with_presented(cx: &Cx, lease_us: u64, applied: Option<NonZeroU64>) -> InputSession {
     let now = host_now(cx).unwrap();
     let c = credentials();
     let mut a = SessionAuthority::new(
@@ -62,7 +66,17 @@ fn session(cx: &Cx, lease_us: u64) -> InputSession {
     );
     a.mark_capabilities_checked().unwrap();
     a.authorize_observation(now).unwrap();
-    a.mark_view_ready(now).unwrap();
+    if let Some(sequence) = applied {
+        a.mark_presented_ready_until(
+            sequence,
+            now.checked_add(HostDuration::from_micros(lease_us))
+                .unwrap(),
+            now,
+        )
+        .unwrap();
+    } else {
+        a.mark_view_ready(now).unwrap();
+    }
     a.grant_lease(c.lease, now).unwrap();
     a.issue_input_ticket(c.lease, c.ticket, now).unwrap();
     InputSession::new(
@@ -413,6 +427,96 @@ fn authority_ticket_uses_the_same_native_mailbox_and_keeps_legacy_replies_distin
     assert_eq!(legacy.sequence, 2);
     assert_eq!(legacy.credentials.ticket, InputTicketId::from_raw(6));
     assert_eq!(observed.effects.lock().unwrap().len(), 0);
+    agent.control().stop(StopReason::LocalRevoke);
+    assert!(rt.block_on(driver).handoff_safe());
+}
+#[test]
+fn readiness_ticket_refuses_without_applied_proof_and_never_falls_back() {
+    let (rt, cx) = runtime_cx();
+    let observed = trace();
+    let sink = observed.clone();
+    let seat = Seat::default();
+    let (mut agent, driver) = seat
+        .start(
+            cx.clone(),
+            session(&cx, 3_000_000),
+            route(),
+            move || Ok(Sink::new(sink)),
+            clean,
+        )
+        .unwrap();
+    agent
+        .issue_readiness_ticket_record(InputTicketId::from_raw(5), 1)
+        .unwrap();
+    assert_eq!(
+        agent.issue_authority_ticket_record(InputTicketId::from_raw(6), 2),
+        Err(Error::Backpressure)
+    );
+    assert_eq!(agent.try_input_result(), Err(Error::NotInputCommand));
+    assert_eq!(
+        reply(&mut agent),
+        Reply::ReadinessTicket(Err(Refusal::Authority(
+            fr_core::authority::AuthorityError::ViewUnready
+        )))
+    );
+    assert!(!agent.control().is_stopped());
+    // The refused readiness command published no ticket with this ID.
+    agent
+        .issue_ticket_record(InputTicketId::from_raw(5), 2)
+        .unwrap();
+    let Reply::Ticket(Ok(legacy)) = reply(&mut agent) else {
+        panic!("legacy reply required");
+    };
+    assert_eq!(legacy.sequence, 2);
+    assert_eq!(legacy.credentials.ticket, InputTicketId::from_raw(5));
+    assert_eq!(*observed.effects.lock().unwrap(), Vec::<Operation>::new());
+    agent.control().stop(StopReason::LocalRevoke);
+    assert!(rt.block_on(driver).handoff_safe());
+}
+#[test]
+fn readiness_ticket_samples_applied_provenance_in_the_original_native_mailbox() {
+    let (rt, cx) = runtime_cx();
+    let native = session_with_presented(&cx, 3_000_000, NonZeroU64::new(19));
+    let until = native
+        .monitor()
+        .authorization_deadline(host_now(&cx).unwrap())
+        .unwrap();
+    let observed = trace();
+    let sink = observed.clone();
+    let seat = Seat::default();
+    let (mut agent, driver) = seat
+        .start(cx, native, route(), move || Ok(Sink::new(sink)), clean)
+        .unwrap();
+    agent
+        .issue_readiness_ticket_record(InputTicketId::from_raw(5), 1)
+        .unwrap();
+    assert_eq!(
+        agent.issue_ticket_record(InputTicketId::from_raw(6), 2),
+        Err(Error::Backpressure)
+    );
+    assert!(matches!(
+        agent.input_response(),
+        Err(Error::NotInputCommand)
+    ));
+    let Reply::ReadinessTicket(Ok(proof)) = reply(&mut agent) else {
+        panic!("exact readiness reply must remain in its original slot");
+    };
+    assert_eq!(proof.presented_sequence, 19);
+    assert_eq!(proof.authority.authority_until_us, until.as_micros());
+    assert_eq!(proof.authority.ticket.sequence, 1);
+    assert_eq!(
+        proof.authority.ticket.credentials,
+        InputCredentials {
+            ticket: InputTicketId::from_raw(5),
+            ..credentials()
+        }
+    );
+    assert_eq!(
+        proof.authority.ticket.expires_at_us,
+        (proof.authority.ticket.issued_at_us + 1_500_000).min(until.as_micros())
+    );
+    assert!(proof.authority.ticket.expires_at_us < until.as_micros());
+    assert_eq!(*observed.effects.lock().unwrap(), Vec::<Operation>::new());
     agent.control().stop(StopReason::LocalRevoke);
     assert!(rt.block_on(driver).handoff_safe());
 }

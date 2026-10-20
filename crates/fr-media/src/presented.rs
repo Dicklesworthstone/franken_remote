@@ -8,6 +8,7 @@ use fr_wire::{
     input::{InputDelivery, InputDirection},
     presented::{self as wire, Report, Sample, Stamp},
 };
+use std::{num::NonZeroU64, sync::Arc};
 pub const HISTORY: usize = 64;
 pub const REPORT_INTERVAL_US: u64 = 50_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +25,66 @@ pub enum Decision {
     Ready { until_us: u64 },
     Unavailable,
     Obsolete,
+}
+
+/// Snapshot of one original reporter's admitted sequence. A zero sequence
+/// means that this reporter has not handed any report to its transport yet.
+/// The private identity survives observation-to-control promotion; another
+/// reporter with identical numeric bindings cannot substitute for this owner.
+#[derive(Debug, Clone)]
+pub struct AdmittedCursor {
+    binding: Binding,
+    sequence: u64,
+    visible: Option<Stamp>,
+    lineage: Arc<()>,
+}
+impl AdmittedCursor {
+    pub const fn binding(&self) -> Binding {
+        self.binding
+    }
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+    pub const fn visible(&self) -> Option<Stamp> {
+        self.visible
+    }
+    /// Validate another snapshot of this same original reporter, independent
+    /// of when its admitted prefix was sampled.
+    pub fn is_from(&self, cursor: &Self) -> bool {
+        Arc::ptr_eq(&self.lineage, &cursor.lineage) && self.binding == cursor.binding
+    }
+}
+impl PartialEq for AdmittedCursor {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.lineage, &other.lineage)
+            && self.binding == other.binding
+            && self.sequence == other.sequence
+            && self.visible == other.visible
+    }
+}
+impl Eq for AdmittedCursor {}
+
+/// Receipt from the reporter's actual transport-admission hook. This is local
+/// queue admission, not evidence that the host applied the report or that the
+/// view remains fresh. Receipts have nonzero sequences and cannot be forged
+/// from a binding, a decoded wire report, or a replacement reporter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedReport(AdmittedCursor);
+impl QueuedReport {
+    pub const fn binding(&self) -> Binding {
+        self.0.binding
+    }
+    pub const fn sequence(&self) -> u64 {
+        self.0.sequence
+    }
+    pub const fn visible(&self) -> Option<Stamp> {
+        self.0.visible
+    }
+    /// Compare original ownership, including the complete recovery binding.
+    /// The caller still checks sequence order and its own admitted ceiling.
+    pub fn is_from(&self, cursor: &AdmittedCursor) -> bool {
+        self.0.is_from(cursor)
+    }
 }
 fn tick(last: &mut u64, now: u64) -> Result<(), Error> {
     if now < *last {
@@ -104,6 +165,18 @@ impl Verifier {
     /// deadline would not extend the confirmed one (a shrunken bound included)
     /// is obsolete: it never shortens an existing view deadline.
     pub fn receive(&mut self, bytes: &[u8], now: u64, bound_us: u64) -> Result<Decision, Error> {
+        self.receive_report(bytes, now, bound_us)
+            .map(|(_, decision)| decision)
+    }
+    /// Return the sequence from this exact verified report, never the replay
+    /// floor. Only a `Ready` decision that the authority owner successfully
+    /// applies can become a host acknowledgement of readiness.
+    pub fn receive_report(
+        &mut self,
+        bytes: &[u8],
+        now: u64,
+        bound_us: u64,
+    ) -> Result<(NonZeroU64, Decision), Error> {
         tick(&mut self.last_now, now)?;
         if !(1..=wire::MAX_SOURCE_AGE_US).contains(&bound_us) {
             return Err(Error::Overflow);
@@ -119,9 +192,10 @@ impl Verifier {
         if report.sequence <= self.floor {
             return Err(Error::Replay);
         }
+        let sequence = NonZeroU64::new(report.sequence).ok_or(Error::Replay)?;
         self.floor = report.sequence;
         let Some(sample) = report.visible else {
-            return Ok(Decision::Unavailable);
+            return Ok((sequence, Decision::Unavailable));
         };
         let until_us = sample
             .stamp
@@ -129,16 +203,16 @@ impl Verifier {
             .checked_add(bound_us)
             .ok_or(Error::Overflow)?;
         if self.confirmed_until.is_some_and(|old| until_us <= old) {
-            return Ok(Decision::Obsolete);
+            return Ok((sequence, Decision::Obsolete));
         }
         if now >= until_us {
-            return Ok(Decision::Unavailable);
+            return Ok((sequence, Decision::Unavailable));
         }
         if !self.history.contains(&Some(sample.stamp)) {
             return Err(Error::UnknownSource);
         }
         self.confirmed_until = Some(until_us);
-        Ok(Decision::Ready { until_us })
+        Ok((sequence, Decision::Ready { until_us }))
     }
 }
 struct Pending {
@@ -150,6 +224,7 @@ struct Pending {
 /// Unchanged source identity never generates heartbeat-like readiness extensions.
 pub struct Reporter {
     binding: Binding,
+    lineage: Arc<()>,
     limits: ProtocolLimits,
     sequence: u64,
     last_now: u64,
@@ -166,6 +241,7 @@ impl Reporter {
         binding.validate().map_err(Error::Wire)?;
         Ok(Self {
             binding,
+            lineage: Arc::new(()),
             limits,
             sequence: 1,
             last_now: now,
@@ -178,6 +254,46 @@ impl Reporter {
     }
     pub fn has_reported(&self) -> bool {
         self.sent.is_some()
+    }
+    /// The last admitted record, not a prepared candidate or an intended send.
+    pub fn admitted_cursor(&self) -> AdmittedCursor {
+        AdmittedCursor {
+            binding: self.binding,
+            sequence: self.sequence - 1,
+            visible: self.sent.filter(|_| !self.unavailable_sent),
+            lineage: self.lineage.clone(),
+        }
+    }
+    /// Reserve a mandatory negative report for a newly observed local lapse.
+    /// Its sequence is a barrier, NOT an admission receipt. Even a reporter
+    /// which has never sent a positive report must establish this barrier.
+    /// Repeated calls preserve already-pending negative bytes and send-by;
+    /// an expired negative stays terminal and can never be given a new budget.
+    pub fn force_unavailable(&mut self, now: u64) -> Result<u64, Error> {
+        self.discard_expired_positive(now)?;
+        if self.pending.as_ref().is_some_and(|p| p.stamp.is_none()) {
+            return Ok(self.sequence);
+        }
+        let until = now.checked_add(REPORT_INTERVAL_US).ok_or(Error::Overflow)?;
+        let mut bytes = [0; wire::BYTES];
+        wire::encode(
+            Report {
+                sequence: self.sequence,
+                visible: None,
+            },
+            self.binding,
+            &self.limits,
+            &mut bytes,
+            InputDirection::ViewerToHost,
+            InputDelivery::Reliable,
+        )
+        .map_err(Error::Wire)?;
+        self.pending = Some(Pending {
+            stamp: None,
+            bytes,
+            until,
+        });
+        Ok(self.sequence)
     }
     /// `bound_us` is the viewer's source-age bound for this path. A sample at
     /// or past it is not fresh evidence: it is reported like no visible view.
@@ -202,25 +318,7 @@ impl Reporter {
         let Some(sample) = sample else {
             self.pending = None;
             if self.sent.is_some() && !self.unavailable_sent {
-                let until = now.checked_add(REPORT_INTERVAL_US).ok_or(Error::Overflow)?;
-                let mut bytes = [0; wire::BYTES];
-                wire::encode(
-                    Report {
-                        sequence: self.sequence,
-                        visible: None,
-                    },
-                    self.binding,
-                    &self.limits,
-                    &mut bytes,
-                    InputDirection::ViewerToHost,
-                    InputDelivery::Reliable,
-                )
-                .map_err(Error::Wire)?;
-                self.pending = Some(Pending {
-                    stamp: None,
-                    bytes,
-                    until,
-                });
+                self.force_unavailable(now)?;
             }
             return Ok(());
         };
@@ -303,16 +401,34 @@ impl Reporter {
         Ok(self.pending.as_ref().map(|p| (p.bytes.as_slice(), p.until)))
     }
     pub fn queued(&mut self, now: u64) -> Result<(), Error> {
+        self.queued_receipt(now).map(|_| ())
+    }
+    /// Call only after transport actually accepts these exact pending bytes.
+    /// Backpressure, preparation, expiry and discarded candidates emit nothing.
+    pub fn queued_receipt(&mut self, now: u64) -> Result<QueuedReport, Error> {
         self.pending(now)?.ok_or(Error::Expired)?;
+        // Arithmetic failure cannot partially advance the admitted cursor or
+        // let a later caller wrap/reuse the original report identity.
+        let next = self.sequence.checked_add(1).ok_or(Error::Overflow)?;
+        let after = now.checked_add(REPORT_INTERVAL_US).ok_or(Error::Overflow)?;
         let pending = self.pending.take().ok_or(Error::Expired)?;
+        let receipt = QueuedReport(AdmittedCursor {
+            binding: self.binding,
+            sequence: self.sequence,
+            visible: pending.stamp,
+            lineage: self.lineage.clone(),
+        });
         if let Some(stamp) = pending.stamp {
             self.sent = Some(stamp);
             self.unavailable_sent = false;
         } else {
             self.unavailable_sent = true;
         }
-        self.sequence = self.sequence.checked_add(1).ok_or(Error::Overflow)?;
-        self.after = now.checked_add(REPORT_INTERVAL_US).ok_or(Error::Overflow)?;
-        Ok(())
+        self.sequence = next;
+        self.after = after;
+        Ok(receipt)
     }
 }
+
+#[cfg(test)]
+mod overflow_tests;

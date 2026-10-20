@@ -23,6 +23,20 @@ pub const MAX_TICKET_LIFETIME_US: u64 = 1_500_000;
 pub const AUTHORITY_CAPABILITY: &str = "input-ticket-authority";
 pub const AUTHORITY_VERSION: u16 = 1;
 pub const AUTHORITY_TICKET_BYTES: usize = INPUT_TICKET_BYTES + 8;
+/// Optional acknowledgement of an actually applied presentation report. This
+/// depends on the authority profile and never replaces fresh local visibility.
+pub const READINESS_CAPABILITY: &str = "input-ticket-readiness";
+pub const READINESS_VERSION: u16 = 1;
+pub const READINESS_TICKET_BYTES: usize = AUTHORITY_TICKET_BYTES + 8;
+
+/// The exact feedback layout selected for the original session. Received
+/// lengths never select a profile or permit retry through another decoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Profile {
+    Legacy,
+    Authority,
+    Readiness,
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Ticket {
     pub credentials: InputCredentials,
@@ -48,30 +62,58 @@ impl fmt::Debug for AuthorityTicket {
     }
 }
 
+/// The host's latest successfully applied positive presentation report,
+/// sampled with the ticket and existing authority cap. The report sequence is
+/// nonzero and scoped to this ticket's view/recovery generation. A client must
+/// additionally relate it to its own admitted reports and current suspension.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ReadinessTicket {
+    pub authority: AuthorityTicket,
+    pub presented_sequence: u64,
+}
+impl fmt::Debug for ReadinessTicket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("InputTicketReadiness([redacted])")
+    }
+}
+
 /// Require a positive negotiated selection before choosing the extended codec.
 /// Absence preserves the legacy profile. An explicitly unsupported version or
 /// incomplete selection refuses instead of silently changing layouts.
-pub fn authority_selected(selection: &Selection) -> Result<bool, WireError> {
+pub fn selected_profile(selection: &Selection) -> Result<Profile, WireError> {
     selection.validate().map_err(|error| match error {
         negotiation::Error::Version | negotiation::Error::Profile => WireError::UnsupportedVersion,
         negotiation::Error::Limits => WireError::InvalidLimits,
         negotiation::Error::Wire(error) => error,
         _ => WireError::InvalidValue,
     })?;
-    let Some(authority) = selection
+    let authority = selection
         .capabilities
         .iter()
-        .find(|capability| capability.name == AUTHORITY_CAPABILITY)
-    else {
-        return Ok(false);
-    };
-    if authority.version != AUTHORITY_VERSION {
+        .find(|capability| capability.name == AUTHORITY_CAPABILITY);
+    let readiness = selection
+        .capabilities
+        .iter()
+        .find(|capability| capability.name == READINESS_CAPABILITY);
+    if authority.is_some_and(|capability| capability.version != AUTHORITY_VERSION)
+        || readiness.is_some_and(|capability| capability.version != READINESS_VERSION)
+    {
         return Err(WireError::UnsupportedVersion);
     }
+    let profile = match (authority, readiness) {
+        (None, None) => return Ok(Profile::Legacy),
+        (None, Some(_)) => return Err(WireError::InvalidDependency),
+        (Some(_), None) => Profile::Authority,
+        (Some(_), Some(_)) => Profile::Readiness,
+    };
     if selection.role != negotiation::Role::RequestControl {
         return Err(WireError::WrongRole);
     }
-    if (selection.limits.max_control_message_bytes() as usize) < AUTHORITY_TICKET_BYTES {
+    let bytes = match profile {
+        Profile::Readiness => READINESS_TICKET_BYTES,
+        Profile::Authority | Profile::Legacy => AUTHORITY_TICKET_BYTES,
+    };
+    if (selection.limits.max_control_message_bytes() as usize) < bytes {
         return Err(WireError::InvalidLimits);
     }
     if ![
@@ -92,7 +134,21 @@ pub fn authority_selected(selection: &Selection) -> Result<bool, WireError> {
     }) {
         return Err(WireError::InvalidDependency);
     }
-    Ok(true)
+    Ok(profile)
+}
+
+/// Both extended profiles carry the actual authority cap. Call
+/// [`selected_profile`] when choosing the exact codec.
+pub fn authority_selected(selection: &Selection) -> Result<bool, WireError> {
+    Ok(matches!(
+        selected_profile(selection)?,
+        Profile::Authority | Profile::Readiness
+    ))
+}
+
+/// True only for the positively selected readiness acknowledgement profile.
+pub fn readiness_selected(selection: &Selection) -> Result<bool, WireError> {
+    Ok(selected_profile(selection)? == Profile::Readiness)
 }
 
 fn role(direction: InputDirection, delivery: InputDelivery) -> Result<(), WireError> {
@@ -126,6 +182,13 @@ fn valid_authority(ticket: AuthorityTicket, channel: u32) -> Result<(), WireErro
             .checked_sub(ticket.ticket.issued_at_us)
             .is_some_and(|lifetime| (1..=crate::control::MAX_LEASE_LIFETIME_US).contains(&lifetime))
     {
+        return Err(WireError::InvalidValue);
+    }
+    Ok(())
+}
+fn valid_readiness(ticket: ReadinessTicket, channel: u32) -> Result<(), WireError> {
+    valid_authority(ticket.authority, channel)?;
+    if ticket.presented_sequence == 0 {
         return Err(WireError::InvalidValue);
     }
     Ok(())
@@ -212,8 +275,8 @@ fn read_body(r: &mut Reader<'_>) -> Result<Ticket, WireError> {
     })
 }
 
-/// Encode only after [`authority_selected`] returned true for the authenticated
-/// session. Legacy peers continue using [`encode`] and its exact 128-byte layout.
+/// Encode only for [`Profile::Authority`]. Legacy peers continue using [`encode`]
+/// and its exact 128-byte layout; readiness uses [`encode_readiness`].
 pub fn encode_authority(
     ticket: AuthorityTicket,
     out: &mut [u8],
@@ -231,8 +294,7 @@ pub fn encode_authority(
         Kind::InputTicket,
         AUTHORITY_TICKET_BYTES - HEADER_BYTES,
     )?;
-    write_body(&mut w, ticket.ticket)?;
-    w.u64(ticket.authority_until_us)?;
+    write_authority_body(&mut w, ticket)?;
     w.finish()
 }
 
@@ -253,11 +315,79 @@ pub fn decode_authority(
         None,
     )?;
     let mut r = record.reader(Kind::InputTicket)?;
-    let ticket = AuthorityTicket {
-        ticket: read_body(&mut r)?,
-        authority_until_us: r.u64()?,
-    };
+    let ticket = read_authority_body(&mut r)?;
     r.finish()?;
     valid_authority(ticket, channel)?;
+    Ok(ticket)
+}
+
+fn write_authority_body(w: &mut Writer<'_>, ticket: AuthorityTicket) -> Result<(), WireError> {
+    write_body(w, ticket.ticket)?;
+    w.u64(ticket.authority_until_us)
+}
+
+fn read_authority_body(r: &mut Reader<'_>) -> Result<AuthorityTicket, WireError> {
+    Ok(AuthorityTicket {
+        ticket: read_body(r)?,
+        authority_until_us: r.u64()?,
+    })
+}
+
+/// Encode the positively selected [`Profile::Readiness`] layout. A host without
+/// an actually applied report proof must withhold this ticket, never encode zero
+/// or downgrade its selected profile. Input and queued-record expiries stay short.
+pub fn encode_readiness(
+    ticket: ReadinessTicket,
+    out: &mut [u8],
+    limits: &ProtocolLimits,
+    channel: u32,
+    direction: InputDirection,
+    delivery: InputDelivery,
+) -> Result<usize, WireError> {
+    role(direction, delivery)?;
+    valid_readiness(ticket, channel)?;
+    let mut w = Writer::record_bounded(
+        out,
+        limits.max_control_message_bytes() as usize,
+        channel,
+        Kind::InputTicket,
+        READINESS_TICKET_BYTES - HEADER_BYTES,
+    )?;
+    write_authority_body(&mut w, ticket.authority)?;
+    w.u64(ticket.presented_sequence)?;
+    w.finish()
+}
+
+/// Decode only the fixed 144-byte readiness profile. The acknowledgement does
+/// not itself establish its causal relationship to the receiver's suspension;
+/// the original client owner checks that against its actually admitted reports.
+pub fn decode_readiness(
+    bytes: &[u8],
+    limits: &ProtocolLimits,
+    channel: u32,
+    direction: InputDirection,
+    delivery: InputDelivery,
+) -> Result<ReadinessTicket, WireError> {
+    role(direction, delivery)?;
+    if bytes.len() != READINESS_TICKET_BYTES {
+        return Err(if bytes.len() < READINESS_TICKET_BYTES {
+            WireError::Truncated
+        } else {
+            WireError::TrailingBytes
+        });
+    }
+    let record = Record::decode_bounded(
+        bytes,
+        limits.max_control_message_bytes() as usize,
+        channel,
+        None,
+    )?;
+    let mut r = record.reader(Kind::InputTicket)?;
+    let ticket = ReadinessTicket {
+        authority: read_authority_body(&mut r)?,
+        presented_sequence: r.u64()?,
+    };
+    r.finish()?;
+    valid_readiness(ticket, channel)?;
     Ok(ticket)
 }

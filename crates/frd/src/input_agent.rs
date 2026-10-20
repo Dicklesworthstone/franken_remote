@@ -35,6 +35,7 @@ use fr_core::{
 use fr_wire::{
     WireError,
     input::{InputDelivery, InputDirection, MAX_INPUT_RECORD_BYTES, decode_input},
+    input_ticket::{AuthorityTicket, Profile, ReadinessTicket, Ticket},
 };
 use std::{
     future::Future,
@@ -279,6 +280,7 @@ pub enum Reply {
     Authority(Result<HostInstant, Refusal>),
     Ticket(Result<fr_wire::input_ticket::Ticket, Refusal>),
     AuthorityTicket(Result<fr_wire::input_ticket::AuthorityTicket, Refusal>),
+    ReadinessTicket(Result<fr_wire::input_ticket::ReadinessTicket, Refusal>),
     Reconciliation(Result<Reconciliation, Refusal>),
     ReconciliationPanic { report: Option<Reconciliation> },
     CancelledBeforeStart,
@@ -324,7 +326,7 @@ enum CommandKind {
     Ticket {
         ticket: InputTicketId,
         sequence: u64,
-        authority: bool,
+        profile: Profile,
     },
     Authority(AuthorityCommand),
 }
@@ -576,7 +578,7 @@ impl Agent {
         ticket: InputTicketId,
         sequence: u64,
     ) -> Result<(), Error> {
-        self.enqueue_ticket(ticket, sequence, false)
+        self.enqueue_ticket(ticket, sequence, Profile::Legacy)
     }
     /// The negotiated feedback profile additionally reports the original
     /// owner's actual lease/observation cap, sampled atomically at issuance.
@@ -586,19 +588,28 @@ impl Agent {
         ticket: InputTicketId,
         sequence: u64,
     ) -> Result<(), Error> {
-        self.enqueue_ticket(ticket, sequence, true)
+        self.enqueue_ticket(ticket, sequence, Profile::Authority)
+    }
+    /// Acknowledge only presentation evidence applied after native release.
+    /// Missing evidence refuses on the original owner without publishing a ticket.
+    pub fn issue_readiness_ticket_record(
+        &mut self,
+        ticket: InputTicketId,
+        sequence: u64,
+    ) -> Result<(), Error> {
+        self.enqueue_ticket(ticket, sequence, Profile::Readiness)
     }
     fn enqueue_ticket(
         &mut self,
         ticket: InputTicketId,
         sequence: u64,
-        authority: bool,
+        profile: Profile,
     ) -> Result<(), Error> {
         self.enqueue(Command {
             kind: CommandKind::Ticket {
                 ticket,
                 sequence,
-                authority,
+                profile,
             },
             bytes: [0; MAX_INPUT_RECORD_BYTES],
             length: 0,
@@ -989,14 +1000,14 @@ fn execute<S: InputSink>(
         CommandKind::Ticket {
             ticket,
             sequence,
-            authority,
+            profile,
         } => {
             shared.check_admission();
             if cx.checkpoint().is_err() {
                 shared.control.stop(StopReason::Cancelled);
             }
             let now = input_watchdog::host_now(cx).expect("captured timer");
-            ticket_reply(session, ticket, sequence, now, authority)
+            ticket_reply(session, ticket, sequence, now, profile)
         }
         CommandKind::Authority(command) => {
             shared.check_admission();
@@ -1035,23 +1046,38 @@ fn ticket_reply(
     ticket: InputTicketId,
     sequence: u64,
     now: HostInstant,
-    authority: bool,
+    profile: Profile,
 ) -> Reply {
-    let result = session.issue_ticket_authority_timed(ticket, now).map(
-        |(issued, until, authority_until)| fr_wire::input_ticket::AuthorityTicket {
-            ticket: fr_wire::input_ticket::Ticket {
+    let proof = match profile {
+        Profile::Readiness => session.issue_readiness_ticket_timed(ticket, now),
+        Profile::Legacy | Profile::Authority => session.issue_ticket_proof_timed(ticket, now),
+    };
+    let result = proof.map(|proof| {
+        let record = AuthorityTicket {
+            ticket: Ticket {
                 credentials: session.ticket_credentials(ticket),
                 sequence,
-                issued_at_us: issued.as_micros(),
-                expires_at_us: until.as_micros(),
+                issued_at_us: proof.issued_at.as_micros(),
+                expires_at_us: proof.expires_at.as_micros(),
             },
-            authority_until_us: authority_until.as_micros(),
-        },
-    );
-    if authority {
-        Reply::AuthorityTicket(result)
-    } else {
-        Reply::Ticket(result.map(|record| record.ticket))
+            authority_until_us: proof.authority_until.as_micros(),
+        };
+        (record, proof.presented_sequence)
+    });
+    match profile {
+        Profile::Legacy => Reply::Ticket(result.map(|(record, _)| record.ticket)),
+        Profile::Authority => Reply::AuthorityTicket(result.map(|(record, _)| record)),
+        Profile::Readiness => Reply::ReadinessTicket(result.and_then(|(authority, sequence)| {
+            let presented_sequence = sequence
+                .ok_or(Refusal::Authority(
+                    fr_core::authority::AuthorityError::ViewUnready,
+                ))?
+                .get();
+            Ok(ReadinessTicket {
+                authority,
+                presented_sequence,
+            })
+        })),
     }
 }
 

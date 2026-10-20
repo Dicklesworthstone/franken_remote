@@ -626,7 +626,14 @@ impl super::StreamingViewer {
         // Only lifetime counters cross epochs; old pending replies and source
         // evidence do not. Late old metrics are explicitly retired by Dispatch.
         let feedback_sent = self.feedback.take().map_or(0, |f| f.sent);
-        let presentation_sent = self.presentation.take().map_or(0, |p| p.sent);
+        let presentation = self.presentation.take();
+        // Bind the old admitted prefix before recovery drains old feedback,
+        // including recovery on the very first turn after control promotion.
+        // Input's explicit generation transition discards this scope later.
+        let report_cursor = presentation
+            .as_ref()
+            .map(super::ViewerPresentation::admitted_cursor);
+        let presentation_sent = presentation.map_or(0, |p| p.sent);
         let refused = Cell::new(None);
         // A drive ends on its callback's first refusal: report that, not the
         // transport's bare Handler error.
@@ -660,7 +667,7 @@ impl super::StreamingViewer {
                 Ok(presentation)
             }
             super::Peer::Control(mut viewer) => {
-                let previous = match viewer.take_media_for_recovery() {
+                let previous = match viewer.take_media_for_recovery(report_cursor) {
                     Ok(previous) => previous,
                     Err(error) => {
                         viewer.close();

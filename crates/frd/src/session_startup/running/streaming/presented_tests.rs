@@ -334,19 +334,21 @@ fn viewer_report_deadline_includes_time_between_view_sampling_and_service() {
         evidence.age_upper_us = bound - 10_000;
         asupersync::time::sleep(c.now(), Duration::from_millis(20)).await;
         let before = q.usage();
+        let admitted = reporter.admitted_cursor();
         // The 20 ms between sampling and service is charged to the sample's
         // age, which then exceeds the bound: nothing is reported, and (since
         // 2b5ffcd) an unusable report is not a session failure.
         assert_eq!(
-            reporter.service(
+            reporter.service_reported(
                 q,
                 &c,
                 ViewSample::Visible(evidence, sampled_at),
                 now(&c).unwrap()
             ),
-            Ok(())
+            Ok(None)
         );
         assert_eq!(reporter.sent, 0);
+        assert_eq!(reporter.admitted_cursor(), admitted);
         assert_eq!(q.usage(), before);
         host.close();
         viewer.close();
@@ -365,6 +367,8 @@ fn actual_critical_backpressure_does_not_extend_a_pending_presentation_deadline(
             ViewerPresentation::attach(&selection, parent, view(parent), q, routes.outbound, start)
                 .unwrap()
                 .unwrap();
+        let admitted = reporter.admitted_cursor();
+        assert_eq!(admitted.sequence(), 0);
         let filler = bytes(view(parent), 1, None);
         loop {
             match q.send(
@@ -386,15 +390,17 @@ fn actual_critical_backpressure_does_not_extend_a_pending_presentation_deadline(
             wire::VIEWER_RTT_MULTIPLE,
         );
         evidence.age_upper_us = bound - 100_000;
-        reporter
-            .service(
+        assert_eq!(
+            reporter.service_reported(
                 q,
                 &c,
                 ViewSample::Visible(evidence, start),
                 now(&c).unwrap(),
-            )
-            .unwrap();
+            ),
+            Ok(None)
+        );
         assert_eq!(reporter.sent, 0);
+        assert_eq!(reporter.admitted_cursor(), admitted);
         let full = q.usage();
         asupersync::time::sleep(c.now(), Duration::from_millis(110)).await;
         let at = now(&c).unwrap();
@@ -404,11 +410,151 @@ fn actual_critical_backpressure_does_not_extend_a_pending_presentation_deadline(
         // its source tombstoned instead of ending the session.
         evidence.age_upper_us = 0;
         assert_eq!(
-            reporter.service(q, &c, ViewSample::Visible(evidence, at), at),
-            Ok(())
+            reporter.service_reported(q, &c, ViewSample::Visible(evidence, at), at),
+            Ok(None)
         );
         assert_eq!(reporter.sent, 0);
+        assert_eq!(reporter.admitted_cursor(), admitted);
         assert_eq!(q.usage(), full);
+
+        // A mandatory loss barrier is a reservation, not a local admission.
+        // The still-full real route admits neither it nor a later positive
+        // sample, and expiry cannot turn the negative into a new report budget.
+        let forced_at = now(&c).unwrap();
+        assert_eq!(reporter.force_unavailable(forced_at), Ok(1));
+        assert_eq!(reporter.admitted_cursor(), admitted);
+        assert_eq!(
+            reporter.service_reported(
+                q,
+                &c,
+                ViewSample::Visible(sample(forced_at), forced_at),
+                forced_at,
+            ),
+            Ok(None)
+        );
+        asupersync::time::sleep(c.now(), Duration::from_millis(60)).await;
+        let expired_at = now(&c).unwrap();
+        assert!(expired_at >= forced_at + fr_media::presented::REPORT_INTERVAL_US);
+        assert_eq!(
+            reporter.force_unavailable(expired_at),
+            Err(presented::Error::Proof(fr_media::presented::Error::Expired))
+        );
+        assert_eq!(
+            reporter.service_reported(
+                q,
+                &c,
+                ViewSample::Visible(sample(expired_at), expired_at),
+                expired_at,
+            ),
+            Err(presented::Error::Proof(fr_media::presented::Error::Expired))
+        );
+        assert_eq!(reporter.admitted_cursor(), admitted);
+        assert_eq!(reporter.sent, 0);
+        assert_eq!(q.usage(), full);
+        assert!(!q.is_closed());
+        host.close();
+        viewer.close();
+    });
+}
+
+#[test]
+fn report_receipt_is_emitted_once_only_after_its_original_route_admits_the_record() {
+    use crate::media::presented::{ViewSample, ViewerPresentation};
+    run(|c, h| async move {
+        let (mut host, mut viewer, mut proof) = fixture(&c, &h).await;
+        let parent = host.binding();
+        let selection = host.selection().clone();
+        let (q, routes) = viewer.io().unwrap();
+        let mut reporter = ViewerPresentation::attach(
+            &selection,
+            parent,
+            view(parent),
+            q,
+            routes.outbound,
+            now(&c).unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        let original = reporter.admitted_cursor();
+        assert_eq!(original.sequence(), 0);
+        let until = now(&c).unwrap() + 2_000_000;
+        let mut receipt = None;
+        let mut received = None;
+        let mut nonce = 3000;
+        while received.is_none() {
+            assert!(now(&c).unwrap() < until, "report was never received");
+            if receipt.is_none() {
+                // Startup can still own critical credit until its actual ACK.
+                // Each replacement here is explicit fresh source-fixture data,
+                // and nothing is acknowledged before a real Accepted result.
+                let evidence = sample(now(&h).unwrap());
+                proof.observe(Some(progress(evidence))).unwrap();
+                let at = now(&c).unwrap();
+                receipt = reporter
+                    .service_reported(
+                        viewer.io().unwrap().0,
+                        &c,
+                        ViewSample::Visible(evidence, at),
+                        at,
+                    )
+                    .unwrap();
+                if let Some(admitted) = &receipt {
+                    assert_eq!(admitted.sequence(), 1);
+                    assert_eq!(admitted.binding(), view(parent));
+                    assert_eq!(admitted.visible(), Some(evidence.stamp));
+                    assert!(admitted.is_from(&original));
+                } else {
+                    assert_eq!(reporter.admitted_cursor(), original);
+                    assert_eq!(reporter.sent, 0);
+                }
+            }
+            let (a, b) = Box::pin(support::both(
+                host.drive(
+                    Duration::from_millis(1),
+                    || {
+                        nonce += 1;
+                        Ok(nonce)
+                    },
+                    |route, data| {
+                        let report = wire::decode(
+                            data,
+                            view(parent),
+                            &ProtocolLimits::ABSOLUTE,
+                            InputDirection::ViewerToHost,
+                            InputDelivery::Reliable,
+                        )
+                        .unwrap();
+                        assert!(received.replace(report).is_none(), "duplicate report");
+                        proof.receive(route, data).unwrap();
+                        Ok(Disposition::Consumed)
+                    },
+                ),
+                viewer.drive(Duration::from_millis(1), block),
+            ))
+            .await;
+            a.unwrap();
+            b.unwrap();
+        }
+        let receipt = receipt.expect("received bytes must have local admission evidence");
+        let report = received.unwrap();
+        assert_eq!(report.sequence, receipt.sequence());
+        assert_eq!(report.visible.map(|sample| sample.stamp), receipt.visible());
+        assert_eq!(proof.accepted, 1);
+        let admitted = reporter.admitted_cursor();
+        assert_eq!(admitted.sequence(), 1);
+        assert_eq!(admitted.visible(), receipt.visible());
+        assert!(receipt.is_from(&admitted));
+        assert_eq!(
+            reporter.service_reported(
+                viewer.io().unwrap().0,
+                &c,
+                ViewSample::Pending,
+                now(&c).unwrap(),
+            ),
+            Ok(None)
+        );
+        assert_eq!(reporter.admitted_cursor(), admitted);
+        assert_eq!(reporter.sent, 1);
         host.close();
         viewer.close();
     });

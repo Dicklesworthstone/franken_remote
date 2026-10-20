@@ -12,7 +12,7 @@ use fr_wire::{
 pub(super) struct State {
     pub until_us: u64,
     sequence: u64,
-    boot: HostBootId,
+    pub(super) boot: HostBootId,
     issued_at_us: u64,
     recovery: RecoveryGeneration,
 }
@@ -41,7 +41,7 @@ impl InputClient {
             self.stop(StopReason::InvalidTicket);
             Error::Wire(e)
         })?;
-        self.install_ticket(ticket, None, clock, now)
+        self.install_ticket(ticket, None, None, clock, now)
     }
     /// Accept the explicitly negotiated authority-bearing ticket profile on
     /// the original reliable feedback route. The added deadline reports the
@@ -66,15 +66,54 @@ impl InputClient {
             self.stop(StopReason::InvalidTicket);
             Error::Wire(e)
         })?;
-        self.install_ticket(record.ticket, Some(record.authority_until_us), clock, now)
+        self.install_ticket(
+            record.ticket,
+            Some(record.authority_until_us),
+            None,
+            clock,
+            now,
+        )
+    }
+    /// Accept only the explicitly selected causal readiness profile. Its
+    /// acknowledged presentation report must belong to this original reporter,
+    /// and cross this suspension's admitted negative barrier before resumption.
+    pub fn accept_readiness_ticket(
+        &mut self,
+        bytes: &[u8],
+        clock: ClockCorrelation,
+        now: ClientInstant,
+    ) -> Result<(), Error> {
+        self.tick(now)?;
+        let record = input_ticket::decode_readiness(
+            bytes,
+            &self.limits,
+            self.binding.channel,
+            InputDirection::HostToViewer,
+            InputDelivery::Reliable,
+        )
+        .map_err(|error| {
+            self.stop(StopReason::InvalidTicket);
+            Error::Wire(error)
+        })?;
+        self.install_ticket(
+            record.authority.ticket,
+            Some(record.authority.authority_until_us),
+            Some(record.presented_sequence),
+            clock,
+            now,
+        )
     }
     fn install_ticket(
         &mut self,
         ticket: input_ticket::Ticket,
         authority_until: Option<u64>,
+        presented_sequence: Option<u64>,
         clock: ClockCorrelation,
         now: ClientInstant,
     ) -> Result<(), Error> {
+        if presented_sequence.is_some() != self.readiness.is_some() {
+            return self.fail(StopReason::InvalidTicket);
+        }
         let c = ticket.credentials;
         // The reliable ticket stream is ordered independently of media
         // replacement. A ticket queued before the host's recovery fence may
@@ -130,6 +169,19 @@ impl InputClient {
         if until <= now.0 {
             return Err(Error::TicketExpired);
         }
+        let causal_ready = if let Some(sequence) = presented_sequence {
+            match self
+                .readiness
+                .as_mut()
+                .expect("selected profile")
+                .acknowledge(sequence)
+            {
+                Ok(ready) => ready,
+                Err(()) => return self.fail(StopReason::InvalidTicket),
+            }
+        } else {
+            false
+        };
         self.credentials.ticket = c.ticket;
         if self.awaiting_recovery_ticket {
             // Unlike a same-generation freshness lapse, this exact new view
@@ -138,7 +190,9 @@ impl InputClient {
             // waiting another source-age ceiling only delays usable control.
             // Fresh presentation remains an independent prerequisite.
             self.awaiting_recovery_ticket = false;
-            self.awaiting_ticket = false;
+            if self.readiness.is_none() || causal_ready {
+                self.awaiting_ticket = false;
+            }
             self.try_resume(now);
         } else if let Some(since) = self.suspended_since {
             // Only a ticket issued after the HOST's own lapse can authorize
@@ -147,9 +201,11 @@ impl InputClient {
             // began, so a ticket conservatively issued later than that was
             // issued after the host revived (it refuses tickets meanwhile).
             let elapsed = now.0.saturating_sub(since.0);
-            if clock
-                .age_upper_us(ticket.issued_at_us, now.0)
-                .is_ok_and(|age| age.saturating_add(MAX_SOURCE_AGE_US) < elapsed)
+            if causal_ready
+                || (self.readiness.is_none()
+                    && clock
+                        .age_upper_us(ticket.issued_at_us, now.0)
+                        .is_ok_and(|age| age.saturating_add(MAX_SOURCE_AGE_US) < elapsed))
             {
                 self.awaiting_ticket = false;
                 self.try_resume(now);

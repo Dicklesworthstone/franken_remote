@@ -5,7 +5,10 @@ existing authenticated QUIC input-feedback stream to the viewer. A ticket renews
 only the short-lived credential for future actions. It does not create or renew
 a control lease, observation authorization, input mapping, source observation,
 or visible-frame evidence. The optional authority-bearing profile also reports
-the original owner's already-existing control/observation deadline.
+the original owner's already-existing control/observation deadline. The optional
+readiness profile additionally acknowledges a presentation report that the host
+actually applied, so a recovered client can establish the relevant readiness
+transition without waiting for the conservative one-second inference window.
 
 ## Preserve in-flight input
 
@@ -53,8 +56,9 @@ version-1 selection of `native-input-attachment`, `native-control-grant`,
 `clock-correlation` and `presented-state`. The input attachment's existing media
 attachment prerequisites remain independently enforced. Neither endpoint infers
 the profile from record length, silently tries another decoder, nor treats an
-offered capability as selected. Each decoder refuses the other profile's fixed
-layout.
+offered capability as selected. Each decoder refuses another profile's fixed
+layout. `authority_selected` is also true for the readiness profile below;
+`selected_profile` chooses the exact codec.
 
 `authority_until_us` is the actual exclusive host-monotonic cap sampled atomically
 with ticket issuance from the original owner: the minimum of its current control
@@ -74,6 +78,59 @@ authority snapshot may keep an otherwise-live optional controller facility
 usable within the original control grant, but cannot resume a revoked or stale
 view, extend an existing clipboard item's deadline, or retime already queued
 egress. Those records retain their original exclusive expiry and bytes.
+
+### Optional readiness acknowledgement
+
+Positive selection of `input-ticket-readiness` version 1 requires selected
+`input-ticket-authority` version 1 and all of its existing dependencies. It uses
+the same `InputTicket` kind and original reliable feedback route with a 120-byte
+fixed body: exactly 144 bytes including the header. The first 112 body bytes are
+the authority profile unchanged. One big-endian `u64`, `presented_sequence`,
+follows at record byte offset 136. The header's payload length is 120. The new
+`ReadinessTicket { authority: AuthorityTicket, presented_sequence }` has separate
+`encode_readiness` and `decode_readiness` APIs; the decoder rejects every size
+other than 144 bytes, and the selected control-message limit must admit all 144.
+
+The acknowledgement is strictly nonzero. It identifies the latest positive
+`PresentedState` report whose verified source evidence was successfully applied
+to the original authority, after any required release of held keys and buttons.
+It is sampled under the same authority lock as ticket issuance and the existing
+minimum of lease/observation deadlines. A report merely received, replay-rejected,
+obsolete, unavailable or waiting for native release is not such proof. A host
+that selected this profile and has no applied report proof withholds issuance
+as `ViewUnready`; it does not encode a zero sentinel, switch layouts or mint a
+replacement authority lifetime.
+
+The report's sequence is meaningful only within the ticket's exact view and
+recovery generation. On a local freshness lapse, the client first fences input
+and requires an explicit negative presentation report. It records that report's
+sequence only after admission on its original ordered session-control stream.
+A readiness ticket can resume the same-generation suspension only when its
+acknowledgement is greater than this loss-report sequence and no greater than
+the client's actually admitted report ceiling, and independent current
+presentation/mapping evidence is fresh. Ordered delivery then establishes that
+the host processed this loss before the positive report it acknowledges.
+Preparing a report, receiving a heartbeat or completing a native decode creates
+no report admission or readiness proof.
+
+A later fresh-to-stale transition requires a new loss barrier even while the
+client is still waiting for an earlier acknowledgement. The original suspension
+deadline stays fixed. Pending negative reports retain their original bytes and
+expiry under backpressure. Recovery replaces the reporter's sequence scope;
+old-generation tickets cannot acknowledge the replacement's reports. Neither
+this proof nor the optional authority cap replaces the short input-ticket
+expiry, replays an action, renews an old clipboard/file item's deadline, retimes
+queued egress, or revives a terminally stopped owner.
+
+`selected_profile` returns `Profile::Legacy`, `Profile::Authority` or
+`Profile::Readiness` from the positive selection, and rejects unsupported explicit
+versions, incomplete dependencies, wrong roles and inadequate limits.
+`readiness_selected` is true only for the third profile. Optional negotiation
+with an authority-only peer retains the exact 136-byte layout; a legacy peer
+retains the exact 128-byte layout and existing conservative resume inference.
+No endpoint guesses a profile from incoming bytes or retries a weaker decoder.
+
+### Feedback route
 
 The route must be explicitly installed as `Messages::InputFeedback` on both
 endpoints. It admits only `InputTicket` and `InputResult` (`0x0048`) on one
@@ -96,8 +153,10 @@ receipt has priority over renewal and cannot be overwritten or relabelled as a
 ticket. The supplied credential generator is not called while that slot is busy
 or before the 250-millisecond issuance cadence. Actual ticket bytes, sequence and
 native expiry survive transport backpressure unchanged. A failed or abandoned
-send never issues a replacement or re-encodes old input. An unsent expired ticket
-terminates the input attachment rather than gaining another transmission window.
+send never issues a replacement or re-encodes old input. An expired ticket that
+was never admitted can be discarded without resetting its consumed identity or
+cadence; transport-retained records keep their original deadline and cannot gain
+another transmission window.
 
 Unlike a receipt for an already committed effect, a ticket cannot be sent after
 input revocation. Existing connection-identity, stream FIN/RESET and cancellation
@@ -155,10 +214,42 @@ limits, shorter and overflowing authority caps, optional bilateral selection,
 unsupported versions and required dependencies. They establish protocol behavior;
 they add no WAN latency, throughput, native clipboard or live-tailnet measurement.
 
+Six readiness-profile wire regressions compare all three layouts against the
+original independent golden bytes and the specified appended fields, reject all
+six cross-profile decoder combinations, and exercise every truncation, trailing
+data, role/channel/header/identity checks, full-record limits, zero proof,
+inherited ticket/authority bounds, overflow edges and optional bilateral
+selection. Missing dependencies and malformed explicit selections refuse through
+both convenience helpers as well as the profile selector. Wire validation alone
+does not establish the causal suspension/report relationship or measure native
+resume latency; those belong to the original runtime and client owners.
+
+The causal path additionally has eight core tests, ten reporter/admission tests
+and fourteen client tests. These exercise applied proof under the original
+authority lock, actual held-input release, repeated losses, exact report-owner
+identity, transport-admission ceilings, expired and obsolete feedback, recovery
+sequence restart and the unchanged suspension deadline. The client simulation
+resumes a same-generation lapse in 50,100 microseconds once its admitted loss,
+later presentation and host acknowledgement are available. This establishes
+removal of the one-second inference wait; it is not measured native or WAN latency.
+
+Native regressions cover the real mailbox, verified-report application, actual
+localhost TLS/QUIC admission and the production streaming viewer. The readiness
+bootstrap case selects the shipped offers and requires another press/release
+after 3.1 seconds of control, with four distinct native receipts in total. These
+daemon/native cases require the full runtime gate. They were source-reviewed but
+not executed in the local 8 GiB environment, where the unchanged Asupersync
+dependency prevents the daemon build from completing. The four pure crates'
+executed tests are independent evidence, not a replacement for that gate.
+
 ```sh
 cargo test -p fr-core --test ticket_renewal --locked
+cargo test -p fr-core --test input_readiness_ticket --locked
 cargo test -p fr-wire -p fr-client --test input_ticket --locked
 cargo test -p fr-wire --test input_ticket_authority --locked
+cargo test -p fr-wire --test input_ticket_readiness --locked
+cargo test -p fr-client --test input_readiness --locked
+cargo test -p fr-media --test presented_admission --locked
 cargo test -p fr-media --test clock_deadline --locked
 cargo test -p fr-native --all-features --test input_quic --locked -- --test-threads=4
 ./scripts/verify.sh fast
@@ -171,5 +262,6 @@ every external dependency. The full-workspace candidate verification is recorded
 separately in the publication commit. No Asupersync dependency/release change is
 needed by this implementation. Controller-specific lease challenge coordination is now connected separately in
 [CONTROL_LEASE_RENEWAL.md](CONTROL_LEASE_RENEWAL.md). Initial broker grants,
-platform input sampling and the complete desktop application loop still require
-integration; neither feature closes those broader qualification gates.
+platform input sampling and the desktop application loop retain their separate
+owners and qualification boundaries; these ticket profiles do not close broader
+platform or live-tailnet qualification gates.

@@ -1395,7 +1395,12 @@ mod tests {
         }));
         // Control boundaries are offered only with an input agent, optionally.
         let control = offer(Some(core()), false, false, false);
-        assert_eq!(control.capabilities.len(), 12);
+        assert_eq!(control.capabilities.len(), 13);
+        assert!(control.capabilities.iter().any(|cap| {
+            cap.name == fr_wire::input_ticket::READINESS_CAPABILITY
+                && cap.version == fr_wire::input_ticket::READINESS_VERSION
+                && !cap.required
+        }));
         assert_eq!(
             control.capabilities.iter().filter(|c| c.required).count(),
             4
@@ -1404,7 +1409,7 @@ mod tests {
         // extension, only with control.
         assert_eq!(offer(None, true, false, false), observe);
         let clipboard = offer(Some(core()), true, false, false);
-        assert_eq!(clipboard.capabilities.len(), 16);
+        assert_eq!(clipboard.capabilities.len(), 17);
         assert_eq!(
             clipboard.capabilities.iter().filter(|c| c.required).count(),
             4

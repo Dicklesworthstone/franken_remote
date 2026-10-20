@@ -20,13 +20,23 @@ mod held;
 pub mod process;
 pub mod scroll;
 pub use control::ControlLease;
-use core::fmt;
+use core::{fmt, num::NonZeroU64};
 pub use held::{Reconciliation, ReconciliationOutcome};
 use scroll::{LineScroll, WheelDirection};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
+
+/// Exact issuance metadata from one serialized transition of the original
+/// native owner. No new authority or presentation is inferred from this value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IssuedTicketProof {
+    pub issued_at: HostInstant,
+    pub expires_at: HostInstant,
+    pub authority_until: HostInstant,
+    pub presented_sequence: Option<NonZeroU64>,
+}
 
 /// Explicitly qualified backend operations; absence is a refusal, not fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -567,14 +577,51 @@ impl InputSession {
         ticket: InputTicketId,
         now: HostInstant,
     ) -> Result<(HostInstant, HostInstant, HostInstant), Refusal> {
+        self.issue_ticket_proof_timed(ticket, now)
+            .map(|proof| (proof.issued_at, proof.expires_at, proof.authority_until))
+    }
+    /// Snapshot only an applied presentation report, alongside the existing
+    /// ticket/lease deadlines. Legacy readiness can issue an ordinary ticket
+    /// but carries no presentation acknowledgement.
+    pub fn issue_ticket_proof_timed(
+        &mut self,
+        ticket: InputTicketId,
+        now: HostInstant,
+    ) -> Result<IssuedTicketProof, Refusal> {
+        self.issue_ticket_snapshot(ticket, now, false)
+    }
+    /// Strict negotiated readiness issuance: without an applied report, refuse
+    /// before allocating a ticket. This shares the original owner, lock and
+    /// final issuance time with the ordinary ticket path.
+    pub fn issue_readiness_ticket_timed(
+        &mut self,
+        ticket: InputTicketId,
+        now: HostInstant,
+    ) -> Result<IssuedTicketProof, Refusal> {
+        self.issue_ticket_snapshot(ticket, now, true)
+    }
+    fn issue_ticket_snapshot(
+        &mut self,
+        ticket: InputTicketId,
+        now: HostInstant,
+        require_presented: bool,
+    ) -> Result<IssuedTicketProof, Refusal> {
         self.check_active()?;
         let view = &mut self.view;
         let lease = self.lease;
         self.authority.with_time(&mut self.clock, now, |a, at| {
             follow_recovery(view, a);
-            let until = a.issue_input_ticket(lease, ticket, at)?;
-            let authority_until = a.lease_deadline()?;
-            Ok((at, until, authority_until))
+            let expires_at = if require_presented {
+                a.issue_presented_input_ticket(lease, ticket, at)?
+            } else {
+                a.issue_input_ticket(lease, ticket, at)?
+            };
+            Ok(IssuedTicketProof {
+                issued_at: at,
+                expires_at,
+                authority_until: a.lease_deadline()?,
+                presented_sequence: a.presented_sequence(),
+            })
         })
     }
     /// Service independently during idle, not only when a packet arrives.

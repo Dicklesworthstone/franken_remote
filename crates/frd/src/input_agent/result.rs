@@ -59,6 +59,7 @@ impl ResultContext {
             Reply::InitializationFailed(error) => InputReply::InitializationFailed(error),
             Reply::Ticket(_)
             | Reply::AuthorityTicket(_)
+            | Reply::ReadinessTicket(_)
             | Reply::Authority(_)
             | Reply::Reconciliation(_)
             | Reply::ReconciliationPanic { .. } => {

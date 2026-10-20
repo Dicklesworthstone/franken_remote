@@ -431,6 +431,11 @@ mod tests {
                 && cap.version == fr_wire::input_ticket::AUTHORITY_VERSION
                 && !cap.required
         }));
+        assert!(offer.capabilities.iter().any(|cap| {
+            cap.name == fr_wire::input_ticket::READINESS_CAPABILITY
+                && cap.version == fr_wire::input_ticket::READINESS_VERSION
+                && !cap.required
+        }));
         // --clipboard adds three optional clipboard boundaries and the optional
         // bulk-record extension; the required capability set stays unchanged.
         let clipboard = super::offer(true);

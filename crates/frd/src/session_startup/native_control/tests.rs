@@ -21,7 +21,10 @@ use fr_media::{
     freshness::ClockPolicy,
     worker::{Backend, Configuration, Role as WorkerRole},
 };
-use fr_wire::negotiation::{Capability as WireCapability, Offer};
+use fr_wire::{
+    input_ticket::Profile,
+    negotiation::{Capability as WireCapability, Offer},
+};
 use std::{
     cell::Cell,
     future::Future,
@@ -127,7 +130,7 @@ fn host_offer_makes_control_optional_and_never_upgrades_an_observer() {
     ));
     let control = host_offer(true);
     assert!(control.validate().is_ok());
-    assert_eq!(control.capabilities.len(), 12);
+    assert_eq!(control.capabilities.len(), 13);
     let proof = control
         .capabilities
         .iter()
@@ -135,6 +138,13 @@ fn host_offer_makes_control_optional_and_never_upgrades_an_observer() {
         .unwrap();
     assert_eq!(proof.version, fr_wire::input_ticket::AUTHORITY_VERSION);
     assert!(!proof.required);
+    let readiness = control
+        .capabilities
+        .iter()
+        .find(|cap| cap.name == fr_wire::input_ticket::READINESS_CAPABILITY)
+        .unwrap();
+    assert_eq!(readiness.version, fr_wire::input_ticket::READINESS_VERSION);
+    assert!(!readiness.required);
     assert_eq!(
         control.capabilities.iter().filter(|c| c.required).count(),
         4
@@ -146,6 +156,7 @@ fn host_offer_makes_control_optional_and_never_upgrades_an_observer() {
         .unwrap();
     assert!(profile(&controller, true));
     assert!(fr_wire::input_ticket::authority_selected(&controller).unwrap());
+    assert!(fr_wire::input_ticket::readiness_selected(&controller).unwrap());
     let observer = control
         .intersect(&observation_offer())
         .unwrap()
@@ -170,7 +181,7 @@ fn clipboard_is_offered_optionally_only_with_control_and_the_local_enable() {
     assert_eq!(host_offer_with(false, true), host_offer(false));
     let host = host_offer_with(true, true);
     assert!(host.validate().is_ok());
-    assert_eq!(host.capabilities.len(), 16);
+    assert_eq!(host.capabilities.len(), 17);
     assert_eq!(host.capabilities.iter().filter(|c| c.required).count(), 4);
     let client = control_offer_with_clipboard();
     assert!(client.validate().is_ok());
@@ -311,8 +322,13 @@ fn run3<F: FnOnce(Cx, Cx, Cx) -> Fut, Fut: Future<Output = ()>>(f: F) {
     });
 }
 #[allow(clippy::too_many_lines)]
-async fn exercise(c: Cx, h: Cx, cleanup: Cx, consent: bool, visible: bool) {
-    let (mut host, viewer) = pair_initialized(&c, &h, capabilities(), |_| {}).await;
+async fn exercise(c: Cx, h: Cx, cleanup: Cx, consent: bool, visible: bool, profile: Profile) {
+    let (mut host, viewer) =
+        pair_initialized(&c, &h, readiness::capabilities(profile), |_| {}).await;
+    assert_eq!(
+        fr_wire::input_ticket::selected_profile(host.selection()),
+        Ok(profile)
+    );
     let control = host.observation().unwrap();
     assert!(!control.view_ready().unwrap());
     let mut nonce_counter = 6000;
@@ -360,6 +376,9 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, consent: bool, visible: bool) {
     let mut ticket = 8000;
     let mut active = None;
     let mut approved = false;
+    let mut completed = false;
+    let repeat_after_renewal = profile == Profile::Readiness;
+    let expected_receipts = if repeat_after_renewal { 4 } else { 2 };
     let ((hr, vr), ()) = Box::pin(support::both(
         support::both(
             async {
@@ -445,13 +464,19 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, consent: bool, visible: bool) {
                                             input.visible(p.frame.as_raw()),
                                         );
                                     }
-                                    if sent_actions == 0
+                                    let after_renewal = now(&c).unwrap() >= at + 3_100_000;
+                                    let submit = sent_actions == 0
                                         || (sent_actions == 1 && receipts.get() == 1)
-                                    {
+                                        || (repeat_after_renewal
+                                            && after_renewal
+                                            && sent_actions == 2
+                                            && receipts.get() == 2)
+                                        || (sent_actions == 3 && receipts.get() == 3);
+                                    if submit {
                                         let _ = input
                                             .action(fr_client::input::Action::Key {
                                                 key: PhysicalKey::new(4).unwrap(),
-                                                transition: if sent_actions == 0 {
+                                                transition: if matches!(sent_actions, 0 | 2) {
                                                     KeyTransition::Press
                                                 } else {
                                                     KeyTransition::Release
@@ -460,7 +485,8 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, consent: bool, visible: bool) {
                                             .unwrap();
                                         sent_actions += 1;
                                     }
-                                    if receipts.get() == 2 && now(&c).unwrap() >= at + 3_100_000 {
+                                    if receipts.get() == expected_receipts && after_renewal {
+                                        completed = true;
                                         control.revoke();
                                         stop.stop();
                                     }
@@ -469,7 +495,17 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, consent: bool, visible: bool) {
                             }
                             Ok(())
                         },
-                        |_| receipts.set(receipts.get() + 1),
+                        |event| {
+                            let fr_client::input::ResultEvent::Completed(receipt) = event else {
+                                panic!("new action needs its own completed receipt: {event:?}");
+                            };
+                            assert_eq!(
+                                receipt.outcome,
+                                fr_core::input_sequence::InputOutcome::SubmittedToOs
+                            );
+                            assert_eq!(receipt.submitted_operations, 1);
+                            receipts.set(receipts.get() + 1);
+                        },
                     )
                     .await;
                 viewer_done.set(true);
@@ -506,7 +542,16 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, consent: bool, visible: bool) {
     .await;
     assert!(hr.is_err() && vr.is_err());
     if visible && consent {
-        assert_eq!(receipts.get(), 2, "host {hr:?} viewer {vr:?}");
+        assert!(
+            completed,
+            "control ended before the original grant's renewal: host {hr:?} viewer {vr:?}"
+        );
+        assert_eq!(
+            receipts.get(),
+            expected_receipts,
+            "host {hr:?} viewer {vr:?}"
+        );
+        assert_eq!(effects.lock().unwrap().len(), expected_receipts);
         assert!(approved);
         assert!(host.presentation_reports() > 1);
         assert!(viewer.presentation_reports() > 1);
@@ -514,7 +559,7 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, consent: bool, visible: bool) {
     } else {
         assert_eq!(receipts.get(), 0);
         assert!(!approved);
-        assert!(effects.lock().unwrap().is_empty());
+        assert_eq!(*effects.lock().unwrap(), Vec::<Operation>::new());
     }
     assert_eq!(host.worker_id(), host_pid);
     assert_eq!(viewer.worker_id(), viewer_pid);
@@ -537,16 +582,18 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, consent: bool, visible: bool) {
 }
 #[test]
 fn public_bootstraps_join_real_grant_and_static_source_renewal_without_manual_channels() {
-    run3(|c, h, cleanup| exercise(c, h, cleanup, true, true));
+    run3(|c, h, cleanup| exercise(c, h, cleanup, true, true, Profile::Legacy));
 }
 #[test]
 fn public_control_bootstrap_never_substitutes_first_decode_for_visibility() {
-    run3(|c, h, cleanup| exercise(c, h, cleanup, true, false));
+    run3(|c, h, cleanup| exercise(c, h, cleanup, true, false, Profile::Legacy));
 }
 #[test]
 fn public_control_bootstrap_never_substitutes_presentation_for_consent() {
-    run3(|c, h, cleanup| exercise(c, h, cleanup, false, true));
+    run3(|c, h, cleanup| exercise(c, h, cleanup, false, true, Profile::Legacy));
 }
+
+mod readiness;
 
 mod dispatch;
 mod handoff;
@@ -645,7 +692,7 @@ fn the_drop_lane_and_clipboard_require_independent_positive_selection() {
         host_offer_with_files(false, false, false, true),
         host_offer(false)
     );
-    // Concatenating the independent lanes carries 21 capabilities within the
+    // Concatenating the independent lanes carries 22 capabilities within the
     // existing bound. The combined profile below still omits only the
     // solicited decoder-load extension.
     let mut both_lanes = fr_client::native::control_offer_with_clipboard();
@@ -657,7 +704,7 @@ fn the_drop_lane_and_clipboard_require_independent_positive_selection() {
             .cloned(),
     );
     both_lanes.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
-    assert_eq!(both_lanes.capabilities.len(), 21);
+    assert_eq!(both_lanes.capabilities.len(), 22);
     assert!(both_lanes.validate().is_ok());
     // The bounded combined profile negotiates each lane independently.
     let mut minimal = host_offer_with_files(true, true, false, true);
@@ -666,7 +713,7 @@ fn the_drop_lane_and_clipboard_require_independent_positive_selection() {
     assert_eq!(files_lane(&clipboard), Ok(()));
     let combined = fr_client::native::control_offer_with_clipboard_and_files();
     assert!(combined.validate().is_ok());
-    assert_eq!(combined.capabilities.len(), 20);
+    assert_eq!(combined.capabilities.len(), 21);
     for (clipboard, files) in [(false, false), (true, false), (false, true), (true, true)] {
         let selection = select(
             host_offer_with_files(true, clipboard, false, files),

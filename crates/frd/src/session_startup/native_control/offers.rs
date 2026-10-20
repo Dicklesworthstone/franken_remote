@@ -90,14 +90,21 @@ pub fn host_offer_with_files(control: bool, clipboard: bool, audio: bool, files:
                 .filter(|_| control)
                 .map(|&(name, version)| (name, version, false)),
         )
-        // Report the actual lease/observation cap alongside short input
-        // tickets only when both control-capable peers select this profile.
+        // Extended tickets report the actual authority cap, then optionally
+        // the successfully applied presentation sequence for causal resumption.
         .chain(
-            [(
-                fr_wire::input_ticket::AUTHORITY_CAPABILITY,
-                fr_wire::input_ticket::AUTHORITY_VERSION,
-                false,
-            )]
+            [
+                (
+                    fr_wire::input_ticket::AUTHORITY_CAPABILITY,
+                    fr_wire::input_ticket::AUTHORITY_VERSION,
+                    false,
+                ),
+                (
+                    fr_wire::input_ticket::READINESS_CAPABILITY,
+                    fr_wire::input_ticket::READINESS_VERSION,
+                    false,
+                ),
+            ]
             .into_iter()
             .filter(|_| control),
         )

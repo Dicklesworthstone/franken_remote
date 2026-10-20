@@ -20,7 +20,11 @@ use fr_client::input::{
     presentation::{self, PresentedInput},
 };
 use fr_core::{held_state::HeldState, input::DesktopPoint};
-use fr_media::{delivery::DecodedFrame, freshness::ViewEvidence};
+use fr_media::{
+    delivery::DecodedFrame,
+    freshness::ViewEvidence,
+    presented::{AdmittedCursor, QueuedReport},
+};
 use fr_transport::quic::{self, Disposition, Route};
 use fr_wire::{Kind, input::MAX_INPUT_RECORD_BYTES, negotiation::Role};
 use std::{
@@ -193,6 +197,9 @@ impl ViewerSession {
         }
         input.view_deadline(t)?;
         input.enable_control_renewal(binding.id, t)?;
+        if channels.ticket_profile() == fr_wire::input_ticket::Profile::Readiness {
+            input.expect_readiness_feedback(t)?;
+        }
         // Negotiated reference recovery: a lost reference suspends this grant
         // until the recovered generation instead of ending it (plan 12.3).
         if self.opened.selection.capabilities.iter().any(|c| {
@@ -229,6 +236,40 @@ impl ViewerSession {
     }
 }
 impl ControlledViewer {
+    pub(super) fn readiness_feedback(&self) -> bool {
+        self.channels.ticket_profile() == fr_wire::input_ticket::Profile::Readiness
+    }
+    /// Bind before reading any readiness ticket, including the first turn
+    /// after promotion. The reporter stays on the original control stream.
+    pub(super) fn bind_readiness_reporter(&mut self, cursor: AdmittedCursor) -> Result<(), Error> {
+        let at = self.check()?;
+        let expected = self.media.as_ref().ok_or(Error::Closed)?.binding();
+        self.bind_report_cursor(cursor, expected, at)
+    }
+    fn bind_report_cursor(
+        &mut self,
+        cursor: AdmittedCursor,
+        mut expected: fr_wire::decoder::Binding,
+        at: ClientInstant,
+    ) -> Result<(), Error> {
+        // PresentedState belongs to the original control stream; the media
+        // attachment supplies its exact configuration and recovery dimensions.
+        expected.parent = self.session.opened.binding;
+        if cursor.binding() != expected {
+            return Err(Error::WrongBinding);
+        }
+        self.input.bind_readiness_reporter(cursor, at)?;
+        Ok(())
+    }
+    pub(super) fn needs_loss_report(&self) -> bool {
+        self.input.needs_loss_report()
+    }
+    pub(super) fn report_admitted(&mut self, receipt: QueuedReport) -> Result<(), Error> {
+        let at = self.check()?;
+        self.input.report_admitted(receipt, at)?;
+        self.abandon_if_suspended()?;
+        Ok(())
+    }
     pub(super) fn presented_sample(
         &mut self,
     ) -> Result<crate::media::presented::ViewSample, Error> {
@@ -280,7 +321,10 @@ impl ControlledViewer {
     /// Hand this stream's media to its reference recovery, suspending the
     /// grant's input first: the lost reference means the view cannot advance
     /// (plan 12.3). Renewals continue; no input is sent until resumed.
-    pub(super) fn take_media_for_recovery(&mut self) -> Result<NegotiatedMedia, Error> {
+    pub(super) fn take_media_for_recovery(
+        &mut self,
+        reports: Option<AdmittedCursor>,
+    ) -> Result<NegotiatedMedia, Error> {
         self.enter_recovery()?;
         // Recovery may already have retired the old media routes. Detach that
         // failed owner BEFORE checking the live parent and input owners; their
@@ -289,7 +333,15 @@ impl ControlledViewer {
         media
             .retiring_viewer_routes(&self.session.transport)
             .map_err(Error::Media)?;
-        self.check()?;
+        let at = self.check()?;
+        if self.readiness_feedback() {
+            // A recovery may start immediately after promotion, before the
+            // first ordinary network turn bound the reporter. Its exact old
+            // admitted prefix still gates feedback drained during recovery.
+            // Validate after detaching retired media, which cannot keep its
+            // original routes live merely to bind this local proof.
+            self.bind_report_cursor(reports.ok_or(Error::WrongBinding)?, media.binding(), at)?;
+        }
         Ok(media)
     }
     /// Install the recovered media and move this suspended grant to the
@@ -691,7 +743,7 @@ impl ControlledViewer {
         let files = &self.files;
         let clipboard = &self.clipboard;
         let clipboard_setup = &self.clipboard_setup;
-        let authority_tickets = self.channels.authority_tickets();
+        let ticket_profile = self.channels.ticket_profile();
         let input = &mut self.input;
         let last_result = &mut self.last_result;
         let mut failure = None;
@@ -730,10 +782,16 @@ impl ControlledViewer {
                 }
             } else if route == Route::Stream(feedback) {
                 if kind == Some(&(Kind::InputTicket as u16).to_be_bytes()) {
-                    let accepted = if authority_tickets {
-                        input.accept_authority_ticket(bytes, sample, t)
-                    } else {
-                        input.accept_ticket(bytes, sample, t)
+                    let accepted = match ticket_profile {
+                        fr_wire::input_ticket::Profile::Legacy => {
+                            input.accept_ticket(bytes, sample, t)
+                        }
+                        fr_wire::input_ticket::Profile::Authority => {
+                            input.accept_authority_ticket(bytes, sample, t)
+                        }
+                        fr_wire::input_ticket::Profile::Readiness => {
+                            input.accept_readiness_ticket(bytes, sample, t)
+                        }
                     };
                     match accepted {
                         Ok(()) | Err(presentation::Error::Input(input::Error::TicketExpired)) => {

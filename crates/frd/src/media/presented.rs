@@ -3,8 +3,8 @@
 //! carries reports. No decoder, network callback or heartbeat grants control.
 use super::{Error as MediaError, ObservationControl, host_now};
 use asupersync::cx::Cx;
-use fr_core::{limits::ProtocolLimits, time::HostInstant};
-use fr_media::presented::{Decision, Reporter, Verifier};
+use fr_core::{authority::SessionAuthority, limits::ProtocolLimits, time::HostInstant};
+use fr_media::presented::{AdmittedCursor, Decision, QueuedReport, Reporter, Verifier};
 use fr_transport::quic::{
     self, ConnectionBinding, Messages, Priority, QuicRecords, Route, StreamRoute,
 };
@@ -14,6 +14,7 @@ use fr_wire::{
     negotiation::{ControlBinding, Selection},
     presented as wire,
 };
+use std::num::NonZeroU64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -184,23 +185,12 @@ impl HostPresentation {
                 .lock()
                 .map_err(|_| Error::Authority(MediaError::Poisoned))?;
             let at = host_now(&self.control.cx).map_err(Error::Authority)?;
-            match self
+            let (sequence, decision) = self
                 .verifier
-                .receive(bytes, at.as_micros(), self.bound_us)
-                .map_err(Error::Proof)?
-            {
-                Decision::Ready { until_us } => {
-                    match authority.mark_view_ready_until(HostInstant::from_micros(until_us), at) {
-                        Ok(()) => self.accepted = self.accepted.saturating_add(1),
-                        // A suspended lease revives only after its native
-                        // owner confirmed the release of held input (plan
-                        // 11.3); a later report retries. The view stays stale.
-                        Err(fr_core::authority::AuthorityError::ReleasePending) => {}
-                        Err(e) => return Err(Error::Authority(MediaError::Authority(e))),
-                    }
-                }
-                Decision::Unavailable => authority.mark_view_stale(),
-                Decision::Obsolete => {}
+                .receive_report(bytes, at.as_micros(), self.bound_us)
+                .map_err(Error::Proof)?;
+            if apply_verified_report(&mut authority, sequence, decision, at)? {
+                self.accepted = self.accepted.saturating_add(1);
             }
             Ok(())
         })();
@@ -218,6 +208,36 @@ impl HostPresentation {
 impl Drop for HostPresentation {
     fn drop(&mut self) {
         self.stale();
+    }
+}
+
+/// Verification's replay floor is not an applied acknowledgement. Only this
+/// successful authority transition installs the exact report's nonzero sequence.
+fn apply_verified_report(
+    authority: &mut SessionAuthority,
+    sequence: NonZeroU64,
+    decision: Decision,
+    at: HostInstant,
+) -> Result<bool, Error> {
+    match decision {
+        Decision::Ready { until_us } => {
+            match authority.mark_presented_ready_until(
+                sequence,
+                HostInstant::from_micros(until_us),
+                at,
+            ) {
+                Ok(()) => Ok(true),
+                // A suspended lease resumes only after its native owner has
+                // released held input. A verified report alone proves no resume.
+                Err(fr_core::authority::AuthorityError::ReleasePending) => Ok(false),
+                Err(error) => Err(Error::Authority(MediaError::Authority(error))),
+            }
+        }
+        Decision::Unavailable => {
+            authority.mark_view_stale();
+            Ok(false)
+        }
+        Decision::Obsolete => Ok(false),
     }
 }
 
@@ -324,6 +344,17 @@ impl ViewerPresentation {
             ages: AgeHistogram::default(),
         }))
     }
+    /// Adopt the original report owner's admitted prefix when observation
+    /// becomes control. Preparing or merely observing a report changes nothing.
+    pub(crate) fn admitted_cursor(&self) -> AdmittedCursor {
+        self.reporter.admitted_cursor()
+    }
+    /// Establish a mandatory causal barrier for a newly observed local lapse.
+    /// The returned sequence is reserved; only service_reported can admit it.
+    pub(crate) fn force_unavailable(&mut self, now: u64) -> Result<u64, Error> {
+        self.reporter.force_unavailable(now).map_err(Error::Proof)
+    }
+    #[cfg(test)]
     pub(crate) fn service(
         &mut self,
         q: &mut QuicRecords,
@@ -331,6 +362,17 @@ impl ViewerPresentation {
         sample: ViewSample,
         now: u64,
     ) -> Result<(), Error> {
+        self.service_reported(q, cx, sample, now).map(|_| ())
+    }
+    /// Return local admission evidence only from the original route's actual
+    /// Accepted outcome. Backpressure, expiry and replacement yield no receipt.
+    pub(crate) fn service_reported(
+        &mut self,
+        q: &mut QuicRecords,
+        cx: &Cx,
+        sample: ViewSample,
+        now: u64,
+    ) -> Result<Option<QueuedReport>, Error> {
         if !q.is_bound_to(&self.connection) || q.is_closed() {
             return Err(Error::Binding);
         }
@@ -354,11 +396,12 @@ impl ViewerPresentation {
         if let Some((bytes, until)) = self.reporter.pending(now).map_err(Error::Proof)? {
             match send_report(q, cx, self.outbound, bytes, now, until)? {
                 ReportAdmission::Accepted => {
-                    self.reporter.queued(now).map_err(Error::Proof)?;
+                    let receipt = self.reporter.queued_receipt(now).map_err(Error::Proof)?;
                     self.sent = self.sent.saturating_add(1);
                     if positive && let ViewSample::Visible(sample, _) = sample {
                         self.ages.record(sample.age_upper_us);
                     }
+                    return Ok(Some(receipt));
                 }
                 ReportAdmission::Backpressure => {}
                 ReportAdmission::Expired => {
@@ -371,7 +414,7 @@ impl ViewerPresentation {
                 }
             }
         }
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -473,3 +516,5 @@ fn presented_age_quantiles_are_bucket_upper_bounds_and_bounded() {
 
 #[cfg(test)]
 mod expiry_tests;
+#[cfg(test)]
+mod readiness_tests;

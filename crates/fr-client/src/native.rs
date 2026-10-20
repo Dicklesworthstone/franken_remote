@@ -43,7 +43,9 @@ pub fn observation_offer_with_audio() -> Offer {
 /// boundary: a host whose input executor cannot scroll by lines omits it, and
 /// the controller then asks for everything but the wheel. The optional
 /// authority-ticket profile reports the original host lease/observation cap
-/// for auxiliary operations; legacy hosts retain the exact short-ticket codec.
+/// for auxiliary operations. Optional readiness acknowledgement lets a fresh
+/// view resume after its own host-confirmed loss report; older hosts keep their
+/// exact ticket codec and conservative resumption rule.
 pub fn control_offer() -> Offer {
     offer(
         Role::RequestControl,
@@ -260,6 +262,11 @@ fn offer(role: Role, extra: &[(&str, u16, bool)]) -> Offer {
             (
                 fr_wire::input_ticket::AUTHORITY_CAPABILITY,
                 fr_wire::input_ticket::AUTHORITY_VERSION,
+                false,
+            ),
+            (
+                fr_wire::input_ticket::READINESS_CAPABILITY,
+                fr_wire::input_ticket::READINESS_VERSION,
                 false,
             ),
         ]

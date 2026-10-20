@@ -942,7 +942,7 @@ async fn network(
     mut recovery: Option<&mut recovery_control::Receiver>,
     statistics: &mut Statistics,
     mut feedback: Option<&mut ViewerFeedback>,
-    presentation: Option<&mut ViewerPresentation>,
+    mut presentation: Option<&mut ViewerPresentation>,
     mut cursor: Option<&mut cursor::ViewerCursor>,
     mut audio: Option<&mut audio::ViewerAudio>,
     cx: &Cx,
@@ -970,6 +970,19 @@ async fn network(
     let recovering = recovery::service(peer, recovery.as_deref_mut(), receiver, repair, cx)?;
     if recovering && let Peer::Control(viewer) = peer {
         viewer.enter_recovery().map_err(Error::Control)?;
+    }
+    // Promotion retains the original reporter's admitted prefix. Bind it
+    // before feedback can arrive; preparation/backpressure advances nothing.
+    if let Some(viewer) = peer
+        .controlled()
+        .filter(|viewer| viewer.readiness_feedback())
+    {
+        let reporter = presentation
+            .as_deref_mut()
+            .ok_or(Error::PresentedState(presented::Error::Binding))?;
+        viewer
+            .bind_readiness_reporter(reporter.admitted_cursor())
+            .map_err(Error::Control)?;
     }
     let (session, media) = peer.parts()?;
     let routes = media
@@ -1046,15 +1059,30 @@ async fn network(
         } else {
             peer.presented_sample(receiver)?
         };
+        if peer
+            .controlled()
+            .is_some_and(|viewer| viewer.needs_loss_report())
+        {
+            presentation
+                .force_unavailable(now(cx).map_err(Error::Session)?)
+                .map_err(Error::PresentedState)?;
+        }
         let session = peer.parent()?;
-        presentation
-            .service(
+        let receipt = presentation
+            .service_reported(
                 &mut session.transport,
                 cx,
                 sample,
                 now(cx).map_err(Error::Session)?,
             )
             .map_err(Error::PresentedState)?;
+        if let Some(receipt) = receipt
+            && let Some(viewer) = peer
+                .controlled()
+                .filter(|viewer| viewer.readiness_feedback())
+        {
+            viewer.report_admitted(receipt).map_err(Error::Control)?;
+        }
     }
     // The session's renewal, repair and input services get their turn first.
     if let Some(feedback) = feedback {
