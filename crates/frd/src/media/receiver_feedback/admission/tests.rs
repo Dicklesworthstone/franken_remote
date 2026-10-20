@@ -12,9 +12,7 @@ use fr_wire::{
 };
 use std::time::Duration;
 
-#[allow(dead_code)]
-#[path = "../../../../../fr-transport/tests/support/mod.rs"]
-mod support;
+use crate::session_startup::test_network as support;
 
 fn bytes() -> Vec<u8> {
     let binding = Binding {
