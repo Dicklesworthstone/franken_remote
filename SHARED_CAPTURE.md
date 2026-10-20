@@ -63,7 +63,7 @@ returned `PreparedSharedCapture` exclusively borrows the original source while
 other network owners can continue to use their own egresses. Its existing native
 capture path retains authority, topology, source provenance, deadlines and the
 shared recovery scheduler. The same reserved allocation ceiling reaches the
-worker's `request_with_response_capacity` for BOTH the initial exchange and every
+worker's checked request for BOTH the initial exchange and every
 Poll reply; declared length is checked before allocation or payload reads, and
 actual capacity is checked before pixels enter the buffer. Revocation between
 preparation and polling refuses.
@@ -88,6 +88,46 @@ per-connection send scheduling and network publication across multiple viewers
 still require their own OS-share-session integration. These APIs do not change
 the current native publisher into an automatic shared broker, and the
 eight-recipient turn bound is not a global subscription admission limit.
+
+## Capture work and renewable authority
+
+An already-running capture retains one immutable two-second work ceiling across
+its initial request and every subsequent `Poll`. An existing recovery attempt
+can shorten that ceiling; neither a poll reply nor an authority renewal moves
+it. Cursor reads retain a one-second ceiling and selected-monitor checks retain
+a two-second ceiling. Startup discovery and configuration keep their existing
+fixed admission deadlines.
+
+While those operations wait for IPC, the worker rechecks the original
+`ObservationControl` and its shared tailnet lease before and after every native
+poll, including `Pending`. Timely authenticated renewal can therefore keep the
+same capture running past the first sampled authority expiry. The non-cloneable
+admission owner must refresh while its previous proof is still live, with the
+same identity and permissions; the worker creates no proof. Observation challenge
+responses must be accepted by the original authority owner. Merely issuing a
+challenge, receiving a worker reply or advancing time does not renew authority.
+The canonical running session continues servicing its network/admission owner
+alongside capture. The one-second grant policy is unchanged.
+
+The supervision timer wakes at the earliest of current authority expiry, the
+original work ceiling and the ten-millisecond watchdog interval. A shortened
+authority bound moves an already registered timer earlier; time consumed by the
+authority callback is checked before native work. Revocation, actual expiry,
+clock regression, invalid IPC or an abandoned operation still poison the
+original exchange and kill its child. Cleanup retains and reaps that same child
+on the independent cleanup context. Frame identity and capture timestamp remain
+the originals; no uncertain capture is replayed.
+
+Seven deterministic worker tests exercise renewal, immutable ceilings, actual
+timer wakeups, idle-I/O isolation and refusal around native polls. Three
+`shared_capture::live_authority` tests exercise actual supervised child IPC:
+delayed direct/Poll replies cross the old authority bound only with accepted
+responses, repeated Poll replies cannot restart the two-second work limit, and
+unanswered challenges/revocation terminate a silent child. Their child payloads
+are deliberately opaque and their observation responses are explicit fixtures.
+The new Rust tests await runtime execution at this checkpoint; source review and
+pinned formatting are separate evidence. This is not HEVC, live-tailnet or a
+longer production-native capture-stall qualification.
 
 ## Executed verification
 

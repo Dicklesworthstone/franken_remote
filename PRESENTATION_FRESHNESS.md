@@ -295,10 +295,15 @@ The same test now checks suspension (plan 11.3):
 It passed 3 of 3 runs on the final build, each with one suspension of
 1.05-1.24 s.
 
-The freeze stays under about 450 ms. A capture's deadline is also capped at
-the tailnet admission proof, which is refreshed only with 500 ms left, so a
-longer stall can end observation as a hung worker. A 600 ms freeze did that
-whenever it straddled a refresh.
+That measured freeze stayed under about 450 ms. At the time, a capture's
+deadline was fixed to the first sampled tailnet admission proof, refreshed
+only with 500 ms left. A 600 ms freeze ended observation whenever it crossed
+that original expiry, even if the same admission owner refreshed in time.
+Running capture now checks the original owner's current authority throughout
+IPC while retaining one immutable two-second work ceiling and any shorter
+original recovery deadline. See [Capture work and renewable authority](SHARED_CAPTURE.md#capture-work-and-renewable-authority).
+This implementation does not retroactively qualify a longer native stall:
+the recorded production acceptance still uses its actual 400 ms freeze.
 
 Qualifying the test found two faults, both fixed with planted-negative tests:
 - The frozen capture's result arrived past the 250 ms reference horizon. An

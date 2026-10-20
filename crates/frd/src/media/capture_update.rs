@@ -107,7 +107,9 @@ impl CaptureSource {
             .admit_capture(issued.as_micros(), join_until)
             .map_err(Error::Receiver)?;
         let force_idr = force_idr || scheduled_idr;
-        let mut deadline = control.deadline(Duration::from_secs(2))?;
+        // Work keeps one immutable ceiling. Timely renewals of the original
+        // authority are checked during IPC, not frozen at this first sample.
+        let mut deadline = worker::Deadline::after(&control.cx, Duration::from_secs(2))?;
         if let Some(until) = recovery_until {
             let nanos = until.checked_mul(1000).ok_or(worker::Error::Deadline)?;
             deadline = deadline.capped_at(Time::from_nanos(nanos));
@@ -119,7 +121,7 @@ impl CaptureSource {
         let mut operation = MediaOperation::new(&mut self.worker);
         let mut reply = operation
             .worker
-            .request_with_response_capacity(
+            .request_checked(
                 &control.cx,
                 if conditional {
                     Kind::CaptureIfChanged
@@ -129,6 +131,7 @@ impl CaptureSource {
                 capture_payload(frame, issued.as_micros(), force_idr),
                 maximum_capacity,
                 deadline,
+                || control.live_deadline(),
             )
             .await?;
         let content = loop {
@@ -175,12 +178,13 @@ impl CaptureSource {
                     sleep(now, Duration::from_millis(1)).await;
                     reply = operation
                         .worker
-                        .request_with_response_capacity(
+                        .request_checked(
                             &control.cx,
                             Kind::Poll,
                             vec![],
                             maximum_capacity,
                             deadline,
+                            || control.live_deadline(),
                         )
                         .await?;
                 }

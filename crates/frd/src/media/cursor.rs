@@ -52,16 +52,17 @@ impl CaptureSource {
         }
         let limits = self.configuration.limits()?;
         let capacity = cursor::MAX_BYTES.min(limits.max_control_message_bytes() as usize);
-        let deadline = control.deadline(Duration::from_secs(1))?;
+        let deadline = worker::Deadline::after(&control.cx, Duration::from_secs(1))?;
         let mut operation = MediaOperation::new(&mut self.worker);
         let reply = operation
             .worker
-            .request_with_response_capacity(
+            .request_checked(
                 &control.cx,
                 Kind::ReadCursor,
                 vec![],
                 Some(capacity),
                 deadline,
+                || control.live_deadline(),
             )
             .await?;
         operation.completed = true;

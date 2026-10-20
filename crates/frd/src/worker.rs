@@ -12,6 +12,8 @@ use asupersync::{
 };
 use fr_core::limits::ProtocolLimits;
 use fr_media::worker::{self, Configuration, HEADER_BYTES, Header, Identity, Kind, Record, Role};
+#[cfg(test)]
+mod live_deadline_tests;
 mod readiness;
 mod retirement;
 pub use retirement::Retirement;
@@ -328,46 +330,39 @@ fn runtime_ready(cx: &Cx) -> Result<(), Error> {
 /// necessary because the pinned runtime exposes no public cancel-waker API.
 /// Only I/O wakeups repoll the exchange. Network turns and this watchdog still
 /// check cancellation and deadlines, without repeatedly reading an idle pipe.
-async fn bounded<T>(
+async fn bounded<T, E: From<Error>>(
     cx: &Cx,
     deadline: Deadline,
+    mut live: impl FnMut() -> Result<Time, E>,
     future: impl Future<Output = Result<T, Error>>,
-) -> Result<T, Error> {
+) -> Result<T, E> {
     let mut previous = now(cx)?;
     let mut future = pin!(future);
     let readiness = readiness::Readiness::new();
-    let mut timer = pin!(sleep_until(previous.min(deadline.0)));
+    let mut wake_at = previous.min(deadline.0);
+    let mut timer = pin!(sleep_until(wake_at));
     poll_fn(|task| {
-        let current = match now(cx) {
-            Ok(t) => t,
-            Err(e) => return Poll::Ready(Err(e)),
+        if let Err(error) = live_deadline(cx, deadline, &mut previous, &mut live) {
+            return Poll::Ready(Err(error));
+        }
+        let result = readiness.poll(future.as_mut(), task);
+        // A foreign poll can consume time or coincide with revocation even if
+        // it returns Pending. Recheck the same owner before retaining its work.
+        let (current, until) = match live_deadline(cx, deadline, &mut previous, &mut live) {
+            Ok(times) => times,
+            Err(error) => return Poll::Ready(Err(error)),
         };
-        if current < previous {
-            return Poll::Ready(Err(Error::ClockRegression));
+        if let Poll::Ready(result) = result {
+            return Poll::Ready(result.map_err(E::from));
         }
-        previous = current;
-        if cx.checkpoint().is_err() {
-            return Poll::Ready(Err(Error::Cancelled));
-        }
-        if current >= deadline.0 {
-            return Poll::Ready(Err(Error::Deadline));
-        }
-        if let Poll::Ready(result) = readiness.poll(future.as_mut(), task) {
-            // A foreign completion cannot extend either the clock deadline or cancellation.
-            if cx.checkpoint().is_err() {
-                return Poll::Ready(Err(Error::Cancelled));
-            }
-            return match now(cx) {
-                Ok(t) if t < current => Poll::Ready(Err(Error::ClockRegression)),
-                Ok(t) if t < deadline.0 => Poll::Ready(result),
-                Ok(_) => Poll::Ready(Err(Error::Deadline)),
-                Err(e) => Poll::Ready(Err(e)),
-            };
+        let next = Time::from_nanos(current.as_nanos().saturating_add(10_000_000)).min(until);
+        if next < wake_at {
+            timer.as_mut().get_mut().reset(next);
+            wake_at = next;
         }
         if timer.as_mut().poll(task).is_ready() {
-            let next =
-                Time::from_nanos(current.as_nanos().saturating_add(10_000_000)).min(deadline.0);
             timer.as_mut().get_mut().reset(next);
+            wake_at = next;
             // reset clears the registration. Re-enter to register the new sleep,
             // never poll it twice here: time may already have passed `next`, and
             // a second Ready would leave a completed Sleep for the next turn.
@@ -376,6 +371,36 @@ async fn bounded<T>(
         Poll::Pending
     })
     .await
+}
+
+fn check_deadline(cx: &Cx, deadline: Deadline, previous: &mut Time) -> Result<Time, Error> {
+    let current = now(cx)?;
+    if current < *previous {
+        return Err(Error::ClockRegression);
+    }
+    *previous = current;
+    cx.checkpoint().map_err(|_| Error::Cancelled)?;
+    if current >= deadline.0 {
+        return Err(Error::Deadline);
+    }
+    Ok(current)
+}
+
+fn live_deadline<E: From<Error>>(
+    cx: &Cx,
+    deadline: Deadline,
+    previous: &mut Time,
+    live: &mut impl FnMut() -> Result<Time, E>,
+) -> Result<(Time, Time), E> {
+    check_deadline(cx, deadline, previous)?;
+    let until = live()?.min(deadline.0);
+    // The callback itself can consume time. It does not authorize a native
+    // poll or completion at an already elapsed authority/work boundary.
+    let current = check_deadline(cx, deadline, previous)?;
+    if current >= until {
+        return Err(Error::Deadline.into());
+    }
+    Ok((current, until))
 }
 
 /// One child, two private pipes, one outstanding operation. No live owner is
@@ -638,8 +663,30 @@ impl Worker {
         maximum_capacity: Option<usize>,
         deadline: Deadline,
     ) -> Result<Record, Error> {
+        self.request_checked(
+            cx,
+            kind,
+            body,
+            maximum_capacity,
+            deadline,
+            || Ok(deadline.0),
+        )
+        .await
+    }
+    /// Keep the original work ceiling while checking the current authority on
+    /// every IPC poll. Only the caller's original authority owner can renew it;
+    /// no worker reply, watchdog turn, or callback creates admission.
+    pub(crate) async fn request_checked<E: From<Error>>(
+        &mut self,
+        cx: &Cx,
+        kind: Kind,
+        body: Vec<u8>,
+        maximum_capacity: Option<usize>,
+        deadline: Deadline,
+        live: impl FnMut() -> Result<Time, E>,
+    ) -> Result<Record, E> {
         if self.state != State::Running {
-            return Err(Error::Unavailable);
+            return Err(Error::Unavailable.into());
         }
         if !matches!(
             (self.role, kind),
@@ -653,15 +700,15 @@ impl Worker {
                 | (Role::Capture | Role::Present, Kind::Poll)
                 | (_, Kind::Stop)
         ) {
-            return Err(Error::Protocol(worker::Error::WrongRole));
+            return Err(Error::Protocol(worker::Error::WrongRole).into());
         }
         if kind == Kind::CheckMonitor && self.selected.is_none() {
-            return Err(Error::Protocol(worker::Error::WrongState));
+            return Err(Error::Protocol(worker::Error::WrongState).into());
         }
         if maximum_capacity == Some(0) {
-            return Err(Error::Protocol(worker::Error::ResourceLimit));
+            return Err(Error::Protocol(worker::Error::ResourceLimit).into());
         }
-        self.exchange_with_response_capacity(cx, kind, body, maximum_capacity, deadline)
+        self.exchange_checked(cx, kind, body, maximum_capacity, deadline, live)
             .await
     }
     async fn exchange(
@@ -671,22 +718,23 @@ impl Worker {
         body: Vec<u8>,
         deadline: Deadline,
     ) -> Result<Record, Error> {
-        self.exchange_with_response_capacity(cx, kind, body, None, deadline)
+        self.exchange_checked(cx, kind, body, None, deadline, || Ok(deadline.0))
             .await
     }
-    async fn exchange_with_response_capacity(
+    async fn exchange_checked<E: From<Error>>(
         &mut self,
         cx: &Cx,
         kind: Kind,
         body: Vec<u8>,
         maximum_capacity: Option<usize>,
         deadline: Deadline,
-    ) -> Result<Record, Error> {
+        live: impl FnMut() -> Result<Time, E>,
+    ) -> Result<Record, E> {
         runtime_ready(cx)?;
         let identity = self.identity;
         let next = identity.sequence.checked_add(1).ok_or(Error::Unavailable)?;
-        let request = Record::new(kind, identity, body, &self.limits)?;
-        let header = request.header.encode(&self.limits)?;
+        let request = Record::new(kind, identity, body, &self.limits).map_err(Error::from)?;
+        let header = request.header.encode(&self.limits).map_err(Error::from)?;
         let mut guard = Exchange {
             owner: self,
             finished: false,
@@ -694,7 +742,7 @@ impl Worker {
         let limits = guard.owner.limits;
         let input = guard.owner.input.as_mut().ok_or(Error::Unavailable)?;
         let output = guard.owner.output.as_mut().ok_or(Error::Unavailable)?;
-        let response = bounded(cx, deadline, async {
+        let response = bounded(cx, deadline, live, async {
             input
                 .write_all(&header)
                 .await
@@ -1165,6 +1213,7 @@ mod tests {
             let mut pending = pin!(bounded(
                 &cx,
                 deadline,
+                || Ok::<_, Error>(deadline.time()),
                 poll_fn(|_| {
                     polls.set(polls.get() + 1);
                     Poll::<Result<(), Error>>::Pending
@@ -1202,6 +1251,7 @@ mod tests {
             let result = bounded(
                 &cx,
                 deadline,
+                || Ok::<_, Error>(deadline.time()),
                 poll_fn(|task| {
                     polls += 1;
                     task.waker().wake_by_ref();

@@ -259,11 +259,13 @@ impl CaptureSource {
         let mut operation = MediaOperation::new(&mut self.worker);
         operation
             .worker
-            .request(
+            .request_checked(
                 &control.context(),
                 Kind::CheckMonitor,
                 Vec::new(),
-                control.deadline(Duration::from_secs(2))?,
+                None,
+                crate::worker::Deadline::after(&control.context(), Duration::from_secs(2))?,
+                || control.live_deadline(),
             )
             .await?;
         control.check()?;

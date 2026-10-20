@@ -614,3 +614,6 @@ mod reservation;
 
 #[path = "shared_capture/production.rs"]
 mod production;
+
+#[path = "shared_capture/live_authority.rs"]
+mod live_authority;

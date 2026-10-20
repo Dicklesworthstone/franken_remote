@@ -247,6 +247,12 @@ impl ObservationControl {
         lease.uses_authority(&self.authority)
     }
     pub fn deadline(&self, maximum: Duration) -> Result<Deadline, Error> {
+        let until = self.live_deadline()?;
+        Ok(Deadline::after(&self.cx, maximum)?.capped_at(until))
+    }
+    /// Current proof from this original observation/admission owner. Running
+    /// worker requests re-read it without restarting their fixed work ceiling.
+    fn live_deadline(&self) -> Result<Time, Error> {
         let peer_until = self.admission_deadline()?;
         let mut authority = self.authority.lock().map_err(|_| Error::Poisoned)?;
         let until = authority
@@ -254,7 +260,7 @@ impl ObservationControl {
             .map_err(Error::Authority)?;
         let until = peer_until.map_or(until.as_micros(), |peer| peer.min(until.as_micros()));
         let nanos = until.checked_mul(1000).ok_or(worker::Error::Deadline)?;
-        Ok(Deadline::after(&self.cx, maximum)?.capped_at(Time::from_nanos(nanos)))
+        Ok(Time::from_nanos(nanos))
     }
     /// Record why a serve ended (first wins), before fencing it.
     pub(crate) fn note_end(&self, reason: crate::input_watchdog::StopReason) {
