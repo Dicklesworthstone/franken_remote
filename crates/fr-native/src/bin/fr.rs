@@ -104,6 +104,13 @@ is granted, when the host runs frd run --files DIR. Symlinks and special files
 are refused before connecting. The host never overwrites: a taken name is
 refused. Completion reports each selection by index and size only, with the
 host-reported outcome or a typed refusal.
+While controlling a configured --send selection, physical Ctrl+Alt+Shift+F8
+requests pause, F9 requests resume, and F10 cancels that upload selection only.
+Keep the viewer focused. Release the function key between requests. Its press,
+repeat and release stay local; modifier keys still follow ordinary input rules.
+Original transfer deadlines continue while paused; resume never retries ended
+work. Downloads are not controlled by these keys. Ctrl+Alt+Shift+Escape remains
+an immediate local stop. Missing/ambiguous physical keys disable these shortcuts.
 --receive DIR (with --control) accepts the host's explicit selections into an
 existing absolute local directory owned by you and not writable by other users
 or groups. No path component may be a symlink. The host must run frd run --once

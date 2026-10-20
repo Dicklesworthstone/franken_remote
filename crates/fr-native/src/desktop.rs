@@ -158,6 +158,9 @@ pub struct Desktop {
     retirement: Option<Retirement>,
     stop: Option<StreamingViewerControl>,
     input: Option<crate::viewer_input::CaptureControl>,
+    // Status/intent only, not another source, queue, lease or lifetime. Never
+    // copied into a new Desktop when the reconnect supervisor opens an attempt.
+    file_controls: Option<frd::native_files::SendControl>,
 }
 impl Desktop {
     pub const fn new(configuration: Configuration) -> Self {
@@ -171,6 +174,7 @@ impl Desktop {
             retirement: None,
             stop: None,
             input: None,
+            file_controls: None,
         }
     }
     pub fn state(&self) -> State {
@@ -242,6 +246,8 @@ impl Desktop {
     /// `fr connect --control --send`: hand this attempt's explicit local
     /// selection to the controller's drop lane before service. Nothing is read
     /// here; no source starts before the grant and the host's one-use offer.
+    /// Once native input attaches, physical Ctrl+Alt+Shift+F8/F9/F10 controls
+    /// this original selection only (pause/resume/cancel), never the desktop.
     pub fn configure_file_send(
         &mut self,
         request: frd::native_files::SendRequest,
@@ -249,11 +255,14 @@ impl Desktop {
         if self.state() != State::Viewing {
             return Err(Error::NotViewing);
         }
-        self.observer
+        let controls = self
+            .observer
             .as_mut()
             .ok_or(Error::NotViewing)?
             .configure_file_send(request)
-            .map_err(Error::Files)
+            .map_err(Error::Files)?;
+        self.file_controls = Some(controls.clone());
+        Ok(controls)
     }
     /// Receive the host's explicit selections into this locally pinned directory.
     /// This is consent for the original control lease, not another input grant.
@@ -518,6 +527,7 @@ impl Desktop {
         let window = self.window().ok_or(Error::NotViewing)?;
         let display = self.observer.as_ref().ok_or(Error::NotViewing)?.display();
         let local = &self.configuration.display;
+        let file_controls = self.file_controls.clone();
         let input = &mut self.input;
         let observer = self.observer.as_mut().ok_or(Error::NotViewing)?;
         let stop = observer.control();
@@ -543,12 +553,13 @@ impl Desktop {
                                 } else {
                                     check_layout(display, target, &layout)?;
                                 }
-                                *input = Some(
-                                    crate::viewer_input::X11InputCapture::attach(
-                                        viewer, local, target, layout,
-                                    )
-                                    .map_err(Error::InputCapture)?,
-                                );
+                                *input = Some(attach_input(
+                                    viewer,
+                                    local,
+                                    target,
+                                    layout,
+                                    file_controls.as_ref(),
+                                )?);
                                 Ok(())
                             })(),
                         }
@@ -608,6 +619,7 @@ impl Desktop {
         window.enable_orderly_close().map_err(Error::Window)?;
         let display = self.observer.as_ref().ok_or(Error::NotViewing)?.display();
         let local = &self.configuration.display;
+        let file_controls = self.file_controls.clone();
         let input = &mut self.input;
         let observer = self.observer.as_mut().ok_or(Error::NotViewing)?;
         let stop = observer.control();
@@ -639,12 +651,13 @@ impl Desktop {
                                 } else {
                                     check_layout(display, target, &layout)?;
                                 }
-                                *input = Some(
-                                    crate::viewer_input::X11InputCapture::attach(
-                                        viewer, local, target, layout,
-                                    )
-                                    .map_err(Error::InputCapture)?,
-                                );
+                                *input = Some(attach_input(
+                                    viewer,
+                                    local,
+                                    target,
+                                    layout,
+                                    file_controls.as_ref(),
+                                )?);
                                 Ok(())
                             })(),
                         }
@@ -866,6 +879,26 @@ impl<F> Drop for Operation<'_, F> {
             *self.state = State::Stopped;
         }
     }
+}
+
+/// Both interactive serving modes bind shortcuts only AFTER native attachment
+/// accepts the original viewer and confirmed layout. A failed capture creates
+/// no replacement owner; an absent upload leaves all function keys remote.
+fn attach_input(
+    viewer: &mut frd::session_startup::ControlledViewer,
+    display: &str,
+    window: crate::viewer_input::Window,
+    layout: frd::session_startup::viewer_events::Layout,
+    files: Option<&frd::native_files::SendControl>,
+) -> Result<crate::viewer_input::CaptureControl, Error> {
+    let input = crate::viewer_input::X11InputCapture::attach(viewer, display, window, layout)
+        .map_err(Error::InputCapture)?;
+    if let Some(files) = files {
+        // A concurrently stopped capture can refuse the binding; its original
+        // source fence still governs the desktop, and no key can issue a command.
+        let _bound = input.enable_file_shortcuts(files.clone());
+    }
+    Ok(input)
 }
 
 #[cfg(test)]

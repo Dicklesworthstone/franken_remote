@@ -41,8 +41,11 @@ the local selection, requests cancellation once, and continues polling cleanup;
 it cannot become an automatic retry.
 
 Applications must continue servicing the original controller and transport while
-paused. This change wires the control handle into that owner; it does **not** add
-a graphical button, keyboard shortcut, or command-line switch.
+paused. The native X11 viewer now binds physical Ctrl+Alt+Shift+F8/F9/F10 to
+pause/resume/cancel an explicitly configured upload, without leaving its focused
+window. See [Native upload shortcuts](NATIVE_FILE_SHORTCUTS.md) for gesture
+custody, unavailable mappings and qualification limits. There is still no new
+progress dialog, graphical button or command-line pause switch.
 
 ## Deadlines and effects do not pause
 
