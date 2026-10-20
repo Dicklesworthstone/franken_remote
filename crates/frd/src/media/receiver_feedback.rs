@@ -5,7 +5,7 @@ use fr_core::limits::ProtocolLimits;
 use fr_media::{
     delivery::ReceivePipeline,
     pacing::ReceiverEvidence,
-    receiver_feedback::{Requester, Responder},
+    receiver_feedback::{Requester, Responder, SendError},
 };
 use fr_transport::quic::{self, QuicRecords, Route};
 use fr_wire::{
@@ -14,6 +14,8 @@ use fr_wire::{
     negotiation::{ControlBinding, Selection},
     receiver_metrics::{self as wire, Load},
 };
+
+mod admission;
 
 const WORK_RETENTION_US: u64 = 250_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,14 +97,11 @@ impl HostFeedback {
         self.requester.evidence(now).map_err(Error::Load)
     }
     pub(crate) fn service(&mut self, q: &mut QuicRecords, cx: &Cx, now: u64) -> Result<(), Error> {
-        self.requester.prepare(now).map_err(Error::Load)?;
-        if let Some((bytes, until)) = self.requester.pending(now).map_err(Error::Load)? {
-            match q.send(cx, self.outbound, bytes, until, || before(cx, until)) {
-                Ok(()) => self.requester.queued(now).map_err(Error::Load)?,
-                Err(quic::Error::Backpressure) => {}
-                Err(e) => return Err(Error::Transport(e)),
-            }
-        }
+        self.requester
+            .transmit(now, |bytes, until| {
+                admission::send(q, cx, self.outbound, bytes, now, until)
+            })
+            .map_err(send_error)?;
         Ok(())
     }
 }
@@ -182,24 +181,23 @@ impl ViewerFeedback {
     /// Canonical renewal, repair and input work is serviced before telemetry.
     pub(crate) fn service(&mut self, q: &mut QuicRecords, cx: &Cx, now: u64) -> Result<(), Error> {
         self.clock(now)?;
-        if let Some((bytes, until)) = self.responder.pending(now).map_err(Error::Load)? {
-            match q.send(cx, self.outbound, bytes, until, || before(cx, until)) {
-                Ok(()) => {
-                    self.responder.queued(now).map_err(Error::Load)?;
-                    self.sent = self.sent.saturating_add(1);
-                }
-                Err(quic::Error::Backpressure) => {}
-                Err(e) => return Err(Error::Transport(e)),
-            }
+        if self
+            .responder
+            .transmit(now, |bytes, until| {
+                admission::send(q, cx, self.outbound, bytes, now, until)
+            })
+            .map_err(send_error)?
+        {
+            self.sent = self.sent.saturating_add(1);
         }
         Ok(())
     }
 }
-fn before(cx: &Cx, until: u64) -> bool {
-    cx.checkpoint().is_ok()
-        && cx
-            .timer_driver()
-            .is_some_and(|t| t.now().as_nanos() / 1000 < until)
+fn send_error(error: SendError<Error>) -> Error {
+    match error {
+        SendError::Protocol(error) => Error::Load(error),
+        SendError::Transport(error) => error,
+    }
 }
 #[cfg(test)]
 pub(crate) mod tests;

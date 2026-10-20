@@ -24,6 +24,20 @@ pub enum Error {
     Sequence,
     Expired,
 }
+/// Result of attempting the exact pending telemetry record. Expired means
+/// its ORIGINAL deadline elapsed before transport admission, not that retained
+/// bytes or the connection failed. No admission may be reported twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admission {
+    Accepted,
+    Backpressure,
+    Expired,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendError<E> {
+    Protocol(Error),
+    Transport(E),
+}
 struct Query {
     bytes: [u8; wire::QUERY_BYTES],
     sequence: u64,
@@ -110,6 +124,31 @@ impl Requester {
         }
         q.sent = true;
         Ok(())
+    }
+    /// Submit at most one query. Backpressure retains its exact bytes and
+    /// deadline; expiry retires it without fabricating a sent query, resampling
+    /// evidence, or issuing a replacement in this call. The transport callback
+    /// must report Expired only before admission and at/after `until`.
+    pub fn transmit<E>(
+        &mut self,
+        now: u64,
+        send: impl FnOnce(&[u8], u64) -> Result<Admission, E>,
+    ) -> Result<bool, SendError<E>> {
+        self.prepare(now).map_err(SendError::Protocol)?;
+        let Some((bytes, until)) = self.pending(now).map_err(SendError::Protocol)? else {
+            return Ok(false);
+        };
+        let admitted = send(bytes, until).map_err(SendError::Transport)?;
+        match admitted {
+            Admission::Accepted => self.queued(now).map_err(SendError::Protocol)?,
+            Admission::Backpressure => {}
+            Admission::Expired => {
+                // The callback established this lower bound on the same clock.
+                // Advance only the existing owner; do not prepare a new query.
+                self.tick(until).map_err(SendError::Protocol)?;
+            }
+        }
+        Ok(admitted == Admission::Accepted)
     }
     /// Late/replayed replies are consumed without refreshing any evidence. A
     /// response to a never-issued query is a protocol error. Returns true only
@@ -219,6 +258,25 @@ impl Responder {
     pub fn pending(&mut self, now: u64) -> Result<Option<(&[u8], u64)>, Error> {
         self.tick(now)?;
         Ok(self.pending.as_ref().map(|p| (p.bytes.as_slice(), p.until)))
+    }
+    /// Submit at most the original reply. An expired, unadmitted reply is
+    /// retired, never resampled for its consumed query. A successful callback
+    /// means transport admission only, not receipt or presentation evidence.
+    pub fn transmit<E>(
+        &mut self,
+        now: u64,
+        send: impl FnOnce(&[u8], u64) -> Result<Admission, E>,
+    ) -> Result<bool, SendError<E>> {
+        let Some((bytes, until)) = self.pending(now).map_err(SendError::Protocol)? else {
+            return Ok(false);
+        };
+        let admitted = send(bytes, until).map_err(SendError::Transport)?;
+        match admitted {
+            Admission::Accepted => self.queued(now).map_err(SendError::Protocol)?,
+            Admission::Backpressure => {}
+            Admission::Expired => self.tick(until).map_err(SendError::Protocol)?,
+        }
+        Ok(admitted == Admission::Accepted)
     }
     pub fn queued(&mut self, now: u64) -> Result<(), Error> {
         self.tick(now)?;

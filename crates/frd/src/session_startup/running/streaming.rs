@@ -741,7 +741,10 @@ impl<S> VideoServices<'_, S> {
                 .service(q, cx, current)
                 .map_err(Error::ReceiverFeedback)?;
         }
-        Ok(current)
+        // Admission can observe a later clock (and retire an expired query).
+        // Capture pacing must not reuse the pre-admission timestamp behind
+        // that owner's clock floor, or an optional expiry becomes Clock.
+        now(cx)
     }
     fn collect_capture(&mut self, cx: &Cx) -> Result<Option<Observation>, Error> {
         let mut observation = None;
