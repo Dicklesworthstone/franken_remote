@@ -298,3 +298,5 @@ int fr_viewer_picker_next(struct fr_picker *p, uint32_t *kind, uint32_t *row) {
     if (redraw && !picker_draw(p)) return -1;
     return 1;
 }
+
+#include "file_progress.c"
