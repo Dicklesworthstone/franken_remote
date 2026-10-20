@@ -84,7 +84,9 @@ fn staggered_critical_records_keep_fifo_and_release_every_charge() {
             let usage = p.server.usage();
             assert!(usage.critical_send_records <= policy.critical_send_records);
             assert!(usage.critical_send_bytes <= policy.critical_send_bytes);
-            assert_eq!(usage.retained_send_records, 0);
+            // These are total retained charges, including critical traffic.
+            assert_eq!(usage.retained_send_records, usage.critical_send_records);
+            assert_eq!(usage.retained_send_upper_bound, usage.critical_send_bytes);
             if sent == 64 && received == 64 && usage.critical_send_records == 0 {
                 break;
             }

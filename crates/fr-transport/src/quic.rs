@@ -287,8 +287,8 @@ impl Default for Policy {
     }
 }
 /// Start a batch at its first native prefix, including all records already
-/// queued. Later bulk admissions may join only during its fixed fill window;
-/// critical batches stay closed. No first-prefix delay or new queue is added.
+/// queued. Later admissions may join only within SendEpoch's fixed fill window
+/// and critical count bound. No first-prefix delay or new queue is added.
 fn freeze_epoch(
     senders: &mut [Sender],
     pending: &mut VecDeque<PendingWrite>,
@@ -785,6 +785,9 @@ impl QuicRecords {
                     ),
                 };
                 if used_records >= record_limit || bytes.len() > byte_limit - used_bytes {
+                    return Err(Error::Backpressure);
+                }
+                if !self.metadata_admission_ready(r, bytes, used_bytes, used_records) {
                     return Err(Error::Backpressure);
                 }
             }
