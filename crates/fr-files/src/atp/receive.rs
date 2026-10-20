@@ -4,8 +4,10 @@
 //! not an ATP listener or an alternative identity handshake. The caller must bound
 //! the outer `FileOffer/FileChunk` records and subtract their envelope from F before
 //! constructing this owner. It never accepts paths, jobs or credentials from an
-//! ATP handshake. The selected 0.5.0 portable full-object profiles is documented in
-//! `FILE_RECEIVE.md`; directory trees use explicit profile 2; metadata, delta/resume and `RaptorQ` refuse.
+//! ATP handshake. The pinned portable full-object profiles are documented in
+//! `PROTOCOL_FILES.md`; content-only trees use explicit profile 2, and profile 3
+//! binds bare directory entries. Native attributes, links, delta/resume and
+//! `RaptorQ` refuse.
 use crate::{
     receive::{DirectoryManifest, DropDirectory, Expected, MAX_CHUNK_BYTES},
     session::{Binding, Permission, Policy, Progress, VerifiedOffer},
@@ -160,7 +162,9 @@ pub struct Receiver {
     active: Option<Progress>,
     pending: Option<Pending>,
     profile: u16,
-    sizes: Vec<u64>,
+    // None marks an original index validated as a structural directory. It
+    // counts in ATP's proof but can never accept an ObjectData write.
+    sizes: Vec<Option<u64>>,
     offsets: Vec<u64>,
 }
 impl fmt::Debug for Receiver {
@@ -298,15 +302,7 @@ impl Receiver {
                 }
                 let manifest = portable_manifest(&frame, profile)?;
                 let expected = if manifest.is_directory {
-                    Expected::Directory(
-                        DirectoryManifest::new(
-                            manifest.root_name.clone(),
-                            manifest.total_bytes,
-                            manifest.entries.clone(),
-                            manifest.merkle_root_hex.clone(),
-                        )
-                        .map_err(|_| Error::Manifest)?,
-                    )
+                    Expected::Directory(directory_manifest(&manifest, profile)?)
                 } else {
                     Expected::Manifest {
                         sha256_hex: manifest.entries[0].sha256_hex.clone(),
@@ -324,7 +320,13 @@ impl Receiver {
                     })
                     .map_err(Error::Worker)?;
                 self.profile = profile;
-                self.sizes = manifest.entries.iter().map(|e| e.size).collect();
+                // Validated profiles admit only absent regular metadata or the
+                // committed bare directory marker. Keep that kind per index.
+                self.sizes = manifest
+                    .entries
+                    .iter()
+                    .map(|e| e.metadata.is_none().then_some(e.size))
+                    .collect();
                 self.offsets = vec![0; self.sizes.len()];
                 (sequence, Operation::Begin, Some(manifest.merkle_root_hex))
             }
@@ -347,7 +349,9 @@ impl Receiver {
                     || self
                         .sizes
                         .get(index as usize)
-                        .is_none_or(|size| end > *size)
+                        .copied()
+                        .flatten()
+                        .is_none_or(|size| end > size)
                 {
                     return Err(Error::ResourceLimit);
                 }
@@ -497,7 +501,8 @@ fn portable_manifest(frame: &Frame, profile: u16) -> Result<TransferManifest, Er
     }
     let manifest: TransferManifest =
         serde_json::from_slice(&frame.payload).map_err(|_| Error::Manifest)?;
-    if manifest.metadata_root_hex.is_some()
+    if (manifest.metadata_root_hex.is_some()
+        && profile != fr_wire::files::ATP_PORTABLE_DIRECTORY_ENTRIES)
         || manifest.directory_metadata.is_some()
         || manifest.delta_manifest.is_some()
     {
@@ -507,14 +512,11 @@ fn portable_manifest(frame: &Frame, profile: u16) -> Result<TransferManifest, Er
         return Err(Error::Manifest);
     }
     match profile {
-        fr_wire::files::ATP_PORTABLE_DIRECTORY_FULL if manifest.is_directory => {
-            DirectoryManifest::new(
-                manifest.root_name.clone(),
-                manifest.total_bytes,
-                manifest.entries.clone(),
-                manifest.merkle_root_hex.clone(),
-            )
-            .map_err(|_| Error::Manifest)?;
+        fr_wire::files::ATP_PORTABLE_DIRECTORY_FULL
+        | fr_wire::files::ATP_PORTABLE_DIRECTORY_ENTRIES
+            if manifest.is_directory =>
+        {
+            directory_manifest(&manifest, profile)?;
             return Ok(manifest);
         }
         fr_wire::files::ATP_PORTABLE_FULL
@@ -543,6 +545,28 @@ fn portable_manifest(frame: &Frame, profile: u16) -> Result<TransferManifest, Er
         return Err(Error::Manifest);
     }
     Ok(manifest)
+}
+
+fn directory_manifest(
+    manifest: &TransferManifest,
+    profile: u16,
+) -> Result<DirectoryManifest, Error> {
+    let args = (
+        manifest.root_name.clone(),
+        manifest.total_bytes,
+        manifest.entries.clone(),
+        manifest.merkle_root_hex.clone(),
+    );
+    let result = if profile == fr_wire::files::ATP_PORTABLE_DIRECTORY_ENTRIES {
+        let metadata_root = manifest
+            .metadata_root_hex
+            .clone()
+            .ok_or(Error::UnsupportedProfile)?;
+        DirectoryManifest::with_metadata(args.0, args.1, args.2, args.3, metadata_root)
+    } else {
+        DirectoryManifest::new(args.0, args.1, args.2, args.3)
+    };
+    result.map_err(|_| Error::Manifest)
 }
 
 fn validate_envelope(kind: FrameType, offer: Option<bool>) -> Result<(), Error> {

@@ -236,3 +236,6 @@ mod conflicts;
 
 #[path = "directory/lifecycle.rs"]
 mod lifecycle;
+
+#[path = "directory/entries.rs"]
+mod entries;

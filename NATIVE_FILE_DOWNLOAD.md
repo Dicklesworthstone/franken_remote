@@ -32,8 +32,10 @@ Up to eight explicit regular-file or directory selections run in order. Host
 selection pins no-follow descriptors before connecting; content reads, directory
 traversal and hashing start only after the controlling grant and authenticated
 Files attachment. Sources use portable basenames; the viewer cannot browse the
-host filesystem or request another source. Directory profile limits, including
-the refusal of empty non-root directories, are in
+host filesystem or request another source. Empty files, empty roots and nested
+empty directories are preserved. Trees that need explicit directory entries
+require matching ATP profile-3 acceptance; an older peer refuses that selection
+instead of receiving a tree with missing folders. Directory profile limits are in
 [PROTOCOL_FILES.md](PROTOCOL_FILES.md).
 
 `--once` is required for a host-selected batch. Cloned host configurations share

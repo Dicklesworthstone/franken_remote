@@ -39,8 +39,15 @@ fn fixture(kind: u8, channel: u8, suffix: &[u8]) -> Vec<u8> {
 }
 #[test]
 fn five_message_kinds_match_independently_constructed_byte_fixtures() {
-    assert_eq!((ATP_PORTABLE_FULL, ATP_PORTABLE_DIRECTORY_FULL), (1, 2));
-    for profile in [1_u8, 2] {
+    assert_eq!(
+        (
+            ATP_PORTABLE_FULL,
+            ATP_PORTABLE_DIRECTORY_FULL,
+            ATP_PORTABLE_DIRECTORY_ENTRIES,
+        ),
+        (1, 2, 3)
+    );
+    for profile in [1_u8, 2, 3] {
         let atp = &[1, 2, 3];
         let mut accepted = vec![0, profile];
         accepted.extend_from_slice(&3_u64.to_be_bytes());
@@ -92,19 +99,30 @@ fn five_message_kinds_match_independently_constructed_byte_fixtures() {
                 fixture(0x74, 9, &[0, 1]),
             ),
         ] {
-            let mut output = [0; 4096];
-            let size = encode(message(body), context(role), limits(), &mut output).unwrap();
-            assert_eq!(&output[..size], expected);
-            assert_eq!(
-                decode(&expected, context(role), limits()),
-                Ok(message(body))
-            );
-            for end in 0..expected.len() {
-                assert!(decode(&expected[..end], context(role), limits()).is_err());
+            for direction in [Direction::ToHost, Direction::ToController] {
+                let sender = match (direction, role) {
+                    (Direction::ToController, Role::Host) => Role::Controller,
+                    (Direction::ToController, Role::Controller) => Role::Host,
+                    _ => role,
+                };
+                // The authenticated attachment fixes direction; it is not a
+                // peer-selected field in these profile-independent bytes.
+                let context = Context {
+                    direction,
+                    sender,
+                    ..context(role)
+                };
+                let mut output = [0; 4096];
+                let size = encode(message(body), context, limits(), &mut output).unwrap();
+                assert_eq!(&output[..size], expected);
+                assert_eq!(decode(&expected, context, limits()), Ok(message(body)));
+                for end in 0..expected.len() {
+                    assert!(decode(&expected[..end], context, limits()).is_err());
+                }
+                let mut extra = expected.clone();
+                extra.push(0);
+                assert!(decode(&extra, context, limits()).is_err());
             }
-            let mut extra = expected;
-            extra.push(0);
-            assert!(decode(&extra, context(role), limits()).is_err());
         }
     }
 }
@@ -321,14 +339,112 @@ fn entire_envelope_is_charged_to_selected_f_and_never_exceeds_c() {
     );
 }
 #[test]
-fn profiles_and_peer_lengths_cannot_bypass_the_payload_limit() {
-    let mut body = fixture(0x70, 9, &[0, 1, 0, 0, 0, 1, 7]);
-    body[81] = 3; // Profiles 1 and 2 are explicitly implemented; 3 is not.
+fn unsupported_offer_and_accept_profiles_refuse_in_both_directions() {
+    for direction in [Direction::ToHost, Direction::ToController] {
+        for profile in [0_u16, 4, u16::MAX] {
+            for (body, sender) in [
+                (Body::Offer { profile, atp: &[1] }, direction.source()),
+                (
+                    Body::Accept {
+                        profile,
+                        size: 0,
+                        bytes_per_second: 1,
+                        chunk_bytes: 1,
+                        concurrent_transfers: 1,
+                        atp: &[1],
+                    },
+                    direction.receiver(),
+                ),
+            ] {
+                let context = Context {
+                    direction,
+                    ..context(sender)
+                };
+                let mut output = [0; 4096];
+                assert_eq!(
+                    encode(message(body), context, limits(), &mut output),
+                    Err(WireError::UnsupportedVersion)
+                );
+                let mut valid = body;
+                match &mut valid {
+                    Body::Offer { profile, .. } | Body::Accept { profile, .. } => {
+                        *profile = ATP_PORTABLE_DIRECTORY_ENTRIES;
+                    }
+                    _ => unreachable!(),
+                }
+                let size = encode(message(valid), context, limits(), &mut output).unwrap();
+                output[COMMON_BYTES..COMMON_BYTES + 2].copy_from_slice(&profile.to_be_bytes());
+                assert_eq!(
+                    decode(&output[..size], context, limits()),
+                    Err(WireError::UnsupportedVersion)
+                );
+            }
+        }
+    }
+}
+#[test]
+fn directory_entry_profile_retains_binding_role_and_budget_checks() {
+    let original = context(Role::Controller);
+    let frame = fixture(0x70, 9, &[0, 3, 0, 0, 0, 1, 7]);
+    for changed in [
+        Context {
+            handle: 9,
+            ..original
+        },
+        Context {
+            lease: InputLeaseId::from_raw(9),
+            ..original
+        },
+        Context {
+            session: RemoteSessionId::from_raw(9),
+            ..original
+        },
+        Context {
+            sender: Role::Observer,
+            ..original
+        },
+        Context {
+            direction: Direction::ToController,
+            ..original
+        },
+    ] {
+        assert!(decode(&frame, changed, limits()).is_err());
+    }
+    for (rate, chunk, count) in [(0, 1, 1), (1, 0, 1), (1, 4096, 1), (1, 1, 0), (1, 1, 2)] {
+        assert_eq!(
+            encode(
+                message(Body::Accept {
+                    profile: ATP_PORTABLE_DIRECTORY_ENTRIES,
+                    size: 0,
+                    bytes_per_second: rate,
+                    chunk_bytes: chunk,
+                    concurrent_transfers: count,
+                    atp: &[1],
+                }),
+                context(Role::Host),
+                limits(),
+                &mut [0; 4096],
+            ),
+            Err(WireError::InvalidLimits)
+        );
+    }
+    let oversized = vec![7; limits().atp_bytes() + 1];
     assert_eq!(
-        decode(&body, context(Role::Controller), limits()),
-        Err(WireError::UnsupportedVersion)
+        encode(
+            message(Body::Offer {
+                profile: ATP_PORTABLE_DIRECTORY_ENTRIES,
+                atp: &oversized
+            }),
+            original,
+            limits(),
+            &mut [0; 4096],
+        ),
+        Err(WireError::ResourceLimit)
     );
-    body[81] = 1;
+}
+#[test]
+fn peer_lengths_cannot_bypass_the_payload_limit_or_disclose_content() {
+    let mut body = fixture(0x70, 9, &[0, 3, 0, 0, 0, 1, 7]);
     body[82..86].copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(decode(&body, context(Role::Controller), limits()).is_err());
     let debug = format!(

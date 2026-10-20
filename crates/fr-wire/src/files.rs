@@ -27,6 +27,10 @@ pub const ATP_PORTABLE_FULL: u16 = 1;
 /// Bounded, portable content-only directory tree; same pinned ATP full-object
 /// schema. An explicit matching `FileAccept` is required before any data is sent.
 pub const ATP_PORTABLE_DIRECTORY_FULL: u16 = 2;
+/// Portable directory tree with explicit zero-content directory entries in the
+/// pinned ATP schema, including its metadata commitment. Profile 2 is unchanged;
+/// a matching profile-3 `FileAccept` must precede data for this representation.
+pub const ATP_PORTABLE_DIRECTORY_ENTRIES: u16 = 3;
 /// Largest extension-free 0.5.0 ATP data header plus entry index/offset.
 pub const ATP_DATA_OVERHEAD: usize = 20;
 pub const COMMON_BYTES: usize = HEADER_BYTES + 16 + 16 + 16 + 8;
@@ -36,6 +40,13 @@ pub const CHUNK_OVERHEAD: usize = COMMON_BYTES + 4;
 pub const COMPLETE_OVERHEAD: usize = COMMON_BYTES + 1 + 2 + 8 + 4;
 pub const CANCEL_BYTES: usize = COMMON_BYTES + 2;
 pub const MAX_OVERHEAD: usize = ACCEPT_OVERHEAD;
+
+fn supported_profile(profile: u16) -> bool {
+    matches!(
+        profile,
+        ATP_PORTABLE_FULL | ATP_PORTABLE_DIRECTORY_FULL | ATP_PORTABLE_DIRECTORY_ENTRIES
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
@@ -227,7 +238,7 @@ impl Message<'_> {
                 if !source {
                     return Err(WireError::WrongRole);
                 }
-                if !matches!(profile, ATP_PORTABLE_FULL | ATP_PORTABLE_DIRECTORY_FULL) {
+                if !supported_profile(profile) {
                     return Err(WireError::UnsupportedVersion);
                 }
                 if atp.is_empty() {
@@ -246,7 +257,7 @@ impl Message<'_> {
                 if source {
                     return Err(WireError::WrongRole);
                 }
-                if !matches!(profile, ATP_PORTABLE_FULL | ATP_PORTABLE_DIRECTORY_FULL) {
+                if !supported_profile(profile) {
                     return Err(WireError::UnsupportedVersion);
                 }
                 if bytes_per_second == 0

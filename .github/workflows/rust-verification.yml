@@ -70,7 +70,7 @@ jobs:
         id: test
         continue-on-error: true
         run: ./scripts/verify.sh test
-      - name: Exercise host downloads through the actual native commands
+      - name: Exercise native downloads and complete directory uploads
         id: file_download
         continue-on-error: true
         run: |
@@ -91,10 +91,14 @@ jobs:
           listed = subprocess.check_output([binaries[0], '--list'], text=True)
           tests = [line for line in listed.splitlines()
                    if line.startswith('real_files::real_downloads::') and line.endswith(': test')]
-          assert len(tests) >= 4, 'native download regression tests must be present'
+          assert len(tests) >= 5, 'native download and panel regression tests must be present'
+          tree_test = 'real_files::trees::native_upload_preserves_nested_empty_directories_and_the_original_controller'
+          assert listed.splitlines().count(f'{tree_test}: test') == 1, 'native empty-directory upload test must be present'
           env = dict(os.environ, FR_NS_SUDO='1')
           subprocess.run(['bash', 'scripts/test_linux_serial_lifecycle.sh', binaries[0],
               'real_files::real_downloads'], check=True, env=env)
+          subprocess.run(['bash', 'scripts/test_linux_serial_lifecycle.sh', binaries[0],
+              '--exact', tree_test], check=True, env=env)
           PY
       - name: Exercise native clipboard recovery across a capture stall
         id: clipboard_capture_stall

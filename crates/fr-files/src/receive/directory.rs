@@ -6,7 +6,10 @@ use super::{
 };
 
 use asupersync::net::atp::{
-    transport_common::{StagedEntryReceive, flat_merkle_root_from_digests, hex_encode},
+    transport_common::{
+        EntryMetadata, FileKind, StagedEntryReceive, flat_merkle_root_from_digests, hex_encode,
+        metadata_commitment,
+    },
     transport_tcp::ManifestEntry,
 };
 use rustix::{
@@ -27,8 +30,9 @@ pub const MAX_TREE_DEPTH: usize = 8;
 pub const MAX_TREE_PATH_BYTES: usize = 1024;
 pub const MAX_TREE_NAMES_BYTES: usize = 16 * 1024;
 
-/// A fully validated portable tree. Metadata, links, packed members, deltas,
-/// and empty non-root directories are outside this content-only ATP profile.
+/// A fully validated portable tree. The content-only constructor never admits
+/// metadata. The structural profile additionally binds bare directory entries
+/// through the pinned ATP metadata commitment; no native attributes or links.
 /// Paths and hashes are deliberately omitted from Debug and errors.
 pub struct DirectoryManifest {
     pub(super) name: String,
@@ -48,23 +52,49 @@ impl DirectoryManifest {
         entries: Vec<ManifestEntry>,
         root: String,
     ) -> Result<Self, Error> {
+        Self::validated(name, size, entries, root, None)
+    }
+    /// Profile 3: bind explicit directories separately from regular empty files
+    /// before creating staging resources. Regular entries retain canonical
+    /// absent metadata; only the exact bare directory marker is supported.
+    pub fn with_metadata(
+        name: String,
+        size: u64,
+        entries: Vec<ManifestEntry>,
+        root: String,
+        metadata_root: String,
+    ) -> Result<Self, Error> {
+        Self::validated(name, size, entries, root, Some(metadata_root))
+    }
+    fn validated(
+        name: String,
+        size: u64,
+        entries: Vec<ManifestEntry>,
+        root: String,
+        metadata_root: Option<String>,
+    ) -> Result<Self, Error> {
         super::validate_name(&name)?;
-        if entries.len() > MAX_TREE_ENTRIES || !lower_hash(&root) {
+        if entries.len() > MAX_TREE_ENTRIES
+            || !lower_hash(&root)
+            || metadata_root.as_ref().is_some_and(|root| !lower_hash(root))
+        {
             return Err(Error::InvalidLimits);
         }
         // Include every implicit parent, rejecting file/directory collisions
         // and case aliases rather than depending on target filesystem rules.
+        // Pinned ATP permits explicit directories only as empty leaves: no
+        // declared entry may also be the ancestor of another entry.
         let mut nodes = BTreeMap::<String, (String, bool)>::new();
         let mut total = 0u64;
         let mut names = name.len();
         for (index, entry) in entries.iter().enumerate() {
             if entry.index as usize != index
-                || entry.metadata.is_some()
                 || !entry.members.is_empty()
                 || !lower_hash(&entry.sha256_hex)
             {
                 return Err(Error::InvalidName);
             }
+            validate_kind(entry, metadata_root.is_some())?;
             let parts = path_components(&entry.rel_path)?;
             names = names
                 .checked_add(entry.rel_path.len())
@@ -79,14 +109,14 @@ impl DirectoryManifest {
                     path.push('/');
                 }
                 path.push_str(part);
-                let file = n + 1 == parts.len();
+                let leaf = n + 1 == parts.len();
                 let key = path.to_lowercase();
-                if let Some((existing, existing_file)) = nodes.get(&key) {
-                    if existing != &path || file || *existing_file {
+                if let Some((existing, existing_leaf)) = nodes.get(&key) {
+                    if existing != &path || leaf || *existing_leaf {
                         return Err(Error::InvalidName);
                     }
                 } else {
-                    nodes.insert(key, (path.clone(), file));
+                    nodes.insert(key, (path.clone(), leaf));
                     if nodes.len() > MAX_TREE_NODES {
                         return Err(Error::Quota);
                     }
@@ -96,6 +126,21 @@ impl DirectoryManifest {
         if total != size {
             return Err(Error::Integrity);
         }
+        if let Some(expected) = metadata_root {
+            let regular = EntryMetadata::default();
+            let pairs: Vec<_> = entries
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.rel_path.as_str(),
+                        entry.metadata.as_ref().unwrap_or(&regular),
+                    )
+                })
+                .collect();
+            if metadata_commitment(&pairs).as_deref() != Some(expected.as_str()) {
+                return Err(Error::Integrity);
+            }
+        }
         Ok(Self {
             name,
             size,
@@ -103,6 +148,8 @@ impl DirectoryManifest {
             root,
         })
     }
+    /// ATP's `Proof.files` counts manifest entries, including explicit
+    /// directories. Implicit parent directories do not add an entry.
     pub fn file_count(&self) -> usize {
         self.entries.len()
     }
@@ -112,11 +159,33 @@ impl DirectoryManifest {
     pub(crate) fn metadata_bytes(&self) -> u64 {
         // Account hashes, names, indices and fixed per-entry work in the lane's
         // existing rate bucket. Structural admission bounds allocations too.
-        self.entries
+        let entries: u64 = self
+            .entries
             .iter()
-            .map(|e| e.rel_path.len() as u64 + 128)
-            .sum()
+            .map(|e| e.rel_path.len() as u64 + 128 + u64::from(e.metadata.is_some()) * 64)
+            .sum();
+        entries + u64::from(self.entries.iter().any(|e| e.metadata.is_some())) * 64
     }
+}
+fn validate_kind(entry: &ManifestEntry, structural: bool) -> Result<(), Error> {
+    let Some(metadata) = &entry.metadata else {
+        return Ok(());
+    };
+    let directory = EntryMetadata {
+        file_kind: FileKind::Directory,
+        ..EntryMetadata::default()
+    };
+    // The exact canonical marker excludes links, permissions, ownership,
+    // timestamps, platform attributes and xattrs. Some(default Regular) is
+    // noncanonical upstream, and must not become a profile downgrade path.
+    if !structural || *metadata != directory {
+        return Err(Error::InvalidName);
+    }
+    const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    if entry.size != 0 || entry.sha256_hex != EMPTY_SHA256 {
+        return Err(Error::Integrity);
+    }
+    Ok(())
 }
 pub(crate) fn path_components(path: &str) -> Result<Vec<&str>, Error> {
     if path.is_empty() || path.len() > MAX_TREE_PATH_BYTES {
@@ -143,7 +212,8 @@ struct Directory {
     name: String,
 }
 struct Entry {
-    file: File,
+    // None is a validated structural directory, never a writable file index.
+    file: Option<File>,
     parent: usize,
     name: String,
     path: String,
@@ -208,9 +278,17 @@ impl super::DropDirectory {
         paths.insert(String::new(), 0usize);
         for entry in manifest.entries {
             let parts = path_components(&entry.rel_path)?;
+            // Manifest construction has already rejected every metadata form
+            // except the exact committed bare directory marker.
+            let directory = entry.metadata.is_some();
             let mut parent = 0usize;
             let mut path = String::new();
-            for part in &parts[..parts.len() - 1] {
+            let parents = if directory {
+                parts.len()
+            } else {
+                parts.len() - 1
+            };
+            for part in &parts[..parents] {
                 if !path.is_empty() {
                     path.push('/');
                 }
@@ -219,46 +297,28 @@ impl super::DropDirectory {
                     parent = *index;
                     continue;
                 }
-                fs::mkdirat(
-                    &pending.directories[parent].fd,
-                    *part,
-                    Mode::from_raw_mode(0o700),
-                )?;
-                let fd = match fs::openat(
-                    &pending.directories[parent].fd,
-                    *part,
-                    flags,
-                    Mode::empty(),
-                ) {
-                    Ok(fd) => fd,
-                    Err(error) => {
-                        // This exact just-created child is ours. Unknown content
-                        // is never removed; failed cleanup keeps the reservation.
-                        let _ = fs::unlinkat(
-                            &pending.directories[parent].fd,
-                            *part,
-                            AtFlags::REMOVEDIR,
-                        );
-                        return Err(error.into());
-                    }
-                };
-                let index = pending.directories.len();
-                pending.directories.push(Directory {
-                    fd,
-                    parent,
-                    name: (*part).to_owned(),
-                });
+                let index = pending.create_directory(parent, part, flags)?;
                 paths.insert(path.clone(), index);
                 parent = index;
             }
             let name = parts[parts.len() - 1].to_owned();
-            let file = fs::openat(
-                &pending.directories[parent].fd,
-                name.as_str(),
-                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::from_raw_mode(0o600),
-            )?
-            .into();
+            let file = if directory {
+                None
+            } else {
+                Some(
+                    fs::openat(
+                        &pending.directories[parent].fd,
+                        name.as_str(),
+                        OFlags::WRONLY
+                            | OFlags::CREATE
+                            | OFlags::EXCL
+                            | OFlags::NOFOLLOW
+                            | OFlags::CLOEXEC,
+                        Mode::from_raw_mode(0o600),
+                    )?
+                    .into(),
+                )
+            };
             let mut hasher = StagedEntryReceive::new(entry.rel_path.clone().into());
             hasher.mark_created();
             pending.entries.push(Entry {
@@ -276,6 +336,34 @@ impl super::DropDirectory {
     }
 }
 impl PendingDirectory {
+    fn create_directory(
+        &mut self,
+        parent: usize,
+        name: &str,
+        flags: OFlags,
+    ) -> Result<usize, Error> {
+        fs::mkdirat(
+            &self.directories[parent].fd,
+            name,
+            Mode::from_raw_mode(0o700),
+        )?;
+        let fd = match fs::openat(&self.directories[parent].fd, name, flags, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(error) => {
+                // This exact just-created child is ours. Unknown content is
+                // never removed; failed cleanup keeps the reservation.
+                let _ = fs::unlinkat(&self.directories[parent].fd, name, AtFlags::REMOVEDIR);
+                return Err(error.into());
+            }
+        };
+        let index = self.directories.len();
+        self.directories.push(Directory {
+            fd,
+            parent,
+            name: name.to_owned(),
+        });
+        Ok(index)
+    }
     pub fn received_bytes(&self) -> u64 {
         self.received
     }
@@ -298,7 +386,11 @@ impl PendingDirectory {
         {
             return Err(Error::InvalidChunk);
         }
-        entry.file.write_all(bytes)?;
+        entry
+            .file
+            .as_mut()
+            .ok_or(Error::InvalidChunk)?
+            .write_all(bytes)?;
         entry
             .hasher
             .as_mut()
@@ -330,7 +422,9 @@ impl PendingDirectory {
             if digest.size != entry.size || hex_encode(&digest.content_sha256) != entry.sha {
                 return Err(Error::Integrity);
             }
-            entry.file.sync_all()?;
+            if let Some(file) = &entry.file {
+                file.sync_all()?;
+            }
             digests.push(digest);
         }
         if flat_merkle_root_from_digests(&digests) != self.root {
@@ -406,6 +500,9 @@ impl PendingDirectory {
         // a partial failure. The root staying nonempty retains the entire charge.
         let mut failure = None;
         for entry in &self.entries {
+            if entry.file.is_none() {
+                continue;
+            }
             if let Err(error) = fs::unlinkat(
                 &self.directories[entry.parent].fd,
                 entry.name.as_str(),

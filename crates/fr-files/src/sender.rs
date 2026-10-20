@@ -17,7 +17,8 @@ use asupersync::{
     cx::Cx,
     net::atp::{
         protocol::{AtpFrameCodec, Frame, FrameType, ProtocolVersion},
-        transport_tcp::ReceiveReceipt,
+        transport_common::FileKind,
+        transport_tcp::{ReceiveReceipt, TransferManifest},
     },
     time::TimerDriverHandle,
 };
@@ -697,6 +698,28 @@ fn packet(
     })
 }
 impl Transfer {
+    fn prepared(&mut self, manifest: &TransferManifest) -> Result<(), Error> {
+        if self.stage != Stage::Preparing
+            || manifest.is_directory != (self.profile == files::ATP_PORTABLE_DIRECTORY_FULL)
+        {
+            return Err(Error::Protocol);
+        }
+        // Existing file-only trees retain profile 2 byte for byte. Empty
+        // directory leaves need ATP's metadata commitment and explicit peer
+        // acceptance of profile 3; never silently drop them for an old peer.
+        if manifest.entries.iter().any(|entry| {
+            entry
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.file_kind == FileKind::Directory)
+        }) {
+            self.profile = files::ATP_PORTABLE_DIRECTORY_ENTRIES;
+        }
+        self.entries = manifest.entries.iter().map(|e| (e.size, 0)).collect();
+        self.total = Some(manifest.total_bytes);
+        self.root.clone_from(&manifest.merkle_root_hex);
+        Ok(())
+    }
     fn prepare(
         &mut self,
         context: files::Context,
@@ -711,15 +734,7 @@ impl Transfer {
             let Some(Event::Prepared(manifest)) = self.ready.take() else {
                 unreachable!()
             };
-            if self.stage != Stage::Preparing {
-                return Err(Error::Protocol);
-            }
-            if manifest.is_directory != (self.profile == files::ATP_PORTABLE_DIRECTORY_FULL) {
-                return Err(Error::Protocol);
-            }
-            self.entries = manifest.entries.iter().map(|e| (e.size, 0)).collect();
-            self.total = Some(manifest.total_bytes);
-            self.root.clone_from(&manifest.merkle_root_hex);
+            self.prepared(&manifest)?;
             let payload = serde_json::to_vec(&manifest).map_err(|_| Error::Protocol)?;
             if payload.len() > atp::receive::MAX_MANIFEST_BYTES {
                 return Err(Error::Limits);

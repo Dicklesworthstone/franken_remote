@@ -1,11 +1,16 @@
 //! Locally selected descriptors, disk-only hashing/reads, one outstanding result.
+#[cfg(test)]
+mod tests;
 mod tree;
 use super::{Error, Policy};
 use crate::receive::MAX_CHUNK_BYTES;
 use asupersync::{
     cx::Cx,
     net::atp::{
-        transport_common::{StagedEntryReceive, flat_merkle_root_from_digests, hex_encode},
+        transport_common::{
+            EntryMetadata, FileKind, StagedEntryReceive, flat_merkle_root_from_digests, hex_encode,
+            metadata_commitment,
+        },
         transport_tcp::{ManifestEntry, TransferManifest},
     },
     time::TimerDriverHandle,
@@ -215,12 +220,14 @@ fn run(
         };
         selected.check(gate)?;
         // Finish zero-byte entries too, without manufacturing empty data frames.
-        while let Some(entry) = selected.files.get_mut(index) {
-            if offset != entry.original.2 {
+        while let Some(entry) = selected.entries.get_mut(index) {
+            if offset != entry.size() {
                 break;
             }
-            eof(&mut entry.file)?;
-            unchanged(&entry.file, &entry.original)?;
+            if let tree::Contents::File { file, original } = &mut entry.contents {
+                eof(file)?;
+                unchanged(file, original)?;
+            }
             let (actual, _, _) = verification.finalize(entry.path.clone());
             if actual.content_sha256 != expected[index] {
                 return Err(Error::SourceChanged);
@@ -229,19 +236,22 @@ fn run(
             index += 1;
             offset = 0;
         }
-        if index == selected.files.len() {
+        if index == selected.entries.len() {
             selected.check(gate)?;
             reply.try_send(Ok(Event::End)).map_err(|_| Error::Worker)?;
             return Ok(());
         }
-        let entry = &mut selected.files[index];
-        let n = usize::try_from((entry.original.2 - offset).min(maximum as u64))
+        let entry = &mut selected.entries[index];
+        let tree::Contents::File { file, original } = &mut entry.contents else {
+            return Err(Error::Protocol);
+        };
+        let n = usize::try_from((original.2 - offset).min(maximum as u64))
             .map_err(|_| Error::Limits)?;
         let mut bytes = vec![0; n];
-        entry.file.read_exact(&mut bytes)?;
+        file.read_exact(&mut bytes)?;
         verification.update_with_chunk(&bytes);
         gate.check()?;
-        unchanged(&entry.file, &entry.original)?;
+        unchanged(file, original)?;
         reply
             .try_send(Ok(Event::Chunk {
                 index: u32::try_from(index).map_err(|_| Error::Limits)?,
@@ -259,25 +269,35 @@ fn prepare(
     directory: bool,
     gate: &Gate,
 ) -> Result<(TransferManifest, Vec<[u8; 32]>), Error> {
-    let mut digests = Vec::with_capacity(selected.files.len());
-    let mut entries = Vec::with_capacity(selected.files.len());
+    let mut digests = Vec::with_capacity(selected.entries.len());
+    let mut entries = Vec::with_capacity(selected.entries.len());
     let mut buffer = vec![0_u8; MAX_CHUNK_BYTES];
-    for (index, entry) in selected.files.iter_mut().enumerate() {
-        entry.file.rewind()?;
-        let size = entry.original.2;
+    for (index, entry) in selected.entries.iter_mut().enumerate() {
+        let size = entry.size();
         let mut hash = StagedEntryReceive::new(PathBuf::new());
-        let mut offset = 0;
-        while offset < size {
-            gate.check()?;
-            let n = usize::try_from((size - offset).min(MAX_CHUNK_BYTES as u64))
-                .map_err(|_| Error::Limits)?;
-            entry.file.read_exact(&mut buffer[..n])?;
-            hash.update_with_chunk(&buffer[..n]);
-            offset += n as u64;
-        }
-        buffer.fill(0);
-        eof(&mut entry.file)?;
-        unchanged(&entry.file, &entry.original)?;
+        let metadata = match &mut entry.contents {
+            tree::Contents::File { file, original } => {
+                file.rewind()?;
+                let mut offset = 0;
+                while offset < size {
+                    gate.check()?;
+                    let n = usize::try_from((size - offset).min(MAX_CHUNK_BYTES as u64))
+                        .map_err(|_| Error::Limits)?;
+                    file.read_exact(&mut buffer[..n])?;
+                    hash.update_with_chunk(&buffer[..n]);
+                    offset += n as u64;
+                }
+                buffer.fill(0);
+                eof(file)?;
+                unchanged(file, original)?;
+                file.rewind()?;
+                None
+            }
+            tree::Contents::Directory => Some(EntryMetadata {
+                file_kind: FileKind::Directory,
+                ..EntryMetadata::default()
+            }),
+        };
         gate.check()?;
         let (digest, _, _) = hash.finalize(entry.path.clone());
         entries.push(ManifestEntry {
@@ -285,21 +305,42 @@ fn prepare(
             rel_path: entry.path.clone(),
             size,
             sha256_hex: hex_encode(&digest.content_sha256),
-            metadata: None,
+            metadata,
             members: Vec::new(),
         });
         digests.push(digest);
-        entry.file.rewind()?;
     }
     selected.check(gate)?;
     let root = flat_merkle_root_from_digests(&digests);
+    // The pinned ATP commitment includes every entry, using bare Regular
+    // metadata for files. Omitting those files would commit a different graph.
+    let bare = EntryMetadata::default();
+    let pairs = entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.rel_path.as_str(),
+                entry.metadata.as_ref().unwrap_or(&bare),
+            )
+        })
+        .collect::<Vec<_>>();
+    let metadata_root_hex = metadata_commitment(&pairs);
     if directory {
-        crate::receive::DirectoryManifest::new(
-            name.clone(),
-            selected.total_bytes(),
-            entries.clone(),
-            root.clone(),
-        )
+        match &metadata_root_hex {
+            Some(metadata_root) => crate::receive::DirectoryManifest::with_metadata(
+                name.clone(),
+                selected.total_bytes(),
+                entries.clone(),
+                root.clone(),
+                metadata_root.clone(),
+            ),
+            None => crate::receive::DirectoryManifest::new(
+                name.clone(),
+                selected.total_bytes(),
+                entries.clone(),
+                root.clone(),
+            ),
+        }
         .map_err(|_| Error::Source)?;
     }
     let mut random = [0; 16];
@@ -310,7 +351,7 @@ fn prepare(
         is_directory: directory,
         total_bytes: selected.total_bytes(),
         merkle_root_hex: root,
-        metadata_root_hex: None,
+        metadata_root_hex,
         directory_metadata: None,
         delta_manifest: None,
         entries,

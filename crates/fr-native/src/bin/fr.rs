@@ -103,7 +103,8 @@ portable directory roots, in order, into the host's drop directory after control
 is granted, when the host runs frd run --files DIR. Symlinks and special files
 are refused before connecting. The host never overwrites: a taken name is
 refused. Completion reports each selection by index and size only, with the
-host-reported outcome or a typed refusal.
+host-reported outcome or a typed refusal. Empty files, empty directory roots and
+nested empty folders are preserved; older peers may refuse the required profile.
 A separate upload progress panel shows queued bytes, publication receipts,
 pause intent and local cleanup, with Pause / Resume / Cancel upload buttons.
 It requests no keyboard focus. Closing it only hides progress; the upload and
@@ -121,7 +122,7 @@ existing absolute local directory owned by you and not writable by other users
 or groups. No path component may be a symlink. The host must run frd run --once
 --input-agent PATH --send PATH... . Each complete file or portable directory is
 published atomically without overwriting an existing name; empty files and
-empty selected directory roots are supported. No received item is opened or run.
+empty roots and nested empty folders are supported. No received item is opened or run.
 A download progress panel shows privately staged bytes separately from actual
 publication receipts and cleanup. Cancel download requests file-only cancellation;
 closing the panel only hides it. The panel never retries or resumes a download.

@@ -57,12 +57,28 @@ const FILE: &str = "01-données-été λ 📄.bin";
 const EMPTY: &str = "02-empty.txt";
 const TREE: &str = "03-private-tree";
 const EMPTY_TREE: &str = "04-empty-tree";
+const EMPTY_BRANCHES: &str = "05-empty-branches";
 
 fn assert_tree(root: &Path, files: &[(&str, Vec<u8>)]) {
-    assert_entries(root, &["notes.txt", "sub"]);
-    assert_entries(&root.join("sub"), &["nested.bin", "zero.bin"]);
+    assert_entries(root, &["empty-branch", "notes.txt", "sub", "vacant"]);
+    assert_entries(&root.join("sub"), &["empty", "nested.bin", "zero.bin"]);
+    assert_entries(&root.join("empty-branch"), &["leaf"]);
+    for empty in ["empty-branch/leaf", "sub/empty", "vacant"] {
+        assert!(fs::symlink_metadata(root.join(empty)).unwrap().is_dir());
+        assert_entries(&root.join(empty), &[]);
+    }
     for (path, bytes) in files {
         assert_file(&root.join(path), bytes);
+    }
+}
+
+fn assert_empty_branches(root: &Path) {
+    assert_entries(root, &["one", "other"]);
+    assert_entries(&root.join("one"), &["two"]);
+    assert_entries(&root.join("one/two"), &["three"]);
+    for empty in ["one/two/three", "other"] {
+        assert!(fs::symlink_metadata(root.join(empty)).unwrap().is_dir());
+        assert_entries(&root.join(empty), &[]);
     }
 }
 
@@ -84,8 +100,14 @@ fn host_selections_download_atomically_while_control_and_clipboard_stay_live() {
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(file, body).unwrap();
     }
+    for empty in ["empty-branch/leaf", "sub/empty", "vacant"] {
+        fs::create_dir_all(source.0.join(TREE).join(empty)).unwrap();
+    }
     fs::create_dir(source.0.join(EMPTY_TREE)).unwrap();
-    let names = [FILE, EMPTY, TREE, EMPTY_TREE];
+    for empty in ["one/two/three", "other"] {
+        fs::create_dir_all(source.0.join(EMPTY_BRANCHES).join(empty)).unwrap();
+    }
+    let names = [FILE, EMPTY, TREE, EMPTY_TREE, EMPTY_BRANCHES];
     let selected: Vec<_> = names.iter().map(|name| source.0.join(name)).collect();
     let mut s = Controlled::start_downloads(true, true, &selected, Some(&destination.0));
     let mut host_app = Peer::start(&s.host.display);
@@ -103,6 +125,9 @@ fn host_selections_download_atomically_while_control_and_clipboard_stay_live() {
         }
         if destination.0.join(EMPTY_TREE).exists() {
             assert_entries(&destination.0.join(EMPTY_TREE), &[]);
+        }
+        if destination.0.join(EMPTY_BRANCHES).exists() {
+            assert_empty_branches(&destination.0.join(EMPTY_BRANCHES));
         }
         destination.entries() == names
     });
@@ -144,7 +169,8 @@ fn host_selections_download_atomically_while_control_and_clipboard_stay_live() {
             {"index": 0, "bytes": bytes.len(), "durable": true},
             {"index": 1, "bytes": 0, "durable": true},
             {"index": 2, "bytes": tree_bytes, "durable": true},
-            {"index": 3, "bytes": 0, "durable": true}
+            {"index": 3, "bytes": 0, "durable": true},
+            {"index": 4, "bytes": 0, "durable": true}
         ]),
         "{report}"
     );
@@ -161,11 +187,20 @@ fn host_selections_download_atomically_while_control_and_clipboard_stay_live() {
     assert_file(&destination.0.join(EMPTY), &[]);
     assert_tree(&destination.0.join(TREE), &tree_files);
     assert_entries(&destination.0.join(EMPTY_TREE), &[]);
+    assert_empty_branches(&destination.0.join(EMPTY_BRANCHES));
     assert_private(
         &output,
         &host,
         &[&source.0, &destination.0],
-        &[FILE, EMPTY, TREE, EMPTY_TREE, &to_host, &to_viewer],
+        &[
+            FILE,
+            EMPTY,
+            TREE,
+            EMPTY_TREE,
+            EMPTY_BRANCHES,
+            &to_host,
+            &to_viewer,
+        ],
     );
 }
 

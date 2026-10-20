@@ -7,17 +7,31 @@ use crate::receive::directory::{
 use rustix::fs::{self, AtFlags, FileType, Mode, OFlags};
 
 pub(super) struct Selected {
-    pub file: File,
     pub path: String,
-    pub original: Identity,
+    pub contents: Contents,
+}
+pub(super) enum Contents {
+    File { file: File, original: Identity },
+    // The directory's descriptor and identity remain in Selection::directories.
+    // Structural entries never borrow a file reader or a filesystem byte size.
+    Directory,
+}
+impl Selected {
+    pub(super) fn size(&self) -> u64 {
+        match &self.contents {
+            Contents::File { original, .. } => original.2,
+            Contents::Directory => 0,
+        }
+    }
 }
 pub(super) struct Selection {
-    pub files: Vec<Selected>,
+    pub entries: Vec<Selected>,
     // Retain and recheck directory identity/mtime/ctime as well as every file.
     // A changing tree is refused, not silently described as a stable snapshot.
     directories: Vec<(File, Identity)>,
     bytes: u64,
     names: usize,
+    nodes: usize,
 }
 impl Selection {
     pub(super) fn new(
@@ -31,10 +45,11 @@ impl Selection {
         let m = file.metadata()?;
         let original = identity(&m);
         let mut selection = Self {
-            files: Vec::new(),
+            entries: Vec::new(),
             directories: Vec::new(),
             bytes: 0,
             names: name.len(),
+            nodes: 0,
         };
         if directory {
             if !m.is_dir() {
@@ -42,16 +57,15 @@ impl Selection {
             }
             selection.directories.push((file, original));
             selection.visit(0, "", maximum, gate)?;
-            selection.files.sort_by(|a, b| a.path.cmp(&b.path));
+            selection.entries.sort_by(|a, b| a.path.cmp(&b.path));
         } else {
             if !m.is_file() || m.len() > maximum {
                 return Err(Error::Source);
             }
             selection.bytes = m.len();
-            selection.files.push(Selected {
-                file,
+            selection.entries.push(Selected {
                 path: name.to_owned(),
-                original,
+                contents: Contents::File { file, original },
             });
         }
         selection.check(gate)?;
@@ -64,7 +78,7 @@ impl Selection {
         maximum: u64,
         gate: &Gate,
     ) -> Result<(), Error> {
-        let before = self.files.len();
+        let before = self.entries.len();
         let mut iterator =
             fs::Dir::read_from(&self.directories[parent].0).map_err(std::io::Error::from)?;
         while let Some(entry) = iterator.read() {
@@ -81,9 +95,10 @@ impl Selection {
                 format!("{prefix}/{name}")
             };
             path_components(&path).map_err(|_| Error::Limits)?;
-            if self.files.len() + self.directories.len() > MAX_TREE_NODES {
+            if self.nodes >= MAX_TREE_NODES {
                 return Err(Error::Limits);
             }
+            self.nodes += 1;
             self.names = self.names.checked_add(path.len()).ok_or(Error::Limits)?;
             if self.names > MAX_TREE_NAMES_BYTES {
                 return Err(Error::Limits);
@@ -120,25 +135,30 @@ impl Selection {
                 if !m.is_file() {
                     return Err(Error::SourceChanged);
                 }
-                if self.files.len() >= MAX_TREE_ENTRIES {
+                if self.entries.len() >= MAX_TREE_ENTRIES {
                     return Err(Error::Limits);
                 }
                 self.bytes = self.bytes.checked_add(m.len()).ok_or(Error::Limits)?;
                 if self.bytes > maximum {
                     return Err(Error::Limits);
                 }
-                self.files.push(Selected {
-                    file,
+                self.entries.push(Selected {
                     path,
-                    original,
+                    contents: Contents::File { file, original },
                 });
             }
         }
         unchanged(&self.directories[parent].0, &self.directories[parent].1)?;
-        // The portable ATP content graph cannot represent empty non-root dirs.
-        // Refuse rather than silently deleting that part of a user's selection.
-        if parent != 0 && self.files.len() == before {
-            return Err(Error::Source);
+        // ATP's canonical zero-content Directory metadata preserves empty leaves.
+        // Ancestors remain implicit; an empty selected root needs no entry.
+        if parent != 0 && self.entries.len() == before {
+            if self.entries.len() >= MAX_TREE_ENTRIES {
+                return Err(Error::Limits);
+            }
+            self.entries.push(Selected {
+                path: prefix.to_owned(),
+                contents: Contents::Directory,
+            });
         }
         Ok(())
     }
@@ -147,8 +167,10 @@ impl Selection {
         for (fd, original) in &self.directories {
             unchanged(fd, original)?;
         }
-        for entry in &self.files {
-            unchanged(&entry.file, &entry.original)?;
+        for entry in &self.entries {
+            if let Contents::File { file, original } = &entry.contents {
+                unchanged(file, original)?;
+            }
         }
         gate.check()
     }

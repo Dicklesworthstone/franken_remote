@@ -181,20 +181,27 @@ selection, resume and folder sync remain separate work.
 ## Explicit portable directories
 
 `fr_files::sender::Sender::begin_directory(connection, selected_directory_fd,
-name)` sends a bounded directory tree using ATP profile 2. The selection is an
+name)` sends a bounded directory tree using ATP profile 2, or profile 3 when
+empty subdirectories need explicit structural entries. The selection is an
 owned, locally approved directory descriptor, not a remote path. The source
 worker scans children with no-follow, descriptor-relative operations, refuses
-links/special files and unsupported empty non-root directories, retains selected
+links and special files, retains selected
 file/directory descriptors, and checks their identities before and throughout
 streaming. Changed source content or membership is terminal; it is not silently
-retried with a refreshed deadline. Empty roots and empty regular files work.
+retried with a refreshed deadline. Empty roots, empty regular files, mixed trees
+and trees containing only nested empty directories work. Directories contribute
+structure and no content bytes; their original membership remains checked.
 
 The receiver publishes all verified entries with one no-overwrite root rename.
 A conflict preserves the existing destination and the local selection; a lost
 proof after completion remains an unknown publication, never an automatic retry.
 The same original attachment can carry a later legacy single-file transfer after
-its actual directory receipt and source cleanup are collected. See profile 2
-bounds in `PROTOCOL_FILES.md`. This does not implement synchronization jobs,
+its actual directory receipt and source cleanup are collected. Profile 3 uses
+ATP's existing metadata commitment to distinguish directory entries from empty
+regular files. It admits only the structural kind, never source permissions,
+ownership or other filesystem attributes, and requires explicit matching
+acceptance; older peers refuse instead of receiving an incomplete tree. See the
+profile bounds in `PROTOCOL_FILES.md`. This does not implement synchronization jobs,
 metadata preservation, remote directory browsing, or ATP resumption.
 
 The running `ControlledViewer::send_directory` API uses that same original
@@ -223,5 +230,5 @@ outcomes. Evidence: `crates/frd/tests/native_host_linux_serial/real_files.rs`
 (namespace e2e with real files, including a SIGSTOP mid-transfer and two planted
 negatives) and the unit tests in `crates/frd/src/native_files/tests.rs`. Not a
 live-tailnet, picker, drag-and-drop or resumption qualification. Explicit
-directory selection uses the profile-2 path above; downloads use the same ATP
+directory selection uses the profile-2/profile-3 path above; downloads use the same ATP
 machinery in the direction described in NATIVE_FILE_DOWNLOAD.md.

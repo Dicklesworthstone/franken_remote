@@ -537,3 +537,6 @@ fn a_host_without_files_keeps_control_and_the_client_reports_typed_absence() {
 
 #[path = "real_downloads.rs"]
 mod real_downloads;
+
+#[path = "real_files/trees.rs"]
+mod trees;

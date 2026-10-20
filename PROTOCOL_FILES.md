@@ -48,10 +48,54 @@ directories, filesystem metadata, links, packed entries, deltas and resumption
 remain outside this content-only profile. This is explicit directory transfer,
 not automatic synchronization or permission to browse remote paths.
 
+## Portable trees with explicit directory entries
+
+Profile 3 (`ATP_PORTABLE_DIRECTORY_ENTRIES`) preserves nested empty directories
+using the pinned ATP `TransferManifest` and its existing structural metadata.
+This profile uses Asupersync 0.6.0 at the repository's existing revision
+`ee72b665ee87f6c811b1631136676fbc31ec0a88`; it adds no dependency or alternate
+hashing/transfer implementation.
+The sender selects it only when the selected tree needs explicit directory
+entries. Ordinary content-only trees and an empty selected root retain profile 2.
+An offer of profile 3 requires a matching profile-3 `FileAccept` before data;
+an older receiver may refuse it, but the sender never silently drops directories
+or downgrades the selection to profile 2.
+
+An explicit directory is an empty leaf; its ancestors are implicit. No explicit
+entry may also be an ancestor of another entry, in either manifest order.
+The directory has size zero, the upstream empty-content SHA-256, no
+packed members, and `EntryMetadata` containing only `FileKind::Directory` with
+every other field at its default. Regular-file metadata must be absent; the
+commitment uses ATP's default regular-file metadata for those entries.
+The manifest's `metadata_root_hex` must match ATP's existing
+`metadata_commitment` over **all** entry paths and their effective metadata,
+including default regular-file metadata when the field is absent. The receiver
+checks that commitment before creating staging. It also verifies the existing
+flat content Merkle root before publication. This keeps a zero-byte file and an
+empty directory distinct even though they have the same content hash.
+
+No permissions, ownership, timestamps, extended attributes, link targets,
+directory-root metadata, packed members, delta or resumption fields are admitted.
+Received directories use private local permissions. Directory indices never
+accept `ObjectData`; there are no marker files and no directory content reads.
+The private tree, original authority checks, cleanup ownership and single atomic
+no-replace publication are the same as profile 2.
+
+The existing bounds apply to the complete structure: at most 64 explicit
+manifest entries (regular files plus explicit directories), 128 non-root nodes,
+eight path components, 1024 bytes per path, 16 KiB of combined names and a 32 KiB
+manifest within the negotiated record limit. Empty entries still consume entry,
+name, node and metadata-work budgets. Declared content bytes count only regular
+file contents. As in upstream ATP, `Proof.files` counts **all explicit manifest
+entries**, including the structural directories; it is not a regular-file-only
+counter. An all-empty nested tree still needs verification and a publication
+receipt with zero content bytes.
+
 ## Native explicit file and directory selection
 
 `fr connect NODE --control --experimental-native --display only --send PATH`
-now selects either a regular file (profile 1) or a directory root (profile 2).
+now selects either a regular file (profile 1) or a directory root (profile 2 or
+3, depending on whether explicit directory entries are required).
 Repeat `--send` to mix up to eight selections in one connection. The host must
 explicitly enable receiving with `frd run ... --input-agent PATH --files DIR`;
 files do not grant control, and an observer cannot send them.
@@ -70,14 +114,18 @@ The content-free completion still identifies selections by their zero-based
 `index`, never by name. Successful `files_sent[].bytes` is the host-reported total
 content size. For a directory whose size has not been measured,
 `files_refused[].bytes` is JSON `null`, not an inode size or a fabricated zero.
-Empty roots are supported; empty non-root directories and other exclusions above
-are still refused. The content-only profile does not provide picker, delta or resumable-transfer UI.
+Empty roots, empty regular files and nested empty directories are supported by
+the appropriate profile. Other exclusions above still refuse the selection.
+These profiles do not provide picker, delta or resumable-transfer UI.
 
 Regression targets include `fr-files --test directory_batch`, native selection
 unit tests, and the controlled-loop
 `selected_directory_uses_the_native_controlled_owners_and_keeps_input_live` test.
 These distinguish source/unit/fixture coverage from real graphical desktop or
 live-tailnet qualification; selecting a directory does not establish either.
+The native command targets additionally check mixed and all-empty trees in
+`real_files/trees.rs` and `real_downloads.rs`, with independent filesystem checks,
+content-free receipts and continued input on the original controlled session.
 
 ## Host-to-controller downloads
 

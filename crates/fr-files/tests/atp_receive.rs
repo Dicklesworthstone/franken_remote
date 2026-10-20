@@ -1097,3 +1097,6 @@ fn observation_or_crossed_attachment_configuration_never_starts_disk_owner() {
 
 #[path = "atp_receive/directory.rs"]
 mod directory;
+
+#[path = "atp_receive/directory_entries.rs"]
+mod directory_entries;
