@@ -408,13 +408,112 @@ fn uncollected_or_delivered_ready_seed_still_follows_session_cancellation() {
     }
 }
 
+fn open_full_item_worker(
+    seed: crate::clipboard_quic::WorkerSeed,
+    os: &Arc<Mutex<Os>>,
+) -> crate::clipboard_quic::Worker<Native> {
+    let os = os.clone();
+    seed.open(move || {
+        os.lock().unwrap().opened = true;
+        Ok(Native {
+            os,
+            seen: 0,
+            reading: false,
+        })
+    })
+    .unwrap()
+}
+
+fn step_full_item_workers(
+    workers: &mut [crate::clipboard_quic::Worker<Native>; 2],
+    ids: &mut [u128; 2],
+) {
+    for (worker, id) in workers.iter_mut().zip(ids) {
+        worker
+            .step(|| {
+                *id += 1;
+                Ok(*id)
+            })
+            .unwrap();
+    }
+}
+
+fn full_item_native_records(state: &mut Fixture) -> usize {
+    let mut retained = 0;
+    for usage in [
+        state.host.io().unwrap().0.usage(),
+        state.viewer.session.io().unwrap().0.usage(),
+    ] {
+        let bulk = usage.retained_send_records - usage.critical_send_records;
+        retained = retained.max(bulk);
+        assert!(
+            bulk <= 4,
+            "worker handoff exceeded its four-record native bound"
+        );
+        assert!(usage.retained_send_upper_bound - usage.critical_send_bytes <= 4 * 8192);
+    }
+    retained
+}
+
+async fn prime_full_item_sender(
+    state: &mut Fixture,
+    workers: &mut [crate::clipboard_quic::Worker<Native>; 2],
+    ids: &mut [u128; 2],
+    from: usize,
+    nonce_id: &mut u128,
+    ticket_id: &mut u128,
+) -> usize {
+    // Fill the original native burst before driving the opposite connection.
+    // Begin/Chunk advance on local admission, so these four completed ordinary
+    // I/O turns can retain multiple records without a peer application reply.
+    // Withholding the peer's drive also withholds ACKs for those new records.
+    // ZERO changes only the receive wait; each flush and custody guard completes.
+    let mut retained = 0;
+    for _ in 0..4 {
+        step_full_item_workers(workers, ids);
+        if from == 0 {
+            Box::pin(state.host.drive(
+                Duration::ZERO,
+                || nonce(nonce_id),
+                || {
+                    *ticket_id += 1;
+                    Some(InputTicketId::from_raw(*ticket_id))
+                },
+                |_, bytes| {
+                    not_handshake(bytes);
+                    Ok(Disposition::Blocked)
+                },
+            ))
+            .await
+            .unwrap();
+        } else {
+            Box::pin(state.viewer.drive(
+                Duration::ZERO,
+                |_| {},
+                |_, bytes| {
+                    not_handshake(bytes);
+                    Ok(Disposition::Blocked)
+                },
+            ))
+            .await
+            .unwrap();
+        }
+        retained = retained.max(full_item_native_records(state));
+    }
+    retained
+}
+
 #[test]
 fn newly_negotiated_workers_transfer_full_item_limit_in_both_directions() {
-    // Each success case begins with its actual freshly granted host deadline.
-    // A copy started near the end of a previous lease is allowed to expire; a
-    // later renewal deliberately cannot extend that already captured deadline.
+    // Full-size protocol/budget coverage: Native only changes fixture memory,
+    // so step both ORIGINAL workers around the real session drives. This avoids
+    // spending the fixed item lifetime waiting for separately scheduled mock OS
+    // threads. The adjacent automatic_startup test retains WorkerSeed::spawn
+    // coverage in both directions, including Unicode, empty copy and input.
+    // No worker queue, transport budget, item deadline or grant is replaced.
     for from in [0, 1] {
         run(move |c, h| async move {
+            let text = "λ".repeat(524_288);
             let mut state = setup(&c, &h).await;
             begin(&mut state, true, true);
             let driver = state.driver.take().unwrap();
@@ -422,12 +521,14 @@ fn newly_negotiated_workers_transfer_full_item_limit_in_both_directions() {
                 let (mut n, mut t) = (80_000, 90_000);
                 finish(&mut state, &c, &h, &mut n, &mut t).await;
                 let os = [Arc::new(Mutex::new(Os::default())), Arc::new(Mutex::new(Os::default()))];
-                let mut workers = [open(state.host.take_clipboard_worker().unwrap(), &os[0]),
-                    open(state.viewer.take_clipboard_worker().unwrap(), &os[1])];
-                let text = "λ".repeat(524_288);
-                let mut max_native_records = 0;
+                let mut workers = [open_full_item_worker(state.host.take_clipboard_worker().unwrap(), &os[0]),
+                    open_full_item_worker(state.viewer.take_clipboard_worker().unwrap(), &os[1])];
+                let mut worker_ids = [0; 2];
+                step_full_item_workers(&mut workers, &mut worker_ids);
                 let _ = state.viewer.action(key(true)).unwrap();
+                let started = now(&c).unwrap();
                 copy(&os[from], &text);
+                let mut max_native_records = Box::pin(prime_full_item_sender(&mut state, &mut workers, &mut worker_ids, from, &mut n, &mut t)).await;
                 // The item's own captured deadline bounds the transfer: expiry
                 // or any other failure ends a lane with a reason, checked every
                 // turn. The wall clock only guards against a hang; a fixed 2.5 s
@@ -437,26 +538,28 @@ fn newly_negotiated_workers_transfer_full_item_limit_in_both_directions() {
                 loop {
                     let (host, viewer) = (state.host.clipboard_reason(), state.viewer.clipboard_reason());
                     assert!(host.is_none() && viewer.is_none() && now(&c).unwrap() < hang, "full bounded item failed to transfer; sender={from}; host={host:?}; viewer={viewer:?}");
+                    step_full_item_workers(&mut workers, &mut worker_ids);
                     drive(&mut state, &c, &h, &mut n, &mut t).await;
-                    for usage in [state.host.io().unwrap().0.usage(), state.viewer.session.io().unwrap().0.usage()] {
-                        let bulk = usage.retained_send_records - usage.critical_send_records;
-                        max_native_records = max_native_records.max(bulk);
-                        assert!(bulk <= 4, "worker handoff exceeded its four-record native bound");
-                        assert!(usage.retained_send_upper_bound - usage.critical_send_bytes <= 4 * 8192);
-                    }
+                    step_full_item_workers(&mut workers, &mut worker_ids);
+                    max_native_records = max_native_records.max(full_item_native_records(&mut state));
                     let receipt = if from == 0 { state.viewer.take_clipboard_received() } else { state.host.take_clipboard_received() }.unwrap();
                     if let Some(receipt) = receipt {
-                        assert!(matches!(receipt, Received::Consumed(Some(r)) if r.publication == Publication::SubmittedToOs), "terminal clipboard result: {receipt:?}; sender {from}");
+                        let elapsed = now(&c).unwrap().saturating_sub(started);
+                        assert!(matches!(receipt, Received::Consumed(Some(r)) if r.publication == Publication::SubmittedToOs), "terminal clipboard result: {receipt:?}; sender {from}; elapsed_us={elapsed}");
                         assert_eq!(os[1-from].lock().unwrap().text.as_deref(), Some(text.as_str()));
                         break;
                     }
                 }
                 assert!(max_native_records >= 2, "test must exercise pipelined native records");
                 let _ = state.viewer.action(key(false)).unwrap();
-                for _ in 0..10 { drive(&mut state, &c, &h, &mut n, &mut t).await; }
+                for _ in 0..10 {
+                    step_full_item_workers(&mut workers, &mut worker_ids);
+                    drive(&mut state, &c, &h, &mut n, &mut t).await;
+                    step_full_item_workers(&mut workers, &mut worker_ids);
+                }
                 assert_eq!(state.effects.lock().unwrap().keys, [true, false]);
                 state.host.close(); state.viewer.close();
-                for worker in &mut workers { worker.stop(); }
+                for worker in &mut workers { worker.close(); }
             }, driver)).await;
             assert!(done.handoff_safe());
         });

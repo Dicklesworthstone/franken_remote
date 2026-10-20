@@ -262,6 +262,29 @@ impl PendingControl {
         }
         Ok(sample)
     }
+    fn revoked(&mut self, bytes: &[u8]) -> Error {
+        let Some((granted, input)) = &mut self.grant else {
+            return Error::Control(ControlError::WrongBinding);
+        };
+        let binding = fr_wire::authority::Binding {
+            channel: self.request.parent.id,
+            session: self.request.parent.remote_session,
+        };
+        match fr_wire::lease_revoked::decode(
+            bytes,
+            binding,
+            granted.lease,
+            &self.channels.limits(),
+            fr_wire::input::InputDirection::HostToViewer,
+            fr_wire::input::InputDelivery::Reliable,
+        ) {
+            Ok(revoked) => {
+                input.stop(fr_client::input::StopReason::Disconnected);
+                Error::Control(ControlError::LeaseRevoked(revoked))
+            }
+            Err(error) => input_error(fr_client::input::Error::Wire(error)),
+        }
+    }
     pub(super) async fn drive(
         &mut self,
         session: &mut ViewerSession,
@@ -271,6 +294,10 @@ impl PendingControl {
     ) -> Result<(), Error> {
         let sample = self.service(session)?;
         let inbound = Route::Stream(session.routes.inbound);
+        let (_, feedback, _) = self
+            .channels
+            .viewer_routes(&session.transport)
+            .map_err(|e| Error::Control(ControlError::Input(e)))?;
         let routes = media
             .viewer_routes(&session.transport)
             .map_err(Error::Routes)?;
@@ -295,6 +322,22 @@ impl PendingControl {
                                     .map_err(|e| Error::Control(ControlError::ControlRequest(e)))?,
                             );
                             return Ok(Disposition::Consumed);
+                        }
+                        if route == inbound
+                            && bytes.get(6..8)
+                                == Some(&(Kind::LeaseRevoked as u16).to_be_bytes())
+                        {
+                            return Err(self.revoked(bytes));
+                        }
+                        // The host can queue renewal and optional attachment records
+                        // immediately after the grant. Input feedback uses another
+                        // stream and can arrive even before it. Keep their original
+                        // transport-owned bytes until notify transfers this grant;
+                        // media, clock and observation continue on their own paths.
+                        if route == Route::Stream(feedback)
+                            || (self.grant.is_some() && route == inbound)
+                        {
+                            return Ok(Disposition::Blocked);
                         }
                         let disposition = other(route, bytes).map_err(|()| Error::Application)?;
                         if disposition == Disposition::Consumed

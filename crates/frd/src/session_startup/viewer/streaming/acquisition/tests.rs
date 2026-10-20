@@ -1,6 +1,7 @@
 //! Real UDP/TLS, broker, worker-process supervision and stream ownership. The
 //! decoder replies, local consent, source checks, visibility and OS sink are
 //! explicitly simulated; these tests do not qualify HEVC pixels or hardware.
+mod handoff;
 use super::*;
 use crate::{
     input_agent::{Driver, Seat},
@@ -78,6 +79,7 @@ struct Fixture {
     request: Request,
     descriptor: FrameDescriptor,
     video: Route,
+    feedback: Route,
 }
 #[allow(clippy::too_many_lines)]
 async fn fixture(c: &Cx, h: &Cx) -> Fixture {
@@ -118,6 +120,7 @@ async fn fixture(c: &Cx, h: &Cx) -> Fixture {
         crate::media_quic::NegotiatedMedia::new(viewer.io().unwrap().0, &selection, &vc, &vr, &vv)
             .unwrap();
     let channels = NegotiatedInput::new(viewer.io().unwrap().0, &selection, &vc, vi).unwrap();
+    let feedback = Route::Stream(hi.completed_on(host.io().unwrap().0).unwrap().outbound);
     let input = NegotiatedInput::new(host.io().unwrap().0, &selection, &hc, hi).unwrap();
     let video = Route::Datagram(
         hv.completed_on(host.io().unwrap().0)
@@ -227,6 +230,7 @@ async fn fixture(c: &Cx, h: &Cx) -> Fixture {
         },
         descriptor,
         video,
+        feedback,
     }
 }
 fn key(down: bool) -> Action<'static> {
@@ -460,6 +464,7 @@ async fn exercise(c: Cx, h: Cx, delay: u64, show: bool, map: bool, updates: bool
         request,
         descriptor,
         video,
+        feedback: _,
     } = Box::pin(fixture(&c, &h)).await;
     let worker = stream.worker_id().unwrap();
     let stop = stream.control();
@@ -527,7 +532,7 @@ async fn exercise(c: Cx, h: Cx, delay: u64, show: bool, map: bool, updates: bool
                         Ok(())
                     },
                     |_| receipts.set(receipts.get() + 1),
-                    block,
+                    |_, _| Err(()),
                 )
                 .await;
             done.set(true);
