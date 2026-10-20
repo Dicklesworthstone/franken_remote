@@ -32,6 +32,10 @@ fn stop_fences_idle_queued_and_preparing_sources_without_resetting_control() {
                 sender.begin(&f.link.c, File::open(&source).unwrap(), "retry"),
                 Err(Error::Closed)
             );
+            assert_eq!(
+                sender.begin_directory(&f.link.c, File::open(&f.path).unwrap(), "retry-tree"),
+                Err(Error::Closed)
+            );
             if mode == 1 {
                 let report = sender.batch_report().unwrap();
                 assert_eq!(report.started, 0);

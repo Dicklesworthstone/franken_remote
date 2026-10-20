@@ -459,26 +459,7 @@ impl QuicRecords {
     ) -> Result<Self, Error> {
         cx.checkpoint().map_err(|_| Error::Cancelled)?;
         validate_policy(streams, datagrams, policy, native.connection().role())?;
-        if native.negotiated_alpn() != ALPN {
-            return Err(Error::Alpn);
-        }
-        if native.connection().state() != QuicConnectionState::Established
-            || !native.connection().can_send_app_data()
-        {
-            return Err(Error::NotEstablished);
-        }
-        let table = native.connection().inner().streams();
-        if table.connection_recv_limit() > policy.connection_window
-            || table.len() > streams.len()
-            || native
-                .connection()
-                .inner()
-                .pending_outbound_datagram_count()
-                != 0
-            || native.connection().inner().has_pending_stream_frames()
-        {
-            return Err(Error::InvalidPolicy);
-        }
+        validate_native_connection(&native, streams.len(), policy.connection_window)?;
         let mut inbound = Vec::new();
         let mut senders = Vec::new();
         for route in streams {
@@ -1428,6 +1409,33 @@ impl Drop for Held<'_> {
 }
 fn now(cx: &Cx) -> Result<u64, Error> {
     Ok(cx.timer_driver().ok_or(Error::Clock)?.now().as_nanos() / 1000)
+}
+fn validate_native_connection(
+    native: &NativeQuicUdpConnection,
+    stream_count: usize,
+    connection_window: u64,
+) -> Result<(), Error> {
+    if native.negotiated_alpn() != ALPN {
+        return Err(Error::Alpn);
+    }
+    if native.connection().state() != QuicConnectionState::Established
+        || !native.connection().can_send_app_data()
+    {
+        return Err(Error::NotEstablished);
+    }
+    let table = native.connection().inner().streams();
+    if table.connection_recv_limit() > connection_window
+        || table.len() > stream_count
+        || native
+            .connection()
+            .inner()
+            .pending_outbound_datagram_count()
+            != 0
+        || native.connection().inner().has_pending_stream_frames()
+    {
+        return Err(Error::InvalidPolicy);
+    }
+    Ok(())
 }
 fn validate_policy(
     streams: &[StreamRoute],

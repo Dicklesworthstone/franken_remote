@@ -430,11 +430,10 @@ fn files_cleanup(
     use crate::session_startup::{FileReceiveCleanup as Cleanup, FileReceiveError as E};
     match result {
         Ok(Cleanup::NotStarted | Cleanup::Finished(Ok(()))) => Ok(()),
-        Ok(Cleanup::Finished(Err(_))) => Err(crate::worker::Error::Unavailable),
         Ok(Cleanup::Pending) | Err(E::CleanupPending) => Err(crate::worker::Error::Deadline),
         Err(E::Cancelled) => Err(crate::worker::Error::Cancelled),
         Err(E::Clock) => Err(crate::worker::Error::ClockRegression),
-        Err(_) => Err(crate::worker::Error::Unavailable),
+        Ok(Cleanup::Finished(Err(_))) | Err(_) => Err(crate::worker::Error::Unavailable),
     }
 }
 const fn clipboard_cleanup(error: clipboard_quic::Error) -> crate::worker::Error {

@@ -335,6 +335,9 @@ impl<'a> Sender<'a> {
     /// the portable destination basename. Preparation is bounded and asynchronous.
     pub fn begin(&mut self, q: &QuicRecords, file: File, name: &str) -> Result<u64, Error> {
         self.identity(q)?;
+        if self.closed {
+            return Err(Error::Closed);
+        }
         if self.batch.is_some() {
             return Err(Error::Busy);
         }
@@ -349,6 +352,9 @@ impl<'a> Sender<'a> {
         name: &str,
     ) -> Result<u64, Error> {
         self.identity(q)?;
+        if self.closed {
+            return Err(Error::Closed);
+        }
         if self.batch.is_some() {
             return Err(Error::Busy);
         }

@@ -146,9 +146,16 @@ fn an_obsolete_unsent_handoff_does_not_request_transport_retirement() {
 fn the_immediate_record_check_refuses_a_superseded_unsent_begin() {
     runtime().block_on(async {
         let mut f = Fixture::new().await;
+        // Attachment completion proves staging, not acknowledgment. Drain its
+        // existing reply before measuring whether the obsolete Begin queues bytes.
+        let until = clock(&f.cx) + 1_000_000;
+        while !f.bridge.lane.send_drained(&f.link.h).unwrap() {
+            assert!(clock(&f.cx) < until, "attachment reply never drained");
+            f.link.drive(&f.cx).await;
+        }
         f.offer(201);
         assert_eq!(f.pump(), Pump::RecordAccepted);
-        let original = f.link.h.usage().retained_send_records;
+        let original = f.link.h.usage();
         let mut calls = 0;
         let sender = channel(&mut f.seed);
         let result = f.bridge.service(&mut f.link.h, || {
@@ -169,7 +176,12 @@ fn the_immediate_record_check_refuses_a_superseded_unsent_begin() {
         });
         assert_eq!(result, Ok(State::Active));
         assert!(calls >= 2);
-        assert_eq!(f.link.h.usage().retained_send_records, original);
+        let after = f.link.h.usage();
+        assert_eq!(after.retained_send_records, original.retained_send_records);
+        assert_eq!(
+            after.retained_send_upper_bound,
+            original.retained_send_upper_bound
+        );
         assert!(f.bridge.lane.send_drained(&f.link.h).unwrap());
         assert!(f.bridge.pending.is_none());
         assert!(f.bridge.inflight.iter().all(Option::is_none));
