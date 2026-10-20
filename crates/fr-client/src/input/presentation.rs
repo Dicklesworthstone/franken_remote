@@ -394,6 +394,22 @@ impl PresentedInput {
         self.input.accept_ticket(bytes, clock, now)?;
         Ok(())
     }
+    /// The selected authority-bearing feedback profile keeps the same original
+    /// input owner and media-derived readiness. Its auxiliary authority cap is
+    /// never permission to reuse an expired action ticket or a stale view.
+    pub fn accept_authority_ticket(
+        &mut self,
+        bytes: &[u8],
+        clock: ClockCorrelation,
+        now: ClientInstant,
+    ) -> Result<(), Error> {
+        if clock.host_boot() != self.view.host_boot() {
+            self.stop(StopReason::InvalidTicket);
+            return Err(Error::Media(freshness::Error::StaleBinding));
+        }
+        self.input.accept_authority_ticket(bytes, clock, now)?;
+        Ok(())
+    }
     pub fn enable_control_renewal(
         &mut self,
         channel: u32,

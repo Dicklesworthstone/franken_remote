@@ -278,6 +278,7 @@ pub enum Reply {
     Input(Result<Dispatch, Refusal>),
     Authority(Result<HostInstant, Refusal>),
     Ticket(Result<fr_wire::input_ticket::Ticket, Refusal>),
+    AuthorityTicket(Result<fr_wire::input_ticket::AuthorityTicket, Refusal>),
     Reconciliation(Result<Reconciliation, Refusal>),
     ReconciliationPanic { report: Option<Reconciliation> },
     CancelledBeforeStart,
@@ -323,6 +324,7 @@ enum CommandKind {
     Ticket {
         ticket: InputTicketId,
         sequence: u64,
+        authority: bool,
     },
     Authority(AuthorityCommand),
 }
@@ -574,8 +576,30 @@ impl Agent {
         ticket: InputTicketId,
         sequence: u64,
     ) -> Result<(), Error> {
+        self.enqueue_ticket(ticket, sequence, false)
+    }
+    /// The negotiated feedback profile additionally reports the original
+    /// owner's actual lease/observation cap, sampled atomically at issuance.
+    /// It uses the same one-command mailbox and does not renew authority.
+    pub fn issue_authority_ticket_record(
+        &mut self,
+        ticket: InputTicketId,
+        sequence: u64,
+    ) -> Result<(), Error> {
+        self.enqueue_ticket(ticket, sequence, true)
+    }
+    fn enqueue_ticket(
+        &mut self,
+        ticket: InputTicketId,
+        sequence: u64,
+        authority: bool,
+    ) -> Result<(), Error> {
         self.enqueue(Command {
-            kind: CommandKind::Ticket { ticket, sequence },
+            kind: CommandKind::Ticket {
+                ticket,
+                sequence,
+                authority,
+            },
             bytes: [0; MAX_INPUT_RECORD_BYTES],
             length: 0,
         })?;
@@ -962,22 +986,17 @@ fn execute<S: InputSink>(
                 input_watchdog::host_now(cx).expect("captured timer")
             }))
         }
-        CommandKind::Ticket { ticket, sequence } => {
+        CommandKind::Ticket {
+            ticket,
+            sequence,
+            authority,
+        } => {
             shared.check_admission();
             if cx.checkpoint().is_err() {
                 shared.control.stop(StopReason::Cancelled);
             }
             let now = input_watchdog::host_now(cx).expect("captured timer");
-            Reply::Ticket(
-                session
-                    .issue_ticket_timed(ticket, now)
-                    .map(|(issued, until)| fr_wire::input_ticket::Ticket {
-                        credentials: session.ticket_credentials(ticket),
-                        sequence,
-                        issued_at_us: issued.as_micros(),
-                        expires_at_us: until.as_micros(),
-                    }),
-            )
+            ticket_reply(session, ticket, sequence, now, authority)
         }
         CommandKind::Authority(command) => {
             shared.check_admission();
@@ -1009,6 +1028,31 @@ fn execute<S: InputSink>(
         }
     });
     shared.reply(reply);
+}
+
+fn ticket_reply(
+    session: &mut InputSession,
+    ticket: InputTicketId,
+    sequence: u64,
+    now: HostInstant,
+    authority: bool,
+) -> Reply {
+    let result = session.issue_ticket_authority_timed(ticket, now).map(
+        |(issued, until, authority_until)| fr_wire::input_ticket::AuthorityTicket {
+            ticket: fr_wire::input_ticket::Ticket {
+                credentials: session.ticket_credentials(ticket),
+                sequence,
+                issued_at_us: issued.as_micros(),
+                expires_at_us: until.as_micros(),
+            },
+            authority_until_us: authority_until.as_micros(),
+        },
+    );
+    if authority {
+        Reply::AuthorityTicket(result)
+    } else {
+        Reply::Ticket(result.map(|record| record.ticket))
+    }
 }
 
 #[cfg(test)]

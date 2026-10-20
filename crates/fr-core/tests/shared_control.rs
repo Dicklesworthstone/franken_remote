@@ -165,6 +165,100 @@ fn overtaken_ticket_metadata_uses_the_same_issue_time_as_policy() {
     assert_eq!(until, at(1_000_100));
 }
 #[test]
+fn authority_ticket_reports_the_original_lease_separately_from_view_freshness() {
+    let (a, mut native, _renewal) = setup();
+    a.lock()
+        .unwrap()
+        .mark_view_ready_until(at(250_000), at(0))
+        .unwrap();
+    let ticket = InputTicketId::from_raw(4);
+    assert_eq!(
+        native.issue_ticket_authority_timed(ticket, at(100)),
+        Ok((at(100), at(1_000_100), at(3_000_000)))
+    );
+    let monitor = native.monitor();
+    assert_eq!(monitor.deadline(at(100)), Ok(at(250_000)));
+    assert_eq!(monitor.authorize_ticket(ticket, at(249_999)), Ok(()));
+    assert_eq!(
+        monitor.authorize_ticket(ticket, at(250_000)),
+        Err(Refusal::Authority(AuthorityError::ViewUnready))
+    );
+    assert_eq!(
+        native.issue_ticket_authority_timed(InputTicketId::from_raw(5), at(250_001)),
+        Err(Refusal::Authority(AuthorityError::ViewUnready))
+    );
+}
+#[test]
+fn authority_ticket_snapshots_the_earlier_live_lease_and_observation_deadline() {
+    let (a, mut native, mut renewal) = setup();
+    observe(&a, 9, 1_000_000);
+    let first = InputTicketId::from_raw(4);
+    assert_eq!(
+        native.issue_ticket_authority_timed(first, at(1_100_000)),
+        Ok((at(1_100_000), at(2_100_000), at(3_000_000)))
+    );
+    assert_eq!(renewal.challenge(10, at(1_200_000)), Ok(at(4_200_000)));
+    assert_eq!(renewal.respond(10, at(1_200_000)), Ok(at(4_200_000)));
+    let second = InputTicketId::from_raw(5);
+    assert_eq!(
+        native.issue_ticket_authority_timed(second, at(1_300_000)),
+        Ok((at(1_300_000), at(2_300_000), at(4_000_000)))
+    );
+    // Neither the accepted lease renewal nor the longer proof renews an action.
+    let monitor = native.monitor();
+    assert_eq!(
+        monitor.authorize_ticket(first, at(2_100_000)),
+        Err(Refusal::Authority(AuthorityError::TicketExpired))
+    );
+    assert_eq!(monitor.authorize_ticket(second, at(2_100_000)), Ok(()));
+    assert_eq!(a.lock().unwrap().lease_deadline(), Ok(at(4_000_000)));
+}
+#[test]
+fn unaccepted_challenges_cannot_become_authority_ticket_proof() {
+    let (a, mut native, mut renewal) = setup();
+    assert_eq!(
+        a.lock()
+            .unwrap()
+            .issue_observation_challenge(9, at(1_000_000)),
+        Ok(at(4_000_000))
+    );
+    assert_eq!(renewal.challenge(10, at(1_000_000)), Ok(at(4_000_000)));
+    assert_eq!(
+        native.issue_ticket_authority_timed(InputTicketId::from_raw(4), at(1_100_000)),
+        Ok((at(1_100_000), at(2_100_000), at(3_000_000)))
+    );
+    a.lock()
+        .unwrap()
+        .respond_observation_challenge(9, at(1_200_000))
+        .unwrap();
+    assert_eq!(
+        native.issue_ticket_authority_timed(InputTicketId::from_raw(5), at(1_300_000)),
+        Ok((at(1_300_000), at(2_300_000), at(3_000_000)))
+    );
+    renewal.respond(10, at(1_400_000)).unwrap();
+    assert_eq!(
+        native.issue_ticket_authority_timed(InputTicketId::from_raw(6), at(1_500_000)),
+        Ok((at(1_500_000), at(2_500_000), at(4_000_000)))
+    );
+}
+#[test]
+fn overtaken_authority_ticket_uses_serialized_issue_time_without_sliding_the_lease() {
+    let (a, mut native, _renewal) = setup();
+    a.lock()
+        .unwrap()
+        .authorize_observation_delivery(at(100))
+        .unwrap();
+    assert_eq!(
+        native.issue_ticket_authority_timed(InputTicketId::from_raw(4), at(50)),
+        Ok((at(100), at(1_000_100), at(3_000_000)))
+    );
+    assert_eq!(
+        native.issue_ticket_authority_timed(InputTicketId::from_raw(5), at(49)),
+        Err(Refusal::Authority(AuthorityError::ClockRegression))
+    );
+    assert!(native.monitor().is_revoked());
+}
+#[test]
 fn dropping_either_owner_and_replacement_authority_cannot_keep_old_control() {
     let (a, mut native, renewal) = setup();
     drop(renewal);
@@ -340,7 +434,7 @@ fn shared_native_attachment_is_single_use_even_after_owner_stop_and_drop() {
 }
 #[test]
 fn replaced_lease_with_reused_numeric_id_never_revalidates_the_old_native_owner() {
-    let (a, native, mut old) = setup();
+    let (a, mut native, mut old) = setup();
     {
         let mut a = a.lock().unwrap();
         a.revoke_lease();
@@ -357,6 +451,10 @@ fn replaced_lease_with_reused_numeric_id_never_revalidates_the_old_native_owner(
     )
     .unwrap();
     let mut fresh = replacement.take_control_lease().unwrap();
+    assert_eq!(
+        native.issue_ticket_authority_timed(InputTicketId::from_raw(4), at(2)),
+        Err(Refusal::Authority(AuthorityError::StaleLease))
+    );
     assert!(old.challenge(10, at(2)).is_err());
     assert!(native.monitor().deadline(at(2)).is_err());
     drop(native);

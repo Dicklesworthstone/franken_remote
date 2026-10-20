@@ -81,17 +81,18 @@ pub enum State {
     Retired,
 }
 
-// A fixed batch avoids one RTT of head-of-line delay per 16-KiB chunk. Every
-// retained native record keeps its OWN immutable permit/deadline until the
-// whole native lane drains. The worker still has only one handoff slot.
-const MAX_INFLIGHT_RECORDS: usize = 4;
+// Eight permits let full 16-KiB chunks use the existing 128-KiB bulk byte
+// allowance; transport byte admission still takes precedence over this count.
+// Every retained native record keeps its OWN immutable permit/deadline until
+// the whole native lane drains. The worker still has only one handoff slot.
+const MAX_INFLIGHT_RECORDS: usize = 8;
 
 enum OutboundRefusal {
     Lane(Error),
     Record(Error),
 }
 
-/// At most four native in-flight permits, one outbound handoff record, and one
+/// At most eight native in-flight permits, one outbound handoff record, and one
 /// incoming queued/executing/deferred/uncollected record. Other lanes retain
 /// their original transport budgets. No payload history or unbounded queue.
 pub struct Bridge {

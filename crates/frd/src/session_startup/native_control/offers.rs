@@ -90,6 +90,17 @@ pub fn host_offer_with_files(control: bool, clipboard: bool, audio: bool, files:
                 .filter(|_| control)
                 .map(|&(name, version)| (name, version, false)),
         )
+        // Report the actual lease/observation cap alongside short input
+        // tickets only when both control-capable peers select this profile.
+        .chain(
+            [(
+                fr_wire::input_ticket::AUTHORITY_CAPABILITY,
+                fr_wire::input_ticket::AUTHORITY_VERSION,
+                false,
+            )]
+            .into_iter()
+            .filter(|_| control),
+        )
         // Remote-cursor forwarding is optional in both modes: an older viewer
         // omits it and receives no cursor records.
         .chain([(fr_wire::cursor::CAPABILITY, fr_wire::cursor::VERSION, false)])

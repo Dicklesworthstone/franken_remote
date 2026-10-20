@@ -691,6 +691,7 @@ impl ControlledViewer {
         let files = &self.files;
         let clipboard = &self.clipboard;
         let clipboard_setup = &self.clipboard_setup;
+        let authority_tickets = self.channels.authority_tickets();
         let input = &mut self.input;
         let last_result = &mut self.last_result;
         let mut failure = None;
@@ -729,7 +730,12 @@ impl ControlledViewer {
                 }
             } else if route == Route::Stream(feedback) {
                 if kind == Some(&(Kind::InputTicket as u16).to_be_bytes()) {
-                    match input.accept_ticket(bytes, sample, t) {
+                    let accepted = if authority_tickets {
+                        input.accept_authority_ticket(bytes, sample, t)
+                    } else {
+                        input.accept_ticket(bytes, sample, t)
+                    };
+                    match accepted {
                         Ok(()) | Err(presentation::Error::Input(input::Error::TicketExpired)) => {
                             return Ok(Disposition::Consumed);
                         }

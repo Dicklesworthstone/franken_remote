@@ -194,4 +194,17 @@ impl Link {
         })
         .unwrap();
     }
+    /// Select the existing bulk profile BEFORE the real ticketed attachment.
+    /// The default fixture remains the exact legacy profile.
+    #[allow(dead_code)] // Native legacy-profile tests include this shared helper too.
+    pub fn enable_bulk_records(&mut self) {
+        self.selection.capabilities.push(Capability {
+            name: attachment::BULK_RECORD_CAPABILITY.into(),
+            version: attachment::BULK_RECORD_VERSION,
+            required: true,
+        });
+        self.selection
+            .capabilities
+            .sort_by(|a, b| a.name.cmp(&b.name));
+    }
 }

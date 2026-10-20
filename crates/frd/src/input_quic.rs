@@ -18,7 +18,7 @@ use fr_wire::{
     Kind, WireError,
     input::{InputDelivery, InputDirection, MAX_INPUT_RECORD_BYTES},
     input_result::{INPUT_RESULT_BYTES, InputResult, encode_input_result},
-    input_ticket::{INPUT_TICKET_BYTES, Ticket},
+    input_ticket::{AUTHORITY_TICKET_BYTES, INPUT_TICKET_BYTES, Ticket},
 };
 use std::{cell::Cell, time::Duration};
 
@@ -139,7 +139,7 @@ enum Feedback {
 }
 struct Pending {
     feedback: Feedback,
-    bytes: [u8; INPUT_TICKET_BYTES],
+    bytes: [u8; AUTHORITY_TICKET_BYTES],
     length: usize,
     until: u64,
 }
@@ -167,6 +167,7 @@ pub struct QuicInput {
     connection: ConnectionBinding,
     routes: Routes,
     limits: ProtocolLimits,
+    authority_tickets: bool,
     command: Option<Command>,
     pending: Option<Pending>,
     last_reply: Option<InputReply>,
@@ -204,8 +205,27 @@ impl QuicInput {
         connection: &QuicRecords,
         routes: Routes,
     ) -> Result<Self, Error> {
+        Self::with_ticket_profile(cx, agent, connection, routes, false)
+    }
+    /// Only the retained authenticated selection chooses this profile. Public
+    /// low-level construction keeps the exact legacy feedback representation.
+    fn with_ticket_profile(
+        cx: Cx,
+        agent: Agent,
+        connection: &QuicRecords,
+        routes: Routes,
+        authority_tickets: bool,
+    ) -> Result<Self, Error> {
         if connection.is_closed() {
             return Err(Error::Closed);
+        }
+        if authority_tickets
+            && (routes.results.messages != Messages::InputFeedback
+                || routes.results.maximum < AUTHORITY_TICKET_BYTES
+                || (agent.protocol_limits().max_control_message_bytes() as usize)
+                    < AUTHORITY_TICKET_BYTES)
+        {
+            return Err(Error::InvalidRoutes);
         }
         if agent.channel_binding() != routes.actions.binding
             || !connection.has_route(Route::Stream(routes.actions))
@@ -229,6 +249,7 @@ impl QuicInput {
             connection: connection.binding(),
             routes,
             limits,
+            authority_tickets,
             command: None,
             pending: None,
             last_reply: None,
@@ -319,7 +340,7 @@ impl QuicInput {
                 self.last_reply = Some(reply);
                 match reply {
                     InputReply::Record(result) => {
-                        let mut bytes = [0; INPUT_TICKET_BYTES];
+                        let mut bytes = [0; AUTHORITY_TICKET_BYTES];
                         let length = encode_input_result(
                             result,
                             &mut bytes,

@@ -362,6 +362,61 @@ fn selecting_input_projection_never_consumes_an_authority_reply() {
     assert!(rt.block_on(driver).handoff_safe());
 }
 #[test]
+fn authority_ticket_uses_the_same_native_mailbox_and_keeps_legacy_replies_distinct() {
+    let (rt, cx) = runtime_cx();
+    let native = session(&cx, 3_000_000);
+    let until = native
+        .monitor()
+        .authorization_deadline(host_now(&cx).unwrap())
+        .unwrap();
+    let observed = trace();
+    let sink = observed.clone();
+    let seat = Seat::default();
+    let (mut agent, driver) = seat
+        .start(cx, native, route(), move || Ok(Sink::new(sink)), clean)
+        .unwrap();
+    agent
+        .issue_authority_ticket_record(InputTicketId::from_raw(5), 1)
+        .unwrap();
+    assert_eq!(
+        agent.issue_ticket_record(InputTicketId::from_raw(6), 2),
+        Err(Error::Backpressure)
+    );
+    assert_eq!(agent.try_input_result(), Err(Error::NotInputCommand));
+    assert!(matches!(
+        agent.input_response(),
+        Err(Error::NotInputCommand)
+    ));
+    let Reply::AuthorityTicket(Ok(proof)) = reply(&mut agent) else {
+        panic!("the negotiated authority reply must stay in its original slot");
+    };
+    assert_eq!(proof.authority_until_us, until.as_micros());
+    assert_eq!(proof.ticket.sequence, 1);
+    assert_eq!(
+        proof.ticket.credentials,
+        InputCredentials {
+            ticket: InputTicketId::from_raw(5),
+            ..credentials()
+        }
+    );
+    assert_eq!(
+        proof.ticket.expires_at_us,
+        (proof.ticket.issued_at_us + 1_500_000).min(proof.authority_until_us)
+    );
+    assert!(proof.ticket.expires_at_us < proof.authority_until_us);
+    agent
+        .issue_ticket_record(InputTicketId::from_raw(6), 2)
+        .unwrap();
+    let Reply::Ticket(Ok(legacy)) = reply(&mut agent) else {
+        panic!("the legacy API must retain its original reply type");
+    };
+    assert_eq!(legacy.sequence, 2);
+    assert_eq!(legacy.credentials.ticket, InputTicketId::from_raw(6));
+    assert_eq!(observed.effects.lock().unwrap().len(), 0);
+    agent.control().stop(StopReason::LocalRevoke);
+    assert!(rt.block_on(driver).handoff_safe());
+}
+#[test]
 fn dropping_projected_wait_revokes_but_retains_completed_result_and_context() {
     let (rt, cx) = runtime_cx();
     let t = trace();

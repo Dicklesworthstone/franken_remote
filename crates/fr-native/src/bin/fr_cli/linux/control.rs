@@ -426,6 +426,11 @@ mod tests {
         assert!(offer.validate().is_ok());
         assert_eq!(offer.role, Role::RequestControl);
         assert_eq!(offer, fr_client::native::control_offer());
+        assert!(offer.capabilities.iter().any(|cap| {
+            cap.name == fr_wire::input_ticket::AUTHORITY_CAPABILITY
+                && cap.version == fr_wire::input_ticket::AUTHORITY_VERSION
+                && !cap.required
+        }));
         // --clipboard adds three optional clipboard boundaries and the optional
         // bulk-record extension; the required capability set stays unchanged.
         let clipboard = super::offer(true);

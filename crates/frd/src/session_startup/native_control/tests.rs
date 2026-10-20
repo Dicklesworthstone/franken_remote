@@ -127,7 +127,14 @@ fn host_offer_makes_control_optional_and_never_upgrades_an_observer() {
     ));
     let control = host_offer(true);
     assert!(control.validate().is_ok());
-    assert_eq!(control.capabilities.len(), 11);
+    assert_eq!(control.capabilities.len(), 12);
+    let proof = control
+        .capabilities
+        .iter()
+        .find(|cap| cap.name == fr_wire::input_ticket::AUTHORITY_CAPABILITY)
+        .unwrap();
+    assert_eq!(proof.version, fr_wire::input_ticket::AUTHORITY_VERSION);
+    assert!(!proof.required);
     assert_eq!(
         control.capabilities.iter().filter(|c| c.required).count(),
         4
@@ -138,6 +145,7 @@ fn host_offer_makes_control_optional_and_never_upgrades_an_observer() {
         .select()
         .unwrap();
     assert!(profile(&controller, true));
+    assert!(fr_wire::input_ticket::authority_selected(&controller).unwrap());
     let observer = control
         .intersect(&observation_offer())
         .unwrap()
@@ -145,6 +153,7 @@ fn host_offer_makes_control_optional_and_never_upgrades_an_observer() {
         .unwrap();
     assert!(profile(&observer, false));
     assert!(!profile(&observer, true));
+    assert!(!fr_wire::input_ticket::authority_selected(&observer).unwrap());
     assert!(
         observer
             .capabilities
@@ -161,7 +170,7 @@ fn clipboard_is_offered_optionally_only_with_control_and_the_local_enable() {
     assert_eq!(host_offer_with(false, true), host_offer(false));
     let host = host_offer_with(true, true);
     assert!(host.validate().is_ok());
-    assert_eq!(host.capabilities.len(), 15);
+    assert_eq!(host.capabilities.len(), 16);
     assert_eq!(host.capabilities.iter().filter(|c| c.required).count(), 4);
     let client = control_offer_with_clipboard();
     assert!(client.validate().is_ok());
@@ -636,10 +645,9 @@ fn the_drop_lane_and_clipboard_require_independent_positive_selection() {
         host_offer_with_files(false, false, false, true),
         host_offer(false)
     );
-    // Naively concatenating profiles (19 capabilities, with the optional
-    // line-scroll boundary every control offer carries) exceeds the original
-    // sixteen-capability bound; the raised bound admits it, and the combined
-    // profile below still omits only the solicited decoder-load extension.
+    // Concatenating the independent lanes carries 21 capabilities within the
+    // existing bound. The combined profile below still omits only the
+    // solicited decoder-load extension.
     let mut both_lanes = fr_client::native::control_offer_with_clipboard();
     both_lanes.capabilities.extend(
         files
@@ -649,7 +657,7 @@ fn the_drop_lane_and_clipboard_require_independent_positive_selection() {
             .cloned(),
     );
     both_lanes.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
-    assert_eq!(both_lanes.capabilities.len(), 20);
+    assert_eq!(both_lanes.capabilities.len(), 21);
     assert!(both_lanes.validate().is_ok());
     // The bounded combined profile negotiates each lane independently.
     let mut minimal = host_offer_with_files(true, true, false, true);
@@ -658,7 +666,7 @@ fn the_drop_lane_and_clipboard_require_independent_positive_selection() {
     assert_eq!(files_lane(&clipboard), Ok(()));
     let combined = fr_client::native::control_offer_with_clipboard_and_files();
     assert!(combined.validate().is_ok());
-    assert_eq!(combined.capabilities.len(), 19);
+    assert_eq!(combined.capabilities.len(), 20);
     for (clipboard, files) in [(false, false), (true, false), (false, true), (true, true)] {
         let selection = select(
             host_offer_with_files(true, clipboard, false, files),

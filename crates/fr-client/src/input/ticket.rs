@@ -41,6 +41,40 @@ impl InputClient {
             self.stop(StopReason::InvalidTicket);
             Error::Wire(e)
         })?;
+        self.install_ticket(ticket, None, clock, now)
+    }
+    /// Accept the explicitly negotiated authority-bearing ticket profile on
+    /// the original reliable feedback route. The added deadline reports the
+    /// host's existing lease/observation authority for auxiliary operations;
+    /// it never extends this ticket's input expiry or proves view readiness.
+    /// Old clipboard/file items keep their original immutable deadlines.
+    pub fn accept_authority_ticket(
+        &mut self,
+        bytes: &[u8],
+        clock: ClockCorrelation,
+        now: ClientInstant,
+    ) -> Result<(), Error> {
+        self.tick(now)?;
+        let record = input_ticket::decode_authority(
+            bytes,
+            &self.limits,
+            self.binding.channel,
+            InputDirection::HostToViewer,
+            InputDelivery::Reliable,
+        )
+        .map_err(|e| {
+            self.stop(StopReason::InvalidTicket);
+            Error::Wire(e)
+        })?;
+        self.install_ticket(record.ticket, Some(record.authority_until_us), clock, now)
+    }
+    fn install_ticket(
+        &mut self,
+        ticket: input_ticket::Ticket,
+        authority_until: Option<u64>,
+        clock: ClockCorrelation,
+        now: ClientInstant,
+    ) -> Result<(), Error> {
         let c = ticket.credentials;
         // The reliable ticket stream is ordered independently of media
         // replacement. A ticket queued before the host's recovery fence may
@@ -122,18 +156,27 @@ impl InputClient {
             }
         }
         self.clipboard_readiness();
-        self.auxiliary_ticket(ticket.expires_at_us, clock, now);
+        self.auxiliary_ticket(ticket.expires_at_us, authority_until, clock, now);
         Ok(())
     }
     /// Only the input owner's validated same-lease ticket extends auxiliary
     /// proof. Each lane keeps independent lifetime and one-use attachment state.
-    fn auxiliary_ticket(&mut self, host_until: u64, clock: ClockCorrelation, now: ClientInstant) {
+    fn auxiliary_ticket(
+        &mut self,
+        host_until: u64,
+        authority_until: Option<u64>,
+        clock: ClockCorrelation,
+        now: ClientInstant,
+    ) {
         let resumed = !self.awaiting_ticket && !self.awaiting_recovery_ticket;
         for projection in [&mut self.clipboard_projection, &mut self.files_projection] {
-            if projection
-                .as_ref()
-                .is_some_and(|owner| owner.ticket(host_until, clock, now, resumed).is_err())
-            {
+            if projection.as_ref().is_some_and(|owner| {
+                match authority_until {
+                    Some(until) => owner.authority_ticket(until, clock, now, resumed),
+                    None => owner.ticket(host_until, clock, now, resumed),
+                }
+                .is_err()
+            }) {
                 drop(projection.take());
             }
         }

@@ -5,7 +5,7 @@ use fr_core::ids::InputTicketId;
 use fr_transport::quic::QuicRecords;
 use fr_wire::{
     input::{InputDelivery, InputDirection},
-    input_ticket::{self, INPUT_TICKET_BYTES, Ticket},
+    input_ticket::{self, AUTHORITY_TICKET_BYTES, AuthorityTicket, Ticket},
 };
 
 pub const TICKET_CADENCE_US: u64 = 250_000;
@@ -52,9 +52,12 @@ impl QuicInput {
                     .filter(|t| t.as_raw() != 0 && Some(*t) != self.last_ticket)
                     .ok_or(Error::InvalidTicketId)?;
                 let next = now.checked_add(TICKET_CADENCE_US).ok_or(Error::Clock)?;
-                self.agent
-                    .issue_ticket_record(ticket, sequence)
-                    .map_err(Error::Agent)?;
+                if self.authority_tickets {
+                    self.agent.issue_authority_ticket_record(ticket, sequence)
+                } else {
+                    self.agent.issue_ticket_record(ticket, sequence)
+                }
+                .map_err(Error::Agent)?;
                 self.command = Some(Command::Ticket);
                 self.ticket_sequence = sequence.checked_add(1);
                 self.ticket_after_us = next;
@@ -76,10 +79,14 @@ impl QuicInput {
             return Ok(Progress::NativePending);
         };
         self.command = None;
-        let Reply::Ticket(result) = reply else {
-            return Err(Error::Agent(crate::input_agent::Error::NotInputCommand));
+        let result = match (self.authority_tickets, reply) {
+            (false, Reply::Ticket(result)) => result.map(|ticket| (ticket, None)),
+            (true, Reply::AuthorityTicket(result)) => {
+                result.map(|record| (record.ticket, Some(record.authority_until_us)))
+            }
+            _ => return Err(Error::Agent(crate::input_agent::Error::NotInputCommand)),
         };
-        let ticket = match result {
+        let (ticket, authority_until) = match result {
             Ok(ticket) => ticket,
             // A stale view suspends the lease (plan 11.3): no ticket this turn.
             // The next cadence retries once fresh readiness revives it.
@@ -88,15 +95,29 @@ impl QuicInput {
             )) => return Ok(Progress::Idle),
             Err(refusal) => return Err(Error::TicketRefused(refusal)),
         };
-        let mut bytes = [0; INPUT_TICKET_BYTES];
-        let length = input_ticket::encode(
-            ticket,
-            &mut bytes,
-            &self.limits,
-            self.routes.results.binding,
-            InputDirection::HostToViewer,
-            InputDelivery::Reliable,
-        )
+        let mut bytes = [0; AUTHORITY_TICKET_BYTES];
+        let length = if let Some(authority_until_us) = authority_until {
+            input_ticket::encode_authority(
+                AuthorityTicket {
+                    ticket,
+                    authority_until_us,
+                },
+                &mut bytes,
+                &self.limits,
+                self.routes.results.binding,
+                InputDirection::HostToViewer,
+                InputDelivery::Reliable,
+            )
+        } else {
+            input_ticket::encode(
+                ticket,
+                &mut bytes,
+                &self.limits,
+                self.routes.results.binding,
+                InputDirection::HostToViewer,
+                InputDelivery::Reliable,
+            )
+        }
         .map_err(Error::Wire)?;
         self.pending = Some(Pending {
             feedback: Feedback::Ticket(ticket),

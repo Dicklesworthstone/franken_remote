@@ -303,6 +303,16 @@ in transport ownership. `send` takes the original absolute transport-clock
 operation deadline. The session's I/O driver must keep checking the original
 controller's authorization while accepted bytes remain retained.
 
+The application bridge retains at most eight original record permits and one
+bounded worker handoff. This count does not enlarge the native 128-KiB clipboard
+byte allowance: at most seven full 16-KiB chunks, including their headers, fit
+at once. A permit remains held until the actual native whole-lane drain witness,
+not merely until enqueue or a partial transmission. Every retry retains the
+original operation deadline; expiry retires this optional lane while control
+keeps its independent lifecycle. A newer local copy can discard an exclusively
+local unsent record, but records already accepted by transport keep their
+original custody until drain or retirement.
+
 This route proof grants neither input nor native clipboard access. A host joins
 its actual original input owner and native clipboard grant; a viewer must use
 qualified client-side authority, never manufacture a host owner from wire IDs.
@@ -346,9 +356,23 @@ checks exclusive expiry before and after native preparation, and never compares
 unrelated host/client clock origins directly. A better correlation cannot make
 its accounting clock stand still or extend an existing item's original deadline.
 Sending a control response does not prove a host renewal: only a validated newer
-host ticket can refresh proof of the original lease. A lapsed proof or temporary
-view loss returns `NotReady` without destroying the attachment. This bounded
-pause grants no observation or publication authority. Fresh, authenticated proof
+host ticket can refresh proof of the original lease. Peers may explicitly select
+the optional `input-ticket-authority` version-1 profile. Its 136-byte ticket
+includes the host's actual exclusive lease/observation deadline, sampled with
+ticket issuance under the original owner's authority lock. The viewer uses
+that exact deadline for new auxiliary operations, including when it shortens
+the previous proof. This separates a copy's available authority from the short
+input-ticket lifetime without changing the input ticket's expiry, proving a
+renewal from a queued challenge, or manufacturing a new grant. Existing items,
+native reads and retained transport permits keep the deadlines assigned when
+they began. The same proof refreshes the separately attached file owner without
+sharing attachment or transfer state. Peers that omit this optional capability
+retain the exact 128-byte legacy format and its conservative ticket-only proof;
+neither decoder guesses or falls back from the received record length.
+
+A lapsed proof or temporary view loss returns `NotReady` without destroying the
+attachment. This bounded pause grants no observation or publication authority.
+Fresh, authenticated proof
 of the same lease and current visible presentation are both required to resume,
 in either arrival order. The pause cannot exceed the input owner's ten-second
 view-suspension bound, and it never extends an admitted item's deadline. An
@@ -383,6 +407,16 @@ numeric bindings on another receiver do not replace or revoke that lifetime.
 
 The controller tests use actual grant, wire, authority, and media-receiver code
 with explicitly simulated grant/clock/decoder/visibility and record boundaries.
+The authority-profile regressions additionally pass one-MiB text in both
+directions over 66 records and 1.95 seconds after the initial grant has aged two
+seconds. The host renews the same original lease and observation
+owner; each item still has one immutable deadline. These deterministic clock
+and transport-boundary cases establish the policy path, not WAN throughput.
+They also cover a shorter genuine cap, expired or replayed tickets, obsolete
+recovery generations, wrong profiles and terminal-owner replacement. Real
+UDP/TLS bridge regressions separately exercise eight retained permits, the
+unchanged byte ceiling, final-chunk/Commit ordering, supersession and original
+expiry; they require the daemon/native test gate.
 The native integration target additionally exercises the controller path across
 two real Xvfb desktops for empty, Unicode, and one-MiB text, echo/idle behavior,
 original-owner cancellation during INCR, both off switches, and a smaller

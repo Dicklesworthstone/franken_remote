@@ -41,7 +41,9 @@ pub fn observation_offer_with_audio() -> Offer {
 /// (typed), and no input is sent before its local grant and the client's own
 /// presented view. Every control offer also carries the OPTIONAL line-scroll
 /// boundary: a host whose input executor cannot scroll by lines omits it, and
-/// the controller then asks for everything but the wheel.
+/// the controller then asks for everything but the wheel. The optional
+/// authority-ticket profile reports the original host lease/observation cap
+/// for auxiliary operations; legacy hosts retain the exact short-ticket codec.
 pub fn control_offer() -> Offer {
     offer(
         Role::RequestControl,
@@ -249,11 +251,18 @@ fn offer(role: Role, extra: &[(&str, u16, bool)]) -> Offer {
         }),
     )
     .chain(
-        [(
-            control::LINE_SCROLL_CAPABILITY,
-            control::LINE_SCROLL_VERSION,
-            false,
-        )]
+        [
+            (
+                control::LINE_SCROLL_CAPABILITY,
+                control::LINE_SCROLL_VERSION,
+                false,
+            ),
+            (
+                fr_wire::input_ticket::AUTHORITY_CAPABILITY,
+                fr_wire::input_ticket::AUTHORITY_VERSION,
+                false,
+            ),
+        ]
         .iter()
         .filter(|_| role == Role::RequestControl),
     )

@@ -555,13 +555,26 @@ impl InputSession {
         ticket: InputTicketId,
         now: HostInstant,
     ) -> Result<(HostInstant, HostInstant), Refusal> {
+        self.issue_ticket_authority_timed(ticket, now)
+            .map(|(issued, until, _)| (issued, until))
+    }
+    /// Issue on the original owner and snapshot its actual authorization in
+    /// the SAME serialized transition. The third value is the existing lease
+    /// and observation cap, independent of the shorter input/view deadlines.
+    /// This reports authority; it neither renews it nor extends any old ticket.
+    pub fn issue_ticket_authority_timed(
+        &mut self,
+        ticket: InputTicketId,
+        now: HostInstant,
+    ) -> Result<(HostInstant, HostInstant, HostInstant), Refusal> {
         self.check_active()?;
         let view = &mut self.view;
         let lease = self.lease;
         self.authority.with_time(&mut self.clock, now, |a, at| {
             follow_recovery(view, a);
-            a.issue_input_ticket(lease, ticket, at)
-                .map(|until| (at, until))
+            let until = a.issue_input_ticket(lease, ticket, at)?;
+            let authority_until = a.lease_deadline()?;
+            Ok((at, until, authority_until))
         })
     }
     /// Service independently during idle, not only when a packet arrives.

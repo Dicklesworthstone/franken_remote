@@ -254,6 +254,29 @@ impl Owner {
         now: ClientInstant,
         resume_ticket: bool,
     ) -> Result<(), Error> {
+        self.refresh_proof(host_until, clock, now, resume_ticket, false)
+    }
+    /// The negotiated profile carries the original host owner's actual
+    /// lease/observation cap, rather than only a lower bound from a short input
+    /// ticket. Honor a shorter cap too. The old owner must still be live, and
+    /// existing items, native reads and handoffs retain their original deadlines.
+    pub(crate) fn authority_ticket(
+        &self,
+        host_until: u64,
+        clock: ClockCorrelation,
+        now: ClientInstant,
+        resume_ticket: bool,
+    ) -> Result<(), Error> {
+        self.refresh_proof(host_until, clock, now, resume_ticket, true)
+    }
+    fn refresh_proof(
+        &self,
+        host_until: u64,
+        clock: ClockCorrelation,
+        now: ClientInstant,
+        resume_ticket: bool,
+        exact: bool,
+    ) -> Result<(), Error> {
         self.check(now)?;
         let result = (|| {
             let mut m = self.state.inner.lock().map_err(|_| Error::Stopped)?;
@@ -266,7 +289,11 @@ impl Owner {
                 .age_upper_us(0, now.0)
                 .map_err(|_| Error::Clock)?
                 .max(m.last_host);
-            let host_until = host_until.max(m.host_until);
+            let host_until = if exact {
+                host_until
+            } else {
+                host_until.max(m.host_until)
+            };
             let local_until = clock
                 .deadline_lower_us(host_until, now.0)
                 .map_err(|_| Error::Clock)?;

@@ -56,6 +56,10 @@ fn every_host_option_combination_preserves_explicit_opt_in_and_required_gates() 
                     assert_eq!(credit.len(), 1);
                     assert_eq!(credit[0].version, attachment::credit::VERSION);
                     assert!(!credit[0].required);
+                    assert_eq!(
+                        present(&offer, fr_wire::input_ticket::AUTHORITY_CAPABILITY),
+                        control
+                    );
                     assert!(offer.capabilities.len() <= negotiation::MAX_CAPABILITIES);
                     assert_eq!(offer.limits, ProtocolLimits::ABSOLUTE);
                     let required: Vec<_> =
@@ -78,6 +82,10 @@ fn every_host_option_combination_preserves_explicit_opt_in_and_required_gates() 
                             assert_eq!(cap.version, attachment::BULK_RECORD_VERSION);
                             assert!(!cap.required);
                         }
+                        if cap.name == fr_wire::input_ticket::AUTHORITY_CAPABILITY {
+                            assert_eq!(cap.version, fr_wire::input_ticket::AUTHORITY_VERSION);
+                            assert!(!cap.required);
+                        }
                     }
                     for &(name, _) in &CLIPBOARD_CAPABILITIES {
                         assert_eq!(present(&offer, name), control && clipboard);
@@ -89,6 +97,7 @@ fn every_host_option_combination_preserves_explicit_opt_in_and_required_gates() 
                     assert_eq!(observed.role, Role::Observe);
                     assert!(attachment::credit::selected(&observed));
                     assert!(!attachment::bulk_records_selected(&observed));
+                    assert!(!fr_wire::input_ticket::authority_selected(&observed).unwrap());
                     assert_eq!(fr_wire::audio_control::downlink_selected(&observed), audio);
                     if !control {
                         assert_eq!(
@@ -115,6 +124,7 @@ fn real_host_and_client_round_trip_every_independent_lane_combination() {
                             let selected = select(&host, &client);
                             assert_eq!(selected.role, Role::RequestControl);
                             assert!(attachment::credit::selected(&selected));
+                            assert!(fr_wire::input_ticket::authority_selected(&selected).unwrap());
                             assert_eq!(selected.limits, ProtocolLimits::ABSOLUTE);
                             assert_eq!(
                                 attachment::bulk_records_selected(&selected),
@@ -229,6 +239,40 @@ fn attachment_credit_negotiates_independently_and_preserves_legacy_peers() {
                 assert_eq!(selected, expected);
                 assert!(!attachment::credit::selected(&selected));
             }
+        }
+    }
+}
+
+#[test]
+fn authority_tickets_require_both_original_peers_without_changing_other_profiles() {
+    let host = with_line_scroll(host_offer_with_files(true, true, true, true));
+    let client = control_offer_with_auxiliary(true, true, true);
+    let mut expected = select(&host, &client);
+    assert!(fr_wire::input_ticket::authority_selected(&expected).unwrap());
+    expected
+        .capabilities
+        .retain(|cap| cap.name != fr_wire::input_ticket::AUTHORITY_CAPABILITY);
+    for change_host in [false, true] {
+        for omit in [false, true] {
+            let mut h = host.clone();
+            let mut c = client.clone();
+            let changed = if change_host { &mut h } else { &mut c };
+            if omit {
+                changed
+                    .capabilities
+                    .retain(|cap| cap.name != fr_wire::input_ticket::AUTHORITY_CAPABILITY);
+            } else {
+                changed
+                    .capabilities
+                    .iter_mut()
+                    .find(|cap| cap.name == fr_wire::input_ticket::AUTHORITY_CAPABILITY)
+                    .unwrap()
+                    .version += 1;
+            }
+            let selected = select(&h, &c);
+            assert_eq!(selected, expected);
+            assert!(!fr_wire::input_ticket::authority_selected(&selected).unwrap());
+            assert!(attachment::bulk_records_selected(&selected));
         }
     }
 }

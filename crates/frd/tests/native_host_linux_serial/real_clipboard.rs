@@ -16,7 +16,85 @@ use super::real_control::{Controlled, Harness, PRELUDE, eventually, indicator, s
 use super::real_impairment::Netem;
 use super::shipped_client::wait_for;
 use super::*;
-use std::{thread, time::Instant};
+use std::{
+    io::{BufRead, BufReader},
+    process::{Child, ChildStdin, Command, Stdio},
+    sync::mpsc,
+    thread,
+    time::Instant,
+};
+
+/// A debugger stops only the clipboard thread, at the timed park AFTER its
+/// worker turn returned. No shared lock or native call remains in progress.
+/// Closing our private pipe detaches, including on unwinding; the helper also
+/// has its own ceiling. This never sends SIGSTOP to the containing process.
+struct ParkedClipboard {
+    child: Option<Child>,
+    release: Option<ChildStdin>,
+}
+impl ParkedClipboard {
+    fn start(client: &Child) -> Self {
+        let mut child = Command::new("python3")
+            .args([
+                "-u",
+                "-c",
+                include_str!("real_clipboard/park_worker.py"),
+                &client.id().to_string(),
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("python3 and namespace ptrace capability are required");
+        let release = child.stdin.take();
+        let stdout = child.stdout.take().unwrap();
+        let (send, receive) = mpsc::channel();
+        thread::spawn(move || {
+            let mut line = String::new();
+            let result = BufReader::new(stdout).read_line(&mut line);
+            let _ = send.send(result.map(|_| line));
+        });
+        // Custody precedes the assertion: a failed acknowledgement still
+        // closes the pipe and detaches the original worker.
+        let parked = Self {
+            child: Some(child),
+            release,
+        };
+        let line = receive
+            .recv_timeout(Duration::from_secs(8))
+            .expect("clipboard debugger never acknowledged its bounded park")
+            .unwrap();
+        assert!(line.starts_with("PARKED "), "{line:?}");
+        parked
+    }
+    fn resume(mut self) {
+        drop(self.release.take());
+        let child = self.child.as_mut().unwrap();
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "clipboard debugger failed to detach");
+                break;
+            }
+            assert!(Instant::now() < until, "clipboard debugger did not detach");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+impl Drop for ParkedClipboard {
+    fn drop(&mut self) {
+        drop(self.release.take());
+        if let Some(mut child) = self.child.take() {
+            let until = Instant::now() + Duration::from_secs(3);
+            while matches!(child.try_wait(), Ok(None)) && Instant::now() < until {
+                thread::sleep(Duration::from_millis(10));
+            }
+            // Tracer death also detaches: no EXITKILL option is installed.
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
 
 /// One independent X11 application on one display: owns CLIPBOARD with a
 /// given UTF-8 text (serving TARGETS, TIMESTAMP and `UTF8_STRING` with a real
@@ -386,61 +464,127 @@ fn a_lost_lease_ends_the_clipboard_and_later_copies_cross_neither_way() {
     s.daemon.finish();
 }
 
-/// A copy too large to reach the host within its item deadline on a 120 ms
-/// path (fr-clipboard-wan-item-ceiling-6mlb) ends the clipboard only: control
-/// keeps working and the completion names why. Until 145df7c the client's
-/// clipboard refused the connection's own check while that item's records were
-/// still in flight, and the whole session ended `native_session_failed`.
+/// A genuine original ingress deadline expires while only the viewer's native
+/// clipboard worker is parked. The live QUIC bridge has admitted the host's
+/// Begin into its one fixed handoff; it cannot renew that deadline or publish
+/// after the worker resumes. Control and media keep running throughout.
+/// This retains the regression for 145df7c without assuming a modern 200-KiB
+/// copy must fail at 120 ms RTT (fr-clipboard-wan-item-ceiling-6mlb).
 #[test]
-#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; real input agent and clipboard child; tc netem on loopback"]
+#[ignore = "explicit isolated user/mount/network namespace with ptrace; synthetic ingress; two Xvfb displays; real input agent and clipboard child"]
 fn a_copy_that_outlives_its_deadline_on_a_slow_path_ends_the_clipboard_not_control() {
     let mut s = Controlled::start_with(true, true);
     let mut host = Peer::start(&s.host.display);
     let mut viewer = Peer::start(&s.viewer.display);
-    let before = unique("before the delay");
-    viewer.copy(&before);
-    if let Err(last) = pasted(&mut host, &before, Duration::from_secs(20)) {
+    let before = unique("before the clipboard stall");
+    host.copy(&before);
+    if let Err(last) = pasted(&mut viewer, &before, Duration::from_secs(20)) {
         panic!(
             "lane never worked (last {last:?}); host: {}",
             s.daemon.dump()
         );
     }
-    let large = format!("{} {}", unique("large"), "x".repeat(200_000));
-    {
-        let _path = Netem::apply(60, 0.0, 0);
-        viewer.copy(&large);
-        thread::sleep(Duration::from_secs(5));
-        assert!(
-            s.client.try_wait().unwrap().is_none(),
-            "a failed copy ended the session: {}",
-            s.daemon.dump()
-        );
-        assert!(
-            s.pointer_follows((150, 150), Duration::from_secs(10)),
-            "control after the failed copy: {}",
-            s.daemon.dump()
-        );
-    }
-    // The lane retired: its per-lane X11 child (which owned `before`) is gone,
-    // and the late item was never published.
+    assert_eq!(clipboard_children(), 1, "the original host lane is active");
+    let parked = ParkedClipboard::start(&s.client);
+    let late = unique("host item awaiting the original viewer worker");
+    host.copy(&late);
+    // No outgoing viewer item exists. Its exact completion below can therefore
+    // name HandoffExpired only after this incoming Begin was actually admitted
+    // and its immutable local bound crossed; an idle parked worker cannot pass.
     assert!(
         eventually(Duration::from_secs(15), || clipboard_children() == 0),
-        "the clipboard lane did not retire"
+        "the expired lane did not retire its original host child: {}",
+        s.daemon.dump()
+    );
+    assert!(
+        s.client.try_wait().unwrap().is_none(),
+        "a failed copy ended the session: {}",
+        s.daemon.dump()
+    );
+    assert!(
+        s.pointer_follows((150, 150), Duration::from_secs(10)),
+        "control while only the clipboard worker is stopped: {}",
+        s.daemon.dump()
+    );
+    parked.resume();
+    // Resuming the same owner cannot resurrect its queued record. Its X11
+    // connection owned `before`; actual connection teardown loses that owner.
+    assert!(
+        eventually(Duration::from_secs(5), || viewer.owner() == "none"),
+        "the original viewer clipboard owner did not finish cleanup"
     );
     assert_ne!(
-        host.paste().as_deref(),
-        Some(large.as_str()),
+        viewer.paste().as_deref(),
+        Some(late.as_str()),
         "the late item was published"
+    );
+    assert_eq!(clipboard_children(), 0, "the retired lane was reacquired");
+    assert!(
+        s.pointer_follows((220, 180), Duration::from_secs(10)),
+        "control after the clipboard worker resumed: {}",
+        s.daemon.dump()
     );
     s.close_viewer();
     let output = wait_for(s.client, Duration::from_secs(30));
     let report = completion(&output, &s.daemon.dump());
     assert_eq!(report["outcome"], "stopped", "{report}");
+    assert_eq!(report["control_granted"], true, "{report}");
+    assert_eq!(report["attempts"], 1, "{report}");
     assert_eq!(report["clipboard_active"], true, "{report}");
+    assert_eq!(
+        report["clipboard_received"], 1,
+        "only the initial host item was published: {report}"
+    );
     assert_eq!(
         report["clipboard_ended"], "clipboard_item_expired",
         "{report}"
     );
+    drop((host, viewer));
+    s.daemon.finish();
+}
+
+/// Modern peers negotiate actual authority-bearing ticket renewal. A copy
+/// larger than the original four-record window must complete on this impaired
+/// namespace link; no claim is made about a live WAN or the one-MiB ceiling.
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; real input agent and clipboard child; tc netem on loopback"]
+fn a_modern_authority_copy_crosses_a_120ms_path_and_keeps_control() {
+    let mut s = Controlled::start_with(true, true);
+    let mut host = Peer::start(&s.host.display);
+    let mut viewer = Peer::start(&s.viewer.display);
+    // Start the copy after multiple real InputTicket renewal opportunities,
+    // so the initial Granted proof alone cannot explain success.
+    thread::sleep(Duration::from_secs(4));
+    let copied = format!("{} {}", unique("modern impaired copy"), "x".repeat(200_000));
+    let path = Netem::apply(60, 0.0, 0);
+    viewer.copy(&copied);
+    if let Err(last) = pasted(&mut host, &copied, Duration::from_secs(15)) {
+        panic!(
+            "modern copy did not cross (last size {:?}); host: {}",
+            last.as_ref().map(String::len),
+            s.daemon.dump()
+        );
+    }
+    assert_eq!(
+        clipboard_children(),
+        1,
+        "the same host native owner remains"
+    );
+    assert!(
+        s.pointer_follows((180, 170), Duration::from_secs(10)),
+        "control on the impaired path after the copy: {}",
+        s.daemon.dump()
+    );
+    drop(path);
+    s.close_viewer();
+    let output = wait_for(s.client, Duration::from_secs(30));
+    let report = completion(&output, &s.daemon.dump());
+    assert_eq!(report["outcome"], "stopped", "{report}");
+    assert_eq!(report["control_granted"], true, "{report}");
+    assert_eq!(report["attempts"], 1, "{report}");
+    assert_eq!(report["clipboard_active"], true, "{report}");
+    assert_eq!(report["clipboard_absence"], serde_json::Value::Null);
+    assert_eq!(report["clipboard_ended"], serde_json::Value::Null);
     drop((host, viewer));
     s.daemon.finish();
 }

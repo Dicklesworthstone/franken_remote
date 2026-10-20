@@ -98,6 +98,7 @@ pub struct GrantBroker {
     input_routes: Routes,
     negotiated: Option<NegotiatedInput>,
     limits: ProtocolLimits,
+    authority_tickets: bool,
     seat: Seat,
     floor: Option<u64>,
     waiting: Option<Waiting>,
@@ -119,6 +120,11 @@ impl GrantBroker {
         scope: Scope<'_>,
         input: NegotiatedInput,
     ) -> Result<Self, Error> {
+        if input.authority_tickets()
+            != fr_wire::input_ticket::authority_selected(scope.selection).map_err(Error::Wire)?
+        {
+            return Err(Error::InvalidRoutes);
+        }
         let routes = input
             .broker_routes(connection, scope.parent, scope.selection.limits)
             .map_err(Error::Input)?;
@@ -142,6 +148,13 @@ impl GrantBroker {
                 .any(|c| c.name == CAPABILITY && c.version == 1)
         {
             return Err(Error::NotNegotiated);
+        }
+        let authority_tickets =
+            fr_wire::input_ticket::authority_selected(scope.selection).map_err(Error::Wire)?;
+        if authority_tickets
+            && input_routes.results.maximum < fr_wire::input_ticket::AUTHORITY_TICKET_BYTES
+        {
+            return Err(Error::InvalidRoutes);
         }
         let (cx, admission) = observation.input_origin().map_err(Error::Media)?;
         if let Some(lease) = &admission.tailnet {
@@ -209,6 +222,7 @@ impl GrantBroker {
             input_routes,
             negotiated: None,
             limits,
+            authority_tickets,
             seat,
             floor: None,
             waiting: None,
@@ -493,8 +507,14 @@ impl GrantBroker {
                 self.admission.clone(),
             )
             .map_err(Error::Agent)?;
-        let mut input = QuicInput::new(self.cx.clone(), agent, connection, self.input_routes)
-            .map_err(Error::Input)?;
+        let mut input = QuicInput::with_ticket_profile(
+            self.cx.clone(),
+            agent,
+            connection,
+            self.input_routes,
+            self.authority_tickets,
+        )
+        .map_err(Error::Input)?;
         // LeaseGranted already transports ticket sequence zero. Renewal must not
         // reuse it, call the credential source early, or restart its lifetime.
         input.ticket_sequence = Some(1);

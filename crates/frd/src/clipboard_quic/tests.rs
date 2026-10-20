@@ -9,6 +9,8 @@ use fr_wire::{
 };
 use transport_support::{clock, runtime};
 
+mod batching;
+
 #[path = "../../../fr-native/tests/clipboard_network/attachment.rs"]
 #[allow(dead_code)]
 mod attachment;
@@ -28,8 +30,14 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::with_bulk_records(false).await
+    }
+    async fn with_bulk_records(bulk: bool) -> Self {
         let cx = Cx::current().unwrap();
         let mut link = attachment::Link::new(&cx).await;
+        if bulk {
+            link.enable_bulk_records();
+        }
         let input = link.attach(&cx, 9, MediaRole::Input).await;
         let (h, c) = link.attach(&cx, 10, MediaRole::Clipboard).await;
         let grant = authority::grant(&cx);

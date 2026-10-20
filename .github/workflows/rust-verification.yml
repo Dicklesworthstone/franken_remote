@@ -100,7 +100,7 @@ jobs:
           subprocess.run(['bash', 'scripts/test_linux_serial_lifecycle.sh', binaries[0],
               '--exact', tree_test], check=True, env=env)
           PY
-      - name: Exercise native clipboard recovery across a capture stall
+      - name: Exercise native clipboard recovery, expiry, and impaired copies
         id: clipboard_capture_stall
         continue-on-error: true
         run: |
@@ -116,13 +116,23 @@ jobs:
                       and row.get('executable')):
                   binaries.append(os.path.abspath(row['executable']))
           assert len(binaries) == 1, 'one exact native clipboard test binary required'
-          test = 'real_clipboard::a_capture_stall_keeps_the_clipboard_crossing_both_ways'
+          tests = [
+              'real_clipboard::a_capture_stall_keeps_the_clipboard_crossing_both_ways',
+              'real_clipboard::a_copy_that_outlives_its_deadline_on_a_slow_path_ends_the_clipboard_not_control',
+              'real_clipboard::a_modern_authority_copy_crosses_a_120ms_path_and_keeps_control',
+          ]
           listed = subprocess.check_output(
-              [binaries[0], '--list', '--ignored', '--exact', test], text=True)
-          assert listed.splitlines().count(f'{test}: test') == 1, 'native clipboard capture-stall test must be present'
+              [binaries[0], '--list', '--ignored'], text=True)
+          for test in tests:
+              assert listed.splitlines().count(f'{test}: test') == 1, f'native clipboard test must be present: {test}'
           env = dict(os.environ, FR_NS_SUDO='1')
-          subprocess.run(['bash', 'scripts/test_linux_serial_lifecycle.sh', binaries[0],
-              '--exact', test], check=True, env=env)
+          failed = []
+          for test in tests:
+              result = subprocess.run(['bash', 'scripts/test_linux_serial_lifecycle.sh', binaries[0],
+                  '--exact', test], env=env)
+              if result.returncode:
+                  failed.append(test)
+          assert not failed, f'native clipboard regressions failed: {failed}'
           PY
       - name: Examples
         id: examples

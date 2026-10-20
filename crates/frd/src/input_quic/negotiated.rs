@@ -26,6 +26,7 @@ pub struct NegotiatedInput {
     configuration: AttachedChannel,
     parent: ControlBinding,
     limits: ProtocolLimits,
+    authority_tickets: bool,
     reference_recovery: bool,
     /// The reference-recovery generation input records must name: the original
     /// attachment's, advanced only by [`NegotiatedInput::follow_recovery`].
@@ -79,6 +80,8 @@ impl NegotiatedInput {
         {
             return Err(Error::InvalidRoutes);
         }
+        let authority_tickets =
+            fr_wire::input_ticket::authority_selected(selection).map_err(Error::Wire)?;
         let parent = input.completed_parent(q).map_err(Error::Transport)?;
         if configuration
             .completed_parent(q)
@@ -89,6 +92,14 @@ impl NegotiatedInput {
         }
         let configuration = configuration.completed_on(q).map_err(Error::Transport)?;
         let attached = input.completed_on(q).map_err(Error::Transport)?;
+        if authority_tickets
+            && ![attached.inbound, attached.outbound].iter().any(|route| {
+                route.messages == Messages::InputFeedback
+                    && route.maximum >= fr_wire::input_ticket::AUTHORITY_TICKET_BYTES
+            })
+        {
+            return Err(Error::InvalidRoutes);
+        }
         let a = configuration.descriptor.binding;
         let mut b = attached.descriptor.binding;
         if a.parent.id == b.parent.id {
@@ -106,6 +117,7 @@ impl NegotiatedInput {
             configuration,
             parent,
             limits: selection.limits,
+            authority_tickets,
             reference_recovery: selection.capabilities.iter().any(|cap| {
                 cap.name == fr_wire::recovery_request::CAPABILITY
                     && cap.version == fr_wire::recovery_request::VERSION
@@ -140,6 +152,11 @@ impl NegotiatedInput {
     }
     pub const fn limits(&self) -> ProtocolLimits {
         self.limits
+    }
+    /// The exact ticket profile selected on this original input attachment.
+    /// It changes feedback metadata only, never input readiness or authority.
+    pub const fn authority_tickets(&self) -> bool {
+        self.authority_tickets
     }
     /// The view input records must name: the attachment's, at the current
     /// recovery generation.
@@ -283,7 +300,7 @@ impl NegotiatedInput {
             return Err(Error::InvalidRoutes);
         }
         let routes = Routes::new(a.inbound, a.outbound, Some(pointer))?;
-        QuicInput::new(cx, agent, q, routes)
+        QuicInput::with_ticket_profile(cx, agent, q, routes, self.authority_tickets)
     }
     /// Viewer routes stay checked against their original connection. The caller
     /// must still use `InputClient`'s lease, ticket, mapping and presented-state

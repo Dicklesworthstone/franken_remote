@@ -4,7 +4,8 @@ Input-validity tickets now travel from the canonical native input owner over the
 existing authenticated QUIC input-feedback stream to the viewer. A ticket renews
 only the short-lived credential for future actions. It does not create or renew
 a control lease, observation authorization, input mapping, source observation,
-or visible-frame evidence.
+or visible-frame evidence. The optional authority-bearing profile also reports
+the original owner's already-existing control/observation deadline.
 
 ## Preserve in-flight input
 
@@ -23,7 +24,7 @@ unknown external effect.
 
 ## Wire representation
 
-`InputTicket` (`0x0017`) is 128 bytes including the existing 24-byte FRD0 header.
+The legacy `InputTicket` (`0x0017`) is 128 bytes including the existing 24-byte FRD0 header.
 The 104-byte body is, in order: remote session, input lease and ticket IDs
 (16 bytes each); geometry, viewport, codec-configuration and recovery generations
 (8 bytes each); issuance sequence, host-monotonic issue time, host-monotonic
@@ -32,6 +33,47 @@ sequences and initial generations are valid; zero IDs or channel bindings are
 not. The transmitted lifetime must be positive and at most 1,500,000 microseconds.
 Trailing data, invalid mandatory extensions, wrong direction and datagram
 carriage refuse; the negotiated control-message ceiling remains enforced.
+
+### Optional authority-bearing profile
+
+Positive selection of `input-ticket-authority` version 1 uses the same kind,
+direction, feedback binding and reliable stream with a 112-byte fixed body
+(136 bytes including the header). The first 104 body bytes retain the exact
+legacy layout. One big-endian `u64`, `authority_until_us`, follows at record byte
+offset 128. The header's payload length is 112; its version, kind, flags and
+binding rules are unchanged. Legacy `Ticket`, `encode` and `decode` remain
+byte-compatible; the extended profile has separate `AuthorityTicket`,
+`encode_authority` and `decode_authority` APIs.
+
+The capability is optional for compatibility. An absent or non-intersecting
+optional offer leaves the legacy profile in force. An explicitly selected
+unsupported version refuses. `authority_selected` validates the selection and
+requires `RequestControl`, a control-message ceiling of at least 136 bytes, and
+version-1 selection of `native-input-attachment`, `native-control-grant`,
+`clock-correlation` and `presented-state`. The input attachment's existing media
+attachment prerequisites remain independently enforced. Neither endpoint infers
+the profile from record length, silently tries another decoder, nor treats an
+offered capability as selected. Each decoder refuses the other profile's fixed
+layout.
+
+`authority_until_us` is the actual exclusive host-monotonic cap sampled atomically
+with ticket issuance from the original owner: the minimum of its current control
+lease and observation authorization deadlines. It is never reception time plus a
+new lifetime, an estimate from the input ticket's short lifetime, or a fresh grant.
+The wire requires a valid enclosed ticket, `issued_at_us < authority_until_us`,
+`expires_at_us <= authority_until_us`, and at most 3,000,000 microseconds from
+issuance to authority expiry. Checked subtraction rejects wrapped or regressing
+bounds. The enclosed input ticket still has its original maximum 1,500,000-
+microsecond lifetime and its actual shorter expiry.
+
+New snapshots convey the exact current authority cap, including a shorter cap;
+they do not retain the maximum of old and new authority. The viewer uses its
+authenticated clock correlation to conservatively project that existing bound.
+Input validity and presentation readiness keep their own gates. An accepted
+authority snapshot may keep an otherwise-live optional controller facility
+usable within the original control grant, but cannot resume a revoked or stale
+view, extend an existing clipboard item's deadline, or retime already queued
+egress. Those records retain their original exclusive expiry and bytes.
 
 The route must be explicitly installed as `Messages::InputFeedback` on both
 endpoints. It admits only `InputTicket` and `InputResult` (`0x0048`) on one
@@ -106,9 +148,17 @@ priority, abandoned I/O and exact route families. Native integration grants,
 visibility and shared-runtime clock evidence are explicit test fixtures, not
 live tailnet approval or physical-display measurement.
 
+Eight additional authority-profile wire regressions preserve the existing golden
+legacy bytes and cover the exact appended field, both profile mismatches, every
+truncation, trailing bytes, direction/channel/header/identity checks, control
+limits, shorter and overflowing authority caps, optional bilateral selection,
+unsupported versions and required dependencies. They establish protocol behavior;
+they add no WAN latency, throughput, native clipboard or live-tailnet measurement.
+
 ```sh
 cargo test -p fr-core --test ticket_renewal --locked
 cargo test -p fr-wire -p fr-client --test input_ticket --locked
+cargo test -p fr-wire --test input_ticket_authority --locked
 cargo test -p fr-media --test clock_deadline --locked
 cargo test -p fr-native --all-features --test input_quic --locked -- --test-threads=4
 ./scripts/verify.sh fast
