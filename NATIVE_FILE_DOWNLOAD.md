@@ -83,6 +83,42 @@ requires the observed join and final cleanup of every owned staging reservation;
 failed removal or unreleased accounting remains a cleanup failure. Those results
 are independent of a transfer's publication or refusal receipt.
 
+## Read the command result
+
+With `--json`, the terminal session result includes the following download
+fields. Inspect these per-object outcomes even when the desktop session itself
+ended normally.
+
+| Field | Meaning |
+| --- | --- |
+| `files_received` | Actual local publications, each with a zero-based `index`, `bytes` and `durable`. A zero-byte object still needs a publication receipt. `durable: false` retains the publication with unconfirmed crash durability. |
+| `files_receive_refused` | Indexed refusals or uncertain outcomes with static reason codes, such as `receive_conflict`, `receive_integrity`, `receive_permission` or `publication_unknown`. |
+| `files_receive_absence` / `files_receive_ended` | A reason receipt never started, or a retained reason the started receive owner ended. For example, `host_download_unavailable` means the host did not select the download capability. |
+| `files_receive_cleanup` | `not_started`, `pending`, `finished` or `failed` describes the disk owner's cleanup. It does not undo a publication. |
+| `files_receive_progress` | The last staged-byte sample, if any. Staging progress does not establish publication, even when the staged and total byte counts match. |
+| `files_receive_results_truncated` | Additional result evidence was omitted from the bounded report. A missing index cannot establish that the selection had no effect. |
+| `files_receive_cancel_requested` | A local cancellation was requested; use the publication and cleanup fields to determine its outcome. |
+
+For example, this excerpt records a durable first selection followed by a
+conflicting second selection:
+
+```json
+{
+  "files_receive_requested": true,
+  "files_received": [{"index": 0, "bytes": 42, "durable": true}],
+  "files_receive_refused": [{"index": 1, "reason": "receive_conflict"}],
+  "files_receive_cleanup": "finished",
+  "files_receive_results_truncated": false
+}
+```
+
+The first publication remains available and the conflicting destination is
+preserved. The batch stops on that failure; later selections do not start.
+Session cancellation, host revocation and later cleanup errors preserve earlier
+publication receipts. Review these results before explicitly selecting a new
+batch, because interruption and unknown publication never authorize an automatic
+retry.
+
 ## Implementation and coverage
 
 The running-controller integration lives in

@@ -38,7 +38,7 @@ fn cancelled_disk_owner_retires_on_live_cleanup_context_without_closing_parent()
         assert_eq!(f.host.state(), State::Retired);
         clean(&mut f);
         assert_eq!(f.host.try_finish_cleanup(), Some(Ok(())));
-        assert!(staged_handles(&f.path).is_empty());
+        assert_eq!(staged_handles(&f.path), [] as [PathBuf; 0]);
         assert_eq!(fs::read_dir(&f.path).unwrap().count(), 0);
         f.link.h.tick(&cleanup, || true).unwrap();
         f.link.c.tick(&cleanup, || true).unwrap();
