@@ -99,6 +99,10 @@ fn input_stopped(reason: fr_native::viewer_input::StopReason) -> Option<Failure>
             "control_released_locally",
             "Control was released with the local escape; reconnect to acquire it again.",
         ),
+        R::SystemShortcutsUnavailable => (
+            "system_shortcuts_unavailable",
+            "The requested system-shortcut capture was unavailable, so control ended. It needs granted keyboard control and an available local X11 keyboard grab; check host permissions and release other grabs before reconnecting, or explicitly connect without --capture-system-shortcuts.",
+        ),
         R::NativeFailure
         | R::Overflow
         | R::Expired
@@ -111,6 +115,19 @@ fn input_stopped(reason: fr_native::viewer_input::StopReason) -> Option<Failure>
         ),
     };
     Some(failure(code, next))
+}
+/// Native setup can stop the original viewer before attachment returns its
+/// status handle. Retain that exact typed cause through the attachment error.
+#[cfg(feature = "linux-desktop")]
+fn input_attach_stopped(error: fr_native::desktop::Error) -> Option<Failure> {
+    use frd::session_startup::viewer_events::CaptureStartError;
+    let fr_native::desktop::Error::InputCapture(CaptureStartError::Native(
+        fr_native::viewer_input::Error::Stopped(reason),
+    )) = error
+    else {
+        return None;
+    };
+    input_stopped(reason)
 }
 fn tailnet(error: TailnetError) -> Failure {
     match error {
@@ -467,6 +484,11 @@ fn desktop_configuration(
             })?,
         None => configuration,
     };
+    let configuration = if connection.capture_system_shortcuts {
+        configuration.with_system_shortcut_capture()
+    } else {
+        configuration
+    };
     Ok(if connection.display == DisplayChoice::Choose {
         configuration.with_display_picker()
     } else {
@@ -584,7 +606,11 @@ fn completed_result(
         // the stable code.
         // A local input-capture stop ends control by cancelling the session
         // scope, so the connection itself only reports Cancelled. Name it.
-        if let Some(named) = application.last_input_stop().and_then(input_stopped) {
+        if let Some(named) = application
+            .last_input_stop()
+            .and_then(input_stopped)
+            .or_else(|| application.last_error().and_then(input_attach_stopped))
+        {
             return Err(named);
         }
         // The local desktop error is often the real cause: a failed local
@@ -1114,6 +1140,58 @@ mod tests {
         use super::*;
 
         #[test]
+        fn refused_shortcut_capture_keeps_its_specific_local_cause() {
+            use fr_native::viewer_input::StopReason as R;
+            let refused = input_stopped(R::SystemShortcutsUnavailable).unwrap();
+            assert_eq!(refused.code, "system_shortcuts_unavailable");
+            assert_eq!(refused.exit, 1);
+            assert!(refused.next.contains("control ended"));
+            assert_eq!(
+                input_stopped(R::FocusLost).unwrap().code,
+                "control_focus_lost"
+            );
+            assert_eq!(
+                input_stopped(R::NativeFailure).unwrap().code,
+                "control_input_capture_failed"
+            );
+            assert!(input_stopped(R::Local).is_none());
+        }
+
+        #[test]
+        fn early_native_attachment_stop_retains_only_its_exact_local_cause() {
+            use fr_native::{
+                desktop::Error as DesktopError,
+                viewer_input::{Error as NativeError, StopReason as R},
+            };
+            use frd::session_startup::{ControlledViewerError, viewer_events::CaptureStartError};
+            let attach = |reason| {
+                DesktopError::InputCapture(CaptureStartError::Native(NativeError::Stopped(reason)))
+            };
+            let refused = input_attach_stopped(attach(R::SystemShortcutsUnavailable)).unwrap();
+            assert_eq!(refused.code, "system_shortcuts_unavailable");
+            assert_eq!(refused.exit, 1);
+            assert_eq!(
+                input_attach_stopped(attach(R::LocalEscape)).unwrap().code,
+                "control_released_locally"
+            );
+            assert_eq!(
+                input_attach_stopped(attach(R::FocusLost)).unwrap().code,
+                "control_focus_lost"
+            );
+            for unrelated in [
+                attach(R::Local),
+                attach(R::Closed),
+                DesktopError::InputCapture(CaptureStartError::Native(NativeError::InvalidDisplay)),
+                DesktopError::InputCapture(CaptureStartError::Viewer(
+                    ControlledViewerError::Closed,
+                )),
+                DesktopError::NotViewing,
+            ] {
+                assert!(input_attach_stopped(unrelated).is_none());
+            }
+        }
+
+        #[test]
         fn explicit_display_selection_never_falls_back_to_another_display() {
             let mut ui = Interface {
                 display: DisplayChoice::Handle(99),
@@ -1611,6 +1689,7 @@ mod tests {
             attempts: 1,
             fit_window: None,
             control: false,
+            capture_system_shortcuts: false,
             clipboard: false,
             audio: None,
             send: Vec::new(),

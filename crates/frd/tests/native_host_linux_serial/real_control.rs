@@ -191,6 +191,7 @@ serve(event, command, idle)
 /// mapped `FrankenRemote` window, then moves, clicks and types with `XTest`.
 const VIEWER_DRIVER: &str = r#"
 TITLE = b"FrankenRemote"
+CAPTURE_TITLE = b"FrankenRemote - Remote system shortcuts - Ctrl+Alt+Shift+Escape releases control"
 x.XSelectInput(d, root, 1 << 19)
 x.XSync(d, 0)
 state = {"window": 0}
@@ -202,7 +203,8 @@ def event(e):
         say("FOCUSED", e.map.window)
 def command(cmd):
     if cmd[0] == "window":
-        found = [f for f in mapped(TITLE) if f[0] == state["window"]]
+        found = [f for name in (TITLE, CAPTURE_TITLE) for f in mapped(name)
+                 if f[0] == state["window"]]
         say("WIN", *(found[0] if found else ("none",)))
         return
     if cmd[0] == "focus":
@@ -759,6 +761,12 @@ struct Downloads<'a> {
     destination: Option<&'a Path>,
 }
 
+#[derive(Clone, Copy, Default)]
+struct InputSettings {
+    unmap_wheel: bool,
+    capture_system_shortcuts: bool,
+}
+
 pub(super) struct Controlled {
     pub(super) observer: Harness,
     driver: Harness,
@@ -790,7 +798,7 @@ impl Controlled {
             files,
             send,
             None,
-            false,
+            InputSettings::default(),
             None,
         )
     }
@@ -808,7 +816,7 @@ impl Controlled {
             None,
             &[],
             None,
-            false,
+            InputSettings::default(),
             Some(Downloads {
                 sources,
                 destination,
@@ -818,12 +826,46 @@ impl Controlled {
     /// A plain controlled session whose host also watches the selected
     /// session through `image` (a monitor image) and logind session name.
     pub(super) fn start_monitored(image: PathBuf, session: String) -> Self {
-        Self::start_all(false, false, None, &[], Some((image, session)), false, None)
+        Self::start_all(
+            false,
+            false,
+            None,
+            &[],
+            Some((image, session)),
+            InputSettings::default(),
+            None,
+        )
     }
     /// A host display whose pointer map lacks the horizontal wheel buttons
     /// (logical 6/7) BEFORE `frd run` starts and probes its input executor.
     fn start_without_wheel() -> Self {
-        Self::start_all(false, false, None, &[], None, true, None)
+        Self::start_all(
+            false,
+            false,
+            None,
+            &[],
+            None,
+            InputSettings {
+                unmap_wheel: true,
+                ..InputSettings::default()
+            },
+            None,
+        )
+    }
+    /// The shipped CLI explicitly requests the original attachment's X11 grab.
+    fn start_system_shortcuts() -> Self {
+        Self::start_all(
+            false,
+            false,
+            None,
+            &[],
+            None,
+            InputSettings {
+                capture_system_shortcuts: true,
+                ..InputSettings::default()
+            },
+            None,
+        )
     }
     fn start_all(
         host_clipboard: bool,
@@ -831,7 +873,7 @@ impl Controlled {
         files: Option<frd::native_files::Directory>,
         send: &[PathBuf],
         monitor: Option<(PathBuf, String)>,
-        unmap_wheel: bool,
+        input: InputSettings,
         downloads: Option<Downloads<'_>>,
     ) -> Self {
         let (fr, worker, agent) = (
@@ -845,7 +887,7 @@ impl Controlled {
         let viewer = Xvfb::start("1600x900x24");
         let mut observer = Harness::start(HOST_OBSERVER, &host.display, "READY");
         let driver = Harness::start(VIEWER_DRIVER, &viewer.display, "WATCHING");
-        if unmap_wheel {
+        if input.unmap_wheel {
             for logical in [6, 7] {
                 assert_eq!(observer.ask(&format!("unmap {logical}")), ["OK"]);
             }
@@ -892,6 +934,9 @@ impl Controlled {
         );
         if let Some(destination) = downloads.and_then(|files| files.destination) {
             command.arg("--receive").arg(destination);
+        }
+        if input.capture_system_shortcuts {
+            command.arg("--capture-system-shortcuts");
         }
         let client = command.spawn().unwrap();
         let mut session = Self {
@@ -1037,6 +1082,8 @@ impl Controlled {
         })
     }
 }
+
+mod system_shortcuts;
 
 /// A wheel notch on the VIEWER (logical button 4, one line up) reaches the
 /// host window at `at` as one discrete wheel press/release: the host offered

@@ -39,6 +39,7 @@ pub struct Configuration {
     worker_epoch: u128,
     display_picker: bool,
     fit_window: Option<(u32, u32)>,
+    capture_system_shortcuts: bool,
 }
 impl Configuration {
     pub fn new(
@@ -56,6 +57,7 @@ impl Configuration {
             worker_epoch,
             display_picker: false,
             fit_window: None,
+            capture_system_shortcuts: false,
         })
     }
     /// Explicit maximum window size in physical pixels. The full remote image
@@ -74,6 +76,14 @@ impl Configuration {
     #[must_use]
     pub const fn with_display_picker(mut self) -> Self {
         self.display_picker = true;
+        self
+    }
+    /// Request X11 system-shortcut capture when this desktop attaches its
+    /// original granted input owner. This stores intent only: it neither grants
+    /// control nor opens a native keyboard grab. Refusal ends input capture.
+    #[must_use]
+    pub const fn with_system_shortcut_capture(mut self) -> Self {
+        self.capture_system_shortcuts = true;
         self
     }
 }
@@ -577,6 +587,7 @@ impl Desktop {
             return Err(Error::NotViewing);
         }
         let fitted = self.configuration.fit_window.is_some();
+        let capture_system_shortcuts = self.configuration.capture_system_shortcuts;
         let window = self.window().ok_or(Error::NotViewing)?;
         let display = self.observer.as_ref().ok_or(Error::NotViewing)?.display();
         let local = &self.configuration.display;
@@ -611,6 +622,7 @@ impl Desktop {
                                     local,
                                     target,
                                     layout,
+                                    capture_system_shortcuts,
                                     file_controls.as_ref(),
                                 )?);
                                 Ok(())
@@ -668,6 +680,7 @@ impl Desktop {
             return Err(Error::NotViewing);
         }
         let fitted = self.configuration.fit_window.is_some();
+        let capture_system_shortcuts = self.configuration.capture_system_shortcuts;
         let window = self.window().ok_or(Error::NotViewing)?;
         window.enable_orderly_close().map_err(Error::Window)?;
         let display = self.observer.as_ref().ok_or(Error::NotViewing)?.display();
@@ -709,6 +722,7 @@ impl Desktop {
                                     local,
                                     target,
                                     layout,
+                                    capture_system_shortcuts,
                                     file_controls.as_ref(),
                                 )?);
                                 Ok(())
@@ -955,10 +969,16 @@ fn attach_input(
     display: &str,
     window: crate::viewer_input::Window,
     layout: frd::session_startup::viewer_events::Layout,
+    capture_system_shortcuts: bool,
     files: Option<&frd::native_files::SendControl>,
 ) -> Result<crate::viewer_input::CaptureControl, Error> {
-    let input = crate::viewer_input::X11InputCapture::attach(viewer, display, window, layout)
-        .map_err(Error::InputCapture)?;
+    use crate::viewer_input::X11InputCapture;
+    let input = if capture_system_shortcuts {
+        X11InputCapture::attach_with_system_shortcuts(viewer, display, window, layout)
+    } else {
+        X11InputCapture::attach(viewer, display, window, layout)
+    }
+    .map_err(Error::InputCapture)?;
     if let Some(files) = files {
         // A concurrently stopped capture can refuse the binding; its original
         // source fence still governs the desktop, and no key can issue a command.

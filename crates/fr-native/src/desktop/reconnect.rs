@@ -148,8 +148,8 @@ impl<U> Session<U> {
     pub const fn last_error(&self) -> Option<Error> {
         self.error
     }
-    /// The last attempt's local input-capture stop reason, if capture ran
-    /// and stopped before cleanup (never a host or transport result).
+    /// The last attempt's first published local input-capture stop reason,
+    /// retained through native cleanup (never a host or transport result).
     pub const fn last_input_stop(&self) -> Option<crate::viewer_input::StopReason> {
         self.input_stop
     }
@@ -196,6 +196,7 @@ impl<U> Session<U> {
         .map(|mut configuration| {
             configuration.display_picker = base.display_picker;
             configuration.fit_window = base.fit_window;
+            configuration.capture_system_shortcuts = base.capture_system_shortcuts;
             configuration
         })
         .map_err(|_| ObserverError::Application)
@@ -384,6 +385,17 @@ impl<U> Session<U> {
                 CaptureCleanup::NotStarted,
                 frd::session_startup::NativeObserver::input_capture_cleanup,
             );
+            // Native cancellation can wake this runtime before the capture
+            // thread publishes its retained first cause. Once that same owner
+            // is reaped, sample its original handle again before discarding it.
+            // A reason observed before cleanup remains authoritative here.
+            if report.input == CaptureCleanup::Complete
+                && self.input_stop.is_none()
+                && let Some(crate::viewer_input::Status::Stopped(reason)) =
+                    desktop.input().map(|input| input.status())
+            {
+                self.input_stop = Some(reason);
+            }
             report.window = desktop.window_cleanup();
             report.picker = desktop.picker_cleanup();
             if cleaned(report)? {

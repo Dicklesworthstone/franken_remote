@@ -60,11 +60,14 @@ impl Peer {
         ))
     }
     fn command(&mut self, s: &str) {
+        assert_eq!(self.query(s), "ok");
+    }
+    fn query(&mut self, s: &str) -> String {
         writeln!(self.input, "{s}").unwrap();
         self.input.flush().unwrap();
         let mut line = String::new();
         self.output.read_line(&mut line).unwrap();
-        assert_eq!(line.trim(), "ok");
+        line.trim().to_owned()
     }
 }
 impl Drop for Peer {
@@ -184,20 +187,28 @@ fn start(
     window: Window,
     caps: Capabilities,
 ) -> (Arc<Probe>, JoinHandle<Result<(), StopReason>>) {
+    start_using(display, window, caps, false)
+}
+fn start_using(
+    display: CString,
+    window: Window,
+    caps: Capabilities,
+    system_shortcuts: bool,
+) -> (Arc<Probe>, JoinHandle<Result<(), StopReason>>) {
     let probe = Arc::new(Probe::default());
     let copied = probe.clone();
     let (_, layout) = viewport();
     let task = thread::spawn(move || {
-        run(
-            &display,
-            window,
-            &layout,
-            &mut Recording {
-                start: Instant::now(),
-                probe: copied,
-                caps,
-            },
-        )
+        let mut target = Recording {
+            start: Instant::now(),
+            probe: copied,
+            caps,
+        };
+        if system_shortcuts {
+            run_with_system_shortcuts(&display, window, &layout, &mut target)
+        } else {
+            run(&display, window, &layout, &mut target)
+        }
     });
     wait(|| probe.ready.load(Ordering::Acquire) || task.is_finished());
     assert!(
@@ -540,3 +551,5 @@ fn capture_never_focused_ends_as_focus_lost() {
 
 #[path = "tests/file_keys.rs"]
 mod file_keys_tests;
+
+mod system_shortcuts;

@@ -118,6 +118,23 @@ fn native_picker_policy_survives_but_choices_and_owners_do_not_cross_attempts() 
 }
 
 #[test]
+fn shortcut_capture_request_survives_fresh_attempts_without_creating_input() {
+    let mut original = session(71);
+    assert!(!original.configuration(1).unwrap().capture_system_shortcuts);
+    original.configuration = original.configuration.with_system_shortcut_capture();
+    for attempt in [1, 2, 32] {
+        let next = original.configuration(attempt).unwrap();
+        assert!(next.capture_system_shortcuts);
+        assert_eq!(next.worker_epoch, 70 + u128::from(attempt));
+        // Retaining local intent is neither native acquisition nor authority.
+        let desktop = Desktop::new(next);
+        assert!(desktop.input().is_none());
+        assert!(desktop.window().is_none());
+        assert!(desktop.stop.is_none());
+    }
+}
+
+#[test]
 fn a_file_cleanup_failure_blocks_next_attempt_and_keeps_its_original_receipt() {
     use frd::session_startup::{FileSendError, FileSendReceipt};
     let mut report = report();

@@ -59,6 +59,7 @@ fr connect NODE_ID --view-only|--control --experimental-native
     --display HANDLE|only|choose [--worker /absolute/fr-media-worker] [--trust-roots /absolute/ca-roots.pem]
     [--by-name] [--x-display :0] [--socket /absolute/tailscaled.sock]
     [--port 8443] [--ipv6] [--attempts 1..32] [--fit WIDTHxHEIGHT] [--clipboard]
+    [--capture-system-shortcuts]
     [--send /absolute/file-or-directory]... | [--receive /absolute/private-directory]
     [--audio [--audio-server /absolute/pulse/native] [--audio-sink NAME]] [--json]
 fr robot session open NODE_ID [--role view|control] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
@@ -83,6 +84,14 @@ host must run frd run --input-agent. Keys, buttons, absolute pointer and discret
 line-wheel scrolling are available (no text or pixel-scroll input).
 Lost or refused control is never
 retried or reacquired: after a request, fr does not reconnect.
+--capture-system-shortcuts (with --control, Linux X11 only) requests a keyboard
+grab after control is granted, so shortcuts such as Alt+Tab can reach the host.
+On acquisition, the viewer title identifies this mode and
+Ctrl+Alt+Shift+Escape as the immediate local release. Without this flag, the
+local window manager keeps its shortcuts. The choice is fixed for this connection.
+Unavailable capture ends control with system_shortcuts_unavailable; it is never
+silently downgraded. Focus loss, window changes and existing input fences end
+capture and release the grab. Reserved X-server shortcuts remain platform limits.
 A session that ends without a host report names its local cause: view_stale
 (the picture could not be proven fresh in time), transport_deadline_expired (a
 record missed its delivery deadline), host_not_heard (host renewals stopped

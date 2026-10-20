@@ -1,6 +1,8 @@
 //! X11 logical input from an explicitly selected local renderer window into the
-//! original granted viewer's bounded queue. No root/global capture, input grabs,
-//! key injection, text/IME guessing, window creation or replacement authority.
+//! original granted viewer's bounded queue. An explicit connection-time mode
+//! can grab the keyboard on that same focused local window for system shortcuts.
+//! No root/raw capture, key injection, text/IME guessing, window creation or
+//! replacement authority. The default mode leaves system shortcuts local.
 //! Native work has one thread/connection owner, separate from codecs and QUIC.
 //! Requires XI2 and exactly one enabled master pointer/keyboard pair. Held input
 //! is sampled at most four times per second, never adopted from another device.
@@ -11,6 +13,8 @@
 mod escape;
 mod file_keys;
 mod held;
+mod status;
+mod system_shortcuts;
 #[cfg(test)]
 mod tests;
 mod timing;
@@ -22,6 +26,7 @@ use frd::session_startup::{
     ViewerControl,
     viewer_events::{ClientInstant, Event, Layout, LocalPoint, PositionedAction, Source},
 };
+use status::CaptureState;
 use std::{
     ffi::{CString, c_char, c_int, c_void},
     fmt,
@@ -112,6 +117,7 @@ pub enum StopReason {
     InputDevicesChanged,
     EscapeUnavailable,
     LocalEscape,
+    SystemShortcutsUnavailable,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -125,21 +131,22 @@ pub enum Error {
     InvalidDisplay,
     Closed,
     ThreadUnavailable,
+    /// Native initialization ended the original input owner before attachment
+    /// returned. The controlled viewer still retains its native cleanup owner.
+    Stopped(StopReason),
 }
 struct Shared {
     control: ViewerControl,
-    state: AtomicU8,
+    state: CaptureState,
     files: OnceLock<frd::native_files::SendControl>,
     file_keymap: AtomicU8,
+    system_shortcuts: bool,
 }
 impl Shared {
     fn stop(&self, reason: StopReason) {
-        self.control.stop(); // actual original viewer fence FIRST; never waits on native
-        let _ = self
-            .state
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |old| {
-                (old < 2).then_some(reason as u8)
-            });
+        // Reserve the diagnostic cause before the fence wakes session cleanup.
+        // Publish Stopped only after the original viewer has actually fenced.
+        self.state.stop(reason, || self.control.stop());
     }
 }
 #[derive(Clone)]
@@ -149,14 +156,31 @@ impl CaptureControl {
         self.0.stop(StopReason::Local);
     }
     pub fn status(&self) -> Status {
-        state(self.0.state.load(Ordering::Acquire))
+        state(self.0.state.load())
+    }
+    fn first_stop_after_fence(&self) -> Option<StopReason> {
+        // A reservation alone is not an input fence. The Source's actual
+        // lifecycle control must be stopped before returning a terminal cause.
+        if !self.0.control.is_stopped() {
+            return None;
+        }
+        self.0
+            .state
+            .first_stop()
+            .filter(|reason| !matches!(reason, StopReason::Local | StopReason::Closed))
+    }
+    /// True only after this original attachment acquired the requested native
+    /// keyboard grab and completed its initialization/lifecycle barrier. Stop
+    /// fences input first; native cleanup is still reported separately.
+    pub fn system_shortcuts_active(&self) -> bool {
+        self.0.system_shortcuts && self.status() == Status::Running
     }
     /// Bind one explicit upload selection to local Ctrl+Alt+Shift+F8/F9/F10
     /// (pause/resume/cancel). Binding is one-use, adds no input/file authority,
     /// and cannot redirect a retained capture handle to another selection.
     /// The original sender owns deadlines, receipts and actual cleanup.
     pub fn enable_file_shortcuts(&self, files: frd::native_files::SendControl) -> bool {
-        self.0.state.load(Ordering::Acquire) < 2 && self.0.files.set(files).is_ok()
+        self.0.state.load() < 2 && self.0.files.set(files).is_ok()
     }
     /// Physical-key mapping availability, not proof that a request was applied.
     /// None means unconfigured or native initialization has not supplied a map.
@@ -189,6 +213,7 @@ fn state(value: u8) -> Status {
         15 => Status::Stopped(R::InputDevicesChanged),
         16 => Status::Stopped(R::EscapeUnavailable),
         17 => Status::Stopped(R::LocalEscape),
+        18 => Status::Stopped(R::SystemShortcutsUnavailable),
         _ => Status::Stopped(R::Queue),
     }
 }
@@ -220,6 +245,27 @@ impl X11InputCapture {
         source: Source,
         layout: Layout,
     ) -> Result<Self, Error> {
+        Self::start_mode(display, window, source, layout, false)
+    }
+    /// Explicitly capture X11 system shortcuts for this one control attachment.
+    /// This requires granted Keys, the original focused window, no held input,
+    /// a usable physical emergency escape, and actual native grab acquisition.
+    /// A refusal stops the original input owner; it never falls back silently.
+    pub fn start_with_system_shortcuts(
+        display: &str,
+        window: Window,
+        source: Source,
+        layout: Layout,
+    ) -> Result<Self, Error> {
+        Self::start_mode(display, window, source, layout, true)
+    }
+    fn start_mode(
+        display: &str,
+        window: Window,
+        source: Source,
+        layout: Layout,
+        system_shortcuts: bool,
+    ) -> Result<Self, Error> {
         if !local_display(display) {
             return Err(Error::InvalidDisplay);
         }
@@ -230,9 +276,10 @@ impl X11InputCapture {
         let display = CString::new(display).map_err(|_| Error::InvalidDisplay)?;
         let control = CaptureControl(Arc::new(Shared {
             control: source.control(),
-            state: AtomicU8::new(0),
+            state: CaptureState::default(),
             files: OnceLock::new(),
             file_keymap: AtomicU8::new(0),
+            system_shortcuts,
         }));
         let shared = control.0.clone();
         let task = thread::Builder::new()
@@ -243,7 +290,11 @@ impl X11InputCapture {
                     source,
                     shared: shared.clone(),
                 };
-                let result = run(&display, window, &layout, &mut target);
+                let result = if system_shortcuts {
+                    run_with_system_shortcuts(&display, window, &layout, &mut target)
+                } else {
+                    run(&display, window, &layout, &mut target)
+                };
                 shared.stop(result.err().unwrap_or(StopReason::Closed));
             })
             .map_err(|_| {
@@ -268,11 +319,31 @@ impl X11InputCapture {
         window: Window,
         layout: Layout,
     ) -> Result<CaptureControl, frd::session_startup::viewer_events::CaptureStartError<Error>> {
+        Self::attach_mode(viewer, display, window, layout, false)
+    }
+    /// The explicit system-shortcut variant of `attach`. The existing viewer
+    /// retains the same one-use source and native cleanup owner; this API adds
+    /// no grant, new target, live toggle or ability to resume a stopped capture.
+    pub fn attach_with_system_shortcuts(
+        viewer: &mut frd::session_startup::ControlledViewer,
+        display: &str,
+        window: Window,
+        layout: Layout,
+    ) -> Result<CaptureControl, frd::session_startup::viewer_events::CaptureStartError<Error>> {
+        Self::attach_mode(viewer, display, window, layout, true)
+    }
+    fn attach_mode(
+        viewer: &mut frd::session_startup::ControlledViewer,
+        display: &str,
+        window: Window,
+        layout: Layout,
+        system_shortcuts: bool,
+    ) -> Result<CaptureControl, frd::session_startup::viewer_events::CaptureStartError<Error>> {
         let mut control = None;
         let mut local = None;
-        viewer.capture_input_owned(&layout.clone(), |source| {
+        let attached = viewer.capture_input_owned(&layout.clone(), |source| {
             let fence = source.control();
-            let mut capture = Self::start(display, window, source, layout)?;
+            let mut capture = Self::start_mode(display, window, source, layout, system_shortcuts)?;
             control = Some(capture.control());
             // The remote cursor's local owner (plan §11.4) shares this
             // attachment's lifetime; failing to start it only leaves the
@@ -284,7 +355,24 @@ impl X11InputCapture {
                 local = Some(handle);
             }
             Ok(capture)
-        })?;
+        });
+        if let Err(error) = attached {
+            // The factory may have started and fenced native capture before
+            // capture_input_owned's final viewer check. Its owner stays with
+            // that viewer, but preserve the native cause before this handle is
+            // lost; no replacement Source or successful attachment is invented.
+            if let Some(reason) = control
+                .as_ref()
+                .and_then(CaptureControl::first_stop_after_fence)
+            {
+                return Err(
+                    frd::session_startup::viewer_events::CaptureStartError::Native(Error::Stopped(
+                        reason,
+                    )),
+                );
+            }
+            return Err(error);
+        }
         if let Some(handle) = local {
             // A refused attachment stops the handle; control is unaffected.
             let _ = viewer.attach_local_cursor(Box::new(handle));
@@ -342,6 +430,10 @@ impl Drop for Fence {
 struct Native(NonNull<c_void>);
 impl Drop for Native {
     fn drop(&mut self) {
+        // NativeRun has fenced the original target before dropping this owner.
+        // A bounded, asynchronous barrier lets a responsive server acknowledge
+        // the grab/title release; disconnect remains the terminal fallback.
+        system_shortcuts::release(self);
         // SAFETY: unique C allocation, used and released on its owning thread.
         unsafe {
             fr_viewer_input_close(self.0.as_ptr());
@@ -403,10 +495,7 @@ impl Target for NativeTarget {
         self.shared.stop(reason);
     }
     fn ready(&self) {
-        let _ = self
-            .shared
-            .state
-            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
+        self.shared.state.ready();
     }
 }
 fn run(
@@ -417,12 +506,30 @@ fn run(
 ) -> Result<(), StopReason> {
     run_focused(display, window, layout, target, FOCUS_WAIT)
 }
+fn run_with_system_shortcuts(
+    display: &CString,
+    window: Window,
+    layout: &Layout,
+    target: &mut impl Target,
+) -> Result<(), StopReason> {
+    run_focused_mode(display, window, layout, target, FOCUS_WAIT, true)
+}
 fn run_focused(
     display: &CString,
     window: Window,
     layout: &Layout,
     target: &mut impl Target,
     focus_wait: Duration,
+) -> Result<(), StopReason> {
+    run_focused_mode(display, window, layout, target, focus_wait, false)
+}
+fn run_focused_mode(
+    display: &CString,
+    window: Window,
+    layout: &Layout,
+    target: &mut impl Target,
+    focus_wait: Duration,
+    system_shortcuts: bool,
 ) -> Result<(), StopReason> {
     let mut names = [[0; 4]; 256];
     let deadline = std::time::Instant::now() + focus_wait;
@@ -459,7 +566,14 @@ fn run_focused(
     };
     let native = Native(raw);
     let guard = NativeRun { native, target };
-    let result = run_events(&guard.native, window, layout, &names, guard.target);
+    let result = run_events(
+        &guard.native,
+        window,
+        layout,
+        &names,
+        guard.target,
+        system_shortcuts,
+    );
     guard
         .target
         .stop(result.err().unwrap_or(StopReason::Closed));
@@ -483,8 +597,15 @@ fn run_events(
     layout: &Layout,
     names: &[[u8; 4]; 256],
     target: &mut impl Target,
+    system_shortcuts: bool,
 ) -> Result<(), StopReason> {
     let mut escape = escape::LocalEscape::new(names)?;
+    if system_shortcuts {
+        // Acquire before the existing initialization barrier. All setup input
+        // is still discarded, held gestures refused, and queued lifecycle
+        // changes checked before Running or any remote event is published.
+        system_shortcuts::acquire(native, target)?;
+    }
     let mut shortcuts = file_keys::Shortcuts::new(names);
     target.file_shortcut_map(shortcuts.is_some());
     let mut decoder = Decoder::new(names, target.capabilities());

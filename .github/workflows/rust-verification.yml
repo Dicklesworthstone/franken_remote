@@ -100,6 +100,31 @@ jobs:
           subprocess.run(['bash', 'scripts/test_linux_serial_lifecycle.sh', binaries[0],
               '--exact', tree_test], check=True, env=env)
           PY
+      - name: Exercise native system-shortcut capture and local release
+        id: system_shortcuts
+        continue-on-error: true
+        timeout-minutes: 12
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, subprocess
+          from pathlib import Path
+          binaries = []
+          for line in Path(os.environ['RUNNER_TEMP'], 'download-test.json').read_text().splitlines():
+              row = json.loads(line)
+              if (row.get('reason') == 'compiler-artifact'
+                      and row.get('profile', {}).get('test')
+                      and row.get('target', {}).get('name') == 'native_host_linux_serial'
+                      and row.get('executable')):
+                  binaries.append(os.path.abspath(row['executable']))
+          assert len(binaries) == 1, 'one exact native shortcut test binary required'
+          test = 'real_control::system_shortcuts::captured_system_shortcuts_reach_the_host_and_release_on_both_local_exits'
+          listed = subprocess.check_output(
+              [binaries[0], '--list', '--ignored', '--exact', test], text=True)
+          assert listed.splitlines().count(f'{test}: test') == 1, 'native system-shortcut regression must be present'
+          env = dict(os.environ, FR_NS_SUDO='1')
+          subprocess.run(['bash', 'scripts/test_linux_serial_lifecycle.sh', binaries[0],
+              '--exact', test], check=True, env=env, timeout=600)
+          PYTHON
       - name: Exercise native clipboard recovery, expiry, and impaired copies
         id: clipboard_capture_stall
         continue-on-error: true
@@ -180,6 +205,7 @@ jobs:
             clippy=${{ steps.clippy.outcome }}
             test=${{ steps.test.outcome }}
             file_download=${{ steps.file_download.outcome }}
+            system_shortcuts=${{ steps.system_shortcuts.outcome }}
             clipboard_capture_stall=${{ steps.clipboard_capture_stall.outcome }}
             examples=${{ steps.examples.outcome }}
             indicator=${{ steps.indicator.outcome }}

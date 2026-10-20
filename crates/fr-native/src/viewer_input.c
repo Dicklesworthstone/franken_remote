@@ -1,6 +1,8 @@
 /* Local viewer input boundary. Owns ONE XCB connection and an InputOnly clock
- * window, never the renderer's window. No grabs, injection, callbacks or Rust
- * pointers. XKB requests use the system protocol structs, not a second library.
+ * window, never the renderer's window. An explicit initialization-only keyboard
+ * grab may route system shortcuts to that same renderer; no pointer grab,
+ * injection, callbacks or Rust pointers. XKB requests use the system protocol
+ * structs, not a second library.
  * Input is logical X-server input; SendEvent cannot create positive evidence.
  * XTest and the selected user's X server remain explicit trust limits. */
 #include <xcb/xcb.h>
@@ -19,7 +21,8 @@ struct fr_viewer_held { uint8_t keys[32], buttons[32]; };
 struct fr_viewer_input {
     xcb_connection_t *c;
     xcb_window_t window, clock;
-    xcb_atom_t barrier;
+    xcb_atom_t barrier, net_name, utf8;
+    uint32_t width, height;
     uint8_t xkb_event;
     uint32_t serial;
     uint8_t xi_opcode;
@@ -32,6 +35,10 @@ struct fr_viewer_input {
     uint32_t map_query, names_query;
     uint8_t keyboard_id, min_keycode, max_keycode;
     int map_failed;
+    uint32_t grab_focus, grab_geometry, grab_attributes, grab_keys, grab_query, grab_sequence;
+    int grab_state, grab_attempted, grab_title, grab_focus_out;
+    uint32_t release_query;
+    int release_state;
 };
 /* Matches Rust Raw; every consumed event (even ignored) counts toward its bound. */
 struct fr_viewer_event { uint32_t kind, time, detail; int32_t x, y; };
@@ -66,10 +73,195 @@ static int checked(struct fr_viewer_input *h, xcb_void_cookie_t cookie) {
     int ok = !e && !xcb_connection_has_error(h->c);
     free(e); return ok;
 }
+static xcb_atom_t input_atom(struct fr_viewer_input *h, const char *name) {
+    xcb_intern_atom_reply_t *r = reply(h,
+        xcb_intern_atom(h->c, 0, (uint16_t)strlen(name), name).sequence);
+    xcb_atom_t atom = r ? r->atom : XCB_ATOM_NONE;
+    free(r); return atom;
+}
+static int shortcuts_title(struct fr_viewer_input *h, int active) {
+    const char *title = active ?
+        "FrankenRemote - Remote system shortcuts - Ctrl+Alt+Shift+Escape releases control" :
+        "FrankenRemote";
+    uint32_t length = (uint32_t)strlen(title);
+    xcb_change_property(h->c, XCB_PROP_MODE_REPLACE, h->window,
+                        XCB_ATOM_WM_NAME, XCB_ATOM_STRING, 8, length, title);
+    xcb_change_property(h->c, XCB_PROP_MODE_REPLACE, h->window,
+                        h->net_name, h->utf8, 8, length, title);
+    return xcb_flush(h->c) > 0;
+}
 void fr_viewer_input_close(struct fr_viewer_input *h) {
     if (!h) return;
-    if (h->c) xcb_disconnect(h->c); /* releases ONLY our resources and event mask */
+    if (h->c) {
+        /* Ungrab cannot release another client's grab. Disconnect also releases
+         * ours if acquisition succeeded before its reply was consumed. */
+        if (!h->release_state) {
+            if (h->grab_attempted) xcb_ungrab_keyboard(h->c, XCB_CURRENT_TIME);
+            if (h->grab_title) (void)shortcuts_title(h, 0);
+            else if (h->grab_attempted) (void)xcb_flush(h->c);
+        }
+        xcb_disconnect(h->c); /* releases ONLY our resources and event mask */
+    }
     free(h);
+}
+/* Negative cleanup only, after Rust fences the original target. A title write
+ * followed immediately by disconnect may be discarded by the X server. Keep
+ * this connection alive until one asynchronous reply acknowledges processing,
+ * within Rust's independent bounded cleanup budget; disconnect is the fallback.
+ * 1 queued, 0 unnecessary/already started, -1 native failure. */
+int fr_viewer_input_release_begin(struct fr_viewer_input *h) {
+    if (!h || xcb_connection_has_error(h->c)) return -1;
+    if (!h->grab_title || h->release_state) return 0;
+    h->release_state = 1;
+    h->grab_state = -2; h->grab_focus_out = 0;
+    xcb_ungrab_keyboard(h->c, XCB_CURRENT_TIME);
+    if (!shortcuts_title(h, 0)) { h->release_state = -1; return -1; }
+    h->release_query = xcb_get_input_focus(h->c).sequence;
+    if (!h->release_query || xcb_flush(h->c) <= 0) { h->release_state = -1; return -1; }
+    return 1;
+}
+/* 0 pending, 1 acknowledged, -1 failed. The focus value is deliberately unused:
+ * cleanup restores no focus, source, timestamp or input authority. */
+int fr_viewer_input_release_poll(struct fr_viewer_input *h) {
+    if (!h || h->release_state <= 0 || xcb_connection_has_error(h->c)) return -1;
+    if (h->release_state == 2) return 1;
+    void *raw = NULL; xcb_generic_error_t *error = NULL;
+    if (!xcb_poll_for_reply(h->c, h->release_query, &raw, &error))
+        return xcb_connection_has_error(h->c) ? -1 : 0;
+    xcb_get_input_focus_reply_t *r = raw;
+    int ok = r && !error && r->response_type == 1 && !r->length;
+    free(raw); free(error); h->release_query = 0;
+    if (!ok) { h->release_state = -1; return -1; }
+    h->grab_title = 0; h->release_state = 2;
+    return 1;
+}
+enum { FR_GRAB_PREFLIGHT = 1, FR_GRAB_WAITING = 2, FR_GRAB_VERIFY_FOCUS = 3,
+       FR_GRAB_ACQUIRED = 4 };
+/* Initialization only, after Rust validates the physical local escape keys.
+ * Four fixed preflight replies precede at most one grab. Every subsequent poll
+ * stays inside Rust's original native-turn deadline; there is no retry, wait,
+ * event dequeue or new authority in this boundary. */
+int fr_viewer_input_grab_begin(struct fr_viewer_input *h) {
+    if (!h || h->grab_state || xcb_connection_has_error(h->c)) return 0;
+    h->grab_state = FR_GRAB_PREFLIGHT;
+    h->grab_focus = xcb_get_input_focus(h->c).sequence;
+    h->grab_geometry = xcb_get_geometry(h->c, h->window).sequence;
+    h->grab_attributes = xcb_get_window_attributes(h->c, h->window).sequence;
+    h->grab_keys = xcb_query_keymap(h->c).sequence;
+    if (!h->grab_focus || !h->grab_geometry || !h->grab_attributes ||
+        !h->grab_keys || xcb_flush(h->c) <= 0) {
+        h->grab_state = -1; return 0;
+    }
+    return 1;
+}
+/* 0 pending, 1 checked; negative values match grab_poll's terminal refusals. */
+static int grab_preflight(struct fr_viewer_input *h) {
+    if (h->grab_focus) {
+        void *raw = NULL; xcb_generic_error_t *error = NULL;
+        if (xcb_poll_for_reply(h->c, h->grab_focus, &raw, &error)) {
+            xcb_get_input_focus_reply_t *r = raw;
+            int result = !r || error || r->response_type != 1 || r->length ? -1 :
+                r->focus != h->window ? -3 : 1;
+            free(raw); free(error); h->grab_focus = 0;
+            if (result < 0) return result;
+        }
+    }
+    if (h->grab_geometry) {
+        void *raw = NULL; xcb_generic_error_t *error = NULL;
+        if (xcb_poll_for_reply(h->c, h->grab_geometry, &raw, &error)) {
+            xcb_get_geometry_reply_t *r = raw;
+            int result = !r || error || r->response_type != 1 || r->length ? -1 :
+                r->root == h->window || r->width != h->width || r->height != h->height ? -5 : 1;
+            free(raw); free(error); h->grab_geometry = 0;
+            if (result < 0) return result;
+        }
+    }
+    if (h->grab_attributes) {
+        void *raw = NULL; xcb_generic_error_t *error = NULL;
+        if (xcb_poll_for_reply(h->c, h->grab_attributes, &raw, &error)) {
+            xcb_get_window_attributes_reply_t *r = raw;
+            int result = !r || error || r->response_type != 1 || r->length != 3 ? -1 :
+                r->map_state != XCB_MAP_STATE_VIEWABLE ||
+                r->_class != XCB_WINDOW_CLASS_INPUT_OUTPUT ? -5 : 1;
+            free(raw); free(error); h->grab_attributes = 0;
+            if (result < 0) return result;
+        }
+    }
+    if (h->grab_keys) {
+        void *raw = NULL; xcb_generic_error_t *error = NULL;
+        if (xcb_poll_for_reply(h->c, h->grab_keys, &raw, &error)) {
+            xcb_query_keymap_reply_t *r = raw;
+            int result = !r || error || r->response_type != 1 || r->length != 2 ? -1 : 1;
+            if (result > 0) for (unsigned i = 0; i < 32; i++) if (r->keys[i]) result = -4;
+            free(raw); free(error); h->grab_keys = 0;
+            if (result < 0) return result;
+        }
+    }
+    if (xcb_connection_has_error(h->c)) return -1;
+    return !h->grab_focus && !h->grab_geometry && !h->grab_attributes && !h->grab_keys;
+}
+/* 0 pending, 1 acquired; -1 native failure, -2 unavailable, -3 focus lost,
+ * -4 initially held key, -5 changed/unmapped window. Refusals are terminal. */
+int fr_viewer_input_grab_poll(struct fr_viewer_input *h) {
+    if (!h || !h->grab_state || xcb_connection_has_error(h->c)) return -1;
+    if (h->grab_state < 0) return h->grab_state;
+    if (h->grab_state == FR_GRAB_ACQUIRED) return 1;
+    if (h->grab_state == FR_GRAB_PREFLIGHT) {
+        int result = grab_preflight(h);
+        if (result <= 0) {
+            if (result < 0) h->grab_state = result;
+            return result;
+        }
+        h->grab_attempted = 1;
+        /* CurrentTime timestamps this new local request only. Rust's original
+         * input timeline is initialized later; no input event is retimestamped. */
+        h->grab_query = xcb_grab_keyboard(h->c, 0, h->window, XCB_CURRENT_TIME,
+            XCB_GRAB_MODE_ASYNC, XCB_GRAB_MODE_ASYNC).sequence;
+        h->grab_sequence = h->grab_query;
+        h->grab_state = FR_GRAB_WAITING;
+        if (!h->grab_query || xcb_flush(h->c) <= 0) { h->grab_state = -1; return -1; }
+    }
+    if (h->grab_state == FR_GRAB_WAITING) {
+        void *raw = NULL; xcb_generic_error_t *error = NULL;
+        if (!xcb_poll_for_reply(h->c, h->grab_query, &raw, &error))
+            return xcb_connection_has_error(h->c) ? -1 : 0;
+        xcb_grab_keyboard_reply_t *r = raw;
+        int result = !r || error || r->response_type != 1 || r->length ? -1 :
+            r->status != XCB_GRAB_STATUS_SUCCESS ? -2 : 1;
+        free(raw); free(error); h->grab_query = 0;
+        if (result < 0) { h->grab_state = result; return result; }
+        // A successful grab cannot substitute for the original focused window.
+        h->grab_focus = xcb_get_input_focus(h->c).sequence;
+        h->grab_state = FR_GRAB_VERIFY_FOCUS;
+        if (!h->grab_focus || xcb_flush(h->c) <= 0) { h->grab_state = -1; return -1; }
+    }
+    void *raw = NULL; xcb_generic_error_t *error = NULL;
+    if (!xcb_poll_for_reply(h->c, h->grab_focus, &raw, &error))
+        return xcb_connection_has_error(h->c) ? -1 : 0;
+    xcb_get_input_focus_reply_t *focus = raw;
+    int result = !focus || error || focus->response_type != 1 || focus->length ? -1 :
+        focus->focus != h->window ? -3 : 1;
+    free(raw); free(error); h->grab_focus = 0;
+    if (result < 0) { h->grab_state = result; return result; }
+    h->grab_title = 1;
+    if (!shortcuts_title(h, 1)) { h->grab_state = -1; return -1; }
+    h->grab_focus_out = 1;
+    h->grab_state = FR_GRAB_ACQUIRED;
+    return 1;
+}
+/* X servers may emit one NotifyGrab/NotifyNonlinear FocusOut/FocusIn pair even
+ * when the confirmed grab window is already focused. Exempt only that exact
+ * server-authored request notification, once, before the first startup barrier.
+ * Real focus changes (including NotifyWhileGrabbed), other requests, synthetic
+ * notifications and duplicates retain the original FocusLost fence. */
+static int acquisition_focus_out(struct fr_viewer_input *h, const xcb_generic_event_t *e) {
+    const xcb_focus_out_event_t *focus = (const void *)e;
+    if (h->grab_state != FR_GRAB_ACQUIRED || !h->grab_focus_out ||
+        (e->response_type & 0x80) || focus->event != h->window ||
+        focus->mode != XCB_NOTIFY_MODE_GRAB || focus->detail != XCB_NOTIFY_DETAIL_NONLINEAR ||
+        e->full_sequence != h->grab_sequence) return 0;
+    h->grab_focus_out = 0;
+    return 1;
 }
 /* A master keyboard may announce an unchanged map when its active slave changes
  * (including the first XTest key). Keep the original map, never adopt a new one.
@@ -294,6 +486,7 @@ struct fr_viewer_input *fr_viewer_input_open(const char *display, uint32_t windo
     struct fr_viewer_input *h = calloc(1, sizeof(*h));
     if (!h) return NULL;
     h->c = xcb_connect(display, NULL); h->window = window;
+    h->width = width; h->height = height;
     if (!h->c || xcb_connection_has_error(h->c)) goto fail;
     /* Reject a root before subscribing to ANY input. Requery after subscription
      * so a resize during setup cannot establish a stale layout generation. */
@@ -337,7 +530,9 @@ struct fr_viewer_input *fr_viewer_input_open(const char *display, uint32_t windo
     xcb_intern_atom_reply_t *atom = reply(h, xcb_intern_atom(h->c, 0, sizeof(name)-1, name).sequence);
     if (!atom) goto fail;
     h->barrier = atom->atom; free(atom);
-    if (!h->barrier || !held_setup(h)) goto fail;
+    h->net_name = input_atom(h, "_NET_WM_NAME");
+    h->utf8 = input_atom(h, "UTF8_STRING");
+    if (!h->barrier || !h->net_name || !h->utf8 || !held_setup(h)) goto fail;
     return h;
 fail:
     fr_viewer_input_close(h); return NULL;
@@ -382,6 +577,7 @@ int fr_viewer_input_next(struct fr_viewer_input *h, struct fr_viewer_event *out)
     case XCB_PROPERTY_NOTIFY: {
         xcb_property_notify_event_t *v = (void*)e;
         if (!(e->response_type & 0x80) && v->window == h->clock && v->atom == h->barrier && v->state == XCB_PROPERTY_NEW_VALUE) {
+            h->grab_focus_out = 0; /* acquisition exemption cannot survive startup */
             out->kind = BARRIER; out->time = v->time;
         } break;
     }
@@ -396,7 +592,8 @@ int fr_viewer_input_next(struct fr_viewer_input *h, struct fr_viewer_event *out)
         out->x = v->event_x; out->y = v->event_y; break;
     }
     case XCB_FOCUS_OUT:
-        if (((xcb_focus_out_event_t*)e)->event == h->window) out->kind = FOCUS_LOST;
+        if (((xcb_focus_out_event_t*)e)->event == h->window &&
+            !acquisition_focus_out(h, e)) out->kind = FOCUS_LOST;
         break;
     case XCB_UNMAP_NOTIFY:
         if (((xcb_unmap_notify_event_t*)e)->window == h->window) out->kind = WINDOW_LOST;

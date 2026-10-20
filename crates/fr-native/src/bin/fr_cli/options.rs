@@ -88,6 +88,9 @@ pub struct Connection {
     /// `--control`: request input control once, after fresh local evidence.
     /// False only with the explicit `--view-only`; never a silent default.
     pub control: bool,
+    /// `--capture-system-shortcuts` (with `--control` only): request one
+    /// keyboard grab from the original X11 input owner, after control is granted.
+    pub capture_system_shortcuts: bool,
     /// `--clipboard` (with `--control` only): let the UTF-8 text clipboard
     /// follow the control lease, both directions, when the host enables it too.
     pub clipboard: bool,
@@ -548,7 +551,7 @@ fn parse_command(
     let mut seen = BTreeSet::new();
     let (mut json, mut socket, mut by_name, mut view_only, mut experimental, mut ipv6) =
         (false, None, false, false, false, false);
-    let (mut control, mut clipboard) = (false, false);
+    let (mut control, mut clipboard, mut capture_system_shortcuts) = (false, false, false);
     let (mut audio, mut audio_server, mut audio_sink) = (false, None, None);
     let (mut display, mut worker, mut roots, mut x_display) = (None, None, None, None);
     let (mut port, mut attempts) = (8443_u16, 5_u8);
@@ -568,6 +571,7 @@ fn parse_command(
             "--by-name" if remote => by_name = true,
             "--view-only" if connect => view_only = true,
             "--control" if connect => control = true,
+            "--capture-system-shortcuts" if connect => capture_system_shortcuts = true,
             "--clipboard" if connect => clipboard = true,
             "--audio" if connect => audio = true,
             "--audio-server" if connect => audio_server = Some(next_path(args, &mut index)?),
@@ -613,6 +617,13 @@ fn parse_command(
             return Err(Failure::new(
                 "clipboard_requires_control",
                 "The clipboard follows a control lease; pass --control with --clipboard. A view-only session never exposes either clipboard.",
+                2,
+            ));
+        }
+        if capture_system_shortcuts && !control {
+            return Err(Failure::new(
+                "system_shortcuts_require_control",
+                "System-shortcut capture requires --control; a view-only connection never grabs the local keyboard.",
                 2,
             ));
         }
@@ -678,6 +689,7 @@ fn parse_command(
                 attempts,
                 fit_window,
                 control,
+                capture_system_shortcuts,
                 clipboard,
                 audio: audio.then_some(AudioRequest {
                     server: audio_server,
@@ -778,6 +790,60 @@ mod tests {
         ] {
             assert_eq!(
                 options(&refused).err().unwrap().code,
+                "invalid_arguments",
+                "{refused}"
+            );
+        }
+    }
+    #[test]
+    fn system_shortcut_capture_requires_an_explicit_controlled_connection() {
+        let base = "n-host --experimental-native --worker /opt/fr/worker --display only";
+        for (flags, capture) in [
+            ("--view-only", false),
+            ("--control", false),
+            ("--control --capture-system-shortcuts", true),
+        ] {
+            let Command::Connect(connection) =
+                options(&format!("connect {base} {flags}")).unwrap().command
+            else {
+                unreachable!("connection required");
+            };
+            assert_eq!(connection.capture_system_shortcuts, capture, "{flags}");
+        }
+        assert_eq!(
+            options(&format!(
+                "connect {base} --view-only --capture-system-shortcuts"
+            ))
+            .err()
+            .unwrap()
+            .code,
+            "system_shortcuts_require_control"
+        );
+        assert_eq!(
+            options("connect n-host --control --capture-system-shortcuts")
+                .err()
+                .unwrap()
+                .code,
+            "native_transport_unqualified"
+        );
+        assert_eq!(
+            options(&format!("connect {base} --capture-system-shortcuts"))
+                .err()
+                .unwrap()
+                .code,
+            "connection_role_required"
+        );
+    }
+    #[test]
+    fn duplicate_or_non_connection_system_shortcut_capture_is_rejected_before_io() {
+        for refused in [
+            "connect n-host --control --experimental-native --display only --capture-system-shortcuts --capture-system-shortcuts",
+            "displays n-host --experimental-native --capture-system-shortcuts",
+            "doctor --capture-system-shortcuts",
+            "hosts --capture-system-shortcuts",
+        ] {
+            assert_eq!(
+                options(refused).err().unwrap().code,
                 "invalid_arguments",
                 "{refused}"
             );
