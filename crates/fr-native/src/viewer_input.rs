@@ -9,6 +9,7 @@
 //! keyboard input was not negotiated. Its entire native batch is withheld. The
 //! host agent still owns release of previously submitted remote modifiers.
 mod escape;
+mod file_keys;
 mod held;
 #[cfg(test)]
 mod tests;
@@ -26,7 +27,7 @@ use std::{
     fmt,
     ptr::NonNull,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU8, Ordering},
     },
     thread::{self, JoinHandle},
@@ -128,6 +129,8 @@ pub enum Error {
 struct Shared {
     control: ViewerControl,
     state: AtomicU8,
+    files: OnceLock<frd::native_files::SendControl>,
+    file_keymap: AtomicU8,
 }
 impl Shared {
     fn stop(&self, reason: StopReason) {
@@ -147,6 +150,23 @@ impl CaptureControl {
     }
     pub fn status(&self) -> Status {
         state(self.0.state.load(Ordering::Acquire))
+    }
+    /// Bind one explicit upload selection to local Ctrl+Alt+Shift+F8/F9/F10
+    /// (pause/resume/cancel). Binding is one-use, adds no input/file authority,
+    /// and cannot redirect a retained capture handle to another selection.
+    /// The original sender owns deadlines, receipts and actual cleanup.
+    pub fn enable_file_shortcuts(&self, files: frd::native_files::SendControl) -> bool {
+        self.0.state.load(Ordering::Acquire) < 2 && self.0.files.set(files).is_ok()
+    }
+    /// Physical-key mapping availability, not proof that a request was applied.
+    /// None means unconfigured or native initialization has not supplied a map.
+    pub fn file_shortcuts_available(&self) -> Option<bool> {
+        self.0.files.get()?;
+        match self.0.file_keymap.load(Ordering::Acquire) {
+            1 => Some(true),
+            2 => Some(false),
+            _ => None,
+        }
     }
 }
 fn state(value: u8) -> Status {
@@ -211,6 +231,8 @@ impl X11InputCapture {
         let control = CaptureControl(Arc::new(Shared {
             control: source.control(),
             state: AtomicU8::new(0),
+            files: OnceLock::new(),
+            file_keymap: AtomicU8::new(0),
         }));
         let shared = control.0.clone();
         let task = thread::Builder::new()
@@ -340,6 +362,11 @@ trait Target {
     fn capabilities(&self) -> Capabilities;
     fn push(&mut self, event: Event, sampled: ClientInstant) -> Result<(), StopReason>;
     fn ready(&self);
+    fn file_shortcuts_enabled(&self) -> bool {
+        false
+    }
+    fn file_shortcut_map(&self, _available: bool) {}
+    fn file_command(&self, _command: file_keys::Command) {}
     /// Fence the original input owner before any native cleanup can run.
     fn stop(&self, reason: StopReason);
 }
@@ -348,6 +375,19 @@ struct NativeTarget {
     shared: Arc<Shared>,
 }
 impl Target for NativeTarget {
+    fn file_shortcuts_enabled(&self) -> bool {
+        self.shared.files.get().is_some()
+    }
+    fn file_shortcut_map(&self, available: bool) {
+        self.shared
+            .file_keymap
+            .store(if available { 1 } else { 2 }, Ordering::Release);
+    }
+    fn file_command(&self, command: file_keys::Command) {
+        if let Some(files) = self.shared.files.get() {
+            command.apply(files);
+        }
+    }
     fn clock(&self) -> Result<ClientInstant, StopReason> {
         self.source.clock().map_err(|_| StopReason::Closed)
     }
@@ -445,6 +485,8 @@ fn run_events(
     target: &mut impl Target,
 ) -> Result<(), StopReason> {
     let mut escape = escape::LocalEscape::new(names)?;
+    let mut shortcuts = file_keys::Shortcuts::new(names);
+    target.file_shortcut_map(shortcuts.is_some());
     let mut decoder = Decoder::new(names, target.capabilities());
     let mut timeline: Option<Timeline> = None;
     let mut sampler = held::Sampler::new(target.clock()?)?;
@@ -453,12 +495,16 @@ fn run_events(
         // release-only sampling even when no event arrives (e.g. a lost release).
         // The first dequeued event is retained, never retimestamped as fresh.
         let first = if timeline.is_some() {
-            await_event(native, target, &decoder, &sampler)?
+            await_event(native, target, &decoder, &sampler, shortcuts.as_ref())?
         } else {
             None
         };
         let before = target.clock()?;
-        let sample = timeline.is_some() && sampler.due(&decoder, before);
+        let local_held = target.file_shortcuts_enabled()
+            && shortcuts
+                .as_ref()
+                .is_some_and(file_keys::Shortcuts::has_held);
+        let sample = timeline.is_some() && sampler.due_with_local(&decoder, local_held, before);
         if sample {
             sampler.begin(native, before)?;
         }
@@ -482,6 +528,17 @@ fn run_events(
                 target.clock()?;
                 if (1..=5).contains(&event.kind) {
                     let captured_at = timeline.sample(event.time, barrier, before)?;
+                    if let Some(shortcuts) = &mut shortcuts {
+                        match shortcuts.event(*event, target.file_shortcuts_enabled()) {
+                            file_keys::Route::Local(command) => {
+                                if let Some(command) = command {
+                                    target.file_command(command);
+                                }
+                                continue;
+                            }
+                            file_keys::Route::Remote => {}
+                        }
+                    }
                     if let Some(event) = decoder.event(*event, layout)? {
                         target.push(event, captured_at)?;
                     }
@@ -489,6 +546,9 @@ fn run_events(
             }
             if let Some(snapshot) = snapshot.filter(|_| held::stable(&events[..used])) {
                 escape.reconcile(&snapshot.keys);
+                if let Some(shortcuts) = &mut shortcuts {
+                    shortcuts.reconcile(&snapshot.keys);
+                }
                 let observed = decoder.reconcile(&snapshot)?;
                 // Later native events occur after this server barrier. Preserve
                 // that lower bound across millisecond timestamp quantization.
@@ -499,9 +559,17 @@ fn run_events(
             // Input occurring during initialization is never replayed. Refuse a
             // still-held key/button rather than adopt half a native gesture.
             for event in &events[..used] {
+                if let Some(shortcuts) = &mut shortcuts {
+                    let _ = shortcuts.event(*event, false);
+                }
                 let _ = decoder.event(*event, layout)?;
             }
-            if decoder.has_held() {
+            if decoder.has_held()
+                || (target.file_shortcuts_enabled()
+                    && shortcuts
+                        .as_ref()
+                        .is_some_and(file_keys::Shortcuts::has_held))
+            {
                 return Err(StopReason::InitialHeld);
             }
             timeline = Some(Timeline::new(barrier, before));
@@ -569,13 +637,22 @@ fn await_event(
     target: &impl Target,
     decoder: &Decoder,
     sampler: &held::Sampler,
+    shortcuts: Option<&file_keys::Shortcuts>,
 ) -> Result<Option<Raw>, StopReason> {
     loop {
         target.clock()?;
         let mut event = Raw::default();
         // SAFETY: unique owning thread, writable fixed-size event, no callbacks.
         match unsafe { fr_viewer_input_next(native.0.as_ptr(), &raw mut event) } {
-            0 if sampler.due(decoder, target.clock()?) => return Ok(None),
+            0 if sampler.due_with_local(
+                decoder,
+                target.file_shortcuts_enabled()
+                    && shortcuts.is_some_and(file_keys::Shortcuts::has_held),
+                target.clock()?,
+            ) =>
+            {
+                return Ok(None);
+            }
             0 => thread::sleep(TURN),
             1 => return Ok(Some(event)),
             _ => return Err(StopReason::NativeFailure),

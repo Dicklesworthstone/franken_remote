@@ -35,8 +35,19 @@ impl Sampler {
     pub(super) fn new(now: ClientInstant) -> Result<Self, StopReason> {
         Ok(Self { next: next(now)? })
     }
+    #[cfg(test)]
     pub(super) fn due(&self, decoder: &Decoder, now: ClientInstant) -> bool {
-        decoder.has_held() && now >= self.next
+        self.due_with_local(decoder, false, now)
+    }
+    /// Local-only gestures need the same bounded release-only sampling even
+    /// when keyboard forwarding was not negotiated. Never a second timer.
+    pub(super) fn due_with_local(
+        &self,
+        decoder: &Decoder,
+        local_held: bool,
+        now: ClientInstant,
+    ) -> bool {
+        (decoder.has_held() || local_held) && now >= self.next
     }
     pub(super) fn begin(&mut self, native: &Native, now: ClientInstant) -> Result<(), StopReason> {
         self.next = next(now)?;

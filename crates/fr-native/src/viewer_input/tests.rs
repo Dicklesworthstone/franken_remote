@@ -118,6 +118,9 @@ struct Probe {
     stopped: AtomicBool,
     pause: AtomicBool,
     paused: AtomicBool,
+    file_controls: AtomicBool,
+    file_keymap: AtomicU8,
+    file_commands: Mutex<Vec<file_keys::Command>>,
 }
 struct Recording {
     start: Instant,
@@ -125,6 +128,19 @@ struct Recording {
     caps: Capabilities,
 }
 impl Target for Recording {
+    fn file_shortcuts_enabled(&self) -> bool {
+        self.probe.file_controls.load(Ordering::Acquire)
+    }
+    fn file_shortcut_map(&self, available: bool) {
+        self.probe
+            .file_keymap
+            .store(if available { 1 } else { 2 }, Ordering::Release);
+    }
+    fn file_command(&self, command: file_keys::Command) {
+        let mut commands = self.probe.file_commands.lock().unwrap();
+        assert!(commands.len() < 16);
+        commands.push(command);
+    }
     fn clock(&self) -> Result<ClientInstant, StopReason> {
         if self.probe.stopped.load(Ordering::Acquire) {
             return Err(StopReason::Closed);
@@ -521,3 +537,6 @@ fn capture_never_focused_ends_as_focus_lost() {
     assert!(target.probe.events.lock().unwrap().is_empty());
     peer.command("restore");
 }
+
+#[path = "tests/file_keys.rs"]
+mod file_keys_tests;
