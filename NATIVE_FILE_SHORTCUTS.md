@@ -33,7 +33,9 @@ existing owner continues cleanup; publication and uncertainty receipts remain
 separate. A stale handle cannot restart finished, cancelled, or expired work.
 The handle's `SendSnapshot` still distinguishes requested pacing from the last
 observed sender gate. No remote-idle, rollback, or cleanup-success claim follows
-from pressing a key. This change adds shortcuts, not a new progress dialog.
+from pressing a key. The separate [upload progress panel](NATIVE_FILE_PROGRESS.md)
+shows these distinctions and offers equivalent local buttons without taking
+keyboard focus. Hiding or losing that panel does not disable these shortcuts.
 
 ## Native input boundaries
 
@@ -64,5 +66,6 @@ it is not a live authenticated transfer or physical-user authenticity proof.
 
 Full desktop/transport/codec linking and live-tailnet qualification remain
 separate. The existing X server and selected local user remain trusted. No
-Wayland, macOS, Windows, touch, graphical transfer buttons, download pacing or
-cross-connection transfer resumption is implemented by this change.
+Wayland, macOS, Windows, touch, download pacing or cross-connection transfer
+resumption is implemented by the shortcuts. The companion progress panel has
+its own native UI tests and qualification limits.

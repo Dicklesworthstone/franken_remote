@@ -104,6 +104,11 @@ is granted, when the host runs frd run --files DIR. Symlinks and special files
 are refused before connecting. The host never overwrites: a taken name is
 refused. Completion reports each selection by index and size only, with the
 host-reported outcome or a typed refusal.
+A separate upload progress panel shows queued bytes, publication receipts,
+pause intent and local cleanup, with Pause / Resume / Cancel upload buttons.
+It requests no keyboard focus. Closing it only hides progress; the upload and
+keyboard controls continue. Panel failure does not cancel the desktop or files.
+A full progress bar is not a publication receipt, and an unknown size is not zero.
 While controlling a configured --send selection, physical Ctrl+Alt+Shift+F8
 requests pause, F9 requests resume, and F10 cancels that upload selection only.
 Keep the viewer focused. Release the function key between requests. Its press,

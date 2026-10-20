@@ -161,6 +161,9 @@ pub struct Desktop {
     // Status/intent only, not another source, queue, lease or lifetime. Never
     // copied into a new Desktop when the reconnect supervisor opens an attempt.
     file_controls: Option<frd::native_files::SendControl>,
+    // Optional local UI, never a file/source owner. Retain even a hidden panel
+    // until its native thread is joined; reconnect cannot inherit this handle.
+    file_progress: Option<Result<crate::file_progress::Panel, crate::file_progress::Error>>,
 }
 impl Desktop {
     pub const fn new(configuration: Configuration) -> Self {
@@ -175,6 +178,7 @@ impl Desktop {
             stop: None,
             input: None,
             file_controls: None,
+            file_progress: None,
         }
     }
     pub fn state(&self) -> State {
@@ -227,6 +231,19 @@ impl Desktop {
     pub fn input(&self) -> Option<crate::viewer_input::CaptureControl> {
         self.input.clone()
     }
+    /// This attempt's optional upload panel: status/hide only, or its local
+    /// startup refusal. None means no successful upload configuration. Native
+    /// failure remains visible through the handle and never cancels the upload.
+    pub fn file_progress(
+        &self,
+    ) -> Option<Result<crate::file_progress::Control, crate::file_progress::Error>> {
+        self.file_progress.as_ref().map(|panel| {
+            panel
+                .as_ref()
+                .map(crate::file_progress::Panel::control)
+                .map_err(|error| *error)
+        })
+    }
     /// Configure the existing controller-only default-on clipboard before
     /// service. No native open/read happens before bilateral readiness and the
     /// original control grant. Consent and the visible off switch stay separate.
@@ -248,6 +265,9 @@ impl Desktop {
     /// here; no source starts before the grant and the host's one-use offer.
     /// Once native input attaches, physical Ctrl+Alt+Shift+F8/F9/F10 controls
     /// this original selection only (pause/resume/cancel), never the desktop.
+    /// A non-focus-taking progress panel opens for this selection in either
+    /// serving mode. Its absence/failure does not undo successful configuration;
+    /// inspect `file_progress` separately. No panel is automatically reopened.
     pub fn configure_file_send(
         &mut self,
         request: frd::native_files::SendRequest,
@@ -255,13 +275,27 @@ impl Desktop {
         if self.state() != State::Viewing {
             return Err(Error::NotViewing);
         }
-        let controls = self
-            .observer
-            .as_mut()
-            .ok_or(Error::NotViewing)?
+        let observer = self.observer.as_mut().ok_or(Error::NotViewing)?;
+        let controls = observer
             .configure_file_send(request)
             .map_err(Error::Files)?;
+        let session = observer.control();
         self.file_controls = Some(controls.clone());
+        // The original observer accepted the selection once BEFORE optional UI.
+        // No peer XID, alternative session, source read or permission is created.
+        let panel = self
+            .window()
+            .and_then(|window| window.input_window().ok())
+            .ok_or(crate::file_progress::Error::InvalidParent)
+            .and_then(|parent| {
+                crate::file_progress::Panel::start(
+                    &self.configuration.display,
+                    parent,
+                    session,
+                    controls.clone(),
+                )
+            });
+        self.file_progress = Some(panel);
         Ok(controls)
     }
     /// Receive the host's explicit selections into this locally pinned directory.
@@ -703,19 +737,32 @@ impl Desktop {
         if let Some(observer) = &mut self.observer {
             observer.close();
         }
+        if let Some(Ok(panel)) = &self.file_progress {
+            panel.stop();
+        }
         if let Some(window) = &self.window {
             window.control().stop();
         }
         self.state = State::Stopped;
     }
+    /// All local viewing surfaces must finish, including an optional upload
+    /// panel. A hidden/failed panel can still have pending foreign cleanup; the
+    /// existing reconnect gate must retain this Desktop until that thread joins.
     pub fn window_cleanup(&mut self) -> WindowCleanup {
-        self.window
+        let window = self
+            .window
             .as_mut()
             .map_or(WindowCleanup::NotStarted, |window| {
                 window
                     .finish()
                     .map_or(WindowCleanup::Pending, WindowCleanup::Complete)
-            })
+            });
+        if let Some(Ok(panel)) = &mut self.file_progress
+            && !panel.finish()
+        {
+            return WindowCleanup::Pending;
+        }
+        window
     }
     /// Stop at CALL time, even when the returned cleanup future is never polled.
     /// Use an independent cleanup Cx and its original deadline. A pending/failed

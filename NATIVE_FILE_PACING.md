@@ -44,8 +44,10 @@ Applications must continue servicing the original controller and transport while
 paused. The native X11 viewer now binds physical Ctrl+Alt+Shift+F8/F9/F10 to
 pause/resume/cancel an explicitly configured upload, without leaving its focused
 window. See [Native upload shortcuts](NATIVE_FILE_SHORTCUTS.md) for gesture
-custody, unavailable mappings and qualification limits. There is still no new
-progress dialog, graphical button or command-line pause switch.
+custody, unavailable mappings and qualification limits. A separate non-focus-taking
+[upload progress panel](NATIVE_FILE_PROGRESS.md) now shows the original snapshot
+and offers the same three local requests as buttons. There is no command-line
+pause switch; closing the panel only hides it.
 
 ## Deadlines and effects do not pause
 
