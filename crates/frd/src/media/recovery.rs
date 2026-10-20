@@ -39,8 +39,10 @@ impl Subscription {
     ///
     /// Acceptance fences old media and shared native input authority BEFORE any
     /// codec work. The existing capture loop services the source's single IDR
-    /// queue; it must also wake at `CaptureSource::next_recovery_deadline` when
-    /// otherwise idle. Duplicates return false and cannot renew work or time.
+    /// queue. When otherwise idle, prepared shared loops must wake at
+    /// `CaptureSource::next_shared_recovery_deadline`; private loops use
+    /// `CaptureSource::next_recovery_deadline`. Duplicates return false and
+    /// cannot renew work or time.
     /// Terminal sender refusal also fences view readiness and old input tickets,
     /// but cannot cancel another subscription's queued shared-encoder work.
     ///
@@ -121,6 +123,15 @@ impl CaptureSource {
     /// allowance. Generation replacement never recreates or refills it.
     pub fn next_recovery_deadline(&self) -> Option<HostInstant> {
         self.recovery.next_deadline().map(HostInstant::from_micros)
+    }
+    /// Wake bound for a source driven through `prepare_shared_capture`. A live
+    /// later subscriber's request remains queued after an earlier one expires;
+    /// the rate gate and latest original accepted demand bound define this wake.
+    /// This is scheduling evidence, never a viewer's recovery/authority deadline.
+    pub fn next_shared_recovery_deadline(&self) -> Option<HostInstant> {
+        self.recovery
+            .next_shared_deadline()
+            .map(HostInstant::from_micros)
     }
 }
 

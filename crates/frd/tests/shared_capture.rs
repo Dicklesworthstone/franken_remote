@@ -617,3 +617,6 @@ mod production;
 
 #[path = "shared_capture/live_authority.rs"]
 mod live_authority;
+
+#[path = "shared_capture/recovery_isolation.rs"]
+mod recovery_isolation;

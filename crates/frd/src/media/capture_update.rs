@@ -28,6 +28,26 @@ enum Content {
     Encoded(EncodedAccessUnit),
     Unchanged(UnchangedCapture),
 }
+/// A subscriber's recovery budget may bound its private worker, but must not
+/// terminate an independent shared source still serving healthy subscriptions.
+enum CaptureScope {
+    Private,
+    Shared {
+        maximum_capacity: usize,
+        join_until: Option<u64>,
+    },
+}
+impl CaptureScope {
+    fn limits(self) -> (Option<usize>, Option<u64>, bool) {
+        match self {
+            Self::Private => (None, None, false),
+            Self::Shared {
+                maximum_capacity,
+                join_until,
+            } => (Some(maximum_capacity), join_until, true),
+        }
+    }
+}
 impl fmt::Debug for CaptureUpdate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CaptureUpdate")
@@ -69,7 +89,7 @@ impl CaptureSource {
         force_idr: bool,
     ) -> Result<EncodedAccessUnit, Error> {
         match self
-            .capture_request(control, force_idr, false, None, None)
+            .capture_request(control, force_idr, false, CaptureScope::Private)
             .await?
             .content
         {
@@ -85,7 +105,7 @@ impl CaptureSource {
         control: &ObservationControl,
         force_idr: bool,
     ) -> Result<CaptureUpdate, Error> {
-        self.capture_request(control, force_idr, true, None, None)
+        self.capture_request(control, force_idr, true, CaptureScope::Private)
             .await
     }
     async fn capture_request(
@@ -93,18 +113,18 @@ impl CaptureSource {
         control: &ObservationControl,
         force_idr: bool,
         conditional: bool,
-        maximum_capacity: Option<usize>,
-        join_until: Option<u64>,
+        scope: CaptureScope,
     ) -> Result<CaptureUpdate, Error> {
         #[cfg(target_os = "linux")]
         let mut selection = super::discovery::SelectionGuard::capture(self, control)?;
         let issued = control.check()?;
+        let (maximum_capacity, join_until, shared) = scope.limits();
         // Service requests on the original capture loop, not in a parallel
         // worker or per-viewer encoder. An expired cohort cannot reset healthy
         // capture; those failed senders retain their own terminal deadlines.
         let (scheduled_idr, recovery_until) = self
             .recovery
-            .admit_capture(issued.as_micros(), join_until)
+            .admit_capture(issued.as_micros(), join_until, shared)
             .map_err(Error::Receiver)?;
         let force_idr = force_idr || scheduled_idr;
         // Work keeps one immutable ceiling. Timely renewals of the original

@@ -4,11 +4,17 @@ use super::{DeliveryError, RecoveryDemand, SendCache, deadline};
 #[derive(Debug, Clone, Copy)]
 struct Pending {
     ready: u64,
+    // Private capture retains its current cohort's earliest deadline.
     until: u64,
+    // Shared-source scheduling retains the latest ORIGINAL accepted deadline.
+    // This is not permission to deliver to a consumer past its own deadline.
+    shared_until: u64,
 }
 /// Keep one coalescer for the shared encoder lifetime, not one per viewer or
-/// recovery generation. Accepted requests occupy ONE slot and retain the first
-/// cohort's deadline. New generations and cancellation do not refill rate credit.
+/// recovery generation. Accepted requests occupy ONE slot. Private admission
+/// retains the first cohort's deadline; shared-source admission can serve a later
+/// live request independently. Neither changes a sender's recovery deadline.
+/// New generations and cancellation do not refill rate credit.
 #[derive(Debug)]
 pub struct IdrCoalescer {
     interval: u64,
@@ -43,21 +49,27 @@ impl IdrCoalescer {
         self.check_clock(now)?;
         demand.check(cache, now)?;
         let until = demand.deadline_micros();
-        // An idle encoder owner may receive a new request before polling take().
-        // Retire an already expired cohort instead of poisoning the new viewer's
-        // valid demand with its deadline. This never changes next_allowed, and
-        // invalid demands cannot retire work because ownership was checked first.
-        if self.pending.is_some_and(|pending| now >= pending.until) {
-            self.pending = None;
-        }
         // Consume the unique proof even when another viewer already queued work.
         drop(demand);
         match &mut self.pending {
-            Some(p) => p.until = p.until.min(until),
+            Some(p) => {
+                // Preserve private admission's existing cohort replacement when
+                // its earliest request expired before the owner polled take().
+                // A different already accepted request may still justify shared
+                // source work; replacing that private cohort must not erase it.
+                if now >= p.until {
+                    p.ready = now.max(self.next_allowed);
+                    p.until = until;
+                } else {
+                    p.until = p.until.min(until);
+                }
+                p.shared_until = p.shared_until.max(until);
+            }
             None => {
                 self.pending = Some(Pending {
                     ready: now.max(self.next_allowed),
                     until,
+                    shared_until: until,
                 });
             }
         }
@@ -74,6 +86,27 @@ impl IdrCoalescer {
             return Err(DeliveryError::RecoveryExpired);
         }
         self.admit(now, None)
+    }
+    /// Admit an IDR for an independently owned shared source while at least one
+    /// accepted request's original deadline remains unexpired. An earlier failed
+    /// consumer cannot discard a later live request or cap the shared worker's
+    /// lifetime. All requests still consume the SAME encoder rate allowance.
+    ///
+    /// The returned latest deadline is scheduling evidence only, never a new
+    /// consumer deadline or observation/delivery authority. The source needs its
+    /// own bounded work deadline and live observation checks; each sender must
+    /// still refuse replacement and delivery after its original recovery expiry.
+    /// Pair this with `next_shared_deadline`, not the private cohort's deadline.
+    pub fn take_shared(&mut self, now: u64) -> Result<Option<u64>, DeliveryError> {
+        self.check_clock(now)?;
+        let Some(pending) = self.pending else {
+            return Ok(None);
+        };
+        if now >= pending.shared_until {
+            self.pending = None;
+            return Err(DeliveryError::RecoveryExpired);
+        }
+        self.admit_until(now, pending.shared_until)
     }
     /// Admit a locally authorized late-join cohort on the SAME encoder rate
     /// allowance as loss recovery. The caller owns its bounded join slots and
@@ -98,6 +131,9 @@ impl IdrCoalescer {
             (None, Some(until)) => until,
             (None, None) => return Ok(None),
         };
+        self.admit_until(now, until)
+    }
+    fn admit_until(&mut self, now: u64, until: u64) -> Result<Option<u64>, DeliveryError> {
         if now < self.next_allowed || self.pending.is_some_and(|p| now < p.ready) {
             return Ok(None);
         }
@@ -114,6 +150,19 @@ impl IdrCoalescer {
     pub const fn next_deadline(&self) -> Option<u64> {
         match self.pending {
             Some(p) if !self.closed => Some(if p.ready < p.until { p.ready } else { p.until }),
+            _ => None,
+        }
+    }
+    /// Next shared-source rate admission or expiry of ALL accepted requests.
+    /// An expired earliest consumer does not create a past-due wake while a
+    /// later request is still live but waiting for the unchanged rate allowance.
+    pub const fn next_shared_deadline(&self) -> Option<u64> {
+        match self.pending {
+            Some(p) if !self.closed => Some(if p.ready < p.shared_until {
+                p.ready
+            } else {
+                p.shared_until
+            }),
             _ => None,
         }
     }
@@ -141,7 +190,7 @@ impl IdrCoalescer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::delivery::{MediaBindings, MediaEpoch, RecoveryDisposition, SendPolicy};
+    use crate::delivery::{MediaBindings, MediaEpoch, RecoveryDisposition, SendError, SendPolicy};
     use fr_core::{ids::*, limits::ProtocolLimits};
     use fr_wire::{
         MediaLimits,
@@ -201,6 +250,16 @@ mod tests {
     fn queue(idr: &mut IdrCoalescer, cache: &mut SendCache, now: u64) {
         let demand = demand(cache, now);
         idr.queue(cache, demand, now).unwrap();
+    }
+    fn replace(cache: &mut SendCache, now: u64) -> Result<(), SendError> {
+        cache.replace(
+            MediaEpoch {
+                configuration: CodecConfigurationGeneration::INITIAL,
+                recovery: RecoveryGeneration::INITIAL.next().unwrap(),
+            },
+            MediaBindings::new(5, 6, 7, 8).unwrap(),
+            now,
+        )
     }
     #[test]
     fn a_late_viewer_does_not_inherit_an_expired_cohorts_deadline() {
@@ -318,6 +377,241 @@ mod tests {
         assert_eq!(
             idr.take_for_join(99, 2_000_000),
             Err(DeliveryError::ClockRegression)
+        );
+    }
+    #[test]
+    fn shared_admission_preserves_later_live_demand_and_original_sender_deadlines() {
+        let mut idr = IdrCoalescer::new(500_000).unwrap();
+        let mut early = sender(100);
+        let mut later = sender(2_000_000);
+        queue(&mut idr, &mut early, 0);
+        queue(&mut idr, &mut later, 99);
+        // Both demands were accepted before the first expired. The second
+        // sender cannot issue a replacement proof merely because time passed.
+        assert_eq!(idr.take_shared(100).unwrap(), Some(2_000_099));
+        assert_eq!(early.next_deadline(), Some(100));
+        assert_eq!(later.next_deadline(), Some(2_000_099));
+        assert_eq!(
+            replace(&mut early, 100),
+            Err(SendError::Delivery(DeliveryError::RecoveryExpired))
+        );
+        assert_eq!(later.tick(100), Err(SendError::NeedsRecovery));
+        assert_eq!(
+            replace(&mut later, 2_000_099),
+            Err(SendError::Delivery(DeliveryError::RecoveryExpired))
+        );
+        assert_eq!(idr.next_shared_deadline(), None);
+        assert_eq!(idr.take_shared(2_000_099).unwrap(), None);
+    }
+    #[test]
+    fn private_admission_keeps_earliest_expiry_despite_later_shared_demand() {
+        let mut idr = IdrCoalescer::new(500_000).unwrap();
+        let mut early = sender(100);
+        let mut later = sender(2_000_000);
+        queue(&mut idr, &mut early, 0);
+        queue(&mut idr, &mut later, 99);
+        assert_eq!(idr.take(100), Err(DeliveryError::RecoveryExpired));
+        assert_eq!(idr.next_deadline(), None);
+        assert_eq!(idr.next_shared_deadline(), None);
+        assert_eq!(idr.take_shared(100).unwrap(), None);
+        assert_eq!(later.next_deadline(), Some(2_000_099));
+    }
+    #[test]
+    fn shared_rate_wait_does_not_wake_at_an_expired_earliest_deadline() {
+        let mut idr = IdrCoalescer::new(500_000).unwrap();
+        assert_eq!(idr.take_for_join(0, 2_000_000).unwrap(), Some(2_000_000));
+        let mut early = sender(100);
+        let mut later = sender(2_000_000);
+        queue(&mut idr, &mut early, 1);
+        queue(&mut idr, &mut later, 2);
+        assert_eq!(idr.next_deadline(), Some(101));
+        assert_eq!(idr.next_shared_deadline(), Some(500_000));
+        for now in [101, 200_000, 499_999] {
+            assert_eq!(idr.take_shared(now).unwrap(), None);
+            assert_eq!(idr.next_shared_deadline(), Some(500_000));
+        }
+        assert_eq!(idr.take_shared(500_000).unwrap(), Some(2_000_002));
+        assert_eq!(later.next_deadline(), Some(2_000_002));
+        assert_eq!(
+            replace(&mut early, 500_000),
+            Err(SendError::Delivery(DeliveryError::RecoveryExpired))
+        );
+        assert_eq!(replace(&mut later, 500_000), Ok(()));
+    }
+    #[test]
+    fn replacing_private_cohort_retains_previously_accepted_shared_demand() {
+        let mut idr = IdrCoalescer::new(500_000).unwrap();
+        idr.take_for_join(0, 2_000_000).unwrap();
+        let mut early = sender(100);
+        let mut later = sender(2_000_000);
+        let mut newest = sender(100);
+        queue(&mut idr, &mut early, 1);
+        queue(&mut idr, &mut later, 2);
+        queue(&mut idr, &mut newest, 101);
+        // The new private cohort has its own unchanged earliest deadline. It
+        // cannot erase the longer request already accepted by this same source.
+        assert_eq!(idr.next_deadline(), Some(201));
+        assert_eq!(idr.next_shared_deadline(), Some(500_000));
+        assert_eq!(idr.take_shared(201).unwrap(), None);
+        assert_eq!(idr.take_shared(500_000).unwrap(), Some(2_000_002));
+        assert_eq!(later.next_deadline(), Some(2_000_002));
+        assert_eq!(
+            replace(&mut newest, 500_000),
+            Err(SendError::Delivery(DeliveryError::RecoveryExpired))
+        );
+        assert_eq!(replace(&mut later, 500_000), Ok(()));
+    }
+    #[test]
+    fn wholly_expired_shared_demand_is_retired_without_refilling_credit() {
+        let mut idr = IdrCoalescer::new(500_000).unwrap();
+        idr.take_for_join(0, 2_000_000).unwrap();
+        let mut early = sender(10);
+        let mut later = sender(20);
+        queue(&mut idr, &mut early, 1);
+        queue(&mut idr, &mut later, 2);
+        assert_eq!(idr.next_shared_deadline(), Some(22));
+        assert_eq!(idr.take_shared(21).unwrap(), None);
+        assert_eq!(idr.take_shared(22), Err(DeliveryError::RecoveryExpired));
+        assert_eq!(idr.next_deadline(), None);
+        assert_eq!(idr.next_shared_deadline(), None);
+        for cache in [&mut early, &mut later] {
+            assert_eq!(
+                replace(cache, 22),
+                Err(SendError::Delivery(DeliveryError::RecoveryExpired))
+            );
+        }
+        let mut fresh = sender(2_000_000);
+        queue(&mut idr, &mut fresh, 100);
+        assert_eq!(idr.take_shared(499_999).unwrap(), None);
+        assert_eq!(idr.take_shared(500_000).unwrap(), Some(2_000_100));
+    }
+    #[test]
+    fn shared_private_and_join_admission_charge_the_same_encoder_allowance() {
+        let mut idr = IdrCoalescer::new(500_000).unwrap();
+        queue(&mut idr, &mut sender(2_000_000), 0);
+        assert_eq!(idr.take_shared(0).unwrap(), Some(2_000_000));
+        assert_eq!(idr.take_for_join(499_999, 2_000_000).unwrap(), None);
+        assert_eq!(
+            idr.take_for_join(500_000, 2_000_000).unwrap(),
+            Some(2_000_000)
+        );
+        queue(&mut idr, &mut sender(2_000_000), 500_001);
+        assert_eq!(idr.take(999_999).unwrap(), None);
+        assert_eq!(idr.take(1_000_000).unwrap(), Some(2_500_001));
+        queue(&mut idr, &mut sender(2_000_000), 1_000_001);
+        assert_eq!(idr.take_shared(1_499_999).unwrap(), None);
+        assert_eq!(idr.take_shared(1_500_000).unwrap(), Some(3_000_001));
+    }
+    #[test]
+    fn cancelling_shared_demand_does_not_refund_rate_or_change_sender_expiry() {
+        let mut idr = IdrCoalescer::new(500_000).unwrap();
+        queue(&mut idr, &mut sender(2_000_000), 0);
+        idr.take_shared(0).unwrap();
+        let mut early = sender(100);
+        let mut later = sender(2_000_000);
+        queue(&mut idr, &mut early, 1);
+        queue(&mut idr, &mut later, 2);
+        idr.cancel_pending();
+        assert_eq!(idr.next_deadline(), None);
+        assert_eq!(idr.next_shared_deadline(), None);
+        assert_eq!(idr.take_shared(101).unwrap(), None);
+        assert_eq!(later.next_deadline(), Some(2_000_002));
+        assert_eq!(
+            replace(&mut early, 101),
+            Err(SendError::Delivery(DeliveryError::RecoveryExpired))
+        );
+        queue(&mut idr, &mut sender(2_000_000), 101);
+        assert_eq!(idr.take_shared(499_999).unwrap(), None);
+        assert_eq!(idr.take_shared(500_000).unwrap(), Some(2_000_101));
+    }
+    #[test]
+    fn foreign_closed_and_replaced_demands_cannot_extend_shared_scheduling() {
+        let mut idr = IdrCoalescer::new(500_000).unwrap();
+        queue(&mut idr, &mut sender(100), 0);
+        let mut foreign = sender(2_000_000);
+        let mut unrelated = sender(2_000_000);
+        assert_eq!(
+            idr.queue(&unrelated, demand(&mut foreign, 1), 1),
+            Err(DeliveryError::StaleGeneration)
+        );
+        let closed_proof = demand(&mut unrelated, 2);
+        unrelated.close();
+        assert_eq!(
+            idr.queue(&unrelated, closed_proof, 2),
+            Err(DeliveryError::StaleGeneration)
+        );
+        let mut replaced = sender(2_000_000);
+        let old_proof = demand(&mut replaced, 3);
+        replace(&mut replaced, 4).unwrap();
+        assert_eq!(
+            idr.queue(&replaced, old_proof, 4),
+            Err(DeliveryError::StaleGeneration)
+        );
+        let mut expired = sender(1);
+        let expired_proof = demand(&mut expired, 5);
+        assert_eq!(
+            idr.queue(&expired, expired_proof, 6),
+            Err(DeliveryError::RecoveryExpired)
+        );
+        assert_eq!(idr.take_shared(100), Err(DeliveryError::RecoveryExpired));
+        assert_eq!(idr.next_shared_deadline(), None);
+    }
+    #[test]
+    fn dropped_unqueued_demand_and_reused_sender_numbers_cannot_extend_shared_work() {
+        let mut idr = IdrCoalescer::new(500_000).unwrap();
+        queue(&mut idr, &mut sender(100), 0);
+        let mut unqueued = sender(2_000_000);
+        drop(demand(&mut unqueued, 1));
+        let mut original = sender(2_000_000);
+        let orphan = demand(&mut original, 2);
+        drop(original);
+        let mut reused_numbers = sender(2_000_000);
+        // Even a sender with the same generations, request and exact deadline
+        // owns a different cache. Dropping either proof never adds source work.
+        drop(demand(&mut reused_numbers, 2));
+        assert_eq!(
+            idr.queue(&reused_numbers, orphan, 2),
+            Err(DeliveryError::StaleGeneration)
+        );
+        assert_eq!(idr.take_shared(100), Err(DeliveryError::RecoveryExpired));
+        assert_eq!(idr.take_shared(2_000_002).unwrap(), None);
+        assert_eq!(
+            replace(&mut unqueued, 2_000_002),
+            Err(SendError::Delivery(DeliveryError::RecoveryExpired))
+        );
+    }
+    #[test]
+    fn shared_clock_regression_and_explicit_close_are_terminal() {
+        let mut idr = IdrCoalescer::new(500_000).unwrap();
+        queue(&mut idr, &mut sender(100), 10);
+        queue(&mut idr, &mut sender(2_000_000), 20);
+        assert_eq!(idr.take_shared(19), Err(DeliveryError::ClockRegression));
+        assert_eq!(idr.next_deadline(), None);
+        assert_eq!(idr.next_shared_deadline(), None);
+        assert_eq!(idr.take_shared(20), Err(DeliveryError::WrongState));
+        let mut idr = IdrCoalescer::new(500_000).unwrap();
+        queue(&mut idr, &mut sender(2_000_000), 0);
+        idr.close();
+        assert_eq!(idr.next_shared_deadline(), None);
+        assert_eq!(idr.take_shared(0), Err(DeliveryError::WrongState));
+    }
+    #[test]
+    fn shared_rate_deadline_overflow_closes_without_saturating_credit() {
+        let mut idr = IdrCoalescer::new(500_000).unwrap();
+        let mut cache = sender(1);
+        queue(&mut idr, &mut cache, u64::MAX - 2);
+        assert_eq!(
+            idr.take_shared(u64::MAX - 2),
+            Err(DeliveryError::ClockOverflow)
+        );
+        assert_eq!(idr.next_shared_deadline(), None);
+        assert_eq!(
+            idr.take_shared(u64::MAX - 1),
+            Err(DeliveryError::WrongState)
+        );
+        assert_eq!(
+            replace(&mut cache, u64::MAX - 1),
+            Err(SendError::Delivery(DeliveryError::RecoveryExpired))
         );
     }
 }

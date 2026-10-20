@@ -34,30 +34,49 @@ impl SourceRecovery {
     }
     /// Charge only the original source scheduler. Newcomer expiry cannot abort
     /// a capture still needed by healthy viewers: it limits final join admission,
-    /// not that capture's native timeout. A loss recovery retains its original
-    /// cap; its already-admitted IDR also satisfies coincident waiting joins.
+    /// not that capture's native timeout. Private loss recovery retains its
+    /// original cap. For shared capture, each subscription enforces its own
+    /// original recovery deadline without shortening another viewer's worker.
+    /// An already-admitted IDR also satisfies coincident waiting joins.
     pub(super) fn admit_capture(
         &mut self,
         now: u64,
         join_until: Option<u64>,
+        shared: bool,
     ) -> Result<(bool, Option<u64>), DeliveryError> {
         let mut queue = self.0.lock().map_err(|_| DeliveryError::WrongState)?;
-        let recovery_until = match queue.scheduler.take(now) {
+        let recovery = if shared {
+            queue.scheduler.take_shared(now)
+        } else {
+            queue.scheduler.take(now)
+        };
+        let recovery_until = match recovery {
             Ok(until) => until,
             Err(DeliveryError::RecoveryExpired) => None,
             Err(error) => return Err(error),
         };
+        // A surviving shared demand can only be waiting on the same encoder
+        // rate credit. A join cannot bypass it, and must not pass through the
+        // private cohort path which may retire an earlier expired deadline.
+        let shared_waiting = shared && queue.scheduler.next_shared_deadline().is_some();
         let join_idr = if recovery_until.is_none()
+            && !shared_waiting
             && let Some(until) = join_until.filter(|&until| now < until)
         {
             queue.scheduler.take_for_join(now, until)?.is_some()
         } else {
             false
         };
-        Ok((recovery_until.is_some() || join_idr, recovery_until))
+        Ok((
+            recovery_until.is_some() || join_idr,
+            if shared { None } else { recovery_until },
+        ))
     }
     pub(super) fn next_deadline(&self) -> Option<u64> {
         self.0.lock().ok()?.scheduler.next_deadline()
+    }
+    pub(super) fn next_shared_deadline(&self) -> Option<u64> {
+        self.0.lock().ok()?.scheduler.next_shared_deadline()
     }
     pub(super) fn retire(&mut self, source: &Arc<()>) {
         match self.0.lock() {

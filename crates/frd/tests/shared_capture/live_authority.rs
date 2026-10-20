@@ -187,6 +187,7 @@ fn unanswered_challenges_and_revocation_do_not_keep_a_silent_capture_alive() {
             let control = observation(&rt, id);
             let mut source = delayed_source(&control, "silent").await;
             let original_until = near_expiry(&clock, &control).await;
+            let before = host_now(&clock).unwrap();
             let result = during_pending(&clock, source.capture_if_changed(&control, true), || {
                 if revoke {
                     control.revoke();
@@ -198,11 +199,22 @@ fn unanswered_challenges_and_revocation_do_not_keep_a_silent_capture_alive() {
             if revoke {
                 assert_eq!(result.unwrap_err(), Error::Worker(WorkerError::Cancelled));
             } else {
-                assert_eq!(
+                // Expiry may fall between the authority callback and the
+                // worker's second clock sample. Both paths fence the same bound.
+                assert!(matches!(
                     result.unwrap_err(),
                     Error::Authority(AuthorityError::ObservationExpired)
+                        | Error::Worker(WorkerError::Deadline)
+                ));
+                assert_eq!(
+                    control.check().unwrap_err(),
+                    Error::Authority(AuthorityError::ObservationExpired)
                 );
-                assert!(host_now(&clock).unwrap() >= original_until);
+                let finished = host_now(&clock).unwrap();
+                assert!(finished >= original_until);
+                // Falling back to the unrelated two-second work ceiling is not
+                // timely authority expiry, even though it also kills the child.
+                assert!(finished.as_micros() < before.as_micros() + 2_000_000);
                 assert!(control.renew(501).is_err());
             }
             assert_eq!(source.worker_mut().state(), State::Poisoned);

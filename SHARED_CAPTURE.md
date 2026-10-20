@@ -92,11 +92,13 @@ eight-recipient turn bound is not a global subscription admission limit.
 ## Capture work and renewable authority
 
 An already-running capture retains one immutable two-second work ceiling across
-its initial request and every subsequent `Poll`. An existing recovery attempt
-can shorten that ceiling; neither a poll reply nor an authority renewal moves
-it. Cursor reads retain a one-second ceiling and selected-monitor checks retain
-a two-second ceiling. Startup discovery and configuration keep their existing
-fixed admission deadlines.
+its initial request and every subsequent `Poll`. Private capture also retains
+its original recovery-attempt cap. Reserved shared capture keeps the source's
+work ceiling while each recipient enforces its own recovery deadline; one
+subscriber cannot shorten another viewer's worker lifetime. Neither a poll reply
+nor an authority renewal moves the work ceiling. Cursor reads retain a one-second
+ceiling and selected-monitor checks retain a two-second ceiling. Startup
+discovery and configuration keep their existing fixed admission deadlines.
 
 While those operations wait for IPC, the worker rechecks the original
 `ObservationControl` and its shared tailnet lease before and after every native
@@ -128,6 +130,48 @@ are deliberately opaque and their observation responses are explicit fixtures.
 The new Rust tests await runtime execution at this checkpoint; source review and
 pinned formatting are separate evidence. This is not HEVC, live-tailnet or a
 longer production-native capture-stall qualification.
+
+## Recovery deadlines belong to each viewer
+
+The supported `Subscription::request_recovery` and `PreparedSharedCapture`
+composition uses the original shared encoder and rate allowance. Its queued IDR
+requests carry each failed sender's existing deadline. Once native work starts,
+an expiring sender cannot kill the independent shared capture child: the same
+source may still produce a useful IDR for healthy or later-expiring viewers.
+Private `capture` and `capture_if_changed` retain their existing recovery cap.
+Shared capture still ends on the source's actual authority failure, revocation,
+original two-second work expiry, invalid response or abandoned operation.
+
+`IdrCoalescer::take_shared` retains the latest deadline from an actually accepted
+request as bounded scheduling evidence, alongside the original private cohort
+bound. An earlier expired request cannot erase another viewer's live request.
+The queue still has one fixed metadata slot and one unchanged encoder-rate
+allowance; coalescing, cancellation, private/shared calls and joins cannot refill
+that allowance. No receiver, sender or input deadline is moved. A shared capture
+loop should use `CaptureSource::next_shared_recovery_deadline` when otherwise
+idle so an earlier expired cohort does not cause repeated immediate wakeups.
+
+Every subscriber still checks its own original recovery deadline before channel
+replacement and final IDR admission. Expired subscribers remain fenced; the new
+output cannot restore their old input tickets or revive an ended recovery.
+Healthy subscribers keep their bindings, decoder generation and original source.
+Response capacity is reserved before native work and stays charged through the
+same output ownership path.
+
+This fixes the lower-level shared-capture API composition. The canonical shared
+publisher already routes recovery through its independently bounded join path;
+this change does not claim a newly implemented multi-viewer CLI or live-tailnet
+qualification. Deterministic coalescer regressions use actual sender owners;
+supervised-child integration tests use deliberately opaque payloads.
+
+All 487 `fr-media` all-feature tests pass on the exact pinned nightly, including
+eleven new shared scheduling regressions; strict all-target/all-feature Clippy
+also passes. Three new `shared_capture::recovery_isolation` tests cover an
+in-flight viewer expiry with healthy delivery, the retained private timeout,
+and source authority expiry/revocation with independent child cleanup. Their
+native execution remains pending: compiling unchanged pinned Asupersync exceeds
+this environment's 8 GiB memory limit. Formatting and source review do not replace
+that pending runtime evidence.
 
 ## Executed verification
 

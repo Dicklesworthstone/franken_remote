@@ -1,5 +1,7 @@
 //! Reserve the actual parent-side IPC output capacity before issuing capture.
-use super::{CaptureSource, Error, ObservationControl, SharedCaptureUpdate, Subscription};
+use super::{
+    CaptureScope, CaptureSource, Error, ObservationControl, SharedCaptureUpdate, Subscription,
+};
 use crate::{media_egress::Egress, worker};
 use fr_media::{
     delivery::{SharedFramePool, SharedFrameReservation},
@@ -92,8 +94,10 @@ impl PreparedSharedCapture<'_> {
         self.reservation.charged_bytes()
     }
     /// Uses the existing source's conditional capture, recovery scheduler,
-    /// selected-display checks, authority and fixed native deadline. No parallel
-    /// encoder, clock, reference identity, or recovery rate allowance is created.
+    /// selected-display checks, authority and fixed native deadline. Each viewer
+    /// retains its own recovery deadline; one expiring viewer cannot shorten the
+    /// shared worker's lifetime. No parallel encoder, clock, reference identity
+    /// or recovery rate allowance is created.
     pub async fn capture_if_changed(self, force_idr: bool) -> Result<SharedCaptureUpdate, Error> {
         self.capture(force_idr, None).await
     }
@@ -104,7 +108,8 @@ impl PreparedSharedCapture<'_> {
     /// remains reserved BEFORE the rate allowance is consumed or IPC is issued.
     /// The join owner must reject expired joins after completion; its deadline
     /// cannot shorten a capture still needed by healthy viewers. Native work
-    /// retains its original fixed source/recovery deadline, never a renewed one.
+    /// retains its original fixed source deadline, never a renewed one. A failed
+    /// subscriber's own recovery deadline remains enforced at final admission.
     pub async fn capture_for_join(self, until_micros: u64) -> Result<SharedCaptureUpdate, Error> {
         self.capture(false, Some(until_micros)).await
     }
@@ -119,8 +124,10 @@ impl PreparedSharedCapture<'_> {
                 self.control,
                 force_idr,
                 true,
-                Some(self.reservation.maximum_capacity()),
-                join_until,
+                CaptureScope::Shared {
+                    maximum_capacity: self.reservation.maximum_capacity(),
+                    join_until,
+                },
             )
             .await?;
         let result = update.share_reserved(self.reservation);
