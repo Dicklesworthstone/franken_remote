@@ -9,6 +9,8 @@ pub(in crate::session_startup) mod files;
 mod interactive;
 mod native_turn;
 mod recovery;
+mod repair;
+mod repair_send;
 use super::{
     ViewerSession,
     controlled::{ControlledViewer, ViewerControl},
@@ -30,6 +32,7 @@ use fr_media::{
 };
 use fr_transport::quic::{self, Disposition, Route};
 pub use interactive::{InteractiveState, ViewingControl};
+use repair::Repair;
 use std::{
     future::{Future, poll_fn},
     pin::{Pin, pin},
@@ -921,56 +924,6 @@ impl<F> Drop for Guarded<F> {
     }
 }
 
-// Repair wire grammar admits at most 64 ranges, irrespective of AU size. One
-// fixed pending buffer avoids both retained-record growth and allocation churn.
-struct Repair {
-    bytes: [u8; 36 + 64 * 8],
-    len: usize,
-    until: u64,
-    frame: u64,
-}
-impl Default for Repair {
-    fn default() -> Self {
-        Self {
-            bytes: [0; 36 + 64 * 8],
-            len: 0,
-            until: 0,
-            frame: 0,
-        }
-    }
-}
-impl Repair {
-    fn clear(&mut self) {
-        self.bytes.fill(0);
-        self.len = 0;
-        self.until = 0;
-        self.frame = 0;
-    }
-    fn prepare(&mut self, receiver: &mut ReceivePipeline, current: u64) -> Result<(), Error> {
-        receiver.tick(current).map_err(Error::Delivery)?;
-        if self.len != 0 && !receiver.repair_needed(self.frame) {
-            self.clear();
-        }
-        if self.len != 0 && current >= self.until {
-            return Err(Error::Closed);
-        }
-        if self.len == 0
-            && let Some(offer) = receiver
-                .repair_offer(current, &mut self.bytes)
-                .map_err(Error::Delivery)?
-        {
-            self.len = offer.bytes;
-            self.frame = offer.frame;
-            // Repair is useful until the ORIGINAL missing reference expires.
-            // An unrelated 80 ms send timeout killed otherwise recoverable
-            // desktops while the admitted reference still had time to arrive.
-            // Keep this exact offer through backpressure; neither a poll nor
-            // transport admission creates a new lifetime or another attempt.
-            self.until = offer.reference_deadline_us;
-        }
-        Ok(())
-    }
-}
 /// A host record no lane of this session claimed, named by its FRD0 kind.
 fn unclaimed(bytes: &[u8]) -> Error {
     Error::UnclaimedRecord(
@@ -1008,31 +961,22 @@ async fn network(
         lane.viewer(viewer);
     }
     recovery::prepare(peer, recovery.as_deref_mut(), receiver, repair, cx)?;
+    if repair_send::transmit(peer, receiver, repair, cx)? {
+        statistics.repair_requests = statistics.repair_requests.saturating_add(1);
+    }
+    // The prepared repair may have expired during admission. Tick the ORIGINAL
+    // receiver and suspend a control grant before any further network/native
+    // work; negotiated recovery keeps the connection and original budget.
+    let recovering = recovery::service(peer, recovery.as_deref_mut(), receiver, repair, cx)?;
+    if recovering && let Peer::Control(viewer) = peer {
+        viewer.enter_recovery().map_err(Error::Control)?;
+    }
     let (session, media) = peer.parts()?;
     let routes = media
         .viewer_routes(&session.transport)
         .map_err(Error::Routes)?;
     if let Some(cursor) = cursor.as_deref_mut() {
         cursor.refresh(media, &session.transport)?;
-    }
-    if repair.len != 0 {
-        let route = Route::Stream(
-            media
-                .repair_stream(&session.transport)
-                .map_err(Error::Routes)?,
-        );
-        match session
-            .transport
-            .send(cx, route, &repair.bytes[..repair.len], repair.until, || {
-                now(cx).is_ok_and(|n| n < repair.until) && receiver.repair_needed(repair.frame)
-            }) {
-            Ok(()) => {
-                repair.clear();
-                statistics.repair_requests = statistics.repair_requests.saturating_add(1);
-            }
-            Err(quic::Error::Backpressure) => {}
-            Err(e) => return Err(Error::Transport(e)),
-        }
     }
     if let Some(audio) = audio.as_deref_mut() {
         // Bounded local output progress and its one acknowledgement/stop.
