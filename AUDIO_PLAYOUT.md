@@ -49,7 +49,7 @@ After the first output, a queued packet on the exact next sequence/sample
 position may start decoding before its device slot is due. The process-backed
 Opus decoder then uses its existing one-job/one-result mailbox while the
 previous sound plays. The result is collected only at the original device
-slot; there is no extra PCM FIFO or output-clock adjustment. Startup keeps its
+slot; decode-ahead adds no PCM FIFO and never retimes that slot. Startup keeps its
 full reorder window, and missing packets cannot cause early concealment.
 
 The same permission checks, original arrival expiry and missed-slot refusal
@@ -59,7 +59,47 @@ apply at submission, not predecode. `audio_predecode` covers delayed-codec
 scheduling and those fences; `opus_predecode` additionally runs the actual
 Opus child and compares its output with separately driven native decode using
 synthetic device clocks. These are not physical-device or live-network
-measurements, nor drift correction or recovery from a terminal audio gap.
+measurements, nor qualification of clock correction or terminal-gap recovery.
+
+## Bounded source/device clock correction
+
+The playout owner now corrects slow source/device clock skew in the existing
+submission path. Uniquely admitted source sample timestamps are compared with
+the scheduled source/device mapping. One earliest-arrival phase sample per
+second suppresses positive network/inbox jitter; a 2 ms dead band, 10-second
+proportional settling interval, 100 ppm/second slew bound and absolute 1000 ppm
+cap prevent sudden retiming. Reordered/duplicate packets are not extra samples.
+
+Fractional sample credit is spent only on successful output. A pending native
+decode retains its exact planned span; polling never moves that slot. Before
+output, the existing PCM buffer is linearly interpolated in place, independently
+per channel, preserving endpoints and original source identity. This small
+converter is not band-limited; listening/fidelity qualification remains open.
+Uncorrected frames are bit-exact. No codec, wire field, PCM FIFO or allocation
+is added. The PulseAudio boundary independently validates the bounded corrected
+length and exact contiguous output span. Its fixed initial lead reserves rounding
+space INSIDE the existing 40 ms device-queue ceiling, never beyond it.
+
+Packet expiry, the finite concealment horizon, permission checks, missed slots,
+clock regression and generation retirement remain unchanged. Stop/reconfigure
+clears the estimate and fractional credit; correction cannot restart a device,
+extend a deadline, hold video, or enable an audio direction.
+
+Executed on pinned nightly-2026-08-31: 754 media/client tests and eight checks of
+the actual native audio library pass; strict scoped all-target Clippy passes.
+The new deterministic playout cases sustain six simulated minutes with 600 ppm
+source-fast or device-fast clocks at 10/20 ms, with zero unintended concealment
+and at most three queued packets. Additional 180-second cases combine 500 ppm
+skew, variable arrival delay, duplicates and isolated injected losses. Independent
+out-of-place interpolation checks cover both channels and all admitted durations.
+Disabling correction or corrupting in-place traversal fails the regressions.
+
+These are production-code component checks with injected clocks/codec output,
+not real device skew, audible fidelity, actual Opus/network or current-workspace
+qualification. The external native manifest compiles the actual library target
+and PulseAudio/Opus modules without CLI/daemon dev dependencies. Changed source
+baselines match GitHub; supporting sources are the checksum-retained c45b547
+snapshot plus published audio predecode. No broad playback bead is closed.
 
 ## Native wire-to-Opus receive boundary
 
@@ -130,7 +170,7 @@ that full development-dependency build was not executed here.
 These are source/policy and real-codec composition checks, not full-workspace,
 physical-device, audible-latency, live-transport or hardware qualification.
 Per-OS capture/playback, supervised audio-worker/session integration, device queue
-retirement, drift correction and cross-host A/V alignment remain open under
+retirement, physical clock-drift qualification and cross-host A/V alignment remain open under
 fr-p2-audio-playback-lel and plan 15.4. See [native Opus](NATIVE_OPUS.md).
 
 ## Native Linux output integration

@@ -26,6 +26,7 @@ use fr_core::audio::{
 use fr_media::audio::{AudioAccessUnit, AudioMediaError, AudioPcmFrame};
 
 pub mod decoder;
+mod drift;
 use decoder::PolledDecoder;
 
 const MAX_AGE_US: u64 = MAX_JITTER_CEILING_MS as u64 * 1000;
@@ -86,6 +87,7 @@ struct Arrival {
 
 #[derive(Clone, Copy)]
 struct Pending {
+    span: drift::Span,
     sequence: u64,
     at: u64,
     concealed: bool,
@@ -102,6 +104,7 @@ pub struct AudioPlayout<D: PolledDecoder> {
     config: AudioStreamConfig,
     floor: AudioGeneration,
     jitter: AudioJitterBuffer,
+    drift: drift::Drift,
     arrivals: [Option<Arrival>; JITTER_BUFFER_CAPACITY],
     volume: AudioVolumeControl,
     last: PlayoutClock,
@@ -125,6 +128,7 @@ impl<D: PolledDecoder> AudioPlayout<D> {
             config,
             floor: config.generation(),
             jitter,
+            drift: drift::Drift::default(),
             arrivals: [None; JITTER_BUFFER_CAPACITY],
             volume: AudioVolumeControl::new(),
             last: clock,
@@ -169,6 +173,11 @@ impl<D: PolledDecoder> AudioPlayout<D> {
     pub const fn queued_packets(&self) -> usize {
         self.jitter.queued_packet_count()
     }
+    /// Current bounded local sample-rate correction, in parts per million.
+    /// Positive stretches output; this is scheduling metadata, not sound evidence.
+    pub fn clock_correction_ppm(&self) -> i32 {
+        self.drift.ppm()
+    }
     pub fn volume_mut(&mut self) -> &mut AudioVolumeControl {
         &mut self.volume
     }
@@ -181,6 +190,7 @@ impl<D: PolledDecoder> AudioPlayout<D> {
             self.error = Some(error);
         }
         self.jitter.stop();
+        self.drift = drift::Drift::default();
         self.arrivals.fill(None);
         self.next_output = None;
         self.progress_until = None;
@@ -296,6 +306,12 @@ impl<D: PolledDecoder> AudioPlayout<D> {
             self.next_output = Some(next);
             self.progress_until = Some(until);
         }
+        self.drift.observe(
+            packet.timestamp_samples(),
+            clock.output_samples,
+            clock.now.0,
+            u64::from(self.config.jitter_target_ms()) * u64::from(OPUS_SAMPLE_RATE / 1000),
+        );
         Ok(true)
     }
     fn check(&mut self, clock: PlayoutClock) -> Result<(), PlayoutError> {
@@ -362,7 +378,11 @@ impl<D: PolledDecoder> AudioPlayout<D> {
                 == Some(self.config.expected_samples_per_frame())
             && pcm.timestamp_samples() == at
     }
-    fn begin_packet(&mut self, packet: &AudioAccessUnit) -> Result<Pending, PlayoutError> {
+    fn begin_packet(
+        &mut self,
+        packet: &AudioAccessUnit,
+        span: drift::Span,
+    ) -> Result<Pending, PlayoutError> {
         let entry = self
             .arrivals
             .iter_mut()
@@ -375,13 +395,17 @@ impl<D: PolledDecoder> AudioPlayout<D> {
             .submit_packet(packet)
             .map_err(PlayoutError::Codec)?;
         Ok(Pending {
+            span,
             sequence: packet.sequence(),
             at: packet.timestamp_samples(),
             concealed: false,
             until,
         })
     }
-    fn begin_decode(&mut self) -> Result<Option<(Pending, Option<AudioPcmFrame>)>, PlayoutError> {
+    fn begin_decode(
+        &mut self,
+        span: drift::Span,
+    ) -> Result<Option<(Pending, Option<AudioPcmFrame>)>, PlayoutError> {
         let missing_at = self.jitter.next_sample_timestamp();
         match self
             .jitter
@@ -389,7 +413,9 @@ impl<D: PolledDecoder> AudioPlayout<D> {
             .map_err(PlayoutError::Jitter)?
         {
             JitterDrainResult::Underrun => Ok(None),
-            JitterDrainResult::Packet(packet) => Ok(Some((self.begin_packet(&packet)?, None))),
+            JitterDrainResult::Packet(packet) => {
+                Ok(Some((self.begin_packet(&packet, span)?, None)))
+            }
             JitterDrainResult::Plc {
                 missing_sequence,
                 duration_samples,
@@ -403,6 +429,7 @@ impl<D: PolledDecoder> AudioPlayout<D> {
                     .map_err(PlayoutError::Codec)?;
                 Ok(Some((
                     Pending {
+                        span,
                         sequence: missing_sequence,
                         at,
                         concealed: true,
@@ -433,12 +460,19 @@ impl<D: PolledDecoder> AudioPlayout<D> {
                 && self.pending.is_none()
                 && let Some(packet) = self.jitter.predecode_packet()
             {
-                self.pending = Some(self.begin_packet(&packet)?);
+                self.pending = Some(self.begin_packet(
+                    &packet,
+                    self.drift.plan(self.config.expected_samples_per_frame()),
+                )?);
             }
             return Ok(PlayoutResult::Waiting);
         }
+        let span = self.pending.map_or_else(
+            || self.drift.plan(self.config.expected_samples_per_frame()),
+            |p| p.span,
+        );
         let next = due
-            .checked_add(u64::from(self.config.expected_samples_per_frame()))
+            .checked_add(u64::from(span.samples))
             .ok_or(PlayoutError::ClockOverflow)?;
         if clock.output_samples >= next {
             return Err(PlayoutError::MissedDeviceSlot);
@@ -451,7 +485,7 @@ impl<D: PolledDecoder> AudioPlayout<D> {
         // a packet/PLC, or refresh work merely because the worker was slow.
         let (pending, immediate) = if let Some(pending) = self.pending.take() {
             (pending, None)
-        } else if let Some(started) = self.begin_decode()? {
+        } else if let Some(started) = self.begin_decode(span)? {
             started
         } else {
             return Ok(PlayoutResult::Waiting);
@@ -471,6 +505,7 @@ impl<D: PolledDecoder> AudioPlayout<D> {
         };
         let mut pcm = Scrub(pcm);
         let Pending {
+            span,
             sequence,
             at,
             concealed,
@@ -495,6 +530,12 @@ impl<D: PolledDecoder> AudioPlayout<D> {
             .checked_add(u64::from(self.config.frame_duration_ms()) * 1000)
             .and_then(|end| end.checked_add(MAX_AGE_US))
             .ok_or(PlayoutError::ClockOverflow)?;
+        let source_next = at
+            .checked_add(u64::from(self.config.expected_samples_per_frame()))
+            .ok_or(PlayoutError::ClockOverflow)?;
+        pcm.0
+            .resample_for_clock(span.samples as usize)
+            .map_err(PlayoutError::Codec)?;
         self.volume.apply_to_pcm(&mut pcm.0);
         let receipt = AudioSubmission {
             direction: self.config.direction(),
@@ -508,6 +549,7 @@ impl<D: PolledDecoder> AudioPlayout<D> {
         };
         submit(&pcm.0, receipt)?;
         self.next_output = Some(next);
+        self.drift.submitted(span, source_next, next);
         if !concealed {
             self.progress_until = Some(progress);
         }

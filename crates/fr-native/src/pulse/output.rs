@@ -32,21 +32,7 @@ impl PlaybackDevice {
         checkpoint: &mut impl FnMut() -> Result<ClientInstant, Error>,
     ) -> Result<Submission, Error> {
         let clock = self.clock_inner(checkpoint()?)?;
-        let samples = u64::from(self.config.expected_samples_per_frame());
-        if audio.direction != AudioDirection::Downlink
-            || audio.generation != self.config.generation()
-            || pcm.generation() != audio.generation
-            || pcm.channels() != self.config.channels()
-            || pcm.sample_rate() != 48_000
-            || u64::try_from(pcm.samples_per_channel()).ok() != Some(samples)
-            || pcm.timestamp_samples() != audio.source_samples
-            || audio.output_samples.checked_add(samples) != Some(audio.output_valid_before)
-            || self
-                .next
-                .is_some_and(|next| next != (audio.sequence, audio.output_samples))
-        {
-            return Err(Error::Metadata);
-        }
+        let samples = validate_pcm(self.config, pcm, audio, self.next)?;
         let next_sequence = audio.sequence.checked_add(1).ok_or(Error::Metadata)?;
         let stream = self.stream()?;
         // SAFETY: copy the public timing value while the nonthreaded loop is idle.
@@ -61,12 +47,10 @@ impl PlaybackDevice {
         // never shift already submitted audio or assume the requested target won.
         let lead = match self.lead_samples {
             Some(lead) => lead,
-            None => timing
-                .configured_sink_usec
-                .checked_mul(48)
-                .and_then(|n| n.div_ceil(1000).checked_add(5 * 48))
-                .filter(|&n| n <= LEAD_SAMPLES)
-                .ok_or(Error::BufferLimit)?,
+            None => output_lead(
+                timing.configured_sink_usec,
+                self.config.expected_samples_per_frame(),
+            )?,
         };
         let target = audio.output_samples.checked_add(lead).ok_or(Error::Clock)?;
         let end = target.checked_add(samples).ok_or(Error::Clock)?;
@@ -266,4 +250,49 @@ pub(super) fn validate_native_extent(
         return Err(Error::Backpressure);
     }
     Ok(())
+}
+
+fn validate_pcm(
+    config: fr_core::audio::AudioStreamConfig,
+    pcm: &AudioPcmFrame,
+    audio: AudioSubmission,
+    next: Option<(u64, u64)>,
+) -> Result<u64, Error> {
+    let samples = u64::try_from(pcm.samples_per_channel()).map_err(|_| Error::Metadata)?;
+    if audio.direction != AudioDirection::Downlink
+        || audio.generation != config.generation()
+        || pcm.generation() != audio.generation
+        || pcm.channels() != config.channels()
+        || pcm.sample_rate() != 48_000
+        || !fr_media::audio::clock::valid_sample_count(
+            config.expected_samples_per_frame() as usize,
+            pcm.samples_per_channel(),
+        )
+        || pcm.timestamp_samples() != audio.source_samples
+        || audio.output_samples.checked_add(samples) != Some(audio.output_valid_before)
+        || next.is_some_and(|next| next != (audio.sequence, audio.output_samples))
+    {
+        return Err(Error::Metadata);
+    }
+    Ok(samples)
+}
+
+#[cfg(test)]
+#[path = "output/clock_tests.rs"]
+mod clock_tests;
+
+/// Keep the original server queue ceiling even when a frame gains a rounding
+/// sample. Choose this once, before the first write; later correction cannot
+/// shift the established output mapping or enlarge the native backlog.
+fn output_lead(configured_us: u64, nominal: u32) -> Result<u64, Error> {
+    let requested = configured_us
+        .checked_mul(48)
+        .and_then(|n| n.div_ceil(1000).checked_add(5 * 48))
+        .filter(|&n| n <= LEAD_SAMPLES)
+        .ok_or(Error::BufferLimit)?;
+    let largest = u64::from(nominal) + u64::from(nominal.div_ceil(1000));
+    let available = (u64::from(MAX_DEVICE_BUFFER_MS) * 48)
+        .checked_sub(largest)
+        .ok_or(Error::BufferLimit)?;
+    Ok(requested.min(available))
 }

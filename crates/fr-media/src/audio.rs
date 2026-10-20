@@ -24,6 +24,8 @@
 //!   `testing` only): tagged placeholder bytes, never Opus and never evidence of
 //!   codec support. Production callers supply a real codec (fr-native's libopus).
 
+pub mod clock;
+
 use core::fmt;
 use fr_core::audio::{
     AudioChannels, AudioConfigError, AudioDirection, AudioGeneration, AudioStreamConfig,
