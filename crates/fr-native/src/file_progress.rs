@@ -1,7 +1,10 @@
-//! Optional, non-focus-taking transfer progress on the ORIGINAL desktop attempt.
+//! Optional, non-focus-taking local controls on the ORIGINAL desktop attempt.
 //! Only content-free snapshots and supported local control requests are used.
-//! Failure or closing this panel never closes the session or cancels a transfer.
+//! Failure or closing a panel never closes the session or changes its settings.
+//! Audio preferences reuse the same bounded native panel as file progress;
+//! neither a local mute nor a volume change creates observation/input authority.
 mod model;
+use fr_client::audio::AudioVolumeControl;
 use frd::{
     native_files::{ReceiveControl, ReceiveStatus, SendControl, SendSnapshot},
     session_startup::StreamingViewerControl,
@@ -27,6 +30,7 @@ const MAX_EVENTS: usize = 64;
 enum Direction {
     Upload = 0,
     Download = 1,
+    Audio = 2,
 }
 
 // One coherent original-owner snapshot, never a download projected into a
@@ -35,23 +39,30 @@ enum Direction {
 enum Snapshot {
     Upload(Box<SendSnapshot>),
     Download(ReceiveStatus),
+    Audio { volume: f32, muted: bool },
 }
 
 enum Transfer {
     Upload(SendControl),
     Download(ReceiveControl),
+    Audio(AudioVolumeControl),
 }
 impl Transfer {
     fn direction(&self) -> Direction {
         match self {
             Self::Upload(_) => Direction::Upload,
             Self::Download(_) => Direction::Download,
+            Self::Audio(_) => Direction::Audio,
         }
     }
     fn snapshot(&self) -> Snapshot {
         match self {
             Self::Upload(source) => Snapshot::Upload(Box::new(source.snapshot())),
             Self::Download(source) => Snapshot::Download(source.status()),
+            Self::Audio(source) => {
+                let (volume, muted) = source.snapshot();
+                Snapshot::Audio { volume, muted }
+            }
         }
     }
     fn action(&self, action: Action) {
@@ -60,6 +71,17 @@ impl Transfer {
             Self::Download(source) => {
                 if action == Action::Cancel {
                     let _accepted = source.cancel();
+                }
+            }
+            Self::Audio(source) => {
+                let mut source = source.clone();
+                match action {
+                    Action::Quieter => source.set_volume(source.volume() - 0.1),
+                    Action::Louder => source.set_volume(source.volume() + 0.1),
+                    Action::Mute => {
+                        source.toggle_mute();
+                    }
+                    _ => {}
                 }
             }
         }
@@ -72,6 +94,9 @@ enum Action {
     Pause = 1,
     Resume = 2,
     Cancel = 4,
+    Quieter = 8,
+    Louder = 16,
+    Mute = 32,
 }
 impl Action {
     fn from_raw(value: u32) -> Option<Self> {
@@ -79,6 +104,9 @@ impl Action {
             1 => Some(Self::Pause),
             2 => Some(Self::Resume),
             4 => Some(Self::Cancel),
+            8 => Some(Self::Quieter),
+            16 => Some(Self::Louder),
+            32 => Some(Self::Mute),
             _ => None,
         }
     }
@@ -88,6 +116,7 @@ impl Action {
             Self::Pause => source.pause(),
             Self::Resume => source.resume(),
             Self::Cancel => source.cancel(),
+            Self::Quieter | Self::Louder | Self::Mute => return,
         };
     }
 }
@@ -175,6 +204,16 @@ impl Panel {
     ) -> Result<Self, Error> {
         Self::start_transfer(display, parent, session, Transfer::Download(source))
     }
+    /// Local preferences for this observer's actual playback owner, in either
+    /// viewing role. This never touches the OS volume, microphone or host state.
+    pub fn start_audio(
+        display: &str,
+        parent: crate::viewer_input::Window,
+        session: StreamingViewerControl,
+        volume: AudioVolumeControl,
+    ) -> Result<Self, Error> {
+        Self::start_transfer(display, parent, session, Transfer::Audio(volume))
+    }
     fn start_transfer(
         display: &str,
         parent: crate::viewer_input::Window,
@@ -206,6 +245,7 @@ impl Panel {
             .name(match source.direction() {
                 Direction::Upload => "fr-upload-ui".into(),
                 Direction::Download => "fr-download-ui".into(),
+                Direction::Audio => "fr-audio-ui".into(),
             })
             .spawn(move || {
                 let _fence = Fence(shared.clone());

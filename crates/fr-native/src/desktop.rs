@@ -174,6 +174,7 @@ pub struct Desktop {
     // Optional local UI, never a file/source owner. Retain even a hidden panel
     // until its native thread is joined; reconnect cannot inherit this handle.
     file_progress: Option<Result<crate::file_progress::Panel, crate::file_progress::Error>>,
+    audio_controls: Option<Result<crate::file_progress::Panel, crate::file_progress::Error>>,
 }
 impl Desktop {
     pub const fn new(configuration: Configuration) -> Self {
@@ -189,6 +190,7 @@ impl Desktop {
             input: None,
             file_controls: None,
             file_progress: None,
+            audio_controls: None,
         }
     }
     pub fn state(&self) -> State {
@@ -345,7 +347,7 @@ impl Desktop {
     }
     /// Install the local playback output for this observer's attached
     /// audio-down lane, before serving. `Audio(NotSelected)` is typed absence:
-    /// the host did not enable/offer audio, or this is a controlled session.
+    /// the host did not enable/offer audio. Either viewing role can request it.
     pub fn configure_audio(
         &mut self,
         output: Box<dyn frd::session_startup::ViewerAudioOutput>,
@@ -358,6 +360,44 @@ impl Desktop {
             .ok_or(Error::NotViewing)?
             .configure_audio(output)
             .map_err(Error::Audio)
+    }
+    /// Install playback plus local volume/mute controls for either viewing role.
+    /// `volume` must be the handle supplied to `output`; it is only a preference,
+    /// not audio admission. An unavailable/closed panel never stops playback.
+    /// The panel refuses to cover the remote image or steal keyboard focus.
+    pub fn configure_audio_with_controls(
+        &mut self,
+        output: Box<dyn frd::session_startup::ViewerAudioOutput>,
+        volume: fr_client::audio::AudioVolumeControl,
+    ) -> Result<(), Error> {
+        self.configure_audio(output)?;
+        let session = self.observer.as_ref().ok_or(Error::NotViewing)?.control();
+        let panel = self
+            .window()
+            .and_then(|window| window.input_window().ok())
+            .ok_or(crate::file_progress::Error::InvalidParent)
+            .and_then(|parent| {
+                crate::file_progress::Panel::start_audio(
+                    &self.configuration.display,
+                    parent,
+                    session,
+                    volume,
+                )
+            });
+        self.audio_controls = Some(panel);
+        Ok(())
+    }
+    /// Status/hide for this attempt's optional local audio controls. No panel is
+    /// automatically reopened and no handle is carried into a new connection.
+    pub fn audio_controls(
+        &self,
+    ) -> Option<Result<crate::file_progress::Control, crate::file_progress::Error>> {
+        self.audio_controls.as_ref().map(|panel| {
+            panel
+                .as_ref()
+                .map(crate::file_progress::Panel::control)
+                .map_err(|error| *error)
+        })
     }
     /// Content-free viewer audio counters; `None` when audio-down is absent.
     pub fn audio_statistics(&self) -> Option<frd::session_startup::ViewerAudioStatistics> {
@@ -773,13 +813,16 @@ impl Desktop {
         if let Some(Ok(panel)) = &self.file_progress {
             panel.stop();
         }
+        if let Some(Ok(panel)) = &self.audio_controls {
+            panel.stop();
+        }
         if let Some(window) = &self.window {
             window.control().stop();
         }
         self.state = State::Stopped;
     }
-    /// All local viewing surfaces must finish, including an optional transfer
-    /// panel. A hidden/failed panel can still have pending foreign cleanup; the
+    /// All local viewing surfaces must finish, including optional transfer and
+    /// audio panels. A hidden/failed panel may still have pending foreign cleanup; the
     /// existing reconnect gate must retain this Desktop until that thread joins.
     pub fn window_cleanup(&mut self) -> WindowCleanup {
         let window = self
@@ -791,6 +834,11 @@ impl Desktop {
                     .map_or(WindowCleanup::Pending, WindowCleanup::Complete)
             });
         if let Some(Ok(panel)) = &mut self.file_progress
+            && !panel.finish()
+        {
+            return WindowCleanup::Pending;
+        }
+        if let Some(Ok(panel)) = &mut self.audio_controls
             && !panel.finish()
         {
             return WindowCleanup::Pending;

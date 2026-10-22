@@ -1,4 +1,4 @@
-//! `fr connect --view-only --audio`: host playback into the selected local
+//! `fr connect --audio`: host playback in either viewing role into the selected local
 //! `PulseAudio` output. Host Opus is decoded only in the restricted per-epoch
 //! fr-opus-worker, never on the session thread or by an in-process fallback.
 //! Configuration acknowledgement waits for BOTH real native owners. PCM replies
@@ -11,6 +11,10 @@ use std::path::PathBuf;
 /// Content-free outcome for the completion record.
 #[derive(Debug, Default)]
 pub(super) struct Report {
+    /// Exact local preference used by the actual output and optional panel.
+    pub volume: fr_client::audio::AudioVolumeControl,
+    pub controls:
+        Option<Result<fr_native::file_progress::Control, fr_native::file_progress::Error>>,
     /// The host configured a stream and this client acknowledged it.
     pub acknowledged: bool,
     /// Decoded frames the local audio server accepted (not audibility).
@@ -34,6 +38,25 @@ pub(super) struct Report {
     pub generation_start: u64,
 }
 impl Report {
+    pub(super) fn for_request(request: &AudioRequest) -> Self {
+        Self {
+            volume: fr_client::audio::AudioVolumeControl::from_parts(
+                f32::from(request.volume) / 100.0,
+                request.muted,
+            ),
+            ..Self::default()
+        }
+    }
+    /// Retain the latest local preference across reconnects, without allowing
+    /// an old panel or output handle to change the next attempt's preference.
+    pub(super) fn begin_attempt(&mut self) -> fr_client::audio::AudioVolumeControl {
+        let (volume, muted) = self.volume.snapshot();
+        self.volume = fr_client::audio::AudioVolumeControl::from_parts(volume, muted);
+        self.controls = None;
+        self.acknowledged = false;
+        self.generation_start = self.submitted;
+        self.volume.clone()
+    }
     pub(super) fn active(&self) -> bool {
         self.acknowledged && self.submitted > self.generation_start && self.absence.is_none()
     }
@@ -139,6 +162,7 @@ pub(super) use output::threaded::Output;
 mod output {
     pub(super) mod threaded;
     use super::Report;
+    use fr_client::audio::AudioVolumeControl;
     use fr_client::input::ClientInstant;
     use fr_core::audio::{AudioStopReason, AudioStreamConfig};
     use fr_native::opus::{
@@ -194,9 +218,15 @@ mod output {
         stage: Stage,
         failure: Option<Failure>,
         report: Rc<RefCell<Report>>,
+        volume: AudioVolumeControl,
     }
     impl Output {
-        pub fn new(server: PathBuf, sink: Option<String>, report: Rc<RefCell<Report>>) -> Self {
+        pub fn new(
+            server: PathBuf,
+            sink: Option<String>,
+            report: Rc<RefCell<Report>>,
+            volume: AudioVolumeControl,
+        ) -> Self {
             Self {
                 image: super::decoder_image().ok(),
                 retirement: None,
@@ -206,6 +236,7 @@ mod output {
                 stage: Stage::Idle,
                 failure: None,
                 report,
+                volume,
             }
         }
     }
@@ -341,7 +372,7 @@ mod output {
                     )
                     .map_err(|_| ViewerAudioRefused)?;
                     self.retirement = Some(retirement);
-                    let playout = PulsePlayout::with_decoder(
+                    let mut playout = PulsePlayout::with_decoder(
                         binding,
                         offer,
                         device,
@@ -349,6 +380,7 @@ mod output {
                         decoder,
                     )
                     .map_err(|error| self.refuse(error))?;
+                    *playout.volume_mut() = self.volume.clone();
                     self.stage = Stage::Configuring(playout);
                 }
                 Stage::Configuring(mut playout) => {
@@ -448,6 +480,12 @@ pub(super) fn output(
     server: PathBuf,
     request: &AudioRequest,
     report: &std::rc::Rc<std::cell::RefCell<Report>>,
+    volume: fr_client::audio::AudioVolumeControl,
 ) -> Box<dyn frd::session_startup::ViewerAudioOutput> {
-    Box::new(Output::new(server, request.sink.clone(), report.clone()))
+    Box::new(Output::new(
+        server,
+        request.sink.clone(),
+        report.clone(),
+        volume,
+    ))
 }

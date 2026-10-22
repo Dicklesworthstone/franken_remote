@@ -352,7 +352,7 @@ fn connect(
         }),
         audio: audio_output
             .as_ref()
-            .map(|_| Rc::new(RefCell::new(audio::Report::default()))),
+            .map(|(_, request)| Rc::new(RefCell::new(audio::Report::for_request(request)))),
         files: sends,
         downloads,
         ..Progress::default()
@@ -834,17 +834,21 @@ fn install_audio(
     request: &super::options::AudioRequest,
     report: &Rc<RefCell<audio::Report>>,
 ) {
+    let volume = report.borrow_mut().begin_attempt();
     #[cfg(feature = "linux-audio")]
-    match desktop.configure_audio(audio::output(server.to_path_buf(), request, report)) {
-        Ok(()) => {}
-        Err(fr_native::desktop::Error::Audio(
-            frd::session_startup::ViewerAudioUnavailable::NotSelected,
-        )) => report.borrow_mut().absent("host_did_not_offer"),
-        Err(_) => report.borrow_mut().absent("audio_setup_refused"),
+    {
+        let output = audio::output(server.to_path_buf(), request, report, volume.clone());
+        match desktop.configure_audio_with_controls(output, volume) {
+            Ok(()) => report.borrow_mut().controls = desktop.audio_controls(),
+            Err(fr_native::desktop::Error::Audio(
+                frd::session_startup::ViewerAudioUnavailable::NotSelected,
+            )) => report.borrow_mut().absent("host_did_not_offer"),
+            Err(_) => report.borrow_mut().absent("audio_setup_refused"),
+        }
     }
     #[cfg(not(feature = "linux-audio"))]
     {
-        let _ = (desktop, server, request);
+        let _ = (desktop, server, request, volume);
         report.borrow_mut().absent("audio_unavailable_in_build");
     }
 }
@@ -942,11 +946,29 @@ fn audio_completion(progress: &Progress, json: bool) -> String {
             )
         });
     let dropped = audio.as_ref().map_or(0, |report| report.dropped_packets);
+    let (volume, muted) = audio
+        .as_ref()
+        .map_or((1.0, false), |report| report.volume.snapshot());
+    let volume = volume * 100.0;
+    let controls = audio.as_ref().map_or("not_requested", |report| {
+        use fr_native::file_progress::{Status, StopReason};
+        match report.controls.as_ref() {
+            None => "not_started",
+            Some(Err(_)) => "unavailable",
+            Some(Ok(control)) => match control.status() {
+                Status::Opening => "opening",
+                Status::Running => "running",
+                Status::Stopped(StopReason::Hidden) => "hidden",
+                Status::Stopped(StopReason::SessionEnded | StopReason::OwnerStopped) => "closed",
+                Status::Stopped(_) => "unavailable",
+            },
+        }
+    });
     if json {
         let absence = absence.map_or_else(|| "null".to_owned(), |a| format!("\"{a}\""));
         let first_failure = first_failure.map_or_else(|| "null".to_owned(), |a| format!("\"{a}\""));
         format!(
-            ",\"audio_requested\":{requested},\"audio_active\":{active},\"audio_frames_submitted\":{played},\"audio_output_resets\":{resets},\"audio_output_dropped_packets\":{dropped},\"audio_output_expired_generations\":{expired},\"audio_output_failed_generations\":{failed},\"audio_output_recovered_generations\":{recovered},\"audio_output_first_failure\":{first_failure},\"audio_absence\":{absence},\"audibility_proven\":false"
+            ",\"audio_requested\":{requested},\"audio_active\":{active},\"audio_frames_submitted\":{played},\"audio_output_resets\":{resets},\"audio_output_dropped_packets\":{dropped},\"audio_output_expired_generations\":{expired},\"audio_output_failed_generations\":{failed},\"audio_output_recovered_generations\":{recovered},\"audio_output_first_failure\":{first_failure},\"audio_absence\":{absence},\"audio_volume_percent\":{volume:.0},\"audio_muted\":{muted},\"audio_controls\":\"{controls}\",\"audibility_proven\":false"
         )
     } else {
         let mut text = match (requested, active, absence) {
@@ -972,6 +994,14 @@ fn audio_completion(progress: &Progress, json: bool) -> String {
             let _ = write!(
                 text,
                 " Audio output inbox: {dropped} packet(s) dropped at capacity."
+            );
+        }
+        if requested {
+            use std::fmt::Write;
+            let _ = write!(
+                text,
+                " Local audio volume: {volume:.0}%, {}. Controls: {controls}.",
+                if muted { "muted" } else { "unmuted" }
             );
         }
         text

@@ -61,7 +61,8 @@ fr connect NODE_ID --view-only|--control --experimental-native
     [--port 8443] [--ipv6] [--attempts 1..32] [--fit WIDTHxHEIGHT] [--clipboard]
     [--capture-system-shortcuts]
     [--send /absolute/file-or-directory]... | [--receive /absolute/private-directory]
-    [--audio [--audio-server /absolute/pulse/native] [--audio-sink NAME]] [--json]
+    [--audio [--audio-server /absolute/pulse/native] [--audio-sink NAME]
+     [--audio-volume 0..100] [--audio-muted]] [--json]
 fr robot session open NODE_ID [--role view|control] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
 fr robot session close NODE_ID [--lease LEASE] [--socket /absolute/tailscaled.sock] [--json]
 fr robot observe NODE_ID [--display N] [--screenshot /path/screen.png] [--evidence-level decoded|submitted_to_compositor|instrumentally_observed] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
@@ -144,6 +145,16 @@ actual cleanup status; filenames and paths are omitted, including on cancellatio
 capability is offered. The host must run frd run --audio. Output goes to the local
 PulseAudio server (--audio-server, else PULSE_SERVER, else
 $XDG_RUNTIME_DIR/pulse/native) and its default sink unless --audio-sink names one.
+--audio-volume sets this session's local volume (0..100, default 100);
+--audio-muted starts muted. A local Remote audio panel offers Quieter, Louder and
+Mute / unmute in either viewing role. Volume changes keep mute as selected, and
+both preferences survive audio recovery without restarting playback and are kept
+when this command reconnects. Changes apply to new audio submissions; already
+queued sound drains briefly. No host, microphone or system-wide volume is changed.
+Closing the panel keeps the setting.
+The panel appears only if it can fit outside the remote image without taking
+focus. If it cannot, the initial CLI preferences still apply; use --fit to leave
+room for local controls. The completion reports audio_controls and the last setting.
 A host without audio is reported as typed absence, not an error; video continues.
 Builds without the linux-audio feature refuse --audio.
 Native transport/media remain unqualified. Set XAUTHORITY in the local environment

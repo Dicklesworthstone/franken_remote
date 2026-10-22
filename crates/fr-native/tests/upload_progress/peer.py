@@ -65,7 +65,7 @@ def viewable(window):
 d = open_display(sys.argv[1].encode())
 assert d, "X display unavailable"
 direction = sys.argv[2] if len(sys.argv) > 2 else "upload"
-assert direction in ("upload", "download")
+assert direction in ("upload", "download", "audio")
 panel_class = ("franken-remote-" + direction).encode() + b"\0FrankenRemote\0"
 root = root_window(d)
 full_screen = len(sys.argv) > 3 and sys.argv[3] == "full-screen"

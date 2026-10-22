@@ -115,6 +115,10 @@ pub struct AudioRequest {
     pub server: Option<PathBuf>,
     /// Output sink; `None` is the local server's default output.
     pub sink: Option<String>,
+    /// Local remote-audio gain in percent; never the host or OS mixer volume.
+    pub volume: u8,
+    /// Initial local mute, independent of gain.
+    pub muted: bool,
 }
 /// Explicit policies only. `Only` refuses ambiguity; it is never "first" or an
 /// invented primary display. Both policies are reevaluated on each live catalog.
@@ -553,6 +557,7 @@ fn parse_command(
         (false, None, false, false, false, false);
     let (mut control, mut clipboard, mut capture_system_shortcuts) = (false, false, false);
     let (mut audio, mut audio_server, mut audio_sink) = (false, None, None);
+    let (mut audio_volume, mut audio_muted) = (None, false);
     let (mut display, mut worker, mut roots, mut x_display) = (None, None, None, None);
     let (mut port, mut attempts) = (8443_u16, 5_u8);
     let mut fit_window = None;
@@ -578,6 +583,14 @@ fn parse_command(
             "--audio-sink" if connect => {
                 audio_sink = Some(next_arg(args, &mut index)?.to_string());
             }
+            "--audio-volume" if connect => {
+                let volume: u8 = next_parsed(args, &mut index)?;
+                if volume > 100 {
+                    return Err(usage());
+                }
+                audio_volume = Some(volume);
+            }
+            "--audio-muted" if connect => audio_muted = true,
             "--experimental-native" if remote => experimental = true,
             "--ipv6" if remote => ipv6 = true,
             "--display" if connect => {
@@ -627,7 +640,12 @@ fn parse_command(
                 2,
             ));
         }
-        if !audio && (audio_server.is_some() || audio_sink.is_some()) {
+        if !audio
+            && (audio_server.is_some()
+                || audio_sink.is_some()
+                || audio_volume.is_some()
+                || audio_muted)
+        {
             return Err(usage());
         }
         if !send.is_empty() && !control {
@@ -694,6 +712,8 @@ fn parse_command(
                 audio: audio.then_some(AudioRequest {
                     server: audio_server,
                     sink: audio_sink,
+                    volume: audio_volume.unwrap_or(100),
+                    muted: audio_muted,
                 }),
                 send,
                 receive,
@@ -872,6 +892,8 @@ mod tests {
             Some(AudioRequest {
                 server: Some(PathBuf::from("/run/user/7/pulse/native")),
                 sink: Some("speakers".into()),
+                volume: 100,
+                muted: false,
             })
         );
         // Control uses the same isolated output; neither role enables audio
@@ -890,6 +912,8 @@ mod tests {
             Some(AudioRequest {
                 server: Some(PathBuf::from("/run/native")),
                 sink: Some("speakers".into()),
+                volume: 100,
+                muted: false,
             })
         );
         let Command::Connect(plain_control) = options(&format!("connect {base} --control"))
@@ -911,6 +935,44 @@ mod tests {
                 "invalid_arguments",
                 "{refused}"
             );
+        }
+    }
+    #[test]
+    fn local_audio_preferences_require_audio_and_work_in_both_roles() {
+        let base = "connect n-host --experimental-native --display only";
+        for role in ["--view-only", "--control"] {
+            for volume in [0, 37, 100] {
+                let Command::Connect(connection) = options(&format!(
+                    "{base} {role} --audio --audio-volume {volume} --audio-muted"
+                ))
+                .unwrap()
+                .command
+                else {
+                    unreachable!("connection required");
+                };
+                let audio = connection.audio.unwrap();
+                assert_eq!(audio.volume, volume);
+                assert!(audio.muted);
+            }
+            for flags in [
+                "--audio-volume 30",
+                "--audio-muted",
+                "--audio --audio-volume 101",
+                "--audio --audio-volume -1",
+                "--audio --audio-volume NaN",
+                "--audio --audio-volume 0.5",
+                "--audio --audio-volume 10 --audio-volume 20",
+                "--audio --audio-muted --audio-muted",
+            ] {
+                assert_eq!(
+                    options(&format!("{base} {role} {flags}"))
+                        .err()
+                        .unwrap()
+                        .code,
+                    "invalid_arguments",
+                    "{flags}"
+                );
+            }
         }
     }
     #[test]

@@ -3,6 +3,7 @@
 //! destruction, belongs to one foreign-work thread, not the session executor.
 //! The restricted decoder process and its existing retirement proof are retained.
 use super::{Report, end_reason, now};
+use fr_client::audio::AudioVolumeControl;
 use fr_client::input::ClientInstant;
 use fr_core::audio::{AudioDirection, AudioGeneration, MAX_OPUS_PAYLOAD_BYTES};
 use fr_wire::audio::{self as wire, AudioConfiguration};
@@ -225,9 +226,15 @@ pub(crate) struct Output {
     last: Option<AudioGeneration>,
     ended: bool,
     report: Rc<RefCell<Report>>,
+    volume: AudioVolumeControl,
 }
 impl Output {
-    pub(crate) fn new(server: PathBuf, sink: Option<String>, report: Rc<RefCell<Report>>) -> Self {
+    pub(crate) fn new(
+        server: PathBuf,
+        sink: Option<String>,
+        report: Rc<RefCell<Report>>,
+        volume: AudioVolumeControl,
+    ) -> Self {
         Self {
             server,
             sink,
@@ -238,6 +245,7 @@ impl Output {
             last: None,
             ended: false,
             report,
+            volume,
         }
     }
     fn account(&mut self) {
@@ -305,6 +313,7 @@ impl ViewerAudioOutput for Output {
             origin: self.origin,
             binding,
             offer,
+            volume: self.volume.clone(),
         };
         let shared = Arc::new(Shared::new(now(self.origin).0));
         let slot = WORKER_SLOT
@@ -465,6 +474,7 @@ struct NativeConfig {
     origin: Instant,
     binding: u32,
     offer: AudioConfiguration,
+    volume: AudioVolumeControl,
 }
 // The only wait in the acknowledgement bridge is on the foreign-work thread.
 // PulsePlayout::acknowledge cannot return success until the session accepted its
@@ -496,7 +506,7 @@ fn native(
     replies: &SyncSender<Ack>,
 ) -> bool {
     let report = Rc::new(RefCell::new(Report::default()));
-    let mut output = super::Output::new(config.server, config.sink, report.clone());
+    let mut output = super::Output::new(config.server, config.sink, report.clone(), config.volume);
     output.image = Some(config.image);
     output.origin = config.origin;
     let result = (|| {

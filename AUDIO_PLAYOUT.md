@@ -205,3 +205,56 @@ acknowledgement and joint decoder/device retirement. Its qualified test slice is
 [Linux audio output](LINUX_AUDIO_OUTPUT.md) for executed normal and sanitizer
 results, retained timing failures, resource limits and remaining session/device
 qualification. This does not complete host capture or the network/audio worker.
+
+## Local controls in the native Linux client
+
+`fr connect --audio` now connects the native shell's local volume/mute
+preferences to the actual threaded output owner. It accepts
+`--audio-volume 0..100` (default 100) and `--audio-muted` for both `--view-only`
+and `--control`. Either preference requires the explicit `--audio` request.
+They cannot enable host capture, grant observation or input, or enable a
+microphone. The gain applies to FrankenRemote's decoded PCM; neither the host
+volume nor the local system mixer is changed.
+
+A non-focus-taking **Remote audio** utility panel offers **Quieter**, **Louder**
+and **Mute / unmute**. Gain changes are clamped to 0–100% in steps of ten
+percentage points and preserve the mute selection. It reuses the existing
+bounded local-panel owner, event age/flood checks, original-viewer window
+validation and native cleanup path. Its three commands are disjoint from file
+pause/resume/cancel commands. Closing it retains the preference and leaves
+playback and the remote session running. It never requests keyboard focus or
+captures a global shortcut.
+
+The shared atomic preference reaches the CLI output proxy, its foreign-work
+thread, the current `PulsePlayout` and each replacement audio generation.
+It is installed before configuration acknowledgement, so an initially muted
+session cannot submit unmuted PCM while its output is starting. Changes apply at
+new PCM submission without restarting Opus history or retiming audio. Already
+submitted sound can drain for the existing bounded device queue; mute is not a
+claim that previously submitted hardware samples were retracted.
+
+When this command reconnects, the latest gain/mute snapshot initializes a fresh
+preference handle after the old attempt's native cleanup. An old handle cannot
+alter the new attempt. Preferences carry no permission, and a new attempt
+cannot count earlier submissions as active playback. Persistence after the
+command exits, per-host settings, other client shells and device/audibility
+qualification remain open under `fr-p2-audio-playback-lel`.
+
+The panel appears only where its existing 640×310 window fits entirely outside
+the remote image. Fullscreen views or a window manager that overlaps the remote
+image make the optional panel unavailable or hidden; audio and initial CLI
+preferences still work. Use `--fit` to leave room for local controls.
+A hidden panel is not automatically reopened. Completion records expose
+`audio_volume_percent`, `audio_muted` and `audio_controls` in either role,
+separately from acknowledgement, actual submissions and typed absence.
+
+Regression sources cover gain clamping and independent mute, rejecting
+unrequested/invalid CLI preferences, both-role completion, reconnect isolation,
+real X11 button/focus/placement behavior and the real native owner's replacement
+generation retaining the same preference. X11 tests require a display
+(`FR_NATIVE_UPLOAD_PANEL_REQUIRED=1` makes absence a failure); the native owner
+test requires the real private PulseAudio fixture and matching
+`fr-opus-worker`. These checks are not physical-speaker, live-tailnet or
+cross-platform evidence. The current implementation's Rust/native execution
+remains pending: the build workspace exhausted storage and its execution
+service disconnected before those gates could run.

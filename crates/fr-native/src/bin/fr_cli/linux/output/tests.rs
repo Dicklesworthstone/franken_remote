@@ -16,7 +16,12 @@ const BINDING: u32 = 61;
 #[test]
 fn the_native_refusal_keeps_freshness_expiry_distinct_from_device_failure() {
     let report = Rc::new(RefCell::new(Report::default()));
-    let mut output = Output::new(PathBuf::from("/unused"), None, report);
+    let mut output = Output::new(
+        PathBuf::from("/unused"),
+        None,
+        report,
+        AudioVolumeControl::new(),
+    );
     output.refuse(PlayoutError::Device(DeviceError::Expired));
     assert_eq!(output.failure, Some(Failure::Expired));
     output.refuse(PlayoutError::Device(DeviceError::Denied));
@@ -68,7 +73,12 @@ fn image() -> PathBuf {
 }
 fn owner(server: &Server) -> Output {
     let report = Rc::new(RefCell::new(Report::default()));
-    let mut output = Output::new(server.socket.clone(), Some("fr_test".into()), report);
+    let mut output = Output::new(
+        server.socket.clone(),
+        Some("fr_test".into()),
+        report,
+        AudioVolumeControl::new(),
+    );
     output.image = Some(image()); // libtest lives in deps/, not the installed fr directory.
     output
 }
@@ -279,16 +289,38 @@ fn output_reset_needs_original_decoder_retirement_and_a_new_child() {
     let _serial = SERIAL.lock().unwrap();
     let server = Server::start();
     let mut output = owner(&server);
+    let mut local = output.volume.clone();
+    local.set_volume(0.25);
+    local.set_muted(true);
     let original = configured(&mut output, 70);
+    let Stage::Playing(playout) = &mut output.stage else {
+        panic!("configured owner must be playing");
+    };
+    assert_eq!(playout.volume_mut().snapshot(), (0.25, true));
+    local.set_muted(false);
+    assert_eq!(playout.volume_mut().snapshot(), (0.25, false));
     let pid = original.process_id().unwrap();
     output.reset();
     if !original.is_complete() {
         assert!(output.configure(BINDING, offer(71)).is_err());
     }
     retired(&original);
+    local.set_volume(0.5);
+    local.set_muted(true);
     output.report.borrow_mut().acknowledged = false;
     let replacement = configured(&mut output, 71);
     assert_ne!(replacement.process_id(), Some(pid));
+    let Stage::Playing(playout) = &mut output.stage else {
+        panic!("replacement owner must be playing");
+    };
+    assert_eq!(playout.volume_mut().snapshot(), (0.5, true));
+    local.set_muted(false);
+    assert_eq!(playout.volume_mut().snapshot(), (0.5, false));
     drop(output);
     retired(&replacement);
+    local.set_muted(true);
+    assert!(
+        replacement.is_complete(),
+        "preferences cannot revive an owner"
+    );
 }

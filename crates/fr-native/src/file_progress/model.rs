@@ -1,4 +1,4 @@
-//! Bounded, content-free presentation of ONE original transfer snapshot.
+//! Bounded, content-free presentation of one original local control snapshot.
 mod receive;
 use super::{Action, Snapshot};
 use fr_files::{
@@ -27,7 +27,45 @@ impl Frame {
         match snapshot {
             Snapshot::Upload(status) => Self::new(status),
             Snapshot::Download(status) => Self::receive(status),
+            Snapshot::Audio { volume, muted } => Self::audio(*volume, *muted),
         }
+    }
+    fn audio(volume: f32, muted: bool) -> Self {
+        // AudioVolumeControl guarantees a finite gain in [0, 1].
+        #[allow(clippy::cast_possible_truncation)]
+        let progress = (volume * 1000.0).round() as i32;
+        let mut frame = Self {
+            lines: [[0; COLUMNS]; ROWS],
+            progress,
+            actions: Action::Mute as u32,
+        };
+        if volume > 0.0 {
+            frame.actions |= Action::Quieter as u32;
+        }
+        if volume < 1.0 {
+            frame.actions |= Action::Louder as u32;
+        }
+        frame.lines[0] = line(format_args!(
+            "Volume: {:.0}% | {}",
+            volume * 100.0,
+            if muted { "Muted" } else { "Unmuted" }
+        ));
+        frame.lines[1] = line(format_args!(
+            "Applies to this remote session on this computer."
+        ));
+        frame.lines[2] = line(format_args!(
+            "Quieter / Louder change volume by 10 percentage points."
+        ));
+        frame.lines[3] = line(format_args!(
+            "Changing volume preserves your mute selection."
+        ));
+        frame.lines[4] = line(format_args!(
+            "Mute affects new audio; already queued sound drains briefly."
+        ));
+        frame.lines[5] = line(format_args!(
+            "Closing this panel retains the current setting."
+        ));
+        frame
     }
     pub(super) fn new(s: &SendSnapshot) -> Self {
         let active = !s.cancel_requested

@@ -1,5 +1,37 @@
 //! Content-free reporting state; no fixture submission is native playback proof.
-use super::Report;
+use super::{AudioRequest, Report};
+
+#[test]
+fn reconnect_keeps_latest_preference_but_old_handles_cannot_change_the_new_attempt() {
+    let mut report = Report::for_request(&AudioRequest {
+        server: None,
+        sink: None,
+        volume: 37,
+        muted: false,
+    });
+    let mut original = report.begin_attempt();
+    assert_eq!(original.volume().to_bits(), 0.37_f32.to_bits());
+    original.set_volume(0.25);
+    original.set_muted(true);
+    report.controls = Some(Err(fr_native::file_progress::Error::InvalidParent));
+    report.acknowledged = true;
+    report.submitted = 1;
+    assert!(report.active());
+
+    let mut replacement = report.begin_attempt();
+    assert_eq!(replacement.snapshot(), (0.25, true));
+    assert!(report.controls.is_none());
+    original.set_volume(1.0);
+    original.set_muted(false);
+    assert_eq!(replacement.snapshot(), (0.25, true));
+    assert_eq!(report.volume.snapshot(), (0.25, true));
+    replacement.set_volume(0.5);
+    assert_eq!(report.volume.snapshot(), (0.5, true));
+    assert!(!report.active(), "a preference never starts playback");
+    assert!(!report.acknowledged);
+    assert_eq!(report.submitted, 1, "retain prior submitted PCM accounting");
+    assert_eq!(report.generation_start, 1);
+}
 
 #[test]
 fn a_silent_replacement_cannot_recover_an_expired_generation() {

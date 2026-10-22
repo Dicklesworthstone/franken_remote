@@ -33,6 +33,7 @@ fn fixture(
         last: Some(offer().generation),
         ended: false,
         report: Rc::new(RefCell::new(Report::default())),
+        volume: AudioVolumeControl::new(),
     };
     (output, shared, slot)
 }

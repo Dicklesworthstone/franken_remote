@@ -116,7 +116,7 @@ void fr_upload_close(struct fr_upload *p) {
 void fr_upload_disarm(struct fr_upload *p) { if (p) p->pressed = 0; }
 struct fr_upload *fr_upload_open(const char *display, uint32_t parent,
         uint32_t width, uint32_t height, uint32_t direction) {
-    if (!display || !parent || !width || !height || direction > 1) return NULL;
+    if (!display || !parent || !width || !height || direction > 2) return NULL;
     struct fr_upload *p = calloc(1, sizeof(*p));
     if (!p) return NULL;
     p->base = calloc(1, sizeof(*p->base));
@@ -165,12 +165,14 @@ struct fr_upload *fr_upload_open(const char *display, uint32_t parent,
     size[0] = (1u << 2) | (1u << 4) | (1u << 5); /* PPosition | PMinSize | PMaxSize */
     size[1] = (uint32_t)x; size[2] = (uint32_t)y;
     size[5] = size[7] = UP_WIDTH; size[6] = size[8] = UP_HEIGHT;
-    const char *title = direction ? "FrankenRemote - download progress" :
-        "FrankenRemote - upload progress";
+    const char *title = direction == 2 ? "FrankenRemote - remote audio" :
+        direction == 1 ? "FrankenRemote - download progress" : "FrankenRemote - upload progress";
     const char upload_class[] = "franken-remote-upload\0FrankenRemote\0";
     const char download_class[] = "franken-remote-download\0FrankenRemote\0";
-    const char *class = direction ? download_class : upload_class;
-    size_t class_len = direction ? sizeof(download_class)-1 : sizeof(upload_class)-1;
+    const char audio_class[] = "franken-remote-audio\0FrankenRemote\0";
+    const char *class = direction == 2 ? audio_class : direction == 1 ? download_class : upload_class;
+    size_t class_len = direction == 2 ? sizeof(audio_class)-1 :
+        direction == 1 ? sizeof(download_class)-1 : sizeof(upload_class)-1;
     xcb_font_t font = xcb_generate_id(h->c);
     if (!h->close || !utf8 || !utility ||
         !property(h, h->protocols, XCB_ATOM_ATOM, 32, 1, &h->close) ||
@@ -203,7 +205,7 @@ static int upload_box(struct fr_upload *p, int16_t x, int16_t y, uint16_t w, uin
 }
 int fr_upload_draw(struct fr_upload *p, const struct fr_upload_frame *f) {
     if (!p || !f || f->progress < -1 || f->progress > 1000 ||
-        (f->actions & ~(p->direction ? 4u : 7u))) return 0;
+        (f->actions & ~(p->direction == 2 ? 56u : p->direction == 1 ? 4u : 7u))) return 0;
     size_t sizes[UP_ROWS];
     for (unsigned row = 0; row < UP_ROWS; ++row) {
         sizes[row] = 0;
@@ -217,7 +219,8 @@ int fr_upload_draw(struct fr_upload *p, const struct fr_upload_frame *f) {
     p->actions = f->actions;
     struct fr_viewer_window *h = p->base;
     if (!checked(h, xcb_clear_area_checked(h->c, 0, h->window, 0, 0, 0, 0))) return 0;
-    const char *heading = p->direction ? "Download progress - original destination only" :
+    const char *heading = p->direction == 2 ? "Remote audio - local volume controls" :
+        p->direction == 1 ? "Download progress - original destination only" :
         "Upload progress - original selection only";
     if (!upload_text(p, 16, 23, heading, strlen(heading))) return 0;
     for (unsigned row = 0; row < UP_ROWS; ++row) {
@@ -225,15 +228,19 @@ int fr_upload_draw(struct fr_upload *p, const struct fr_upload_frame *f) {
     }
     if (!upload_box(p, 16, 200, 606, 16, 0)) return 0;
     if (f->progress > 0 && !upload_box(p, 18, 202, (uint16_t)(602 * (uint32_t)f->progress / 1000), 12, 1)) return 0;
-    const char *labels[] = { "Pause", "Resume", p->direction ? "Cancel download" : "Cancel upload" };
-    for (unsigned i = p->direction ? 2u : 0u; i < 3; ++i) {
+    const char *labels[] = { p->direction == 2 ? "Quieter" : "Pause",
+        p->direction == 2 ? "Louder" : "Resume",
+        p->direction == 2 ? "Mute / unmute" : p->direction == 1 ? "Cancel download" : "Cancel upload" };
+    for (unsigned i = p->direction == 1 ? 2u : 0u; i < 3; ++i) {
         int16_t x = (int16_t)(16 + i * 204);
         if (!upload_box(p, x, 234, 188, 32, 0) ||
             !upload_text(p, (int16_t)(x + 10), 254, labels[i], strlen(labels[i]))) return 0;
-        if (!(p->actions & (1u << i)) && !upload_text(p, (int16_t)(x + 110), 254, "(off)", 5)) return 0;
+        if (!(p->actions & (1u << (i + (p->direction == 2 ? 3u : 0u)))) &&
+            !upload_text(p, (int16_t)(x + 110), 254, "(off)", 5)) return 0;
     }
-    const char footer[] = "Buttons request changes. Closing this panel only hides progress.";
-    return upload_text(p, 16, 290, footer, sizeof(footer)-1);
+    const char *footer = p->direction == 2 ? "No microphone, host-volume or system-volume changes." :
+        "Buttons request changes. Closing this panel only hides progress.";
+    return upload_text(p, 16, 290, footer, strlen(footer));
 }
 static uint32_t upload_hit(int16_t x, int16_t y) {
     if (y < 234 || y >= 266) return 0;
@@ -288,7 +295,7 @@ int fr_upload_next(struct fr_upload *p, uint32_t *kind, uint32_t *action) {
     case XCB_LEAVE_NOTIFY: case XCB_FOCUS_OUT: p->pressed = 0; break;
     case XCB_BUTTON_PRESS: case XCB_BUTTON_RELEASE: {
         xcb_button_press_event_t *v = (xcb_button_press_event_t *)e;
-        uint32_t hit = upload_hit(v->event_x, v->event_y) & p->actions;
+        uint32_t hit = (upload_hit(v->event_x, v->event_y) << (p->direction == 2 ? 3u : 0u)) & p->actions;
         if (synthetic || v->event != h->window || v->detail != 1 || (v->state & 0xff)) { p->pressed = 0; break; }
         if (!p->mapped || !upload_layout_valid(p)) { p->pressed = 0; *kind = 2; break; }
         if (type == XCB_BUTTON_PRESS) p->pressed = hit;

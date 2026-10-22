@@ -149,3 +149,36 @@ fn observer_and_controller_expose_recovered_generations_without_hiding_failures(
         assert!(text.contains("First output failure: audio_output_worker_stalled"));
     }
 }
+
+#[test]
+fn both_roles_report_local_preferences_without_claiming_playback_or_control() {
+    for control in [false, true] {
+        let mut progress = progress(
+            Some(audio::Report {
+                volume: fr_client::audio::AudioVolumeControl::from_parts(0.37, true),
+                controls: Some(Err(fr_native::file_progress::Error::InvalidParent)),
+                absence: Some("host_did_not_offer"),
+                ..audio::Report::default()
+            }),
+            false,
+        );
+        if !control {
+            progress.control = None;
+        }
+        let json: serde_json::Value =
+            serde_json::from_str(&completion(&progress, true, None)).unwrap();
+        assert_eq!(json["role"], if control { "control" } else { "observe" });
+        assert_eq!(json["audio_volume_percent"], 37);
+        assert_eq!(json["audio_muted"], true);
+        assert_eq!(json["audio_controls"], "unavailable");
+        assert_eq!(json["audio_active"], false);
+        assert_eq!(json["audio_frames_submitted"], 0);
+        assert_eq!(json["audibility_proven"], false);
+        if control {
+            assert_eq!(json["control_granted"], false);
+        }
+        let text = completion(&progress, false, None);
+        assert!(text.contains("Local audio volume: 37%, muted"));
+        assert!(text.contains("Controls: unavailable"));
+    }
+}
