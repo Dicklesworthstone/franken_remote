@@ -109,7 +109,9 @@ fn joining_critical_records_does_not_release_budget_before_native_acknowledgment
         let mut p = pair(&cx, policy).await;
         let route = Route::Stream(p.host_routes[0]);
         let until = clock(&cx) + 2_000_000;
-        p.server.send(&cx, route, &packet(0), until, || true).unwrap();
+        p.server
+            .send(&cx, route, &packet(0), until, || true)
+            .unwrap();
         // Start the flight, but do not service the peer or manufacture ACKs.
         p.server.drive(&cx, Duration::ZERO, || true).await.unwrap();
         for sequence in 1..4 {
@@ -139,7 +141,9 @@ fn refused_critical_record_cannot_join_or_consume_the_existing_flight() {
         let mut p = pair(&cx, Policy::default()).await;
         let route = Route::Stream(p.host_routes[0]);
         let until = clock(&cx) + 2_000_000;
-        p.server.send(&cx, route, &packet(0), until, || true).unwrap();
+        p.server
+            .send(&cx, route, &packet(0), until, || true)
+            .unwrap();
         p.server.drive(&cx, Duration::ZERO, || true).await.unwrap();
         assert_eq!(
             p.server.send_prepared(

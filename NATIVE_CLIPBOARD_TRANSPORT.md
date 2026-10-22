@@ -129,11 +129,11 @@ use independent monotonic viewer-clock cursors, so a concurrent network check
 cannot replace the exact native sample awaiting its final publication check.
 Every cursor remains bound to the same original controller and presentation.
 
-There is one outbound handoff record and at most four records admitted to the
+There is one outbound handoff record and at most eight records admitted to the
 native transport. Every admitted record retains its original Egress permit until
 the native empty-send witness accounts for queued, unsent, and retransmittable
 bytes. A local copy into QUIC frees the handoff slot, not the authorization permit.
-The fixed four-record batch and the existing bulk byte/record budget both apply;
+The fixed eight-record batch and the existing bulk byte/record budget both apply;
 control and input reservations are never borrowed. A contended handoff-release
 lock cannot cause an already admitted record to be sent twice.
 

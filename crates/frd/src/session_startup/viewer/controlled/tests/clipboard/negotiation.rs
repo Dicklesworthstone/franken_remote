@@ -447,10 +447,12 @@ fn full_item_native_records(state: &mut Fixture) -> usize {
         let bulk = usage.retained_send_records - usage.critical_send_records;
         retained = retained.max(bulk);
         assert!(
-            bulk <= 4,
-            "worker handoff exceeded its four-record native bound"
+            bulk <= 8,
+            "worker handoff exceeded its eight-record native bound"
         );
-        assert!(usage.retained_send_upper_bound - usage.critical_send_bytes <= 4 * 8192);
+        // This fixture negotiates the original 8192-byte clipboard records,
+        // not the optional full-size bulk records. Both ceilings still apply.
+        assert!(usage.retained_send_upper_bound - usage.critical_send_bytes <= 8 * 8192);
     }
     retained
 }
@@ -464,12 +466,12 @@ async fn prime_full_item_sender(
     ticket_id: &mut u128,
 ) -> usize {
     // Fill the original native burst before driving the opposite connection.
-    // Begin/Chunk advance on local admission, so these four completed ordinary
+    // Begin/Chunk advance on local admission, so these completed ordinary
     // I/O turns can retain multiple records without a peer application reply.
     // Withholding the peer's drive also withholds ACKs for those new records.
     // ZERO changes only the receive wait; each flush and custody guard completes.
     let mut retained = 0;
-    for _ in 0..4 {
+    for _ in 0..16 {
         step_full_item_workers(workers, ids);
         if from == 0 {
             Box::pin(state.host.drive(
@@ -499,7 +501,11 @@ async fn prime_full_item_sender(
             .unwrap();
         }
         retained = retained.max(full_item_native_records(state));
+        if retained == 8 {
+            break;
+        }
     }
+    assert_eq!(retained, 8, "exercise the complete bounded native burst");
     retained
 }
 
@@ -550,7 +556,7 @@ fn newly_negotiated_workers_transfer_full_item_limit_in_both_directions() {
                         break;
                     }
                 }
-                assert!(max_native_records >= 2, "test must exercise pipelined native records");
+                assert_eq!(max_native_records, 8, "test must exercise the eight-record native bound");
                 let _ = state.viewer.action(key(false)).unwrap();
                 for _ in 0..10 {
                     step_full_item_workers(&mut workers, &mut worker_ids);

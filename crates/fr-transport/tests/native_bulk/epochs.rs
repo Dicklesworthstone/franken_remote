@@ -176,6 +176,10 @@ fn later_records_wait_for_the_closed_native_epoch_without_losing_order_or_credit
         let cx = Cx::current().unwrap();
         let mut pair = pair(&cx, Policy::default()).await;
         for sequence in 0..2 {
+            if sequence != 0 {
+                // Close the fixed 10 ms fill window without servicing ACKs.
+                asupersync::time::sleep(cx.now(), Duration::from_millis(11)).await;
+            }
             pair.server
                 .send(
                     &cx,
@@ -214,7 +218,7 @@ fn later_records_wait_for_the_closed_native_epoch_without_losing_order_or_credit
         }
         assert_eq!(
             received, 1,
-            "new admissions cannot join an already staged epoch"
+            "new admissions cannot join an epoch after its fill window closes"
         );
         let until = clock(&cx) + 500_000;
         while pair.server.usage().retained_send_records != 0 {

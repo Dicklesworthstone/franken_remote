@@ -70,8 +70,8 @@ fn metadata_fits(policy: Policy, used: (usize, usize), length: usize) -> bool {
     if bytes == 0 && records == 0 {
         return true;
     }
-    let record_limit = policy.critical_send_records
-        - (policy.critical_send_records / 4).min(RESERVED_RECORDS);
+    let record_limit =
+        policy.critical_send_records - (policy.critical_send_records / 4).min(RESERVED_RECORDS);
     let byte_limit =
         policy.critical_send_bytes - (policy.critical_send_bytes / 4).min(RESERVED_BYTES);
     records < record_limit && total <= byte_limit
@@ -103,7 +103,10 @@ mod tests {
         let control = route(Messages::SessionControl);
         for kind in 0..=u16::MAX {
             let expected = kind == Kind::Progress as u16 || kind == Kind::PresentedState as u16;
-            assert_eq!(limited_metadata(control, &header(kind), &[control]), expected);
+            assert_eq!(
+                limited_metadata(control, &header(kind), &[control]),
+                expected
+            );
         }
         assert!(!limited_metadata(control, &[], &[control]));
         assert!(!limited_metadata(control, &[0; 7], &[control]));

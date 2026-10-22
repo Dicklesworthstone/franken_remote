@@ -287,7 +287,7 @@ impl Default for Policy {
     }
 }
 /// Start a batch at its first native prefix, including all records already
-/// queued. Later admissions may join only within SendEpoch's fixed fill window
+/// queued. Later admissions may join only within `SendEpoch`'s fixed fill window
 /// and critical count bound. No first-prefix delay or new queue is added.
 fn freeze_epoch(
     senders: &mut [Sender],
