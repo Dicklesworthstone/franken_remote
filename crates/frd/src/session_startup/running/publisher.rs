@@ -81,7 +81,8 @@ impl Policy {
             || self.streaming.network_turn > Duration::from_millis(50)
             || !(1..=64).contains(&self.streaming.records_per_turn)
             || self.adaptive_capture.is_some_and(|d| {
-                d > Duration::from_millis(200)
+                d > Duration::from_secs(1)
+                    || (d > Duration::from_millis(200) && d != self.streaming.capture_interval)
                     || d.as_micros() < self.streaming.capture_interval.as_nanos().div_ceil(1000)
             })
         {

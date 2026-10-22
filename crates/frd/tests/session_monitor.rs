@@ -260,6 +260,7 @@ fn frd_run_refuses_to_listen_without_fresh_session_evidence() {
             once: true,
             handle_signals: false,
             input_agent: None,
+            adaptive_capture: false,
             clipboard: false,
             audio: None,
             files: None,

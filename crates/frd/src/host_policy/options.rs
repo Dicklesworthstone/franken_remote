@@ -49,6 +49,9 @@ pub struct RunOptions {
     /// Local encoder target bits/s; absent retains 8,000,000. Not a hard
     /// instantaneous transport ceiling or an automatic bandwidth estimate.
     pub bitrate: Option<u32>,
+    /// Local opt-in to measured raw-capture pacing for a controlling session.
+    /// Requires `input_agent`; an observer-first shared source keeps fixed cadence.
+    pub adaptive_capture: bool,
     /// Absolute `fr-input-agent` path. Absent: observation only (unchanged).
     /// Present: a first viewer may take the exclusive controlled share.
     pub input_agent: Option<PathBuf>,
@@ -126,6 +129,13 @@ impl RunOptions {
                     return Err(Error::InvalidArgument);
                 }
                 options.clipboard = true;
+                continue;
+            }
+            if flag == "--adaptive-capture" {
+                if options.adaptive_capture {
+                    return Err(Error::InvalidArgument);
+                }
+                options.adaptive_capture = true;
                 continue;
             }
             if flag == "--audio" {

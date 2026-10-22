@@ -10,6 +10,7 @@ fn parse(args: &[&str]) -> Result<RunOptions, Error> {
 fn video_defaults_and_individual_overrides_are_independent() {
     let default = parse(&[]).unwrap();
     assert!(default.fps.is_none() && default.bitrate.is_none());
+    assert!(!default.adaptive_capture);
     assert_eq!(default.video_profile().unwrap(), video::Profile::default());
     assert_eq!(default.selected_encoder().unwrap(), None);
     let rate = parse(&["--fps", "60"]).unwrap().video_profile().unwrap();
@@ -193,4 +194,84 @@ fn video_rates_in_service_args_retain_legacy_software_and_existing_restrictions(
     options.approval_mode.clear();
     options.kind = ServiceKind::LaunchdAgent;
     assert!(options.validate().is_err());
+}
+
+#[test]
+fn adaptive_capture_is_an_explicit_boolean_and_does_not_change_the_codec_target() {
+    let options = parse(&[
+        "--adaptive-capture",
+        "--input-agent",
+        "/usr/libexec/fr-input-agent",
+        "--encoder",
+        "software",
+        "--fps",
+        "60",
+        "--bitrate",
+        "2000000",
+    ])
+    .unwrap();
+    assert!(options.adaptive_capture);
+    assert_eq!(
+        options.video_profile().unwrap(),
+        video::Profile::new(60, 2_000_000).unwrap()
+    );
+    assert_eq!(
+        options.selected_encoder().unwrap(),
+        Some(Encoder::SoftwareExplicit)
+    );
+    assert!(options.approval.is_none() && options.sharing.is_none());
+    assert!(!options.audio && !options.clipboard && options.files.is_none());
+    for args in [
+        &["--adaptive-capture", "--adaptive-capture"][..],
+        &["--adaptive-capture=true"][..],
+        &["--adaptive-capture", "true"][..],
+    ] {
+        assert!(matches!(parse(args), Err(Error::InvalidArgument)));
+    }
+}
+
+#[test]
+fn installed_adaptive_control_retains_the_choice_and_refuses_an_observer_only_host() {
+    let mut options = InstallOptions {
+        kind: ServiceKind::SystemdUser,
+        exec_path: PathBuf::from("/usr/bin/frd"),
+        approval_mode: "none".into(),
+        software_explicit: true,
+        run_args: [
+            "--input-agent",
+            "/usr/libexec/fr-input-agent",
+            "--adaptive-capture",
+            "--fps",
+            "1",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect(),
+        ..InstallOptions::default()
+    };
+    options.validate().unwrap();
+    let unit = render_systemd_unit(&options);
+    let command = unit
+        .lines()
+        .find_map(|line| line.strip_prefix("ExecStart=:"))
+        .unwrap();
+    let args = command
+        .split_whitespace()
+        .skip(2)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let parsed = RunOptions::parse(&args).unwrap();
+    assert!(parsed.adaptive_capture && parsed.input_agent.is_some());
+    assert_eq!(parsed.video_profile().unwrap().fps(), 1);
+    assert_eq!(command.matches("--adaptive-capture").count(), 1);
+    options.run_args = vec!["--adaptive-capture".into()];
+    assert!(matches!(
+        options.validate(),
+        Err(
+            crate::service_install::ServiceError::HostProfileUnavailable {
+                code: "adaptive_capture_requires_input_agent",
+                ..
+            }
+        )
+    ));
 }

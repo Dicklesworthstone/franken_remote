@@ -86,6 +86,7 @@ use std::{
 };
 
 /// Local operator choices; nothing here is peer-selectable.
+#[allow(clippy::struct_excessive_bools)] // Independent local enables, not session state.
 #[derive(Debug, Clone)]
 pub struct Options {
     pub socket: Option<PathBuf>,
@@ -98,6 +99,9 @@ pub struct Options {
     pub sharing: Scope,
     pub fps: u16,
     pub bitrate: u32,
+    /// Measured raw-capture pacing for the dedicated controlling session only.
+    /// Requires `input_agent`; observer-first shared capture retains its cadence.
+    pub adaptive_capture: bool,
     /// Replacement nft/ip executables (root-owned); `None` uses /usr/sbin.
     pub ingress_tools: Option<(PathBuf, PathBuf)>,
     /// Serve one OS-share lifetime, then stop (tests and one-shot sharing).
@@ -798,6 +802,7 @@ fn check(options: &Options) -> Result<(), Error> {
             .input_agent
             .as_ref()
             .is_some_and(|p| !p.is_absolute())
+        || (options.adaptive_capture && options.input_agent.is_none())
         || (options.clipboard && options.input_agent.is_none())
         || (options.files.is_some() && options.input_agent.is_none())
         || (options.file_send.is_some()
@@ -977,6 +982,11 @@ impl Share<'_> {
                 self.encoder.backend(),
             )
             .map_err(|_| Error::Configuration)?;
+            let profile = if self.options.adaptive_capture {
+                profile.with_adaptive_capture()
+            } else {
+                profile
+            };
             let profile = if self.options.clipboard {
                 profile.with_clipboard()
             } else {
@@ -1569,6 +1579,7 @@ mod tests {
             sharing: Scope::OwnUser,
             fps: 30,
             bitrate: 8_000_000,
+            adaptive_capture: false,
             ingress_tools: None,
             once: true,
             handle_signals: false,
@@ -1599,6 +1610,13 @@ mod tests {
                 Err(Error::Configuration)
             );
         }
+        let mut adaptive_only = options.clone();
+        adaptive_only.worker = PathBuf::from("/unprovisioned/fr-media-worker");
+        adaptive_only.adaptive_capture = true;
+        assert_eq!(
+            run(&adaptive_only, &report, &stop),
+            Err(Error::Configuration)
+        );
         let mut relative_agent = options.clone();
         relative_agent.worker = PathBuf::from("/usr/bin/fr-media-worker");
         relative_agent.input_agent = Some(PathBuf::from("fr-input-agent"));

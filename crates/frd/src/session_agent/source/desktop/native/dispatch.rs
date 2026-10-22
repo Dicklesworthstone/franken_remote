@@ -567,6 +567,13 @@ impl Driver {
     pub fn worker_id(&self) -> Option<u32> {
         self.desktop.as_ref().and_then(Opened::worker_id)
     }
+    /// Actual controlling-source pacing evidence; shared observers keep fixed cadence.
+    pub fn capture_pacing(&self) -> Option<&fr_media::pacing::Controller> {
+        match self.desktop.as_ref()? {
+            Opened::Controlled(desktop) => desktop.capture_pacing(),
+            Opened::Shared(_) => None,
+        }
+    }
 }
 /// A running controlled share ends like a shared one: its viewer's own ending
 /// (departure, protocol, deadline, its lease ending) is the served viewer's

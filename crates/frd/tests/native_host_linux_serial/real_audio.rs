@@ -380,6 +380,7 @@ fn options(
         once: false,
         handle_signals: false,
         input_agent: None,
+        adaptive_capture: false,
         clipboard: false,
         audio,
         files: None,

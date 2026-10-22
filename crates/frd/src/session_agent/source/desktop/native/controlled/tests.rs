@@ -167,3 +167,43 @@ fn a_file_worker_requires_observed_join_and_successful_disk_cleanup() {
     assert!(!format!("{with:?}").contains("fr-profile-files"));
     let _ = std::fs::remove_dir(&dir);
 }
+
+#[test]
+fn adaptive_capture_preserves_the_original_control_profile_and_seat() {
+    let seat = Seat::default();
+    let profile = ControlProfile::new(
+        Path::new("/usr/libexec/fr-input-agent"),
+        ":0",
+        None,
+        seat.clone(),
+        caps(),
+        30,
+        2_000_000,
+        Backend::SoftwareExplicit,
+    )
+    .unwrap();
+    assert!(!profile.adaptive_capture());
+    let display = fr_wire::display::Display {
+        handle: 1,
+        geometry: fr_core::ids::DisplayGeometryGeneration::INITIAL,
+        x: 0,
+        y: 0,
+        pixel_width: 640,
+        pixel_height: 480,
+        logical_width: 640,
+        logical_height: 480,
+        scale_numerator: 1,
+        scale_denominator: 1,
+        rotation: 0,
+    };
+    let configuration = profile.configuration(display);
+    let adaptive = profile.with_adaptive_capture();
+    assert!(adaptive.adaptive_capture());
+    assert_eq!(adaptive.configuration(display), configuration);
+    assert_eq!(adaptive.capabilities(), caps());
+    assert!(!adaptive.clipboard() && !adaptive.files() && !adaptive.file_download());
+    let reservation = adaptive.seat().reserve().unwrap();
+    assert!(seat.is_occupied());
+    drop(reservation);
+    assert!(!seat.is_occupied());
+}

@@ -119,6 +119,11 @@ OPTIONS:
     --fps FPS       Maximum capture/codec frame rate, integer 1..240 (default 30).
                     Native backpressure skips opportunities; this is not measured
                     throughput. No queued catch-up frames
+    --adaptive-capture  With --input-agent: adapt the controlling session's raw
+                    capture cadence to measured source/send/decoder pressure and idle.
+                    Normally bounded at 200 ms; a slower --fps remains fixed.
+                    Codec settings stay fixed; observer-first shares keep fixed cadence.
+                    Off by default; see ADAPTIVE_CAPTURE.md
     --bitrate BPS   Encoder target bits per second, integer 10000..200000000
                     (default 8000000). Not a hard network ceiling or automatic
                     adaptation. See docs/video-rate-controls.md
@@ -344,9 +349,11 @@ fn run_refusal(json: bool, code: &str, detail: &str, status: u8) -> ExitCode {
 /// What the operator enabled, restated with every listening line so the
 /// console never understates control or overstates lock protection.
 #[cfg(target_os = "linux")]
+#[allow(clippy::struct_excessive_bools)] // Independent startup facts, not session state.
 #[derive(Clone, Copy)]
 struct Profile {
     control: bool,
+    adaptive_capture: bool,
     session_lifetime: bool,
     observation_indicator: bool,
     encoder: frd::host_run::Encoder,
@@ -364,6 +371,7 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                 "event": "listening",
                 "address": address.to_string(),
                 "control": profile.control,
+                "controlled_adaptive_capture": profile.adaptive_capture,
                 "observation_indicator": profile.observation_indicator,
                 "encoder_selection": profile.encoder.as_str(),
                 "video_fps_limit": profile.video.fps(),
@@ -407,6 +415,11 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                     profile.video.fps(),
                     profile.video.bitrate()
                 );
+                if profile.adaptive_capture {
+                    println!(
+                        "frd: adaptive raw-capture cadence enabled for controlling sessions; codec settings and observer-first shared cadence stay fixed"
+                    );
+                }
                 if profile.encoder.is_hardware() {
                     println!(
                         "frd: experimental hardware HEVC with CPU-staged X11 capture; selection is not hardware qualification"
@@ -502,6 +515,14 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         Ok(options) => options,
         Err(error) => return local_policy::refusal(error, json),
     };
+    if options.adaptive_capture && options.input_agent.is_none() {
+        return run_refusal(
+            json,
+            "adaptive_capture_requires_input_agent",
+            "--adaptive-capture paces a controlling session; it needs --input-agent",
+            2,
+        );
+    }
     let video = match options.video_profile() {
         Ok(video) => video,
         Err(error) => return local_policy::refusal(error, json),
@@ -623,6 +644,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         once: options.once,
         handle_signals: true,
         input_agent,
+        adaptive_capture: options.adaptive_capture,
         clipboard: options.clipboard,
         audio,
         files,
@@ -631,6 +653,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
     };
     let profile = Profile {
         control: run_options.input_agent.is_some(),
+        adaptive_capture: run_options.adaptive_capture,
         session_lifetime: run_options.session_monitor.is_some(),
         observation_indicator: options.observation_indicator.is_some(),
         encoder,

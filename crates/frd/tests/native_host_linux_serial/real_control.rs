@@ -471,6 +471,7 @@ impl Daemon {
             once: false,
             handle_signals: false,
             input_agent,
+            adaptive_capture: false,
             clipboard,
             audio: None,
             files,

@@ -5,6 +5,41 @@ This is an implemented, opt-in local pacing slice of plan section 13 and bead
 its real source and QUIC sender. It is **not** a complete adaptive bitrate,
 resolution, end-to-end latency, or per-path aggregate-bandwidth controller.
 
+## Local host selection
+
+The shipped Linux host exposes this pacing path for the first controlling viewer:
+
+```sh
+frd run --encoder software --input-agent /usr/libexec/fr-input-agent --adaptive-capture
+```
+
+The option is off by default and requires `--input-agent`. It is a local
+capture-policy choice, not a negotiated peer capability. The existing approval,
+input permission, mandatory control indicator, and lease still govern the share.
+Installed services preserve the choice through their `--` arguments and reject
+it without the input agent.
+
+The original controlled publisher receives the existing measured source-work,
+send-admission, retention-credit and negotiated decoder-load samples. Collected
+native input retains its existing bounded idle wake path. The encoder bitrate,
+resolution and configuration do not change. An observer-first share still uses
+its shared owner's fixed cadence; aggregate shared-source adaptation remains
+separate work.
+
+The `--fps` setting remains the maximum capture rate. The adaptive maximum is
+200 ms unless the configured capture interval is already slower; a `--fps` value
+below 5 then keeps that slower interval fixed. The host never speeds up a low-fps
+operator choice to fit the adaptive range.
+
+A dispatch regression follows the actual controlling owner through native
+UDP/TLS/QUIC and supervised capture, presentation and input IPC. It checks a
+genuine unchanged source reaches verified idle, the original input receipt and
+ordered native cleanup still complete, and pacing disappears with the reaped
+publisher. Codec output, native input effects and visible confirmation in that
+regression are explicit protocol fixtures, not hardware or physical presentation
+evidence. Separate parser, service-render, profile and low-fps-policy regressions
+cover the selection boundary.
+
 ## Enabling the implemented path
 
 Call `Stream::enable_adaptive_capture` or `StreamingHost::enable_adaptive_capture`
@@ -16,7 +51,8 @@ host.enable_adaptive_capture(std::time::Duration::from_millis(200))?;
 
 The minimum interval is the stream's existing, encoder-qualified capture policy,
 rounded up to a whole microsecond. The maximum is caller-selected and cannot
-exceed 200 ms. Invalid limits, repeated configuration, and a stopped or already
+exceed 200 ms, except that an already slower fixed interval may be retained as
+both minimum and maximum (up to one second). Invalid limits, repeated configuration, and a stopped or already
 serving owner are refused without replacing the controller. Existing callers
 retain their fixed policy until they explicitly enable adaptation.
 

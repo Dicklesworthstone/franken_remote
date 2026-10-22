@@ -79,8 +79,17 @@ async fn connection_with(
 }
 
 #[test]
-#[allow(clippy::too_many_lines)]
 fn a_controlling_first_viewer_gets_the_exclusive_share_and_its_input_reaches_the_executor() {
+    exclusive_control(false);
+}
+
+#[test]
+fn local_adaptive_capture_reaches_the_actual_controlled_owner_and_keeps_input_live() {
+    exclusive_control(true);
+}
+
+#[allow(clippy::too_many_lines)]
+fn exclusive_control(adaptive: bool) {
     let runtime = support::runtime();
     let c = runtime.request_cx_with_budget(Budget::INFINITE);
     let h = runtime.request_cx_with_budget(Budget::INFINITE);
@@ -97,19 +106,22 @@ fn a_controlling_first_viewer_gets_the_exclusive_share_and_its_input_reaches_the
     agent
         .permissions_mut()
         .set_permission(PermissionKind::ScreenCapture, PermissionStatus::Granted);
-    let agent = agent.with_control(
-        ControlProfile::new(
-            &agent_image,
-            ":0",
-            None,
-            seat.clone(),
-            keys(),
-            30,
-            2_000_000,
-            Backend::SoftwareExplicit,
-        )
-        .unwrap(),
-    );
+    let profile = ControlProfile::new(
+        &agent_image,
+        ":0",
+        None,
+        seat.clone(),
+        keys(),
+        30,
+        2_000_000,
+        Backend::SoftwareExplicit,
+    )
+    .unwrap();
+    let agent = agent.with_control(if adaptive {
+        profile.with_adaptive_capture()
+    } else {
+        profile
+    });
     let ticker = Arc::new(AtomicU64::new(700_000));
     let entropy: crate::session_startup::shared_viewers::Entropy =
         Arc::new(move || Ok(u128::from(ticker.fetch_add(1, Ordering::Relaxed))));
@@ -164,6 +176,7 @@ fn a_controlling_first_viewer_gets_the_exclusive_share_and_its_input_reaches_the
         let busy = Cell::new(false);
         // Set by the probe below once a later viewer was refused Busy.
         let refused_later = Cell::new(false);
+        let controlled_since = Cell::new(None::<u64>);
         let mut client = Box::pin(async {
             let _first = first;
             let mut observer = viewer
@@ -209,11 +222,20 @@ fn a_controlling_first_viewer_gets_the_exclusive_share_and_its_input_reaches_the
                                     let _ = input.action(key(true)).unwrap();
                                     pressed = true;
                                 }
+                                let since = controlled_since.get().unwrap_or_else(|| {
+                                    let start = now(&c).unwrap();
+                                    controlled_since.set(Some(start));
+                                    start
+                                });
                                 // Stop only after the probe saw a later viewer
                                 // refused WHILE this share ran; stopping on the
                                 // first receipt raced that probe (it failed about
                                 // half of isolated runs, "no later viewer").
-                                if receipts.get() == 1 && refused_later.get() && !busy.get() {
+                                if receipts.get() == 1
+                                    && refused_later.get()
+                                    && !busy.get()
+                                    && (!adaptive || now(&c).unwrap() >= since + 1_500_000)
+                                {
                                     busy.set(true);
                                     stop.store(true, Ordering::Release);
                                 }
@@ -279,6 +301,26 @@ fn a_controlling_first_viewer_gets_the_exclusive_share_and_its_input_reaches_the
         );
         drop(client);
         drop(running);
+        if adaptive {
+            let pacing = driver.capture_pacing().expect("original controlled owner");
+            assert_eq!(
+                pacing.policy(),
+                fr_media::pacing::Policy {
+                    minimum_interval_us: 50_000,
+                    maximum_interval_us: 200_000,
+                }
+            );
+            assert_eq!(pacing.report().unwrap().mode, fr_media::pacing::Mode::Idle);
+            assert!(pacing.decisions().any(|report| {
+                report.reason == fr_media::pacing::Reason::VerifiedIdle
+                    && report
+                        .sample
+                        .observation
+                        .is_some_and(|source| !source.changed)
+            }));
+        } else {
+            assert!(driver.capture_pacing().is_none());
+        }
         // The executor saw exactly the press, then its fence, then the
         // release-only cleanup of the held key, then an orderly stop.
         let lines = transcript(&agent_log);
@@ -311,6 +353,7 @@ fn a_controlling_first_viewer_gets_the_exclusive_share_and_its_input_reaches_the
         // The proven exit released the publisher and with it the viewer's
         // connection; a later reap reports that same exit, never a new child.
         assert!(driver.worker_id().is_none());
+        assert!(driver.capture_pacing().is_none());
         assert_eq!(
             driver
                 .reap(

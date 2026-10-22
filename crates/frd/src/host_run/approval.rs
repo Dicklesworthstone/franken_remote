@@ -267,6 +267,7 @@ mod tests {
             once: true,
             handle_signals: false,
             input_agent: None,
+            adaptive_capture: false,
             clipboard: false,
             audio: None,
             files: None,

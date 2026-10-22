@@ -235,3 +235,30 @@ fn original_budget_fences_before_abandoning_a_waiting_native_continuation() {
         assert!(dropped.load(Ordering::Acquire));
     });
 }
+
+#[test]
+fn adaptive_policy_keeps_operator_low_fps_limits_fixed() {
+    for micros in [200_001, 250_000, 500_000, 1_000_000] {
+        let interval = Duration::from_micros(micros);
+        let fixed = Policy {
+            streaming: streaming::Policy {
+                capture_interval: interval,
+                ..streaming::Policy::default()
+            },
+            adaptive_capture: Some(interval),
+            ..Policy::default()
+        };
+        assert!(fixed.validate().is_ok(), "{micros}");
+        for maximum in [micros - 1, micros + 1] {
+            assert_eq!(
+                Policy {
+                    adaptive_capture: Some(Duration::from_micros(maximum)),
+                    ..fixed
+                }
+                .validate(),
+                Err(Error::InvalidConfiguration),
+                "{micros} / {maximum}"
+            );
+        }
+    }
+}

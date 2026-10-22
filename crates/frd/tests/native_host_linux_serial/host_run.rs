@@ -105,6 +105,7 @@ fn options(api: &fixture::Api, tools: &Tools, worker: PathBuf) -> Options {
         once: true,
         handle_signals: false,
         input_agent: None,
+        adaptive_capture: false,
         clipboard: false,
         audio: None,
         files: None,

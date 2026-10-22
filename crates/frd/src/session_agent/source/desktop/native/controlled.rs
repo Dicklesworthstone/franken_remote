@@ -80,6 +80,7 @@ pub struct ControlProfile {
     fps: u16,
     bitrate: u32,
     backend: Backend,
+    adaptive_capture: bool,
     clipboard: bool,
     /// `frd run --files DIR`: the operator's pinned drop directory.
     files: Option<crate::native_files::Directory>,
@@ -115,10 +116,21 @@ impl ControlProfile {
             fps,
             bitrate,
             backend,
+            adaptive_capture: false,
             clipboard: false,
             files: None,
             file_download: None,
         })
+    }
+    /// Enable measured raw-capture pacing on this original controlling owner.
+    /// It changes admission timing only, leaving codec settings and authority intact.
+    #[must_use]
+    pub const fn with_adaptive_capture(mut self) -> Self {
+        self.adaptive_capture = true;
+        self
+    }
+    pub const fn adaptive_capture(&self) -> bool {
+        self.adaptive_capture
     }
     /// The operator's separate local drop directory (`frd run --files`). Under
     /// the explicit `approval none` profile this IS the local file-receive
@@ -232,6 +244,13 @@ impl ControlledDesktop {
     pub fn worker_id(&self) -> Option<u32> {
         match &self.media {
             Media::Live(publisher) => publisher.worker_id(),
+            Media::Reaped(_) => None,
+        }
+    }
+    /// Pacing evidence belongs to the original publisher until it is reaped.
+    pub fn capture_pacing(&self) -> Option<&fr_media::pacing::Controller> {
+        match &self.media {
+            Media::Live(publisher) => publisher.pacing(),
             Media::Reaped(_) => None,
         }
     }
@@ -559,6 +578,9 @@ where
     let policy = PublisherPolicy {
         timeout: Duration::from_micros(startup.until.saturating_sub(now))
             .min(Duration::from_secs(60)),
+        adaptive_capture: profile
+            .adaptive_capture()
+            .then_some(capture_interval.max(Duration::from_millis(200))),
         streaming: crate::media::streaming::Policy {
             capture_interval,
             ..crate::media::streaming::Policy::default()
