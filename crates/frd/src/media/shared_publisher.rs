@@ -592,20 +592,20 @@ impl Subscriber {
         }
         let result = (|| {
             entry.check_media(transport)?;
-            if entry.fenced() {
-                entry.notify_local_failure(cx, transport)?;
-                return Ok(SendReport {
-                    accepted: 0,
-                    pending: true,
-                });
-            }
             let mut report = SendReport {
                 accepted: 0,
                 pending: false,
             };
+            if entry.fenced() {
+                entry.notify_local_failure(cx, transport)?;
+                report.pending = true;
+                entry.service_audio(cx, transport, audio_ring, &owner, &mut report)?;
+                return Ok(report);
+            }
             entry.service_startup(transport, &owner, &mut report)?;
             if !entry.service_join(transport, &owner, &mut report)? {
                 report.pending = true;
+                entry.service_audio(cx, transport, audio_ring, &owner, &mut report)?;
                 return Ok(report);
             }
             for _ in report.accepted..maximum_records {
@@ -632,6 +632,7 @@ impl Subscriber {
                         entry.absorb(Error::Transport(error))?;
                         entry.notify_local_failure(cx, transport)?;
                         report.pending = true;
+                        entry.service_audio(cx, transport, audio_ring, &owner, &mut report)?;
                         return Ok(report);
                     }
                 };

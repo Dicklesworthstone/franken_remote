@@ -1,7 +1,7 @@
 //! Actual independent TLS/UDP peers and completed role-specific attachments.
 #[path = "../../../fr-transport/tests/support/mod.rs"]
 #[allow(dead_code)]
-mod net;
+pub(super) mod net;
 use asupersync::cx::Cx;
 use fr_core::{ids::*, limits::ProtocolLimits};
 use fr_transport::quic::*;
@@ -188,8 +188,13 @@ impl Link {
         let (hc, cc) = self.attach(cx, MediaRole::Configuration, 8).await;
         let (hr, cr) = self.attach(cx, MediaRole::Recovery, 9).await;
         let (hv, cv) = self.attach(cx, MediaRole::Video, 10).await;
-        let host = NegotiatedMedia::new(&self.h, &self.selection, &hc, &hr, &hv).unwrap();
-        let viewer = NegotiatedMedia::new(&self.c, &self.selection, &cc, &cr, &cv).unwrap();
+        let mut host = NegotiatedMedia::new(&self.h, &self.selection, &hc, &hr, &hv).unwrap();
+        let mut viewer = NegotiatedMedia::new(&self.c, &self.selection, &cc, &cr, &cv).unwrap();
+        if host.audio_selected() {
+            let (ha, ca) = self.attach(cx, MediaRole::AudioDown, 11).await;
+            host.attach_audio(&self.h, &ha).unwrap();
+            viewer.attach_audio(&self.c, &ca).unwrap();
+        }
         Media {
             host,
             viewer,
@@ -256,7 +261,7 @@ pub(super) fn configuration() -> Configuration {
 pub(super) fn pool() -> SharedFramePool {
     SharedFramePool::new(ProtocolLimits::ABSOLUTE, 32 * 1024 * 1024, 8).unwrap()
 }
-fn fixture(script: &str, prefix: &str) -> PathBuf {
+pub(super) fn fixture(script: &str, prefix: &str) -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
         "fr-shared-startup-{prefix}-{}-{}.py",

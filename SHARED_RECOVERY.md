@@ -43,8 +43,10 @@ recovery, a sender-discovered broken chain is absorbed, not fatal:
   `admit_sender_failure`. The source task may find the expiry first; it needs
   no connection for this.
 - The entry is fenced: no capture credit, no new pictures, no progress, no
-  cursor or audio service, and its presentation/feedback reports are consumed
-  as obsolete. It stays a member, so a sole viewer keeps its source.
+  cursor service, and its presentation/feedback reports are consumed as
+  obsolete. It stays a member, so a sole viewer keeps its source. An already
+  established audio attachment continues under its own observation checks;
+  sound cannot restore the failed picture's readiness.
 - The viewer's own session sends one reliable `Failed` progress record
   (`notify_sender_failure`, which checks the connection first) and then waits.
 - The viewer's ordinary bound recovery request must arrive by the same deadline
@@ -90,7 +92,7 @@ with their original transport owner. After attachment, ordinary publisher captur
 and `Subscriber::service` drive the existing shared decoder handshake. The original
 source coalesces recovery and late-join IDR demand under its existing 500 ms rate
 allowance. The sender is rebound, not reconstructed; old failure and repair spending
-is retained. No media goes to the recovering viewer before Configured, and no
+is retained. No video goes to the recovering viewer before Configured, and no
 readiness is reported before its matching FirstDecoded.
 
 Source consent and each viewer's observation authority remain independent. Failure,
@@ -98,6 +100,38 @@ timeout, cancellation and invalid replacement affect only that subscriber unless
 it was the last source owner. A decode report never grants visibility or input.
 Control-intent sessions do not use this observation-only path. Existing transport
 namespace exhaustion still refuses rather than recycling retired bindings.
+
+## Playback audio during video recovery
+
+Video reference recovery preserves an established audio-down attachment, its
+acknowledged audio epoch and its original connection. The three replacement
+exchanges retire only configuration, recovery and video routes. Their completion
+now carries the original audio attachment proof into the replacement media owner;
+it does not silently discard that proof or open another audio channel.
+
+The shared publisher continues bounded audio service while a video failure is
+fenced, while its replacement attachments are pending, and while its decoder
+startup is waiting. A sole recovering viewer also retains audio demand, so a
+temporary video recovery does not stop and restart the share's audio worker.
+Other viewers retain their own routes, audio acknowledgements and video
+generations. A new or late-joining viewer still completes video startup before
+first starting audio.
+
+This is observation continuity, not permission to bypass a stop. Every send
+still checks the source and viewer observation authorities; a revoked or
+suspended observation, ended connection, retired audio route, or matching
+viewer AudioStop fences the lane. Hidden or recovering video cannot grant view
+readiness or input permission, and a host lock still ends observation through
+the existing session authority path. Audio packets retain their original
+capture-based deadlines and bounded ring; there is no recovery catch-up queue.
+
+The shared-startup audio regressions use completed TLS/UDP attachments, the real
+publisher and supervised audio-worker IPC. They check continuing audio through
+video replacement for a sole viewer and for independent siblings, including
+original audio routes and epoch, one source launch, and observation revocation.
+Their codec payloads are explicit fixtures; they do not qualify native Opus,
+physical playback, audio continuity on an impaired network, or platform lock
+notifications.
 
 ## Executed checks
 

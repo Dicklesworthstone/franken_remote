@@ -48,16 +48,35 @@ async fn joined_with_recovery(
     delayed: bool,
     recovery: bool,
 ) -> Box<Cohort> {
+    let capabilities: &[&str] = if recovery {
+        &[fr_wire::recovery_request::CAPABILITY]
+    } else {
+        &[]
+    };
+    Box::pin(joined_with_capabilities(
+        rt,
+        changing,
+        delayed,
+        capabilities,
+    ))
+    .await
+}
+async fn joined_with_capabilities(
+    rt: &Runtime,
+    changing: bool,
+    delayed: bool,
+    capabilities: &[&str],
+) -> Box<Cohort> {
     let cx = Cx::current().unwrap();
     let (owner, a, b) = (gate(rt, 1), gate(rt, 13), gate(rt, 14));
     let mut al = Link::new(&cx, 13).await;
     let mut bl = Link::new(&cx, 14).await;
-    if recovery {
+    for &capability in capabilities {
         for link in [&mut al, &mut bl] {
             link.selection
                 .capabilities
                 .push(fr_wire::negotiation::Capability {
-                    name: fr_wire::recovery_request::CAPABILITY.into(),
+                    name: capability.into(),
                     version: 1,
                     required: true,
                 });
@@ -579,3 +598,6 @@ mod consent;
 
 #[path = "publisher/recovery.rs"]
 mod recovery;
+
+#[path = "publisher/audio.rs"]
+mod audio;

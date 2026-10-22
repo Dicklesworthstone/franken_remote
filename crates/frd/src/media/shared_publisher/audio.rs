@@ -234,19 +234,14 @@ impl EntryAudio {
     }
 }
 impl Entry {
-    /// Admitted, decoder-ready observation with an attached audio-down lane.
-    pub(super) fn audio_streaming(&self) -> bool {
-        self.failure.is_none()
-            && self.join.is_none()
-            && self.starting.is_none()
-            && self.recovery.is_none()
-            && self
-                .media
-                .as_ref()
-                .is_some_and(crate::media_quic::NegotiatedMedia::audio_selected)
-    }
     fn audio_demand(&self) -> bool {
-        self.audio_streaming() && self.audio.lanes.is_some() && self.audio.lane.wants_audio()
+        // Once attached, audio observation outlives video-only recovery. In
+        // particular, media is temporarily None while its three video roles
+        // are replaced; that cannot withdraw this viewer's audio demand.
+        self.failure.is_none()
+            && self.control.check().is_ok()
+            && self.audio.lanes.is_some()
+            && self.audio.lane.wants_audio()
     }
     /// Bounded: at most `RECORDS_PER_TURN` audio records. A broken audio lane
     /// fences audio only; it never ends this viewer's video.
@@ -258,19 +253,40 @@ impl Entry {
         owner: &ObservationControl,
         report: &mut SendReport,
     ) -> Result<(), Error> {
-        if !self.audio_streaming() || self.audio.lane.is_stopped() {
+        if self.failure.is_some() || self.audio.lane.is_stopped() {
             return Ok(());
         }
-        let media = self.media.as_ref().ok_or(Error::Closed)?;
-        let lanes = match media.audio_lanes(transport) {
-            Ok(Some(lanes)) => lanes,
-            Ok(None) => return Ok(()),
-            Err(_) => {
-                self.audio.close();
-                self.audio.lanes = None;
+        let lanes = if let Some(lanes) = self.audio.lanes {
+            lanes
+        } else {
+            // Preserve first-start admission: pending/late-joining video never
+            // starts a new audio source. Only an already established audio
+            // attachment continues through the later recovery boundary.
+            if self.join.is_some() || self.starting.is_some() || self.fenced() {
                 return Ok(());
             }
+            let media = self.media.as_ref().ok_or(Error::Closed)?;
+            match media.audio_lanes(transport) {
+                Ok(Some(lanes)) => lanes,
+                Ok(None) => return Ok(()),
+                Err(_) => {
+                    self.audio.close();
+                    return Ok(());
+                }
+            }
         };
+        // The original connection was checked by Subscriber before this turn.
+        // Retained audio wiring cannot keep a retired route alive, even while
+        // the replacement temporarily owns the negotiated media descriptor.
+        if transport.is_closed()
+            || !transport.has_route(Route::Stream(lanes.control))
+            || !transport.has_route(Route::Stream(lanes.replies))
+            || !transport.has_route(Route::Datagram(lanes.packets))
+            || transport.receive_ended(lanes.replies).unwrap_or(true)
+        {
+            self.audio.close();
+            return Ok(());
+        }
         self.audio
             .service(cx, transport, ring, lanes, owner, &self.control, report)
     }

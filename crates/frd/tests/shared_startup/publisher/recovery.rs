@@ -23,7 +23,7 @@ fn request(peer: &Peer) -> Vec<u8> {
     .unwrap();
     bytes
 }
-fn admit(peer: &mut Peer) {
+pub(super) fn admit(peer: &mut Peer) {
     let bytes = request(peer);
     assert!(
         peer.subscriber
@@ -39,7 +39,7 @@ fn admit(peer: &mut Peer) {
             .unwrap()
     );
 }
-fn tickets() -> [Ticket; 3] {
+pub(super) fn tickets() -> [Ticket; 3] {
     [Ticket(8001), Ticket(8002), Ticket(8003)]
 }
 

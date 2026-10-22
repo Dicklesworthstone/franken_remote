@@ -4,8 +4,8 @@
 use super::NegotiatedMedia;
 use asupersync::{cx::Cx, net::quic_native::StreamRole};
 use fr_transport::quic::{
-    self, ChannelRequest, ChannelScope, ConnectionBinding, ControlRoutes, Disposition,
-    MediaChannel, QuicRecords, Route,
+    self, AttachedChannel, ChannelRequest, ChannelScope, ConnectionBinding, ControlRoutes,
+    Disposition, MediaChannel, QuicRecords, Route,
 };
 use fr_wire::{
     attachment::{self, MediaRole, Message, Ticket},
@@ -48,6 +48,9 @@ pub struct Replacement {
     routes: ControlRoutes,
     parent: ControlBinding,
     selection: Selection,
+    // Audio has its own acknowledged epoch and attachment lifetime. Replacing
+    // video neither retires these routes nor grants a new audio attachment.
+    audio: Option<Box<AttachedChannel>>,
     view: Binding,
     tickets: Option<[Ticket; 3]>,
     channels: [Option<MediaChannel>; 3],
@@ -133,6 +136,7 @@ impl NegotiatedMedia {
             routes: control,
             parent,
             selection: self.selection,
+            audio: self.audio,
             view,
             tickets,
             channels: [None, None, None],
@@ -331,8 +335,14 @@ impl Replacement {
             let [Some(configuration), Some(recovery), Some(video)] = &self.channels else {
                 return Err(Error::Closed);
             };
-            NegotiatedMedia::new(q, &self.selection, configuration, recovery, video)
-                .map_err(Error::Media)
+            let mut media =
+                NegotiatedMedia::new(q, &self.selection, configuration, recovery, video)
+                    .map_err(Error::Media)?;
+            // Preserve the exact original proof, not a copied/rebound view or a
+            // new audio epoch. audio_lanes still checks its independent routes;
+            // an audio-only retirement must not fail successful video recovery.
+            media.audio = self.audio.take();
+            Ok(media)
         })();
         if result.is_err() {
             q.close();
