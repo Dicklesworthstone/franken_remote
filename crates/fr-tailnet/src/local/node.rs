@@ -5,6 +5,7 @@ use asupersync::cx::Cx;
 use std::time::Duration;
 use std::{
     fmt,
+    future::{Future, poll_fn},
     net::IpAddr,
     sync::{Arc, atomic::Ordering},
 };
@@ -67,6 +68,13 @@ impl LocalApi {
     /// addresses and a tailnet-qualified certificate name before socket binding.
     /// The deadline begins before lookup; delayed replies do not slide it.
     pub async fn node_identity(&self, cx: &Cx) -> Result<NodeIdentity, Error> {
+        self.node_identity_bounded(cx, None).await
+    }
+    async fn node_identity_bounded(
+        &self,
+        cx: &Cx,
+        original: Option<&NodeIdentity>,
+    ) -> Result<NodeIdentity, Error> {
         now(cx)?;
         self.busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -75,8 +83,11 @@ impl LocalApi {
         let issued_us = now(cx)?;
         let wall_issued_us = wall_now()?;
         let mut expires_us = issued_us.checked_add(VALIDITY_US).ok_or(Error::Clock)?;
-        let lookup_end = issued_us.checked_add(1_000_000).ok_or(Error::Clock)?;
-        let (identity, credential, key_expires_us) = Box::pin(bounded(
+        let lookup_end = match original {
+            Some(old) => old.expires_us,
+            None => issued_us.checked_add(1_000_000).ok_or(Error::Clock)?,
+        };
+        let mut lookup = Box::pin(bounded(
             cx,
             Duration::from_micros(lookup_end.checked_sub(now(cx)?).ok_or(Error::Timeout)?),
             async {
@@ -103,7 +114,19 @@ impl LocalApi {
                     .flatten();
                 Ok((a, ca, key_expires))
             },
-        ))
+        ));
+        let (identity, credential, key_expires_us) = poll_fn(|task| {
+            if let Some(old) = original {
+                self.check_node(cx, old)?;
+            }
+            let result = lookup.as_mut().poll(task);
+            // Parsing a ready response can cross the old monotonic or key
+            // deadline. Even a successful result cannot replace expired proof.
+            if let Some(old) = original {
+                self.check_node(cx, old)?;
+            }
+            result
+        })
         .await?;
         if let Some(expiry) = key_expires_us {
             let remaining = expiry.checked_sub(wall_now()?).ok_or(Error::KeyExpired)?;
@@ -130,6 +153,25 @@ impl LocalApi {
         }
         node.check_at(now(cx)?, wall_now()?)
     }
+    /// One periodic lookup for an already installed DIRECT ingress boundary.
+    /// Pending work may use the old snapshot's remaining validity; no error is
+    /// retried or ignored. Every poll checks original provenance, key and clocks;
+    /// completed replies must also match the original daemon and full identity.
+    /// Initial installation, cold admission and helper-backed ingress keep the
+    /// public one-second lookup bound. The helper has a separate EOF lifetime.
+    pub(super) async fn revalidate_direct_ingress_node(
+        &self,
+        cx: &Cx,
+        old: &NodeIdentity,
+    ) -> Result<NodeIdentity, Error> {
+        self.check_node(cx, old)?;
+        let new = self.node_identity_bounded(cx, Some(old)).await?;
+        self.check_node(cx, old)?;
+        if !old.same_node(&new) {
+            return Err(Error::IdentityChanged);
+        }
+        Ok(new)
+    }
     /// Refresh only an unexpired snapshot belonging to this exact daemon
     /// instance. An address, certificate name, key or tailnet change requires
     /// closing old listeners/sessions and creating a new checked owner.
@@ -147,3 +189,6 @@ impl LocalApi {
         Ok(new)
     }
 }
+
+#[cfg(test)]
+mod tests;

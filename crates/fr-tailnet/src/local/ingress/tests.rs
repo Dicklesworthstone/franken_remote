@@ -336,6 +336,9 @@ async fn fixture(cx: &Cx) -> Boundary {
     api.daemon_uid = UnixStream::pair().unwrap().0.peer_cred().unwrap().uid;
     let node = api.node_identity(cx).await.unwrap();
     worker.join().unwrap();
+    fixture_boundary(cx, api, node)
+}
+fn fixture_boundary(cx: &Cx, api: LocalApi, node: NodeIdentity) -> Boundary {
     Boundary {
         lease: Lease {
             api,
@@ -477,4 +480,52 @@ fn cancellation_retires_without_leaving_a_renewable_lease() {
             Err(Error::Identity(IdentityError::Cancelled))
         );
     });
+}
+
+#[test]
+fn initial_direct_confirmation_keeps_its_cold_bound_and_periodic_wait_uses_old_validity() {
+    use crate::local::tests::{Server, fixtures, response};
+    use asupersync::{
+        time::{TimerDriverHandle, VirtualClock},
+        types::Time,
+    };
+    for installation in [true, false] {
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_millis(100)));
+        let response_clock = clock.clone();
+        let (mut status, _) = fixtures();
+        status["Self"]["DNSName"] = json!("host.fixture.ts.net.");
+        let server = Server::with_reply_hook(vec![response(&status, false)], move |index| {
+            if index >= 2 {
+                response_clock.advance(600_000_000);
+            }
+        });
+        RuntimeBuilder::new()
+            .worker_threads(2)
+            .enable_platform_reactor(true)
+            .with_timer_driver(TimerDriverHandle::with_virtual_clock(clock))
+            .build()
+            .unwrap()
+            .block_on(async {
+                let cx = Cx::current().unwrap();
+                let node = server.client.node_identity(&cx).await.unwrap();
+                let mut boundary = fixture_boundary(&cx, server.client.clone(), node);
+                let lease = boundary.lease().unwrap();
+                let result = if installation {
+                    boundary.revalidate_for(Refresh::Installation).await
+                } else {
+                    boundary.revalidate().await
+                };
+                let expected = if installation {
+                    Error::Identity(IdentityError::Timeout)
+                } else {
+                    // This lifetime fixture deliberately has no kernel TUN.
+                    // Only the periodic path gets beyond the slow identity
+                    // pair and reaches the original interface refusal.
+                    Error::UnqualifiedInterface
+                };
+                assert_eq!(result, Err(expected));
+                assert_eq!(server.calls.load(Ordering::SeqCst), 4);
+                assert!(lease.check(address()).is_err(), "both failures fence");
+            });
+    }
 }

@@ -534,6 +534,10 @@ enum Backend {
     Direct,
     Helper(helper::Link),
 }
+enum Refresh {
+    Installation,
+    Periodic,
+}
 /// Cloneable liveness evidence for a rule already installed by Boundary. This
 /// is not peer identity or permission. Retain it in the ORIGINAL transport's I/O
 /// checks through every handoff, until that transport has actually been dropped.
@@ -668,7 +672,7 @@ impl Boundary {
         };
         // Recheck both sides of the transaction before callers can obtain a
         // lease. No delayed command gets a replacement validity deadline.
-        owner.revalidate().await?;
+        owner.revalidate_for(Refresh::Installation).await?;
         Ok(owner)
     }
     pub const fn address(&self) -> SocketAddr {
@@ -695,6 +699,9 @@ impl Boundary {
     /// work retires the original lifetime. Old validity must still hold after
     /// every await; a late result cannot resurrect protection.
     pub fn revalidate(&mut self) -> impl Future<Output = Result<(), Error>> + '_ {
+        self.revalidate_for(Refresh::Periodic)
+    }
+    fn revalidate_for(&mut self, refresh: Refresh) -> impl Future<Output = Result<(), Error>> + '_ {
         let attempt = Attempt {
             owner: self,
             complete: false,
@@ -710,11 +717,24 @@ impl Boundary {
                 .map_err(|_| Error::Closed)?
                 .node
                 .clone();
-            let node = owner
-                .lease
-                .api
-                .revalidate_node(&owner.lease.cx, &old)
-                .await?;
+            let node = if matches!(refresh, Refresh::Periodic)
+                && matches!(&owner.backend, Backend::Direct)
+            {
+                owner
+                    .lease
+                    .api
+                    .revalidate_direct_ingress_node(&owner.lease.cx, &old)
+                    .await?
+            } else {
+                // Initial confirmation has no admitted protection lifetime to
+                // spend. Helper renewal must also keep its original bound so
+                // metadata cannot postpone observing helper EOF past shutdown.
+                owner
+                    .lease
+                    .api
+                    .revalidate_node(&owner.lease.cx, &old)
+                    .await?
+            };
             let index = qualified_interface(&owner.lease.cx, &owner.config).await?;
             if index != owner.index {
                 return Err(Error::InterfaceChanged);

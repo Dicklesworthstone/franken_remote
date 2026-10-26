@@ -26,7 +26,7 @@ fn endpoints() -> ConnectionAddresses {
         peer: "100.64.0.2:30001".parse().unwrap(),
     }
 }
-fn fixtures() -> (Value, Value) {
+pub(super) fn fixtures() -> (Value, Value) {
     let host_key = format!("nodekey:{}", "1".repeat(64));
     let key = format!("nodekey:{}", "2".repeat(64));
     let peer = json!({"ID":"n-peer", "NodeID":2, "PublicKey":key, "UserID":7,
@@ -78,14 +78,20 @@ fn peer_mut(status: &mut Value) -> &mut Value {
         .unwrap()
 }
 
-struct Server {
-    client: LocalApi,
+pub(super) struct Server {
+    pub(super) client: LocalApi,
     stop: Arc<AtomicBool>,
-    calls: Arc<AtomicUsize>,
+    pub(super) calls: Arc<AtomicUsize>,
     thread: Option<JoinHandle<()>>,
 }
 impl Server {
     fn new(replies: Vec<Vec<u8>>, pause: Duration) -> Self {
+        Self::with_reply_hook(replies, move |_| thread::sleep(pause))
+    }
+    pub(super) fn with_reply_hook(
+        replies: Vec<Vec<u8>>,
+        mut before_reply: impl FnMut(usize) + Send + 'static,
+    ) -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let unique = NEXT.fetch_add(1, Ordering::SeqCst);
         let path = std::env::temp_dir().join(format!(
@@ -134,7 +140,7 @@ impl Server {
                         || request.starts_with("GET /localapi/v0/whois?addr=100.64.0.2%3A30001 ")
                 );
                 counted.fetch_add(1, Ordering::SeqCst);
-                thread::sleep(pause);
+                before_reply(index);
                 let reply = &replies[index.min(replies.len() - 1)];
                 index += 1;
                 // The client may cancel or refuse an oversize response partway through.
@@ -177,7 +183,7 @@ impl Drop for Server {
         self.thread.take().unwrap().join().unwrap();
     }
 }
-fn response(value: &Value, chunked: bool) -> Vec<u8> {
+pub(super) fn response(value: &Value, chunked: bool) -> Vec<u8> {
     let data = serde_json::to_vec(value).unwrap();
     if chunked {
         let mut out = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();

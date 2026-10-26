@@ -36,6 +36,36 @@ expiry, cancellation, abandonment and a caught callback panic fence that
 session. The application is not restarted and external effects are not retried.
 Use a dedicated session Cx, distinct from the broker and credential-service Cx.
 
+### A slow periodic identity read on the direct path
+
+An already installed **direct** boundary lets one pending LocalAPI self-identity
+lookup use the original node snapshot's remaining validity. Previously that
+lookup stopped after one second even when the original three-second snapshot
+was still live. The periodic refresh still starts after the same 500 ms interval;
+it never retries an error, keeps failed evidence, or moves an old deadline.
+Original provenance, monotonic validity, key expiry and wall-clock checks run
+before and after every lookup poll. A replacement snapshot is timestamped when
+its request starts, and it becomes the boundary's evidence only after the same
+node, interface and firewall checks all finish before the old expiry.
+
+Initial rule installation, cold node/admission checks and helper-backed
+boundaries keep their one-second lookup limit. The helper's connection-loss
+detection and shutdown grace are separate lifetime constraints; this change
+does not delay those checks. The original ip/nft command limits, refresh
+cadence, peer admission and observation/control authorization are unchanged.
+Any returned error, cancellation, expired snapshot or abandoned refresh still
+retires the boundary. A delayed success cannot revive it.
+
+Focused regressions cover real credential-checked Unix/HTTP exchanges with
+controlled authority-clock advancement, one actual reply delayed over one
+second, exact old-expiry edges, unchanged cold/installation limits, changed
+identity, key expiry, wall-clock failure and cancellation. The interface fixture
+still refuses its deliberately nonexistent TUN; these tests do not replace
+kernel or installed-Tailscale qualification. The new regressions have been
+source-reviewed and formatted; their runtime execution is not yet claimed.
+Slow command/helper responses and live loaded-host measurements remain open
+under fr-ingress-revalidation-load-qelg.
+
 `LinuxServer::stop` fences at call time and closes an unused listener. It removes
 only its owned rule, and refuses `InUse` while any handed-off transport retains
 the lease. Cancellation is not proof of socket destruction. Keep the owner to
