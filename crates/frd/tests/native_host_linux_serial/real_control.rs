@@ -454,8 +454,35 @@ impl Daemon {
         files: Option<frd::native_files::Directory>,
         session_monitor: Option<frd::session_monitor::Configuration>,
     ) -> Self {
-        let api = fixture::Api::new();
-        let tools = Tools::new();
+        Self::start_profile(
+            display,
+            worker,
+            input_agent,
+            clipboard,
+            files,
+            session_monitor,
+            false,
+        )
+    }
+    fn start_profile(
+        display: &str,
+        worker: &Path,
+        input_agent: Option<PathBuf>,
+        clipboard: bool,
+        files: Option<frd::native_files::Directory>,
+        session_monitor: Option<frd::session_monitor::Configuration>,
+        dual_stack: bool,
+    ) -> Self {
+        let api = if dual_stack {
+            fixture::Api::dual_stack()
+        } else {
+            fixture::Api::new()
+        };
+        let tools = if dual_stack {
+            super::dual_stack::tools()
+        } else {
+            Tools::new()
+        };
         let options = Options {
             socket: Some(api.path.clone()),
             port: address().port(),
@@ -767,6 +794,7 @@ struct Downloads<'a> {
 struct InputSettings {
     unmap_wheel: bool,
     capture_system_shortcuts: bool,
+    dual_stack: bool,
 }
 
 pub(super) struct Controlled {
@@ -782,6 +810,20 @@ pub(super) struct Controlled {
 impl Controlled {
     fn start() -> Self {
         Self::start_with(false, false)
+    }
+    fn start_dual_stack() -> Self {
+        Self::start_all(
+            false,
+            false,
+            None,
+            &[],
+            None,
+            InputSettings {
+                dual_stack: true,
+                ..InputSettings::default()
+            },
+            None,
+        )
     }
     /// `frd run --input-agent [--clipboard]` and `fr connect --control [--clipboard]`.
     pub(super) fn start_with(host_clipboard: bool, client_clipboard: bool) -> Self {
@@ -928,18 +970,23 @@ impl Controlled {
                 downloads.sources,
             )
         } else {
-            Daemon::start_monitored(
+            Daemon::start_profile(
                 &host.display,
                 &worker,
                 Some(agent),
                 host_clipboard,
                 files,
                 monitor,
+                input.dual_stack,
             )
         };
         // No viewer, no lease: the executor (and its indicator) is per lease.
         assert_eq!(indicator(&mut observer), None);
-        let client_api = ClientApi::new();
+        let client_api = if input.dual_stack {
+            ClientApi::dual_stack()
+        } else {
+            ClientApi::new()
+        };
         let roots = fixture::pki().join("ca.pem");
         let mut command = connect_command(
             &fr,
@@ -950,6 +997,9 @@ impl Controlled {
             client_clipboard,
             send,
         );
+        if input.dual_stack {
+            command.arg("--ipv6");
+        }
         if let Some(downloads) = downloads {
             if let Some(destination) = downloads.destination {
                 command.arg("--receive").arg(destination);
@@ -1257,6 +1307,73 @@ fn fr_connect_control_drives_the_host_desktop_through_frd_run() {
         "indicator outlived the session"
     );
     s.daemon.finish();
+}
+
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; real input agent"]
+fn fr_connect_control_uses_ipv6_while_host_also_listens_on_ipv4() {
+    let mut s = Controlled::start_dual_stack();
+    let listened: Vec<_> = s
+        .daemon
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            Event::Listening { address } => Some(*address),
+            _ => None,
+        })
+        .collect();
+    assert!(listened.contains(&address()));
+    assert!(listened.contains(&super::dual_stack::ipv6_address()));
+    // This is the production HEVC view and input path, selected by --ipv6
+    // even though both LocalAPIs also advertise IPv4 for the same stable node.
+    assert!(
+        s.pointer_follows((321, 301), Duration::from_secs(10)),
+        "{}",
+        s.daemon.dump()
+    );
+    let code: u32 = s.observer.ask("keycode 0x61")[1].parse().unwrap();
+    let before = host_events(&mut s.observer).len();
+    s.viewer("key 0x61 1");
+    s.viewer("key 0x61 0");
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            let events = host_events(&mut s.observer);
+            events[before..]
+                .iter()
+                .any(|event| (event.0, event.1, event.3) == (2, code, false))
+                && events[before..]
+                    .iter()
+                    .any(|event| (event.0, event.1, event.3) == (3, code, false))
+        }),
+        "IPv6 control did not reach the independent host X11 observer"
+    );
+    let paths = s.daemon._api.requests.lock().unwrap().clone();
+    assert!(paths.iter().any(|path| {
+        path.starts_with("/localapi/v0/whois?addr=%5Bfd7a%3A115c%3Aa1e0%3A%3A2%5D%3A")
+    }));
+    assert!(
+        !paths
+            .iter()
+            .any(|path| path.starts_with("/localapi/v0/whois?addr=100.64.0.2%3A")),
+        "an explicit IPv6 target must not dial IPv4"
+    );
+    s.close_viewer();
+    let output = wait_for(s.client, Duration::from_secs(30));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["outcome"], "stopped", "{report}");
+    assert_eq!(report["control_granted"], true, "{report}");
+    assert!(
+        report["input_submitted_to_os"].as_u64().unwrap() >= 2,
+        "{report}"
+    );
+    controller_closed(&report);
+    let rules = s.daemon.tools.0.join("state.json");
+    s.daemon.finish();
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(rules).unwrap()).unwrap();
+    assert_eq!(state["tables"], serde_json::json!({}));
+    assert_eq!(state["created"], state["deleted"]);
+    assert!(state["deleted"].as_u64().unwrap() >= 2);
+    assert!(UdpSocket::bind(super::dual_stack::ipv6_address()).is_ok());
 }
 
 #[test]

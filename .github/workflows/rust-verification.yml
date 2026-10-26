@@ -19,6 +19,7 @@ on:
       - 'scripts/audit.py'
       - 'scripts/test_verify_lanes.py'
       - 'scripts/test_linux_serial_lifecycle.sh'
+      - 'scripts/verify-native-dial.sh'
       - '.github/workflows/rust-verification.yml'
   workflow_dispatch:
 
@@ -125,6 +126,69 @@ jobs:
           subprocess.run(['bash', 'scripts/test_linux_serial_lifecycle.sh', binaries[0],
               '--exact', test], check=True, env=env, timeout=600)
           PYTHON
+      - name: Exercise dual-stack hosting and native IPv6 view/control
+        id: native_dual_stack
+        continue-on-error: true
+        timeout-minutes: 12
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, subprocess
+          from pathlib import Path
+          binaries = []
+          for line in Path(os.environ['RUNNER_TEMP'], 'download-test.json').read_text().splitlines():
+              row = json.loads(line)
+              if (row.get('reason') == 'compiler-artifact'
+                      and row.get('profile', {}).get('test')
+                      and row.get('target', {}).get('name') == 'native_host_linux_serial'
+                      and row.get('executable')):
+                  binaries.append(os.path.abspath(row['executable']))
+          assert len(binaries) == 1, 'one exact native dual-stack test binary required'
+          tests = [
+              'dual_stack::successive_ipv6_and_ipv4_peers_keep_both_original_protections_renewed',
+              'dual_stack::tampering_with_either_protection_fences_the_whole_idle_listener_set',
+              'dual_stack::a_failed_second_bind_cleans_all_installed_protections_without_a_partial_listener',
+              'real_control::fr_connect_control_uses_ipv6_while_host_also_listens_on_ipv4',
+          ]
+          listed = subprocess.check_output([binaries[0], '--list', '--ignored'], text=True)
+          for test in tests:
+              assert listed.splitlines().count(f'{test}: test') == 1, f'native dual-stack test must be present: {test}'
+          env = dict(os.environ, FR_NS_SUDO='1')
+          failed = []
+          for test in tests:
+              result = subprocess.run(['bash', 'scripts/test_linux_serial_lifecycle.sh', binaries[0],
+                  '--exact', test], env=env)
+              if result.returncode:
+                  failed.append(test)
+          assert not failed, f'native dual-stack regressions failed: {failed}'
+          PYTHON
+      - name: Exercise native IPv4-to-IPv6 dial fallback
+        id: native_dial_fallback
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          cargo test -p fr-tailnet --all-features --locked --lib --no-run --message-format=json > "$RUNNER_TEMP/dual-stack-dial-test.json"
+          python3 - <<'PYTHON'
+          import json, os, subprocess
+          from pathlib import Path
+          binaries = []
+          for line in Path(os.environ['RUNNER_TEMP'], 'dual-stack-dial-test.json').read_text().splitlines():
+              row = json.loads(line)
+              if (row.get('reason') == 'compiler-artifact'
+                      and row.get('profile', {}).get('test')
+                      and row.get('target', {}).get('name') == 'fr_tailnet'
+                      and row.get('executable')):
+                  binaries.append(os.path.abspath(row['executable']))
+          assert len(binaries) == 1, 'one exact native dial test binary required'
+          test = 'local::dial::tests::native_dial_falls_back_to_ipv6_with_one_original_timeout_and_no_application_replay'
+          listed = subprocess.check_output(
+              [binaries[0], '--list', '--ignored', '--exact', test], text=True)
+          assert listed.splitlines().count(f'{test}: test') == 1, 'native dial fallback regression must be present'
+          # Reuse the daily connection lane's isolated sudo path. The script
+          # runs all native_dial cases, including this exact fallback regression.
+          subprocess.run(['sudo', '-n', 'unshare', '--user', '--map-root-user', '--net',
+              'env', 'FR_DIAL_TEST_NAMESPACE=isolated', 'bash', 'scripts/verify-native-dial.sh',
+              '--inside', binaries[0]], check=True, timeout=120)
+          PYTHON
       - name: Exercise native clipboard recovery, expiry, and impaired copies
         id: clipboard_capture_stall
         continue-on-error: true
@@ -206,6 +270,8 @@ jobs:
             test=${{ steps.test.outcome }}
             file_download=${{ steps.file_download.outcome }}
             system_shortcuts=${{ steps.system_shortcuts.outcome }}
+            native_dual_stack=${{ steps.native_dual_stack.outcome }}
+            native_dial_fallback=${{ steps.native_dial_fallback.outcome }}
             clipboard_capture_stall=${{ steps.clipboard_capture_stall.outcome }}
             examples=${{ steps.examples.outcome }}
             indicator=${{ steps.indicator.outcome }}

@@ -193,7 +193,7 @@ impl Server {
             .map(crate::session_startup::closure_reporting::Reporting::new)
             .unzip();
         let run_api = self.api.clone();
-        let address = listener.local_addr();
+        let bound_addresses = listener.local_addresses();
         let identity = self.identity.clone();
         let clock = cx.clone();
         // Snapshot policy before returning the acceptance future. A delayed
@@ -219,13 +219,17 @@ impl Server {
         let terminal_clock = self.credential_clock.clone().unwrap_or_else(|| cx.clone());
         let terminal_identity = identity.clone();
         let terminal_policy = policy.clone();
+        let terminal_addresses = bound_addresses.clone();
         let terminal_check: Check = Arc::new(move || {
             // Policy and credentials are the ORIGINAL owners/epoch. Their
             // revocation, expiry or broker cancellation still refuses the report.
             if let Some(lease) = terminal_policy.as_ref().map_err(|error| *error)? {
                 lease.check().map_err(Error::Policy)?;
             }
-            if !terminal_ingress(address) {
+            if !terminal_addresses
+                .iter()
+                .all(|&address| terminal_ingress(address))
+            {
                 return Err(Error::IngressUnavailable);
             }
             terminal_identity
@@ -233,12 +237,13 @@ impl Server {
                 .map_err(Error::Tailnet)?;
             Ok(())
         });
+        let checked_addresses = bound_addresses.clone();
         let check: Check = Arc::new(move || {
             clock.checkpoint().map_err(|_| Error::Cancelled)?;
             if let Some(lease) = policy.as_ref().map_err(|error| *error)? {
                 lease.check().map_err(Error::Policy)?;
             }
-            if !ingress(address) {
+            if !checked_addresses.iter().all(|&address| ingress(address)) {
                 return Err(Error::IngressUnavailable);
             }
             identity.status(&clock).map_err(Error::Tailnet)?;
@@ -255,10 +260,10 @@ impl Server {
             .and_then(|()| check())
             .and_then(|()| {
                 listener
-                    .accept_with_identity(
+                    .accept_with_local_identity(
                         cx,
                         request.connection_id,
-                        move |_, parameters| async move {
+                        move |address, _, parameters| async move {
                             let result = async {
                                 let node = api.node_identity(cx).await?;
                                 if !node.addresses().contains(&address.ip()) {
@@ -314,7 +319,9 @@ impl Server {
                     local: native.local_addr(),
                     peer: native.peer_addr(),
                 };
-                if addresses.local != address || !current.addresses().contains(&address.ip()) {
+                if !bound_addresses.contains(&addresses.local)
+                    || !current.addresses().contains(&addresses.local.ip())
+                {
                     return Err(Error::Tailnet(fr_tailnet::Error::AddressMismatch));
                 }
                 // No source-prefix, name-based, cached or capability fallback.

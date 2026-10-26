@@ -2,7 +2,7 @@
 use super::{Error, LinuxServer, Serving};
 use crate::native_connection::host::{PanicFence, serial};
 use asupersync::{cx::Cx, runtime::RuntimeHandle, types::CancelKind};
-use std::{future::Future, sync::Arc};
+use std::future::Future;
 
 impl LinuxServer {
     /// Serve successive peers without handing a raw listener or an asserted
@@ -39,13 +39,13 @@ impl LinuxServer {
             .take()
             .ok_or(Error::Spent)
             .and_then(|listener| {
-                let lease = self.boundary.lease().map_err(Error::Ingress)?;
+                let check = self.boundary.check().map_err(Error::Ingress)?;
                 Ok(self.server.serve_serial_on_protected_listener(
                     supervisor.clone(),
                     runtime,
                     listener,
                     policy,
-                    Arc::new(move |address| lease.check(address).is_ok()),
+                    check,
                     application,
                 ))
             });

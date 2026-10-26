@@ -74,7 +74,7 @@ use fr_wire::{
 use std::{
     fmt,
     future::{Future, poll_fn},
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     path::PathBuf,
     pin::pin,
     sync::{
@@ -923,30 +923,36 @@ impl Share<'_> {
             .node_identity(broker)
             .await
             .map_err(Error::Tailnet)?;
-        let ip = node
-            .addresses()
-            .iter()
-            .copied()
-            .find(IpAddr::is_ipv4)
-            .or_else(|| node.addresses().first().copied())
-            .ok_or(Error::NoTailnetAddress)?;
-        let address = SocketAddr::new(ip, self.options.port);
-        let mut ingress = ingress::Configuration::new(address, &self.options.interface)
-            .map_err(Error::Ingress)?;
-        if let Some((nft, ip)) = &self.options.ingress_tools {
-            ingress = ingress.executables(nft, ip).map_err(Error::Ingress)?;
+        if node.addresses().is_empty() {
+            return Err(Error::NoTailnetAddress);
         }
         // Without CAP_NET_ADMIN the root `frd ingress-helper` owns the rule.
         let helper = std::path::Path::new(ingress::helper::DEFAULT_SOCKET);
-        ingress = ingress
-            .enforcement(ingress::Enforcement::detect(helper))
-            .map_err(Error::Ingress)?;
+        let enforcement = ingress::Enforcement::detect(helper);
+        let mut configurations = Vec::with_capacity(node.addresses().len());
+        for &ip in node.addresses() {
+            let address = SocketAddr::new(ip, self.options.port);
+            let mut ingress = ingress::Configuration::new(address, &self.options.interface)
+                .map_err(Error::Ingress)?;
+            if let Some((nft, ip)) = &self.options.ingress_tools {
+                ingress = ingress.executables(nft, ip).map_err(Error::Ingress)?;
+            }
+            configurations.push(
+                ingress
+                    .enforcement(enforcement.clone())
+                    .map_err(Error::Ingress)?,
+            );
+        }
         let mut server = Server::new(self.api.clone(), self.identity.clone());
         if let Some(policy) = self.policy {
             server = server.with_live_policy(policy.clone());
         }
         server
-            .bind_linux(broker, ingress, native_accept::Configuration::default())
+            .bind_linux_addresses(
+                broker,
+                configurations,
+                native_accept::Configuration::default(),
+            )
             .await
             .map_err(|e| Error::Listener(Box::new(e)))
     }
@@ -1137,9 +1143,9 @@ impl Share<'_> {
         consent: &mut approval::Owner,
     ) -> Result<Ended, Error> {
         let mut linux = self.bind(broker).await?;
-        (self.report)(Event::Listening {
-            address: linux.address(),
-        });
+        for address in linux.addresses() {
+            (self.report)(Event::Listening { address });
+        }
         let source = self.cx()?;
         let supervisor = self.cx()?;
         if let Ok(mut slot) = self.active.lock() {

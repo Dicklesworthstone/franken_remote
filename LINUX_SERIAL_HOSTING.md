@@ -6,6 +6,21 @@ across every attempt: idle acquisition, TLS, post-TLS membership authorization,
 application service, original-transport retirement, cooldown, and rebinding.
 It does not expose a socket or accept a caller's boolean assertion of protection.
 
+`Server::bind_linux_addresses` extends the same owner to a fixed set of at most
+eight exact current node addresses. `frd run` supplies the installed node's IPv4
+and IPv6 addresses and installs a separate enforced ingress boundary for each.
+The first valid Initial selects one original socket through fair polling, under
+one aggregate datagram limit and one fixed acquisition deadline. Unselected
+sockets close before TLS; the selected local address is rechecked against the
+original bind set, ingress protection and fresh identity evidence. After the
+peer's original transport retires, the full original set binds again.
+
+All original boundaries keep renewing while that one session runs. Losing any
+boundary fences the service; cancellation and completion fence every boundary
+before application resources are released. Cleanup attempts every installed
+rule and retains failed removals for explicit retry. This remains the same
+capacity-one service and desktop source owner.
+
 Provision and service the original host credentials, optionally select a live
 policy monitor with `Server::with_live_policy`, then bind the explicit local
 kernel-TUN configuration through `bind_linux`. Pass `serve_serial` a dedicated
@@ -69,13 +84,20 @@ instead of only on a real tailnet. The runner refuses (exit 2) without `nft`.
 
 The runner uses a fresh user/mount/network namespace and executes every
 explicitly ignored test. It mounts synthetic `/sys` and `/run` only inside that
-namespace. IPv4 UDP/TLS, Host/Viewer negotiation, Unix peer-credential HTTP, the
+namespace. IPv4/IPv6 UDP/TLS, Host/Viewer negotiation, Unix peer-credential HTTP, the
 protected policy store, command subprocesses, ingress renewal, and serial owners
 are real. **The selected interface and nftables replies are explicit fixtures:**
 these tests do not filter real packets or establish kernel-ingress qualification.
 They check successor sessions across evidence renewal, fixed idle deadlines,
 rule loss during cooldown, retained transport, policy revision changes,
 cancellation, panic and unpolled abandonment without weakening production checks.
+
+The dual-stack regression cases additionally exercise cross-family serial
+sessions past the first evidence deadline, either family's protection failing,
+partial bind cleanup, and the shipped controlling client over IPv6 while the
+host also listens on IPv4. The control case checks real HEVC presentation and
+independently observed X11 pointer/key effects. These are namespace acceptance
+cases; their presence does not claim live-tailnet IPv6 qualification.
 
 `host_run` drives the production `frd run` composition (`crates/frd/src/host_run.rs`)
 with a scripted capture worker: a real viewer receives frames for four seconds past

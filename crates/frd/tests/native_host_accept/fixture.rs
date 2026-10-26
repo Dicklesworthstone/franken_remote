@@ -69,18 +69,24 @@ pub enum Mode {
     Unverifiable,
     ChangeAfterWhoIs,
 }
-fn metadata(mode: Mode, changed: bool) -> (Value, Value) {
+fn metadata(mode: Mode, changed: bool, dual_stack: bool) -> (Value, Value) {
     let key = format!("nodekey:{}", "2".repeat(64));
     let user = if mode == Mode::OtherUser { 8 } else { 7 };
     let peer = json!({"ID":"n-peer","NodeID":2,"PublicKey":key,"UserID":user,
         "TailscaleIPs":["100.64.0.2"],"InNetworkMap":true,"DNSName":"client.fixture.ts.net."});
-    let status = json!({"Version":"synthetic-namespace-not-live-tailnet-qualification","BackendState":"Running",
+    let mut status = json!({"Version":"synthetic-namespace-not-live-tailnet-qualification","BackendState":"Running",
         "TailscaleIPs":["100.64.0.1"],"CurrentTailnet":{"Name":"test.invalid","MagicDNSSuffix":"fixture.ts.net"},
         "Self":{"ID":"n-host","NodeID":1,"PublicKey":format!("nodekey:{}", "1".repeat(64)),"UserID":7,
             "TailscaleIPs":["100.64.0.1"],"InNetworkMap":true,"DNSName":if changed { "changed.fixture.ts.net.".to_string() } else { format!("{HOST}.") }},
         "Peer":{key.clone():peer}});
     let mut who = json!({"Node":{"ID":2,"StableID":"n-peer","Key":key,"User":user,"Addresses":["100.64.0.2/32"],"MachineAuthorized":true},
         "UserProfile":{"ID":user,"LoginName":"private@fixture.invalid"}});
+    if dual_stack {
+        status["TailscaleIPs"] = json!(["100.64.0.1", "fd7a:115c:a1e0::1"]);
+        status["Self"]["TailscaleIPs"] = status["TailscaleIPs"].clone();
+        status["Peer"][&key]["TailscaleIPs"] = json!(["100.64.0.2", "fd7a:115c:a1e0::2"]);
+        who["Node"]["Addresses"] = json!(["100.64.0.2/32", "fd7a:115c:a1e0::2/128"]);
+    }
     if mode == Mode::Unverifiable {
         who["Node"]
             .as_object_mut()
@@ -102,6 +108,13 @@ pub struct Api {
 }
 impl Api {
     pub fn new() -> Self {
+        Self::profile(false)
+    }
+    #[allow(dead_code)] // used by the protected multi-address hosting suite
+    pub fn dual_stack() -> Self {
+        Self::profile(true)
+    }
+    fn profile(dual_stack: bool) -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let path = pki().join(format!("host-api-{}", NEXT.fetch_add(1, Ordering::SeqCst)));
         let listener = UnixListener::bind(&path).unwrap();
@@ -160,10 +173,15 @@ impl Api {
                     paths.push(path.to_string());
                 }
                 let mode = *state.lock().unwrap();
-                let (status, who) = metadata(mode, changed);
+                let (status, who) = metadata(mode, changed, dual_stack);
                 let (body, kind) = if path.starts_with("/localapi/v0/status?") {
                     (serde_json::to_vec(&status).unwrap(), "application/json")
-                } else if path.starts_with("/localapi/v0/whois?addr=100.64.0.2%3A") {
+                } else if path.starts_with("/localapi/v0/whois?addr=100.64.0.2%3A")
+                    || (dual_stack
+                        && path.starts_with(
+                            "/localapi/v0/whois?addr=%5Bfd7a%3A115c%3Aa1e0%3A%3A2%5D%3A",
+                        ))
+                {
                     counted.fetch_add(1, Ordering::SeqCst);
                     if mode == Mode::ChangeAfterWhoIs {
                         changed = true;
@@ -275,7 +293,13 @@ pub async fn client(cx: &Cx, address: SocketAddr) -> NativeQuicUdpConnection {
     .unwrap();
     let socket = QuicUdpEndpoint::bind(
         cx,
-        "100.64.0.2:0".parse().unwrap(),
+        if address.is_ipv4() {
+            "100.64.0.2:0"
+        } else {
+            "[fd7a:115c:a1e0::2]:0"
+        }
+        .parse()
+        .unwrap(),
         QuicUdpEndpointConfig::default(),
     )
     .await

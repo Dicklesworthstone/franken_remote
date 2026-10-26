@@ -39,6 +39,9 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddressFamily {
+    /// Prefer a verified IPv4 pair, with one verified IPv6 alternative before
+    /// application startup. Explicit family choices never fall back.
+    Automatic,
     Ipv4,
     Ipv6,
 }
@@ -53,7 +56,7 @@ impl Default for Configuration {
     fn default() -> Self {
         Self {
             port: 8443,
-            family: AddressFamily::Ipv4,
+            family: AddressFamily::Automatic,
             startup_timeout: Duration::from_secs(30),
             transport: Policy::default(),
         }
@@ -80,6 +83,7 @@ impl Configuration {
 fn select_route(local: &[IpAddr], peer: &[IpAddr], cfg: Configuration) -> Result<DialRoute, Error> {
     cfg.validate()?;
     let matches = |ip: &&IpAddr| match cfg.family {
+        AddressFamily::Automatic => false,
         AddressFamily::Ipv4 => ip.is_ipv4(),
         AddressFamily::Ipv6 => ip.is_ipv6(),
     };
@@ -97,6 +101,39 @@ fn select_route(local: &[IpAddr], peer: &[IpAddr], cfg: Configuration) -> Result
         local,
         remote: SocketAddr::new(remote, cfg.port),
     })
+}
+fn select_routes(
+    local: &[IpAddr],
+    peer: &[IpAddr],
+    cfg: Configuration,
+) -> Result<(DialRoute, Option<DialRoute>), Error> {
+    cfg.validate()?;
+    if cfg.family != AddressFamily::Automatic {
+        return select_route(local, peer, cfg).map(|route| (route, None));
+    }
+    let ipv4 = select_route(
+        local,
+        peer,
+        Configuration {
+            family: AddressFamily::Ipv4,
+            ..cfg
+        },
+    )
+    .ok();
+    let ipv6 = select_route(
+        local,
+        peer,
+        Configuration {
+            family: AddressFamily::Ipv6,
+            ..cfg
+        },
+    )
+    .ok();
+    match (ipv4, ipv6) {
+        (Some(primary), alternate) => Ok((primary, alternate)),
+        (None, Some(primary)) => Ok((primary, None)),
+        (None, None) => Err(Error::AddressFamilyUnavailable),
+    }
 }
 /// Owns a locally provisioned canonical dialer and one scoped viewer attempt.
 /// Roots come from local platform/package trust, never the contacted peer. The
@@ -181,10 +218,11 @@ impl Client {
                 if expected.is_some_and(|old| !old.same_identity(&target)) {
                     return Err(Error::Tailnet(fr_tailnet::Error::IdentityChanged));
                 }
-                let route = select_route(target.local_addresses(), target.addresses(), cfg)?;
+                let (route, alternate) =
+                    select_routes(target.local_addresses(), target.addresses(), cfg)?;
                 let connected = self
                     .native
-                    .dial(&cx, target, route)
+                    .dial_with_fallback(&cx, target, route, alternate)
                     .map_err(Error::Tailnet)?
                     .await
                     .map_err(Error::Tailnet)?;

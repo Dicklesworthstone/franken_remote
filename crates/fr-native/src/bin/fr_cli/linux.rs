@@ -394,7 +394,7 @@ fn connect(
         family: if connection.target.ipv6 {
             AddressFamily::Ipv6
         } else {
-            AddressFamily::Ipv4
+            AddressFamily::Automatic
         },
         ..Default::default()
     };

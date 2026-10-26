@@ -28,6 +28,8 @@ exec "${enter[@]}" bash -ec '
   ip link set lo up
   ip addr add 100.64.0.1/32 dev lo
   ip addr add 100.64.0.2/32 dev lo
+  ip -6 addr add fd7a:115c:a1e0::1/128 dev lo nodad
+  ip -6 addr add fd7a:115c:a1e0::2/128 dev lo nodad
   # The live tailnet path: tailscale0 has MTU 1280 and Tailscale drops IP
   # fragments, so a QUIC datagram above the path MTU is lost, not reassembled.
   # The drop runs before conntrack defragmentation (priority -400).

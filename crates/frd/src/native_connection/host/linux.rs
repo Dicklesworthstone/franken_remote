@@ -1,10 +1,13 @@
-//! One protected Linux socket through the ORIGINAL native host/session service.
+//! One bounded protected Linux bind set through the ORIGINAL host/session service.
 //! No raw socket or caller-supplied protection assertion leaves this owner.
 use super::{Host, Request, Server};
 use asupersync::{cx::Cx, types::CancelKind};
 use fr_tailnet::ingress;
 use fr_transport::native_accept::{self, Listener};
-use std::{fmt, future::Future, net::SocketAddr, sync::Arc};
+use std::{fmt, future::Future, net::SocketAddr};
+
+mod boundaries;
+use boundaries::Boundaries;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -26,12 +29,12 @@ impl std::error::Error for Error {}
 /// No scope widening or effect retry occurs. Retain the owner until stop completes.
 pub struct LinuxServer {
     server: Server,
-    boundary: ingress::Boundary,
+    boundary: Boundaries,
     listener: Option<Listener>,
 }
 impl fmt::Debug for LinuxServer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("LinuxNativeHost([protected original socket])")
+        f.write_str("LinuxNativeHost([protected original sockets])")
     }
 }
 impl Server {
@@ -45,30 +48,94 @@ impl Server {
     /// Start run promptly: an unsupervised node snapshot expires rather than
     /// silently extending permission across idle time. run services renewal.
     pub async fn bind_linux(
-        mut self,
+        self,
         broker: &Cx,
         configuration: ingress::Configuration,
         transport: native_accept::Configuration,
     ) -> Result<LinuxServer, Error> {
+        self.bind_linux_addresses(broker, vec![configuration], transport)
+            .await
+    }
+
+    /// Bind all current exact node addresses as ONE serial listener. Each
+    /// address has its own independently installed/read-back ingress boundary;
+    /// no socket is opened until the complete set is protected. The first valid
+    /// Initial chooses one endpoint for the existing TLS/admission path. The
+    /// unused sockets close before TLS, and the next serial attempt binds the
+    /// same protected set again. This does not admit concurrent peers.
+    pub async fn bind_linux_addresses(
+        mut self,
+        broker: &Cx,
+        configurations: Vec<ingress::Configuration>,
+        transport: native_accept::Configuration,
+    ) -> Result<LinuxServer, Error> {
+        if configurations.is_empty()
+            || configurations.len() > native_accept::MAX_ADDRESSES
+            || configurations
+                .iter()
+                .enumerate()
+                .any(|(index, configuration)| {
+                    configurations[..index]
+                        .iter()
+                        .any(|old| old.address() == configuration.address())
+                })
+        {
+            return Err(Error::Ingress(ingress::Error::InvalidConfiguration));
+        }
         self.identity
             .status(broker)
             .map_err(|e| Error::Host(super::Error::Tailnet(e)))?;
-        let node = self
-            .api
-            .node_identity(broker)
-            .await
-            .map_err(|e| Error::Host(super::Error::Tailnet(e)))?;
-        let boundary = ingress::Boundary::install(broker, self.api.clone(), node, configuration)
-            .await
-            .map_err(Error::Ingress)?;
-        let lease = boundary.lease().map_err(Error::Ingress)?;
-        let listener = Listener::bind(broker, boundary.address(), transport)
-            .await
-            .map_err(|e| Error::Host(super::Error::Accept(e)))?;
-        lease.check(listener.local_addr()).map_err(Error::Ingress)?;
-        self.identity
-            .status(broker)
-            .map_err(|e| Error::Host(super::Error::Tailnet(e)))?;
+        let addresses: Vec<_> = configurations
+            .iter()
+            .map(ingress::Configuration::address)
+            .collect();
+        let mut boundary = Boundaries(Vec::with_capacity(configurations.len()));
+        let installed = async {
+            for configuration in configurations {
+                let node = self
+                    .api
+                    .node_identity(broker)
+                    .await
+                    .map_err(|e| Error::Host(super::Error::Tailnet(e)))?;
+                if !addresses
+                    .iter()
+                    .all(|address| node.addresses().contains(&address.ip()))
+                {
+                    return Err(Error::Ingress(ingress::Error::InvalidConfiguration));
+                }
+                boundary.0.push(
+                    ingress::Boundary::install(broker, self.api.clone(), node, configuration)
+                        .await
+                        .map_err(Error::Ingress)?,
+                );
+            }
+            let check = boundary.check().map_err(Error::Ingress)?;
+            let listener = Listener::bind_addresses(broker, &addresses, transport)
+                .await
+                .map_err(|e| Error::Host(super::Error::Accept(e)))?;
+            if !listener
+                .local_addresses()
+                .iter()
+                .all(|&address| check(address))
+            {
+                return Err(Error::Ingress(ingress::Error::Closed));
+            }
+            self.identity
+                .status(broker)
+                .map_err(|e| Error::Host(super::Error::Tailnet(e)))?;
+            Ok(listener)
+        }
+        .await;
+        let listener = match installed {
+            Ok(listener) => listener,
+            Err(error) => {
+                // There is no admitted transport. Retire every successfully
+                // installed rule even when a later address/bind was refused.
+                // Cancellation may leave restrictive residue as before.
+                let _ = boundary.stop(broker).await;
+                return Err(error);
+            }
+        };
         // This context predates every listener/session cancellation and already
         // owns the enforced boundary and the credential checks. Retaining it is
         // not a new permission or an un-cancelled copy of a peer's context.
@@ -87,11 +154,23 @@ impl LinuxServer {
         self.server.observation_closure()
     }
     pub fn address(&self) -> SocketAddr {
-        self.boundary.address()
+        self.boundary.0[0].address()
+    }
+    /// The complete original protected bind set.
+    pub fn addresses(&self) -> Vec<SocketAddr> {
+        self.boundary.addresses()
     }
     /// Local operational identifier, never a peer-selected firewall target.
     pub fn cleanup_table(&self) -> &str {
-        self.boundary.cleanup_table()
+        self.boundary.0[0].cleanup_table()
+    }
+    /// Every independently owned rule; useful for local cleanup diagnostics.
+    pub fn cleanup_tables(&self) -> Vec<&str> {
+        self.boundary
+            .0
+            .iter()
+            .map(ingress::Boundary::cleanup_table)
+            .collect()
     }
     /// Fence before dropping an unused socket. An active service borrows this
     /// owner; cancel its dedicated session Cx to stop it independently.
@@ -121,12 +200,12 @@ impl LinuxServer {
         let mut creation_fence = super::PanicFence(session, false);
         let listener = self.listener.take().ok_or(Error::Spent);
         let initial = listener.and_then(|listener| {
-            let lease = self.boundary.lease().map_err(Error::Ingress)?;
+            let check = self.boundary.check().map_err(Error::Ingress)?;
             Ok(self.server.run_on_protected_listener(
                 session,
                 listener,
                 request,
-                Arc::new(move |address| lease.check(address).is_ok()),
+                check,
                 application,
             ))
         });

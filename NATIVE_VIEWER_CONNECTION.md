@@ -16,11 +16,22 @@ session Cx**, a `PeerSelector`, `Configuration`, the actual local capability
 
 The connector validates bounds before discovery, resolves exact node-owned
 addresses, and delegates TLS/QUIC to the already-published native dialer. The
-configured address family is explicit; unavailable families refuse instead of
-racing addresses, performing DNS fallback, or changing the destination.
-`Configuration::default()` uses the provisional configurable port 8443, IPv4,
-and a thirty-second application startup deadline. The native profile's 64 KiB
-stream and 512 KiB connection windows must match the record policy before dialing.
+default address policy prefers a verified IPv4 pair and retains one verified
+IPv6 alternative. If the preferred socket cannot bind or its handshake times
+out, the alternate family gets a fresh handshake within the same original
+timeout. The first attempt receives half that timeout when both families are
+available; the alternative receives only the remaining time. One shared dial
+slot and one socket at a time prevent a connection race. Every attempt retains
+the same node identity, port and strict certificate/hostname checks, with fresh
+LocalAPI revalidation before application traffic. Certificate, identity,
+protocol and authority refusals remain terminal. There is no application work
+to replay during fallback. An explicit family selection remains binding;
+`fr connect --ipv6` and `fr displays --ipv6` never fall back to IPv4. With only
+one verified family, the sole attempt keeps its full original timeout.
+`Configuration::default()` uses the provisional configurable port 8443, automatic
+family selection, and a thirty-second application startup deadline. The native
+profile's 64 KiB stream and 512 KiB connection windows must match the record policy
+before dialing.
 This is not permission to enlarge a negotiated application record or media budget.
 
 After actual TLS and the dialer's post-handshake metadata revalidation,

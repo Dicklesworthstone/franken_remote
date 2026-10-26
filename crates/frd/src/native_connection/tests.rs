@@ -81,6 +81,40 @@ fn address_family_selection_uses_only_exact_verified_sets_without_fallback() {
         Err(Error::InvalidConfiguration)
     );
 }
+
+#[test]
+fn automatic_address_selection_prefers_ipv4_and_keeps_one_verified_ipv6_alternative() {
+    let local = [
+        "fd7a:115c:a1e0::1".parse().unwrap(),
+        "100.64.0.1".parse().unwrap(),
+    ];
+    let peer = [
+        "fd7a:115c:a1e0::2".parse().unwrap(),
+        "100.64.0.2".parse().unwrap(),
+    ];
+    let cfg = Configuration::default();
+    let (primary, alternate) = select_routes(&local, &peer, cfg).unwrap();
+    assert_eq!(primary.local, local[1]);
+    assert_eq!(primary.remote, SocketAddr::new(peer[1], cfg.port));
+    assert_eq!(alternate.unwrap().local, local[0]);
+    assert_eq!(
+        alternate.unwrap().remote,
+        SocketAddr::new(peer[0], cfg.port)
+    );
+    let (ipv6, alternate) = select_routes(&local[..1], &peer, cfg).unwrap();
+    assert_eq!(ipv6.local, local[0]);
+    assert!(alternate.is_none());
+    assert_eq!(
+        select_routes(&local[..1], &peer[1..], cfg),
+        Err(Error::AddressFamilyUnavailable)
+    );
+    for family in [AddressFamily::Ipv4, AddressFamily::Ipv6] {
+        let explicit = Configuration { family, ..cfg };
+        let (route, alternate) = select_routes(&local, &peer, explicit).unwrap();
+        assert_eq!(route, select_route(&local, &peer, explicit).unwrap());
+        assert!(alternate.is_none(), "explicit family selection is binding");
+    }
+}
 #[test]
 fn real_tls_connection_keeps_its_guard_through_approval_and_running_viewer() {
     let runtime = network::runtime();

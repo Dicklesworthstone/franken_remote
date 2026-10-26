@@ -87,6 +87,153 @@ fn route(port: u16) -> DialRoute {
         remote: format!("100.64.0.2:{port}").parse().unwrap(),
     }
 }
+fn dual_stack_metadata() -> Value {
+    let mut value = metadata();
+    value["TailscaleIPs"] = json!(["100.64.0.1", "fd7a:115c:a1e0::1"]);
+    value["Self"]["TailscaleIPs"] = value["TailscaleIPs"].clone();
+    peer_mut(&mut value)["TailscaleIPs"] = json!(["100.64.0.2", "fd7a:115c:a1e0::2"]);
+    value
+}
+fn ipv6_route(port: u16) -> DialRoute {
+    DialRoute {
+        local: "fd7a:115c:a1e0::1".parse().unwrap(),
+        remote: SocketAddr::new("fd7a:115c:a1e0::2".parse().unwrap(), port),
+    }
+}
+
+#[test]
+fn fallback_never_retries_identity_trust_protocol_or_authority_refusals() {
+    assert!(may_try_alternate(Error::NativeBind));
+    assert!(may_try_alternate(Error::HandshakeTimeout));
+    for refusal in [
+        Error::InvalidPolicy,
+        Error::InvalidEndpoint,
+        Error::MissingRuntime,
+        Error::Busy,
+        Error::Cancelled,
+        Error::Timeout,
+        Error::LocalApiUnavailable,
+        Error::UntrustedLocalApi,
+        Error::Http,
+        Error::LocalApiDenied,
+        Error::MalformedMetadata,
+        Error::SnapshotChanged,
+        Error::BackendNotRunning,
+        Error::AddressMismatch,
+        Error::SharedPeer,
+        Error::IdentityMismatch,
+        Error::ScopeDenied,
+        Error::ExplicitScopeRequired,
+        Error::MachineNotAuthorized,
+        Error::TailnetMembershipUnverifiable,
+        Error::CapabilityDenied,
+        Error::InvalidCapability,
+        Error::CertificateRejected,
+        Error::CertificateNotDue,
+        Error::InvalidTrustStore,
+        Error::NativeHandshake,
+        Error::PeerCertificateRejected,
+        Error::EntropyUnavailable,
+        Error::KeyExpired,
+        Error::Clock,
+        Error::Expired,
+        Error::IdentityChanged,
+        Error::Revoked,
+    ] {
+        assert!(
+            !may_try_alternate(refusal),
+            "{refusal:?} must remain terminal"
+        );
+    }
+}
+
+#[test]
+fn fallback_validates_both_pairs_before_claiming_the_shared_slot() {
+    let server = Server::new(
+        vec![response(&dual_stack_metadata(), false)],
+        Duration::ZERO,
+    );
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let dialer = client(&server, Duration::from_secs(5));
+        for alternate in [
+            route(8443),
+            ipv6_route(9443),
+            DialRoute {
+                remote: "[fd7a:115c:a1e0::3]:8443".parse().unwrap(),
+                ..ipv6_route(8443)
+            },
+            DialRoute {
+                local: "fd7a:115c:a1e0::9".parse().unwrap(),
+                ..ipv6_route(8443)
+            },
+        ] {
+            let target = target(&server, &cx).await;
+            let calls = server.calls.load(Ordering::SeqCst);
+            assert!(matches!(
+                dialer.dial_with_fallback(&cx, target, route(8443), Some(alternate)),
+                Err(Error::AddressMismatch)
+            ));
+            assert_eq!(calls, server.calls.load(Ordering::SeqCst));
+        }
+        let first = dialer
+            .dial_with_fallback(
+                &cx,
+                target(&server, &cx).await,
+                route(8443),
+                Some(ipv6_route(8443)),
+            )
+            .unwrap();
+        assert!(matches!(
+            dialer
+                .clone()
+                .dial(&cx, target(&server, &cx).await, ipv6_route(8443)),
+            Err(Error::Busy)
+        ));
+        drop(first);
+        drop(
+            dialer
+                .dial(&cx, target(&server, &cx).await, ipv6_route(8443))
+                .unwrap(),
+        );
+    });
+}
+
+#[test]
+fn fallback_does_not_restart_an_unpolled_deadline_or_ignore_cancellation() {
+    let server = Server::new(
+        vec![response(&dual_stack_metadata(), false)],
+        Duration::ZERO,
+    );
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let dialer = client(&server, Duration::from_millis(100));
+        let pending = dialer
+            .dial_with_fallback(
+                &cx,
+                target(&server, &cx).await,
+                route(8443),
+                Some(ipv6_route(8443)),
+            )
+            .unwrap();
+        let calls = server.calls.load(Ordering::SeqCst);
+        sleep(cx.now(), Duration::from_millis(150)).await;
+        assert!(matches!(pending.await, Err(Error::Timeout)));
+        assert_eq!(calls, server.calls.load(Ordering::SeqCst));
+        let pending = dialer
+            .dial_with_fallback(
+                &cx,
+                target(&server, &cx).await,
+                route(8443),
+                Some(ipv6_route(8443)),
+            )
+            .unwrap();
+        let calls = server.calls.load(Ordering::SeqCst);
+        cx.cancel_fast(CancelKind::User);
+        assert!(matches!(pending.await, Err(Error::Cancelled)));
+        assert_eq!(calls, server.calls.load(Ordering::SeqCst));
+    });
+}
 async fn both<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output) {
     let (mut a, mut b) = (pin!(a), pin!(b));
     let (mut ar, mut br) = (None, None);
@@ -349,13 +496,16 @@ fn native_dial_rejects_wrong_certificate_name_without_exposing_connection() {
         ))
         .await;
         // No connection is exposed either way. Measured 2026-09-28: here the
-        // client ends in Timeout even with a 12 s budget (the server's accept
+        // client ends in HandshakeTimeout even with a 12 s budget (the server's accept
         // fails, the client never surfaces the rejection), so the typed
         // PeerCertificateRejected path is covered by handshake_error's unit test
         // and the missing prompt refusal is tracked on
         // fr-rc-transport-client-trust-g9u.
         assert!(
-            matches!(result, Err(Error::PeerCertificateRejected | Error::Timeout)),
+            matches!(
+                result,
+                Err(Error::PeerCertificateRejected | Error::HandshakeTimeout)
+            ),
             "{:?}",
             result.err()
         );
@@ -403,7 +553,10 @@ fn native_dial_timeout_and_abandonment_release_socket_and_slot() {
             .dial(&cx, target(&server, &cx).await, route(8443))
             .unwrap()
             .await;
-        assert!(matches!(r, Err(Error::Timeout | Error::NativeHandshake)));
+        assert!(matches!(
+            r,
+            Err(Error::HandshakeTimeout | Error::NativeHandshake)
+        ));
         drop(
             dialer
                 .dial(&cx, target(&server, &cx).await, route(8443))
@@ -443,6 +596,59 @@ fn native_dial_ipv6_uses_the_selected_node_addresses_and_expired_handoff_refuses
         assert!(remote.unwrap().local_addr().is_ipv6());
         sleep(cx.now(), Duration::from_millis(3100)).await;
         assert!(matches!(peer.into_connection(&cx), Err(Error::Expired)));
+    });
+}
+
+#[test]
+#[ignore = "explicit network namespace lane: scripts/verify-native-dial.sh"]
+fn native_dial_falls_back_to_ipv6_with_one_original_timeout_and_no_application_replay() {
+    let server = Server::new(
+        vec![response(&dual_stack_metadata(), false)],
+        Duration::ZERO,
+    );
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let dialer = client(&server, Duration::from_secs(6));
+        // The preferred endpoint receives UDP but never services a handshake.
+        // Keeping it bound avoids turning silence into an ICMP/refusal fixture.
+        let silent = endpoint(&cx).await;
+        let port = silent.local_addr().port();
+        let alternate = QuicUdpEndpoint::bind(&cx, ipv6_route(port).remote, endpoint_config())
+            .await
+            .unwrap();
+        let started = now(&cx).unwrap();
+        let (result, remote) = Box::pin(timeout(
+            cx.now(),
+            Duration::from_secs(7),
+            both(
+                dialer
+                    .dial_with_fallback(
+                        &cx,
+                        target(&server, &cx).await,
+                        route(port),
+                        Some(ipv6_route(port)),
+                    )
+                    .unwrap(),
+                accept(&cx, alternate, "leaf", Duration::ZERO),
+            ),
+        ))
+        .await
+        .unwrap();
+        let native = result.unwrap().into_connection(&cx).unwrap();
+        let remote = remote.unwrap();
+        assert_eq!(native.peer_addr(), ipv6_route(port).remote);
+        assert_eq!(native.peer_addr(), remote.local_addr());
+        assert_eq!(native.local_addr().ip(), ipv6_route(port).local);
+        assert!(now(&cx).unwrap() - started < 6_000_000);
+        assert!(
+            server.calls.load(Ordering::SeqCst) >= 10,
+            "metadata renews through both handshakes"
+        );
+        assert!(
+            native.connection().inner().streams().is_empty(),
+            "no application action exists to replay"
+        );
+        drop(silent);
     });
 }
 

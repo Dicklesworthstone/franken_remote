@@ -34,7 +34,7 @@ pub(super) fn run(
         family: if target.ipv6 {
             super::AddressFamily::Ipv6
         } else {
-            super::AddressFamily::Ipv4
+            super::AddressFamily::Automatic
         },
         ..Default::default()
     };

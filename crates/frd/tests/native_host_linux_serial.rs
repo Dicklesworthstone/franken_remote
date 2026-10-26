@@ -45,6 +45,9 @@ use std::{
 struct Tools(PathBuf);
 impl Tools {
     fn new() -> Self {
+        Self::profile(include_str!("native_host_linux_serial/tools.py"))
+    }
+    fn profile(script: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         assert_eq!(
             fs::read_to_string("/run/fr-synthetic-ingress").unwrap(),
@@ -59,12 +62,15 @@ impl Tools {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         for name in ["nft", "ip"] {
             let file = dir.join(name);
-            crate::executable::write(&file, include_str!("native_host_linux_serial/tools.py"));
+            crate::executable::write(&file, script);
         }
         Self(dir)
     }
     fn configuration(&self) -> ingress::Configuration {
-        ingress::Configuration::new(address(), "fr-fixture")
+        self.configuration_for(address())
+    }
+    fn configuration_for(&self, address: SocketAddr) -> ingress::Configuration {
+        ingress::Configuration::new(address, "fr-fixture")
             .unwrap()
             .executables(&self.0.join("nft"), &self.0.join("ip"))
             .unwrap()
@@ -73,6 +79,9 @@ impl Tools {
         serde_json::from_slice(&fs::read(self.0.join("state.json")).unwrap()).unwrap()
     }
 }
+
+#[path = "native_host_linux_serial/dual_stack.rs"]
+mod dual_stack;
 fn address() -> SocketAddr {
     "100.64.0.1:4791".parse().unwrap()
 }

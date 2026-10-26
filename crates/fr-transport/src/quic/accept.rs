@@ -10,8 +10,10 @@
 //! Consequently the discovery datagram is discarded and the canonical handshake
 //! processes its retransmission. This costs an Initial PTO; it is not a new QUIC
 //! implementation, Retry protocol, lossless demultiplexer or multi-client server.
-//! One call consumes one socket. Success transfers it to the authenticated owner;
-//! refusal, timeout and abandonment close it. No detached task is started.
+//! A bounded set of exact local addresses may compete for the same ONE incoming
+//! connection. Discovery polls them fairly under one aggregate budget; only the
+//! selected socket enters TLS. Success transfers it to the authenticated owner;
+//! refusal, timeout and abandonment close every socket. No task is started.
 
 use crate::quic::{ALPN, Policy};
 use asupersync::{
@@ -54,6 +56,9 @@ const _: () = assert!(MAX_DATAGRAM <= 1280 - 40 - 8);
 const RECEIVE_BATCH: usize = 16;
 const MAX_SCAN: u16 = 256;
 const MAX_TIMEOUT: Duration = Duration::from_secs(30);
+/// Matches the bounded address list accepted from installed node metadata. This
+/// is address selection for one peer, not concurrent connection demultiplexing.
+pub const MAX_ADDRESSES: usize = 8;
 
 /// No packet bytes, addresses, TLS diagnostics or certificate material in errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,43 +195,77 @@ fn remaining(cx: &Cx, until: u64, expired: Error) -> Result<Duration, Error> {
 /// Bind only after the host's qualified interface restriction is in force. A
 /// tailnet-looking IP address alone does NOT satisfy that requirement.
 pub struct Listener {
-    endpoint: QuicUdpEndpoint,
+    endpoints: Vec<QuicUdpEndpoint>,
     config: Configuration,
 }
 impl fmt::Debug for Listener {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("NativeListener([one bounded socket])")
+        f.write_str("NativeListener([bounded exact-address sockets])")
     }
 }
 impl Listener {
     pub async fn bind(cx: &Cx, address: SocketAddr, config: Configuration) -> Result<Self, Error> {
-        config.validate()?;
-        now(cx)?;
-        let endpoint = QuicUdpEndpoint::bind(
-            cx,
-            address,
-            QuicUdpEndpointConfig {
-                // Sentinel byte detects truncation of oversized discovery
-                // datagrams. The later owner retains this same bounded socket.
-                max_packet_size: MAX_DATAGRAM + 1,
-                max_batch_size: RECEIVE_BATCH,
-                socket_recv_buffer_size: Some(65_536),
-                socket_send_buffer_size: Some(65_536),
-                enable_timestamping: false,
-            },
-        )
-        .await
-        .map_err(|_| {
-            if cx.checkpoint().is_err() {
-                Error::Cancelled
-            } else {
-                Error::Endpoint
-            }
-        })?;
-        Ok(Self { endpoint, config })
+        Self::bind_addresses(cx, &[address], config).await
     }
+    /// Bind each exact local address before accepting any peer. No wildcard
+    /// fallback is added. A failed bind drops every earlier socket, so a partial
+    /// set is never silently published. The host must protect EVERY address
+    /// independently before calling this method.
+    pub async fn bind_addresses(
+        cx: &Cx,
+        addresses: &[SocketAddr],
+        config: Configuration,
+    ) -> Result<Self, Error> {
+        config.validate()?;
+        if addresses.is_empty()
+            || addresses.len() > MAX_ADDRESSES
+            || addresses
+                .iter()
+                .enumerate()
+                .any(|(index, address)| addresses[..index].contains(address))
+        {
+            return Err(Error::Configuration);
+        }
+        now(cx)?;
+        let mut endpoints = Vec::with_capacity(addresses.len());
+        for &address in addresses {
+            let endpoint = QuicUdpEndpoint::bind(
+                cx,
+                address,
+                QuicUdpEndpointConfig {
+                    // Sentinel byte detects truncation of oversized discovery
+                    // datagrams. The later owner retains this same bounded socket.
+                    max_packet_size: MAX_DATAGRAM + 1,
+                    max_batch_size: RECEIVE_BATCH,
+                    socket_recv_buffer_size: Some(65_536),
+                    socket_send_buffer_size: Some(65_536),
+                    enable_timestamping: false,
+                },
+            )
+            .await
+            .map_err(|_| {
+                if cx.checkpoint().is_err() {
+                    Error::Cancelled
+                } else {
+                    Error::Endpoint
+                }
+            })?;
+            now(cx)?;
+            endpoints.push(endpoint);
+        }
+        Ok(Self { endpoints, config })
+    }
+    /// First bound address, retained for single-address callers. Admission for
+    /// a set must use `local_addresses` and the actual selected TLS endpoint.
     pub fn local_addr(&self) -> SocketAddr {
-        self.endpoint.local_addr()
+        self.endpoints[0].local_addr()
+    }
+    /// The complete fixed bind set, including the kernel-selected ports.
+    pub fn local_addresses(&self) -> Vec<SocketAddr> {
+        self.endpoints
+            .iter()
+            .map(QuicUdpEndpoint::local_addr)
+            .collect()
     }
     /// Original local bounds, retained unchanged by a serial replacement.
     pub const fn configuration(&self) -> Configuration {
@@ -270,19 +309,53 @@ impl Listener {
         F: FnOnce(SocketAddr, Vec<u8>) -> I + 'a,
         I: Future<Output = Result<QuicHandshakeDriver, Error>> + 'a,
     {
+        self.accept_with_local_identity(cx, local_cid, move |_, peer, parameters| {
+            identity(peer, parameters)
+        })
+    }
+    /// The selected exact local endpoint accompanies the candidate's untrusted
+    /// peer address. A multi-address host uses it to refresh its own installed
+    /// identity before TLS. Neither address is an application admission proof.
+    pub fn accept_with_local_identity<'a, F, I>(
+        self,
+        cx: &'a Cx,
+        local_cid: ConnectionId,
+        identity: F,
+    ) -> Result<impl Future<Output = Result<NativeQuicUdpConnection, Error>> + 'a, Error>
+    where
+        F: FnOnce(SocketAddr, SocketAddr, Vec<u8>) -> I + 'a,
+        I: Future<Output = Result<QuicHandshakeDriver, Error>> + 'a,
+    {
         if !(8..=20).contains(&local_cid.len()) {
             return Err(Error::Configuration);
         }
         let until = deadline(cx, self.config.initial_timeout)?;
         Ok(async move {
             let Self {
-                mut endpoint,
+                mut endpoints,
                 config,
             } = self;
             let mut candidate = None;
+            let mut next = 0;
             for _ in 0..config.max_initial_datagrams {
                 remaining(cx, until, Error::InitialTimeout)?;
-                let packets = timeout_at(Time::from_nanos(until), endpoint.receive_batch(cx, 1))
+                // Each pending receive borrows one original socket and keeps at
+                // most one datagram. Rotating after EVERY packet prevents a noisy
+                // IPv4 endpoint from starving an already-arrived IPv6 Initial.
+                let mut reads: Vec<_> = endpoints
+                    .iter_mut()
+                    .map(|endpoint| Box::pin(endpoint.receive_batch(cx, 1)))
+                    .collect();
+                let received = poll_fn(|task| {
+                    for offset in 0..reads.len() {
+                        let index = (next + offset) % reads.len();
+                        if let std::task::Poll::Ready(packets) = reads[index].as_mut().poll(task) {
+                            return std::task::Poll::Ready(packets.map(|packets| (index, packets)));
+                        }
+                    }
+                    std::task::Poll::Pending
+                });
+                let (index, packets) = timeout_at(Time::from_nanos(until), received)
                     .await
                     .map_err(|_| Error::InitialTimeout)?
                     .map_err(|_| {
@@ -292,6 +365,8 @@ impl Listener {
                             Error::Endpoint
                         }
                     })?;
+                drop(reads);
+                next = (index + 1) % endpoints.len();
                 // Recheck AFTER the receive: a ready packet is not permission
                 // to accept after the original acquisition budget expired.
                 remaining(cx, until, Error::InitialTimeout)?;
@@ -300,15 +375,20 @@ impl Listener {
                     && dcid != local_cid
                     && scid != local_cid
                 {
-                    candidate = Some((packet.src_addr, dcid, scid));
+                    candidate = Some((index, packet.src_addr, dcid, scid));
                     break;
                 }
             }
-            let (peer, dcid, scid) = candidate.ok_or(Error::InitialBudget)?;
+            let (index, peer, dcid, scid) = candidate.ok_or(Error::InitialBudget)?;
+            let endpoint = endpoints.swap_remove(index);
+            let local = endpoint.local_addr();
+            // Capacity remains ONE. No unused socket can acquire another peer
+            // or hold a queued Initial while this connection is authenticated.
+            drop(endpoints);
             // Factory invocation, all identity I/O and TLS consume this deadline.
             let until = deadline(cx, config.handshake_timeout)?;
             let driver =
-                bounded_identity(cx, until, identity(peer, transport_parameters())).await?;
+                bounded_identity(cx, until, identity(local, peer, transport_parameters())).await?;
             remaining(cx, until, Error::HandshakeTimeout)?;
             let connection = timeout_at(
                 Time::from_nanos(until),

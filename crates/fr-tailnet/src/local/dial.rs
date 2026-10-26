@@ -1,6 +1,8 @@
-//! One bounded outbound QUIC attempt to an installed-daemon-selected node.
+//! Bounded outbound QUIC dialing to an installed-daemon-selected node.
 //! TLS authenticates the destination; this is neither a host listener nor a
-//! desktop grant. There is no DNS, redirect, alternate transport, or retry here.
+//! desktop grant. An optional second address family uses the same identity,
+//! shared dial slot and original timeout, before any application I/O exists.
+//! There is no DNS, redirect or alternate transport.
 use super::{LocalApi, Lookup, PeerTarget, bounded, now};
 use crate::Error;
 use asupersync::{
@@ -36,7 +38,8 @@ const MAX_ROOTS: usize = 256;
 const MAX_ROOT_BYTES: usize = 1024 * 1024;
 
 /// Exactly one address pair chosen locally from the current node-owned sets.
-/// No automatic family fallback can retarget an attempt or reset its deadline.
+/// Each attempt keeps this pair; a selected alternative is a separate handshake
+/// under the original operation's deadline and the same verified identity.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct DialRoute {
     pub local: IpAddr,
@@ -121,42 +124,100 @@ impl NativeClient {
         target: PeerTarget,
         route: DialRoute,
     ) -> Result<impl Future<Output = Result<ConnectedPeer, Error>> + 'a, Error> {
+        self.dial_with_fallback(cx, target, route, None)
+    }
+
+    /// Dial one preferred pair, optionally followed by the other address family
+    /// after a bind failure or handshake timeout. Both pairs must already belong
+    /// to the SAME verified local/remote nodes and use the same remote port.
+    ///
+    /// The preferred family has half the original timeout when an alternative
+    /// exists; the alternative receives only the remaining original time. There
+    /// is one socket/handshake at a time, one shared dial slot, and continuous
+    /// same-identity metadata renewal. Certificate, membership, cancellation
+    /// and protocol refusals are terminal. No application operation is replayed.
+    pub fn dial_with_fallback<'a>(
+        &'a self,
+        cx: &'a Cx,
+        target: PeerTarget,
+        route: DialRoute,
+        alternate: Option<DialRoute>,
+    ) -> Result<impl Future<Output = Result<ConnectedPeer, Error>> + 'a, Error> {
         self.api.check_peer_target(cx, &target)?;
         route.check(&target)?;
+        if let Some(alternate) = alternate {
+            alternate.check(&target)?;
+            if alternate.local.is_ipv4() == route.local.is_ipv4()
+                || alternate.remote.port() != route.remote.port()
+            {
+                return Err(Error::AddressMismatch);
+            }
+        }
         let started = now(cx)?;
-        let end = started
-            .checked_add(u64::try_from(self.timeout.as_micros()).map_err(|_| Error::InvalidPolicy)?)
-            .ok_or(Error::Clock)?;
+        let duration = u64::try_from(self.timeout.as_micros()).map_err(|_| Error::InvalidPolicy)?;
+        let end = started.checked_add(duration).ok_or(Error::Clock)?;
         self.busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| Error::Busy)?;
         let slot = Lookup(self.busy.clone());
         Ok(async move {
             let _slot = slot;
-            let remaining = end.checked_sub(now(cx)?).ok_or(Error::Timeout)?;
-            let result = Box::pin(bounded(
-                cx,
-                Duration::from_micros(remaining),
-                self.connect(cx, target, route),
-            ))
-            .await;
-            // The dial's own deadline passed: the HOST did not complete the
-            // handshake (not running, serving another viewer, or UDP blocked).
-            // A LocalAPI lookup timeout inside the dial stays `Timeout`.
-            match result {
-                Err(Error::Timeout) if now(cx)? >= end => Err(Error::HandshakeTimeout),
-                other => other,
+            if now(cx)? >= end {
+                return Err(Error::Timeout);
+            }
+            let current = Mutex::new(Arc::new(target));
+            let preferred_end = if alternate.is_some() {
+                started + duration / 2
+            } else {
+                end
+            };
+            let result = self.connect_until(cx, &current, route, preferred_end).await;
+            match (result, alternate) {
+                (Err(error), Some(alternate)) if may_try_alternate(error) => {
+                    // The first future (and its socket) has been dropped. Its
+                    // latest same-identity snapshot remains checked by connect;
+                    // a failed/expired authority can never authorize fallback.
+                    self.connect_until(cx, &current, alternate, end).await
+                }
+                (result, _) => result,
             }
         })
+    }
+
+    async fn connect_until(
+        &self,
+        cx: &Cx,
+        current: &Mutex<Arc<PeerTarget>>,
+        route: DialRoute,
+        end: u64,
+    ) -> Result<ConnectedPeer, Error> {
+        let remaining = end
+            .checked_sub(now(cx)?)
+            .filter(|left| *left != 0)
+            .ok_or(Error::HandshakeTimeout)?;
+        let result = Box::pin(bounded(
+            cx,
+            Duration::from_micros(remaining),
+            self.connect(cx, current, route),
+        ))
+        .await;
+        // A LocalAPI lookup timeout stays Timeout; only this attempt's own
+        // fixed timeout can advance to the other already-verified family.
+        let finished = now(cx)?;
+        match result {
+            Err(Error::Timeout) | Ok(_) if finished >= end => Err(Error::HandshakeTimeout),
+            other => other,
+        }
     }
 
     async fn connect(
         &self,
         cx: &Cx,
-        target: PeerTarget,
+        current: &Mutex<Arc<PeerTarget>>,
         route: DialRoute,
     ) -> Result<ConnectedPeer, Error> {
-        let target = self.api.revalidate_peer_target(cx, &target).await?;
+        let old = current.lock().map_err(|_| Error::Revoked)?.clone();
+        let target = self.api.revalidate_peer_target(cx, &old).await?;
         route.check(&target)?;
         let (initial, local) = connection_ids()?;
         let driver = QuicHandshakeDriver::client(
@@ -177,9 +238,9 @@ impl NativeClient {
                 .map_err(|_| Error::NativeBind)?;
         let local_addr = endpoint.local_addr();
         self.api.check_peer_target(cx, &target)?;
-        let current = Mutex::new(Arc::new(target));
+        *current.lock().map_err(|_| Error::Revoked)? = Arc::new(target);
         let native = {
-            let mut refresh = pin!(self.refresh_while_connecting(cx, &current));
+            let mut refresh = pin!(self.refresh_while_connecting(cx, current));
             let mut connecting = pin!(NativeQuicUdpConnection::connect(
                 cx,
                 endpoint,
@@ -205,7 +266,7 @@ impl NativeClient {
         };
         // A completed TLS exchange alone cannot freeze metadata from before the
         // handshake. Finish a fresh, same-identity read before exposing ANY app I/O.
-        let old = current.into_inner().map_err(|_| Error::Revoked)?;
+        let old = current.lock().map_err(|_| Error::Revoked)?.clone();
         let target = self.api.revalidate_peer_target(cx, &old).await?;
         route.check(&target)?;
         if native.local_addr() != local_addr || native.peer_addr() != route.remote {
@@ -235,6 +296,10 @@ impl NativeClient {
             *slot = Arc::new(next);
         }
     }
+}
+
+fn may_try_alternate(error: Error) -> bool {
+    matches!(error, Error::NativeBind | Error::HandshakeTimeout)
 }
 
 /// A completed real TLS/UDP connection still tied to its fresh target snapshot.

@@ -16,10 +16,10 @@ use std::{
 
 /// The client node's installed-daemon view: it is the fixture peer (n-peer,
 /// 100.64.0.2) and the host is its only peer.
-fn client_status() -> Vec<u8> {
+fn client_status(dual_stack: bool) -> Vec<u8> {
     let own = format!("nodekey:{}", "2".repeat(64));
     let host = format!("nodekey:{}", "1".repeat(64));
-    serde_json::to_vec(&serde_json::json!({
+    let mut status = serde_json::json!({
         "Version": "synthetic-namespace-not-live-tailnet-qualification",
         "BackendState": "Running",
         "TailscaleIPs": ["100.64.0.2"],
@@ -30,8 +30,14 @@ fn client_status() -> Vec<u8> {
         "Peer": {host.clone(): {"ID": "n-host", "NodeID": 1, "PublicKey": host, "UserID": 7,
             "TailscaleIPs": ["100.64.0.1"], "InNetworkMap": true,
             "DNSName": format!("{}.", fixture::HOST)}},
-    }))
-    .unwrap()
+    });
+    if dual_stack {
+        status["TailscaleIPs"] = serde_json::json!(["100.64.0.2", "fd7a:115c:a1e0::2"]);
+        status["Self"]["TailscaleIPs"] = status["TailscaleIPs"].clone();
+        status["Peer"][&host]["TailscaleIPs"] =
+            serde_json::json!(["100.64.0.1", "fd7a:115c:a1e0::1"]);
+    }
+    serde_json::to_vec(&status).unwrap()
 }
 
 pub(super) struct ClientApi {
@@ -42,6 +48,12 @@ pub(super) struct ClientApi {
 }
 impl ClientApi {
     pub(super) fn new() -> Self {
+        Self::profile(false)
+    }
+    pub(super) fn dual_stack() -> Self {
+        Self::profile(true)
+    }
+    fn profile(dual_stack: bool) -> Self {
         let path = fixture::pki().join("client-api");
         let listener = UnixListener::bind(&path).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -72,7 +84,7 @@ impl ClientApi {
                 let text = String::from_utf8_lossy(&request).into_owned();
                 let path = text.split_whitespace().nth(1).unwrap_or("").to_string();
                 let reply = if path == "/localapi/v0/status?peers=true" {
-                    let body = client_status();
+                    let body = client_status(dual_stack);
                     let mut reply = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()

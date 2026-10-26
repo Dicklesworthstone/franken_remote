@@ -150,7 +150,7 @@ impl Server {
         ingress: IngressCheck,
         application: &'a mut A,
     ) -> impl Future<Output = Result<Statistics, Error>> + 'a {
-        let address = listener.local_addr();
+        let addresses = listener.local_addresses();
         let transport = listener.configuration();
         let clock = supervisor.clone();
         let identity = self.identity.clone();
@@ -159,8 +159,9 @@ impl Server {
             .clone()
             .unwrap_or_else(|| supervisor.clone());
         let boundary = ingress;
+        let checked_addresses = addresses.clone();
         let security: Check = Arc::new(move || {
-            if !boundary(address) {
+            if !checked_addresses.iter().all(|&address| boundary(address)) {
                 return Err(Error::Host(HostError::IngressUnavailable));
             }
             identity
@@ -225,11 +226,13 @@ impl Server {
                     let fence = super::PanicFence(&peer, false);
                     let socket = match listener.take() {
                         Some(socket) => socket,
-                        None => Listener::bind(&peer, address, transport)
+                        None => Listener::bind_addresses(&peer, &addresses, transport)
                             .await
                             .map_err(|e| Error::Host(HostError::Accept(e)))?,
                     };
                     inside()?;
+                    let ordinary_addresses = addresses.clone();
+                    let terminal_addresses = addresses.clone();
                     let mut served = false;
                     let outcome = {
                         let running = self.run_on_protected_listener_gated(
@@ -238,10 +241,12 @@ impl Server {
                             request,
                             Arc::new(move |bound| {
                                 // The check itself retains the transport-retirement marker.
-                                original() && bound == address && gate().is_ok()
+                                original() && ordinary_addresses.contains(&bound) && gate().is_ok()
                             }),
                             Arc::new(move |bound| {
-                                terminal_original() && bound == address && terminal_gate().is_ok()
+                                terminal_original()
+                                    && terminal_addresses.contains(&bound)
+                                    && terminal_gate().is_ok()
                             }),
                             |host| {
                                 served = true;

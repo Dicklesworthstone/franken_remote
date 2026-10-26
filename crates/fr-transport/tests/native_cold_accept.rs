@@ -78,7 +78,13 @@ async fn client(
     .unwrap();
     let endpoint = QuicUdpEndpoint::bind(
         cx,
-        "127.0.0.1:0".parse().unwrap(),
+        if address.is_ipv4() {
+            "127.0.0.1:0"
+        } else {
+            "[::1]:0"
+        }
+        .parse()
+        .unwrap(),
         QuicUdpEndpointConfig::default(),
     )
     .await
@@ -104,6 +110,9 @@ async fn client(
     )
     .await
 }
+
+#[path = "native_cold_accept/dual_stack.rs"]
+mod dual_stack;
 #[test]
 fn discovers_unknown_peer_completes_real_tls_and_delivers_authenticated_stream() {
     let _serial = serialized();
