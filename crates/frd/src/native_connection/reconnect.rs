@@ -374,6 +374,10 @@ fn notify(app: &mut impl Application, status: Status) -> Result<(), Failure> {
 /// A reference-expiry report which cannot obtain three fresh media roles may
 /// restart observation AFTER cleanup. The old namespace/decoder is never reused,
 /// and decode failure does not become retryable merely because roles ran out.
+/// A native handshake timeout also permits a fresh attempt: the dialer has
+/// dropped the old socket and no Viewer/application was exposed. Each retry
+/// revalidates the pinned identity and performs strict TLS again; a typed
+/// certificate, protocol or authority refusal is still terminal.
 pub fn retryable(failure: Failure) -> bool {
     use crate::session_startup::ControlledViewerError;
 
@@ -387,6 +391,7 @@ pub fn retryable(failure: Failure) -> bool {
             fr_tailnet::Error::LocalApiUnavailable
             | fr_tailnet::Error::BackendNotRunning
             | fr_tailnet::Error::NativeRouteIo
+            | fr_tailnet::Error::HandshakeTimeout
             | fr_tailnet::Error::Timeout,
         ))
         | Failure::Observation(ObserverError::Streaming(StreamingViewerError::Recovery(

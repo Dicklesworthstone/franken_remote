@@ -2,6 +2,7 @@
 //! real credential-checked Unix HTTP, exact non-loopback socket addresses, real
 //! TLS and production startup/renewal. Identity, CA and host admission are fixtures.
 use super::*;
+mod reconnect;
 use asupersync::{
     net::{
         quic_core::{ConnectionId, PacketHeader, TransportParameters},

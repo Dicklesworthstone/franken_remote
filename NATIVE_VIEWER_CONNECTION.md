@@ -48,6 +48,19 @@ supervisor may make a bounded fresh connection after this setup failure, with
 its existing cleanup and backoff; no application or input operation has started
 on the failed connection. The CLI reports `tailnet_route_unavailable`.
 
+The reconnect supervisor also retries a typed `HandshakeTimeout` after the
+original native dial deadline expires without a completed handshake. This covers
+a host becoming available after the first attempt or an exhausted handshake
+flight; it does not extend an in-progress handshake or bypass a refusal. The
+same finite `--attempts` budget, cleanup-before-backoff ordering, pinned node
+identity and strict TLS checks apply to every fresh connection. Explicit
+certificate rejection, other TLS/protocol failures, identity changes and local
+stop remain terminal. No viewer, input request or application data was admitted
+on the timed-out attempt. Namespace regressions exercise a real UDP blackhole
+followed by authenticated TLS/session startup, plus bounded repeated timeouts,
+cleanup failure, cancellation and changed identity. These are test scenarios,
+not live-tailnet or hardware qualification. Tracked as `fr-vqhv`.
+
 After actual TLS and the dialer's post-handshake metadata revalidation,
 `ConnectedPeer::into_owned_connection` moves the original connection **and** its
 original authenticated target into a renewable owner. A parked, expired result
