@@ -3,7 +3,9 @@
 //! must install the expectation and settle that original bounded handshake.
 //! Source cancellation/cleanup never borrows or cancels the desktop context.
 use super::super::controlled::ControlledViewer;
-use crate::native_files::{Absence, SETUP_TIMEOUT, SendControl, SendPhase, SendRequest};
+use crate::native_files::{
+    Absence, SETUP_TIMEOUT, SendControl, SendIntake, SendPhase, SendRequest,
+};
 use fr_files::{
     sender::{Error, Policy, Progress, Stage, batch::Report},
     session::Permission,
@@ -36,6 +38,16 @@ impl Lane {
         self.send = Some(Box::new(Sending::new(request, control)));
         Ok(())
     }
+    pub(in crate::session_startup) fn set_intake(&mut self, intake: SendIntake) {
+        if let Some(send) = &mut self.send {
+            send.intake = Some(intake);
+        }
+    }
+    pub(in crate::session_startup) fn close_intake(&self) {
+        if let Some(send) = &self.send {
+            send.close_intake();
+        }
+    }
     pub(in crate::session_startup) fn add_receive(
         &mut self,
         request: crate::native_files::ReceiveRequest,
@@ -65,6 +77,7 @@ impl Lane {
     }
     pub(in crate::session_startup) fn without_control(&mut self) {
         if let Some(lane) = &mut self.send {
+            lane.close_intake();
             lane.request = None;
             lane.control.end(Absence::Unavailable);
             lane.control.cleaned(Some(Ok(())));
@@ -81,6 +94,8 @@ pub(in crate::session_startup) struct Sending {
     control: SendControl,
     expecting: bool,
     cancelled: bool,
+    intake: Option<SendIntake>,
+    original_deadline: Option<u64>,
 }
 impl Sending {
     pub(in crate::session_startup) fn new(request: SendRequest, control: SendControl) -> Self {
@@ -90,12 +105,16 @@ impl Sending {
             control,
             expecting: false,
             cancelled: false,
+            intake: None,
+            original_deadline: None,
         }
     }
     /// No source read, blocking join, alternate transport pump or renewed grant.
     pub(in crate::session_startup) fn viewer(&mut self, viewer: &mut impl Endpoint) {
+        self.advance_intake(viewer);
         let cancel = self.control.cancel_requested();
         if cancel {
+            self.close_intake();
             // Release queued descriptors now, but keep the agreed attachment's
             // policy/expectation. Skipping it would make the host's offer fatal.
             self.request = None;
@@ -111,6 +130,7 @@ impl Sending {
                 // this unstarted expectation, not the source or a sent record.
                 Err(Error::Cancelled) if !viewer.closed() => {}
                 Err(error) => {
+                    self.close_intake();
                     self.expecting = true;
                     self.request = None;
                     self.control.end(Absence::Refused(error));
@@ -145,11 +165,19 @@ impl Sending {
         }
         if let Some(request) = self.request.take() {
             if viewer.stage() == Some(Stage::Idle) {
-                match viewer.start(request) {
+                let result = match self.original_deadline.take() {
+                    Some(until) => viewer.start_before(request, until),
+                    None => viewer.start(request),
+                };
+                match result {
                     Ok(()) => self
                         .control
                         .update(|status| status.phase = SendPhase::Sending),
-                    Err(error) => self.control.end(Absence::Refused(error)),
+                    Err(error) => {
+                        self.close_intake();
+                        self.control.end(Absence::Refused(error));
+                        self.control.cleaned(Some(Ok(())));
+                    }
                 }
             } else {
                 self.control.end(Absence::SetupFailed(
@@ -182,6 +210,55 @@ impl Sending {
         self.control.cleaned(viewer.cleanup());
         self.observe(viewer);
     }
+    fn close_intake(&self) {
+        if let Some(intake) = &self.intake {
+            intake.close();
+        }
+    }
+    fn advance_intake(&mut self, viewer: &mut impl Endpoint) {
+        let Some(intake) = self.intake.clone() else {
+            return;
+        };
+        intake.set_ready(false);
+        if viewer.closed()
+            || viewer.stage() == Some(Stage::Closed)
+            || self.cancelled
+            || self.control.cancel_requested()
+            || self.control.status().phase == SendPhase::Ended
+        {
+            intake.close();
+            return;
+        }
+        if !self.expecting || viewer.negotiating() || self.request.is_some() {
+            return;
+        }
+        if let Some(report) = viewer.report() {
+            self.observe(viewer);
+            if !report.complete {
+                return;
+            }
+            if report.stop.is_some() {
+                intake.close();
+                return;
+            }
+            // A complete report proves the original sources were joined. Keep
+            // it in that batch's handle BEFORE clearing the sender's report.
+            if viewer.collect_report() != Some(report) {
+                return;
+            }
+        }
+        if !viewer.can_start() {
+            return;
+        }
+        if let Some(pending) = intake.take() {
+            self.control = pending.control;
+            self.request = Some(pending.request);
+            self.original_deadline = Some(pending.until_us);
+            self.cancelled = false;
+        } else {
+            intake.set_ready(true);
+        }
+    }
     /// Called on ordinary turns AND after final parent cleanup. Keep the real
     /// ordered receipts; bytes queued alone never advance the phase to Finished.
     pub(in crate::session_startup) fn observe(&self, viewer: &impl Endpoint) {
@@ -192,6 +269,11 @@ impl Sending {
             viewer.progress(),
             viewer.paused(),
         );
+    }
+}
+impl Drop for Sending {
+    fn drop(&mut self) {
+        self.close_intake();
     }
 }
 
@@ -205,6 +287,15 @@ pub(in crate::session_startup) trait Endpoint {
     fn stage(&self) -> Option<Stage>;
     fn failure(&self) -> Option<Error>;
     fn start(&mut self, request: SendRequest) -> Result<(), Error>;
+    fn start_before(&mut self, request: SendRequest, _until_us: u64) -> Result<(), Error> {
+        self.start(request)
+    }
+    fn collect_report(&mut self) -> Option<Report> {
+        None
+    }
+    fn can_start(&mut self) -> bool {
+        !self.closed() && self.stage() == Some(Stage::Idle)
+    }
     fn cancel(&mut self) -> Result<(), Error>;
     fn cleanup(&mut self) -> Option<Result<(), Error>>;
     fn report(&self) -> Option<Report>;
@@ -230,6 +321,15 @@ impl Endpoint for ControlledViewer {
     }
     fn start(&mut self, request: SendRequest) -> Result<(), Error> {
         self.send_files(request.selection, request.lifetime)
+    }
+    fn start_before(&mut self, request: SendRequest, until_us: u64) -> Result<(), Error> {
+        self.send_files_before(request.selection, until_us)
+    }
+    fn collect_report(&mut self) -> Option<Report> {
+        self.take_file_batch_report()
+    }
+    fn can_start(&mut self) -> bool {
+        self.can_select_files()
     }
     fn cancel(&mut self) -> Result<(), Error> {
         self.cancel_file_send()

@@ -10,6 +10,8 @@ use crate::{
 };
 use fr_wire::files::Reason;
 
+mod repeated;
+
 async fn drop_fixture(c: &Cx, h: &Cx) -> Fixture {
     Box::pin(fixture_with_clipboard(
         c,

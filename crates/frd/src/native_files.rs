@@ -422,6 +422,8 @@ pub struct SendStatus {
 }
 mod control;
 pub use control::{SendControl, SendSnapshot};
+mod intake;
+pub use intake::SendIntake;
 mod download;
 pub use download::{
     HostSelection, MAX_RECEIVE_RESULTS, ReceiveControl, ReceivePhase, ReceiveRequest, ReceiveStatus,

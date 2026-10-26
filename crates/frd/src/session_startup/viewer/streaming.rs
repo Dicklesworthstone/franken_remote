@@ -523,6 +523,29 @@ impl StreamingViewer {
             .add_send(request, control.clone())?;
         Ok(control)
     }
+    pub(crate) fn configure_file_send_with_intake(
+        &mut self,
+        request: crate::native_files::SendRequest,
+    ) -> Result<
+        (
+            crate::native_files::SendControl,
+            crate::native_files::SendIntake,
+        ),
+        crate::native_files::Absence,
+    > {
+        let policy = request.policy;
+        let control = self.configure_file_send(request)?;
+        let (session, _) = self
+            .peer
+            .parts()
+            .map_err(|_| crate::native_files::Absence::Unavailable)?;
+        let intake = crate::native_files::SendIntake::new(session.cx.clone(), policy);
+        self.files
+            .as_mut()
+            .expect("configured original upload")
+            .set_intake(intake.clone());
+        Ok((control, intake))
+    }
     /// Register one explicitly approved local destination before serving.
     /// The host can address only this pinned directory, on this original
     /// controller, after the direction-specific Files attachment completes.
@@ -655,6 +678,9 @@ impl StreamingViewer {
     pub fn close(&mut self) {
         // Fence before codec cancellation or memory retirement.
         self.control.stop();
+        if let Some(files) = &self.files {
+            files.close_intake();
+        }
         self.peer.close();
         self.close_media();
     }

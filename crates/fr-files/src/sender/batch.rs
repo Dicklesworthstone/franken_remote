@@ -149,6 +149,24 @@ impl Sender<'_> {
         selection: Selection,
         lifetime: Duration,
     ) -> Result<(), Error> {
+        if !(Duration::from_micros(1)..=Duration::from_secs(3600)).contains(&lifetime) {
+            return Err(Error::Limits);
+        }
+        let deadline = self
+            .now()
+            .checked_add(micros(lifetime)?)
+            .ok_or(Error::Clock)?;
+        self.begin_batch_before(q, selection, deadline)
+    }
+    /// Admit a locally queued selection under its ORIGINAL absolute deadline on
+    /// this sender's monotonic clock. Queueing or another source's cleanup cannot
+    /// restart its lifetime. This still opens no source and grants no authority.
+    pub fn begin_batch_before(
+        &mut self,
+        q: &QuicRecords,
+        selection: Selection,
+        deadline: u64,
+    ) -> Result<(), Error> {
         self.identity(q)?;
         if self.closed {
             return Err(Error::Closed);
@@ -158,20 +176,22 @@ impl Sender<'_> {
             return Err(Error::Busy);
         }
         let total = selection.len();
-        if total == 0 || !(Duration::from_micros(1)..=Duration::from_secs(3600)).contains(&lifetime)
-        {
+        if total == 0 {
             return Err(Error::Limits);
         }
         self.next.checked_add(total as u64).ok_or(Error::Limits)?;
         self.cx.checkpoint().map_err(|_| Error::Cancelled)?;
-        let deadline = self
-            .now()
-            .checked_add(micros(lifetime)?)
-            .ok_or(Error::Clock)?;
+        let now = self.now();
+        if now >= deadline {
+            return Err(Error::Expired);
+        }
+        if deadline - now > 3_600_000_000 {
+            return Err(Error::Limits);
+        }
         self.batch = Some(Batch {
             selection,
             deadline,
-            last: self.now(),
+            last: now,
             report: Report {
                 total,
                 started: 0,

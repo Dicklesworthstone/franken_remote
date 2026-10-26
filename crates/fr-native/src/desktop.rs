@@ -347,6 +347,36 @@ impl Desktop {
         &mut self,
         request: frd::native_files::SendRequest,
     ) -> Result<frd::native_files::SendControl, Error> {
+        self.configure_file_send_inner(request, false)
+            .map(|(control, _)| control)
+    }
+    /// Keep the original negotiated upload available for later explicit local
+    /// selections. The returned intake opens only after a successful batch and
+    /// original source cleanup; no request survives desktop retirement.
+    pub fn configure_file_send_with_intake(
+        &mut self,
+        request: frd::native_files::SendRequest,
+    ) -> Result<
+        (
+            frd::native_files::SendControl,
+            frd::native_files::SendIntake,
+        ),
+        Error,
+    > {
+        self.configure_file_send_inner(request, true)
+            .map(|(control, intake)| (control, intake.expect("requested original intake")))
+    }
+    fn configure_file_send_inner(
+        &mut self,
+        request: frd::native_files::SendRequest,
+        repeated: bool,
+    ) -> Result<
+        (
+            frd::native_files::SendControl,
+            Option<frd::native_files::SendIntake>,
+        ),
+        Error,
+    > {
         if self.state() != State::Viewing {
             return Err(Error::NotViewing);
         }
@@ -356,9 +386,19 @@ impl Desktop {
             first_reserves_clipboard: self.first_file_panel_reserves_clipboard,
         };
         let observer = self.observer.as_mut().ok_or(Error::NotViewing)?;
-        let controls = observer
-            .configure_file_send(request)
-            .map_err(Error::Files)?;
+        let (controls, intake) = if repeated {
+            let (control, intake) = observer
+                .configure_file_send_with_intake(request)
+                .map_err(Error::Files)?;
+            (control, Some(intake))
+        } else {
+            (
+                observer
+                    .configure_file_send(request)
+                    .map_err(Error::Files)?,
+                None,
+            )
+        };
         let session = observer.control();
         if !placement.secondary {
             self.first_file_panel_reserves_clipboard = placement.clipboard;
@@ -380,7 +420,7 @@ impl Desktop {
                 )
             });
         self.file_progress = Some(panel);
-        Ok(controls)
+        Ok((controls, intake))
     }
     /// Receive the host's explicit selections into this locally pinned directory.
     /// This is consent for the original control lease, not another input grant.

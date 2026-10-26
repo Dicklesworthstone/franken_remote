@@ -351,6 +351,22 @@ impl ControlledViewer {
             .ok_or(Error::Closed)?
             .begin_batch(&self.session.transport, selection, lifetime)
     }
+    pub(crate) fn send_files_before(
+        &mut self,
+        selection: Selection,
+        until_us: u64,
+    ) -> Result<(), Error> {
+        self.admit_file_send()?;
+        self.files
+            .upload
+            .sender
+            .as_mut()
+            .ok_or(Error::Closed)?
+            .begin_batch_before(&self.session.transport, selection, until_us)
+    }
+    pub(crate) fn can_select_files(&mut self) -> bool {
+        self.file_stage() == Some(Stage::Idle) && self.admit_file_send().is_ok()
+    }
     fn admit_file_send(&mut self) -> Result<(), Error> {
         self.check().map_err(|_| Error::Closed)?;
         if self.files.upload.pending.is_some() {

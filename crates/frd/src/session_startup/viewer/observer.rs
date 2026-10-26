@@ -186,6 +186,24 @@ impl NativeObserver {
         }
         self.viewer.configure_file_send(request)
     }
+    /// Preserve one original upload lane for later explicit local selections.
+    /// Each accepted selection has its own immutable result/cancel handle; no
+    /// descriptor, permission or old result is carried across a reconnect.
+    pub fn configure_file_send_with_intake(
+        &mut self,
+        request: crate::native_files::SendRequest,
+    ) -> Result<
+        (
+            crate::native_files::SendControl,
+            crate::native_files::SendIntake,
+        ),
+        crate::native_files::Absence,
+    > {
+        if self.input.is_none() {
+            return Err(crate::native_files::Absence::Unavailable);
+        }
+        self.viewer.configure_file_send_with_intake(request)
+    }
     /// Register this attempt's explicitly selected client destination before
     /// native control service. The returned handle retains every actual terminal
     /// result and can cancel only this optional file operation.
