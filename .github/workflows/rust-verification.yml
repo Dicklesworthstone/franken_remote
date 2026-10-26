@@ -213,6 +213,11 @@ jobs:
               'real_clipboard::a_capture_stall_keeps_the_clipboard_crossing_both_ways',
               'real_clipboard::a_copy_that_outlives_its_deadline_on_a_slow_path_ends_the_clipboard_not_control',
               'real_clipboard::a_modern_authority_copy_crosses_a_120ms_path_and_keeps_control',
+              'real_clipboard::fr_connect_clipboard_crosses_both_ways_through_frd_run',
+              'real_clipboard::a_host_without_clipboard_keeps_control_and_the_client_reports_typed_absence',
+              'real_clipboard::privacy::hiding_the_host_clipboard_switch_stops_only_clipboard_when_idle',
+              'real_clipboard::privacy::hiding_the_client_clipboard_switch_stops_only_clipboard_when_idle',
+              'real_clipboard::privacy::turning_off_the_idle_client_clipboard_keeps_control_and_new_local_values',
           ]
           listed = subprocess.check_output(
               [binaries[0], '--list', '--ignored'], text=True)

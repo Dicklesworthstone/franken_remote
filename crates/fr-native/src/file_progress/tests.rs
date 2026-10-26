@@ -1,6 +1,7 @@
 //! Actual C drawing/events plus the production Rust loop. Session authority and
 //! file outcomes are explicit fixtures, not authenticated transfer qualification.
 mod audio;
+mod clipboard;
 mod receive;
 use super::*;
 use frd::native_files::{SendPhase, SendSnapshot, SendStatus};
@@ -71,7 +72,9 @@ impl Target for Probe {
             Action::Pause => sample.pause_requested = true,
             Action::Resume => sample.pause_requested = false,
             Action::Cancel => sample.cancel_requested = true,
-            Action::Quieter | Action::Louder | Action::Mute => panic!("audio action in file panel"),
+            Action::Quieter | Action::Louder | Action::Mute | Action::TurnOff => {
+                panic!("unrelated action in file panel");
+            }
         }
     }
 }
@@ -157,7 +160,7 @@ impl Drop for Peer {
         let _ = self.child.wait();
     }
 }
-fn wait(mut check: impl FnMut() -> bool) {
+pub(super) fn wait(mut check: impl FnMut() -> bool) {
     let until = Instant::now() + Duration::from_secs(3);
     while !check() {
         assert!(Instant::now() < until, "upload UI did not progress");

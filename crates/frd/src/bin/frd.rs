@@ -71,9 +71,15 @@ OPTIONS:
                     (control_capability_missing); no line scrolling (several
                     X screens, wheel buttons unmapped) offers control without
                     the wheel. Absent: view-only
-    --clipboard     With --input-agent: the controller's UTF-8 text clipboard
-                    follows its lease, both directions (the agent's per-lane
-                    --clipboard child owns X11 CLIPBOARD). Off by default
+    --no-clipboard  Disable the default bidirectional text clipboard sharing
+                    for --input-agent hosts. Sharing starts only after an actual
+                    control grant and a visible Clipboard sharing window at
+                    both ends. Turn off or close either window to end clipboard
+                    sharing. The desktop normally continues; a transfer that
+                    cannot stop independently closes the connection safely.
+                    Unsupported clipboard keeps control usable.
+                    --clipboard explicitly selects the default. View-only
+                    sessions never expose either clipboard
     --send PATH     With --once and --input-agent: send this explicit absolute
                     file or portable directory root to a controller using --receive.
                     Repeat up to 8 times. No browsing or automatic replay; cannot

@@ -175,6 +175,7 @@ pub struct Desktop {
     // until its native thread is joined; reconnect cannot inherit this handle.
     file_progress: Option<Result<crate::file_progress::Panel, crate::file_progress::Error>>,
     audio_controls: Option<Result<crate::file_progress::Panel, crate::file_progress::Error>>,
+    clipboard_controls: Option<crate::file_progress::clipboard::Owner>,
 }
 impl Desktop {
     pub const fn new(configuration: Configuration) -> Self {
@@ -191,6 +192,7 @@ impl Desktop {
             file_controls: None,
             file_progress: None,
             audio_controls: None,
+            clipboard_controls: None,
         }
     }
     pub fn state(&self) -> State {
@@ -258,7 +260,8 @@ impl Desktop {
     }
     /// Configure the existing controller-only default-on clipboard before
     /// service. No native open/read happens before bilateral readiness and the
-    /// original control grant. Consent and the visible off switch stay separate.
+    /// original control grant. The native factory additionally waits for this
+    /// attempt's mapped, responsive off switch. UI loss fences only clipboard.
     pub fn configure_clipboard(
         &mut self,
         configuration: frd::native_clipboard::Configuration,
@@ -266,11 +269,36 @@ impl Desktop {
         if self.state() != State::Viewing {
             return Err(Error::NotViewing);
         }
-        self.observer
+        let owner = crate::file_progress::clipboard::Owner::new();
+        let session = self.observer.as_ref().ok_or(Error::NotViewing)?.control();
+        let parent = self
+            .window()
+            .and_then(|window| window.input_window().ok())
+            .ok_or(crate::file_progress::Error::InvalidParent);
+        let configuration = owner.protect(
+            configuration,
+            self.configuration.display.clone(),
+            parent,
+            session,
+        );
+        let control = self
+            .observer
             .as_mut()
             .ok_or(Error::NotViewing)?
             .configure_clipboard(configuration)
-            .map_err(Error::Clipboard)
+            .map_err(Error::Clipboard)?;
+        self.clipboard_controls = Some(owner);
+        Ok(control)
+    }
+    /// The original clipboard's local privacy surface. It opens only after the
+    /// original control grant and bilateral readiness. Hiding it turns off that
+    /// clipboard synchronously; it never closes or grants control of a desktop.
+    pub fn clipboard_controls(
+        &self,
+    ) -> Option<Result<crate::file_progress::Control, crate::file_progress::Error>> {
+        self.clipboard_controls
+            .as_ref()
+            .and_then(crate::file_progress::clipboard::Owner::control)
     }
     /// `fr connect --control --send`: hand this attempt's explicit local
     /// selection to the controller's drop lane before service. Nothing is read
@@ -816,13 +844,16 @@ impl Desktop {
         if let Some(Ok(panel)) = &self.audio_controls {
             panel.stop();
         }
+        if let Some(owner) = &self.clipboard_controls {
+            owner.stop();
+        }
         if let Some(window) = &self.window {
             window.control().stop();
         }
         self.state = State::Stopped;
     }
     /// All local viewing surfaces must finish, including optional transfer and
-    /// audio panels. A hidden/failed panel may still have pending foreign cleanup; the
+    /// audio/clipboard panels. A hidden/failed panel may still have pending foreign cleanup; the
     /// existing reconnect gate must retain this Desktop until that thread joins.
     pub fn window_cleanup(&mut self) -> WindowCleanup {
         let window = self
@@ -840,6 +871,11 @@ impl Desktop {
         }
         if let Some(Ok(panel)) = &mut self.audio_controls
             && !panel.finish()
+        {
+            return WindowCleanup::Pending;
+        }
+        if let Some(owner) = &mut self.clipboard_controls
+            && !owner.finish()
         {
             return WindowCleanup::Pending;
         }

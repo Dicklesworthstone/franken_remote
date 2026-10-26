@@ -11,9 +11,10 @@
 //! window is not detected, so completion keeps `physical_visibility_proven:
 //! false`. A refused report grants nothing: the session keeps its own gates.
 //!
-//! `--clipboard` configures each attempt's controller-only UTF-8 clipboard at
+//! The default-on controller-only UTF-8 clipboard is configured per attempt at
 //! `ready`, before service: nothing opens until the grant and the host's own
-//! readiness; the X11 owner then runs on the clipboard worker thread (this
+//! readiness plus a mapped, responsive local Turn off panel. `--no-clipboard`
+//! declines this optional lane. The X11 owner runs on the clipboard worker thread (this
 //! local display, a separate XCB connection). Completion reports content-free
 //! tallies only: whether it became active, how many host items were published
 //! to the local CLIPBOARD, or the typed reason it never became active.
@@ -69,10 +70,10 @@ pub(super) fn offer(clipboard: bool) -> Offer {
     }
 }
 
-/// The local half of `--clipboard`: this user's X11 display (the one the
+/// The local half of shared clipboard: this user's X11 display (the one the
 /// viewer window uses) and the runtime's qualified randomness for item IDs.
 #[derive(Clone)]
-// Without linux-clipboard, `connect` refuses --clipboard before building one.
+// Without linux-clipboard, configuration reports this optional lane unavailable.
 #[cfg_attr(not(feature = "linux-clipboard"), allow(dead_code))]
 pub(super) struct Clipboard {
     pub(super) display: String,
@@ -133,16 +134,18 @@ fn configuration(
     use fr_wire::clipboard::session::synchronize::IdentifierFailure;
     let display = local.display.clone();
     let cx = local.cx.clone();
-    frd::native_clipboard::Configuration::new(
-        // The local user's explicit `--clipboard` is this side's consent.
+    frd::native_clipboard::Configuration::new_with_control(
+        // Local connection policy enables text sharing unless declined with
+        // --no-clipboard. Desktop gates native access on its visible off panel.
         true,
         std::time::Duration::from_secs(2),
-        move || {
+        move |original| {
             fr_native::clipboard::X11Clipboard::open(
                 &display,
                 &fr_core::limits::ProtocolLimits::ABSOLUTE,
                 true,
             )
+            .map(|native| native.with_privacy_gate(move || original.status().enabled))
         },
         move || {
             let mut bytes = [0; 16];
@@ -208,7 +211,7 @@ pub(super) struct Counters {
     pub(super) dropped_aged: u64,
     /// The ORIGINAL outcome of the attempt whose cleanup ended reconnection.
     pub(super) ended: Option<Result<(), Failure>>,
-    /// Some only with `--clipboard`.
+    /// Some when this controller's clipboard policy is enabled.
     pub(super) clipboard: Option<ClipboardCounters>,
 }
 impl Counters {
@@ -420,6 +423,31 @@ impl Attempt {
 mod tests {
     use super::*;
     use fr_wire::{attachment, negotiation::Role};
+    #[cfg(not(feature = "linux-clipboard"))]
+    #[test]
+    fn absent_native_clipboard_is_optional_with_a_typed_local_refusal() {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .enable_platform_reactor(true)
+            .build()
+            .unwrap();
+        let local = Clipboard {
+            display: ":0".into(),
+            cx: runtime.request_cx_with_budget(asupersync::types::Budget::INFINITE),
+        };
+        let error = configuration(&local).unwrap_err();
+        assert_eq!(
+            error,
+            frd::clipboard_quic::Error::NativeSetup(fr_core::clipboard::PlatformError::Unsupported)
+        );
+        assert_eq!(absence(Some(error)), "local_clipboard_unavailable");
+        assert!(
+            offer(true)
+                .capabilities
+                .iter()
+                .filter(|cap| cap.name.contains("clipboard"))
+                .all(|cap| !cap.required)
+        );
+    }
     #[test]
     fn the_control_offer_and_capabilities_match_the_x11_host_profile_only() {
         let offer = offer(false);

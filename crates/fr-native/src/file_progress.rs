@@ -1,8 +1,10 @@
 //! Optional, non-focus-taking local controls on the ORIGINAL desktop attempt.
 //! Only content-free snapshots and supported local control requests are used.
-//! Failure or closing a panel never closes the session or changes its settings.
+//! Clipboard panels fence their original clipboard on close, loss or failure.
+//! File/audio panels retain their settings when closed; none closes the desktop.
 //! Audio preferences reuse the same bounded native panel as file progress;
 //! neither a local mute nor a volume change creates observation/input authority.
+pub(crate) mod clipboard;
 mod model;
 use fr_client::audio::AudioVolumeControl;
 use frd::{
@@ -31,6 +33,7 @@ enum Direction {
     Upload = 0,
     Download = 1,
     Audio = 2,
+    Clipboard = 3,
 }
 
 // One coherent original-owner snapshot, never a download projected into a
@@ -40,12 +43,14 @@ enum Snapshot {
     Upload(Box<SendSnapshot>),
     Download(ReceiveStatus),
     Audio { volume: f32, muted: bool },
+    Clipboard(frd::native_clipboard::Status),
 }
 
 enum Transfer {
     Upload(SendControl),
     Download(ReceiveControl),
     Audio(AudioVolumeControl),
+    Clipboard(frd::native_clipboard::Control),
 }
 impl Transfer {
     fn direction(&self) -> Direction {
@@ -53,6 +58,7 @@ impl Transfer {
             Self::Upload(_) => Direction::Upload,
             Self::Download(_) => Direction::Download,
             Self::Audio(_) => Direction::Audio,
+            Self::Clipboard(_) => Direction::Clipboard,
         }
     }
     fn snapshot(&self) -> Snapshot {
@@ -63,6 +69,7 @@ impl Transfer {
                 let (volume, muted) = source.snapshot();
                 Snapshot::Audio { volume, muted }
             }
+            Self::Clipboard(source) => Snapshot::Clipboard(source.status()),
         }
     }
     fn action(&self, action: Action) {
@@ -84,6 +91,11 @@ impl Transfer {
                     _ => {}
                 }
             }
+            Self::Clipboard(source) => {
+                if action == Action::TurnOff {
+                    source.stop();
+                }
+            }
         }
     }
 }
@@ -97,6 +109,7 @@ enum Action {
     Quieter = 8,
     Louder = 16,
     Mute = 32,
+    TurnOff = 64,
 }
 impl Action {
     fn from_raw(value: u32) -> Option<Self> {
@@ -107,6 +120,7 @@ impl Action {
             8 => Some(Self::Quieter),
             16 => Some(Self::Louder),
             32 => Some(Self::Mute),
+            64 => Some(Self::TurnOff),
             _ => None,
         }
     }
@@ -116,7 +130,7 @@ impl Action {
             Self::Pause => source.pause(),
             Self::Resume => source.resume(),
             Self::Cancel => source.cancel(),
-            Self::Quieter | Self::Louder | Self::Mute => return,
+            Self::Quieter | Self::Louder | Self::Mute | Self::TurnOff => return,
         };
     }
 }
@@ -126,6 +140,7 @@ pub enum Error {
     InvalidParent,
     SessionEnded,
     ThreadUnavailable,
+    Stopped(StopReason),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
@@ -141,6 +156,8 @@ pub enum StopReason {
     NativeFailure,
     EventFlood,
     OwnerStopped,
+    MappingExpired,
+    Unresponsive,
 }
 fn status(state: u8) -> Status {
     match state {
@@ -150,6 +167,8 @@ fn status(state: u8) -> Status {
         3 => Status::Stopped(StopReason::SessionEnded),
         5 => Status::Stopped(StopReason::EventFlood),
         6 => Status::Stopped(StopReason::OwnerStopped),
+        7 => Status::Stopped(StopReason::MappingExpired),
+        8 => Status::Stopped(StopReason::Unresponsive),
         _ => Status::Stopped(StopReason::NativeFailure),
     }
 }
@@ -158,15 +177,25 @@ fn stop(state: &AtomicU8, reason: StopReason) {
         (old < 2).then_some(reason as u8)
     });
 }
-/// Status/hide only. No transfer handle, input grant or replacement selection.
+/// Status/hide only. Hiding a clipboard privacy panel synchronously turns off
+/// its original clipboard. This never acquires input or selects a replacement.
 #[derive(Clone)]
-pub struct Control(Arc<AtomicU8>);
+pub struct Control {
+    state: Arc<AtomicU8>,
+    privacy: Option<Arc<clipboard::Privacy>>,
+}
 impl Control {
     pub fn status(&self) -> Status {
-        status(self.0.load(Ordering::Acquire))
+        status(self.state.load(Ordering::Acquire))
     }
     pub fn hide(&self) {
-        stop(&self.0, StopReason::Hidden);
+        self.stop(StopReason::Hidden);
+    }
+    fn stop(&self, reason: StopReason) {
+        if let Some(privacy) = &self.privacy {
+            privacy.stop();
+        }
+        stop(&self.state, reason);
     }
 }
 impl std::fmt::Debug for Control {
@@ -182,6 +211,7 @@ impl std::fmt::Debug for Control {
 pub struct Panel {
     control: Control,
     task: Option<JoinHandle<()>>,
+    watchdog: Option<JoinHandle<()>>,
 }
 impl Panel {
     /// `parent` must be THIS application's mapped local viewer window, never a
@@ -214,6 +244,25 @@ impl Panel {
     ) -> Result<Self, Error> {
         Self::start_transfer(display, parent, session, Transfer::Audio(volume))
     }
+    /// Mandatory visible off control for this original clipboard. A failed
+    /// constructor also fences the source; readiness must precede native reads.
+    pub fn start_clipboard(
+        display: &str,
+        parent: crate::viewer_input::Window,
+        session: StreamingViewerControl,
+        source: frd::native_clipboard::Control,
+    ) -> Result<Self, Error> {
+        let result = Self::start_transfer(
+            display,
+            parent,
+            session,
+            Transfer::Clipboard(source.clone()),
+        );
+        if result.is_err() {
+            source.stop();
+        }
+        result
+    }
     fn start_transfer(
         display: &str,
         parent: crate::viewer_input::Window,
@@ -239,36 +288,76 @@ impl Panel {
             return Err(Error::SessionEnded);
         }
         let display = CString::new(display).map_err(|_| Error::InvalidDisplay)?;
-        let control = Control(Arc::new(AtomicU8::new(0)));
-        let shared = control.0.clone();
+        let privacy = match &source {
+            Transfer::Clipboard(source) => Some(Arc::new(clipboard::Privacy::new(source.clone()))),
+            _ => None,
+        };
+        let control = Control {
+            state: Arc::new(AtomicU8::new(0)),
+            privacy: privacy.clone(),
+        };
+        let shared = control.clone();
         let task = thread::Builder::new()
             .name(match source.direction() {
                 Direction::Upload => "fr-upload-ui".into(),
                 Direction::Download => "fr-download-ui".into(),
                 Direction::Audio => "fr-audio-ui".into(),
+                Direction::Clipboard => "fr-clipboard-ui".into(),
             })
             .spawn(move || {
                 let _fence = Fence(shared.clone());
-                let reason = run(&display, parent, &shared, &NativeTarget { session, source });
-                stop(&shared, reason);
+                let reason = run(
+                    &display,
+                    parent,
+                    &shared.state,
+                    &NativeTarget {
+                        session,
+                        source,
+                        privacy,
+                    },
+                );
+                shared.stop(reason);
             })
             .map_err(|_| Error::ThreadUnavailable)?;
+        // A blocked XCB connection cannot remain evidence for clipboard access.
+        // Retain the native task even if its independent watchdog cannot start.
+        let watchdog = if control.privacy.is_some() {
+            let shared = control.clone();
+            match thread::Builder::new()
+                .name("fr-clipboard-ui-watch".into())
+                .spawn(move || clipboard::supervise(&shared))
+            {
+                Ok(task) => Some(task),
+                Err(_) => {
+                    control.stop(StopReason::NativeFailure);
+                    None
+                }
+            }
+        } else {
+            None
+        };
         Ok(Self {
             control,
             task: Some(task),
+            watchdog,
         })
     }
     pub fn control(&self) -> Control {
         self.control.clone()
     }
     pub fn stop(&self) {
-        stop(&self.control.0, StopReason::OwnerStopped);
+        self.control.stop(StopReason::OwnerStopped);
     }
     pub fn finish(&mut self) -> bool {
-        if self.task.as_ref().is_some_and(|t| !t.is_finished()) {
+        if self.task.as_ref().is_some_and(|t| !t.is_finished())
+            || self.watchdog.as_ref().is_some_and(|t| !t.is_finished())
+        {
             return false;
         }
         if let Some(task) = self.task.take() {
+            let _joined = task.join();
+        }
+        if let Some(task) = self.watchdog.take() {
             let _joined = task.join();
         }
         true
@@ -279,10 +368,10 @@ impl Drop for Panel {
         self.stop();
     }
 }
-struct Fence(Arc<AtomicU8>);
+struct Fence(Control);
 impl Drop for Fence {
     fn drop(&mut self) {
-        stop(&self.0, StopReason::NativeFailure);
+        self.0.stop(StopReason::NativeFailure);
     }
 }
 unsafe extern "C" {
@@ -295,6 +384,7 @@ unsafe extern "C" {
     ) -> *mut c_void;
     fn fr_upload_draw(native: *mut c_void, frame: *const Frame) -> c_int;
     fn fr_upload_validate(native: *mut c_void) -> c_int;
+    fn fr_upload_mapped(native: *mut c_void) -> c_int;
     fn fr_upload_next(native: *mut c_void, kind: *mut u32, action: *mut u32) -> c_int;
     fn fr_upload_close(native: *mut c_void);
     fn fr_upload_disarm(native: *mut c_void);
@@ -314,10 +404,13 @@ trait Target {
     fn direction(&self) -> Direction;
     fn snapshot(&self) -> Snapshot;
     fn action(&self, action: Action);
+    fn panel_stopped(&self) {}
+    fn progress(&self) {}
 }
 struct NativeTarget {
     session: StreamingViewerControl,
     source: Transfer,
+    privacy: Option<Arc<clipboard::Privacy>>,
 }
 impl Target for NativeTarget {
     fn stopped(&self) -> bool {
@@ -332,6 +425,16 @@ impl Target for NativeTarget {
     fn action(&self, action: Action) {
         self.source.action(action);
     }
+    fn panel_stopped(&self) {
+        if let Some(privacy) = &self.privacy {
+            privacy.stop();
+        }
+    }
+    fn progress(&self) {
+        if let Some(privacy) = &self.privacy {
+            privacy.progress();
+        }
+    }
 }
 fn run(
     display: &CString,
@@ -339,6 +442,7 @@ fn run(
     state: &AtomicU8,
     target: &impl Target,
 ) -> StopReason {
+    let _target_fence = TargetFence(target);
     if target.stopped() {
         return StopReason::SessionEnded;
     }
@@ -359,15 +463,35 @@ fn run(
     };
     let native = Native(native);
     // Record terminal state BEFORE native disconnect, including unwind.
-    let _fence = NativeFence(state);
+    let _fence = NativeFence { state, target };
     let reason = events(&native, state, target);
+    target.panel_stopped();
     stop(state, reason);
     reason
 }
-struct NativeFence<'a>(&'a AtomicU8);
-impl Drop for NativeFence<'_> {
+struct TargetFence<'a, T: Target>(&'a T);
+impl<T: Target> Drop for TargetFence<'_, T> {
     fn drop(&mut self) {
-        stop(self.0, StopReason::NativeFailure);
+        self.0.panel_stopped();
+    }
+}
+struct NativeFence<'a, T: Target> {
+    state: &'a AtomicU8,
+    target: &'a T,
+}
+impl<T: Target> Drop for NativeFence<'_, T> {
+    fn drop(&mut self) {
+        self.target.panel_stopped();
+        stop(self.state, StopReason::NativeFailure);
+    }
+}
+fn mark_ready(native: &Native, state: &AtomicU8, target: &impl Target) {
+    // Positive mapping/drawing evidence; clipboard also requires server-authored
+    // unobscured visibility. An accepted map request alone never opens its gate.
+    // SAFETY: thread-confined native owner, no retained Rust pointer.
+    if unsafe { fr_upload_mapped(native.0.as_ptr()) } == 1 {
+        target.progress();
+        let _ = state.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
     }
 }
 fn events(native: &Native, state: &AtomicU8, target: &impl Target) -> StopReason {
@@ -464,8 +588,9 @@ fn events(native: &Native, state: &AtomicU8, target: &impl Target) -> StopReason
             }
             previous = Some(frame);
             refreshed = Instant::now();
-            let _ = state.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
+            mark_ready(native, state, target);
         }
+        target.progress();
         turn = now;
         thread::sleep(TURN);
     }

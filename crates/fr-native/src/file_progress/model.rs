@@ -28,7 +28,46 @@ impl Frame {
             Snapshot::Upload(status) => Self::new(status),
             Snapshot::Download(status) => Self::receive(status),
             Snapshot::Audio { volume, muted } => Self::audio(*volume, *muted),
+            Snapshot::Clipboard(status) => Self::clipboard(status),
         }
+    }
+    fn clipboard(status: &frd::native_clipboard::Status) -> Self {
+        use frd::native_clipboard::Phase;
+        let enabled = status.enabled && !matches!(status.phase, Phase::Retired | Phase::Closed);
+        let mut frame = Self {
+            lines: [[0; COLUMNS]; ROWS],
+            progress: -1,
+            actions: if enabled { Action::TurnOff as u32 } else { 0 },
+        };
+        frame.lines[0] = line(format_args!(
+            "Text clipboard: {}",
+            if !enabled {
+                "off for this connection"
+            } else if status.phase == Phase::Running {
+                "on, in both directions"
+            } else {
+                "waiting for the approved control connection"
+            }
+        ));
+        frame.lines[1] = line(format_args!(
+            "Text only, at most 1 MiB per item. No automatic file or URL opening."
+        ));
+        frame.lines[2] = line(format_args!(
+            "Turn off ends text sharing for this connection."
+        ));
+        frame.lines[3] = line(format_args!(
+            "If a transfer cannot stop independently, the connection closes."
+        ));
+        frame.lines[4] = line(format_args!(
+            "Closing or hiding this panel also turns clipboard sharing off."
+        ));
+        frame.lines[5] = line(format_args!(
+            "Clipboard text is never shown here or written to diagnostics."
+        ));
+        frame.lines[6] = line(format_args!(
+            "Turning off does not erase an existing system clipboard value."
+        ));
+        frame
     }
     fn audio(volume: f32, muted: bool) -> Self {
         // AudioVolumeControl guarantees a finite gain in [0, 1].

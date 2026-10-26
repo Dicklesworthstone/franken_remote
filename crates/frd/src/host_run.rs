@@ -11,8 +11,9 @@
 //! indicator). An explicitly configured desktop UI can require one-use
 //! local consent before any observation; legacy callers refuse that mode. Encoder selection is explicit local policy; legacy entry
 //! points retain software, and hardware never silently falls back. The
-//! controller's text clipboard is a further, separate operator opt-in
-//! (`clipboard`, requires the input agent); it follows the controller's lease.
+//! controller's text clipboard follows its lease when enabled (`clipboard`,
+//! requires the input agent). The CLI enables it by default for control hosts,
+//! with `--no-clipboard` and a separate local privacy switch at either end.
 //! So is the controller's drop directory (`files`, requires the input agent):
 //! explicit viewer-to-host file sends land there only under the live lease.
 pub mod approval;

@@ -58,7 +58,7 @@ fr displays NODE_ID --experimental-native [--trust-roots /absolute/ca-roots.pem]
 fr connect NODE_ID --view-only|--control --experimental-native
     --display HANDLE|only|choose [--worker /absolute/fr-media-worker] [--trust-roots /absolute/ca-roots.pem]
     [--by-name] [--x-display :0] [--socket /absolute/tailscaled.sock]
-    [--port 8443] [--ipv6] [--attempts 1..32] [--fit WIDTHxHEIGHT] [--clipboard]
+    [--port 8443] [--ipv6] [--attempts 1..32] [--fit WIDTHxHEIGHT] [--no-clipboard]
     [--capture-system-shortcuts]
     [--send /absolute/file-or-directory]... | [--receive /absolute/private-directory]
     [--receive-conflict reject|keep-both] [--receive-max-file-bytes N]
@@ -107,9 +107,16 @@ any other end is native_session_failed, its typed chain on stderr. When an
 automatic reconnect then fails too, attempts_ended names the earlier
 attempts' ends (the reconnect's own end, e.g. host_not_answering after a
 --once host stopped, would otherwise hide them).
---clipboard (with --control; build with linux-clipboard) lets the UTF-8 text
-CLIPBOARD follow the control lease both ways, when the host runs frd run
---clipboard too; otherwise the completion reports clipboard absence by type.
+With --control, UTF-8 text clipboard sharing is enabled by default, up to 1 MiB
+per item, when both ends provide it (build fr-native with linux-clipboard).
+It starts only after control is granted and local privacy controls are visible.
+Use --no-clipboard before connecting, or Turn off in either end's Clipboard
+sharing window, to disable this lane. Closing or losing that window also turns
+clipboard sharing off for the current session. The desktop normally continues;
+if an in-progress transfer cannot stop independently, the connection closes.
+--clipboard explicitly selects the default; conflicting choices are refused.
+View-only sessions never access either clipboard. Missing native permission or
+clipboard support reports typed absence while keyboard, mouse and video continue.
 --send PATH (with --control, repeatable up to 8) sends those regular files or
 portable directory roots, in order, into the host's drop directory after control
 is granted, when the host runs frd run --files DIR. Symlinks and special files

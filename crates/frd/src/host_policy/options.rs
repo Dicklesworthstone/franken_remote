@@ -55,8 +55,9 @@ pub struct RunOptions {
     /// Absolute `fr-input-agent` path. Absent: observation only (unchanged).
     /// Present: a first viewer may take the exclusive controlled share.
     pub input_agent: Option<PathBuf>,
-    /// Let that controller's text clipboard follow its lease (needs
-    /// `input_agent`; the caller refuses it alone before any I/O).
+    /// Let that controller's text clipboard follow its lease. CLI parsing
+    /// enables this with `input_agent` unless `--no-clipboard` is selected;
+    /// explicit `--clipboard` without an input agent is refused by the caller.
     pub clipboard: bool,
     /// Local enable of host playback audio (off by default). Only an admitted
     /// observer that selected audio-down receives it; see `frd run --help`.
@@ -95,6 +96,7 @@ impl RunOptions {
         let mut options = Self::default();
         let mut iter = args.iter();
         let mut json = false;
+        let mut clipboard = None;
         while let Some(flag) = iter.next() {
             if flag == "--json" {
                 if json {
@@ -124,11 +126,8 @@ impl RunOptions {
                 options.once = true;
                 continue;
             }
-            if flag == "--clipboard" {
-                if options.clipboard {
-                    return Err(Error::InvalidArgument);
-                }
-                options.clipboard = true;
+            if flag == "--clipboard" || flag == "--no-clipboard" {
+                set(&mut clipboard, flag == "--clipboard")?;
                 continue;
             }
             if flag == "--adaptive-capture" {
@@ -199,6 +198,7 @@ impl RunOptions {
                 _ => return Err(Error::InvalidArgument),
             }
         }
+        options.clipboard = clipboard.unwrap_or(options.input_agent.is_some());
         let _ = options.selected_encoder()?;
         let _ = options.video_profile()?;
         // Control retains its existing mandatory per-lease indicator. The two
@@ -357,13 +357,35 @@ mod tests {
         }
     }
     #[test]
-    fn clipboard_is_an_opt_in_flag_given_at_most_once() {
+    fn clipboard_defaults_to_control_and_accepts_one_explicit_choice() {
         assert!(!parse(&["--software-explicit"]).unwrap().clipboard);
-        let options = parse(&["--input-agent", "/a", "--clipboard"]).unwrap();
-        assert!(options.clipboard);
+        assert!(!parse(&["--no-clipboard"]).unwrap().clipboard);
+        assert!(parse(&["--input-agent", "/a"]).unwrap().clipboard);
+        assert!(
+            parse(&["--input-agent", "/a", "--clipboard"])
+                .unwrap()
+                .clipboard
+        );
+        assert!(
+            !parse(&["--input-agent", "/a", "--no-clipboard"])
+                .unwrap()
+                .clipboard
+        );
+        // Resolve defaults after the complete parse, independent of flag order.
+        assert!(
+            !parse(&["--no-clipboard", "--input-agent", "/a"])
+                .unwrap()
+                .clipboard
+        );
+        // Retain the caller's specific clipboard_requires_input_agent refusal.
+        assert!(parse(&["--clipboard"]).unwrap().clipboard);
         for refused in [
             &["--clipboard", "--clipboard"][..],
+            &["--no-clipboard", "--no-clipboard"][..],
+            &["--clipboard", "--no-clipboard"][..],
+            &["--no-clipboard", "--clipboard"][..],
             &["--clipboard=yes"][..],
+            &["--no-clipboard=yes"][..],
             &["--input-agent", "--clipboard"][..],
         ] {
             assert!(

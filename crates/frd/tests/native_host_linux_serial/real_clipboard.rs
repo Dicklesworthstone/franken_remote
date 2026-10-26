@@ -1,5 +1,5 @@
-//! The shipped `fr connect --control --clipboard` against the production
-//! `frd run --input-agent --clipboard`, with REAL X11 selections on both sides:
+//! Default clipboard sharing with shipped `fr connect --control` against
+//! production `frd run --input-agent`, with REAL X11 selections on both sides:
 //! the client's own X11 clipboard owner on the viewer Xvfb, and on the host the
 //! real per-lane `fr-input-agent --clipboard` child (frd itself loads no X11).
 //! Text travels the real bounded begin/chunk/commit records on the clipboard
@@ -12,6 +12,8 @@
 //! existing namespace fixtures, and the viewer harness plays the window manager
 //! and the user as in `real_control`. Xvfb selections in a namespace are not a
 //! desktop clipboard manager, Wayland, or a live tailnet.
+mod privacy;
+
 use super::real_control::{Controlled, Harness, PRELUDE, eventually, indicator, signal};
 use super::real_impairment::Netem;
 use super::shipped_client::wait_for;
@@ -372,7 +374,7 @@ fn fr_connect_clipboard_crosses_both_ways_through_frd_run() {
 #[test]
 #[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; real input agent"]
 fn a_host_without_clipboard_keeps_control_and_the_client_reports_typed_absence() {
-    // `frd run --input-agent` WITHOUT --clipboard; the client asks for it.
+    // `frd run --input-agent --no-clipboard`; the client requests it by default.
     let mut s = Controlled::start_with(false, true);
     let mut host = Peer::start(&s.host.display);
     let mut viewer = Peer::start(&s.viewer.display);

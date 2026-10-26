@@ -102,6 +102,8 @@ fn help_is_usable_without_a_display_daemon_or_credentials() {
         help.contains("fr hosts")
             && help.contains("--view-only")
             && help.contains("--control")
+            && help.contains("--no-clipboard")
+            && help.contains("Turn off")
             && help.contains("--experimental-native")
             && help.contains("--receive-conflict reject|keep-both")
             && help.contains("--receive-max-file-bytes")

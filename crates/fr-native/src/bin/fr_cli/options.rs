@@ -95,8 +95,9 @@ pub struct Connection {
     /// `--capture-system-shortcuts` (with `--control` only): request one
     /// keyboard grab from the original X11 input owner, after control is granted.
     pub capture_system_shortcuts: bool,
-    /// `--clipboard` (with `--control` only): let the UTF-8 text clipboard
-    /// follow the control lease, both directions, when the host enables it too.
+    /// Default-on with `--control`, disabled by `--no-clipboard`: let the
+    /// UTF-8 text clipboard follow the control lease in both directions when
+    /// both endpoints have a live local privacy control and native permission.
     pub clipboard: bool,
     /// `--audio`: explicitly ask for host playback audio in either role.
     /// `None` offers no audio capability at all.
@@ -559,7 +560,7 @@ fn parse_command(
     let mut seen = BTreeSet::new();
     let (mut json, mut socket, mut by_name, mut view_only, mut experimental, mut ipv6) =
         (false, None, false, false, false, false);
-    let (mut control, mut clipboard, mut capture_system_shortcuts) = (false, false, false);
+    let (mut control, mut clipboard, mut capture_system_shortcuts) = (false, None, false);
     let (mut audio, mut audio_server, mut audio_sink) = (false, None, None);
     let (mut audio_volume, mut audio_muted) = (None, false);
     let (mut display, mut worker, mut roots, mut x_display) = (None, None, None, None);
@@ -583,7 +584,9 @@ fn parse_command(
             "--view-only" if connect => view_only = true,
             "--control" if connect => control = true,
             "--capture-system-shortcuts" if connect => capture_system_shortcuts = true,
-            "--clipboard" if connect => clipboard = true,
+            "--clipboard" | "--no-clipboard" if connect && clipboard.is_none() => {
+                clipboard = Some(flag == "--clipboard");
+            }
             "--audio" if connect => audio = true,
             "--audio-server" if connect => audio_server = Some(next_path(args, &mut index)?),
             "--audio-sink" if connect => {
@@ -647,7 +650,7 @@ fn parse_command(
                 2,
             ));
         }
-        if clipboard && !control {
+        if clipboard == Some(true) && !control {
             return Err(Failure::new(
                 "clipboard_requires_control",
                 "The clipboard follows a control lease; pass --control with --clipboard. A view-only session never exposes either clipboard.",
@@ -729,7 +732,7 @@ fn parse_command(
                 fit_window,
                 control,
                 capture_system_shortcuts,
-                clipboard,
+                clipboard: control && clipboard.unwrap_or(true),
                 audio: audio.then_some(AudioRequest {
                     server: audio_server,
                     sink: audio_sink,
@@ -805,14 +808,20 @@ mod tests {
         }
     }
     #[test]
-    fn clipboard_is_an_explicit_opt_in_that_needs_control() {
+    fn clipboard_defaults_to_control_and_can_be_disabled_before_connecting() {
         let base = "n-host --experimental-native --worker /opt/fr/worker --display only";
-        for (flags, clipboard) in [("--control", false), ("--control --clipboard", true)] {
+        for (flags, control, clipboard) in [
+            ("--control", true, true),
+            ("--control --clipboard", true, true),
+            ("--control --no-clipboard", true, false),
+            ("--view-only", false, false),
+            ("--view-only --no-clipboard", false, false),
+        ] {
             let Command::Connect(c) = options(&format!("connect {base} {flags}")).unwrap().command
             else {
                 unreachable!("connection required");
             };
-            assert!(c.control);
+            assert_eq!(c.control, control, "{flags}");
             assert_eq!(c.clipboard, clipboard, "{flags}");
         }
         // Never with viewing only: a typed refusal before any I/O.
@@ -825,9 +834,15 @@ mod tests {
         );
         for refused in [
             format!("connect {base} --control --clipboard --clipboard"),
+            format!("connect {base} --control --no-clipboard --no-clipboard"),
+            format!("connect {base} --control --clipboard --no-clipboard"),
+            format!("connect {base} --control --no-clipboard --clipboard"),
             "displays n-host --experimental-native --clipboard".into(),
+            "displays n-host --experimental-native --no-clipboard".into(),
             "doctor --clipboard".into(),
+            "doctor --no-clipboard".into(),
             "hosts --clipboard".into(),
+            "hosts --no-clipboard".into(),
         ] {
             assert_eq!(
                 options(&refused).err().unwrap().code,
@@ -1549,13 +1564,15 @@ mod controlled_audio_tests {
     }
 
     #[test]
-    fn audio_clipboard_and_files_are_independent_explicit_control_choices() {
+    fn explicit_audio_and_files_preserve_the_independent_clipboard_choice() {
         let base = "connect n-host --control --experimental-native --display only --worker /opt/fr/fr-media-worker";
         for extra in [
             "--audio",
             "--audio --clipboard",
+            "--audio --no-clipboard",
             "--audio --send /a",
             "--audio --clipboard --send /a",
+            "--audio --no-clipboard --send /a",
         ] {
             let Command::Connect(connection) =
                 parse(&args(&format!("{base} {extra}"))).unwrap().command
@@ -1563,7 +1580,7 @@ mod controlled_audio_tests {
                 unreachable!("connection required");
             };
             assert!(connection.control && connection.audio.is_some());
-            assert_eq!(connection.clipboard, extra.contains("--clipboard"));
+            assert_eq!(connection.clipboard, !extra.contains("--no-clipboard"));
             assert_eq!(connection.send.len(), usize::from(extra.contains("--send")));
         }
     }

@@ -18,6 +18,7 @@ open_display = bind(x, "XOpenDisplay", D, C.c_char_p)
 root_window = bind(x, "XDefaultRootWindow", U, D)
 create = bind(x, "XCreateSimpleWindow", U, D, U, I, I, C.c_uint, C.c_uint, C.c_uint, U, U)
 map_window = bind(x, "XMapWindow", I, D, U)
+raise_window = bind(x, "XRaiseWindow", I, D, U)
 focus = bind(x, "XSetInputFocus", I, D, U, I, U)
 get_focus = bind(x, "XGetInputFocus", I, D, C.POINTER(U), C.POINTER(I))
 sync = bind(x, "XSync", I, D, I)
@@ -65,7 +66,7 @@ def viewable(window):
 d = open_display(sys.argv[1].encode())
 assert d, "X display unavailable"
 direction = sys.argv[2] if len(sys.argv) > 2 else "upload"
-assert direction in ("upload", "download", "audio")
+assert direction in ("upload", "download", "audio", "clipboard")
 panel_class = ("franken-remote-" + direction).encode() + b"\0FrankenRemote\0"
 root = root_window(d)
 full_screen = len(sys.argv) > 3 and sys.argv[3] == "full-screen"
@@ -141,7 +142,8 @@ def panel(window=None, depth=0):
     return 0
 
 def point(name):
-    return {"pause": (100, 250), "resume": (304, 250), "cancel": (508, 250), "outside": (200, 220)}[name]
+    return {"pause": (100, 250), "resume": (304, 250), "cancel": (508, 250),
+            "off": (508, 250), "outside": (200, 220)}[name]
 
 for raw in sys.stdin:
     parts = raw.split()
@@ -169,6 +171,22 @@ for raw in sys.stdin:
             xx, yy, _, _ = rectangle(parent); target = outer(w)
         else: xx, yy, target = -100, -100, outer(w)
         move(d, target, xx, yy)
+    elif command in ("cover", "cover_partial"):
+        xx, yy, ww, hh = rectangle(w)
+        # Xlib's override-redirect flag is supplied with XChangeWindowAttributes
+        # through the protocol-sized attributes structure, bypassing WM layout.
+        class SetAttributes(C.Structure):
+            _fields_ = [("background_pixmap", U), ("background_pixel", U),
+                ("border_pixmap", U), ("border_pixel", U), ("bit_gravity", I),
+                ("win_gravity", I), ("backing_store", I), ("backing_planes", U),
+                ("backing_pixel", U), ("save_under", I), ("event_mask", C.c_long),
+                ("do_not_propagate_mask", C.c_long), ("override_redirect", I),
+                ("colormap", U), ("cursor", U)]
+        change_attributes = bind(x, "XChangeWindowAttributes", I, D, U, U, C.POINTER(SetAttributes))
+        cover = create(d, root, xx, yy, ww // 2 if command == "cover_partial" else ww, hh, 0, 0, 0xffffff)
+        settings = SetAttributes(); settings.override_redirect = 1
+        change_attributes(d, cover, 1 << 9, C.byref(settings))
+        map_window(d, cover); raise_window(d, cover)
     elif command in ("click", "press", "release"):
         xx, yy = point(parts[1]); warp(d, 0, w, 0, 0, 0, 0, xx, yy)
         if command in ("click", "press"): button(d, 1, 1, 0)

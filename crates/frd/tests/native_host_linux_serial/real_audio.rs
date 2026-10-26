@@ -391,7 +391,8 @@ fn options(
 
 /// The shipped `fr` (this binary's sibling), with an explicit role and
 /// `--audio`, playing into `pulse`.
-/// `lanes` adds `--clipboard` and `--send` for a controller.
+/// `lanes` leaves the default clipboard enabled or disables it explicitly,
+/// and adds `--send` for a controller.
 fn connect_audio(
     api: &Path,
     roots: &Path,
@@ -410,7 +411,7 @@ fn connect_audio(
             "--audio",
             "--experimental-native",
         ])
-        .args(lanes.clipboard.then_some("--clipboard"))
+        .args((!lanes.clipboard).then_some("--no-clipboard"))
         .args(
             lanes
                 .send

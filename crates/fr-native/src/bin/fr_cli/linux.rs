@@ -334,14 +334,6 @@ fn connect(
             "Verify the locally provisioned trust store and native connection policy.",
         )
     })?;
-    #[cfg(not(feature = "linux-clipboard"))]
-    if connection.clipboard {
-        return Err(Failure::new(
-            "clipboard_unavailable",
-            "This fr was built without linux-clipboard; rebuild fr-native with --features linux-clipboard, or omit --clipboard.",
-            2,
-        ));
-    }
     // Classify every --send path by type before any network I/O.
     let sends = files::select(&connection.send)?;
     let downloads = files::download::select(connection.receive.as_ref())?;
@@ -726,7 +718,7 @@ struct Interface {
     progress: Rc<RefCell<Progress>>,
     /// The current opened `--control` attempt; never carried to the next one.
     attempt: Option<control::Attempt>,
-    /// Some only with `--clipboard`: configured afresh on every attempt.
+    /// Default-on for control unless `--no-clipboard`; fresh on every attempt.
     clipboard: Option<control::Clipboard>,
     /// `--audio`: the resolved local server and request for either role.
     audio: Option<(std::path::PathBuf, super::options::AudioRequest)>,

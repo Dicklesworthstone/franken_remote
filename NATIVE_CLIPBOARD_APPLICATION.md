@@ -1,5 +1,29 @@
 # Native application clipboard lifecycle
 
+## Native desktop controls
+
+Linux `fr connect --control` and `frd run --input-agent PATH` enable text
+clipboard sharing by default. `--no-clipboard` disables it at either end;
+`--clipboard` explicitly selects the default. Conflicting choices are refused.
+Service installation preserves the disable. View-only never accesses clipboard.
+
+The actual grant, approval, bilateral readiness and OS permission gate access.
+The client and host each show a clipboard **Turn off** control. Native setup
+waits for mapped, drawn, responsive UI. Hiding, obscuring, closing or losing it
+fences the original lane, including during blocked native work. Old controls
+cannot affect later sessions; cleanup preserves newer OS clipboard values.
+
+Without retained clipboard payload, retirement preserves the desktop. A stop
+during protected native I/O with retained payload still closes the connection:
+the pinned transport cannot selectively retract that packet. This privacy fence
+remains mandatory. Missing support, permission or UI reports typed absence.
+
+Full Cargo/session execution remains blocked locally by shared storage and
+memory exhaustion. Focused native checks are separate evidence; new CLI and
+session regressions are retained for execution on a provisioned builder.
+
+## Application ownership
+
 The public Linux `NativePublisher` and `NativeObserver` owners now accept
 `configure_clipboard(Configuration)` before their control-capable service starts.
 This connects [automatic running-session negotiation](NATIVE_CLIPBOARD_TRANSPORT.md)

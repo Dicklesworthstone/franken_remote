@@ -404,7 +404,7 @@ fn connect_command(
     let mut command = Command::new(fr);
     command
         .args(["connect", "n-host", "--control", "--experimental-native"])
-        .args(clipboard.then_some("--clipboard"))
+        .args((!clipboard).then_some("--no-clipboard"))
         .args(
             send.iter()
                 .flat_map(|path| [std::ffi::OsStr::new("--send"), path.as_os_str()]),
@@ -709,7 +709,7 @@ exec \"$@\"
             .arg(input_agent)
             .arg("--trust-roots")
             .arg(fixture::pki().join("ca.pem"))
-            .args(clipboard.then_some("--clipboard"))
+            .args((!clipboard).then_some("--no-clipboard"))
             .args(
                 sources
                     .iter()
@@ -825,7 +825,8 @@ impl Controlled {
             None,
         )
     }
-    /// `frd run --input-agent [--clipboard]` and `fr connect --control [--clipboard]`.
+    /// Default clipboard with `frd run --input-agent` and `fr connect --control`;
+    /// false explicitly selects `--no-clipboard` at that endpoint.
     pub(super) fn start_with(host_clipboard: bool, client_clipboard: bool) -> Self {
         Self::start_full(host_clipboard, client_clipboard, None, &[])
     }

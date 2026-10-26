@@ -287,6 +287,28 @@ fn frd_run_options_after_double_dash_reach_the_unit_validated_by_frd_run() {
 
 #[test]
 #[cfg(target_os = "linux")] // frd run options are validated only for the Linux host.
+fn service_preserves_default_clipboard_and_an_explicit_local_disable() {
+    let base = [
+        "--user",
+        "--software-explicit",
+        "--approval",
+        "none",
+        "--",
+        "--input-agent",
+        "/usr/libexec/fr-input-agent",
+    ];
+    for (extra, enabled) in [(&[][..], true), (&["--no-clipboard"][..], false)] {
+        let args: Vec<&str> = base.iter().chain(extra).copied().collect();
+        let options = parse(&args).unwrap();
+        let run = crate::host_policy::options::RunOptions::parse(&options.run_args).unwrap();
+        assert_eq!(run.clipboard, enabled);
+        let unit = crate::service_install::render_systemd_unit(&options);
+        assert_eq!(unit.contains(" --no-clipboard"), !enabled, "{unit}");
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")] // frd run options are validated only for the Linux host.
 fn frd_run_options_that_every_start_would_refuse_are_refused_at_install() {
     let base = ["--user", "--software-explicit", "--approval", "none", "--"];
     for (tail, code) in [
@@ -297,6 +319,7 @@ fn frd_run_options_that_every_start_would_refuse_are_refused_at_install() {
         ),
         // frd run's own parser refuses these.
         (&["--no-such-flag"][..], None),
+        (&["--clipboard", "--no-clipboard"][..], None),
         (&["--input-agent"][..], None),
         // Set by the installer's own flags, or meaningless for a service.
         (&["--port", "9000"][..], None),
